@@ -63,20 +63,61 @@ The receiver verifies the signature using the public key. If valid, the claims a
 
 RS256 and ES256 are preferred for OAuth2 systems. The authorization server holds the private key and publishes the public key at a JWKS (JSON Web Key Set) endpoint (`/.well-known/jwks.json`). Resource servers fetch and cache the JWKS to validate tokens without calling the authorization server on every request.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph HS["HS256 - symmetric"]
+        direction LR
+        hAuth(["Auth Server"]) -->|"same secret"| hA["Service A<br/>can sign + verify"]
+        hAuth -->|"same secret"| hB["Service B<br/>can sign + verify"]
+        hA -.->|"can forge tokens for"| hB
+    end
+
+    subgraph RS["RS256 - asymmetric"]
+        direction LR
+        rAuth(["Auth Server<br/>holds private key"]) -->|"signs"| rToken(("JWT"))
+        rToken -->|"verify only"| rA["Service A<br/>public key"]
+        rToken -->|"verify only"| rB["Service B<br/>public key"]
+    end
+
+    class hAuth,rAuth frozen
+    class hA,hB lossN
+    class rA,rB train
+    class rToken mathOp
+```
+
+*HS256's shared secret lets any verifier also forge tokens for any other service; RS256 keeps signing power solely with the Auth Server, so a compromised service can only verify, never mint.*
+
 ### OAuth 2.0 Grant Types
 
 **Authorization Code + PKCE (most secure, use for web and mobile apps with a user):**
 
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant C as Client App
+    participant A as Auth Server
+
+    C->>C: generate code_verifier<br/>code_challenge = SHA256(code_verifier)
+    C-->>B: redirect to /authorize<br/>+ code_challenge, state
+    B->>A: GET /authorize
+    A-->>B: login page
+    B->>A: credentials + consent
+    A-->>B: redirect to redirect_uri<br/>?code=xyz&state
+    B->>C: deliver code=xyz
+    C->>A: POST /token<br/>code, code_verifier, client_id
+    A->>A: SHA256(code_verifier)<br/>== code_challenge?
+    A-->>C: access_token + refresh_token
 ```
-1. Client generates code_verifier (random 43-128 chars)
-   code_challenge = BASE64URL(SHA256(code_verifier))
-2. Browser redirects to authorization server with:
-   response_type=code, client_id, redirect_uri, scope, code_challenge, code_challenge_method=S256, state
-3. User authenticates and consents at the authorization server
-4. Authorization server redirects to redirect_uri with: code, state
-5. Client POSTs to token endpoint: grant_type=authorization_code, code, redirect_uri, code_verifier, client_id
-6. Authorization server: SHA256(code_verifier) == code_challenge? If yes, issues access_token + refresh_token
-```
+
+*Six steps, one secret: only the client that generated `code_verifier` can pass step 6's hash check, so an intercepted authorization code alone is worthless to an attacker.*
 
 PKCE (Proof Key for Code Exchange) prevents authorization code interception. Even if the `code` is intercepted (e.g., from the redirect URI in a native app), the attacker cannot exchange it without the `code_verifier` that only the original client knows.
 
@@ -96,14 +137,25 @@ Used when a backend service needs to call another backend service. No user conte
 
 **Device Authorization Flow (TV / headless devices):**
 
+```mermaid
+sequenceDiagram
+    participant D as Device
+    participant S as Auth Server
+    participant U as User (Phone)
+
+    D->>S: POST /device_authorization<br/>client_id, scope
+    S-->>D: device_code, user_code,<br/>verification_uri, interval
+    D->>D: display "Go to example.com/activate<br/>enter code: ABCD-1234"
+    loop poll until approved
+        D->>S: POST /token<br/>grant_type=device_code
+        S-->>D: authorization_pending
+    end
+    U->>S: open verification_uri<br/>enter user_code, authenticate
+    D->>S: POST /token (next poll)
+    S-->>D: access_token
 ```
-Device POSTs: /device_authorization, client_id, scope
-Server returns: device_code, user_code, verification_uri, interval
-Device displays: "Go to example.com/activate and enter code: ABCD-1234"
-Device polls: /token?grant_type=urn:ietf:params:oauth:grant-type:device_code
-User completes: opens verification_uri on phone, enters user_code, authenticates
-Next poll succeeds: device receives access_token
-```
+
+*The device never sees the user's credentials — it just polls `/token` in a loop while the user completes authorization on a separate, trusted device.*
 
 ### OpenID Connect (OIDC)
 
@@ -127,11 +179,27 @@ For access tokens: use JWT for stateless microservices where each service valida
 
 RBAC (Role-Based Access Control): permissions are assigned to roles, roles are assigned to users.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    alice(["User: alice"]) -->|"has role"| editor["Role: Editor"]
+    editor -->|"has permission"| write(["article:write"])
+    editor -->|"has permission"| readA(["article:read"])
+    viewer["Role: Viewer"] -->|"has permission"| readB(["article:read"])
+
+    class alice io
+    class editor,viewer base
+    class write,readA,readB train
 ```
-User alice --has-role--> Editor
-Role Editor --has-permission--> article:write, article:read
-Role Viewer --has-permission--> article:read
-```
+
+*Permissions flow through roles, never directly to users — alice inherits `article:write`/`article:read` solely because she holds the Editor role.*
 
 Simple, well-understood, scales to hundreds of roles. Does not handle context-sensitive rules easily.
 
@@ -145,6 +213,34 @@ PERMIT IF:
   AND resource.classification != "top-secret"
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reqN(["access request"]) --> c1{"subject.dept ==<br/>resource.dept?"}
+    c1 -->|"no"| deny(["DENY"])
+    c1 -->|"yes"| c2{"action in<br/>read, write?"}
+    c2 -->|"no"| deny
+    c2 -->|"yes"| c3{"time between<br/>09:00-18:00?"}
+    c3 -->|"no"| deny
+    c3 -->|"yes"| c4{"classification !=<br/>top-secret?"}
+    c4 -->|"no"| deny
+    c4 -->|"yes"| permit(["PERMIT"])
+
+    class reqN req
+    class c1,c2,c3,c4 mathOp
+    class deny lossN
+    class permit train
+```
+
+*ABAC evaluation is a chain of AND-gates — a single failing attribute (department mismatch, disallowed action, off-hours, top-secret classification) short-circuits straight to DENY.*
+
 Powerful for complex enterprise scenarios. Evaluated against a policy engine (OPA — Open Policy Agent). More complex to implement and audit.
 
 ---
@@ -153,65 +249,84 @@ Powerful for complex enterprise scenarios. Evaluated against a policy engine (OP
 
 ### OAuth2 Authorization Code + PKCE Flow
 
+```mermaid
+sequenceDiagram
+    participant B as User Browser
+    participant C as Client App
+    participant A as Auth Server
+    participant R as Resource Server
+
+    B->>C: click login
+    C->>C: generate code_verifier<br/>+ code_challenge
+    C-->>B: redirect to /authorize<br/>+ code_challenge
+    B->>A: GET /authorize
+    A-->>B: login page
+    B->>A: credentials
+    A-->>B: redirect /callback?code=xyz
+    B->>C: GET /callback?code=xyz
+    C->>A: POST /token<br/>code, code_verifier
+    A-->>C: access_token, refresh_token
+    C->>R: GET /api/data<br/>Bearer token
+    R->>R: validate JWT<br/>(JWKS cache)
+    R-->>C: 200 OK
 ```
-  User Browser          Client App           Auth Server         Resource Server
-       |                    |                    |                    |
-       |--- click login ---->|                    |                    |
-       |                    |-- generate -------->|                    |
-       |                    |   code_verifier     |                    |
-       |                    |   code_challenge    |                    |
-       |<-- redirect --------|                    |                    |
-       |    (auth endpoint + code_challenge)      |                    |
-       |------ GET /authorize ------------------>|                    |
-       |<---- login page ----------------------->|                    |
-       |------ credentials ---------------------->|                    |
-       |<---- redirect: /callback?code=xyz -------|                    |
-       |--- GET /callback?code=xyz ------------>|                    |
-       |                    |-- POST /token ----->|                    |
-       |                    |   code=xyz          |                    |
-       |                    |   code_verifier     |                    |
-       |                    |<-- access_token ----|                    |
-       |                    |    refresh_token    |                    |
-       |                    |-- GET /api/data Bearer token ---------->|
-       |                    |                    |<-- validate JWT ----|
-       |                    |                    |    (JWKS cache)     |
-       |                    |<------------------ 200 OK --------------|
-```
+
+*Four actors, one bearer token: the Client never sees the user's credentials, and the Resource Server never calls the Auth Server directly — it validates locally against the cached JWKS.*
 
 ### JWT Structure and Validation
 
-```
-  JWT:
-  eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9
-  .eyJzdWIiOiJ1c2VyLTEyMyIsInJvbGVzIjpbImVkaXRvciJdLCJleHAiOjE3MDAwMDM2MDB9
-  .RSASHA256_SIGNATURE
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Validation steps at Resource Server:
-  1. Split on "."
-  2. Decode header -> alg must be "RS256" (pinned, not from token)
-  3. Fetch/cache JWKS from https://auth.example.com/.well-known/jwks.json
-  4. Verify signature using matching public key (kid)
-  5. Verify exp > now (not expired)
-  6. Verify iss == "https://auth.example.com" (expected issuer)
-  7. Verify aud contains this service's identifier
-  8. Extract claims: sub, roles -> use for authorization
+    jwt(["JWT<br/>header.payload.signature"]) --> split["split on '.' separator"]
+    split --> alg{"alg == RS256?<br/>(pinned, not read from token)"}
+    alg -->|"no"| reject(["401 Reject"])
+    alg -->|"yes"| jwks["fetch + cache JWKS<br/>(.well-known/jwks.json)"]
+    jwks --> sig{"signature valid?<br/>(public key by kid)"}
+    sig -->|"no"| reject
+    sig -->|"yes"| exp{"token not expired?<br/>(exp in the future)"}
+    exp -->|"no"| reject
+    exp -->|"yes"| iss{"iss == auth.example.com?"}
+    iss -->|"no"| reject
+    iss -->|"yes"| aud{"aud contains<br/>this service?"}
+    aud -->|"no"| reject
+    aud -->|"yes"| claims(["extract claims<br/>sub, roles for authZ"])
+
+    class jwt io
+    class split,alg,sig,exp,iss,aud mathOp
+    class jwks base
+    class reject lossN
+    class claims train
 ```
+
+*Each check is a hard gate — any failure returns 401 without revealing which check failed; the algorithm is pinned by the resource server and never trusted from the token's own header.*
 
 ### Refresh Token Rotation with Token Family
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as Auth Server
+    participant X as Attacker
+
+    C->>A: POST /token<br/>refresh_token=RT1
+    A-->>C: access_token=AT2<br/>refresh_token=RT2
+    Note over A: RT1 invalidated
+
+    X->>A: POST /token<br/>refresh_token=RT1 (stolen)
+    Note over A: RT1 already used!<br/>revoke entire token family
+    A-->>X: 401 Unauthorized
+    Note over C,A: Client is also logged out<br/>RT2 revoked too
 ```
-  Client                Auth Server
-    |--- POST /token refresh_token=RT1 ---->|
-    |<-- access_token=AT2, refresh_token=RT2 --|
-    |                                        |   (RT1 is now invalidated)
-    |
-    ATTACKER intercepts RT1:
-    |--- POST /token refresh_token=RT1 ---->|
-    |                                        |   RT1 was already used!
-    |                                        |   REVOKE all tokens for this user session
-    |<-- 401 Unauthorized ------------------|
-    Client is also logged out (RT2 is now revoked too)
-```
+
+*Reuse of an already-rotated refresh token is itself the breach signal — the server cannot tell attacker from legitimate client, so it revokes the whole token family and logs both out.*
 
 ---
 
@@ -662,21 +777,27 @@ Token introspection is an endpoint on the authorization server that resource ser
 
 **Architecture:**
 
-```
-  [Keycloak — Authorization Server]
-    - Realm per tenant (or shared realm with tenantId claim)
-    - Roles: TENANT_ADMIN, TEAM_MANAGER, VIEWER
-    - RS256 signing, JWKS at /.well-known/jwks.json
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  [Spring Boot API Gateway]
-    - Validates JWT from Authorization: Bearer header
-    - Extracts tenantId + roles from claims
-    - Rejects cross-tenant requests at gateway level
+    kc(["Keycloak<br/>Auth Server<br/>RS256, realm per tenant"]) -->|"signed JWT"| gw["Spring Boot<br/>API Gateway<br/>extracts tenantId + roles"]
+    gw -->|"tenant-scoped"| proj["Project Service<br/>@PreAuthorize"]
+    gw -->|"tenant-scoped"| team["Team Service<br/>@PreAuthorize"]
+    gw -->|"tenant-scoped"| rep["Report Service<br/>@PreAuthorize"]
 
-  [Project Service] [Team Service] [Report Service]
-    - @PreAuthorize with tenant-scoped checks
-    - Spring Data JPA with @TenantFilter
+    class kc frozen
+    class gw mathOp
+    class proj,team,rep train
 ```
+
+*Every downstream service re-checks `tenantId` independently via `@TenantFilter` even though the gateway already rejects cross-tenant requests — defense in depth, not a single trust boundary.*
 
 **Token Claims:**
 

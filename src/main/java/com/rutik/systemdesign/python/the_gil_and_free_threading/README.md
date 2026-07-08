@@ -83,6 +83,40 @@ the programmer's responsibility.
 
 ## 4. Types / Architectures / Strategies
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["New concurrent<br/>workload"]) --> Q1{"I/O-bound or<br/>CPU-bound?"}
+
+    Q1 -->|"I/O-bound"| Q2{"Hundreds+ of<br/>concurrent tasks?"}
+    Q2 -->|"yes"| ASYNCIO(["asyncio<br/>Strategy 3"])
+    Q2 -->|"no, tens"| THREADING(["threading<br/>Strategy 1"])
+
+    Q1 -->|"CPU-bound"| Q3{"Hot loop portable<br/>to C / Cython / Rust?"}
+    Q3 -->|"yes"| CEXT(["C extension,<br/>GIL release<br/>Strategy 4"])
+    Q3 -->|"no, pure Python"| Q4{"3.13 free-threading<br/>acceptable?"}
+    Q4 -->|"yes, experimental OK"| FREET(["free-threading 3.13<br/>Strategy 6"])
+    Q4 -->|"no, need stability"| MP(["multiprocessing /<br/>ProcessPoolExecutor<br/>Strategy 2 / 5"])
+
+    class START io
+    class Q1,Q2,Q3,Q4 mathOp
+    class ASYNCIO,THREADING req
+    class CEXT,FREET train
+    class MP frozen
+```
+
+This condenses the six strategies below plus the Section 9 usage rules into one path: heavy I/O
+concurrency goes to asyncio, lighter I/O-bound work to threading, a portable CPU hotspot to a C
+extension, and everything else to multiprocessing — with 3.13's free-threading as an experimental
+alternative once the C-extension dependencies are audited for GIL safety.
+
 ### Strategy 1: threading — best for I/O-bound work
 
 Use `threading.Thread` or `concurrent.futures.ThreadPoolExecutor` when tasks spend most of their time
@@ -125,83 +159,119 @@ many C extensions still require a GIL and will fail or re-enable it automaticall
 
 ### Diagram 1: Thread state machine — GIL acquisition and release
 
+```mermaid
+stateDiagram-v2
+    [*] --> Created
+    Created --> Waiting: thread started
+    Waiting --> Running: GIL acquired<br/>(after 5ms or holder releases)
+    Running --> Waiting: 5ms elapsed<br/>(switch interval) — drop GIL
+    Running --> Sleeping: blocking I/O<br/>(socket/file) — drop GIL
+    Running --> Dead: thread.join / thread.exit<br/>— drop GIL
+    Sleeping --> Waiting: syscall returns —<br/>re-acquire GIL before return
+    Dead --> [*]
+
+    note right of Running
+        Holds the GIL (PyMutex).
+        Only one thread is here
+        at any moment.
+    end note
 ```
-                   +---------------------+
-                   |  Thread Created     |
-                   +---------------------+
-                            |
-                            v
-        +-------------------------------------------+
-        |  WAITING (blocked on PyMutex — the GIL)  |
-        +-------------------------------------------+
-                            |  GIL acquired (after 5ms or GIL holder releases)
-                            v
-        +-------------------------------------------+
-        |  RUNNING (holds GIL, executes bytecode)   |
-        +-------------------------------------------+
-          |                     |                   |
-          | 5ms elapsed         | blocking I/O      | thread.join() /
-          | (switch interval)   | (socket/file)     | thread.exit()
-          v                     v                   v
-   +------------+    +--------------------+    +---------+
-   | DROP GIL   |    | DROP GIL           |    | DROP GIL|
-   | → WAITING  |    | → SLEEPING         |    | → DEAD  |
-   +------------+    | (kernel handles IO)|    +---------+
-                     +--------------------+
-                              |  syscall returns
-                              v
-                     +--------------------+
-                     | WAITING (re-acquire|
-                     | GIL before return) |
-                     +--------------------+
-```
+
+Every thread cycles between WAITING (blocked on the GIL mutex) and RUNNING (holding it); the only
+ways out of RUNNING are the 5ms switch-interval timer, a blocking I/O syscall, or thread exit — the
+three release paths described in Core Principles 2 and 3.
 
 ### Diagram 2: I/O-bound timeline — two threads sharing the GIL
 
-```
-Time ─────────────────────────────────────────────────────────────►
+```mermaid
+sequenceDiagram
+    participant T1 as Thread-1
+    participant GIL as GIL (mutex)
+    participant T2 as Thread-2
 
-Thread-1: [PYTHON]──[I/O wait──────────────]──[PYTHON]──[I/O wait──]
-              GIL ↑                           GIL ↑
-                   ↓ drop GIL on syscall       ↑ reacquire on return
-Thread-2:          [PYTHON]──[I/O wait────────]──[PYTHON]──[I/O wait]
-                       GIL ↑
+    T1->>GIL: acquire
+    Note over T1: PYTHON — executes bytecode
+    T1-->>GIL: release — blocking I/O syscall
+    Note over T1: I/O wait (kernel)
 
-Legend:
-  [PYTHON] = thread holds GIL, executes bytecode
-  [I/O wait] = thread released GIL, sleeping in kernel
-  Both threads make progress → wall-clock time << 2x single-thread time
+    T2->>GIL: acquire
+    Note over T2: PYTHON — executes bytecode
+    T2-->>GIL: release — blocking I/O syscall
+    Note over T2: I/O wait (kernel)
+
+    T1->>GIL: re-acquire — I/O returned
+    Note over T1: PYTHON — executes bytecode
+
+    Note over T1,T2: Both threads make progress —<br/>wall-clock time is far less than 2x single-thread time.
 ```
+
+While Thread-1 sleeps in the kernel waiting on I/O, it has released the GIL, so Thread-2 can acquire
+it and run Python bytecode in the gap — this overlap is why `threading` works well for I/O-bound code.
 
 ### Diagram 3: CPU-bound timeline — GIL contention
 
-```
-Time ─────────────────────────────────────────────────────────────►
+```mermaid
+sequenceDiagram
+    participant T1 as Thread-1
+    participant GIL as GIL (mutex)
+    participant T2 as Thread-2
 
-Thread-1: [CPU 5ms]─drop─wait────────────────[CPU 5ms]─drop─wait──
-Thread-2:           ─acquire─[CPU 5ms]─drop─wait────────────────[CPU 5ms]
+    T1->>GIL: acquire
+    Note over T1: CPU burst (5ms)
+    T1-->>GIL: drop — switch interval elapsed
+    Note over T1: WAITING (blocked)
 
-Total wall time ≈ T1_cpu + T2_cpu (sequential, not parallel)
-Overhead: context switches + mutex contention on top
-Result: 2-thread CPU program is SLOWER than single-thread
+    T2->>GIL: acquire
+    Note over T2: CPU burst (5ms)
+    T2-->>GIL: drop — switch interval elapsed
+    Note over T2: WAITING (blocked)
+
+    T1->>GIL: acquire
+    Note over T1: CPU burst (5ms)
+
+    Note over T1,T2: Total wall time ~ T1_cpu + T2_cpu<br/>(sequential, not parallel) — context switches and mutex<br/>contention add overhead on top, so 2 threads run SLOWER than one.
 ```
+
+Unlike the I/O-bound case, there is no idle gap for another thread to fill — each 5ms CPU burst forces
+a drop-and-reacquire handoff, so the two threads run one after another instead of overlapping.
 
 ### Diagram 4: PEP 703 free-threading — per-object biased reference counting
 
-```
-Without GIL (python3.13t):
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Object
-  ┌──────────────────────────────────────────┐
-  │  ob_ref_local  (Thread-A's shard, fast)  │  <- Thread-A updates without lock
-  │  ob_ref_shared (cross-thread delta)      │  <- lock only when sharing
-  │  ob_mutex      (PyMutex per object)      │
-  └──────────────────────────────────────────┘
+    TA(["Thread-A (owner)"])
+    TB(["Thread-B (visitor)"])
 
-Thread-A (owner):   reads/writes ob_ref_local  → no lock needed (biased)
-Thread-B (visitor): atomically modifies ob_ref_shared → lock-free CAS
-GC merge step:      ob_ref_total = ob_ref_local + ob_ref_shared
+    subgraph OBJ["Object — python3.13t, no GIL"]
+        L(ob_ref_local<br/>thread-local shard)
+        S(ob_ref_shared<br/>cross-thread delta)
+        MU(ob_mutex<br/>PyMutex per object)
+    end
+
+    TA -->|"read/write,<br/>no lock (biased)"| L
+    TB -->|"atomic CAS,<br/>lock-free"| S
+    MU -.->|"guards sharing"| S
+    L --> GC((GC merge))
+    S --> GC
+    GC -->|"ob_ref_total =<br/>local + shared"| TOT([total refcount])
+
+    class TA,TB io
+    class L,S,MU base
+    class GC mathOp
+    class TOT train
 ```
+
+Splitting the refcount into an owner-only local shard and a cross-thread shared delta is what removes
+the lock from the hot path: the owning thread never blocks, and only the rarer cross-thread update
+needs the per-object mutex or an atomic CAS.
 
 ---
 
@@ -448,6 +518,27 @@ handlers. There is one thread, one GIL holder, and the event loop cooperatively 
 | Debugging difficulty | Medium (race conditions) | Low (isolated state) | Medium (callback hell) | High (C/Cython) | High (data races) |
 | Python version | All | All | 3.4+ (mature 3.7+) | All (PyO3 / Cython) | 3.13+ only |
 | Best use case | I/O-bound tasks | CPU-bound tasks | High-concurrency I/O | CPU hotspots in Python | Parallel CPU (future) |
+
+```mermaid
+quadrantChart
+    title CPU Parallelism vs I/O Concurrency
+    x-axis Low I/O concurrency --> High I/O concurrency
+    y-axis No CPU parallelism --> Full CPU parallelism
+    quadrant-1 Best of both, rare
+    quadrant-2 CPU-parallel specialists
+    quadrant-3 Avoid
+    quadrant-4 I/O specialists
+    threading: [0.62, 0.10]
+    asyncio: [0.95, 0.04]
+    multiprocessing: [0.38, 0.92]
+    "C extension": [0.50, 0.85]
+    "free-threading 3.13": [0.62, 0.75]
+```
+
+Plotting the table's two most decisive rows makes the GIL's core trade visible: threading and asyncio
+sit in the bottom-right (I/O specialists, zero CPU parallelism), multiprocessing and C extensions sit
+top-left (full CPU parallelism, weak I/O overlap), and only the still-experimental free-threading build
+edges toward the top-right quadrant that no stable CPython strategy currently occupies.
 
 ---
 
@@ -914,16 +1005,17 @@ def measure_decode(paths: list[Path], use_threads: bool) -> float:
 
 **Summary of timing results:**
 
+```mermaid
+xychart-beta
+    title "Thumbnail pipeline wall time (1000 images, 4-core)"
+    x-axis ["Sequential", "4 threads", "8 threads", "Pool 2w", "Pool 4w", "Pool 8w"]
+    y-axis "Wall time (seconds)" 0 --> 40
+    bar [34.8, 36.2, 38.5, 17.9, 10.8, 10.6]
 ```
-Pipeline variant                          Wall time (1000 images, 4-core)
-─────────────────────────────────────────────────────────────────────────
-Sequential (1 thread)                     34.8s
-threading (4 threads, broken)             36.2s     (+4% SLOWER)
-threading (8 threads, broken)             38.5s     (+11% SLOWER)
-ProcessPoolExecutor(2 workers)            17.9s     (1.9x speedup)
-ProcessPoolExecutor(4 workers)            10.8s     (3.2x speedup)   MEETS TARGET
-ProcessPoolExecutor(8 workers)            10.6s     (3.3x speedup)   I/O bottleneck
-```
+
+Threading only makes this CPU-bound pipeline slower (36.2s at 4 threads, 38.5s at 8 — up to 11% worse
+than sequential); `ProcessPoolExecutor(4)` is the sweet spot at 10.8s (3.2x speedup, meeting the
+sub-12s target), with 8 workers gaining almost nothing once JPEG writes become I/O-bound.
 
 **Key lessons:**
 1. Threading for CPU-bound Pillow work is slower than sequential due to GIL contention.

@@ -103,32 +103,48 @@ URI versioning is most pragmatic for public APIs. Internal APIs can use header v
 
 Offset pagination at page 1000 with page size 20 executes `OFFSET 20000` in SQL — the database scans and discards 20,000 rows. This causes query time proportional to page number, not page size.
 
+```mermaid
+xychart-beta
+    title "Rows scanned per page: OFFSET pagination vs keyset/cursor"
+    x-axis "Page number (size = 20)" [1, 100, 1000, 25000]
+    y-axis "Rows scanned to build the page" 0 --> 500000
+    line [20, 2000, 20000, 500000]
+    line [20, 20, 20, 20]
+```
+
+The offset line reuses the two concrete numbers already in this module: page 1000 scans and discards 20,000 rows (above), and the equivalent `OFFSET 500000` query scans 500,000 rows (Section 10). Keyset/cursor pagination touches only the page size, 20 rows, at any depth.
+
 ---
 
 ## 5. Architecture Diagrams
 
 ### Request Lifecycle with Caching
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CDN as CDN/Proxy
+    participant S as API Server
+    participant D as Database
+
+    Note over C,D: Request 1 — CDN cache hit
+    C->>CDN: GET /items/5
+    Note over CDN: cache hit<br/>ETag: "v3"
+    CDN-->>C: 200 OK (cached body)
+    Note over C,CDN: cache hit — no origin request
+
+    Note over C,D: Request 2 — CDN cache stale, revalidate with origin
+    C->>CDN: GET /items/5<br/>If-None-Match: "v3"
+    Note over CDN: cache miss / stale
+    CDN->>S: GET /items/5<br/>If-None-Match: "v3"
+    S->>D: SELECT item 5
+    D-->>S: item v3
+    S-->>CDN: 304 Not Modified
+    CDN-->>C: 304 Not Modified
+    Note over C,D: 304 has no body — saves bandwidth
 ```
-Client         CDN/Proxy        API Server       Database
-  |               |                 |                |
-  |--GET /items/5->|                 |                |
-  |               | cache hit?       |                |
-  |               | ETag: "v3"       |                |
-  |<--200 OK ------|                 |                |
-  |  [cache hit, no origin request]  |                |
-  |               |                 |                |
-  |--GET /items/5->|                 |                |
-  |  If-None-Match: "v3"             |                |
-  |               | cache miss/stale |                |
-  |               |--GET /items/5-->|                |
-  |               |  If-None-Match: "v3"             |
-  |               |                 |--SELECT------->|
-  |               |                 |<--item v3------|
-  |               |<--304 Not Mod.--|                |
-  |<--304 Not Mod--|                 |                |
-  [304 saves body bandwidth]
-```
+
+The first request is served entirely from the CDN edge cache. The second forces revalidation against the origin, but a matching ETag still returns a bodyless 304 instead of the full payload.
 
 ### RFC 7807 Problem Details Error Response
 
@@ -163,27 +179,28 @@ Client         CDN/Proxy        API Server       Database
 
 An operation is idempotent if applying it N times has the same effect as applying it once.
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant R as Redis/DB
+
+    Note over C,R: Idempotent by nature: PUT, DELETE<br/>Not idempotent: POST (creates a new order every call)
+
+    C->>S: POST /orders<br/>Idempotency-Key: 550e8400-...
+    S->>R: check idempotency key
+
+    alt key exists
+        R-->>S: cached response
+        S-->>C: return cached response
+    else key is new
+        S->>S: process order
+        S->>R: store key + response<br/>(24h TTL)
+        S-->>C: return response
+    end
 ```
-Idempotent:
-  PUT /orders/123 with the same body → order 123 always ends in same state
-  DELETE /orders/123 → first call deletes, subsequent calls return 404 (no side effect)
 
-Not idempotent:
-  POST /orders → creates a new order every time
-
-Making POST idempotent with Idempotency-Key:
-  Client generates a UUID for the request
-  Sends: POST /orders
-         Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
-
-  Server:
-  1. Check idempotency key in Redis/DB
-  2. If exists: return cached response
-  3. If new: process, store key+response, return response
-
-  Server stores: key -> (response_body, status_code, expires_at)
-  Expires after 24h (client must retry within this window)
-```
+The Idempotency-Key turns a non-idempotent POST into a safely retryable call: the server keys the stored response on the client-supplied UUID and replays it unchanged for 24 hours instead of creating a second order.
 
 ### 6.2 HATEOAS
 
@@ -422,6 +439,31 @@ Implement at the API gateway or a filter/middleware layer. Return 429 Too Many R
 **Problem**: An e-commerce API had a checkout endpoint `POST /checkout` that was creating duplicate orders during Black Friday traffic spikes. Network timeouts at the CDN layer (30s) were causing mobile clients to retry the checkout POST, resulting in doubled orders and doubled charges.
 
 **Investigation**: Load balancer logs showed the original POST reached the backend and completed in 25s (slow due to payment processor latency). The CDN timed out at 30s and the client retried. The retry arrived 5s after the first request completed, and since there was no deduplication, a second order was created.
+
+```mermaid
+sequenceDiagram
+    participant C as Mobile Client
+    participant CDN as CDN (30s timeout)
+    participant B as Checkout Backend
+    participant P as Payment Processor
+
+    C->>CDN: POST /checkout (attempt 1)
+    CDN->>B: forward request
+    B->>P: charge card
+    Note over B,P: slow payment processor
+    P-->>B: charge confirmed
+    Note over B: attempt 1 completes at 25s
+    Note over CDN,C: CDN's 30s timeout fires first —<br/>client never sees the response
+    C->>CDN: POST /checkout (retry)
+    Note over C,B: retry reaches backend<br/>5s after attempt 1 completed
+    CDN->>B: forward retry
+    Note over B: no Idempotency-Key — no dedup
+    B->>B: create 2nd order
+    B-->>CDN: 201 Created (order #2)
+    CDN-->>C: 201 Created (order #2)
+```
+
+The backend finished attempt 1 in 25s, but the CDN's 30s timeout fired before the response reached the client, so the client retried; the retry landed 5s after attempt 1 had already completed and, with no idempotency check, created a second order — exactly what the Idempotency-Key fix below prevents.
 
 **Fix**:
 ```java

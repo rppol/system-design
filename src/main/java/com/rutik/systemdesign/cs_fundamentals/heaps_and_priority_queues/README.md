@@ -43,6 +43,42 @@ right_child(i)= 2 * i + 1
 
 ## 3. Types / Architectures / Strategies
 
+**Choosing a variant** — start from the requirement, not the data structure; the six subsections below cover each leaf:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["choosing a<br/>heap variant"]) --> D1{"repeated min/max<br/>extraction only?"}
+    D1 -->|"yes, default"| BIN("Binary Heap<br/>d=2, O(log n)")
+
+    Q --> D2{"push-heavy<br/>workload?"}
+    D2 -->|"yes, e.g. Dijkstra"| DARY("d-ary Heap<br/>d=4, half the height")
+
+    Q --> D3{"need decrease-key<br/>or delete-by-key?"}
+    D3 -->|"production"| IDX("Indexed Heap<br/>heap + hashmap")
+    D3 -.->|"theory-only"| FIB("Fibonacci Heap<br/>high constants")
+
+    Q --> D4{"need running<br/>median of a stream?"}
+    D4 -->|"yes"| TWO("Two-Heap Pattern<br/>max-heap + min-heap")
+
+    class Q io
+    class D1,D2,D3,D4 mathOp
+    class BIN base
+    class DARY train
+    class IDX train
+    class FIB frozen
+    class TWO req
+```
+
+*Binary heap is the default; branch off only when a specific requirement — push-heavy tuning, decrease-key support, or a streaming median — demands one of the other variants below.*
+
 ### Binary Heap (d=2)
 The default. Push/pop O(log n), peek O(1), build O(n). Stored in a flat array.
 
@@ -339,6 +375,16 @@ def heap_sort(arr: List[int]) -> List[int]:
 **When d-ary heap beats d=2:**
 - d=4 gives height log_4(n) = log_2(n)/2 — half as many sift-up steps (sift-up dominates in Dijkstra since you push often).
 - Sift-down examines d children per level — slightly more comparisons but still fewer cache misses than pointer-following in a BST.
+
+```mermaid
+xychart-beta
+    title "Heap height = log_d(n) at n = 1,000,000, by branching factor d"
+    x-axis "branching factor d" ["d=2", "d=3", "d=4"]
+    y-axis "height (sift-up steps)" 0 --> 22
+    bar [20, 13, 10]
+```
+
+*d=4's height is exactly half of d=2's (log_4(n) = log_2(n)/2, i.e. 10 vs 20 at n=1,000,000) — the concrete payoff behind "d=4 gives half as many sift-up steps" above, which is why push-heavy workloads like Dijkstra favor a larger d.*
 
 ---
 

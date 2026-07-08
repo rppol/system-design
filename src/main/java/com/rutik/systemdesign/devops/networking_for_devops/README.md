@@ -12,10 +12,35 @@ Networking is where "it works locally" goes to die. DNS resolution, CIDR plannin
 
 A packet's journey from client to your container crosses many layers DevOps owns:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["client"]) --> dns("DNS")
+    dns --> lb("public LB<br/>L4 / L7")
+    lb --> fw{"firewall<br/>SG"}
+    fw --> nat("NAT")
+    nat --> subnet("VPC subnet")
+    subnet --> node("node")
+    node --> cni("kube-proxy<br/>CNI")
+    cni --> pod("pod")
+    pod --> tls("TLS<br/>terminate")
+    tls --> app(["app"])
+
+    class client io
+    class dns,lb,nat,cni,tls mathOp
+    class fw lossN
+    class subnet,node base
+    class pod,app train
 ```
-client -> DNS -> public LB (L4/L7) -> firewall/SG -> NAT -> VPC subnet
-       -> node -> kube-proxy/CNI -> pod -> TLS terminate -> app
-```
+
+Each arrow above is a place a request can silently die — a caching DNS answer, a firewall dropping the port, a NAT exhausting source ports — which is why hop-by-hop diagnosis (Section 6) walks this exact chain.
 
 The operational primitives:
 - **DNS** — name → IP resolution; the most common "intermittent" failure source.
@@ -72,6 +97,52 @@ The operational primitives:
 | Re-encryption | LB terminates, re-encrypts to backend | Inspect + encrypt internally | Double crypto cost |
 | mTLS (mesh) | Both ends authenticate | Zero-trust identity | Cert lifecycle complexity |
 
+The table's "Where TLS ends" column is really a question of *where the plaintext segment lives* — visualizing the same client-to-backend path for all four strategies makes that placement immediate:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph edge["Edge termination"]
+        direction LR
+        c1(["client"]) -->|"TLS"| lb1("LB")
+        lb1 -->|"plaintext"| be1[["backend"]]
+    end
+
+    subgraph pass["Pass-through"]
+        direction LR
+        c2(["client"]) -->|"TLS"| lb2("LB")
+        lb2 -->|"TLS unmodified"| be2[["backend"]]
+    end
+
+    subgraph reenc["Re-encryption"]
+        direction LR
+        c3(["client"]) -->|"TLS"| lb3("LB")
+        lb3 -->|"TLS re-encrypted"| be3[["backend"]]
+    end
+
+    subgraph mtls["mTLS mesh"]
+        direction LR
+        c4(["client"]) -->|"mTLS"| lb4("LB")
+        lb4 -->|"mTLS"| be4[["backend"]]
+    end
+
+    class c1,c2,c3,c4 io
+    class lb1,lb2,lb3,lb4 mathOp
+    class be1 lossN
+    class be2 frozen
+    class be3 train
+    class be4 base
+```
+
+Only edge termination leaves a plaintext hop (red) inside the network — every other strategy keeps the LB-to-backend leg encrypted, which is exactly the "plaintext inside the network" con called out in the table above.
+
 ### DNS record types you operate
 
 | Record | Purpose |
@@ -87,28 +158,33 @@ The operational primitives:
 
 ## 5. Architecture Diagrams
 
-```
-Request path with edge TLS termination + L7 routing
+Request path with edge TLS termination and L7 routing:
 
-  client
-    | 1. DNS: api.example.com -> 203.0.113.10 (ALIAS to ALB)   [TTL 60s]
-    v
-  ALB (L7, public subnet) -- terminates TLS (ACM cert)
-    | path /v1/* -> target group A      header host -> rules
-    | path /v2/* -> target group B
-    | health check: GET /healthz every 15s, 2 fails = unhealthy
-    v
-  EC2 / EKS nodes (private subnet)  <- security group allows :8080 from ALB SG only
-    |
-    v
-  pod (kube-proxy/CNI routes to pod IP)
-    |
-    v
-  app  (plaintext inside VPC, or re-encrypt for sensitive data)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  egress: pod -> NAT gateway (public subnet) -> internet
-          (SNAT rewrites src to NAT's EIP; port pool is finite)
+    client(["client"]) -->|"DNS: api.example.com<br/>to 203.0.113.10 (ALIAS)<br/>TTL 60s"| alb("ALB L7<br/>terminates TLS")
+    alb -->|"/v1/* to TG-A, /v2/* to TG-B<br/>health check /healthz 15s<br/>SG: 8080 from ALB only"| nodes("EC2 / EKS nodes<br/>private subnet")
+    nodes -->|"kube-proxy / CNI<br/>routes to pod IP"| pod("pod")
+    pod -->|"plaintext in VPC,<br/>or re-encrypt"| app(["app"])
+    pod -.->|"egress"| nat("NAT gateway<br/>public subnet")
+    nat -->|"SNAT to NAT's EIP,<br/>port pool is finite"| internet(["internet"])
+
+    class client io
+    class alb,nat mathOp
+    class nodes base
+    class pod,app train
+    class internet frozen
 ```
+
+The main request path (solid) ends at the pod; the NAT egress branch (dotted) is a separate flow whose source-port pool — finite per Section 6 — is what exhausts under heavy outbound volume.
 
 ---
 
@@ -160,11 +236,35 @@ A NAT gateway SNATs many private hosts behind one public IP. Each outbound conne
 
 ### Stateful SG vs stateless NACL (the asymmetric-bug source)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SG["Security Group (stateful)"]
+        direction LR
+        sgIn(["inbound :443<br/>allowed"]) --> sgAuto("return traffic<br/>auto-allowed")
+    end
+
+    subgraph NACL["NACL (stateless)"]
+        direction LR
+        naclIn(["inbound :443<br/>allowed"]) --> naclCheck{"outbound ephemeral<br/>1024-65535 allowed?"}
+        naclCheck -->|"yes"| naclOk(["response<br/>returns"])
+        naclCheck -->|"no"| naclDrop(["response<br/>dropped"])
+    end
+
+    class sgIn,naclIn req
+    class sgAuto,naclOk train
+    class naclCheck mathOp
+    class naclDrop lossN
 ```
-Security Group (stateful):  allow inbound :443  -> return traffic auto-allowed.
-NACL (stateless):           allow inbound :443  -> you ALSO must allow outbound
-                            on ephemeral ports (1024-65535) or responses are dropped.
-```
+
+This is exactly where the "request reaches the server but the client times out" bug (Q4) hides: a security group auto-allows the return leg, but a NACL silently drops it unless you add the explicit outbound ephemeral-port rule.
 
 ---
 
@@ -174,6 +274,33 @@ NACL (stateless):           allow inbound :443  -> you ALSO must allow outbound
 - **Kubernetes CoreDNS + `ndots:5`**: in-cluster DNS appends search domains; a non-FQDN lookup triggers up to 5 queries before the real one, causing latency — fixed by FQDNs or tuning `ndots`. (See [kubernetes_networking](../kubernetes_networking/).)
 - **Cloudflare / CloudFront** at the edge for DNS, CDN, TLS, and DDoS protection before traffic reaches origin.
 - **VPC endpoints (PrivateLink)** to reach S3/DynamoDB/ECR without traversing the NAT gateway — both a cost and a port-exhaustion fix.
+
+The `ndots:5` amplification is easier to see than to describe: a 2-dot name is tried against every search domain, in order, before the real lookup ever fires.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    q(["query api.example.com<br/>2 dots, ndots:5"]) --> a1{"try ns.svc<br/>.cluster.local"}
+    a1 -->|"NXDOMAIN"| a2{"try svc<br/>.cluster.local"}
+    a2 -->|"NXDOMAIN"| a3{"try<br/>.cluster.local"}
+    a3 -->|"NXDOMAIN"| a4{"try next<br/>search domain"}
+    a4 -->|"NXDOMAIN"| a5{"try as FQDN<br/>absolute name"}
+    a5 -->|"success"| ok(["resolved<br/>5th query"])
+
+    class q req
+    class a1,a2,a3,a4 lossN
+    class a5 mathOp
+    class ok train
+```
+
+Four wasted NXDOMAIN round trips (red) precede the one query that actually succeeds — the exact "several failed lookups before the real one" cost Q9 asks about, fixed by a trailing-dot FQDN that skips straight to the last node.
 
 ---
 
@@ -299,15 +426,30 @@ VPC endpoints (Gateway for S3/DynamoDB, Interface/PrivateLink for others) keep t
 
 A service calling an external payments API sees P99 latency jump from 80 ms to 3 s for ~30% of requests. App code, CPU, and memory are unchanged. The payments vendor migrated their endpoint behind a new CDN the day before.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    dns(["payments-api.vendor.com<br/>DNS lookup"]) --> resolve{"round-robin<br/>4 IPs, TTL 3600s"}
+    resolve -->|"2 healthy"| healthy(["CDN edge<br/>~80ms"])
+    resolve -->|"2 stale<br/>old resolver entry"| stale(["dead IP"])
+    stale --> timeout("TCP timeout / retry<br/>~3s")
+    dns -.->|"ndots:5"| ndotsNode("search-domain<br/>lookups per call")
+
+    class dns req
+    class resolve mathOp
+    class healthy train
+    class stale,timeout lossN
+    class ndotsNode mathOp
 ```
-+-----------------------------------------------------------+
-| payments-api.vendor.com resolves to 4 IPs (round-robin)   |
-|   2 healthy CDN edges (80ms)                              |
-|   2 stale IPs cached by an old resolver entry (TTL 3600s) |
-|        -> connect to dead IP -> TCP timeout/retry (3s)    |
-| ndots:5 also adds search-domain lookups on each call      |
-+-----------------------------------------------------------+
-```
+
+Two of the four round-robin IPs are stale; every request that lands on one of them burns a full 3 s TCP timeout before it can retry — and `ndots:5` (dotted branch) piles on extra search-domain lookups for every single call, healthy or not.
 
 **Diagnosis:**
 

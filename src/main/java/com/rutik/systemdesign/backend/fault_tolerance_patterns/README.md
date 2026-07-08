@@ -48,12 +48,15 @@ Key insight: Fault tolerance is about failing fast and failing gracefully, not a
 
 The circuit breaker operates as a finite state machine with three states:
 
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN
+    OPEN --> HALF_OPEN
+    HALF_OPEN --> CLOSED
+    HALF_OPEN --> OPEN: probe calls fail
 ```
-CLOSED --> OPEN --> HALF_OPEN --> CLOSED
-                               |
-                               v
-                             OPEN (if probe calls fail)
-```
+*Three states cycle continuously — CLOSED to OPEN to HALF_OPEN to CLOSED — and a failed probe in HALF_OPEN sends the breaker back to OPEN instead of resetting.*
 
 **CLOSED (normal operation)**
 All requests flow through. The circuit breaker monitors the failure rate over a sliding window. When the failure rate exceeds `failureRateThreshold` (default: 50%) over at least `minimumNumberOfCalls` (default: 100), the circuit transitions to OPEN.
@@ -102,91 +105,88 @@ After the wait duration expires, the circuit allows `permittedNumberOfCallsInHal
 
 ### Circuit Breaker State Machine
 
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN: failure rate at least 50%<br/>min 100 calls
+    OPEN --> HALF_OPEN: after 60s wait
+    HALF_OPEN --> CLOSED: probe calls pass<br/>failure rate below 50%
+    HALF_OPEN --> OPEN: probe calls fail
 ```
-                  failure_rate >= 50%
-                  (min 100 calls)
-                  +-------------------+
-                  |                   |
-                  v                   |
-    +----------+  |   +----------+   +----------+
-    |          |  |   |          |   |          |
-    |  CLOSED  +--+   |   OPEN   +-->| HALF_OPEN|
-    |          |      |          |   |          |
-    +----------+      +----------+   +----------+
-         ^            after 60s           |
-         |                               | probe calls pass
-         +-------------------------------+
-                  failure_rate < 50%
-```
+*The 50% failure-rate threshold (over a 100-call minimum) trips CLOSED to OPEN; after the 60s wait, HALF_OPEN probes decide whether to close again or reopen — the HALF_OPEN-to-OPEN edge is the transition most implementations forget to test (see Pitfall 6, §10).*
 
 ### Request Flow with Circuit Breaker + Retry + Fallback
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CR([Client Request]) --> RT["Retry<br/>maxAttempts=3<br/>full jitter backoff"]
+    RT --> CB{"Circuit<br/>Breaker"}
+    CB -->|"CLOSED: pass through"| TG["Timeout Guard<br/>connect=2s, read=5s"]
+    CB -.->|"OPEN: reject immediately"| FB["Fallback<br/>stale cache / default value"]
+    TG --> SUC{"Call<br/>succeeded?"}
+    SUC -->|"yes"| RESP([Response to Client])
+    SUC -.->|"no"| FB
+
+    class CR io
+    class RT,CB,TG,SUC mathOp
+    class RESP train
+    class FB lossN
 ```
-    Client Request
-         |
-         v
-    +----+----+
-    |  Retry  | maxAttempts=3, exponential jitter backoff
-    +----+----+
-         |
-         v
-    +----+----+
-    | Circuit |  CLOSED: pass through
-    | Breaker |  OPEN:   reject immediately --> Fallback
-    +----+----+
-         |
-         v
-    +----+----------+
-    | Timeout Guard | connectTimeout=2s, readTimeout=5s
-    +----+----------+
-         |
-    success / failure
-         |
-    +----+----+
-    | Fallback| stale cache / default value
-    +---------+
-```
+*Retry wraps the circuit breaker, which wraps the timeout guard — matching the decoration order in §6 — so an OPEN breaker and a timed-out call both funnel into the same fallback path.*
 
 ### Bulkhead Isolation
 
-```
-    Incoming Requests
-          |
-    +-----+-----+
-    |           |
-    v           v
-+-------+   +-------+
-| Pool  |   | Pool  |
-| for   |   | for   |
-| svc-A |   | svc-B |
-| 10    |   | 10    |
-| threads   | threads
-+-------+   +-------+
-    |           |
-    v           v
- Service A   Service B
- (hanging)   (healthy)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
- Service A exhausts its pool of 10 threads.
- Service B is completely unaffected.
- Without bulkhead: Service A exhausts the shared pool of 200 threads.
- Service B also starves.
+    REQ([Incoming Requests]) --> PA["Pool for svc-A<br/>10 threads"]
+    REQ --> PB["Pool for svc-B<br/>10 threads"]
+    PA --> SA(["Service A<br/>hanging"])
+    PB --> SB(["Service B<br/>healthy"])
+
+    class REQ req
+    class PA lossN
+    class PB train
+    class SA,SB frozen
 ```
+*Service A hangs and exhausts its own 10-thread pool, but Service B's separate 10-thread pool keeps serving traffic untouched. Without bulkheads, Service A would instead exhaust the shared pool of 200 threads and starve Service B too.*
 
 ### Timeout Hierarchy
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ROOT["Client SDK timeout<br/>10s end-to-end"] --> CT["HTTP connect timeout<br/>2s - TCP handshake"]
+    ROOT --> RT["HTTP read timeout<br/>5s - first byte"]
+    ROOT --> SC["CB slow-call threshold<br/>2s - counts as failure"]
+    ROOT --> OW["CB open wait<br/>60s"]
+
+    class ROOT base
+    class CT,RT,SC,OW mathOp
 ```
-    Client SDK timeout: 10s (total end-to-end)
-    |
-    +-- HTTP connect timeout: 2s  (TCP handshake)
-    |
-    +-- HTTP read timeout:    5s  (time to first byte after connection)
-    |
-    +-- Circuit breaker slow-call threshold: 2s
-    |   (calls slower than 2s count as failures)
-    |
-    +-- Circuit breaker open wait: 60s
-```
+*Each inner timeout must fire strictly before the one that wraps it: the 5s read timeout must trip before the 10s SDK budget expires, and the circuit breaker's 2s slow-call threshold must trip before the 5s read timeout — otherwise slow-call protection never engages (Pitfall 4, §10).*
 
 ---
 
@@ -318,6 +318,27 @@ ThreadPoolBulkheadConfig threadPoolBulkhead = ThreadPoolBulkheadConfig.custom()
 ```
 
 ### Composing All Patterns Together
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    BH{"Bulkhead<br/>concurrency gate"} --> RT["Retry<br/>outermost"]
+    RT --> CB{"Circuit Breaker"}
+    CB --> TL["TimeLimiter<br/>innermost"]
+    TL --> CALL(["paymentClient.charge"])
+    CB -.->|"CB open or call fails:<br/>retry re-enters whole block"| RT
+
+    class BH,RT,CB,TL mathOp
+    class CALL io
+```
+*Decoration order is nesting order, not call order: Bulkhead gates entry, Retry is outermost around Circuit Breaker, and Circuit Breaker wraps TimeLimiter around the actual call — so every retry re-enters the whole circuit-breaker-protected block below it, and the breaker's failure count updates on each attempt.*
 
 ```java
 @Service
@@ -507,6 +528,34 @@ A team configured a read timeout of 3 seconds on their HTTP client but a circuit
 
 A team used a semaphore bulkhead (maxConcurrentCalls=20) for a blocking JDBC database call in a Tomcat-based Spring MVC application (200 threads default). Each JDBC call could block for up to 10 seconds under load. With 20 permits, only 20 threads could call the database at once. The other 180 Tomcat threads were queueing or blocking on the semaphore. Because the semaphore bulkhead ties up the caller's thread, it provided no actual isolation — the caller threads were still consumed. The fix: use a thread pool bulkhead with its own dedicated executor so that the JDBC call is executed in an isolated pool and the Tomcat threads are not held.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SEM["Semaphore Bulkhead - 20 permits in 200 Tomcat threads"]
+        direction LR
+        CT1(["Caller thread"]) -->|"blocks up to 10s<br/>holding the permit"| DB1["JDBC call"]
+    end
+
+    subgraph TPB["Thread Pool Bulkhead - 10 dedicated threads"]
+        direction LR
+        CT2(["Caller thread"]) -->|"returns<br/>immediately"| POOL["Pool thread<br/>blocks instead"]
+        POOL --> DB2["JDBC call"]
+    end
+
+    class CT1 lossN
+    class DB1,DB2 base
+    class CT2 train
+    class POOL frozen
+```
+*With a semaphore bulkhead, the Tomcat caller thread itself blocks for up to 10s per JDBC call — 20 permits still leaves 180 of the 200 Tomcat threads queueing. A thread pool bulkhead lets the caller thread return immediately; only the isolated pool thread blocks, which is why it — not the semaphore — provides real isolation.*
+
 ### Pitfall 6: Not Testing the HALF_OPEN State
 
 Most teams test CLOSED and OPEN states but never test HALF_OPEN. In one incident, a bug in a custom `CircuitBreakerStatePredicator` caused the circuit to immediately transition back to OPEN when the first probe call in HALF_OPEN returned a slow (but successful) response. Because `slowCallRateThreshold` was 0% in HALF_OPEN (the team had not configured it separately), a single 3-second probe call tripped the circuit again. The service never recovered automatically and required a deployment to fix. The fix: write integration tests that simulate HALF_OPEN probe behavior, including slow-but-successful responses.
@@ -652,31 +701,40 @@ Adaptive throttling (Google's approach) tracks the ratio of accepted to total re
 
 **Architecture:**
 
-```
-    Client (Browser / Mobile)
-            |
-            v
-    +---------------+
-    | Checkout API  |  Spring Boot, Tomcat (200 threads)
-    +-------+-------+
-            |
-    +-------+------------------+
-    |                          |
-    v                          v
-+---+----+             +-------+------+
-|Critical|             |  Optional    |
-|  Path  |             |  Enrichments |
-+---+----+             +-------+------+
-    |                          |
-    +---+---+---+          +---+---+
-        |   |   |          |       |
-        v   v   v          v       v
-    Inv Pay Ship       Pricing  Fraud
-    Res Svc  Svc        Svc     Detect
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Bulkhead A (10 threads): Inventory + Payment + Shipping (critical)
-Bulkhead B (5 threads):  Pricing + Fraud Detection (optional enrichments)
+    CLIENT([Client<br/>Browser / Mobile]) --> API["Checkout API<br/>Spring Boot - Tomcat 200 threads"]
+
+    subgraph CP["Critical Path - Bulkhead A, 10 threads"]
+        direction LR
+        INV(["Inventory<br/>Reservation"])
+        PAY(["Payment<br/>Svc"])
+        SHIP(["Shipping<br/>Svc"])
+    end
+
+    subgraph OE["Optional Enrichments - Bulkhead B, 5 threads"]
+        direction LR
+        PRC(["Pricing<br/>Svc"])
+        FRD(["Fraud<br/>Detect"])
+    end
+
+    API --> CP
+    API --> OE
+
+    class CLIENT io
+    class API mathOp
+    class INV,PAY,SHIP lossN
+    class PRC,FRD train
 ```
+*Bulkhead A (10 threads) isolates the no-fallback critical path — inventory, payment, shipping — from Bulkhead B (5 threads); a slow fraud-detection model reload can never block checkout. This split is what took the error rate during downstream degradation from 100% to under 3% (see Results below).*
 
 **Key Design Decisions:**
 

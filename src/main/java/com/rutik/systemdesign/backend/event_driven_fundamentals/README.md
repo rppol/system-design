@@ -113,51 +113,80 @@ Key insight: Events transfer ownership of reaction to the consumer. The producer
 
 ### Events vs Commands vs Queries
 
-```
-EVENTS (past tense, no response expected)
-  Producer ─────event──────► Broker ─────event──────► Consumer A
-                                        │──────event──────► Consumer B
-                                        │──────event──────► Consumer C (may not exist yet)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-COMMANDS (imperative, single recipient)
-  Orchestrator ──command──► Broker ─────command────► Target Service
-                                                       └─► response event back to orchestrator
+    subgraph EV["Events (no response expected)"]
+        P(["Producer"]) -->|"event"| BR1("Broker")
+        BR1 -->|"event"| CA(["Consumer A"])
+        BR1 -->|"event"| CB(["Consumer B"])
+        BR1 -.->|"event"| CC(["Consumer C<br/>(may not exist yet)"])
+    end
 
-QUERIES (read-only, response mandatory)
-  Client ───────query────────────────────────────────► Query Service
-  Client ◄──────response (data)──────────────────────  Query Service
+    subgraph CM["Commands (single recipient)"]
+        ORC(["Orchestrator"]) -->|"command"| BR2("Broker")
+        BR2 -->|"command"| TS(["Target Service"])
+        TS -.->|"response event"| ORC
+    end
+
+    subgraph QR["Queries (response mandatory)"]
+        CL(["Client"]) -->|"query"| QS(["Query Service"])
+        QS -.->|"response data"| CL
+    end
+
+    class P,CL io
+    class BR1,BR2,QS base
+    class CA,CB,CC req
+    class ORC mathOp
+    class TS train
 ```
+
+Events broadcast to every subscriber with no response expected — a Consumer C that may not exist yet can still be added later without touching the producer; commands target exactly one recipient and expect execution; queries are point-to-point and always return data.
 
 ### Choreography vs Orchestration
 
-```
-CHOREOGRAPHY
-  ┌─────────────┐   OrderPlaced    ┌──────────────────┐
-  │ Order Svc   │ ──────────────►  │ Broker (Kafka)   │
-  └─────────────┘                  └──────────────────┘
-                                        │         │
-                    InventoryReserved   │         │ PaymentRequired
-                   ◄────────────────────┘         └──────────────►
-              ┌──────────────────┐           ┌──────────────────┐
-              │ Inventory Svc    │           │ Payment Svc      │
-              └──────────────────┘           └──────────────────┘
-  (no service knows about the others — they react to events)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-ORCHESTRATION
-  ┌─────────────────────────────────────┐
-  │         Order Saga Orchestrator     │
-  └─────────────────────────────────────┘
-       │ ReserveInventory cmd         ▲ InventoryReserved event
-       ▼                              │
-  ┌──────────────────┐    ┌──────────────────┐
-  │  Inventory Svc   │    │   Broker         │
-  └──────────────────┘    └──────────────────┘
-       │ ChargeCard cmd               ▲ PaymentCharged event
-       ▼                              │
-  ┌──────────────────┐                │
-  │  Payment Svc     │ ───────────────┘
-  └──────────────────┘
+    subgraph CHORO["Choreography (no service knows the others)"]
+        OS(["Order Svc"]) -->|"OrderPlaced"| BK1("Broker (Kafka)")
+        BK1 -->|"OrderPlaced"| IV1(["Inventory Svc"])
+        BK1 -->|"OrderPlaced"| PV1(["Payment Svc"])
+        IV1 -.->|"InventoryReserved"| BK1
+        PV1 -.->|"PaymentRequired"| BK1
+    end
+
+    subgraph ORCH["Orchestration (central coordinator)"]
+        SO(["Order Saga<br/>Orchestrator"]) -->|"ReserveInventory cmd"| IV2(["Inventory Svc"])
+        IV2 -.->|"InventoryReserved event"| BK2("Broker")
+        BK2 -.->|"InventoryReserved event"| SO
+        SO -->|"ChargeCard cmd"| PV2(["Payment Svc"])
+        PV2 -.->|"PaymentCharged event"| BK2
+        BK2 -.->|"PaymentCharged event"| SO
+    end
+
+    class OS io
+    class BK1,BK2 base
+    class IV1,PV1 req
+    class SO mathOp
+    class IV2,PV2 train
 ```
+
+Choreography fans the same event out to every subscriber and no service is aware of the others; orchestration centralizes the flow behind a saga orchestrator that issues commands and blocks on response events, trading autonomy for one place to see the full saga state.
 
 ### Event Envelope Structure
 
@@ -180,20 +209,37 @@ ORCHESTRATION
 
 ### Event Storming Legend
 
-```
-┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
-│ ORANGE   │  │  BLUE    │  │  YELLOW  │  │  PINK    │  │  PURPLE  │
-│ Domain   │  │ Command  │  │Aggregate │  │  Policy  │  │ External │
-│  Event   │  │          │  │          │  │          │  │  System  │
-└──────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Timeline ──────────────────────────────────────────────────────────►
+    subgraph LG["Sticky Note Legend"]
+        L1(["Orange<br/>Domain Event"])
+        L2(["Blue<br/>Command"])
+        L3(["Yellow<br/>Aggregate"])
+        L4(["Pink<br/>Policy"])
+        L5(["Purple<br/>External System"])
+    end
 
-[UserRegistered]──►[SendWelcomeEmail cmd]──►[Email Aggregate]
-                            ▲
-                    [When UserRegistered, THEN SendWelcomeEmail]
-                            Policy (pink)
+    subgraph TL["Timeline Example"]
+        E1(["UserRegistered"]) --> C1(["SendWelcomeEmail cmd"]) --> A1(["Email Aggregate"])
+        P1{"When UserRegistered<br/>THEN SendWelcomeEmail"} -.-> C1
+    end
+
+    class L1,E1 mathOp
+    class L2,C1 io
+    class L3,A1 base
+    class L4,P1 lossN
+    class L5 frozen
 ```
+
+The legend's sticky-note colors carry straight into the timeline: the orange UserRegistered domain event triggers the blue SendWelcomeEmail command under a pink policy rule, landing on the yellow Email aggregate.
 
 ---
 
@@ -366,6 +412,22 @@ public class OrderPlacedIntegrationEvent {
 | Domain event | Rich domain data | Low | Low (immediate) |
 | ECST (fat event) | Full state | Very low | Medium (consumer lag) |
 
+```mermaid
+quadrantChart
+    title Event Type Tradeoff Space
+    x-axis Thin Payload --> Fat Payload
+    y-axis Low Coupling --> High Coupling
+    quadrant-1 Fat and tightly coupled
+    quadrant-2 Thin and tightly coupled
+    quadrant-3 Thin and loosely coupled
+    quadrant-4 Fat and loosely coupled
+    Notification: [0.12, 0.85]
+    Domain Event: [0.48, 0.32]
+    ECST: [0.85, 0.08]
+```
+
+Payload size and consumer coupling move in opposite directions: thin notification events keep consumers coupled to the producer's API (a call-back is mandatory), while fat ECST events decouple consumers at the cost of larger, staler payloads — domain events sit in between.
+
 | Message Type | Direction | Response Expected | State Change |
 |--------------|-----------|-------------------|--------------|
 | Event | Broadcast | No | Already happened |
@@ -400,6 +462,29 @@ public class OrderPlacedIntegrationEvent {
 - Compensation logic is complex.
 - Business requirements demand a clear audit of saga progress.
 - Regulatory compliance requires explicit workflow state storage.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q{"How many services<br/>react to the flow"} -->|"2-3, stable"| CHO(["Choreography"])
+    Q -->|"4-5, still growing"| WARN{"Tipping point:<br/>refactor before it grows"}
+    Q -->|"5+, complex<br/>compensations"| ORC(["Orchestration"])
+    WARN -.-> ORC
+
+    class Q mathOp
+    class CHO train
+    class WARN lossN
+    class ORC base
+```
+
+Service count is the practical signal for picking a pattern: 2-3 stable services favor choreography, 5+ services with real compensation logic favor orchestration, and 4-5 growing services is the tipping point Pitfall 4 warns about — refactor before the flow becomes unreadable.
 
 ---
 
@@ -538,25 +623,37 @@ CQRS separates the write model (command side) from the read model (query side) a
 
 **Event Flow Design**:
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CUST(["Customer"]) --> OSVC(["Order Service"]) --> KFK("Kafka:<br/>orders.placed")
+
+    KFK --> ISO(["Inventory Saga<br/>Orchestrator"])
+    KFK --> NSV(["Notification Svc<br/>(choreography)"])
+    KFK --> ASV(["Analytics Svc<br/>(choreography)"])
+
+    ISO --> INV(["Inventory Svc<br/>(Reserved or Failed)"])
+    ISO --> PAY(["Payment Svc<br/>(Charged or Failed)"])
+
+    INV --> SSM{"Saga State Machine<br/>(compensate if needed)"}
+    PAY --> SSM
+
+    class CUST io
+    class OSVC,ISO mathOp
+    class KFK base
+    class NSV,ASV req
+    class INV,PAY train
+    class SSM lossN
 ```
-Customer ──► Order Service ──► Kafka: orders.placed
-                                        │
-                     ┌──────────────────┼──────────────────────┐
-                     ▼                  ▼                      ▼
-             Inventory Saga        Notification Svc       Analytics Svc
-             Orchestrator          (choreography)         (choreography)
-                     │
-         ┌───────────┴───────────┐
-         ▼                       ▼
-   Inventory Svc            Payment Svc
-   (InventoryReserved or    (PaymentCharged or
-    InventoryFailed)         PaymentFailed)
-         │                       │
-         └───────────┬───────────┘
-                     ▼
-             Saga State Machine
-             (compensate if needed)
-```
+
+The order event fans out to three independent consumers; only the inventory-payment branch funnels back into a saga state machine that can trigger compensation, while notification and analytics stay fire-and-forget.
 
 **Event Envelope Design**:
 ```java

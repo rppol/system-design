@@ -93,28 +93,56 @@ Tree height for N rows:
 
 ### WAL and Checkpoint
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph W["Write"]
+        direction LR
+        w1(["Lock row<br/>MVCC version"]) --> w2["Append to<br/>WAL buffer"]
+        w2 --> w3["Write page to<br/>buffer pool"]
+        w3 --> w4(["Return success"])
+    end
+
+    subgraph F["Commit fsync"]
+        direction LR
+        f1{"COMMIT<br/>issued?"} -->|"yes"| f2["Flush WAL<br/>to disk"]
+        f2 --> f3(["Durable:<br/>commit confirmed"])
+    end
+
+    subgraph K["Checkpoint<br/>periodic or manual"]
+        direction LR
+        k1["Flush dirty pages<br/>to data files"] --> k2["Record<br/>checkpoint LSN"]
+        k2 --> k3["Recycle WAL segments<br/>before that LSN"]
+    end
+
+    subgraph R["Crash Recovery"]
+        direction LR
+        r1(["Restart<br/>after crash"]) --> r2["Find last<br/>checkpoint LSN"]
+        r2 --> r3["Replay WAL to<br/>current end"]
+        r3 --> r4(["Consistent state"])
+    end
+
+    w4 --> f1
+    f3 -.-> k1
+    k3 -.-> r1
+    f3 -.->|"replica streams +<br/>replays continuously"| standby(["Hot standby"])
+
+    class w1,w4 io
+    class w2,f1,f2,k2,r2,r3 mathOp
+    class w3,k1 base
+    class f3,r4 train
+    class k3,standby frozen
+    class r1 lossN
 ```
-Write to database:
-  1. Lock row (or MVCC version)
-  2. Write to WAL buffer: WRITE op record
-  3. Write to shared buffer pool (page in memory)
-  4. Return success (fsync is optional per transaction - synchronous_commit)
 
-WAL to disk (fsync):
-  - On COMMIT: WAL flushed to disk before returning success
-  - Guarantees: if you get a commit confirmation, data is durable
-
-Checkpoint (periodic or manual):
-  - Flush all dirty pages from buffer pool to data files
-  - Record checkpoint LSN in WAL
-  - Old WAL segments before checkpoint LSN can be recycled
-
-Crash recovery:
-  - On restart: find last checkpoint LSN
-  - Replay WAL from checkpoint LSN to current WAL end
-  - Database reaches consistent state
-  - Hot standby: replica streams WAL continuously and replays it
-```
+The write path only needs the WAL buffer to return success; the fsync that makes a commit durable happens separately, on COMMIT. Checkpoints and crash recovery run on their own cadence — recovery always replays forward from the last checkpoint LSN, and a hot standby just performs that same replay continuously instead of waiting for a crash.
 
 ### MVCC Row Versioning
 
@@ -176,6 +204,35 @@ EXPLAIN SELECT id, status FROM orders WHERE user_id = 456;
 -- Index Only Scan using orders_user_id_idx on orders
 -- requires visibility map to be up-to-date (VACUUM)
 ```
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    q(["Query with<br/>WHERE filter"]) --> sel{"Estimated<br/>selectivity?"}
+    sel -->|"over 15-20% of rows"| seq["Seq Scan<br/>reads whole table"]
+    sel -->|"thousands of rows"| bmp["Bitmap Index Scan<br/>then Bitmap Heap Scan"]
+    sel -->|"few rows"| idx["Index Scan<br/>B+tree + heap fetch"]
+    idx --> cov{"Index covers all<br/>SELECT columns?"}
+    cov -->|"yes, visibility<br/>map current"| ios(["Index Only Scan<br/>no heap access"])
+    cov -->|"no"| heap(["heap fetch<br/>per matching row"])
+
+    class q io
+    class sel,cov mathOp
+    class seq lossN
+    class bmp req
+    class idx base
+    class ios train
+    class heap frozen
+```
+
+The planner picks among these four scan shapes purely from estimated selectivity — a low-selectivity filter is cheaper as a full sequential scan than as scattered random I/O, while a highly selective one is worth a B+tree traversal, and only a covering index with a current visibility map earns the index-only fast path.
 
 ### 6.2 Covering Indexes
 
@@ -294,6 +351,22 @@ CREATE INDEX idx_readings_ts ON sensor_readings USING BRIN (recorded_at);
 | Read Committed | Best | Dirty reads |
 | Repeatable Read | Good | Dirty reads, non-repeatable reads |
 | Serializable | Worst (SSI overhead) | All anomalies |
+
+```mermaid
+quadrantChart
+    title Isolation Level: Read Speed vs Anomalies Prevented
+    x-axis "Low Read Speed" --> "High Read Speed"
+    y-axis "Few Anomalies Blocked" --> "Many Anomalies Blocked"
+    quadrant-1 "Strict and fast (rare)"
+    quadrant-2 "Strict and slow"
+    quadrant-3 "Loose and slow"
+    quadrant-4 "Loose and fast"
+    "Read Committed": [0.82, 0.18]
+    "Repeatable Read": [0.55, 0.55]
+    "Serializable": [0.15, 0.92]
+```
+
+The two tables above plot onto one curve: Read Committed is fastest but blocks only dirty reads, Serializable blocks every anomaly but pays SSI overhead, and Repeatable Read sits between the two.
 
 ---
 

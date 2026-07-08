@@ -65,38 +65,46 @@ Protocol Buffers serialize structured data into a compact binary format — typi
 
 ### gRPC Architecture
 
+```mermaid
+sequenceDiagram
+    participant C as Client Application
+    participant S as gRPC Client Stub
+    participant H as HTTP/2 Connection
+    participant G as gRPC Server
+    participant I as Service Implementation
+
+    C->>S: userService.getUser(id=123)
+    Note over S: serialize to protobuf bytes<br/>set method=POST, path=/users.UserService/GetUser
+    S->>H: send over multiplexed TLS stream
+    H->>G: forward frame (Netty / Undertow)
+    Note over G: deserialize protobuf<br/>apply interceptors (auth, logging, tracing)
+    G->>I: dispatch getUser(request, StreamObserver)
+    I-->>G: build response
+    Note over G: serialize response to protobuf
+    G-->>H: DATA frame + trailing HEADERS<br/>grpc-status=0 (OK)
+    H-->>C: deserialize, return to application
 ```
-Client Application
-    |
-    | generated stub call: userService.getUser(GetUserRequest{id=123})
-    v
-gRPC Client Stub (generated)
-    |
-    | serialize to protobuf bytes
-    | set headers: :method POST, :path /users.UserService/GetUser, content-type application/grpc
-    | send over HTTP/2 stream
-    v
-HTTP/2 Connection (multiplexed, TLS)
-    |
-    v
-gRPC Server (Netty / Undertow)
-    |
-    | deserialize protobuf
-    | apply server interceptors (auth, logging, tracing)
-    | dispatch to service implementation
-    v
-Service Implementation
-    | getUser(GetUserRequest, StreamObserver<GetUserResponse>)
-    |
-    v
-gRPC Server Response
-    | serialize response to protobuf
-    | send DATA frame on same HTTP/2 stream
-    | send trailing HEADERS with grpc-status: 0 (OK)
-    v
-gRPC Client receives response
-    | deserialize, return to application
+
+A single unary call traced end-to-end: the stub serializes the request onto one multiplexed HTTP/2 stream, the server deserializes and runs interceptors before dispatch, and the response returns as a DATA frame followed by trailing HEADERS carrying `grpc-status: 0`.
+
+### Four RPC Modes by Streaming Direction
+
+```mermaid
+quadrantChart
+    title Four gRPC Modes by Streaming Direction
+    x-axis Single Client Request --> Streaming Client Requests
+    y-axis Single Server Response --> Streaming Server Responses
+    quadrant-1 Bidirectional Streaming
+    quadrant-2 Server Streaming
+    quadrant-3 Unary
+    quadrant-4 Client Streaming
+    Unary: [0.25, 0.25]
+    Server streaming: [0.25, 0.75]
+    Client streaming: [0.75, 0.25]
+    Bidirectional streaming: [0.75, 0.75]
 ```
+
+The four modes from the Section 4.1 table are not four unrelated cases — they are every combination of two independent yes/no choices, does the client stream and does the server stream, and only bidirectional streaming sends and receives concurrently on the same call.
 
 ### Protobuf Wire Format
 
@@ -127,33 +135,59 @@ Note: Field names are NOT in the wire format.
       This is why field numbers must never be reused.
 ```
 
+### Protobuf Schema Evolution: Safe vs. Breaking Changes
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Change(["proto schema change"]) --> Decision{"safe or breaking?"}
+    Decision -->|"safe"| S1["add field<br/>new number"]
+    Decision -->|"safe"| S2["add enum value"]
+    Decision -->|"safe"| S3["add new RPC"]
+    Decision -->|"safe"| S4["rename field<br/>number unchanged"]
+    Decision -->|"breaking"| B1["remove field<br/>without reserving number"]
+    Decision -->|"breaking"| B2["change field type"]
+    Decision -->|"breaking"| B3["reuse a field number"]
+
+    class Change io
+    class Decision mathOp
+    class S1,S2,S3,S4 train
+    class B1,B2,B3 lossN
+```
+
+Additive changes stay wire-compatible because the field number never moves; removing a field without reserving it, changing a field's type, or reusing a number breaks old clients silently — exactly what `buf breaking --against` catches in CI.
+
 ### Deadline Propagation
 
-```
-Client sets deadline: 1000ms
-    |
-    | gRPC call to Service A (900ms remaining)
-    v
-Service A
-    | remaining deadline propagated automatically
-    | gRPC call to Service B (800ms remaining)
-    v
-Service B
-    | gRPC call to Database (600ms remaining)
-    v
-Database: query takes 700ms → exceeds remaining deadline
+```mermaid
+sequenceDiagram
+    participant Client
+    participant A as Service A
+    participant B as Service B
+    participant DB as Database
 
-Service B: detects deadline exceeded, returns DEADLINE_EXCEEDED
-Service A: receives DEADLINE_EXCEEDED from B, cancels own work, propagates up
-Client: receives DEADLINE_EXCEEDED, does not wait for 1000ms to expire
-
-Without deadline propagation:
-  Client timeout → client closes connection
-  Service A still running (no signal received)
-  Service B still running
-  Database query completes, result discarded
-  Services A and B wasted resources
+    Client->>A: call, deadline 1000ms
+    Note over A: 900ms remaining
+    A->>B: call, deadline propagated
+    Note over B: 800ms remaining
+    B->>DB: query, deadline propagated
+    Note over DB: 600ms remaining
+    DB-->>B: query takes 700ms, exceeds remaining deadline
+    B-->>A: DEADLINE_EXCEEDED
+    Note over B: detects timeout, cancels own work
+    A-->>Client: DEADLINE_EXCEEDED
+    Note over A: cancels own work, propagates up
+    Note over Client: does not wait for the full 1000ms
 ```
+
+The 700ms database query blows the 600ms budget it was handed, so DEADLINE_EXCEEDED unwinds Service B, then Service A, then the client immediately — without propagation, only the client would time out while Service A, Service B, and the database keep working for nothing.
 
 ---
 

@@ -88,35 +88,103 @@ Cloud networking layers on top of the single-VPC basics from [cloud_fundamentals
 
 ## 5. Architecture Diagrams
 
+**Peering mesh vs Transit Gateway hub**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Mesh["Peering mesh — 5 VPCs = 10 peerings"]
+        direction LR
+        MA(["A"]) --- MB(["B"])
+        MA --- MC(["C"])
+        MA --- MD(["D"])
+        MA --- ME(["E"])
+        MB --- MC
+        MB --- MD
+        MB --- ME
+        MC --- MD
+        MC --- ME
+        MD --- ME
+    end
+
+    subgraph Hub["Transit Gateway hub-and-spoke — 5 attachments"]
+        direction LR
+        HA(["A"]) --- TGW{"TGW"}
+        HB(["B"]) --- TGW
+        HC(["C"]) --- TGW
+        HD(["D"]) --- TGW
+        HE(["E"]) --- TGW
+    end
+
+    class MA,MB,MC,MD,ME lossN
+    class HA,HB,HC,HD,HE train
+    class TGW mathOp
 ```
-Peering mesh vs Transit Gateway hub
 
-  Mesh (5 VPCs = 10 peerings):        Hub-and-spoke (5 attachments):
-     A---B                                 A   B
-     |\ /|                                  \ /
-     | X |                              C -- TGW -- D
-     |/ \|                                  / \
-     C---D---E                             E   (route tables segment spokes)
+*A 5-VPC mesh needs 10 peering connections (N(N-1)/2); the same 5 VPCs need only 5 attachments through a Transit Gateway hub, and route tables still segment which spokes can reach which.*
 
-PrivateLink (consume a service privately, no peering)
+**PrivateLink — consume a service privately, no peering**
 
-  Consumer VPC                       Provider VPC
-   [app] --> [Interface Endpoint] ===private=== [NLB] --> [service]
-            (ENI w/ private IP)      (no route exposure, no internet)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Global edge: CDN + global LB + DNS
+    subgraph Consumer["Consumer VPC"]
+        direction LR
+        App(["app"]) --> EP("Interface Endpoint<br/>ENI, private IP")
+    end
 
-  user (Tokyo) --DNS (latency policy)--> nearest edge
-        |
-   [CloudFront/Cloudflare edge - Tokyo]
-        |--- cache HIT: serve from edge (low latency, origin offloaded)
-        |--- cache MISS: fetch from origin (regional ALB) over backbone
-                              |
-                       [origin: ALB -> app -> RDS]  (us-east-1)
+    subgraph Provider["Provider VPC"]
+        direction LR
+        NLB("NLB") --> Svc(["service"])
+    end
 
-  Global Accelerator / anycast: one IP, BGP steers to nearest healthy Region;
-  failover is near-instant (no DNS TTL wait)
+    EP -->|"private link: no route exposure, no internet"| NLB
+
+    class App io
+    class EP mathOp
+    class NLB mathOp
+    class Svc base
 ```
+
+*The consumer never joins the provider's network — its Interface Endpoint reaches the provider's NLB over a private connection, with no peering, no route exposure, and no internet hop.*
+
+**Global edge: CDN + global LB + DNS**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    User(["user<br/>Tokyo"]) -->|"DNS: latency policy"| Edge(["CDN edge<br/>Tokyo"])
+    Edge -->|"cache HIT"| Hit("serve from edge<br/>low latency")
+    Edge -.->|"cache MISS"| Origin[["origin: ALB → app → RDS<br/>us-east-1"]]
+
+    class User req
+    class Edge base
+    class Hit train
+    class Origin frozen
+```
+
+*A cache HIT is served straight from the nearest edge, offloading the origin; a cache MISS falls through to the regional origin over the backbone. Global Accelerator's anycast IP steers around a failed Region via BGP withdrawal — near-instant, unlike DNS-TTL-bound failover.*
 
 ---
 
@@ -252,11 +320,75 @@ aws cloudfront create-invalidation --distribution-id E123 --paths "/static/*"
 
 **Reconsider when:** you have only 2-3 VPCs (peering is simpler and cheaper than TGW's per-attachment + per-GB charges); content is fully dynamic and per-user (CDN cache hit ratio will be near zero — though edge TLS/DDoS may still help); a single Region serves your users well (global LB adds complexity for no latency win). Don't add a TGW or CDN reflexively — each has per-hour/per-GB costs.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Sit(["your situation"])
+    Q1{"more than<br/>~5 VPCs?"}
+    Q2{"exposing just<br/>one service?"}
+    Q3{"cacheable<br/>content?"}
+    Q4{"multiple<br/>Regions?"}
+    TGW(["Transit Gateway"])
+    Peer(["VPC Peering"])
+    PL(["PrivateLink"])
+    CDN(["CDN"])
+    SkipCDN(["skip CDN<br/>near-zero hit ratio"])
+    GLB(["Global LB /<br/>latency DNS"])
+    One(["single Region<br/>skip global LB"])
+
+    Sit --> Q1
+    Sit --> Q2
+    Sit --> Q3
+    Sit --> Q4
+    Q1 -->|"yes"| TGW
+    Q1 -.->|"no, 2-3 VPCs"| Peer
+    Q2 -->|"yes"| PL
+    Q3 -->|"yes"| CDN
+    Q3 -.->|"no"| SkipCDN
+    Q4 -->|"yes"| GLB
+    Q4 -.->|"no"| One
+
+    class Sit io
+    class Q1,Q2,Q3,Q4 mathOp
+    class TGW,PL,CDN,GLB train
+    class Peer,SkipCDN,One base
+```
+
+*These four checks are independent, not mutually exclusive — most platforms end up running Transit Gateway, PrivateLink, a CDN, and global LB together; the dotted branches are the "reconsider" guardrails from the paragraph above.*
+
 ---
 
 ## 10. Common Pitfalls
 
 **Pitfall 1 — Expecting VPC peering to be transitive.**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["VPC A"]) -->|"peered"| B(["VPC B"])
+    B -->|"peered"| C(["VPC C"])
+    A -.->|"blocked: not transitive"| C
+
+    class A req
+    class B base
+    class C frozen
+```
+
+*A is peered with B, and B is peered with C, but A still cannot reach C — peering never forwards traffic through an intermediate VPC. Only a Transit Gateway (the hub-and-spoke diagram in section 5) gives every VPC transitive reachability.*
 
 ```hcl
 # BROKEN: peer A<->B and B<->C, then expect A to reach C through B

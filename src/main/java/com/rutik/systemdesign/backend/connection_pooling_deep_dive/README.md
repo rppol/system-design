@@ -74,94 +74,86 @@ Transaction mode with PgBouncer multiplexes many application connections to a sm
 
 ### HikariCP ConcurrentBag Internals
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph BorrowPath["borrow()"]
+        direction LR
+        A([getConnection]) --> B{ThreadLocal<br/>cache hit?}
+        B -->|yes| C{CAS to<br/>IN_USE ok?}
+        C -->|success| R([return connection])
+        C -->|fail| D
+        B -->|no| D{scan sharedList<br/>for idle entry}
+        D -->|found + CAS ok| R
+        D -->|none free| W[queue on<br/>handoffQueue]
+        W -->|offered by returner| R
+        W -.->|timeout| F([ConnectionTimeoutException])
+    end
+
+    subgraph ReturnPath["return()"]
+        direction LR
+        X([conn.close]) --> Y[state to<br/>NOT_IN_USE]
+        Y --> Z{waiters<br/>greater than 0?}
+        Z -->|yes| H[direct handoff<br/>via handoffQueue]
+        Z -->|no| S[idle in<br/>sharedList]
+    end
+
+    class A,R,X io
+    class B,C,D,Z mathOp
+    class W req
+    class F lossN
+    class Y,H,S train
 ```
-ConcurrentBag (HikariCP's custom data structure):
-  sharedList: CopyOnWriteArrayList<PoolEntry>  // all connections
-  threadList: ThreadLocal<List<WeakReference<PoolEntry>>>  // per-thread cache
-  handoffQueue: SynchronousTransferQueue       // for fast waiters
-  waiters: AtomicInteger                       // threads waiting
 
-borrow():
-  1. Check threadList (this thread's previously used connections first)
-     → ThreadLocal hit avoids lock contention for high-reuse threads
-     → CAS state from NOT_IN_USE to IN_USE → return if successful
-
-  2. Scan sharedList for any NOT_IN_USE connection
-     → CAS state from NOT_IN_USE to IN_USE → return if successful
-
-  3. Add to waiters, timeout on handoffQueue
-     → When any thread returns a connection, it offers to handoffQueue
-     → Waiting thread receives it directly (no queue traversal)
-
-return():
-  1. Set state back to NOT_IN_USE
-  2. If waiters > 0: offer to handoffQueue (direct transfer to waiter)
-  3. Otherwise: connection available in sharedList
-
-Performance:
-  borrow/return ~microseconds with no lock contention
-  CAS operations instead of synchronized blocks
-  ThreadLocal cache minimizes cross-thread competition
-```
+*A `borrow()` call checks the thread's own cache first (lock-free on a repeat hit), then scans the shared list with a single CAS, and only queues on the handoff queue once every connection is checked out; this three-tier design is why borrow/return complete in microseconds with no synchronized blocks.*
 
 ### Pool Sizing and Little's Law
 
+```mermaid
+xychart-beta
+    title "HikariCP pool size: naive estimate vs. formula vs. danger zone"
+    x-axis ["Little's Law raw", "+50% headroom", "HikariCP formula", "Degradation starts"]
+    y-axis "Connections needed" 0 --> 30
+    bar [1, 1.5, 9, 25]
 ```
-Little's Law: L = λ * W
-  L = average connections in use (pool size needed)
-  λ = throughput (queries/second)
-  W = average query duration (seconds)
 
-Example:
-  100 concurrent users, each executing 1 query taking 10ms
-  λ = 100 req/s * 1 query/req = 100 queries/s
-  W = 0.010 s
-  L = 100 * 0.010 = 1 connection in use on average
-
-  But we need headroom for bursts. Add safety factor:
-  pool_size = L * 1.5 = 1.5 connections? Too few for burst.
-
-  Better formula from HikariCP documentation:
-  pool_size = (cores * 2) + spindles
-
-  For PostgreSQL on 4-core SSD server:
-  = (4 * 2) + 1 = 9
-
-  Implication: 10 connections can serve ~1000 req/s
-  with 10ms average query time (1000 * 0.01 = 10).
-
-  More than ~20-30 connections to a single PostgreSQL server
-  typically DEGRADES performance due to locking and context switching.
-```
+*Little's Law (L = λ × W: average connections in use = throughput in queries/second times average query duration in seconds) on 100 req/s at 10ms each gives L = 100 × 0.010 = 1 connection in use on average, and a naive 50% safety margin only reaches 1.5 — both under-provision for bursts. The HikariCP formula, (cores × 2) + spindles = (4 × 2) + 1 = 9, lands with real headroom, well below the ~20-30 connection point where PostgreSQL performance starts to degrade from locking and context switching; 10 connections at that rate comfortably serves ~1000 req/s at 10ms per query.*
 
 ### Connection Lifecycle
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Idle: pool init<br/>(TCP connect + auth)
+    Idle --> InUse: getConnection()<br/>ConcurrentBag borrow
+    InUse --> Idle: conn.close()<br/>returns to pool
+    Idle --> Validating: idle over keepaliveTime<br/>(HouseKeeper check)
+    Validating --> Idle: isValid() succeeds
+    Validating --> Retired: isValid() fails
+    Idle --> Retired: age over maxLifetime<br/>or idle over idleTimeout
+    Retired --> [*]: closed,<br/>replacement created
+
+    class Idle base
+    class InUse train
+    class Validating mathOp
+    class Retired lossN
 ```
-Pool initialized:
-  minimumIdle connections created eagerly
-  Each: TCP connect, auth, ready state
 
-Request arrives:
-  getConnection() call
-  → Pool finds idle connection (ConcurrentBag borrow)
-  → validate if connection.validate() configured
-  → return to caller
-
-Application uses connection:
-  Execute SQL, read results
-
-Application calls conn.close():
-  → NOT TCP close — returns connection to pool
-  → Pool sets state to NOT_IN_USE
-  → Available for next borrow
-
-Background maintenance (HikariPool.HouseKeeper):
-  Every 30 seconds:
-    Remove idle connections older than idleTimeout (if above minimumIdle)
-    Close connections older than maxLifetime, create replacement
-    Validate connections idle for more than keepaliveTime
-    Log pool statistics
-```
+*A connection cycles between Idle and InUse on every borrow/return; the HouseKeeper thread is what moves it sideways into Validating (idle past keepaliveTime) or forward into Retired (past maxLifetime or idleTimeout), checking every 30 seconds independent of application traffic.*
 
 ---
 
@@ -265,32 +257,33 @@ public void longRunningProcess() {
 
 ### 6.4 Pool Exhaustion Scenario
 
+```mermaid
+sequenceDiagram
+    participant T as 50 threads
+    participant P as HikariCP Pool
+    participant D as Database
+
+    Note over P: maximumPoolSize=10<br/>connectionTimeout=5000ms
+
+    Note over T,P: Normal case — 200ms queries
+    T->>P: borrow()
+    P-->>T: 10 connections granted
+    Note over T: 40 threads queued<br/>(pool exhausted)
+    T->>D: execute query
+    D-->>T: results after 200ms
+    T->>P: return 10 connections
+    P-->>T: 10 more connections granted
+    Note over T: 30 threads still waiting
+
+    Note over T,P: Problem case — DB slows to 10s
+    T->>P: borrow()
+    P-->>T: 10 connections granted
+    T->>D: execute query (10s)
+    Note over T: 40 threads wait up to<br/>connectionTimeout
+    P--xT: ConnectionTimeoutException<br/>after 5000ms
 ```
-System: maximumPoolSize=10, connectionTimeout=5000ms
-Load: 50 concurrent threads each executing a 200ms query
 
-Timeline:
-  t=0:   10 threads borrow connections, start queries
-  t=0:   40 threads blocked waiting for connection (pool exhausted)
-  t=200ms: First batch completes, return 10 connections
-  t=200ms: 10 more threads borrow and start queries
-  t=200ms: 30 threads still waiting
-
-This is normal behavior — pool works correctly.
-
-Problem scenario: queries slow down to 10 seconds (downstream DB issue)
-  t=0:   10 threads borrow connections, queries take 10s
-  t=5000ms: 40 waiting threads get ConnectionTimeoutException
-  Application logs: "Unable to acquire JDBC Connection; nested exception is
-    com.zaxxer.hikari.pool.HikariPool$PoolInitializationException:
-    Timeout after 5000ms waiting to acquire a connection from HikariCP pool"
-  Root cause: not the pool, but the database being slow
-
-Monitoring:
-  hikaricp_connections_pending (Micrometer gauge)
-  If this is consistently > 0, pool is a bottleneck
-  If 10 = maximumPoolSize, increase pool or optimize queries
-```
+*The pool behaves identically in both runs — grant up to `maximumPoolSize`, queue the rest — but a 200ms query drains and refills the pool every cycle while a 10s query holds all 10 connections past the 5000ms `connectionTimeout`, turning healthy queuing into `ConnectionTimeoutException` for every waiter. The fix is never to enlarge the pool blindly: watch `hikaricp_connections_pending` — a value pinned near maximumPoolSize means the query, not the pool, is the real bottleneck.*
 
 ---
 
@@ -423,3 +416,28 @@ See the [Java case study: design_connection_pool](../java/case_studies/design_co
 **Fix**: Deployed PgBouncer in transaction mode. Application continues to use 20-connection pools. PgBouncer forwards transactions to only 50 PostgreSQL connections. Total PostgreSQL connections: 50 (constant). Application pools: 600 (unchanged). PgBouncer acts as a multiplexer.
 
 **Longer term**: Reduced HikariCP pool to 10 per instance based on the formula (PostgreSQL on 4-core server: (4*2)+1 = 9 ≈ 10 per instance). With PgBouncer: 30 * 10 = 300 connections through PgBouncer → 50 real PostgreSQL connections. 80% reduction in DB connection overhead.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["30 × 20 conn<br/>= 600 attempted"]) -->|attempted directly| B{"PostgreSQL capacity<br/>max_connections=100"}
+    B -->|600 over limit of 100| C(["FATAL: too many<br/>clients already"])
+
+    D(["30 × 10 conn<br/>= 300 pooled"]) -->|via PgBouncer| E["PgBouncer<br/>transaction mode"]
+    E -->|multiplexed| F(["50 real PostgreSQL<br/>connections"])
+
+    class A,D io
+    class B mathOp
+    class C lossN
+    class E mathOp
+    class F train
+```
+
+*Connecting the fleet directly overwhelms PostgreSQL's max_connections=100 — 600 attempted connections exceed it 6x and every excess attempt fails with `FATAL: sorry, too many clients already`. Routing through PgBouncer in transaction mode instead multiplexes application-side pools down to a constant 50 real PostgreSQL connections, the 80% reduction in DB connection overhead described above.*

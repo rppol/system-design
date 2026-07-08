@@ -195,6 +195,34 @@ HTTP APIs that trigger mutations (payment, order placement) must be safe to retr
 4. If found and processing is in-flight, return `409 Conflict` (or wait and retry).
 5. If not found, process the request, store the result alongside the key in a single transaction.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client sends<br/>Idempotency-Key"]) --> lookup{"key in<br/>idempotency_requests?"}
+    lookup -->|"not found"| process("Process request,<br/>store result + key<br/>in one transaction")
+    lookup -->|"found, complete"| cached("Return cached<br/>response")
+    lookup -->|"found, in-flight"| conflict("Return 409 Conflict<br/>or wait and retry")
+    process --> respond(["Response to client"])
+    cached --> respond
+    conflict --> respond
+
+    class client io
+    class lookup mathOp
+    class process train
+    class cached base
+    class conflict lossN
+    class respond io
+```
+
+The single lookup is the whole pattern: a new key falls through to normal processing, a completed key short-circuits to the stored response, and an in-flight key — the retry racing its own original request — gets a 409 instead of double-processing, which is exactly how Stripe's production implementation (section 7) behaves for 24 hours per key.
+
 Idempotency keys should expire after a reasonable window (24 hours for payments, 7 days for long-running orders) to prevent unbounded table growth.
 
 ### 4.7 Delivery Semantics
@@ -213,104 +241,109 @@ Note: Kafka's "exactly-once semantics" (EOS) with transactions and idempotent pr
 
 ### 2PC Flow — Normal and Failure Case
 
+**Normal flow — every participant votes to commit:**
+
+```mermaid
+sequenceDiagram
+    participant Coord as Coordinator
+    participant A as Participant A
+    participant B as Participant B
+    participant C as Participant C
+
+    Coord->>A: PREPARE
+    Coord->>B: PREPARE
+    Coord->>C: PREPARE
+    A-->>Coord: VOTE_COMMIT
+    B-->>Coord: VOTE_COMMIT
+    C-->>Coord: VOTE_COMMIT
+    Note over Coord: all votes COMMIT<br/>write COMMIT to log
+    Coord->>A: COMMIT
+    Coord->>B: COMMIT
+    Coord->>C: COMMIT
 ```
-NORMAL FLOW
-===========
 
-  Coordinator
-      |
-      |--- PREPARE --> [Participant A] --- VOTE_COMMIT -->|
-      |--- PREPARE --> [Participant B] --- VOTE_COMMIT -->|
-      |--- PREPARE --> [Participant C] --- VOTE_COMMIT -->|
-      |                                                   |
-      |<----- all VOTE_COMMIT received ------------------|
-      |
-      |--- COMMIT --> [Participant A]
-      |--- COMMIT --> [Participant B]
-      |--- COMMIT --> [Participant C]
+All three participants vote `VOTE_COMMIT`, so the coordinator durably logs the decision before fanning out `COMMIT` — the happy path most 2PC discussions stop at.
 
+**Coordinator crash after PREPARE, before the decision is sent:**
 
-COORDINATOR CRASH AFTER PREPARE, BEFORE DECISION
-=================================================
+```mermaid
+sequenceDiagram
+    participant Coord as Coordinator
+    participant A as Participant A
+    participant B as Participant B
+    participant C as Participant C
 
-  Coordinator  (CRASHED)
-      |
-      |--- PREPARE --> [Participant A] --- VOTE_COMMIT --> (waiting...)
-      |--- PREPARE --> [Participant B] --- VOTE_COMMIT --> (waiting...)
-      |--- PREPARE --> [Participant C] --- VOTE_ABORT  --> (waiting...)
-
-  All participants hold locks.
-  Participant A and B cannot commit or abort unilaterally.
-  They block until coordinator recovers. This is the BLOCKING PROBLEM.
+    Coord->>A: PREPARE
+    Coord->>B: PREPARE
+    Coord->>C: PREPARE
+    A-->>Coord: VOTE_COMMIT
+    B-->>Coord: VOTE_COMMIT
+    C-->>Coord: VOTE_ABORT
+    Note over Coord: Coordinator CRASHES<br/>before deciding
+    Note over A,B: locks still held,<br/>waiting...<br/>cannot commit or abort<br/>unilaterally
 ```
+
+A and B already voted `VOTE_COMMIT` and are holding locks when the coordinator crashes; with no decision to act on, they block until it recovers — this is the blocking problem that makes 2PC unsuitable once participants span independently-operated microservices.
 
 ### Saga Choreography Flow
 
+```mermaid
+sequenceDiagram
+    participant O as Order Service
+    participant I as Inventory Service
+    participant P as Payment Service
+
+    Note over O: Place Order
+    O->>I: OrderCreated event
+    Note over I: Reserve Inventory
+    I->>P: InventoryReserved event
+    Note over P: Charge Payment (fails)
+    P-->>I: PaymentFailed event
+    Note over I: Release Inventory
+    I-->>O: ReleaseInventory event
+    Note over O: Cancel Order<br/>publishes OrderCancelled event
 ```
-  Order Service          Inventory Service         Payment Service
-       |                        |                        |
-  [Place Order]                 |                        |
-       |                        |                        |
-       |--OrderCreated event--> |                        |
-       |                 [Reserve Inventory]             |
-       |                        |                        |
-       |               InventoryReserved event --------> |
-       |                        |               [Charge Payment]
-       |                        |                        |
-       |                        |              PaymentFailed event
-       |                        |                        |
-       |               <---ReleaseInventory event--------|
-       |                 [Release Inventory]             |
-       |                        |                        |
-       |<---OrderCancelled event--                       |
-  [Cancel Order]                                         |
-```
+
+Each service reacts only to the events it subscribes to — there is no central coordinator watching the whole flow, so when Charge Payment fails the compensation cascades in reverse (Payment to Inventory to Order), exactly as section 4.3 describes.
 
 ### Saga Orchestration Flow
 
+```mermaid
+stateDiagram-v2
+    [*] --> STARTED
+    STARTED --> ORDER_CREATED: send CreateOrderCmd<br/>recv OrderCreatedReply
+    ORDER_CREATED --> INVENTORY_RESERVED: send ReserveInventoryCmd<br/>recv InventoryReservedReply
+    INVENTORY_RESERVED --> PAYMENT_FAILED: send ChargePaymentCmd<br/>recv PaymentFailedReply
+    PAYMENT_FAILED --> COMPENSATING: send ReleaseInventoryCmd<br/>recv InventoryReleasedReply
+    COMPENSATING --> CANCELLED: send CancelOrderCmd<br/>recv OrderCancelledReply
+    CANCELLED --> [*]
 ```
-  Saga Orchestrator
-  +-----------------------------------------+
-  | State: STARTED                          |
-  |   -> send CreateOrderCmd                |
-  |      receive OrderCreatedReply          |
-  | State: ORDER_CREATED                    |
-  |   -> send ReserveInventoryCmd           |
-  |      receive InventoryReservedReply     |
-  | State: INVENTORY_RESERVED               |
-  |   -> send ChargePaymentCmd              |
-  |      receive PaymentFailedReply         |
-  | State: PAYMENT_FAILED                   |
-  |   -> send ReleaseInventoryCmd           |
-  |      receive InventoryReleasedReply     |
-  | State: COMPENSATING                     |
-  |   -> send CancelOrderCmd               |
-  |      receive OrderCancelledReply        |
-  | State: CANCELLED                        |
-  +-----------------------------------------+
-       |              |              |
-  Order Service  Inventory Svc  Payment Svc
-```
+
+The orchestrator sends exactly one command and waits for exactly one reply per transition; Order Service, Inventory Svc, and Payment Svc never talk to each other directly, only to this state machine — which is what makes the workflow easy to monitor and debug.
 
 ### Transactional Outbox + CDC Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    svc("Service write path<br/>DB Transaction:<br/>INSERT orders +<br/>INSERT outbox_events") -->|"DB WAL<br/>/ binlog"| connector("Debezium Connector<br/>tails WAL")
+    connector --> topic(["Kafka Topic"])
+    topic --> consumer(["Consumer<br/>idempotent inbox"])
+
+    class svc req
+    class connector mathOp
+    class topic req
+    class consumer io
 ```
-  Service (write path)
-  +----------------------------+
-  | DB Transaction             |
-  |  INSERT INTO orders (...)  |
-  |  INSERT INTO outbox_events |
-  |    (id, type, payload)     |
-  +----------------------------+
-           |
-           | DB WAL / binlog
-           v
-  +-------------------+         +--------+         +-----------+
-  | Debezium Connector| ------> | Kafka  | ------> | Consumer  |
-  |  (tails WAL)      |         | Topic  |         | (idempotent|
-  +-------------------+         +--------+         |  inbox)   |
-                                                   +-----------+
-```
+
+Debezium tails the WAL/binlog directly instead of polling the outbox table, so the order write and its outbox insert commit in one local transaction while the CDC connector streams changes to Kafka with sub-100ms latency and zero added query load on the database.
 
 ---
 
@@ -617,6 +650,24 @@ public void onCreditFailed(UUID sagaId) {
 | Saga (Orchestration) | Eventual | High (orchestrator is stateless) | No | Yes | Medium (centralised logic) |
 | Outbox + CDC | Eventual | High | No | Yes | Low–Medium |
 
+```mermaid
+quadrantChart
+    title Distributed transaction protocols: consistency vs availability
+    x-axis Low Availability --> High Availability
+    y-axis Eventual Consistency --> Strong Consistency
+    quadrant-1 Ideal rarely achievable
+    quadrant-2 Strong but blocking
+    quadrant-3 Avoid this corner
+    quadrant-4 Eventual and resilient
+    2PC: [0.15, 0.95]
+    3PC: [0.4, 0.85]
+    Saga Choreography: [0.8, 0.25]
+    Saga Orchestration: [0.75, 0.32]
+    Outbox + CDC: [0.9, 0.15]
+```
+
+Plotting the table above onto the CAP tension named in section 1 shows the split cleanly: 2PC and 3PC buy strong consistency by giving up availability (coordinator SPOF, blocking on crash), while every saga variant and outbox + CDC land in the eventual-and-resilient corner — no protocol here reaches the empty top-right quadrant, because nothing escapes the tradeoff.
+
 ### Consistency Model Comparison
 
 | Model | Guarantee | Latency | Implementation |
@@ -861,26 +912,23 @@ If the orchestrator is stateless (saga state persisted entirely in the database)
 
 **Architecture**:
 
+```mermaid
+stateDiagram-v2
+    state "SEAT_RELEASED / CANCELLED" as CANCELLED
+
+    [*] --> STARTED
+    STARTED --> SEAT_RESERVED: ReserveSeatCmd<br/>to Reservation Svc
+    SEAT_RESERVED --> FARE_LOCKED: LockFareCmd<br/>to Pricing Svc
+    FARE_LOCKED --> PAYMENT_CHARGED: ChargePaymentCmd<br/>to Payment Svc (approved)
+    FARE_LOCKED --> PAYMENT_FAILED: ChargePaymentCmd<br/>to Payment Svc (declined)
+    PAYMENT_CHARGED --> COMPLETED: SendConfirmationCmd<br/>to Notification Svc
+    PAYMENT_FAILED --> FARE_UNLOCKED: UnlockFareCmd<br/>to Pricing Svc
+    FARE_UNLOCKED --> CANCELLED: ReleaseSeatCmd<br/>to Reservation Svc
+    COMPLETED --> [*]
+    CANCELLED --> [*]
 ```
-  Booking Orchestrator (persisted state machine)
-  +--------------------------------------------------+
-  | STARTED                                           |
-  |   -> ReserveSeatCmd        -> Reservation Svc    |
-  | SEAT_RESERVED                                     |
-  |   -> LockFareCmd           -> Pricing Svc        |
-  | FARE_LOCKED                                       |
-  |   -> ChargePaymentCmd      -> Payment Svc        |
-  | PAYMENT_CHARGED                                   |
-  |   -> SendConfirmationCmd   -> Notification Svc   |
-  | COMPLETED                                         |
-  |                                                   |
-  | PAYMENT_FAILED                                    |
-  |   -> UnlockFareCmd         -> Pricing Svc        |
-  | FARE_UNLOCKED                                     |
-  |   -> ReleaseSeatCmd        -> Reservation Svc    |
-  | SEAT_RELEASED = CANCELLED                         |
-  +--------------------------------------------------+
-```
+
+The happy path (STARTED to COMPLETED) and the compensation path (PAYMENT_FAILED to CANCELLED) share the same FARE_LOCKED branch point — ChargePaymentCmd is the one step with two outcomes, and the production numbers below show it fails 2–5% of the time versus under 0.5% for the seat and fare steps.
 
 **Key design decisions**:
 

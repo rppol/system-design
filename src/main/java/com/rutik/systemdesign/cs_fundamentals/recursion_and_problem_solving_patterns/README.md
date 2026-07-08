@@ -65,24 +65,32 @@ This module teaches how recursion works (call stack, base case, recurrence), the
 
 ### Call Stack for Recursive Factorial
 
-```
-factorial(4)
-|
-+-> factorial(3)
-    |
-    +-> factorial(2)
-        |
-        +-> factorial(1)
-            |
-            +-> return 1   (base case)
-            return 1*1 = 1
-        return 2*1 = 2
-    return 3*2 = 6
-return 4*6 = 24
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Stack depth at deepest point: 5 frames (factorial(4)...factorial(0) or base).
-Space: O(n) call stack.
+    f4("factorial(4)") -->|"call"| f3("factorial(3)")
+    f3 -->|"call"| f2("factorial(2)")
+    f2 -->|"call"| f1("factorial(1)")
+    f1 -->|"call"| f0("factorial(0)<br/>base case")
+    f0 -.->|"return 1"| f1
+    f1 -.->|"return 1×1"| f2
+    f2 -.->|"return 2×1"| f3
+    f3 -.->|"return 3×2"| f4
+    f4 -.->|"return 4×6"| out(["24"])
+
+    class f4,f3,f2,f1 mathOp
+    class f0 io
+    class out train
 ```
+
+Stack depth at the deepest point is 5 frames (`factorial(4)` down to the `factorial(0)` base case). Each solid arrow pushes a new frame on the way down; each dotted arrow pops one on the way back up, carrying the accumulated product — total space is O(n).
 
 ### Two-Pointer on Sorted Array (Target Sum)
 
@@ -115,18 +123,29 @@ s = "ADOBECODEBANC"    t = "ABC"
 
 ### Backtracking Search Tree (Subsets of [1,2,3])
 
-```
-                []
-          /     |      \
-        [1]    [2]      [3]
-       /   \     \
-    [1,2] [1,3] [2,3]
-      |
-  [1,2,3]
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Total subsets: 2^3 = 8 (including empty set).
-At each node: include or exclude the next element.
+    root(["empty"]) -->|"include 1"| n1("1")
+    root -->|"include 2"| n2("2")
+    root -->|"include 3"| n3("3")
+    n1 -->|"include 2"| n12("1, 2")
+    n1 -->|"include 3"| n13("1, 3")
+    n2 -->|"include 3"| n23("2, 3")
+    n12 -->|"include 3"| n123("1, 2, 3")
+
+    class root io
+    class n1,n2,n3,n12,n13,n23,n123 train
 ```
+
+Total subsets: 2^3 = 8 (including the empty set). Every node is one valid subset; each edge is the choice to include the next element, so the tree's 8 nodes enumerate the full search space the backtracking code walks.
 
 ---
 
@@ -287,6 +306,36 @@ def permutations(nums: list[int]) -> list[list[int]]:
 | Sorted array / search space halves each step | Binary search |
 | Independent subproblems, combine results | Divide-and-conquer |
 | Overlapping subproblems, optimal value | Dynamic programming |
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["New problem"]) --> q1{"Need all combos /<br/>permutations / subsets?"}
+    q1 -->|"yes"| bt(["Backtracking"])
+    q1 -->|"no"| q2{"Linked list -<br/>cycle or middle?"}
+    q2 -->|"yes"| fsp(["Fast-slow pointer"])
+    q2 -->|"no"| q3{"Sorted array or<br/>monotonic property?"}
+    q3 -->|"pair/triplet target"| tp(["Two-pointer"])
+    q3 -->|"halve search space"| bs(["Binary search"])
+    q3 -->|"no"| q4{"Contiguous<br/>subarray/substring?"}
+    q4 -->|"yes"| sw(["Sliding window"])
+    q4 -->|"no"| q5{"Subproblems<br/>overlap?"}
+    q5 -->|"yes, optimal value"| dp(["Dynamic programming"])
+    q5 -->|"no, independent"| dc(["Divide-and-conquer"])
+
+    class start io
+    class q1,q2,q3,q4,q5 mathOp
+    class bt,fsp,tp,bs,sw,dp,dc train
+```
+
+This triages the table above into the order an interviewer expects you to reason in: five yes/no questions about the problem's signals route to one of the seven patterns, turning the flat lookup into the recognition sequence described in Section 2's Key Insight.
 
 ---
 
@@ -537,6 +586,16 @@ def exist_broken(board, word):
 | 3×3 | 4 | ≤ 9 × 4³ = 576 | < 1ms |
 | 10×10 | 8 | ≤ 100 × 4⁸ = 6.5M | ~10ms |
 | 30×30 | 12 | ≤ 900 × 4¹² = 15B | Slow without pruning |
+
+```mermaid
+xychart-beta
+    title "Nodes Explored vs Grid and Word Size"
+    x-axis ["3×3, L=4", "10×10, L=8", "30×30, L=12"]
+    y-axis "Nodes explored" 0 --> 15000000000
+    bar [576, 6500000, 15000000000]
+```
+
+The 4^L branching factor means nodes explored does not scale with grid size — it scales with the word length exponent, so 576 and 6.5M both round to a sliver next to the 30×30 case's 15B ceiling.
 
 Pruning (early `board[r][c] != word[idx]` check) cuts the actual explored nodes to a tiny fraction of the theoretical maximum in practice.
 

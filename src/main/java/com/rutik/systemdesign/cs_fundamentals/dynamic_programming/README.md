@@ -44,23 +44,57 @@ This module covers the two structural properties that enable DP, the two impleme
 
 ### Top-Down Memoisation
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["solve(state)<br/>called"]) --> check{"state<br/>in memo?"}
+    check -->|"hit"| cached("return<br/>cached result")
+    check -->|"miss"| compute("compute from<br/>smaller sub-states")
+    compute --> store("store result<br/>in memo")
+    store --> ret(["return result"])
+    cached --> ret
+
+    class start,ret io
+    class check mathOp
+    class cached base
+    class compute train
+    class store base
 ```
-Define recursive function solve(state).
-Check if state in memo → return cached result.
-Compute result from recursive calls on smaller states.
-Store in memo before returning.
-```
+
+*A memo hit short-circuits straight to a cached return; a miss computes the state once, stores it, then returns — every later call for the same state takes the hit path instead of recursing again.*
 
 Advantages: only computes states that are actually reached (useful when the reachable portion of the state space is small); natural to write; easy to debug by reading the recursion.
 
 ### Bottom-Up Tabulation
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    alloc("allocate dp table<br/>indexed by state") --> fillbase("fill<br/>base cases")
+    fillbase --> iterate("iterate states in<br/>topological order")
+    iterate --> answer(["answer =<br/>dp[target_state]"])
+
+    class alloc base
+    class fillbase frozen
+    class iterate train
+    class answer io
 ```
-Allocate dp table indexed by state.
-Fill base cases.
-Iterate over states in topological order (dependency-first).
-Answer is dp[target_state].
-```
+
+*Tabulation fills every state in dependency-first order, so each cell is computed exactly once and is already available when a later cell needs it.*
 
 Advantages: no recursion overhead or stack overflow risk; amenable to space optimisation (rolling array); easier to profile (loop, not stack).
 
@@ -82,23 +116,63 @@ Count integers in [L, R] satisfying a digit-level constraint (e.g., no repeated 
 
 ### Fibonacci — Naive vs Memoised vs Tabulated
 
-```
 Naive fib(5) recursion tree (exponential — 15 calls for fib(5)):
-                  fib(5)
-               /          \
-           fib(4)          fib(3)
-          /     \         /     \
-       fib(3)  fib(2)  fib(2) fib(1)
-       /   \
-   fib(2) fib(1)
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    n5("fib(5)") --> n4("fib(4)")
+    n5 --> n3a("fib(3)")
+    n4 --> n3b("fib(3)")
+    n4 --> n2a("fib(2)")
+    n3a --> n2b("fib(2)")
+    n3a --> n1a("fib(1)")
+    n3b --> n2c("fib(2)")
+    n3b --> n1b("fib(1)")
+
+    class n5,n4 mathOp
+    class n3a,n3b,n2a,n2b,n1a,n2c,n1b lossN
+```
+
+*fib(3) and fib(2) each recur multiple times in the tree (red) — the same overlapping sub-problem re-solved from scratch every time; the full unabbreviated tree makes 15 calls for fib(5).*
 
 Memoised — each unique fib(k) computed once:
-  fib(5) -> fib(4) -> fib(3) -> fib(2) -> fib(1) [base]
-                              -> fib(0) [base]
-                   -> fib(2) [CACHED]
-              -> fib(3) [CACHED]
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    m5("fib(5)") --> m4("fib(4)")
+    m4 --> m3("fib(3)")
+    m3 --> m2("fib(2)")
+    m2 --> m1(["fib(1)<br/>base case"])
+    m2 --> m0(["fib(0)<br/>base case"])
+    m4 -.->|"cache hit"| m2
+    m5 -.->|"cache hit"| m3
+
+    class m5,m4 mathOp
+    class m3,m2 base
+    class m1,m0 frozen
+```
+
+*fib(3) and fib(2) become single cached nodes (gold); every later call is a dotted cache-hit edge instead of a fresh subtree, turning the 15-call naive tree into 6 computations — one per unique value from fib(0) to fib(5).*
 
 Tabulated (bottom-up, left to right):
+
+```
   dp: [0, 1, 1, 2, 3, 5]
        ^  ^  ^  ^  ^  ^
        0  1  2  3  4  5   (index)
@@ -417,6 +491,36 @@ def lis_nlogn(nums: list[int]) -> int:
 
 **Do NOT use DP when**: sub-problems are independent (divide and conquer without overlap — merge sort, binary search); the problem does not have optimal substructure (longest simple path); the state space is unbounded or grows with input in a way that makes the table infeasible.
 
+Putting the three techniques into a single decision cascade:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["optimisation /<br/>counting problem"]) --> overlap{"overlapping<br/>sub-problems?"}
+    overlap -->|"no"| dc("divide & conquer<br/>merge sort, binary search")
+    overlap -->|"yes"| optsub{"optimal<br/>substructure?"}
+    optsub -->|"no"| neither("no clean DP or greedy<br/>e.g. longest simple path")
+    optsub -->|"yes"| exchange{"exchange argument holds:<br/>local choice = global optimum?"}
+    exchange -->|"yes"| greedy("greedy<br/>interval scheduling, Huffman")
+    exchange -->|"no, or fails<br/>a counterexample"| dp("dynamic programming<br/>memoise or tabulate")
+
+    class start io
+    class overlap,optsub,exchange mathOp
+    class dc frozen
+    class neither lossN
+    class greedy train
+    class dp base
+```
+
+*No overlap routes to divide and conquer; overlap without optimal substructure (red) is the case neither technique cleanly solves; overlap plus optimal substructure sends the problem to the exchange-argument test, which decides greedy vs DP.*
+
 **Complexity warning**: DP with O(n × W) where W can be 10^9 (unbounded integer) is pseudo-polynomial — it depends on the numeric value, not just the number of items. This is why knapsack is NP-hard in the general case despite the DP solution working well in practice when W is bounded.
 
 ---
@@ -710,18 +814,30 @@ def edit_distance_bounded(typed: str, target: str, max_cost: float) -> float:
 
 **Scaling to a full dictionary (100K words)**:
 
-```
-Naive: compare typed against all 100K words -> 100K * O(m*n) per keystroke.
-Optimised pipeline:
-  1. Filter by length: abs(len(typed) - len(candidate)) > threshold -> skip.
-     Cuts 90%+ of candidates for threshold=2.
-  2. BK-Tree (metric tree on edit distance): find all words within distance k
-     in O(k^2 * log(dict_size)) using the triangle inequality.
-  3. Cache: memoize (typed_prefix, candidate_prefix) pairs across keystrokes.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Latency target: < 20ms per keystroke (perceived as instantaneous).
-With BK-tree + length filter: ~2ms on a modern phone CPU.
+    key(["typed<br/>keystroke"]) -.->|"naive: scan<br/>100K words"| naive("O(100K × m×n)<br/>per keystroke")
+    key --> filt{"length filter<br/>within threshold"}
+    filt -->|"cuts 90%+<br/>of candidates"| bk("BK-Tree lookup<br/>edit distance up to k")
+    bk --> cache("memoise prefix pairs<br/>across keystrokes")
+    cache --> out(["top-k suggestions<br/>~2ms"])
+
+    class key,out io
+    class naive lossN
+    class filt mathOp
+    class bk train
+    class cache base
 ```
+
+*The naive scan costs O(100K × m×n) per keystroke (red, dotted — the path not taken); the length filter, BK-Tree, and prefix cache together cut this to about 2ms on a modern phone CPU, comfortably under the 20ms latency target for perceived-instantaneous autocorrect.*
 
 **Discussion questions**:
 1. How would you extend this to support transpositions (swapped adjacent characters) — e.g., "teh" → "the" at cost 0.5?

@@ -76,10 +76,22 @@ The Master theorem determines the total complexity from (a, b, d).
 
 For `T(n) = aT(n/b) + O(n^d)`:
 
-```
-Case 1: d > log_b(a)  =>  T(n) = O(n^d)           (combine dominates)
-Case 2: d = log_b(a)  =>  T(n) = O(n^d * log n)   (equal work at each level)
-Case 3: d < log_b(a)  =>  T(n) = O(n^log_b(a))    (leaves dominate)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    cmp{"compare d to log_b(a)"} -->|"d above log_b(a)"| c1(["Case 1<br/>combine dominates<br/>T(n) = O(n^d)"])
+    cmp -->|"d equals log_b(a)"| c2(["Case 2<br/>equal work per level<br/>T(n) = O(n^d · log n)"])
+    cmp -->|"d below log_b(a)"| c3(["Case 3<br/>leaves dominate<br/>T(n) = O(n^log_b(a))"])
+
+    class cmp mathOp
+    class c1,c2,c3 io
 ```
 
 Intuition: compare the "work at each level" (n^d grows as levels widen) with the "number of leaves" (a^(log_b n) = n^(log_b a)). The larger one wins.
@@ -90,77 +102,112 @@ Intuition: compare the "work at each level" (n^d grows as levels widen) with the
 
 ### Interval Scheduling — Earliest Finish Time
 
-```
-Intervals (sorted by finish time):
-  A: [1, 3]
-  B: [2, 4]
-  C: [3, 5]
-  D: [4, 6]
-  E: [5, 7]
+Intervals sorted by finish time: A [1,3], B [2,4], C [3,5], D [4,6], E [5,7].
 
-Greedy (earliest finish):
-  Take A (finishes at 3). Mark [1,3] used.
-  B [2,4]: starts at 2, overlaps A (ends 3? B starts 2 < A finishes 3 -> conflict).
-  C [3,5]: starts at 3 >= A's finish 3 -> TAKE C.
-  D [4,6]: starts at 4 < C's finish 5 -> skip.
-  E [5,7]: starts at 5 >= C's finish 5 -> TAKE E.
-  Selected: {A, C, E} -> 3 intervals (maximum possible)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["A 1–3<br/>take: first pick"]) --> B["B 2–4<br/>skip: starts 2, before finish 3"]
+    B --> C(["C 3–5<br/>take: starts 3, clear of finish 3"])
+    C --> D["D 4–6<br/>skip: starts 4, before finish 5"]
+    D --> E(["E 5–7<br/>take: starts 5, clear of finish 5"])
+    E --> result(["Selected A, C, E<br/>3 intervals (max)"])
+
+    class A,C,E train
+    class B,D lossN
+    class result io
+```
 
 Why earliest finish? Taking A leaves the maximum remaining time for future intervals.
 If we took B instead (finishes later at 4), C [3,5] would conflict.
-```
 
 ### Huffman Coding — Greedy Tree Construction
 
+Characters and frequencies: a:5, b:9, c:12, d:13, e:16, f:45. Six greedy merges (always combine the two lowest-frequency nodes) build the tree bottom-up; edge labels below are the resulting 0/1 code bits.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root(("root<br/>100")) -->|"0"| f(["f<br/>45"])
+    root -->|"1"| n4(("merge<br/>55"))
+    n4 -->|"0"| n2(("merge<br/>25"))
+    n4 -->|"1"| n3(("merge<br/>30"))
+    n2 -->|"0"| c(["c<br/>12"])
+    n2 -->|"1"| d(["d<br/>13"])
+    n3 -->|"0"| n1(("merge<br/>14"))
+    n3 -->|"1"| e(["e<br/>16"])
+    n1 -->|"0"| a(["a<br/>5"])
+    n1 -->|"1"| b(["b<br/>9"])
+
+    class a,b,c,d,e,f io
+    class n1,n2,n3,n4 mathOp
+    class root train
 ```
-Characters and frequencies:
-  a:5  b:9  c:12  d:13  e:16  f:45
 
-Step 1: min-heap = [(5,a),(9,b),(12,c),(13,d),(16,e),(45,f)]
-Step 2: Pop 5,9 -> create node(14) with children a,b
-        heap = [(12,c),(13,d),(14,node),(16,e),(45,f)]
-Step 3: Pop 12,13 -> create node(25) with children c,d
-        heap = [(14,node),(16,e),(25,node),(45,f)]
-Step 4: Pop 14,16 -> create node(30) with children (a,b node),e
-        heap = [(25,node),(30,node),(45,f)]
-Step 5: Pop 25,30 -> create node(55) with children (c,d),(a,b,e)
-        heap = [(45,f),(55,node)]
-Step 6: Pop 45,55 -> root(100)
-
-Final tree:          root(100)
-                    /         \
-                 f(45)       node(55)
-                            /       \
-                       node(25)   node(30)
-                       /    \     /     \
-                     c(12) d(13) node  e(16)
-                                 / \
-                               a(5) b(9)
-
-Codes: f=0 (1 bit), c=100, d=101, e=111 (3 bits), a=1100, b=1101 (4 bits)
-Weighted average code length = (45*1 + 12*3 + 13*3 + 16*3 + 5*4 + 9*4)/100
-                             = (45+36+39+48+20+36)/100 = 224/100 = 2.24 bits/char
-vs. fixed 3-bit encoding = 3 bits/char (Huffman saves ~25%)
-```
+Reading root-to-leaf gives the codes: f=0 (1 bit), c=100, d=101, e=111 (3 bits), a=1100, b=1101 (4 bits). Weighted average code length = `(45×1 + 12×3 + 13×3 + 16×3 + 5×4 + 9×4)/100 = 224/100 = 2.24 bits/char`, versus 3 bits/char fixed-width — Huffman saves ~25%.
 
 ### Merge Sort — D&C Recursion Tree
 
+`T(n) = 2T(n/2) + O(n)`
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph L0["Level 0 · O(n)"]
+        n0(["n"])
+    end
+    subgraph L1["Level 1 · O(n) total"]
+        n1a(["n/2"])
+        n1b(["n/2"])
+    end
+    subgraph L2["Level 2 · O(n) total"]
+        n2a(["n/4"])
+        n2b(["n/4"])
+        n2c(["n/4"])
+        n2d(["n/4"])
+    end
+    subgraph LN["Level log n · O(n) total"]
+        leaves(["1 1 1 ... 1<br/>n leaves"])
+    end
+
+    n0 --> n1a
+    n0 --> n1b
+    n1a --> n2a
+    n1a --> n2b
+    n1b --> n2c
+    n1b --> n2d
+    n2a -.-> leaves
+    n2b -.-> leaves
+    n2c -.-> leaves
+    n2d -.-> leaves
+
+    class n0 io
+    class n1a,n1b,n2a,n2b,n2c,n2d mathOp
+    class leaves base
 ```
-T(n) = 2T(n/2) + O(n)
 
-Level 0:  n          (1 problem of size n, O(n) merge work)
-Level 1:  n/2  n/2   (2 problems of size n/2, total O(n) merge work)
-Level 2: n/4 n/4 n/4 n/4  (4 problems, total O(n) work)
-...
-Level log n: 1 1 1 ... 1  (n problems of size 1, O(n) work to merge)
-
-Each level: O(n) work
-Number of levels: log n
-Total: O(n log n)
-
-Master theorem: a=2, b=2, d=1
-  log_b(a) = log_2(2) = 1 = d -> Case 2 -> O(n^1 * log n) = O(n log n). Confirmed.
-```
+Each level does O(n) total work (dotted edges elide the remaining middle levels down to the n single-element leaves), and there are log n levels, giving O(n log n) total. Master theorem check: a=2, b=2, d=1 → log_2(2) = 1 = d → Case 2 → O(n^1 · log n) = O(n log n). Confirmed.
 
 ---
 
@@ -399,6 +446,17 @@ def closest_pair(points: List[Point]) -> float:
 
 **Karatsuba multiplication in cryptography**: RSA key generation and elliptic curve operations require multiplying 2048–4096-bit integers. The naive O(n²) algorithm is too slow. Karatsuba's O(n^1.585) D&C algorithm is used in GMP (GNU Multiple Precision Arithmetic Library), which underlies OpenSSL's bignum operations.
 
+```mermaid
+xychart-beta
+    title "Integer multiplication ops at RSA-scale bit-lengths"
+    x-axis "bit-length n" [512, 1024, 2048, 4096]
+    y-axis "operations (millions)" 0 --> 17
+    bar "naive O(n^2)" [0.26, 1.05, 4.19, 16.78]
+    bar "Karatsuba O(n^1.585)" [0.02, 0.06, 0.18, 0.53]
+```
+
+At the 2048–4096-bit RSA key sizes named above, naive O(n²) multiplication needs roughly 4.2M–16.8M digit operations while Karatsuba needs only about 0.18M–0.53M — a ~24x to ~32x reduction that grows with n, which is why GMP switches to Karatsuba past a small digit-count threshold.
+
 **Divide and Conquer in parallel computing**: MapReduce is a D&C framework: map splits data into independent chunks (divide), each worker processes its chunk (conquer), and reduce combines results (combine). The independence of the map step is the key property that enables massive parallelism.
 
 ---
@@ -436,6 +494,31 @@ def closest_pair(points: List[Point]) -> float:
 **Do NOT use greedy when**: there are counterexamples to local optimality (0/1 knapsack, shortest path with negative weights, graph coloring). Test greedy by trying to find a counterexample before coding.
 
 **Do NOT use D&C when**: sub-problems are not independent (use DP instead); the combination step is expensive (O(n²) combine negates the log-n depth benefit unless Master theorem Case 1 doesn't hold); n is small (recursion overhead dominates for n < 10).
+
+Putting all three paradigms on one decision path:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    q1{"sub-problems<br/>overlap?"} -->|"yes"| dp(["Dynamic Programming<br/>memoise, O(n²) typical"])
+    q1 -->|"no: independent"| q2{"exchange argument<br/>proves local = global?"}
+    q2 -->|"yes"| greedy(["Greedy<br/>one pass, O(n log n) typical"])
+    q2 -->|"no: counterexample found"| q3{"combine step cheap<br/>and n not tiny?"}
+    q3 -->|"yes"| dc(["Divide and Conquer<br/>recurse + combine"])
+    q3 -->|"no: n below 10 or<br/>combine O(n^2) or worse"| brute(["Brute force<br/>or iterative"])
+
+    class q1,q2,q3 mathOp
+    class dp,greedy,dc,brute io
+```
+
+Sub-problem overlap is the first fork — overlapping sub-problems need DP's memoisation. Among independent sub-problems, a provable exchange argument means greedy's single pass suffices; otherwise D&C's recurse-and-combine applies, provided the combine step stays cheap and n is not tiny (recursion overhead dominates below n = 10, per the D&C guidance above).
 
 ---
 

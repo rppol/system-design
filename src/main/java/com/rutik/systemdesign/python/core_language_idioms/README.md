@@ -74,48 +74,138 @@ Structural pattern matching. Four pattern kinds: literal, capture, class (with a
 
 ## 5. Architecture Diagrams
 
+### CPython Object Model — `is` vs `==`
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph sameBox["Same object: is and == both True"]
+        direction LR
+        refA(["Reference a"]) --> objSame((Object))
+        refB(["Reference b"]) --> objSame
+    end
+
+    subgraph diffBox["Different objects: == True, is False"]
+        direction LR
+        refC(["Reference c"]) --> objC((Object 1))
+        refD(["Reference d"]) --> objD((Object 2))
+    end
+
+    objSame --> outcome1(["is True<br/>== True"])
+    objC --> outcome2(("is False<br/>== True"))
+    objD --> outcome2
+
+    class refA,refB,refC,refD io
+    class objSame,objC,objD base
+    class outcome1 train
+    class outcome2 lossN
 ```
-CPython Object Model — `is` vs `==`
-─────────────────────────────────────────────────────────
-Reference a ──┐
-              ▼
-         ┌─────────┐          is  →  same box?  (id comparison)
-         │ Object  │    ==  →  same contents?  (__eq__ call)
-         └─────────┘
-Reference b ──┘   (same object — is AND == both True)
+*Two references to the same object make both `is` and `==` true; two distinct objects with equal contents make `==` true but `is` false — that second case is the trap a naive `is` comparison falls into.*
 
-Reference c ──► ┌─────────┐
-                │ Object  │   == True (equal contents), is False (different boxes)
-Reference d ──► └─────────┘
+### Truthiness Evaluation Chain
 
-Truthiness evaluation chain
-─────────────────────────────────────────────────────────
-bool(x)
-  │
-  ├─► x.__bool__()  → True / False
-  │       if AttributeError or NotImplemented:
-  └─► x.__len__()   → 0 means False, non-zero means True
-          if AttributeError:
-      └─► True  (object exists, no protocol → truthy by default)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-EAFP vs LBYL decision tree
-─────────────────────────────────────────────────────────
-                 ┌─────────────────────┐
-                 │  Is success common? │
-                 └────────┬────────────┘
-                   Yes    │    No
-          ┌────────┘      └──────────┐
-          ▼                          ▼
-       EAFP                        LBYL
-  try / except               check first, then act
-  (faster happy path)        (cheaper when often fails)
+    start(["bool of x"]) --> hasBool{"__bool__ defined?"}
+    hasBool -->|"yes"| boolResult(["True or False"])
+    hasBool -->|"no"| hasLen{"__len__ defined?"}
+    hasLen -->|"yes"| lenResult{"len is 0?"}
+    lenResult -->|"yes"| falseResult(["False"])
+    lenResult -->|"no"| trueResult1(["True"])
+    hasLen -->|"no"| trueResult2(["True by default<br/>object exists"])
 
-Comprehension scope isolation (Python 3)
-─────────────────────────────────────────────────────────
-outer scope: i = 10
-[i*2 for i in range(3)]   # i here is local to comprehension
-outer scope: i is still 10   ← unlike Python 2 or plain `for`
+    class start io
+    class hasBool,hasLen,lenResult mathOp
+    class boolResult,trueResult1,trueResult2 train
+    class falseResult lossN
 ```
+*`bool(x)` tries `__bool__` first; if that protocol is absent it falls back to `__len__` (zero is falsy); if neither is defined the object is truthy by default.*
+
+### EAFP vs LBYL Decision Tree
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    q{"Is success common?"} -->|"yes"| eafp(["EAFP<br/>try / except<br/>faster happy path"])
+    q -->|"no"| lbyl(["LBYL<br/>check first, then act<br/>cheaper when it often fails"])
+
+    class q mathOp
+    class eafp train
+    class lbyl frozen
+```
+*Choose EAFP when success is the common case — the exception-free happy path costs almost nothing in CPython; choose LBYL when failure is common or the operation is irreversible (Section 6.3 quantifies both).*
+
+### Comprehension Scope Isolation (Python 3)
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    outerBefore(["outer scope<br/>i = 10"]) --> barrier{"enters comprehension<br/>own frame"}
+    barrier --> innerI(["local i<br/>0, 1, 2"])
+    innerI --> resultList(["result<br/>0, 2, 4"])
+    barrier -.->|"i does not leak"| outerAfter(["outer scope<br/>i = 10 still"])
+
+    class outerBefore,outerAfter io
+    class barrier mathOp
+    class innerI req
+    class resultList train
+```
+*The comprehension executes in its own frame: the `i` inside `[i*2 for i in range(3)]` never touches the outer `i`, so the outer scope's value survives unchanged — unlike Python 2 or a plain `for` loop, whose loop variable does leak into the enclosing scope.*
+
+### `match`/`case` Routing by Shape [3.10]
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    value(["match value"]) --> router{"structural shape?"}
+    router -->|"exact value"| literal(["literal<br/>case 404"])
+    router -->|"any value"| capture(["capture<br/>case x"])
+    router -->|"type + attrs"| classP(["class pattern<br/>type + attributes"])
+    router -->|"tuple or list"| sequence(["sequence<br/>case x, y"])
+    router -->|"alternatives"| orPat(["OR pattern<br/>200 or 201"])
+    router -->|"extra check"| guard(["guard clause<br/>case n if positive"])
+
+    class value io
+    class router,guard mathOp
+    class literal,capture,classP,sequence,orPat train
+```
+*`match`/`case` [3.10] routes one value to a branch by structural shape — literal, capture, class, or sequence pattern — with OR patterns and guard clauses layering extra logic on top; this is destructuring, not the O(1) key lookup of a dict dispatch (Section 6.7).*
 
 ---
 
@@ -221,6 +311,15 @@ def read_config_eafp(path: str) -> str:
 # LBYL when file missing:   ~1.8 µs  (stat() cheap failure)
 # → use EAFP when success is the common case (>50% of calls succeed)
 ```
+
+```mermaid
+xychart-beta
+    title "EAFP vs LBYL: cost by outcome (rough CPython µs)"
+    x-axis ["EAFP: exists", "LBYL: exists", "EAFP: missing", "LBYL: missing"]
+    y-axis "Time (microseconds)" 0 --> 6
+    bar [1.2, 2.1, 5.0, 1.8]
+```
+*When the file usually exists, EAFP's happy path (~1.2 µs) beats LBYL's stat-then-open (~2.1 µs); the crossover flips when the file is usually missing, where LBYL's cheap failed check (~1.8 µs) beats EAFP's ~5.0 µs exception cost — the numeric case for using EAFP only when success is common (Section 9).*
 
 ### 6.4 Comprehensions and generator expressions
 

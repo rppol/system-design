@@ -82,38 +82,101 @@ The defining economic fact: logs are the most expensive observability pillar per
 
 ## 5. Architecture Diagrams
 
+**Kubernetes node-agent log pipeline (DaemonSet)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Pods<br/>stdout / stderr"]) --> B("Node log files<br/>/var/log/containers/*.log")
+    B --> C("Fluent Bit / Vector<br/>DaemonSet: tail + enrich")
+    C --> D("Parse JSON, enrich<br/>redact PII, sample")
+    D --> E[("Elasticsearch/OpenSearch<br/>full-text index + Kibana")]
+    D --> F[("Loki<br/>label index + S3 chunks + Grafana")]
+    E --> G(["Alerts / dashboards / search"])
+    F --> G
+    G -.->|"trace_id"| H("Tempo / Jaeger<br/>correlated trace")
+
+    class A io
+    class B req
+    class C mathOp
+    class D mathOp
+    class E base
+    class F base
+    class G io
+    class H frozen
 ```
-Kubernetes node-agent log pipeline (DaemonSet)
 
-  pods (stdout/stderr) -> /var/log/containers/*.log
-                                |
-                node: Fluent Bit / Vector DaemonSet  (tail + add k8s metadata)
-                                |
-                 parse JSON, enrich (pod/ns/node), redact PII, sample
-                                |
-               +----------------+-----------------+
-               v                                  v
-        Elasticsearch/OpenSearch            Loki (label index +
-        (full-text index) + Kibana           chunks in S3) + Grafana
-                                |
-                         alerts / dashboards / search
-                         correlate via trace_id -> Tempo/Jaeger
+*Every pod's stdout/stderr is tailed by a node-level DaemonSet, parsed and enriched once, then fanned out to whichever backend a team chose — dashboards and alerts pivot back to a trace via the shared `trace_id`.*
 
+**EFK vs Loki storage shape**
 
-EFK vs Loki storage shape
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  EFK:   [log line] --inverted index over every term--> fast any-search, big storage
-  Loki:  [labels: {app, ns, level}] -> tiny index
-         [compressed log chunk in S3] -> grep within selected labels+time window
+    subgraph EFK["EFK: index everything"]
+        E1(["Log line"]) -->|"inverted index<br/>over every term"| E2("Fast any-term search<br/>big storage cost")
+    end
 
+    subgraph LOKI["Loki: index labels only"]
+        L1(["Labels: app, ns, level"]) --> L2("Tiny index")
+        L2 --> L3[("Compressed chunk<br/>in S3")]
+        L3 -.->|"grep in window"| L4("Label + time<br/>scoped search")
+    end
 
-Retention tiering (cost control)
-
-  hot  (0-7d)   fast SSD, fully indexed/searchable        ~$$$
-  warm (7-30d)  cheaper storage, slower queries           ~$$
-  cold (30-365d) object storage / archive, restore-to-query ~$
-  delete >TTL  (compliance-driven; e.g. 90d app, 1y audit)
+    class E1 io
+    class E2 lossN
+    class L1 io
+    class L2 base
+    class L3 frozen
+    class L4 train
 ```
+
+*EFK pays for arbitrary any-term search by inverted-indexing every log line; Loki indexes only a handful of labels and greps compressed chunks within a label-and-time window, compressing bodies roughly 10x instead of indexing every term.*
+
+**Retention tiering (cost control)**
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Hot (0-7d)<br/>SSD, fully indexed ~$$$" as Hot
+    state "Warm (7-30d)<br/>cheaper, slower queries ~$$" as Warm
+    state "Cold (30-365d)<br/>archive, restore-to-query ~$" as Cold
+    state "Deleted<br/>TTL: 90d app / 1y audit" as Deleted
+
+    [*] --> Hot
+    Hot --> Warm: age over 7d
+    Warm --> Cold: age over 30d
+    Cold --> Deleted: age over TTL
+    Deleted --> [*]
+
+    class Hot train
+    class Warm mathOp
+    class Cold frozen
+    class Deleted lossN
+```
+
+*Data cools from the actively-indexed, writable hot tier to compressed cold archive as it ages past 7d and then 30d, then is evicted once it crosses its compliance TTL (90d for app logs, 1y for audit) — the same tiers the Elasticsearch ILM policy automates below.*
 
 ---
 
@@ -225,6 +288,16 @@ policy:
 
 Rough cost intuition: at 10,000 logs/sec averaging 500 bytes, you ingest ~5 MB/s ≈ ~432 GB/day raw. Full-text indexing in ELK can roughly double on-disk size; Loki compresses bodies ~10x and indexes only labels, so the same volume costs a fraction. This is why volume sampling and `what-you-index` decisions dominate the bill.
 
+```mermaid
+xychart-beta
+    title "Daily log storage volume (10k logs/sec, 500B avg)"
+    x-axis ["Raw ingest", "ELK full-text index", "Loki compressed"]
+    y-axis "GB per day" 0 --> 900
+    bar [432, 864, 43]
+```
+
+*The same 432 GB/day of raw traffic roughly doubles once ELK inverted-indexes every term, but collapses to a fraction once Loki compresses bodies ~10x and indexes only labels — the storage bill, not abstract preference, is what should drive the EFK-vs-Loki choice.*
+
 ---
 
 ## 7. Real-World Examples
@@ -256,6 +329,33 @@ Rough cost intuition: at 10,000 logs/sec averaging 500 bytes, you ingest ~5 MB/s
 **Use centralized logging when:** you run distributed/ephemeral workloads (containers, serverless), need post-hoc debugging of specific events, must satisfy audit/compliance retention, or want to correlate detailed events with traces and metrics. It's mandatory in any non-trivial production system.
 
 **Don't reach for logs when:** you need real-time trends, rates, or SLO alerting — metrics are cheaper and faster for aggregates ([observability_metrics_prometheus](../observability_metrics_prometheus/)); when you need to follow a single request across services — distributed tracing is purpose-built for that ([observability_tracing_and_otel](../observability_tracing_and_otel/)); or when you're tempted to compute counts/percentiles by parsing logs at query time — emit a metric instead. And never use logs as your only signal: parsing logs to drive alerts is slow and fragile compared to metrics. Be ruthless about *not* logging chatty success paths at full volume.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["What do you<br/>need to know?"]) --> D1{"Real-time trend,<br/>rate, or SLO alert?"}
+    Start --> D2{"Follow one request<br/>across services?"}
+    Start --> D3{"Reconstruct one exact<br/>event, post-hoc?"}
+
+    D1 -->|"yes"| Metrics("Metrics<br/>cheap aggregates")
+    D2 -->|"yes"| Traces("Traces<br/>per-request path")
+    D3 -->|"yes"| Logs("Logs<br/>high-cardinality detail")
+
+    class Start io
+    class D1,D2,D3 mathOp
+    class Metrics train
+    class Traces req
+    class Logs base
+```
+
+*Each observability pillar answers a different question — pick the cheapest one that answers it, and never build core alerting on log parsing when a metric would do.*
 
 ---
 

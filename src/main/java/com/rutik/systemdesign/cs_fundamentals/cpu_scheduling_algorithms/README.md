@@ -88,54 +88,70 @@ Average: (3+1+0)/3 = 1.33 -> much better
 
 ### Round-Robin (Quantum = 3)
 
-```
-Processes: P1(burst=5), P2(burst=3), P3(burst=7), arriving at t=0
+```mermaid
+sequenceDiagram
+    participant S as "Scheduler"
+    participant P1 as "P1 (burst 5)"
+    participant P2 as "P2 (burst 3)"
+    participant P3 as "P3 (burst 7)"
 
-Queue: [P1, P2, P3]
-  0-3:  Run P1 (remaining=2). Queue: [P2, P3, P1(2)]
-  3-6:  Run P2 (remaining=0). P2 done at t=6. Queue: [P3, P1(2)]
-  6-9:  Run P3 (remaining=4). Queue: [P1(2), P3(4)]
-  9-11: Run P1 (remaining=0). P1 done at t=11. Queue: [P3(4)]
- 11-14: Run P3 (remaining=1). Queue: [P3(1)]
- 14-15: Run P3 done. Queue: []
-
-Turnaround: P1=11, P2=6, P3=15. Average=(11+6+15)/3=10.67
-Response time: P1=0, P2=3, P3=6  <- good for interactivity
+    Note over S,P3: initial queue order - P1, P2, P3
+    S->>P1: run t=0-3
+    P1-->>S: yield, remaining=2
+    S->>P2: run t=3-6
+    P2-->>S: done at t=6
+    S->>P3: run t=6-9
+    P3-->>S: yield, remaining=4
+    S->>P1: run t=9-11
+    P1-->>S: done at t=11
+    S->>P3: run t=11-14
+    P3-->>S: yield, remaining=1
+    S->>P3: run t=14-15
+    P3-->>S: done at t=15
 ```
+
+Each process gets a 3 ms slice before rejoining the back of the queue. Turnaround: P1=11, P2=6, P3=15 (average 10.67); response time: P1=0, P2=3, P3=6 — every process is touched within one quantum cycle, which is why RR beats FCFS on interactivity.
 
 ### MLFQ — Queue Demotion
 
+```mermaid
+stateDiagram-v2
+    [*] --> Q0: new process
+    Q0 --> Q0: blocks before quantum<br/>expires (I/O-bound)
+    Q0 --> Q1: uses full 8ms quantum
+    Q1 --> Q1: blocks before quantum<br/>expires
+    Q1 --> Q2: uses full 16ms quantum
+    Q2 --> Q2: FCFS, no time limit
+    Q2 --> Q0: waited over T (aging boost)
 ```
-Three queues: Q0 (high, quantum=8ms), Q1 (mid, quantum=16ms), Q2 (low, FCFS)
 
-New process -> Q0
-  If uses full quantum -> demote to Q1
-  If blocks before quantum expires -> stay in Q0 (I/O-bound, interactive)
-  Process in Q2 for > T -> boost to Q0 (aging, prevents starvation)
-
-Process lifecycle:
-  Interactive web request: arrives Q0, uses 3ms (I/O wait), stays Q0 -> low latency
-  Background batch job:    arrives Q0, uses 8ms, demoted Q1 -> uses 16ms, demoted Q2
-                           Stays Q2 unless aged back up
-```
+Q0 is the high-priority queue (8ms quantum), Q1 is mid (16ms), Q2 is low (plain FCFS). An interactive web request that blocks after ~3ms of CPU stays in Q0 for low latency; a CPU-bound batch job burns through its full quantum at each level and sinks to Q2, returning to Q0 only via aging.
 
 ### CFS Virtual Runtime
 
-```
-Processes (nice 0, equal weight):  A, B, C — each wants 1/3 of CPU
+```mermaid
+sequenceDiagram
+    participant S as "CFS Scheduler"
+    participant A as "A (vruntime)"
+    participant B as "B (vruntime)"
+    participant C as "C (vruntime)"
 
-vruntime timeline:
-  t=0: A.vruntime=0, B.vruntime=0, C.vruntime=0
-  A runs 4ms: A.vruntime=4, B=0, C=0
-  B runs 4ms: A=4, B.vruntime=4, C=0
-  C runs 4ms: A=4, B=4, C.vruntime=4
-  A runs 4ms: A.vruntime=8, B=4, C=4
-  (pick smallest vruntime = B) -> B runs, etc.
-
-  Over time: each process gets exactly 33% of CPU.
-  With nice values: nice=-5 (A) = 3x weight of nice=0 (B).
-  A's vruntime advances 1/3 as fast -> A gets 3x more CPU time.
+    Note over S,C: t=0 - A=0, B=0, C=0 (tie, pick A)
+    S->>A: run 4ms
+    A-->>S: vruntime=4
+    Note over S,C: A=4, B=0, C=0 (pick B)
+    S->>B: run 4ms
+    B-->>S: vruntime=4
+    Note over S,C: A=4, B=4, C=0 (pick C)
+    S->>C: run 4ms
+    C-->>S: vruntime=4
+    Note over S,C: A=4, B=4, C=4 (tie, pick A)
+    S->>A: run 4ms
+    A-->>S: vruntime=8
+    Note over S,C: A=8, B=4, C=4 - smallest is B, runs next
 ```
+
+CFS always dispatches the runnable thread with the smallest vruntime (kept in a red-black tree), so three equal-weight (nice 0) threads converge on exactly 33% of CPU each. A thread at nice=-5 has 3x the weight of nice=0, so its vruntime advances only 1/3 as fast and it earns 3x more CPU time.
 
 ---
 
@@ -315,6 +331,16 @@ def cfs_simulate(tasks: list[CFSTask], total_time_us: int) -> None:
 
 **Android UI responsiveness**: Android uses CFS with priority boosting for the UI thread. When the user touches the screen, the UI thread is boosted to a high priority for ~100 ms to ensure sub-16 ms frame rendering (60 FPS = 16.67 ms per frame). After 100 ms of inactivity, it returns to normal priority.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Normal
+    Normal --> Boosted: user touches screen
+    Boosted --> Boosted: input within 100ms
+    Boosted --> Normal: 100ms of inactivity
+```
+
+The UI thread's priority is a two-state lifecycle keyed on touch activity: boosted for about 100 ms after each touch to hit the 16.67 ms (60 FPS) frame budget, then dropped back to normal CFS priority once input goes quiet.
+
 **Database server process priorities**: PostgreSQL autovacuum runs at `nice +10` by default — lower priority than query-serving processes. This prevents maintenance operations from starving user queries, at the cost of autovacuum potentially falling behind during high-load periods.
 
 **Real-time scheduling in Linux**: `SCHED_FIFO` and `SCHED_RR` are real-time policies that preempt all CFS threads. Used for latency-sensitive tasks (audio processing, industrial control). `SCHED_DEADLINE` (EDF — Earliest Deadline First) is the theoretical-optimal real-time scheduler, available since Linux 3.14.
@@ -360,32 +386,74 @@ def cfs_simulate(tasks: list[CFSTask], total_time_us: int) -> None:
 
 **CFS**: Default for Linux (and thus most of the world's servers). Ideal when you want fair CPU allocation with optional weighting (nice values). Not suitable for hard real-time tasks (use SCHED_DEADLINE or SCHED_FIFO instead).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{What does<br/>the workload need?}
+    start -->|"batch jobs,<br/>order matters"| fcfs([FCFS])
+    start -->|"many short<br/>interactive tasks"| rr([Round-Robin])
+    start -->|"differentiated<br/>SLA tiers"| prio([Priority + Aging])
+    start -->|"general purpose,<br/>no burst-time knowledge"| mlfq([MLFQ])
+    start -->|"Linux server,<br/>weighted fairness"| cfs([CFS])
+    start -->|"hard real-time<br/>deadline"| rt([SCHED_DEADLINE /<br/>SCHED_FIFO])
+
+    class start mathOp
+    class fcfs frozen
+    class rr train
+    class prio req
+    class mlfq base
+    class cfs base
+    class rt lossN
+```
+
+A quick decision guide distilling the five profiles above: match the workload's knowledge, latency, and fairness needs to the scheduler that targets them, falling back to a dedicated real-time policy when CFS's fairness guarantees are not tight enough.
+
 ---
 
 ## 10. Common Pitfalls
 
 ### Pitfall 1 — Priority inversion (high-priority thread blocked by low-priority thread)
 
-```
-Scenario: P_high (prio=1) waits for mutex held by P_low (prio=10).
-           P_medium (prio=5) runs continuously.
-Result:   P_low never runs (blocked by P_medium).
-           P_high waits forever -> priority inversion!
+```mermaid
+sequenceDiagram
+    participant H as "P_high (prio 1)"
+    participant M as "P_medium (prio 5)"
+    participant L as "P_low (prio 10)"
 
-Real incident: Mars Pathfinder (1997) — priority inversion caused system resets.
-               VxWorks priority inheritance was disabled; enabling it fixed the issue.
+    L->>L: acquires mutex
+    H->>L: request mutex
+    Note over H: blocked - waiting on L
+    M->>M: becomes ready, preempts L
+    Note over L: never scheduled - M keeps running
+    Note over H: waits forever - priority inversion
 ```
 
+Real incident: Mars Pathfinder (1997) — priority inversion caused repeated system resets until VxWorks priority inheritance, which had been disabled, was turned back on.
+
+```mermaid
+sequenceDiagram
+    participant H as "P_high (prio 1)"
+    participant M as "P_medium (prio 5)"
+    participant L as "P_low (prio 10 to 1)"
+
+    L->>L: acquires mutex
+    H->>L: request mutex
+    Note over L: priority inheritance -<br/>boosted from 10 to 1
+    Note over M: L now outranks M,<br/>M cannot preempt
+    L->>L: finishes critical section
+    L-->>H: releases mutex
+    Note over L: priority restored to 10
+    H->>H: runs at real priority
 ```
-FIX: Priority Inheritance Protocol (PIP)
-  When P_low holds a mutex that P_high is waiting for,
-  temporarily boost P_low's priority to P_high's level.
-  P_low finishes and releases the mutex quickly.
-  P_high unblocks and runs at its real priority.
-  
-  In Java: ReentrantLock with priority inheritance is OS-dependent.
-  In POSIX: pthread_mutexattr_setprotocol(PTHREAD_PRIO_INHERIT).
-```
+
+FIX — Priority Inheritance Protocol (PIP): while P_low holds a mutex that P_high is waiting for, the OS temporarily boosts P_low's priority to P_high's level so it finishes and releases the mutex quickly; P_low's priority is then restored. In Java, `ReentrantLock` priority inheritance is OS-dependent; in POSIX, use `pthread_mutexattr_setprotocol(PTHREAD_PRIO_INHERIT)`.
 
 ### Pitfall 2 — Starvation from pure priority scheduling
 

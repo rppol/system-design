@@ -83,61 +83,84 @@ These structures appear constantly in interview problems (reverse a list, detect
 
 ### Singly Linked List: Reverse In-Place
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Before["Before: head to null"]
+        direction LR
+        b1(1) --> b2(2) --> b3(3) --> b4(4) --> bn([null])
+    end
+
+    subgraph After["After: head = 4"]
+        direction LR
+        a4(4) --> a3(3) --> a2(2) --> a1(1) --> an([null])
+    end
+
+    Before -.->|"three-pointer walk<br/>prev / curr / next"| After
+
+    class b1,b2,b3,b4 frozen
+    class bn,an io
+    class a4,a3,a2,a1 train
 ```
-Before:   head -> [1] -> [2] -> [3] -> [4] -> null
-                   ^
-                  prev=null, curr=1
 
-Step 1:   prev=null  curr=[1]  next=[2]
-          [1].next = null (prev)
-          prev=[1]   curr=[2]
-
-Step 2:   prev=[1]  curr=[2]  next=[3]
-          [2].next = [1]
-          prev=[2]  curr=[3]
-
-Step 3:   prev=[2]  curr=[3]  next=[4]
-          [3].next = [2]
-          prev=[3]  curr=[4]
-
-Step 4:   prev=[3]  curr=[4]  next=null
-          [4].next = [3]
-          prev=[4]  curr=null   <- loop ends
-
-After:    [4] -> [3] -> [2] -> [1] -> null
-          head = [4]
-```
+Reversal flips every arrow: the list that read 1→2→3→4→null now reads 4→3→2→1→null, and head becomes the old tail. The three-pointer walk (`prev` / `curr` / `next`) performs this in a single O(n) pass, redirecting one link at a time — never advance a pointer before saving the reference it currently holds.
 
 ### Monotonic Stack: Next Greater Element
 
-```
-arr = [4, 5, 2, 10, 8]
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Process 4:  stack = [4]
-Process 5:  5 > 4 -> pop 4, result[4]=5. stack = [5]
-Process 2:  2 < 5 -> push. stack = [5, 2]
-Process 10: 10 > 2 -> pop 2, result[2]=10. 10 > 5 -> pop 5, result[5]=10. stack = [10]
-Process 8:  8 < 10 -> push. stack = [10, 8]
-Remaining in stack: result[10]=-1, result[8]=-1
+    A(["arr: 4, 5, 2, 10, 8"]) --> P4("process 4<br/>stack: 4")
+    P4 -->|"5 bigger: pop 4<br/>result 4 = 5"| P5("process 5<br/>stack: 5")
+    P5 -->|"2 smaller: push"| P2("process 2<br/>stack: 5, 2")
+    P2 -->|"10 bigger twice<br/>pop 2, pop 5"| P10("process 10<br/>stack: 10")
+    P10 -->|"8 smaller: push"| P8("process 8<br/>stack: 10, 8")
+    P8 -->|"end of array"| R(["result: 4 to 5, 5 to 10<br/>2 to 10, 10 to -1, 8 to -1"])
 
-Result: {4:5, 5:10, 2:10, 10:-1, 8:-1}
-Time: O(n) — each element pushed and popped at most once.
+    class A io
+    class P4,P5,P2,P10,P8 mathOp
+    class R train
 ```
+
+Each element is pushed and popped at most once — the stack only pops when a smaller top meets a bigger newcomer, so the total work across all five elements is O(n), not O(n²).
 
 ### Queue with Two Stacks
 
-```
-enqueue: always push to stack1
-dequeue: if stack2 is empty, pop all from stack1 into stack2, then pop stack2
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-enqueue(1,2,3):   stack1=[1,2,3]  stack2=[]
-dequeue():        stack2=[]  ->  move all: stack1=[], stack2=[3,2,1]
-                  pop stack2 -> returns 1  (correct FIFO order)
-dequeue():        stack2=[3,2] -> pop -> returns 2
-dequeue():        stack2=[3] -> pop -> returns 3
+    In(["enqueue 1, then 2, then 3"]) --> S1("stack1<br/>push-only")
+    S1 -->|"dequeue when stack2 empty<br/>pop all, push all: reverses order"| S2("stack2<br/>pop-only")
+    S2 -->|"pop"| Out(["dequeue returns 1, 2, 3<br/>FIFO order preserved"])
+    S2 -.->|"stack2 empties again<br/>refill from stack1"| S1
 
-Amortized O(1): each element is pushed to stack1 once, moved to stack2 once, popped once.
+    class In req
+    class S1,S2 base
+    class Out io
 ```
+
+Every element makes exactly three trips — pushed onto stack1, moved to stack2, popped from stack2 — so the amortized cost is O(1) per operation, even though the single dequeue that triggers a transfer costs O(n).
 
 ---
 
@@ -210,6 +233,35 @@ def detect_cycle(head: Optional[ListNode]) -> Optional[ListNode]:
             return slow
     return None   # no cycle
 ```
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Searching
+    Searching --> Searching: slow+1, fast+2 each step
+    Searching --> NoCycle: fast hits null
+    Searching --> Met: slow == fast
+    NoCycle --> [*]
+    Met --> ResetSlow: slow reset to head
+    ResetSlow --> Walking: advance both by 1
+    Walking --> Walking: slow != fast
+    Walking --> CycleStart: slow == fast
+    CycleStart --> [*]
+
+    class Searching,Walking mathOp
+    class Met,CycleStart train
+    class NoCycle lossN
+    class ResetSlow base
+```
+
+Floyd's algorithm is two phases, not one: Phase 1 races fast (2 steps) against slow (1 step) until they meet inside the cycle or fast falls off the end; Phase 2 resets slow to head and walks both pointers one step at a time until they meet again — that second meeting point is mathematically guaranteed to be the cycle's start (see Q3).
 
 ### 6.4 Monotonic Stack — Largest Rectangle in Histogram
 
@@ -488,6 +540,36 @@ Maintain two stacks: the main stack and an auxiliary min-stack. On push: push to
 ## 14. Case Study: LRU Cache — Linked List + Hash Map
 
 An LRU (Least Recently Used) cache needs O(1) get and O(1) put. The doubly-linked list maintains access order; the hash map provides O(1) node lookup.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["client: get or put"]) --> HM["hash map<br/>key to node pointer"]
+
+    subgraph DLL["doubly-linked list: MRU to LRU"]
+        direction LR
+        Head("head sentinel<br/>MRU end") --> N1("node key A") --> N2("node key B") --> Tail("tail sentinel<br/>LRU end")
+    end
+
+    HM -->|"O(1) jump"| N1
+    N1 -.->|"move to front<br/>on every access"| Head
+    Tail -->|"evict when<br/>over capacity"| Drop(["evicted"])
+
+    class Client io
+    class HM base
+    class Head,N1,N2 train
+    class Tail frozen
+    class Drop lossN
+```
+
+The hash map turns a key into an O(1) pointer straight into the linked list; list order *is* recency order, so the node nearest `head` is most-recently-used and the node nearest `tail` is next to evict. Every `get`/`put` re-links its node to the front via `_remove` + `_insert_front` (below).
 
 ```python
 from __future__ import annotations

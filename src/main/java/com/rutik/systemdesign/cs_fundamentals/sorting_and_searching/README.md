@@ -28,6 +28,35 @@ This module covers comparison-based sorting (merge sort, quicksort, heapsort), n
 
 **Comparison sort lower bound**: Any comparison-based sort requires Ω(n log n) comparisons in the worst case. Proof: the decision tree has n! leaves, minimum height ≥ log₂(n!) ≥ n log₂ n − n (Stirling) = Ω(n log n).
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R{"a vs b"} -->|"a before b"| N1{"b vs c"}
+    R -->|"a after b"| N2{"a vs c"}
+
+    N1 -->|"b before c"| L1(["a,b,c"])
+    N1 -->|"b after c"| N3{"a vs c"}
+    N3 -->|"a before c"| L2(["a,c,b"])
+    N3 -->|"a after c"| L3(["c,a,b"])
+
+    N2 -->|"a before c"| L4(["b,a,c"])
+    N2 -->|"a after c"| N4{"b vs c"}
+    N4 -->|"b before c"| L5(["b,c,a"])
+    N4 -->|"b after c"| L6(["c,b,a"])
+
+    class R,N1,N2,N3,N4 mathOp
+    class L1,L2,L3,L4,L5,L6 io
+```
+
+*A concrete decision tree for 3 elements (a, b, c): each diamond is one comparison, each pill is one of the 3! = 6 possible orderings. The tree needs height ≥ log₂(6) ≈ 2.58, so at least 3 comparisons — the same counting argument scales to n log n comparisons for n elements.*
+
 **Stability**: A sort is stable if equal elements maintain their original relative order. Merge sort and insertion sort are naturally stable. Quicksort and heapsort are not (without extra bookkeeping). Stability matters for multi-key sorts (sort by department, then by salary within department).
 
 **In-place vs auxiliary space**: In-place sorts (quicksort, heapsort) use O(log n) or O(1) extra space (excluding recursion stack). Merge sort requires O(n) auxiliary space for the merge buffer — a real constraint for large-n or memory-constrained environments.
@@ -74,28 +103,47 @@ This module covers comparison-based sorting (merge sort, quicksort, heapsort), n
 
 ### Merge Sort — Divide and Merge
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["5,2,4,6,1,3"]) --> B("split 5,2,4")
+    A --> C("split 6,1,3")
+    B --> D("split 5,2")
+    B --> E("4")
+    C --> F("split 6,1")
+    C --> G("3")
+    D --> H("5")
+    D --> I("2")
+    F --> J("6")
+    F --> K("1")
+
+    H --> M1("merge 2,5")
+    I --> M1
+    M1 --> M2("merge 2,4,5")
+    E --> M2
+
+    J --> M3("merge 1,6")
+    K --> M3
+    M3 --> M4("merge 1,3,6")
+    G --> M4
+
+    M2 --> Z(["1,2,3,4,5,6"])
+    M4 --> Z
+
+    class A,Z io
+    class B,C,D,F mathOp
+    class E,G,H,I,J,K base
+    class M1,M2,M3,M4 train
 ```
-Input: [5, 2, 4, 6, 1, 3]
 
-Divide phase (top-down):
-  [5, 2, 4, 6, 1, 3]
-       /          \
-  [5, 2, 4]     [6, 1, 3]
-   /     \       /      \
-[5, 2]  [4]   [6, 1]   [3]
- /  \          /   \
-[5] [2]      [6]  [1]
-
-Merge phase (bottom-up):
-[5] + [2]  -> [2, 5]
-[2, 5] + [4] -> [2, 4, 5]
-[6] + [1]  -> [1, 6]
-[1, 6] + [3] -> [1, 3, 6]
-[2, 4, 5] + [1, 3, 6] -> [1, 2, 3, 4, 5, 6]
-
-Each level: O(n) merge work
-Log n levels -> O(n log n) total
-```
+*Each level performs O(n) merge work across log n levels, giving O(n log n) total — divide (orange) recursively halves the array down to single-element base cases (gold), then merge (green) recombines them in sorted order back up to the final output (blue).*
 
 ### Quicksort — Partition Around Pivot
 
@@ -428,6 +476,37 @@ def min_eating_speed(piles: List[int], h: int) -> int:
 ---
 
 ## 9. When to Use / When NOT to Use
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["choose a sort"]) --> Q1{"bounded-int keys,<br/>k under 10n?"}
+    Q1 -->|"yes"| A1(["Counting / Radix sort"])
+    Q1 -->|"no"| Q2{"n is small<br/>(under 32)?"}
+    Q2 -->|"yes"| A2(["Insertion sort"])
+    Q2 -->|"no"| Q3{"data nearly<br/>sorted already?"}
+    Q3 -->|"yes"| A3(["TimSort / Insertion sort"])
+    Q3 -->|"no"| Q4{"stability<br/>required?"}
+    Q4 -->|"yes"| A4(["Merge sort / TimSort"])
+    Q4 -->|"no"| Q5{"memory<br/>constrained?"}
+    Q5 -->|"yes"| A5(["Heapsort"])
+    Q5 -->|"no"| Q6{"many duplicate<br/>keys?"}
+    Q6 -->|"yes"| A6(["3-way Quicksort"])
+    Q6 -->|"no"| A7(["Randomised Quicksort"])
+
+    class Start io
+    class Q1,Q2,Q3,Q4,Q5,Q6 mathOp
+    class A1,A2,A3,A4,A5,A6,A7 train
+```
+
+*A routing view of the Section 8 selection table and the prose below: walk the checks top-to-bottom to land on the right algorithm for your constraints; each branch is justified in detail in the paragraphs that follow.*
 
 **Use merge sort when**: stability is required; worst-case O(n log n) is mandatory; sorting linked lists (merge sort works naturally on lists, quicksort does not); external sort (merge is inherently parallelisable and sequential-I/O-friendly).
 

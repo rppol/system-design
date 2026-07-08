@@ -64,55 +64,145 @@ Together they form the backbone of cross-cutting concerns in Python: logging, au
 
 **Closure internals:**
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    outer(["outer call"])
+    xvar["local variable<br/>x = 10"]
+    inner(["inner<br/>returned as closure"])
+    cellRef["__closure__<br/>cell holding x"]
+    freevars["co_freevars<br/>tuple holds x"]
+    body["return x + 1<br/>cell keeps x alive"]
+
+    outer --> xvar
+    outer --> inner
+    inner --> cellRef
+    inner --> freevars
+    inner --> body
+
+    class outer io
+    class inner train
+    class xvar base
+    class cellRef frozen
+    class freevars mathOp
+    class body lossN
 ```
-outer()
-  ├── local variable: x = 10
-  └── inner()           ← returned as closure
-        ├── __closure__: (cell[x],)
-        ├── __code__.co_freevars: ('x',)
-        └── body: return x + 1   ← cell object keeps x alive
-```
+
+*Each call to `make_multiplier` creates a fresh `inner` closure with its own `__closure__` cell, which is why `double` and `triple` in §6.1 never share state.*
 
 **Decorator application at definition time:**
 
-```
-MODULE LOAD
-    @authenticate          ← step 3: f = authenticate(require_role("admin")(f))
-    @require_role("admin") ← step 2: tmp = require_role("admin")(f)
-    def get_user(): ...    ← step 1: function object created
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-CALL TIME
-    get_user(request)
-        └── authenticate.wrapper(request)
-                └── require_role.wrapper(request)
-                        └── get_user_original(request)
+    subgraph ML["Module Load - decoration order, bottom-up"]
+        direction LR
+        s1(["get_user defined"]) --> s2["apply require_role<br/>admin role"]
+        s2 --> s3["apply authenticate"]
+    end
+
+    subgraph CT["Call Time - execution order, top-down"]
+        direction LR
+        c1(["get_user called"]) --> c2["authenticate wrapper runs"]
+        c2 --> c3["require_role wrapper runs"]
+        c3 --> c4["original get_user runs"]
+    end
+
+    s3 -.->|"invoked later, at runtime"| c1
+
+    class s1 io
+    class s2,s3 mathOp
+    class c1 io
+    class c2,c3 mathOp
+    class c4 train
 ```
+
+*Decoration runs once, bottom-up, at module load; execution runs per call, top-down, through each wrapper before reaching the original — the ordering that trips people up in Q10 and Pitfall 5.*
 
 **Parametrized decorator three-level structure:**
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    factory(["retry factory<br/>receives config"])
+    decoratorN["decorator<br/>receives func, returns wrapper"]
+    wrapperN["wrapper<br/>executes per call"]
+    loopD{"attempt in range<br/>max_attempts"}
+    tryCall["try: return func result"]
+    exceptSleep["except: sleep delay"]
+    raiseExc["raise last exception"]
+
+    factory --> decoratorN --> wrapperN --> loopD
+    loopD -->|"call succeeds"| tryCall
+    loopD -->|"call fails, attempts left"| exceptSleep
+    exceptSleep -.-> loopD
+    loopD -->|"attempts exhausted"| raiseExc
+
+    class factory io
+    class decoratorN,wrapperN,loopD mathOp
+    class tryCall train
+    class exceptSleep,raiseExc lossN
 ```
-retry(max_attempts=3)          ← factory: receives config, returns decorator
-    └── decorator(func)        ← decorator: receives callable, returns wrapper
-            └── wrapper(*a, **kw)  ← wrapper: executes per call
-                    ├── for attempt in range(max_attempts):
-                    │       try: return func(*a, **kw)
-                    │       except ...: sleep(delay)
-                    └── raise last exception
-```
+
+*Three nesting levels — factory, decorator, wrapper — with the retry loop re-entering on failure and raising only after `max_attempts` is exhausted.*
 
 **lru_cache internals:**
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    callNode(["func call"])
+    keyNode["make_key<br/>args, kwargs"]
+    decision{"key in cache?"}
+    cacheStore[("cache dict<br/>maxsize=128")]
+    hitCount["hits++"]
+    missCount["misses++"]
+    compute["result = func args"]
+    storeNode["cache key = result"]
+    returnNode(["return value"])
+
+    callNode --> keyNode --> decision
+    cacheStore -.-> decision
+    decision -->|"hit"| hitCount --> returnNode
+    decision -->|"miss"| missCount --> compute --> storeNode --> returnNode
+
+    class callNode io
+    class keyNode,decision mathOp
+    class cacheStore,storeNode base
+    class hitCount train
+    class missCount,compute lossN
+    class returnNode io
 ```
-func wrapped by lru_cache
-    ├── cache: dict keyed by (args, frozenset(kwargs.items()))
-    ├── hits: int
-    ├── misses: int
-    ├── maxsize: 128 (default)
-    └── on call:
-            key = make_key(args, kwargs)
-            if key in cache: hits++; return cache[key]
-            else: misses++; result = func(*args); cache[key] = result; return result
-```
+
+*A hit short-circuits to an O(1) dict lookup; a miss computes, stores, and returns — the mechanic behind the hits/misses counters `cache_info()` reports in §6.7.*
 
 ---
 
@@ -495,6 +585,54 @@ In FastAPI routes, the timing decorator wraps the coroutine, so it must be decla
 - Multiple threads access the same instance simultaneously — race condition on first access.
 - The computed value can become stale and needs cache invalidation beyond a simple `del`.
 
+**Decision tree — which construct to reach for:**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root{"what is the goal?"}
+    q1{"reused across<br/>many callables?"}
+    q2{"needs persistent<br/>inspectable state?"}
+    q3{"needs config<br/>per application?"}
+    memoQ{"pure function,<br/>hashable args?"}
+    instanceQ{"bound to an<br/>instance method?"}
+    closureNode["closure<br/>lightweight local state"]
+    factoryDec["parametrized factory<br/>retry, roles, limits"]
+    classDec["class-based decorator<br/>__init__ + __call__"]
+    simpleDec["simple decorator<br/>+ functools.wraps"]
+    avoidLru["avoid lru_cache<br/>mutable args or side effects"]
+    cachedPropNode["functools.cached_property"]
+    lruNode["functools.lru_cache"]
+
+    root -->|"wrap or intercept<br/>behavior"| q1
+    root -->|"cache a<br/>return value"| memoQ
+
+    q1 -->|"no"| closureNode
+    q1 -->|"yes"| q3
+    q3 -->|"yes"| factoryDec
+    q3 -->|"no"| q2
+    q2 -->|"yes"| classDec
+    q2 -->|"no"| simpleDec
+
+    memoQ -->|"no"| avoidLru
+    memoQ -->|"yes"| instanceQ
+    instanceQ -->|"yes, one attribute"| cachedPropNode
+    instanceQ -->|"no, module function"| lruNode
+
+    class root,q1,q2,q3,memoQ,instanceQ mathOp
+    class closureNode,factoryDec,classDec,simpleDec,cachedPropNode,lruNode train
+    class avoidLru lossN
+```
+
+*Section 9 distilled into one flow: closures for local state, decorators for cross-cutting behavior (factory when configurable, class-based when stateful, simple otherwise), and `lru_cache`/`cached_property` reserved for pure, hashable, single-threaded memoization.*
+
 ---
 
 ## 10. Common Pitfalls
@@ -613,6 +751,35 @@ class Circle:
 # @lru_cache(maxsize=256)
 # def compute(self, n: int) -> int: ...
 ```
+
+**Reference lifecycle — why `del p` does not free memory:**
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Created
+    Created --> Cached: compute called<br/>self plus n become the cache key
+    Cached --> Zombie: del p<br/>local reference dropped
+    Zombie --> Evicted: maxsize exceeded<br/>LRU evicts oldest entry
+    Zombie --> Collected: process restarts
+    Evicted --> Collected: refcount reaches zero
+    Collected --> [*]
+
+    class Created io
+    class Cached base
+    class Zombie lossN
+    class Evicted mathOp
+    class Collected train
+```
+
+*`del p` only drops the local variable's reference — `self` stays alive as part of the `(self, n)` cache key until LRU eviction or a process restart finally lets it go (see Q7).*
 
 ---
 

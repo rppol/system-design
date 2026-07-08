@@ -60,25 +60,92 @@ Without balancing, a BST degenerates to a linked list on sorted input (O(n) oper
 
 ### 4.3 AVL Rotation (Conceptual)
 
-```
-Left-Left case (right rotation):
-        z                    y
-       / \                  / \
-      y   T4    -->        x    z
-     / \                  / \  / \
-    x   T3               T1 T2 T3 T4
-   / \
-  T1  T2
+**Left-Left case (single right rotation at z):**
 
-Left-Right case (left-right rotation = left rotate y, then right rotate z):
-        z                    x
-       / \                  / \
-      y   T4    -->        y    z
-       \                  / \  / \
-        x                T1 T2 T3 T4
-       / \
-      T1  T2
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph B1["Before: left-left heavy"]
+        direction TB
+        Z1("z") --> Y1("y")
+        Z1 --> T4a(["T4"])
+        Y1 --> X1("x")
+        Y1 --> T3a(["T3"])
+        X1 --> T1a(["T1"])
+        X1 --> T2a(["T2"])
+    end
+
+    subgraph A1["After: rotated"]
+        direction TB
+        Y2("y") --> X2("x")
+        Y2 --> Z2("z")
+        X2 --> T1b(["T1"])
+        X2 --> T2b(["T2"])
+        Z2 --> T3b(["T3"])
+        Z2 --> T4b(["T4"])
+    end
+
+    B1 -.->|"rotate right at z"| A1
+
+    class Z1 lossN
+    class Y1 mathOp
+    class X1 base
+    class T1a,T2a,T3a,T4a frozen
+    class Y2 train
+    class X2,Z2 base
+    class T1b,T2b,T3b,T4b frozen
 ```
+
+**Left-Right case (left-rotate y, then right-rotate z):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph B2["Before: left-right heavy"]
+        direction TB
+        Z3("z") --> Y3("y")
+        Z3 --> T4c(["T4"])
+        Y3 --> X3("x")
+        X3 --> T1c(["T1"])
+        X3 --> T2c(["T2"])
+    end
+
+    subgraph A2["After: double rotation"]
+        direction TB
+        X4("x") --> Y4("y")
+        X4 --> Z4("z")
+        Y4 --> T1d(["T1"])
+        Y4 --> T2d(["T2"])
+        Z4 --> T3d(["T3"])
+        Z4 --> T4d(["T4"])
+    end
+
+    B2 -.->|"double rotate"| A2
+
+    class Z3 lossN
+    class Y3 mathOp
+    class X3 base
+    class T1c,T2c,T4c frozen
+    class X4 train
+    class Y4,Z4 base
+    class T1d,T2d,T3d,T4d frozen
+```
+
+Red marks the unbalanced node that triggers the rotation, orange is the pivot doing the work, purple subtrees are re-parented but never modified, and green is the new balanced root after the fix.
 
 ---
 
@@ -86,50 +153,96 @@ Left-Right case (left-right rotation = left rotate y, then right rotate z):
 
 ### BST Search Path (n=15, balanced)
 
-```
-                    8
-                 /     \
-               4         12
-              / \         / \
-            2    6      10   14
-           / \ / \    /  \  /  \
-          1  3 5  7  9  11 13  15
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Search for 11: 8 -> right -> 12 -> left -> 10 -> right -> 11. 4 comparisons = log2(15) ≈ 4 ✓
+    N8("8") -->|"right"| N12("12")
+    N8 --> N4("4")
+    N12 -->|"left"| N10("10")
+    N12 --> N14("14")
+    N4 --> N2("2")
+    N4 --> N6("6")
+    N10 -->|"right"| N11("11")
+    N10 --> N9("9")
+    N14 --> N13("13")
+    N14 --> N15("15")
+    N2 --> N1("1")
+    N2 --> N3("3")
+    N6 --> N5("5")
+    N6 --> N7("7")
+
+    class N8,N12,N10 lossN
+    class N11 train
+    class N4,N2,N6,N14,N1,N3,N5,N7,N9,N13,N15 base
 ```
+
+Red traces the decision path; green marks the target found. Search for 11 follows 8 -> right -> 12 -> left -> 10 -> right -> 11: 4 comparisons, matching log2(15) ≈ 4.
 
 ### B+Tree Leaf Linked List (Database Index)
 
-```
-Internal nodes (keys only):
-    [10 | 20 | 30]
-   /    |    |    \
-  ...  ...  ...  ...
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Leaf nodes (keys + data pointers, linked):
-[1,2,3] <-> [10,11,12] <-> [20,21,22] <-> [30,31,32] <-> ...
-                                                              ^
-                                                        linked list enables
-                                                        O(k + log n) range scan
+    Root("10, 20, 30<br/>routing keys") -->|"under 10"| L1(["1, 2, 3"])
+    Root -->|"10-19"| L2(["10, 11, 12"])
+    Root -->|"20-29"| L3(["20, 21, 22"])
+    Root -->|"30 and up"| L4(["30, 31, 32"])
+    L1 <--> L2
+    L2 <--> L3
+    L3 <--> L4
+    L4 -.-> More(["more leaf pages"])
+
+    class Root mathOp
+    class L1,L2,L3,L4 base
+    class More frozen
 ```
+
+Internal nodes (orange) hold only routing keys; leaf nodes (gold) hold the actual keys and data pointers and are linked left-to-right. That linked list is what enables a range scan to cost O(k + log n): one O(log n) descent to the first leaf, then O(k) sideways steps.
 
 ### Segment Tree for Range Sum
 
-```
-Array: [1, 3, 5, 7, 9, 11]
+Array: `[1, 3, 5, 7, 9, 11]`, indexed 0-5. Each node stores the sum over its index range; leaves are single elements.
 
-Segment tree:
-                 [0,5]=36
-               /           \
-          [0,2]=9          [3,5]=27
-          /     \          /      \
-      [0,1]=4  [2,2]=5  [3,4]=16  [5,5]=11
-      /    \             /    \
-  [0,0]=1 [1,1]=3  [3,3]=7  [4,4]=9
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-rangeSum(1, 3) = tree[1,1] + tree[2,2] + tree[3,3] = 3 + 5 + 7 = 15
-Build: O(n). Query: O(log n). Update: O(log n).
+    R05("0-5<br/>sum = 36") --> R02("0-2<br/>sum = 9")
+    R05 --> R35("3-5<br/>sum = 27")
+    R02 --> R01("0-1<br/>sum = 4")
+    R02 --> R22("2-2<br/>sum = 5")
+    R35 --> R34("3-4<br/>sum = 16")
+    R35 --> R55("5-5<br/>sum = 11")
+    R01 --> R00("0-0<br/>sum = 1")
+    R01 --> R11("1-1<br/>sum = 3")
+    R34 --> R33("3-3<br/>sum = 7")
+    R34 --> R44("4-4<br/>sum = 9")
+
+    class R05,R02,R35,R55,R00,R34,R44 base
+    class R11,R22,R33 train
 ```
+
+`rangeSum(1, 3)` decomposes into the three green nodes: `tree[1,1] + tree[2,2] + tree[3,3] = 3 + 5 + 7 = 15`. Build is O(n); query and update are each O(log n).
 
 ---
 
@@ -204,6 +317,32 @@ def level_order(root: Optional[TreeNode]) -> list[list[int]]:
 ```
 
 ### 6.3 Tree DP — Diameter and Max Path Sum
+
+Both functions below share one recursive pattern: at every node, combine the two children's results into a local answer, but propagate only a single best arm upward. This is the return-value design decision called out in §2 and §3 — get it right and both problems fall out of the same template.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    N("node N") -.->|"recurse"| L("left subtree<br/>returns L")
+    N -.->|"recurse"| R("right subtree<br/>returns R")
+    L --> C{"combine at N:<br/>best = max(best, L+R)"}
+    R --> C
+    C --> P("propagate upward:<br/>1 + max(L, R)")
+
+    class N base
+    class L,R frozen
+    class C mathOp
+    class P train
+```
+
+Dotted edges are the recursive descent; solid edges are values returning. The orange node is exactly `best[0] = max(best[0], left + right)` in `diameter_of_binary_tree` and `best[0] = max(best[0], node.val + left + right)` in `max_path_sum` below — the green node is the `return 1 + max(left, right)` / `return node.val + max(left, right)` line that keeps climbing.
 
 ```python
 def diameter_of_binary_tree(root: Optional[TreeNode]) -> int:
@@ -331,6 +470,36 @@ def is_valid_bst(root: Optional[TreeNode]) -> bool:
 - You only need point lookups — use a hash table (O(1) vs O(log n)).
 - Data is accessed in random (non-sequential) order on disk — use a B+Tree with large pages.
 - You need a simple priority queue — use a heap (simpler, same O(log n) insert/extract-min).
+
+**Putting it together:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["What access pattern<br/>do you need?"]) --> Q1{"Only point<br/>lookups?"}
+    Q1 -->|"yes"| Hash("Hash table<br/>O(1)")
+    Q1 -->|"no"| Q2{"Only min/max<br/>extraction?"}
+    Q2 -->|"yes"| Heap("Heap<br/>O(log n)")
+    Q2 -->|"no"| Q3{"Data fits<br/>in memory?"}
+    Q3 -->|"no, disk-resident"| Btree("B+Tree<br/>O(log n), few page reads")
+    Q3 -->|"yes"| Bst("Balanced BST<br/>AVL / Red-Black, O(log n)")
+
+    class Start io
+    class Q1,Q2,Q3 mathOp
+    class Hash base
+    class Heap train
+    class Btree frozen
+    class Bst req
+```
+
+This consolidates the two lists above and the BST-vs-Hash-vs-Array row from §8 into one routing decision: point lookups peel off to a hash table, pure min/max needs peel off to a heap, and what remains splits on memory residency between an in-memory balanced BST and a disk-optimised B+Tree.
 
 ---
 

@@ -77,44 +77,88 @@ etcd uses Raft, so it needs an **odd number** (3 or 5) for quorum: 3 tolerates 1
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph CP["Control Plane (hub-and-spoke)"]
+        direction LR
+        kubectl(["kubectl<br/>(users)"])
+        apiserver("kube-apiserver<br/>(the ONLY hub)")
+        scheduler("kube-scheduler")
+        ctrlmgr("controller-manager")
+        cloudctrl("cloud-controller-mgr")
+        etcd[("etcd<br/>Raft · 3 or 5 nodes")]
+
+        kubectl --> apiserver
+        scheduler -.->|"watch"| apiserver
+        ctrlmgr -.->|"watch"| apiserver
+        cloudctrl -.->|"watch"| apiserver
+        apiserver -->|"only writer"| etcd
+    end
+
+    subgraph WN["Worker Node (data plane)"]
+        direction LR
+        kubelet("kubelet")
+        containerd("containerd")
+        runc("runc")
+        pods(["pods"])
+        kubeproxy("kube-proxy")
+        netrules{"iptables / IPVS / eBPF"}
+
+        kubelet -->|"CRI"| containerd --> runc --> pods
+        kubeproxy --> netrules
+        netrules -.->|"Service VIP to<br/>pod IPs"| pods
+    end
+
+    kubelet -->|"reports status /<br/>watches PodSpecs"| apiserver
+
+    class kubectl io
+    class apiserver mathOp
+    class scheduler,ctrlmgr,cloudctrl req
+    class etcd base
+    class kubelet,containerd,runc,pods train
+    class kubeproxy mathOp
+    class netrules mathOp
 ```
-Control plane (hub-and-spoke through the API server)
 
-                       +------------------+
-        kubectl  ----> |                  | <---- watch ---- kube-scheduler
-        (users)        |  kube-apiserver  | <---- watch ---- controller-manager
-        kubelet  ----> |  (the ONLY hub)  | <---- watch ---- cloud-controller-mgr
-                       |                  |
-                       +---------+--------+
-                                 | (only the API server talks to etcd)
-                                 v
-                            +---------+
-                            |  etcd   |  (Raft, 3 or 5 nodes, all cluster state)
-                            +---------+
+*The API server is the only hub: kubectl and the kubelet send requests into it, the scheduler and both controller-managers only watch it, and it alone is allowed to write etcd. On the worker node, the kubelet drives the CRI chain to start containers while kube-proxy programs the network rules that route a Service's virtual IP to live pod IPs.*
 
-Worker node (data plane)
+```mermaid
+sequenceDiagram
+    participant kubectl
+    participant api as kube-apiserver
+    participant etcd
+    participant dc as Deployment<br/>controller
+    participant rsc as ReplicaSet<br/>controller
+    participant sched as kube-scheduler
+    participant kubelet
+    participant eps as EndpointSlice<br/>controller
 
-  +-----------------------------------------------+
-  | kubelet  --CRI--> containerd --> runc --> pods |
-  |    ^  reports status / watches PodSpecs        |
-  |    | (to API server)                           |
-  | kube-proxy --> iptables/IPVS/eBPF (Service VIP -> pod IPs)
-  | container runtime                              |
-  +-----------------------------------------------+
+    kubectl->>api: 1. POST deploy.yaml (replicas=3)
+    Note right of api: authn → authz (RBAC)<br/>→ admission → validate
+    api->>etcd: 2. write Deployment object
+    etcd-->>api: 201 Created
+    dc->>api: 3. watch: new Deployment
+    dc->>api: create ReplicaSet
+    rsc->>api: 4. watch: desired=3, actual=0
+    rsc->>api: create 3 Pods (Pending)
+    sched->>api: 5. watch: unscheduled Pods
+    sched->>api: bind Pod to node (nodeName)
+    kubelet->>api: 6. watch: Pod bound to this node
+    kubelet->>kubelet: CRI pulls image,<br/>starts container
+    kubelet->>api: 7. update status Running/Ready
+    eps->>api: watch: add pod IP to Service
+    Note over kubectl,eps: every step is an independent loop<br/>reading/writing etcd via the apiserver
 ```
 
-```
-What happens on `kubectl apply -f deploy.yaml` (replicas: 3)
-
-1. kubectl POST -> apiserver: authn -> authz (RBAC) -> admission -> validate
-2. apiserver writes Deployment object to etcd, returns 201
-3. Deployment controller (watching) sees new Deployment -> creates ReplicaSet
-4. ReplicaSet controller sees RS desired=3, actual=0 -> creates 3 Pod objects (Pending)
-5. Scheduler sees 3 unscheduled Pods -> picks nodes -> writes Pod.spec.nodeName (Binding)
-6. kubelet on each node sees a Pod bound to it -> calls CRI -> pulls image -> starts container
-7. kubelet updates Pod status -> Running/Ready; EndpointSlice controller adds pod IP to Service
-   Every step is an independent loop reading/writing etcd via the apiserver.
-```
+*Seven independent reconciliation loops, chained only by what each one watches through the apiserver in etcd — no controller ever calls another directly.*
 
 ---
 
@@ -134,12 +178,44 @@ for {
 }
 ```
 
+```mermaid
+stateDiagram-v2
+    [*] --> Watching
+    Watching --> Diffing: watch event or<br/>periodic resync
+    Diffing --> Watching: no diff —<br/>already reconciled
+    Diffing --> Applying: desired != observed
+    Applying --> Watching: one step applied
+```
+
+*Every controller runs this same loop independently. Because it is level-triggered — re-entering at Watching on a periodic resync, not only on the event that changed something — a crashed or restarted controller simply re-converges on its next tick instead of losing state.*
+
 ### The request path through the API server
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reqIn(["request"]) --> authn{"Authentication"}
+    authn --> authz{"Authorization<br/>(RBAC)"}
+    authz --> mutate("Mutating<br/>Admission")
+    mutate --> schema{"Schema<br/>Validation"}
+    schema --> validate{"Validating<br/>Admission"}
+    validate --> etcdw[("etcd write")]
+    etcdw --> fanout(["watch<br/>fan-out"])
+
+    class reqIn io
+    class authn,authz,mutate,schema,validate mathOp
+    class etcdw base
+    class fanout req
 ```
-request -> [Authentication] -> [Authorization (RBAC)] -> [Mutating Admission]
-        -> [Schema Validation] -> [Validating Admission] -> [etcd write] -> [watch fan-out]
-```
+
+*A request must clear five checks — two of them gates that can reject it outright — before it is ever written to etcd; only after the write does the change fan out to every watcher.*
 
 Admission webhooks (mutating, then validating) are where policy engines (OPA Gatekeeper, Kyverno) and sidecar injectors hook in — see [kubernetes_security](../kubernetes_security/) and [policy_as_code_and_compliance](../policy_as_code_and_compliance/).
 
@@ -163,6 +239,16 @@ ETCDCTL_API=3 etcdctl snapshot save /backup/etcd-$(date +%F).db \
 # Defaults that bite: etcd has an ~8 GB DB size quota (--quota-backend-bytes).
 # Exceeding it puts etcd into a read-only "alarm" state -> the whole cluster stops accepting writes.
 ```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Writable
+    state "NOSPACE alarm" as NS
+    Writable --> NS: DB size crosses<br/>quota-backend-bytes (~8GB default)
+    NS --> Writable: etcdctl defrag + compact,<br/>clear the alarm
+```
+
+*The ~8 GB default quota is a hard boundary, not a soft warning: crossing it flips etcd into the NOSPACE alarm, and the whole cluster — including the self-healing writes that would normally fix things — stops accepting writes until a defrag brings the DB back below quota.*
 
 ### Why the scheduler is separate
 
@@ -320,21 +406,43 @@ The bottleneck is usually the control plane, not the workloads: an overloaded AP
 
 A growing platform team notices `kubectl` taking 10+ seconds, rollouts stalling, and HPA reacting minutes late — yet application CPU/memory dashboards are green. The cluster has one custom "label-sync" operator deployed last week.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s1(["kubectl slow"])
+    s2(["rollouts lag"])
+    s3(["HPA delayed"])
+    bottleneck{"control-plane bottleneck<br/>(NOT workloads)"}
+    m1("apiserver_request_duration<br/>P99 = 8s (was 50ms)")
+    m2("apiserver inflight<br/>requests saturated")
+    m3[("etcd_disk_wal_fsync slow<br/>DB 7.6GB / 8GB quota")]
+    culprit(("label-sync operator:<br/>LISTs all pods every 2s,<br/>hot-loop PATCH"))
+
+    s1 --> bottleneck
+    s2 --> bottleneck
+    s3 --> bottleneck
+    bottleneck --> m1
+    bottleneck --> m2
+    bottleneck --> m3
+    m1 --> culprit
+    m2 --> culprit
+    m3 --> culprit
+
+    class s1,s2,s3 io
+    class bottleneck lossN
+    class m1,m2 req
+    class m3 base
+    class culprit lossN
 ```
-Symptom map
-  kubectl slow  ---+
-  rollouts lag  ---+--> control-plane bottleneck (NOT workloads)
-  HPA delayed   ---+
-        |
-        v
-  apiserver_request_duration P99 = 8s    (was 50ms)
-  apiserver inflight requests saturated
-  etcd_disk_wal_fsync slow + DB size 7.6GB / 8GB quota (approaching alarm)
-        |
-        v
-  culprit: label-sync operator LISTs ALL pods cluster-wide every 2s, no selectors,
-           and PATCHes labels in a hot loop -> floods apiserver + bloats etcd revisions
-```
+
+*Symptom map: three user-visible symptoms and the control-plane metrics behind them all trace back to one operator treating the API server and etcd as free — the root cause confirmed below.*
 
 ```go
 // BROKEN: the operator's core loop.

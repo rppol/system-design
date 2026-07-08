@@ -72,6 +72,28 @@ Key property: adding two's complement values uses the same circuit as unsigned a
                                          ^-- overflow bit discarded; result = 0 ✓
 ```
 
+The worked bytes above are one instance of the general rule from Section 3 — flip every bit of the magnitude, then add 1:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    k(["positive magnitude k"]) --> flipOp["Flip every bit<br/>(bitwise NOT)"]
+    flipOp --> addOp["Add 1"]
+    addOp --> negk(["result = -k"])
+
+    class k,negk io
+    class flipOp,addOp mathOp
+```
+
+Two transform steps, zero new hardware: this is why a CPU needs no separate subtract circuit — negate via this pipeline, then reuse the existing unsigned adder.
+
 ### 4.3 Bitwise Operation Truth Table
 
 ```
@@ -154,6 +176,29 @@ Step 1: n & (n-1) = 0b10110 & 0b10101 = 0b10100  (cleared rightmost set bit)
 Step 2: n & (n-1) = 0b10100 & 0b10011 = 0b10000
 Step 3: n & (n-1) = 0b10000 & 0b01111 = 0b00000
 Count = 3 iterations = 3 set bits   → O(number of set bits), not O(total bits)
+```
+
+The trace above is one run of this general loop — it terminates in exactly k iterations, where k is the number of set bits, not the bit width:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["n, count = 0"]) --> check{"n equals 0?"}
+    check -->|"no"| clear["n = n AND (n-1)<br/>clears lowest set bit"]
+    clear --> inc["count += 1"]
+    inc --> check
+    check -->|"yes"| done(["return count"])
+
+    class start,done io
+    class check,clear mathOp
+    class inc train
 ```
 
 ---

@@ -53,6 +53,32 @@ Implementing arithmetic requires understanding the *reflected* (right-hand) and 
 | `__abs__(self)` | `abs(self)` | Unary |
 | `__mul__`, `__rmul__` | `*` operator | Sequence repetition uses `__mul__` |
 
+Binary operator dispatch resolves `a + b` by trying the left operand first and falling back to the right operand's reflected method only when the left side declines:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["a + b"]) --> T1{"a.__add__(b)<br/>supported?"}
+    T1 -->|"yes"| R1(["return result"])
+    T1 -->|"NotImplemented"| T2{"b.__radd__(a)<br/>supported?"}
+    T2 -->|"yes"| R2(["return result"])
+    T2 -->|"NotImplemented"| ERR(["raise TypeError"])
+
+    class Start io
+    class T1,T2 mathOp
+    class R1,R2 train
+    class ERR lossN
+```
+
+Both hops returning `NotImplemented` is what turns an unsupported-type addition into `TypeError` at the call site, not inside either dunder method.
+
 Rich comparisons (`__lt__`, `__le__`, `__eq__`, `__ne__`, `__gt__`, `__ge__`) can be synthesized from `__eq__` and one of `__lt__` / `__gt__` using `functools.total_ordering`. `total_ordering` adds ~2 microseconds per comparison due to wrapper overhead; define all six methods in performance-critical code.
 
 ### 4.2 Container Protocol
@@ -92,54 +118,84 @@ Compare with Java's single-inheritance model in `../../java/core_language/README
 
 ### Attribute Lookup Order
 
-```
-obj.attr   (read access)
-     |
-     v
-Does type(obj).__mro__ contain a DATA DESCRIPTOR with attr?  (defines __get__ AND __set__/__delete__)
-     |                     |
-    YES                    NO
-     |                     |
-     v                     v
-Call descriptor.__get__   Does obj.__dict__ contain attr?
-                               |             |
-                              YES            NO
-                               |             |
-                               v             v
-                         return __dict__  Does type(obj).__mro__ contain
-                         value            a NON-DATA DESCRIPTOR or class attr?
-                                               |             |
-                                              YES            NO
-                                               |             |
-                                               v             v
-                                       Call descriptor.   raise
-                                       __get__ or return  AttributeError
-                                       class attr
+The interpreter walks a fixed four-step order for every `obj.attr` read, checking data descriptors before the instance `__dict__` and non-data descriptors after it:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["obj.attr<br/>(read access)"]) --> Q1{"type(obj).__mro__ has a<br/>DATA DESCRIPTOR for attr?"}
+    Q1 -->|"yes"| A1(["call<br/>descriptor.__get__"])
+    Q1 -->|"no"| Q2{"obj.__dict__<br/>contains attr?"}
+    Q2 -->|"yes"| A2(["return<br/>__dict__ value"])
+    Q2 -->|"no"| Q3{"type(obj).__mro__ has a<br/>NON-DATA DESCRIPTOR<br/>or class attr?"}
+    Q3 -->|"yes"| A3(["call descriptor.__get__<br/>or return class attr"])
+    Q3 -->|"no"| A4(["raise<br/>AttributeError"])
+
+    class Start io
+    class Q1,Q2,Q3 mathOp
+    class A1,A2,A3 train
+    class A4 lossN
 ```
 
 ### Descriptor Types
 
-```
-class Descriptor:
-    def __get__(self, obj, objtype): ...   <- non-data descriptor (instance __dict__ wins)
-    def __set__(self, obj, value):   ...   <- data descriptor (beats instance __dict__)
-    def __delete__(self, obj):       ...   <- makes it a data descriptor
+Defining `__set__` or `__delete__` alongside `__get__` upgrades a descriptor from non-data (shadowed by the instance `__dict__`) to data (always wins) — this is why `property` overrides instance assignment but a plain `function` does not:
 
-property = data descriptor  (has __get__, __set__, __delete__)
-classmethod = non-data descriptor
-staticmethod = non-data descriptor
-function = non-data descriptor  (returns bound method via __get__)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    G("defines only<br/>__get__") --> ND("Non-data descriptor<br/>instance __dict__ wins")
+    GS("defines __get__ +<br/>__set__ / __delete__") --> DD("Data descriptor<br/>beats instance __dict__")
+    PROP(property) --> DD
+    CM(classmethod) --> ND
+    SM(staticmethod) --> ND
+    FN("function returns<br/>bound method via __get__") --> ND
+
+    class G,GS mathOp
+    class DD train
+    class ND frozen
+    class PROP,CM,SM,FN req
 ```
 
 ### MRO Diamond Example
 
-```
-        A
-       / \
-      B   C
-       \ /
-        D
+`D(B, C)` diamond-inherits from `A` through both `B` and `C`; C3 linearization collapses this into the single deterministic order `D -> B -> C -> A -> object` traced below:
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(A) --> B(B)
+    A --> C(C)
+    B --> D(D)
+    C --> D
+
+    class A base
+    class B,C mathOp
+    class D train
+```
+
+```
 class A: pass
 class B(A): pass
 class C(A): pass
@@ -539,6 +595,16 @@ print(plugin.process())  # processing json
 | `dataclass` (plain) | ~232 bytes | ~100 ns | Yes | Simple |
 | `dataclass(slots=True)` [3.10] | ~56 bytes | ~70 ns | No | Same as manual slots |
 | `NamedTuple` | ~72 bytes | ~60 ns (C-level) | No | Limited; tuple semantics |
+
+`__slots__` and `dataclass(slots=True)` cut per-instance memory to roughly a quarter of the `__dict__`-based approaches — the same 232-to-56-byte drop from the Section 6.3 deep dive, repeated here across every idiom:
+
+```mermaid
+xychart-beta
+    title "Memory per Instance by Approach (bytes)"
+    x-axis ["Plain class", "__slots__", "dataclass", "dataclass(slots)", "NamedTuple"]
+    y-axis "Bytes" 0 --> 250
+    bar [232, 56, 232, 56, 72]
+```
 
 | Feature | `property` | Custom descriptor | `__getattr__` |
 |---------|-----------|-------------------|--------------|

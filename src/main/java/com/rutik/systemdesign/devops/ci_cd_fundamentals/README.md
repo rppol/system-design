@@ -10,10 +10,33 @@ CI/CD is the automated path from a code commit to running software. **Continuous
 
 The pipeline is a sequence of stages a commit must pass to reach production:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    commit([commit]) --> build["build"]
+    build --> unit["unit test"]
+    unit --> scan["scan / lint"]
+    scan --> pkg["package<br/>artifact"]
+    pkg --> integ["integration<br/>test"]
+    integ --> stage["deploy<br/>staging"]
+    stage --> prod["deploy<br/>prod"]
+
+    class commit io
+    class build mathOp
+    class unit,scan,integ train
+    class pkg base
+    class stage req
+    class prod lossN
 ```
-commit -> [build] -> [unit test] -> [scan/lint] -> [package artifact] ->
-          [integration test] -> [deploy staging] -> [deploy prod]
-```
+
+*Any stage can stop the line; only a commit that clears every gate reaches production.*
 
 Definitions that interviews probe:
 - **Continuous Integration (CI)** — every commit is automatically built and tested, integrated into the mainline frequently (catches breakage early).
@@ -83,36 +106,66 @@ Key mechanics: **artifacts** (the built, versioned, immutable output — e.g., a
 
 ## 5. Architecture Diagrams
 
+**Build once, promote the same artifact:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    commit([commit]) --> build["CI builds image<br/>registry/app:sha-abc123<br/>(ONE build)"]
+    build --> staging["deploy staging<br/>config: staging"]
+    build --> prod["deploy prod<br/>config: prod"]
+
+    class commit io
+    class build mathOp
+    class staging req
+    class prod lossN
 ```
-Build-once, promote-the-artifact
 
-  commit -> CI builds image  registry/app:sha-abc123  (ONE build)
-                 |
-       +---------+---------+----------------+
-       v                   v                v
-   deploy staging      deploy prod      (same digest everywhere)
-   config: staging     config: prod      ENV differs, BINARY identical
+*The image is built exactly once and promoted unchanged to every environment — only the deploy-time configuration differs; the binary itself (the digest) is identical in staging and prod.*
 
-Pipeline with gates + parallelism
+**Pipeline with gates and parallelism:**
 
-  commit
-    |
-    +--[build]
-    |     |
-    |     +--[unit tests]  --\
-    |     +--[lint]          |  parallel, fast (fail fast)
-    |     +--[SAST/scan]   --/
-    |           | all pass
-    |           v
-    |     [package artifact] -> registry
-    |           |
-    |     [integration tests]
-    |           |
-    |     [deploy staging] -> [smoke/e2e]
-    |           | pass + (approval if Delivery)
-    |           v
-    |     [deploy prod] (canary -> full)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    commit([commit]) --> build["build"]
+    build --> unit["unit tests"]
+    build --> lint["lint"]
+    build --> sast["SAST / scan"]
+    unit --> gate{"all pass?"}
+    lint --> gate
+    sast --> gate
+    gate -->|"yes"| pkg["package<br/>artifact"]
+    pkg --> registry([registry])
+    pkg --> integ["integration<br/>tests"]
+    integ --> stage["deploy<br/>staging"]
+    stage --> smoke["smoke / e2e"]
+    smoke --> gate2{"pass + approved?<br/>(if Delivery)"}
+    gate2 -->|"yes"| prod["deploy prod<br/>(canary then full)"]
+
+    class commit io
+    class build,gate,gate2 mathOp
+    class unit,lint,sast,integ,smoke train
+    class pkg,registry base
+    class stage req
+    class prod lossN
 ```
+
+*Unit tests, lint, and SAST/scan run in parallel so wall-clock time is bounded by the slowest check, not their sum; the final canary-then-full prod rollout waits behind a pass-plus-approval gate under Continuous Delivery.*
 
 ---
 
@@ -161,10 +214,15 @@ jobs:
 
 ### Caching (the biggest speed lever)
 
+```mermaid
+xychart-beta
+    title "Pipeline run time: cache impact"
+    x-axis ["No cache", "With cache"]
+    y-axis "Seconds per run" 0 --> 400
+    bar [390, 48]
 ```
-No cache:   npm ci = 90s, docker build = 5min   -> 6.5min per run
-With cache: deps restored from cache = 8s, layers reused = 40s -> ~50s per run
-```
+
+*Caching turns a 6.5-minute run (90s npm ci + 5min docker build) into about 50 seconds (8s + 40s) — roughly an 8x speedup, the single biggest lever on pipeline wall-clock time.*
 Cache dependency directories and build layers keyed by lockfile/Dockerfile hashes; invalidate when inputs change.
 
 ### Parallelism and the dependency graph
@@ -182,6 +240,24 @@ Cache dependency directories and build layers keyed by lockfile/Dockerfile hashe
   with: {role-to-assume: arn:aws:iam::...:role/ci-deploy, aws-region: us-east-1}
   # OIDC: the runner exchanges a short-lived token for the role -> no long-lived AWS keys in CI.
 ```
+
+**How OIDC federation replaces static keys:**
+
+```mermaid
+sequenceDiagram
+    participant J as Runner
+    participant I as OIDC Provider
+    participant C as Cloud IAM
+
+    J->>I: request identity token
+    I-->>J: signed OIDC token (short-lived)
+    J->>C: present token, assume role
+    C->>C: validate trust policy<br/>(repo, branch, workflow)
+    C-->>J: short-lived cloud credentials
+    Note over J,C: no long-lived keys stored in CI
+```
+
+*The runner never holds a static cloud key — it trades a short-lived, workflow-scoped identity token for temporary credentials on every run, eliminating the most commonly leaked secret class.*
 
 ---
 
@@ -313,13 +389,28 @@ CI produces and verifies the artifact (build, test, scan, push image). CD can be
 
 A team's pipeline builds the image separately in the staging-deploy and prod-deploy jobs. A change merges, passes all tests against the staging-built image, and is promoted. Minutes later prod crashes: a transitive dependency published a new patch version *between* the two builds, and the prod-built image pulled the broken version. Staging was fine; prod was a different binary.
 
+**BROKEN: two builds, two binaries**
+
+```mermaid
+sequenceDiagram
+    participant S as Staging Deploy Job
+    participant R as Package Registry
+    participant P as Prod Deploy Job
+
+    Note over S,R: t0
+    S->>R: docker build (resolve libfoo)
+    R-->>S: libfoo 1.4.2 (good)
+    Note over S: tests pass
+
+    Note over R: t1 — libfoo 1.4.3 published (regression)
+
+    Note over P,R: t2
+    P->>R: docker build AGAIN (resolve libfoo)
+    R-->>P: libfoo 1.4.3 (bad)
+    Note over P: prod crashes
 ```
-BROKEN: two builds, two binaries
-  t0  staging-deploy job: docker build -> pulls libfoo 1.4.2 (good) -> tests pass
-  t1  (libfoo 1.4.3 published, has a regression)
-  t2  prod-deploy job: docker build AGAIN -> pulls libfoo 1.4.3 (bad) -> prod crashes
-  The artifact tested != the artifact shipped.
-```
+
+*The artifact tested != the artifact shipped.*
 
 ```yaml
 # FIX: single build, immutable digest, promoted unchanged; deps locked.

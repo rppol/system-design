@@ -82,49 +82,90 @@ Prometheus is intentionally **not** a long-term, globally-aggregated, infinitely
 
 ## 5. Architecture Diagrams
 
+**Prometheus core scrape + alert flow**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    t1(["node_exporter<br/>:9100"]) -->|"scrape 15s"| prom
+    t2(["app<br/>:8080/metrics"]) -->|"scrape 15s"| prom
+    t3(["kube-state-metrics"]) -->|"scrape 15s"| prom
+    sd["Service discovery<br/>k8s / EC2 + relabel"] --> prom["Prometheus server<br/>scrape → TSDB head<br/>→ 2h blocks<br/>rule eval"]
+    prom -->|"PromQL"| dash(["Dashboards<br/>Grafana / API"])
+    prom -->|"firing alerts"| am["Alertmanager<br/>dedupe / group / route"]
+    am --> recv(["PagerDuty<br/>Slack / email"])
+
+    class t1,t2,t3,dash,recv io
+    class sd,am mathOp
+    class prom base
 ```
-Prometheus core scrape + alert flow
 
-  targets (apps/exporters)  /metrics over HTTP
-      node_exporter :9100
-      app :8080/metrics  ----scrape every 15s----+
-      kube-state-metrics                          |
-                                                  v
-                                      +------------------------+
-   service discovery (k8s/EC2) -----> | Prometheus server      |
-        + relabeling                  |  scrape -> TSDB head    |
-                                      |  (in-mem) -> 2h blocks  |
-                                      |  rule eval (record/alert)|
-                                      +-----------+------------+
-                                          |              |
-                              PromQL (Grafana/API)   firing alerts
-                                          |              v
-                                          |        +-------------+
-                                          |        | Alertmanager| dedupe/group/route
-                                          |        +------+------+
-                                          v               v
-                                     dashboards    PagerDuty/Slack/email
+Targets expose `/metrics`; Prometheus scrapes them every 15s (default `scrape_interval`) directly or via service discovery, evaluates rules, and routes firing alerts to Alertmanager while PromQL serves dashboards straight from the TSDB.
 
+**Thanos long-term + global view (HA + object storage)**
 
-Thanos long-term + global (HA + object storage)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   Prom A --sidecar--+
-                     +--> S3/GCS (2h blocks) <-- Compactor (dedupe + downsample 5m/1h)
-   Prom B --sidecar--+              ^
-        |    |                      |
-        | StoreAPI (recent)    Store Gateway (historical from S3)
-        +----+----------+----------+
-                        v
-                  Thanos Querier  (fans out, dedupes HA replicas) --> Grafana
+    promA["Prom A"] --> sideA["sidecar"]
+    promB["Prom B"] --> sideB["sidecar"]
+    sideA -->|"ship 2h blocks"| objStore(["S3 / GCS<br/>object storage"])
+    sideB -->|"ship 2h blocks"| objStore
+    compactor["Compactor<br/>dedupe + downsample<br/>5m / 1h"] --> objStore
+    objStore -->|"historical"| storeGW["Store Gateway"]
+    sideA -->|"StoreAPI recent"| querier["Thanos Querier<br/>fan-out + dedupe HA"]
+    sideB -->|"StoreAPI recent"| querier
+    storeGW --> querier
+    querier --> grafana(["Grafana"])
 
-
-Cardinality explosion (the core failure mode)
-
-  http_requests_total{path="/u/123", user="abc"}   1 series
-  http_requests_total{path="/u/124", user="def"}   1 series   ... x 5,000,000 users
-   = 5M active series x ~1.5KB = ~7.5 GB head RAM  -> OOM
-  FIX: drop user/id labels; keep bounded {method, route_template, status}
+    class promA,promB base
+    class sideA,sideB,compactor,storeGW,querier mathOp
+    class objStore frozen
+    class grafana io
 ```
+
+Each Prometheus ships 2h blocks to S3/GCS through a sidecar; the Compactor dedupes and downsamples them (5m/1h), and the Thanos Querier fans out across sidecars (recent data via StoreAPI) and the Store Gateway (historical data from S3) while deduping the HA replica pair before Grafana queries it.
+
+**Cardinality explosion — the core failure mode**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s1(["user=abc<br/>path=/u/123"]) --> sum((" × "))
+    s2(["user=def<br/>path=/u/124"]) --> sum
+    dots(["... × 5,000,000 users"]) --> sum
+    sum --> mem["5M series<br/>× ~1.5KB each"]
+    mem --> oom(["≈7.5 GB head RAM<br/>OOM"])
+    fix(["FIX: bounded labels<br/>method + route + status"]) -.->|"instead of"| mem
+
+    class s1,s2,dots io
+    class sum,mem mathOp
+    class oom lossN
+    class fix train
+```
+
+Every unique label combination is a new series: 5M distinct `{path,user}` pairs at ~1.5KB each blow up to ~7.5 GB of head RAM and OOM-kill the server; the fix is dropping unbounded ID labels and keeping only bounded dimensions like `method`/`route_template`/`status`.
 
 ---
 
@@ -178,13 +219,20 @@ alerting:
 
 ### The TSDB lifecycle
 
+```mermaid
+stateDiagram-v2
+    [*] --> Head: sample arrives
+    Head: Head block (in-memory + WAL)
+    Head --> Head: WAL replay after crash
+    Head --> OnDisk: every 2h, cut to disk
+    OnDisk: On-disk block (chunks + index)
+    OnDisk --> Compacted: compaction merges blocks
+    Compacted: Compacted block (2h → 6h → ...)
+    Compacted --> Compacted: further compaction rounds
+    Compacted --> [*]: past retention.time, deleted
 ```
-sample arrives -> appended to the "head" block (in-memory + WAL on disk)
-every 2h       -> head is cut to an immutable on-disk block (chunks + index)
-compaction     -> adjacent blocks merged into larger ones (2h -> 6h -> ...)
-retention      -> blocks older than --storage.tsdb.retention.time deleted
-WAL            -> write-ahead log replayed on restart to recover the head
-```
+
+A sample lands in the in-memory head block (backed by a WAL for crash recovery), gets cut to an immutable on-disk block every 2 hours, is progressively compacted into larger blocks, and is finally deleted once it ages past `--storage.tsdb.retention.time`.
 
 Rough sizing: bytes/sample ≈ 1–2 bytes after compression; a series at 15s = 5,760 samples/day. Head RAM ≈ `active_series * ~1.5KB`. So 1M active series ≈ ~1.5 GB head plus query/WAL overhead — plan RAM around series count, not sample count.
 
@@ -280,6 +328,32 @@ groups:
           (job:http_errors:ratio:rate6h{job="api"} > (6 * 0.001))
         for: 15m
         labels: {severity: ticket}
+```
+
+Both checks below are independent AND-gates across a short and a long window; the picture makes that pairing click faster than the YAML alone.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    burn(["Error budget<br/>burn rate"]) --> fastCheck{"5m AND 1h<br/>burn over 14.4×"}
+    burn --> slowCheck{"30m AND 6h<br/>burn over 6×"}
+    fastCheck -->|"both true"| page["Page<br/>for: 2m"]
+    slowCheck -->|"both true"| ticket["Ticket<br/>for: 15m"]
+    fastCheck -->|"either false"| none(["No alert"])
+    slowCheck -->|"either false"| none
+
+    class burn io
+    class fastCheck,slowCheck mathOp
+    class page lossN
+    class ticket req
+    class none train
 ```
 
 Here SLO = 99.9% so the budget is `1 - 0.999 = 0.001`. Multi-window pairing (short + long) avoids both flapping (short-only) and slow detection (long-only). See burn-rate math in [sre_principles_and_slos](../sre_principles_and_slos/) and routing in [visualization_and_alerting](../visualization_and_alerting/).
@@ -484,6 +558,16 @@ groups:
 ```
 
 After the fixes, active series fell from 6.5M to ~180K, head RAM dropped to ~600 MB, and Prometheus stopped OOMing. The multi-window burn-rate alert paged within 2 minutes of the next error spike, and the HA pair plus Thanos meant no data gaps during the incident. The `user_id`/`tenant_id` analytics that motivated the bad labels moved to the logging/tracing pipeline where per-entity breakdowns belong.
+
+```mermaid
+xychart-beta
+    title "Active series: baseline vs cardinality bomb vs after fix"
+    x-axis ["Baseline", "Cardinality bomb", "After fix"]
+    y-axis "Active series (millions)" 0 --> 7
+    bar [0.2, 6.5, 0.18]
+```
+
+The cardinality bomb pushed active series to 6.5M — about 32x the 200K pre-launch baseline; the fix cut that to ~180K, the ~36x drop the team measured, landing even below where they started.
 
 **Outcome:** cardinality dropped ~36x, the server became stable, alerting became SLO-driven and reliable, and the team learned the cardinal rule — labels are for bounded dimensions, identifiers are for logs and traces.
 

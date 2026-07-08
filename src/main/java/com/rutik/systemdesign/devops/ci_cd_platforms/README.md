@@ -69,28 +69,71 @@ The choice hinges on: where your code lives, whether you want to operate the sys
 
 ## 5. Architecture Diagrams
 
+**SaaS-integrated pipeline (GitHub Actions / GitLab CI):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PR(["push / PR"])
+    Hook("SCM webhook")
+    Control("platform<br/>control plane")
+    Runner(["ephemeral runner<br/>(cloud or self-hosted)"])
+    Registry[("artifact<br/>registry")]
+
+    PR --> Hook
+    Hook --> Control
+    Control -->|"dispatch job"| Runner
+    Runner -->|"runs steps,<br/>cached deps, OIDC"| Registry
+    Registry -.->|"status"| PR
+
+    class PR io
+    class Hook req
+    class Control mathOp
+    class Runner train
+    class Registry base
 ```
-SaaS-integrated (GitHub Actions / GitLab CI)
 
-  push/PR -> SCM webhook -> platform control plane -> dispatch job
-                                                        |
-                            +---------------------------+
-                            v
-                     ephemeral runner (cloud-hosted or self-hosted)
-                            | runs steps, uses cached deps, OIDC to cloud
-                            v
-                     artifacts -> registry;  status -> back to PR
+The push/PR triggers a webhook, the control plane dispatches an ephemeral runner, and status flows back to the PR (dotted) while artifacts land in the registry.
 
-Kubernetes-native (Tekton/Argo)
+**Kubernetes-native pipeline (Tekton / Argo Workflows):**
 
-  trigger (webhook/EventListener) -> create PipelineRun CR
-        |
-        v
-  Tekton controller schedules each Task as a Pod in the cluster
-        |  (same RBAC, secrets, scaling, observability as your apps)
-        v
-  Pods run steps -> push artifact -> update PipelineRun status
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Trigger(["trigger<br/>(webhook / EventListener)"])
+    Run[("PipelineRun CR")]
+    Ctrl("Tekton controller")
+    Pod(["Pod<br/>(runs one Task)"])
+    Art[("artifact")]
+
+    Trigger -->|"create"| Run
+    Run --> Ctrl
+    Ctrl -->|"schedule Task as Pod<br/>(cluster RBAC/secrets)"| Pod
+    Pod -->|"push"| Art
+    Art -.->|"update status"| Run
+
+    class Trigger io
+    class Run base
+    class Ctrl mathOp
+    class Pod train
+    class Art base
 ```
+
+Each Task runs as a Pod scheduled by the controller, sharing the cluster's RBAC, secrets, and scaling — status writes back onto the same PipelineRun CR.
 
 ---
 
@@ -158,13 +201,38 @@ spec:
 
 ### Self-hosted runner autoscaling (the ops concern)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Demand(["demand spikes"])
+    Need{"need more<br/>runners"}
+    ARC("GitHub ARC on K8s:<br/>scale Pods on queue depth")
+    GLK("GitLab K8s executor:<br/>fresh Pod per job")
+    JenK("Jenkins K8s plugin:<br/>dynamic agent Pods")
+    Principle(("ephemeral +<br/>autoscaled"))
+
+    Demand --> Need
+    Need --> ARC
+    Need --> GLK
+    Need --> JenK
+    ARC --> Principle
+    GLK --> Principle
+    JenK --> Principle
+
+    class Demand io
+    class Need mathOp
+    class ARC,GLK,JenK train
+    class Principle base
 ```
-Demand spikes -> need more runners. Options:
-  - GitHub Actions Runner Controller (ARC) on K8s: scale ephemeral runner Pods on queue depth
-  - GitLab Kubernetes executor: each job in a fresh Pod
-  - Jenkins Kubernetes plugin: dynamic agent Pods
-Keep runners ephemeral + autoscaled so you don't pay for idle and don't accumulate state.
-```
+
+Demand spikes fan out to each platform's own autoscaling mechanism, but all three converge on the same principle: ephemeral, queue-driven runners so idle cost and cross-job state never accumulate.
 
 ---
 
@@ -188,11 +256,68 @@ Keep runners ephemeral + autoscaled so you don't pay for idle and don't accumula
 | Lock-in | Tied to SCM (Actions/GitLab) | Portable (Jenkins/Tekton) | Flexibility vs convenience |
 | Runner scaling | Managed autoscale | Self-managed (ARC/K8s) | Cost vs control |
 
+**Where each platform sits on the ops-vs-control tradeoff:**
+
+```mermaid
+quadrantChart
+    title Ops burden vs extensibility/control
+    x-axis Low Ops Burden --> High Ops Burden
+    y-axis Low Extensibility --> High Extensibility
+    quadrant-1 Full control, you operate it
+    quadrant-2 Rare sweet spot
+    quadrant-3 Managed convenience
+    quadrant-4 Avoid, cost with no payoff
+    "GitHub Actions": [0.15, 0.30]
+    "GitLab CI": [0.20, 0.38]
+    "CircleCI": [0.12, 0.28]
+    "Jenkins": [0.90, 0.92]
+    "Tekton / Argo": [0.55, 0.80]
+```
+
+SaaS platforms cluster in the low-ops/low-extensibility corner (managed convenience); Jenkins sits at maximum ops burden and maximum extensibility; Tekton/Argo reaches high control without a separate control plane to operate, provided a Kubernetes platform already exists.
+
 ---
 
 ## 9. When to Use / When NOT to Use
 
 **GitHub Actions / GitLab CI**: your code is on GitHub/GitLab and you want low-ops, fast setup, strong VCS integration. **Jenkins**: you need maximum extensibility, run on-prem/regulated, support many languages/legacy, or already have deep Jenkins investment. **Tekton/Argo Workflows**: your platform is Kubernetes and you want pipelines as cluster-native workloads with shared RBAC/observability.
+
+**Choosing a platform:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Code{"Where does<br/>your code live?"}
+    Ops{"Need max extensibility,<br/>legacy, or on-prem?"}
+    K8s{"Is your platform<br/>already Kubernetes?"}
+    GHA(["GitHub Actions"])
+    GLCI(["GitLab CI"])
+    Jenkins(["Jenkins"])
+    Tekton(["Tekton / Argo<br/>Workflows"])
+    AnySaaS(["low-ops SaaS<br/>(Actions, GitLab CI,<br/>CircleCI)"])
+
+    Code -->|"GitHub"| GHA
+    Code -->|"GitLab"| GLCI
+    Code -->|"elsewhere"| Ops
+    Ops -->|"yes"| Jenkins
+    Ops -->|"no"| K8s
+    K8s -->|"yes"| Tekton
+    K8s -->|"no"| AnySaaS
+
+    class Code,Ops,K8s mathOp
+    class GHA,GLCI,AnySaaS train
+    class Jenkins base
+    class Tekton frozen
+```
+
+This collapses §1's "the choice hinges on" heuristic and Q1's answer into one path: SCM first, then ops appetite, then whether the platform is already Kubernetes.
 
 **Avoid:** running Jenkins for a small GitHub team that just needs build+test+deploy (operational overhead with no payoff); adopting Kubernetes-native CI before you have a Kubernetes platform; or piling on unvetted Jenkins plugins (security and maintenance debt).
 
@@ -287,13 +412,34 @@ Stages enforce sequential ordering (all `test` jobs finish before any `build` jo
 
 A company runs a few persistent self-hosted Jenkins agents shared across 40 repos to save cost. A build for team A's repo writes a cloud credential to the agent's workspace and a temp file. Later, team B's job (a forked PR build) runs on the same agent, reads the leftover credential, and exfiltrates it. Builds are also intermittently flaky from stale `node_modules` left by prior jobs.
 
+**Broken: persistent shared agent leaks state across jobs**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    JobA(["Job A<br/>team A's build"])
+    Agent[("agent-1<br/>long-lived VM,<br/>shared by 40 repos")]
+    JobB(["Job B<br/>fork PR, untrusted"])
+    Leak(["cross-team secret leak<br/>+ flaky builds"])
+
+    JobA -->|"writes creds,<br/>cache, node_modules"| Agent
+    Agent -->|"same filesystem"| JobB
+    JobB -->|"reads leftover<br/>creds + stale deps"| Leak
+
+    class JobA train
+    class Agent base
+    class JobB lossN
+    class Leak lossN
 ```
-BROKEN: persistent shared agents
-  agent-1 (long-lived VM, shared by 40 repos)
-     job A: writes ~/.aws/credentials, /tmp/build-cache, node_modules
-     job B (fork PR, untrusted): same FS -> reads A's creds + stale deps
-  -> cross-team secret leak + flaky builds from state bleed
-```
+
+Team A's job leaves credentials and caches on the shared agent; team B's untrusted fork-PR job later runs on the same filesystem and scavenges what A left behind — the exact failure the fix below eliminates.
 
 ```yaml
 # FIX: ephemeral, isolated agents per job via the Jenkins Kubernetes plugin,

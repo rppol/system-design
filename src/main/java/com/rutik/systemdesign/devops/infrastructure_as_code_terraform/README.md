@@ -80,38 +80,99 @@ Terraform's lineage matters for naming: HashiCorp relicensed Terraform from MPL 
 
 ## 5. Architecture Diagrams
 
+**Terraform core loop**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    HCL(["HCL config<br/>main.tf / variables.tf"])
+    Init(terraform init<br/>download providers,<br/>configure backend)
+    Plan{"terraform plan<br/>refresh state, diff vs HCL"}
+    Create("+ create")
+    Update("~ update")
+    Replace("-/+ replace")
+    Destroy("- destroy")
+    Apply(terraform apply<br/>walk DAG, parallelism 10)
+    State[("terraform.tfstate (S3)<br/>release DynamoDB lock")]
+
+    HCL --> Init --> Plan
+    Plan --> Create --> Apply
+    Plan --> Update --> Apply
+    Plan --> Replace --> Apply
+    Plan --> Destroy --> Apply
+    Apply --> State
+
+    class HCL io
+    class Init mathOp
+    class Plan mathOp
+    class Create train
+    class Update train
+    class Replace lossN
+    class Destroy lossN
+    class Apply train
+    class State base
 ```
-Terraform core loop
 
-  main.tf / variables.tf (DESIRED state, HCL)
-        |
-   terraform init  -> download providers into .terraform/, configure backend
-        |
-   terraform plan  -> 1) refresh: read state, query cloud APIs for actual attrs
-                      2) diff:    desired (HCL) vs refreshed state
-                      3) output:  + create, ~ update, -/+ replace, - destroy
-        |
-   terraform apply -> walk dependency graph (parallelism=10), call provider CRUD
-        |
-        v
-   write back terraform.tfstate (S3) + release DynamoDB lock
+*The reconciliation diff at the heart of every `plan`: desired HCL minus refreshed state classifies each resource into create, update, replace, or destroy; `-/+ replace` (destroy then recreate) is the dangerous outcome to scrutinize before `apply` executes the diff with parallelism 10 and writes state back to S3.*
 
+**Remote state with locking (S3 + DynamoDB)**
 
-Remote state with locking (S3 + DynamoDB)
+```mermaid
+sequenceDiagram
+    participant A as Engineer A
+    participant L as DynamoDB Lock
+    participant C as AWS + S3 State
+    participant B as Engineer B
 
-  engineer A --apply--> [acquire DynamoDB lock]--> mutate AWS --> write S3 state --> release lock
-  engineer B --apply--> [lock held] ... waits ... -> acquires after A -> sees A's state
-       (without the lock, A and B's concurrent writes CORRUPT the single state file)
-
-
-Dependency graph (Terraform builds a DAG, applies in topological order)
-
-  aws_vpc.main
-     +-> aws_subnet.app (depends on vpc id)
-     |       +-> aws_instance.web (depends on subnet id)
-     +-> aws_internet_gateway.igw
-  independent nodes (igw, subnet) created in parallel; dependents wait
+    A->>L: terraform apply, request lock
+    L-->>A: lock acquired
+    B->>L: terraform apply, request lock
+    L-->>B: lock held, wait
+    A->>C: mutate AWS, write tfstate
+    C-->>A: state written
+    A->>L: release lock
+    L-->>B: lock acquired
+    B->>C: read state, sees A's changes
+    Note over A,B: without the lock, concurrent writes<br/>would corrupt the single state file
 ```
+
+*Engineer B's `apply` blocks on the DynamoDB lock until Engineer A releases it, so writes to the single S3 state file always serialize — the exact mechanism that prevents Pitfall 1's state corruption.*
+
+**Dependency graph (Terraform builds a DAG, applies in topological order)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    VPC(aws_vpc.main)
+    Subnet(aws_subnet.app<br/>depends on vpc id)
+    IGW(aws_internet_gateway.igw)
+    Instance(["aws_instance.web<br/>depends on subnet id"])
+
+    VPC --> Subnet
+    VPC --> IGW
+    Subnet --> Instance
+
+    class VPC base
+    class Subnet mathOp
+    class IGW frozen
+    class Instance train
+```
+
+*`aws_vpc.main` is the shared prerequisite; its two children `aws_subnet.app` and `aws_internet_gateway.igw` have no dependency on each other, so Terraform creates them in parallel, while `aws_instance.web` waits on the subnet.*
 
 ---
 
@@ -210,6 +271,48 @@ resource "aws_instance" "web" {
 }
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Delete(("Delete the<br/>middle instance"))
+
+    subgraph CNT["count: index addressing"]
+        direction LR
+        c012("3 instances<br/>index 0, 1, 2")
+        cshift{"remove index 1<br/>rest re-indexes"}
+        cresult("index 2 becomes 1<br/>DESTROYED + RECREATED")
+        c012 --> cshift --> cresult
+    end
+
+    subgraph FE["for_each: key addressing"]
+        direction LR
+        fkeys("3 instances<br/>keys api, worker, cron")
+        fshift{"remove key worker"}
+        fresult("api and cron<br/>UNTOUCHED")
+        fkeys --> fshift --> fresult
+    end
+
+    Delete --> c012
+    Delete --> fkeys
+
+    class Delete mathOp
+    class c012 io
+    class cshift lossN
+    class cresult lossN
+    class fkeys io
+    class fshift mathOp
+    class fresult train
+```
+
+*Deleting the middle instance under `count` shifts every later index down one slot, so Terraform destroys and recreates `web[2]` even though it never changed; under `for_each`, only the removed key's instance disappears and the stable-keyed siblings are untouched.*
+
 ### Workspaces — multiple states, one config
 
 ```bash
@@ -227,6 +330,17 @@ terraform plan -refresh-only            # show drift WITHOUT proposing config-dr
 # Either: (a) accept it into config (commit the change), or
 #         (b) apply to revert the cloud back to HCL.
 ```
+
+```mermaid
+stateDiagram-v2
+    [*] --> InSync: terraform apply
+    InSync --> Drifted: manual console change
+    Drifted --> Detected: plan -refresh-only
+    Detected --> InSync: accept into HCL, commit
+    Detected --> InSync: apply reverts cloud
+```
+
+*A console edit silently moves the cloud out of sync with HCL — for example, someone widening a security group's ingress from port 80 to ports 80 and 22; `plan -refresh-only` is the only step that surfaces the gap, and remediation is always one of two choices: fold the change into HCL, or `apply` to revert the cloud back to the declared state.*
 
 ### Importing existing resources (bring unmanaged infra under Terraform)
 

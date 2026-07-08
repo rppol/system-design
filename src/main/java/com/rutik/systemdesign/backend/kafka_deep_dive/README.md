@@ -96,113 +96,230 @@ Key insight: Kafka's durability and replay capability transform it from a messag
 
 ### Kafka Cluster Architecture (KRaft Mode)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q("KRaft Controller Quorum<br/>3 controllers, one Raft leader")
+
+    Q -.->|"metadata replication<br/>__cluster_metadata"| B1("Broker-1")
+    Q -.-> B2("Broker-2")
+    Q -.-> B3("Broker-3")
+
+    B1 --> B1P0("Topic-A P0<br/>leader")
+    B1 --> B1P1("Topic-A P1<br/>follower")
+    B2 --> B2P0("Topic-A P0<br/>follower")
+    B2 --> B2P1("Topic-A P1<br/>leader")
+    B3 --> B3P0("Topic-A P0<br/>follower")
+    B3 --> B3P1("Topic-A P1<br/>follower")
+
+    B1P0 -->|"replicate"| B2P0
+    B2P1 -->|"replicate"| B3P1
+
+    class Q mathOp
+    class B1,B2,B3 base
+    class B1P0,B2P1 train
+    class B1P1,B2P0,B3P0,B3P1 frozen
 ```
-                         KRaft Controller Quorum
-                    ┌──────────────────────────────┐
-                    │  Controller-1  Controller-2  │
-                    │  Controller-3 (Raft leader)  │
-                    │  Metadata log: __cluster_metadata
-                    └──────────────────────────────┘
-                                  │ metadata replication
-          ┌───────────────────────┼───────────────────────┐
-          ▼                       ▼                       ▼
-   ┌────────────┐          ┌────────────┐          ┌────────────┐
-   │  Broker-1  │          │  Broker-2  │          │  Broker-3  │
-   │            │          │            │          │            │
-   │ Topic-A P0 │ ◄──rep── │ Topic-A P0 │          │ Topic-A P0 │
-   │  (leader)  │          │ (follower) │          │ (follower) │
-   │            │          │            │          │            │
-   │ Topic-A P1 │          │ Topic-A P1 │ ◄──rep── │ Topic-A P1 │
-   │ (follower) │          │  (leader)  │          │ (follower) │
-   └────────────┘          └────────────┘          └────────────┘
-```
+
+Three controllers form a Raft quorum (orange) that replicates cluster metadata to every broker over the internal `__cluster_metadata` topic; each partition has one leader (green, writable) replicating to two followers (purple) spread across the other brokers, matching `replication.factor=3`.
 
 ### Topic, Partition, Segment Structure
 
-```
-Topic: orders.placed  (4 partitions, replication-factor=3)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Partition 0 (Leader: Broker-1)
-  Segment 0: offsets 0-999        [CLOSED, on disk]
-  Segment 1: offsets 1000-1999    [CLOSED, on disk]
-  Segment 2: offsets 2000-...     [ACTIVE, writes here]
-  └─ Index file (offset→position mapping for O(1) seek)
+    T("Topic: orders.placed<br/>4 partitions, RF=3")
 
-Partition 1 (Leader: Broker-2)  ...
-Partition 2 (Leader: Broker-3)  ...
-Partition 3 (Leader: Broker-1)  ...
+    T --> P0("Partition 0<br/>Leader: Broker-1")
+    T --> P1("Partition 1<br/>Leader: Broker-2")
+    T --> P2("Partition 2<br/>Leader: Broker-3")
+    T --> P3("Partition 3<br/>Leader: Broker-1")
+
+    P0 --> S0("Segment 0<br/>offsets 0-999, CLOSED")
+    P0 --> S1("Segment 1<br/>offsets 1000-1999, CLOSED")
+    P0 --> S2("Segment 2<br/>offsets 2000+, ACTIVE")
+    P0 --> IDX("Index file<br/>offset to position map,<br/>constant-time seek")
+
+    class T io
+    class P0,P1,P2,P3 base
+    class S0,S1 frozen
+    class S2 train
+    class IDX mathOp
 ```
+
+orders.placed splits into 4 independently ordered partitions; within Partition 0, closed segments (purple) are immutable on disk, only the newest segment (green) accepts writes, and the index file gives O(1) offset-to-position lookups.
 
 ### Producer → Topic → Consumer Group Flow
 
-```
-                    ┌─────────────────────────────────────┐
-                    │         Producer                    │
-                    │  batch: 64KB, linger: 5ms           │
-                    │  acks=all, idempotent=true           │
-                    └─────────────────────────────────────┘
-                         │ partition(key) → hash(key) % P
-          ┌──────────────┼──────────────┬───────────────┐
-          ▼              ▼              ▼               ▼
-   ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐
-   │Partition 0 │ │Partition 1 │ │Partition 2 │ │Partition 3 │
-   │  offset→  │ │  offset→  │ │  offset→  │ │  offset→  │
-   │  0,1,2,.. │ │  0,1,2,.. │ │  0,1,2,.. │ │  0,1,2,.. │
-   └────────────┘ └────────────┘ └────────────┘ └────────────┘
-          │              │              │               │
-          ▼              ▼              ▼               ▼
-   ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐
-   │Consumer A  │ │Consumer B  │ │Consumer C  │ │Consumer D  │
-   │(Group: G1) │ │(Group: G1) │ │(Group: G1) │ │(Group: G1) │
-   └────────────┘ └────────────┘ └────────────┘ └────────────┘
-   1 consumer per partition = maximum parallelism within a group
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   Group G2 (analytics) reads ALL partitions independently:
-   ┌───────────────────────────────────────────────────────┐
-   │ Consumer X — reads P0, P1, P2, P3 (1 consumer, G2)   │
-   └───────────────────────────────────────────────────────┘
+    Prod("Producer<br/>batch=64KB, linger=5ms<br/>acks=all, idempotent")
+    Hash{"hash(key) % P"}
+
+    Prod --> Hash
+    Hash --> P0("Partition 0")
+    Hash --> P1("Partition 1")
+    Hash --> P2("Partition 2")
+    Hash --> P3("Partition 3")
+
+    P0 --> CA("Consumer A<br/>Group G1")
+    P1 --> CB("Consumer B<br/>Group G1")
+    P2 --> CC("Consumer C<br/>Group G1")
+    P3 --> CD("Consumer D<br/>Group G1")
+
+    P0 -.-> CX("Consumer X<br/>Group G2, reads all")
+    P1 -.-> CX
+    P2 -.-> CX
+    P3 -.-> CX
+
+    class Prod io
+    class Hash mathOp
+    class P0,P1,P2,P3 base
+    class CA,CB,CC,CD train
+    class CX frozen
 ```
+
+hash(key) % P routes each record to exactly one of 4 partitions; consumer group G1 assigns one consumer per partition for maximum parallelism (solid, green), while group G2 independently re-reads all 4 partitions for analytics (dotted, purple) without interfering with G1.
 
 ### Schema Registry Integration
 
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant SR as Schema Registry
+    participant B as Kafka Broker
+    participant C as Consumer
+
+    P->>SR: register schema
+    SR-->>P: schema ID = 42
+    P->>B: magic byte + schema_id=42 + avro_bytes
+    Note over B: store in partition
+
+    B-->>C: poll records
+    C->>SR: fetch schema ID=42
+    SR-->>C: Avro schema
+    Note over C: deserialize bytes
 ```
-Producer                   Schema Registry              Kafka Broker
-   │                             │                           │
-   │── register schema ─────────►│                           │
-   │◄─ schema ID: 42 ────────────│                           │
-   │                             │                           │
-   │── [magic byte][schema_id=42][avro_bytes] ──────────────►│
-   │                             │                 store in partition
-   │                             │                           │
-Consumer                         │                           │
-   │◄────────────────────────────────── poll records ────────│
-   │── fetch schema ID=42 ───────►│                           │
-   │◄─ Avro schema ──────────────│                           │
-   │── deserialize bytes ────────────────────────────────────│
-```
+
+The producer registers its Avro schema once and gets back numeric ID 42; every message on the wire carries only that ID plus a magic byte, so the consumer fetches (and caches) the schema before deserializing the payload.
 
 ### Exactly-Once Semantics (EOS) Architecture
 
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant TC as Transaction Coordinator
+    participant B as Kafka Broker
+    participant C as Consumer
+
+    Note over P: enable.idempotence=true<br/>transaction.id=producer-instance-1
+
+    P->>TC: BEGIN TRANSACTION
+    P->>B: send partition-0 (seq=0)
+    P->>B: send partition-1 (seq=0)
+    P->>TC: COMMIT TRANSACTION
+    TC->>B: write transaction marker COMMITTED
+    Note over B: atomic across partitions
+
+    C->>B: poll (isolation.level=read_committed)
+    B-->>C: committed records only
+    Note over C: skips uncommitted and<br/>aborted transactions
 ```
-Producer (idempotent + transactional)
-  enable.idempotence=true
-  transaction.id=producer-instance-1
-        │
-        │ BEGIN TRANSACTION
-        │ send to partition-0 (seq=0)
-        │ send to partition-1 (seq=0)
-        │ COMMIT TRANSACTION (atomic across partitions)
-        ▼
-Kafka Broker
-  Transaction Coordinator manages two-phase commit
-  Writes transaction marker (COMMITTED) to all affected partitions
-        │
-        ▼
-Consumer (read_committed isolation)
-  isolation.level=read_committed
-  Skips uncommitted records and aborted transactions
-  Only sees committed data → exactly-once visible effect
+
+The producer wraps writes to multiple partitions in one transaction; the coordinator commits atomically by writing a COMMITTED marker to every affected partition, so read_committed consumers only ever see fully committed data, never a partial or aborted write.
+
+### Delivery Semantics: Commit Ordering and Failure Modes
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph AM["At-most-once"]
+        direction LR
+        AM1("commit offset") --> AM2("process") --> AM3{"crash mid-process?"}
+        AM3 -.->|"yes"| AML(["message lost"])
+    end
+
+    subgraph AL["At-least-once"]
+        direction LR
+        AL1("process") --> AL2("commit offset") --> AL3{"crash before commit?"}
+        AL3 -.->|"yes"| ALD(["reprocessed<br/>duplicate"])
+    end
+
+    subgraph EO["Exactly-once"]
+        direction LR
+        EO1("idempotent produce") --> EO2("transactional write") --> EO3("read_committed consume") --> EOK(["no loss,<br/>no duplicate"])
+    end
+
+    class AM1,AL2 mathOp
+    class AM2,AL1 req
+    class AM3,AL3 mathOp
+    class AML,ALD lossN
+    class EO1,EO2,EO3 train
+    class EOK train
 ```
+
+At-most-once commits before processing so a mid-process crash silently drops the message; at-least-once commits after processing so the same crash causes a reprocessed duplicate; exactly-once removes the race entirely by combining an idempotent producer, a transactional write, and read_committed consumption.
+
+### Log Compaction Mechanics
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    B1("k1=v1") --> Comp{"compact:<br/>keep latest<br/>per key"}
+    B2("k2=v2") --> Comp
+    B3("k1=v3") --> Comp
+    B4("k3=null<br/>tombstone") --> Comp
+    B5("k2=v4") --> Comp
+
+    Comp --> A1("k1=v3")
+    Comp --> A2("k2=v4")
+    Comp -.->|"k3 purged"| Gone(["key removed<br/>entirely"])
+
+    class B1,B2 lossN
+    class B3,B5 train
+    class B4 lossN
+    class Comp mathOp
+    class A1,A2 train
+    class Gone lossN
+```
+
+Compaction keeps only the newest physical record per key — k1's and k2's superseded values (red) are discarded once a newer one lands — while k3's tombstone (null value) removes the key from the log entirely, leaving a compact snapshot of current state.
 
 ---
 
@@ -633,21 +750,25 @@ Consumer lag = Log End Offset - Consumer Committed Offset per partition. Monitor
 
 **Architecture**:
 
+```mermaid
+sequenceDiagram
+    participant O as Order API
+    participant K as Kafka (EOS)
+    participant R as Risk Svc
+    participant A as Audit DB
+
+    O->>K: OrderPlaced<br/>(transactional producer)
+    K->>R: poll
+    activate R
+    R->>R: beginTx
+    R->>R: process risk
+    R->>K: produce to orders.approved
+    R->>K: sendOffsetsToTransaction
+    R->>A: commitTx, write audit<br/>(idempotent upsert)
+    deactivate R
 ```
-Order API         Kafka (EOS)      Risk Svc          Audit DB
-    │                  │               │                  │
-    │─── OrderPlaced ─►│               │                  │
-    │   (transactional │               │                  │
-    │    producer)     │               │                  │
-    │                  │──── poll ────►│                  │
-    │                  │               │── beginTx        │
-    │                  │               │── process risk   │
-    │                  │               │── produce to     │
-    │                  │               │   orders.approved│
-    │                  │               │── sendOffsets    │
-    │                  │               │── commitTx ─────►│ write audit (idempotent upsert)
-    │                  │               │                  │
-```
+
+The risk service polls OrderPlaced, evaluates it, and produces the approval event plus its own consumer offsets inside one transaction, so a crash at any point before commitTx simply replays the same batch with zero duplicate audit writes.
 
 **Producer Configuration**:
 ```java

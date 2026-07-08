@@ -91,40 +91,67 @@ The **Well-Architected Framework** organizes design review into six pillars: Ope
 
 ## 5. Architecture Diagrams
 
-```
-Standard 3-tier AWS architecture (Multi-AZ)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Internet
-     |
-  Route 53 (DNS: latency/failover routing)
-     |
-  +--------------------- VPC 10.0.0.0/16 ---------------------+
-  |                                                            |
-  |   AZ-a                          AZ-b                       |
-  |  +-------------------+         +-------------------+        |
-  |  | public subnet     |         | public subnet     |       |
-  |  |  [ALB node]  <-----+--------+--> [ALB node]      |       |
-  |  +--------|----------+         +---------|---------+        |
-  |           |  (SG: 443 from internet)     |                 |
-  |  +--------v----------+         +---------v---------+        |
-  |  | private subnet    |         | private subnet    |       |
-  |  |  [EC2/EKS pods]    |         |  [EC2/EKS pods]   |       |
-  |  +--------|----------+         +---------|---------+        |
-  |           |  (SG: app port from ALB SG)  |                 |
-  |  +--------v----------+         +---------v---------+        |
-  |  | private (DB) subnet|        | private (DB) subnet|       |
-  |  |  [RDS primary] -------sync replication----> [RDS standby]|
-  |  +-------------------+         +-------------------+        |
-  |                                                            |
-  |  NAT Gateway (per AZ) -> Internet GW for egress only       |
-  +------------------------------------------------------------+
-            |
-         S3 (regional, accessed via Gateway VPC Endpoint - no NAT cost)
+    Internet([Internet]) --> R53("Route 53<br/>latency / failover routing")
 
-Well-Architected six pillars (review lens over the above)
-  [Operational Excellence] [Security] [Reliability]
-  [Performance Efficiency] [Cost Optimization] [Sustainability]
+    subgraph VPC["VPC 10.0.0.0/16"]
+        subgraph AZa["AZ-a"]
+            ALBa(["ALB node<br/>public subnet"])
+            Appa("EC2 / EKS pods<br/>private subnet")
+            DBa[("RDS primary<br/>private DB subnet")]
+            ALBa -->|"443 from internet"| Appa
+            Appa -->|"app port from ALB SG"| DBa
+        end
+        subgraph AZb["AZ-b"]
+            ALBb(["ALB node<br/>public subnet"])
+            Appb("EC2 / EKS pods<br/>private subnet")
+            DBb[("RDS standby<br/>private DB subnet")]
+            ALBb -->|"443 from internet"| Appb
+            Appb -->|"app port from ALB SG"| DBb
+        end
+        NAT("NAT Gateway<br/>per AZ")
+        IGW(["Internet Gateway<br/>egress only"])
+        DBa -.->|"sync replication"| DBb
+        Appa -.-> NAT
+        Appb -.-> NAT
+        NAT --> IGW
+    end
+
+    subgraph WA["Well-Architected six pillars — review lens"]
+        P1("Operational<br/>Excellence")
+        P2("Security")
+        P3("Reliability")
+        P4("Performance<br/>Efficiency")
+        P5("Cost<br/>Optimization")
+        P6("Sustainability")
+    end
+
+    S3d[("S3<br/>regional storage")]
+
+    R53 --> ALBa
+    R53 --> ALBb
+    VPC -.->|"Gateway VPC Endpoint<br/>no NAT cost"| S3d
+    VPC -.-> WA
+
+    class Internet,IGW io
+    class R53 mathOp
+    class ALBa,ALBb req
+    class Appa,Appb train
+    class DBa,S3d base
+    class DBb,P1,P2,P3,P4,P5,P6 frozen
+    class NAT lossN
 ```
+
+The ALB is the only internet-facing tier in each AZ; app and database tiers stay private behind security groups scoped to the tier above them, and RDS replicates synchronously to the standby for an automatic failover in roughly 60-120 seconds. S3 traffic reaches the bucket through a Gateway VPC Endpoint, bypassing the NAT Gateway — and its ~$0.045/GB processing charge — entirely, while the six Well-Architected pillars remain the recurring review lens applied over the whole topology.
 
 ---
 
@@ -149,6 +176,30 @@ Well-Architected six pillars (review lens over the above)
 ```
 
 IAM evaluation: an explicit `Deny` always wins; otherwise an `Allow` must exist or the request is denied by default. Prefer **roles** assumed via STS (temporary credentials, default 1-hour) — for EC2 use an **instance profile**, for EKS use **IRSA** (IAM Roles for Service Accounts).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req(["API request"]) --> D1{"explicit Deny<br/>statement?"}
+    D1 -->|yes| Deny(["DENY"])
+    D1 -->|no| D2{"explicit Allow<br/>statement exists?"}
+    D2 -->|yes| Allow(["ALLOW"])
+    D2 -->|no| DefDeny(["DENY<br/>default"])
+
+    class Req io
+    class D1,D2 mathOp
+    class Allow train
+    class Deny,DefDeny lossN
+```
+
+An explicit Deny anywhere in the evaluated policies wins immediately; otherwise the request needs at least one explicit Allow or IAM denies it by default — the precedence that makes a stray wildcard Deny airtight but a missing Allow silently block access (Pitfall 3).
 
 ### VPC + security group (Terraform)
 
@@ -202,6 +253,41 @@ resource "aws_db_instance" "orders" {
 ```
 
 Multi-AZ = **HA** (synchronous standby, automatic failover, not readable). Read replicas = **scale reads** (asynchronous, readable, can promote). For DB internals see [../../database/](../../database/).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph MAZ["Multi-AZ — high availability"]
+        App1(["app writes"])
+        Pri1[("primary")]
+        Stb1[("standby")]
+        App1 --> Pri1
+        Pri1 -.->|"sync · not readable<br/>failover ~60-120s"| Stb1
+    end
+
+    subgraph RR["Read replicas — scale reads"]
+        App2(["app writes"])
+        App3(["app reads"])
+        Pri2[("primary")]
+        Rep2[("replica")]
+        App2 --> Pri2
+        App3 --> Rep2
+        Pri2 -->|"async · readable<br/>promotable"| Rep2
+    end
+
+    class App1,App2,App3 io
+    class Pri1,Pri2 base
+    class Stb1,Rep2 frozen
+```
+
+Multi-AZ keeps a synchronous standby that is never readable, purely for a ~60-120s automatic failover; read replicas are asynchronous, readable copies that offload read traffic and can be promoted to a standalone primary — different problems, which is why production systems often run both at once (Q4).
 
 ### Route 53 failover
 

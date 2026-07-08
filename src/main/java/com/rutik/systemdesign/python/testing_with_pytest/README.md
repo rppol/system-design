@@ -58,12 +58,26 @@ Core capabilities:
 
 ### Test Scope Hierarchy
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A("session<br/>once per run") --> B("module<br/>once per file")
+    B --> C("class<br/>once per class")
+    C --> D("function<br/>default · per test")
+
+    class A frozen
+    class B,C base
+    class D train
 ```
-session
-  module
-    class
-      function  ← default
-```
+
+Scope narrows top-to-bottom — `session` pays setup cost once for the whole run, while `function` (the default) recreates the fixture for every test; narrower scope buys isolation, wider scope buys speed.
 
 ### Testing Strategies
 
@@ -82,43 +96,65 @@ session
 
 ### pytest Execution Pipeline
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pinvoke(["pytest invoked"])
+
+    subgraph Collect["Collect Phase"]
+        direction TB
+        c1["Discover<br/>conftest.py"]
+        c2["Discover<br/>test_*.py files"]
+        c3["Build fixture<br/>graph"]
+        c4["Apply marks<br/>-k / -m filters"]
+        c1 --> c2 --> c3 --> c4
+    end
+
+    subgraph Setup["Setup Phase<br/>per test"]
+        direction TB
+        s1["session-scoped<br/>fixtures"]
+        s2["module-scoped<br/>fixtures"]
+        s3["class-scoped<br/>fixtures"]
+        s4["function-scoped<br/>fixtures"]
+        s1 --> s2 --> s3 --> s4
+    end
+
+    subgraph Call["Call Phase"]
+        direction TB
+        r1["Run test<br/>function body"]
+        r2["Capture stdout<br/>stderr / logs"]
+        r1 --> r2
+    end
+
+    subgraph Teardown["Teardown Phase<br/>reverse order"]
+        direction TB
+        t1["function<br/>yield-cleanup"]
+        t2["class<br/>yield-cleanup"]
+        t3["module<br/>yield-cleanup"]
+        t4["session<br/>yield-cleanup"]
+        t1 --> t2 --> t3 --> t4
+    end
+
+    pinvoke --> Collect --> Setup --> Call --> Teardown
+
+    class pinvoke io
+    class c1,c2 req
+    class c3,c4 mathOp
+    class s1 frozen
+    class s2,s3 base
+    class s4 train
+    class r1,r2 train
+    class t1,t2,t3,t4 lossN
 ```
-pytest invoked
-     │
-     ▼
- Collect phase
- ┌───────────────────────────────────────┐
- │  Discover conftest.py files           │
- │  Discover test_*.py files             │
- │  Build fixture graph                  │
- │  Apply marks, filters (-k, -m)        │
- └───────────────────────────────────────┘
-     │
-     ▼
- Setup phase (per test)
- ┌───────────────────────────────────────┐
- │  Instantiate session-scoped fixtures  │
- │  Instantiate module-scoped fixtures   │
- │  Instantiate class-scoped fixtures    │
- │  Instantiate function-scoped fixtures │
- └───────────────────────────────────────┘
-     │
-     ▼
- Call phase
- ┌───────────────────────────────────────┐
- │  Run test function body               │
- │  Capture stdout/stderr/logs           │
- └───────────────────────────────────────┘
-     │
-     ▼
- Teardown phase (reverse order)
- ┌───────────────────────────────────────┐
- │  Run yield-fixture cleanup (function) │
- │  Run yield-fixture cleanup (class)    │
- │  Run yield-fixture cleanup (module)   │
- │  Run yield-fixture cleanup (session)  │
- └───────────────────────────────────────┘
-```
+
+The four phases run in strict order for every test; Setup instantiates fixtures from widest scope to narrowest (session to function) and Teardown reverses that order, so a function-scoped fixture is always torn down before the session-scoped one it depends on.
 
 ### conftest.py Scope Resolution
 
@@ -136,6 +172,30 @@ project_root/
 ```
 
 pytest walks up the directory tree to resolve fixture names. Fixtures defined closer to the test file take precedence over same-named fixtures higher up.
+
+### Fixture Dependency Graph
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    dbc(["db_connection<br/>session scope"]) --> db(["db<br/>function scope"])
+    db --> seeded(["seeded_db<br/>function scope"])
+    client(["client<br/>function scope"]) --> test(["test_get_item"])
+    seeded --> test
+
+    class dbc frozen
+    class db,seeded,client base
+    class test train
+```
+
+pytest resolves fixture parameters transitively: `test_get_item` names `client` and `seeded_db`; `seeded_db` names `db`, which names the session-scoped `db_connection` — one dependency graph is built per test, then torn down in reverse (see §6.1 and §7).
 
 ---
 
@@ -788,6 +848,32 @@ Module-scoped fixtures are shared across all tests in a file. Pollution occurs w
 #### Problem
 
 A FastAPI service exposes `GET /resource` protected by a Redis-backed sliding-window rate limiter: 10 requests per user per minute. The test suite must cover the happy path, the 429 boundary, error handling when Redis is unavailable, and correct time-window rollover — all without hitting a real Redis instance and with full test isolation.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as FastAPI /resource
+    participant R as Redis Cache
+
+    C->>A: GET /resource (requests 1-10)
+    A->>R: INCR rl:user-2:window1
+    R-->>A: count under 10
+    A-->>C: 200 OK
+
+    C->>A: GET /resource (request 11)
+    A->>R: INCR rl:user-2:window1
+    R-->>A: count = 11
+    A-->>C: 429 Rate limit exceeded
+
+    Note over C,R: +61s — window rolls over<br/>new bucket key
+
+    C->>A: GET /resource (window2)
+    A->>R: INCR rl:user-2:window2
+    R-->>A: count = 1
+    A-->>C: 200 OK
+```
+
+This dramatizes `test_rate_limit_boundary` and `test_time_window_rollover_allows_new_requests` from the suite below: the 11th request in the 60-second window gets `429`, and advancing the frozen clock by 61 seconds — past the window boundary — rolls the counter into a fresh Redis key so the next request succeeds again.
 
 #### Production Code
 

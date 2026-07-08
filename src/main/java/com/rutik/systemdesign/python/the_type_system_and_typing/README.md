@@ -191,32 +191,65 @@ Replaces the verbose `TypeVar` + `Generic[T]` boilerplate.
 
 ### The two-audience model
 
-```
-Source code (.py files with annotations)
-         |
-         |-- (import time) --> __annotations__ dict (raw strings if PEP 563 active)
-         |                              |
-         |                    get_type_hints() --> resolved type objects
-         |                              |
-         |                   Runtime consumers: Pydantic, FastAPI, attrs, dataclasses
-         |
-         |-- (static analysis) --> mypy / pyright
-                                        |
-                                   Type errors reported BEFORE execution
+Two independent audiences read the same annotation: the static checker consumes it before
+execution, while runtime consumers resolve it through `get_type_hints()` after import.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src(["Source code<br/>.py with annotations"])
+    ann("__annotations__ dict<br/>raw strings if PEP 563")
+    gth("get_type_hints()")
+    resolved("resolved type objects")
+    consumers(["Runtime consumers<br/>Pydantic · FastAPI · attrs · dataclasses"])
+    checker("mypy / pyright")
+    errors(["Type errors<br/>reported BEFORE execution"])
+
+    src -->|"import time"| ann --> gth --> resolved --> consumers
+    src -->|"static analysis"| checker --> errors
+
+    class src io
+    class ann frozen
+    class gth,checker mathOp
+    class resolved train
+    class consumers req
+    class errors lossN
 ```
 
 ### TypeVar inference flow
 
-```
-def wrap[T](x: T) -> list[T]: ...
+Given `def wrap[T](x: T) -> list[T]: ...`, a concrete call drives mypy's inference chain from
+argument to return type, and flags a type error only if the caller later misuses the result.
 
-Call:  wrap(42)
-              |
-       mypy infers T = int
-              |
-       return type inferred as list[int]
-              |
-       type error if caller assigns to list[str]
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    invoke(["Call: wrap(42)"])
+    infer("mypy infers<br/>T = int")
+    ret("return type inferred<br/>as list of int")
+    err(["type error if caller<br/>assigns to list of str"])
+
+    invoke --> infer --> ret
+    ret -->|"if assigned to list of str"| err
+
+    class invoke io
+    class infer mathOp
+    class ret train
+    class err lossN
 ```
 
 ### Protocol structural check
@@ -243,30 +276,68 @@ render_all([Triangle()])  # mypy ERROR — Triangle missing draw()
 
 ### Variance with Animal/Dog hierarchy
 
-```
-class Animal: ...
-class Dog(Animal): ...
+Given `class Dog(Animal)`, the same three container shapes from the table above show why only
+the invariant case is blocked — covariant and contravariant substitution are both safe.
 
-list[Dog]  ---- invariant ----> NOT a list[Animal]  (mypy error if you pass list[Dog] where list[Animal] expected)
-Sequence[Dog]  -- covariant --> IS a Sequence[Animal]  (read-only view, safe)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Callable[[Animal], None]  -- contravariant in params -->
-    IS a Callable[[Dog], None]  (accepts broader input = safer for callers passing Dog)
+    listDog(["list of Dog"])
+    errInv(["NOT list of Animal<br/>mypy error"])
+    seqDog(["Sequence of Dog"])
+    seqAnimal(["IS Sequence of Animal<br/>read-only, safe"])
+    callAnimalP(["Callable taking Animal"])
+    callDogP(["IS Callable taking Dog<br/>broader input accepted"])
+
+    listDog -->|"invariant"| errInv
+    seqDog -->|"covariant"| seqAnimal
+    callAnimalP -->|"contravariant in params"| callDogP
+
+    class listDog,seqDog,callAnimalP io
+    class errInv lossN
+    class seqAnimal,callDogP train
 ```
 
 ### Annotated metadata pipeline (Pydantic v2)
 
-```
-Annotated[int, Field(gt=0, lt=1000)]
-            |              |
-            |        Pydantic Field descriptor (metadata)
-            |
-         base type (int)
+`Annotated[int, Field(gt=0, lt=1000)]` decomposes into a base type and Field metadata; Pydantic v2
+reads that metadata via `get_type_hints(include_extras=True)` to build the JSON Schema validator
+that raises `ValidationError` at runtime once a value falls outside `0 < value < 1000`.
 
-Pydantic v2 reads metadata via get_type_hints(include_extras=True)
-  -> extracts Field(...) objects
-  -> builds JSON Schema validators
-  -> raises ValidationError at runtime if value violates constraints
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    annotated(["Annotated int<br/>+ Field constraints"])
+    baseType("base type: int")
+    fieldDesc("Pydantic Field descriptor<br/>metadata")
+    readHints("get_type_hints<br/>include_extras=True")
+    extract("extract Field objects")
+    buildSchema("build JSON Schema<br/>validators")
+    raiseErr(["raise ValidationError<br/>if constraints violated"])
+
+    annotated --> baseType
+    annotated --> fieldDesc --> readHints --> extract --> buildSchema --> raiseErr
+
+    class annotated io
+    class baseType frozen
+    class fieldDesc base
+    class readHints,extract mathOp
+    class buildSchema train
+    class raiseErr lossN
 ```
 
 ---
@@ -439,6 +510,37 @@ Practical rule:
   handle a Dog.
 - **Invariant** (default): both produce and consume — no safe substitution in either direction.
 
+The same producer/consumer mnemonic as a decision tree — read-only roles get `covariant`,
+write-only roles get `contravariant`, and read-write roles stay `invariant`:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    role{"What does the generic<br/>class do with T?"}
+    produce("only produces<br/>returns T")
+    consume("only consumes<br/>accepts T")
+    both("both produces<br/>and consumes T")
+    covar(["mark T_co covariant<br/>safe subtype swap"])
+    contravar(["mark T_contra contravariant<br/>safe supertype swap"])
+    invar(["leave T invariant<br/>no safe substitution"])
+
+    role --> produce --> covar
+    role --> consume --> contravar
+    role --> both --> invar
+
+    class role mathOp
+    class produce,consume,both io
+    class covar,contravar train
+    class invar frozen
+```
+
 `list` is invariant because it both reads and writes. `Sequence` is covariant because it is
 read-only. `Callable[[Dog], None]` is contravariant in its parameter type — a function that accepts
 `Animal` can safely stand in for one that accepts `Dog` (Liskov substitution).
@@ -592,6 +694,39 @@ print(get_type_hints(Node))
 `__annotations__` returns raw string representations when PEP 563 is active (or always in
 Python 3.14+ default mode with PEP 649). `get_type_hints()` evaluates those strings in the
 correct namespace, resolving forward references. Always use `get_type_hints()` in library code.
+
+Both storage modes funnel through the same resolver — the diagram makes that convergence
+explicit, which is why "always call `get_type_hints()`" is safe advice regardless of mode.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["class Node:<br/>value: int"])
+    mode{"PEP 563 future-import<br/>or Python 3.14+ default?"}
+    rawStr("__annotations__ holds<br/>raw strings")
+    liveObj("__annotations__ holds<br/>live type objects")
+    resolve("get_type_hints()<br/>resolves in module namespace")
+    resolved(["resolved types<br/>e.g. int, Node or None"])
+
+    start --> mode
+    mode -->|"yes, deferred"| rawStr --> resolve
+    mode -->|"no, eager"| liveObj --> resolve
+    resolve --> resolved
+
+    class start io
+    class mode mathOp
+    class rawStr frozen
+    class liveObj train
+    class resolve mathOp
+    class resolved train
+```
 
 ### 6.12 FastAPI introspection pattern
 

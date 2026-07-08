@@ -59,6 +59,33 @@ Connectivity and config objects:
 | Job | Run to completion | Ephemeral | N/A | Batch, migrations |
 | CronJob | Scheduled Jobs | Ephemeral | N/A | Backups, periodic tasks |
 
+The table above lists each controller's properties; the decision tree below walks the same choice as a sequence of yes/no questions — pick the first branch that matches the workload.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"Needs stable<br/>identity + storage?"} -->|"yes"| statefulset(["StatefulSet<br/>DBs, Kafka, ZK"])
+    start -->|"no"| perNode{"One pod<br/>per node?"}
+    perNode -->|"yes"| daemonset(["DaemonSet<br/>agents, CNI"])
+    perNode -->|"no"| runToDone{"Run to completion,<br/>not long-lived?"}
+    runToDone -->|"yes, scheduled"| cronjob(["CronJob<br/>backups"])
+    runToDone -->|"yes, one-off"| job(["Job<br/>migrations"])
+    runToDone -->|"no"| deployment(["Deployment<br/>stateless APIs"])
+
+    class start,perNode,runToDone mathOp
+    class statefulset frozen
+    class daemonset base
+    class cronjob,job req
+    class deployment train
+```
+
 ### Service types
 
 | Type | Exposure | Use |
@@ -77,33 +104,69 @@ Connectivity and config objects:
 | liveness | "Is it permanently broken?" | Container restarted |
 | startup | "Has it finished booting?" | Holds off liveness until boot completes |
 
+A pod's three probes gate different transitions: startup delays liveness until boot finishes, readiness gates Service traffic without a restart, and only a liveness failure triggers one.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Booting
+    Booting --> Booting: startupProbe fails, retry
+    Booting --> NotReady: startupProbe passes<br/>liveness now active
+    NotReady --> Serving: readinessProbe passes<br/>added to Service endpoints
+    Serving --> NotReady: readinessProbe fails<br/>removed from endpoints, no restart
+    Serving --> Restarting: livenessProbe fails<br/>container killed
+    NotReady --> Restarting: livenessProbe fails<br/>container killed
+    Restarting --> Booting: container recreated
+    Serving --> [*]: SIGTERM, graceful drain
+```
+
 ---
 
 ## 5. Architecture Diagrams
 
+**Ownership chain (stateless app).** Traffic flows Ingress to Service to Pods; management flows Deployment to ReplicaSet to those same Pods. The prior rollout's ReplicaSet is retained at zero replicas so rollback is just scaling it back up.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ingress(["Ingress<br/>host/path rules"]) --> svc(["Service web<br/>ClusterIP"])
+    svc -->|"selects label<br/>app=web"| pods(["3 Pods<br/>app-7f9-a/b/c"])
+    deploy(["Deployment<br/>replicas: 3"]) -->|"creates/scales"| rsNew["ReplicaSet<br/>current"]
+    rsNew -->|"owns"| pods
+    deploy -.->|"prior rollout"| rsOld["ReplicaSet<br/>scaled to 0"]
+
+    class ingress io
+    class svc base
+    class deploy mathOp
+    class rsNew,pods train
+    class rsOld frozen
 ```
-Ownership chain (stateless app)
 
-  Deployment (replicas: 3, strategy: RollingUpdate)
-      |
-      v  (creates/scales)
-  ReplicaSet (current)        ReplicaSet (old, scaled to 0 after rollout)
-      |
-      v
-  Pod app-7f9-a   Pod app-7f9-b   Pod app-7f9-c   <- random suffixes, interchangeable
-      ^
-      | label app=web
-  Service web (ClusterIP)  --selects label app=web--> ready Pods only
-      ^
-      | host/path rules
-  Ingress  --> Service web
+**Rolling update (`maxUnavailable: 0, maxSurge: 1`).** A replacement pod is surged in and must pass its readiness probe before the corresponding old pod is removed, so ready-pod count never drops below 3 — the same zero-downtime mechanic detailed in Q4.
 
-Rolling update (maxUnavailable: 0, maxSurge: 1)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  v1: [a][b][c]                         3 ready
-      [a][b][c][d(new)]  surge +1 -> wait d Ready
-      [a][b][d]          remove c (only after d Ready)  ... repeat
-  v2: [d][e][f]                         3 ready, zero downtime
+    v1(["v1: a, b, c<br/>3 ready"]) -->|"surge +1"| surge["add pod d<br/>wait for readiness"]
+    surge -->|"d Ready"| remove["remove pod c"]
+    remove -.->|"repeat for b, c"| v2(["v2: d, e, f<br/>3 ready, zero downtime"])
+
+    class v1,v2 train
+    class surge mathOp
+    class remove lossN
 ```
 
 ---
@@ -338,13 +401,25 @@ A headless Service (`clusterIP: None`) returns the individual Pod IPs via DNS in
 
 A team's stateless API drops ~2% of requests with 502/504 errors for about 30 seconds during each rolling deploy. Apps are healthy before and after; the errors are purely deploy-correlated.
 
-```
-Deploy timeline (BROKEN)
-  t0  new pod starts (container up, app still loading routes/cache)
-  t0  NO readiness probe -> Service immediately routes traffic to it
-  t0  old pod receives SIGTERM and starts shutting down
-  t0+ in-flight requests to old pod dropped (no graceful drain)
-  t1  new pod finally ready, but 30s of 5xx already served
+**Deploy timeline (broken).** With no readiness probe, the Service routes traffic to the new pod the instant its container starts, while the old pod is torn down immediately on SIGTERM with no graceful drain — the gap between the two produces the ~30-second window of 5xx errors.
+
+```mermaid
+sequenceDiagram
+    participant Dep as Deployment
+    participant New as New Pod
+    participant Svc as Service
+    participant Old as Old Pod
+    participant Cli as Client
+
+    Dep->>New: t0 start container
+    Note over New: app still loading<br/>routes and cache
+    Svc->>New: t0 route traffic<br/>no readiness probe set
+    Dep->>Old: t0 send SIGTERM
+    Note over Old: shuts down,<br/>no graceful drain
+    Cli->>Old: in-flight request
+    Old-->>Cli: t0+ dropped, connection reset
+    New-->>Svc: t1 readiness probe passes
+    Note over Cli,Svc: about 30s of 5xx<br/>served to clients
 ```
 
 ```yaml

@@ -95,6 +95,35 @@ yield — you must keep that promise with every I/O operation.
 | `asyncio.to_thread(fn, *args)` | 3.9+ | Shorthand for `run_in_executor(None, ...)` |
 | `ProcessPoolExecutor` via `run_in_executor` | 3.4+ | CPU-bound tasks that need true parallelism |
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["blocking sync call<br/>inside async def"]) --> CPU{"CPU-bound?"}
+    CPU -->|"yes"| PPE["ProcessPoolExecutor<br/>via run_in_executor"]
+    CPU -->|"no"| Custom{"need a custom<br/>thread pool?"}
+    Custom -->|"no"| ToThread["asyncio.to_thread<br/>3.9+"]
+    Custom -->|"yes"| RIE["run_in_executor<br/>explicit pool, 3.4+"]
+
+    PPE --> Bypass(["bypasses the GIL<br/>true parallelism"])
+    ToThread --> Default(["default ThreadPoolExecutor<br/>min 32, cpu_count + 4"])
+
+    class Start io
+    class CPU,Custom mathOp
+    class PPE,ToThread,RIE train
+    class Bypass frozen
+    class Default base
+```
+
+Wrapping a blocking library always routes through one of these three offload paths — the fork on
+CPU-bound work matters because only `ProcessPoolExecutor` bypasses the GIL for true parallelism.
+
 ### 4.2 Async Generators and Comprehensions
 
 - `async def gen() -> AsyncGenerator[T, None]`: yields values across await points
@@ -126,67 +155,118 @@ yield — you must keep that promise with every I/O operation.
 
 ### 5.1 Event Loop — Blocking vs Non-Blocking
 
-```
-BLOCKING (time.sleep inside async def)
-======================================
-Event Loop tick 0:  [Route A starts] → calls time.sleep(1) → BLOCKS LOOP
-Event Loop tick 1:  *** FROZEN — no other coroutine can run for 1 second ***
-Event Loop tick 2:  [Route A resumes] → returns
+```mermaid
+sequenceDiagram
+    participant EL as Event Loop
+    participant A as Route A
+    participant B as Route B
+    participant C as Route C
 
-NON-BLOCKING (await asyncio.sleep)
-====================================
-Event Loop tick 0:  [Route A starts] → hits await asyncio.sleep(1) → YIELDS
-Event Loop tick 1:  [Route B runs] → completes
-Event Loop tick 2:  [Route C runs] → completes
-...
-Event Loop tick N:  [Route A resumes after 1s] → returns
+    Note over EL,C: BLOCKING — time.sleep inside async def
+    EL->>A: tick 0 — start
+    A->>A: time.sleep(1) blocks the loop
+    Note over EL,C: tick 1 — frozen, no other coroutine runs for 1s
+    A-->>EL: tick 2 — resume and return
+
+    Note over EL,C: NON-BLOCKING — await asyncio.sleep
+    EL->>A: tick 0 — start
+    A-->>EL: yields at await asyncio.sleep(1)
+    EL->>B: tick 1 — runs and completes
+    EL->>C: tick 2 — runs and completes
+    EL->>A: tick N — resumes after 1s and returns
 ```
+
+A blocking `time.sleep()` freezes every other coroutine for the full second; `await asyncio.sleep()`
+yields immediately so Routes B and C still make progress while Route A waits.
 
 ### 5.2 Semaphore-Bounded Gather
 
-```
-1000 URLs
-    |
-    v
-asyncio.gather(fetch(u) for u in urls)  ← without semaphore
-    |
-    +-- 1000 concurrent connections → 429 Too Many Requests (70% failure)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-asyncio.gather(bounded_fetch(u) for u in urls)  ← with Semaphore(50)
-    |
-    +-- semaphore ──┐
-                    ├── 50 concurrent at a time → 20 rounds → 0% failure
-                    └── 950 waiting in coroutine suspension (no thread cost)
+    URLs(["1000 URLs"]) --> NoSem{"gather<br/>no semaphore"}
+    NoSem --> Conn["1000 concurrent<br/>connections"]
+    Conn --> Fail["429 Too Many Requests<br/>70% failure"]
+
+    URLs --> WithSem{"gather<br/>Semaphore 50"}
+    WithSem --> Batch["50 concurrent<br/>at a time"]
+    Batch --> Rounds["20 rounds<br/>0% failure"]
+    WithSem -.-> Waiting["950 waiting in suspension<br/>no thread cost"]
+
+    class URLs io
+    class NoSem,WithSem mathOp
+    class Conn req
+    class Fail lossN
+    class Batch,Rounds train
+    class Waiting frozen
 ```
+
+Skipping the semaphore opens 1000 simultaneous connections and a 70% failure rate; capping
+concurrency at `Semaphore(50)` finishes the same 1000 URLs in 20 rounds with zero failures and no
+extra thread cost.
 
 ### 5.3 Retry + Circuit Breaker + Backpressure Stack
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P(["Producer<br/>coroutines"]) -->|backpressure| Q["Queue<br/>maxsize=100"]
+    Q --> CP["Consumer pool"]
+    CP -->|concurrency limit| S["Semaphore 20"]
+    S -->|retry + jitter| R["retry_async<br/>decorator"]
+    R -->|fail fast| CB["CircuitBreaker"]
+    CB --> H(["httpx.AsyncClient<br/>actual HTTP call"])
+
+    class P io
+    class Q req
+    class CP,S mathOp
+    class R train
+    class CB lossN
+    class H frozen
 ```
-                         Producer coroutines
-                               |
-                    asyncio.Queue(maxsize=100)   ← backpressure
-                               |
-                         Consumer pool
-                               |
-                    asyncio.Semaphore(20)         ← concurrency limit
-                               |
-                       retry_async decorator      ← retry + jitter
-                               |
-                       CircuitBreaker             ← fail fast
-                               |
-                         httpx.AsyncClient        ← actual HTTP call
-```
+
+Each layer bounds or protects the one beneath it — the queue applies backpressure, the semaphore
+caps concurrency at 20, the retry decorator absorbs transient failures with jitter, and the
+circuit breaker fails fast before the HTTP call is ever attempted.
 
 ### 5.4 asyncio.timeout() Composition (3.11)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Outer["outer timeout 10.0s — total budget"]
+        direction LR
+        S1("step_one<br/>inner timeout 3.0s") --> S2("step_two<br/>inner timeout 6.0s")
+        S2 -.-> Slack(["remaining 1s<br/>absorbed by outer"])
+    end
+
+    class S1,S2 train
+    class Slack frozen
 ```
-async with asyncio.timeout(10.0):          # outer: total budget
-    async with asyncio.timeout(3.0):       # inner: per-step budget
-        result = await step_one()
-    async with asyncio.timeout(6.0):       # independent inner timeout
-        result = await step_two(result)
-    # remaining 1s absorbed by outer
-```
+
+The outer `timeout(10.0)` is a hard 10s ceiling; `step_one` gets its own 3s budget and `step_two`
+gets 6s, and whatever the inner steps do not use is still available to the outer scope.
 
 ---
 
@@ -573,6 +653,31 @@ async def process(ctx_ref: weakref.ref[RequestContext]) -> None:
 ```
 
 ### 6.9 Circuit Breaker Pattern in Async Code
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> CLOSED
+    CLOSED --> OPEN: 5 consecutive<br/>failures
+    OPEN --> HALF_OPEN: 30s recovery<br/>timeout elapses
+    HALF_OPEN --> CLOSED: probe call<br/>succeeds
+    HALF_OPEN --> OPEN: probe call<br/>fails
+
+    class CLOSED train
+    class OPEN lossN
+    class HALF_OPEN mathOp
+```
+
+CLOSED lets requests flow normally while counting failures; five consecutive failures trip the
+breaker OPEN so every call fails fast without touching the network; after the 30s recovery
+timeout, one HALF_OPEN probe decides whether to close again or reopen.
 
 ```python
 import asyncio

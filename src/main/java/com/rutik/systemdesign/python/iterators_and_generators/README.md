@@ -140,78 +140,103 @@ pipeline = aggregate(filter_valid(parse_rows(read_lines("data.csv"))))
 
 ### The Iterator Protocol
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Protocol["iter() / next() calls"]
+        direction LR
+        Caller(["Caller"]) -->|"iter(obj)"| IterDunder["obj.__iter__()"]
+        IterDunder --> IteratorObj(["iterator"])
+        Caller -->|"next(it)"| NextDunder["it.__next__()"]
+        NextDunder --> HasMore{"more values?"}
+        HasMore -->|"yes"| NextValue(["next value"])
+        HasMore -->|"no"| StopIter["StopIteration"]
+    end
+
+    subgraph Desugar["for x in obj — desugared"]
+        direction LR
+        ForLoop(["for x in obj"]) --> Init["it = iter(obj)"]
+        Init --> TryNext{"try: x = next(it)"}
+        TryNext -->|"value"| Body["run loop body"] --> TryNext
+        TryNext -->|"StopIteration"| Break(["break"])
+    end
+
+    class Caller,IteratorObj,NextValue,ForLoop,Break io
+    class IterDunder,NextDunder,HasMore,TryNext mathOp
+    class StopIter lossN
+    class Init,Body train
 ```
-Caller
-  |
-  |  iter(obj)          obj.__iter__()
-  +-------------------> returns iterator
-  |
-  |  next(it)           it.__next__()
-  +-------------------> returns next value  ---> StopIteration when done
-  |
-  |  for x in obj       desugars to:
-  |      ...            it = iter(obj)
-  |                     while True:
-  |                         try: x = next(it)
-  |                         except StopIteration: break
-  |                         <loop body>
-```
+*`for x in obj` is pure sugar over these two dunder calls — `iter()` fetches the iterator once, then `next()` is polled in a loop until it raises `StopIteration`, which the loop silently converts into `break`.*
 
 ### Generator Function Lifecycle
 
+```mermaid
+stateDiagram-v2
+    [*] --> Created
+    Created --> Running: next() / for loop
+    Running --> Suspended: yield value<br/>suspends, sends value to caller
+    Suspended --> Running: next() called again<br/>resumes exactly after yield
+    Running --> Exhausted: return / falls off end
+    Exhausted --> [*]: raises StopIteration(return_value)
+
+    note right of Created
+        generator_function() call returns a
+        generator object — no code runs yet
+    end note
+    note right of Running
+        Generator Frame holds local vars
+        and bytecode position while paused
+    end note
 ```
-generator_function()          Returns generator object (no code runs)
-       |
-next() / for loop
-       |
-       v
-  +--------------------+
-  |  Generator Frame   |
-  |  local vars        |  <--- execution begins here
-  |  bytecode position |
-  +--------------------+
-       |
-      yield value           Suspends; value sent to caller
-       |
-  (suspended)
-       |
-  next() called again       Resumes from yield
-       |
-      return / fall off     Raises StopIteration(return_value)
-```
+*Calling a generator function does not run any code — it only allocates the frame. Every `next()` resumes execution exactly at the last `yield`, with local variables intact, until `return` (or falling off the end) raises `StopIteration`.*
 
 ### Lazy Pipeline Flow
 
-```
-File on Disk
-    |
-    v
-read_lines()      generator — yields one line at a time
-    |
-    v
-parse_rows()      generator — yields one parsed dict at a time
-    |
-    v
-filter_valid()    generator — yields only valid rows
-    |
-    v
-aggregate()       generator — yields running totals / final result
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Memory footprint at any instant: O(1) — only one row in flight
+    FileDisk(["File on Disk"]) --> ReadLines["read_lines()<br/>yields one line"]
+    ReadLines --> ParseRows["parse_rows()<br/>yields one parsed dict"]
+    ParseRows --> FilterValid["filter_valid()<br/>yields only valid rows"]
+    FilterValid --> Aggregate["aggregate()<br/>yields running totals"]
+    Aggregate --> Result(["final result"])
+
+    class FileDisk,Result io
+    class ReadLines,ParseRows,FilterValid,Aggregate train
 ```
+*Memory footprint at any instant: O(1) — only one row is in flight through the whole pipeline, regardless of file size.*
 
 ### `yield from` Delegation
 
+```mermaid
+sequenceDiagram
+    participant Outer as outer_gen
+    participant Inner as inner_gen
+
+    Outer->>Inner: yield from inner_gen
+    Note over Outer,Inner: delegation begins — transparent passthrough
+    Outer->>Inner: send(x) forwarded
+    Inner-->>Outer: yielded value
+    Outer->>Inner: throw(exc) forwarded
+    Outer->>Inner: close() forwarded
+    Inner-->>Outer: StopIteration(ret_val)
+    Note over Outer: ret_val becomes the value<br/>of the yield from expression
 ```
-outer_gen                       inner_gen
-    |                               |
-    |   yield from inner_gen        |
-    |<----------------------------->|
-    |   send(x) forwarded           |
-    |   throw(exc) forwarded        |
-    |   close() forwarded           |
-    |   StopIteration(ret_val) <----| captured as value of yield from expression
-```
+*Unlike a manual `for item in sub: yield item` loop, `yield from` transparently forwards `send()`, `throw()`, and `close()` into the sub-generator and captures its `StopIteration.value` as the expression's own result.*
 
 ---
 
@@ -693,6 +718,38 @@ for config in walk_configs(Path("/etc/app")):
 
 ## 9. When to Use / When NOT to Use
 
+The detailed bullets below answer "should I use a generator at all?" The decision tree first picks *which* construct — list, `tee()`, a generator, or `itertools` — by walking the same questions in the order a reviewer would actually ask them:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Entry(["Choosing an<br/>iteration construct"]) --> Q1
+    Q1{"Need random<br/>access by index?"} -->|"yes"| UseList(["list"])
+    Q1 -->|"no"| Q2{"Multiple passes<br/>over the data?"}
+    Q2 -->|"yes"| UseListTee(["list, or<br/>itertools.tee()"])
+    Q2 -->|"no"| Q3{"Larger than RAM,<br/>infinite, or a<br/>lazy pipeline?"}
+    Q3 -->|"no"| UseEither(["either — lazy eval<br/>adds little benefit"])
+    Q3 -->|"yes"| Q4{"Need send/throw<br/>or try-finally<br/>cleanup?"}
+    Q4 -->|"yes"| UseGenFunc(["generator function"])
+    Q4 -->|"no"| Q5{"Simple one-line<br/>transform?"}
+    Q5 -->|"yes"| UseGenExpr(["generator expression"])
+    Q5 -->|"no"| UseItertools(["compose with itertools"])
+
+    class Entry,UseEither io
+    class Q1,Q2,Q3,Q4,Q5 mathOp
+    class UseList,UseListTee frozen
+    class UseGenFunc,UseGenExpr train
+    class UseItertools base
+```
+*Each leaf maps directly to a row in the Tradeoffs table above: "random access" and "multiple passes" push you to a fully materialised (`frozen`) list, while everything memory- or state-sensitive lands on the generator (`train`) side.*
+
 ### Use generators when:
 
 - Processing files or streams larger than available RAM
@@ -1114,6 +1171,15 @@ def process_fixed(path: Path) -> dict[str, Decimal]:
 | `pd.read_csv(chunksize=100_000)` | 14 min | 4.5 GB | Works but slow |
 | Generator pipeline (this module) | 8 min | 9 MB | Production-ready |
 | Generator pipeline + multiprocessing | 3 min | 35 MB (4 workers) | Further optimised |
+
+```mermaid
+xychart-beta
+    title "Peak memory by approach - 80M-row, 10 GB CSV"
+    x-axis ["pd.read_csv (full load)", "pd.read_csv (chunksize=100k)", "Generator pipeline", "Generator + multiprocessing"]
+    y-axis "Peak memory (MB)" 0 --> 40000
+    bar [40000, 4500, 9, 35]
+```
+*The full eager load blows past the chart scale entirely (over 40 GB, OOM on a 16 GB box); the two generator-pipeline bars on the right are barely visible at 9 MB and 35 MB — roughly 500x less peak memory than the chunked-pandas workaround, and over 4,000x less than the naive full load that crashed.*
 
 **Adding `itertools` to cap processing for testing**:
 

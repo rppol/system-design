@@ -109,30 +109,65 @@ Reading the output:
   Fix: CREATE INDEX ON orders (user_id) or covering index
 ```
 
+### EXPLAIN Plan Execution Flow
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SS["Seq Scan orders<br/>actual 1.25M rows<br/>no index"] --> HJ["Hash Join<br/>actual 245K rows"]
+    IS(["Index Scan users<br/>actual 10.7K rows"]) --> H(("Hash"))
+    H --> HJ
+    HJ --> HA["HashAggregate<br/>actual 8.2K rows"]
+    HA --> SO["Sort top-N heapsort<br/>25kB in memory"]
+    SO --> LM(["Limit 10<br/>final result"])
+
+    class SS lossN
+    class IS,SO train
+    class H,HJ,HA mathOp
+    class LM io
+```
+
+Execution flows bottom-up through the plan tree, matching the "read innermost first" rule above: the two leaf scans run first — Index Scan on users is fast at 10,720 rows, while Seq Scan on orders is the bottleneck at 1.25M rows with no index — then Hash Join, HashAggregate, Sort, and Limit narrow the 245,678 joined rows down to the 10 rows actually returned.
+
 ### N+1 Problem Pattern and Fix
 
-```
-N+1 Pattern:
-  Query 1: SELECT * FROM users LIMIT 10
-  Query 2: SELECT * FROM orders WHERE user_id = 1
-  Query 3: SELECT * FROM orders WHERE user_id = 2
-  Query 4: SELECT * FROM orders WHERE user_id = 3
-  ...
-  Query 11: SELECT * FROM orders WHERE user_id = 10
-  Total: 11 queries for 10 users
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Fix with JOIN:
-  SELECT u.*, o.*
-  FROM users u
-  LEFT JOIN orders o ON o.user_id = u.id
-  LIMIT 10 users (with subquery or window function)
-  Total: 1 query
+    subgraph NP["N+1 Pattern"]
+        U1(["Query 1:<br/>10 users"]) --> O1["Query 2..11:<br/>1 per user"]
+        O1 --> T1(("11 queries"))
+    end
 
-Fix with IN:
-  SELECT * FROM users LIMIT 10                  -> 10 users
-  SELECT * FROM orders WHERE user_id IN (1,2,...,10)  -> 1 query
-  Total: 2 queries (N+1 → 1+1 = 2)
+    subgraph FJ["Fix: JOIN"]
+        J1(["1 query:<br/>users JOIN orders"]) --> T2(("1 query"))
+    end
+
+    subgraph FI["Fix: IN clause"]
+        U2(["Query 1:<br/>10 users"]) --> I2["Query 2:<br/>orders WHERE<br/>user_id IN (...)"]
+        I2 --> T3(("2 queries"))
+    end
+
+    class U1,U2 req
+    class O1,T1 lossN
+    class J1,I2,T2,T3 train
 ```
+
+The N+1 pattern issues one query per user — 11 total for 10 users, the red hot path — while JOIN FETCH collapses everything into a single query and the IN-clause variant lands at 2 queries; both fixes (green) beat the pattern 5-11x.
 
 ---
 
@@ -263,6 +298,16 @@ CREATE INDEX ON orders (created_at DESC, id DESC);
 -- OFFSET 200000: ~800ms
 -- Keyset with same data: ~1ms
 ```
+
+```mermaid
+xychart-beta
+    title "OFFSET Pagination Degrades With Depth, Keyset Stays Flat"
+    x-axis ["Keyset (any depth)", "OFFSET 200K", "OFFSET 9.9M"]
+    y-axis "Latency (seconds)" 0 --> 45
+    bar [0.001, 0.8, 45]
+```
+
+*Keyset pagination costs about 1ms at any depth — an O(1) index seek on the cursor — while OFFSET pagination degrades with page depth: about 800ms at OFFSET 200,000, climbing to the 45-second timeouts a SaaS export endpoint hit at OFFSET 9,900,000 before switching to keyset.*
 
 ### 6.4 Batch Inserts with JDBC and Spring
 

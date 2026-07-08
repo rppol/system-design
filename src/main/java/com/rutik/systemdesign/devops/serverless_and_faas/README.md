@@ -80,34 +80,92 @@ Concrete Lambda limits: 15-minute max timeout, 128 MB-10 GB memory (CPU scales w
 
 ## 5. Architecture Diagrams
 
+**Event-driven serverless pipeline (image processing):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client"]) -->|"HTTPS"| apigw(["API Gateway"])
+    apigw -->|"invoke"| presignFn[["Lambda:<br/>presign upload"]]
+    client -->|"PUT"| s3up[("S3<br/>uploads/")]
+    s3up -.->|"ObjectCreated<br/>event"| thumbFn[["Lambda:<br/>thumbnail"]]
+    thumbFn -->|"on error"| dlq("DLQ (SQS)")
+    dlq -->|"alarm / replay"| alarmR(["Alarm & Replay"])
+    thumbFn -->|"success"| s3thumb[("S3<br/>thumbnails/")]
+    thumbFn -->|"success"| ddb[("DynamoDB<br/>metadata")]
+
+    class client io
+    class apigw req
+    class presignFn,thumbFn mathOp
+    class s3up,s3thumb,ddb base
+    class dlq,alarmR lossN
 ```
-Event-driven serverless pipeline (image processing)
 
-  Client --HTTPS--> API Gateway --invoke--> [Lambda: presign upload]
-                                                  |
-  Client --PUT--> S3 (uploads/) ---ObjectCreated event---> [Lambda: thumbnail]
-                                                  |  on error
-                                                  v
-                                            DLQ (SQS)  --> alarm/replay
-                                                  |  success
-                                                  v
-                                        S3 (thumbnails/) + DynamoDB (metadata)
+*The upload path (top) and the thumbnail path (bottom) run independently: an S3 `ObjectCreated` event — not the client — triggers the thumbnail Lambda, and a failure there lands in a DLQ for alarming and replay instead of silently dropping the image.*
 
-Synchronous request path + cold start
+**Synchronous request path + cold start:**
 
-  request --> API Gateway --> Lambda
-                                |--- WARM: reuse env (~1-5ms overhead) -> handler
-                                |--- COLD: create micro-VM -> download code ->
-                                          start runtime -> run init -> handler
-                                          (~100ms-1s added latency)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Step Functions orchestration (order workflow)
+    req(["request"]) --> apigw(["API Gateway"]) --> decide{"warm or<br/>cold env?"}
+    decide -->|"WARM"| warm["reuse env<br/>~1-5ms overhead"]
+    decide -->|"COLD"| cold["create micro-VM, download code,<br/>start runtime, run init<br/>~100ms-1s added"]
+    warm --> handler((" handler "))
+    cold --> handler
 
-  [Start] -> ValidateOrder -> (Choice: in stock?)
-              |yes-> ChargePayment -> (Parallel: ReserveStock | NotifyUser) -> Ship -> [End]
-              |no -> Backorder -> [End]
-              (each task = a Lambda; retries/catch/timeout defined in the state machine)
+    class req io
+    class apigw req
+    class decide,handler mathOp
+    class warm train
+    class cold lossN
 ```
+
+*Both branches converge on the same handler; a cold start pays for micro-VM creation, code download, runtime start, and init before it can run — the ~100ms-1s tax a warm environment (~1-5ms overhead) skips entirely.*
+
+**Step Functions orchestration (order workflow):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Start"]) --> validate["ValidateOrder"] --> choice{"in stock?"}
+    choice -->|"yes"| charge["ChargePayment"]
+    choice -->|"no"| backorder["Backorder"]
+    charge --> reserve["ReserveStock"]
+    charge --> notify["NotifyUser"]
+    reserve --> ship["Ship"]
+    notify --> ship
+    ship --> stop(["End"])
+    backorder --> stop
+
+    class start,stop io
+    class validate,charge,choice mathOp
+    class reserve,notify,ship train
+    class backorder lossN
+```
+
+*Each task is its own Lambda, with retries, catches, and timeouts declared in the state machine rather than hand-rolled in the functions; the parallel branch runs `ReserveStock` and `NotifyUser` concurrently before shipping.*
 
 ---
 
@@ -239,6 +297,34 @@ Mitigations:
 
 **Reconsider when:** workloads are steady and high-throughput (a constantly busy service is often cheaper on reserved/containers — see [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/)); tasks exceed timeout limits (15 min Lambda) or need persistent connections/state; you need predictable sub-10ms tail latency (cold starts hurt); or you require GPUs/specialized hardware. Very chatty, latency-sensitive microservices can suffer from cold starts and per-invocation overhead — containers on [kubernetes_architecture](../kubernetes_architecture/) may fit better.
 
+**Choosing FaaS vs the alternative:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["New workload"]) --> d1{"Steady,<br/>high-throughput?"}
+    d1 -->|"yes"| containers["Reserved instances<br/>/ containers"]
+    d1 -->|"no"| d2{"Over 15-min timeout, or<br/>needs persistent state/conns?"}
+    d2 -->|"yes"| containers
+    d2 -->|"no"| d3{"Needs sub-10ms tail latency,<br/>or GPU/specialized HW?"}
+    d3 -->|"yes"| containers
+    d3 -->|"no"| faas(["FaaS<br/>(Lambda / Cloud Functions)"])
+
+    class start io
+    class d1,d2,d3 mathOp
+    class containers base
+    class faas train
+```
+
+*Each "reconsider" criterion becomes a gate a workload must clear before landing on FaaS: steady high-throughput load, work exceeding Lambda's 15-minute timeout or needing persistent connections, and sub-10ms tail latency or GPU needs all route to reserved instances/containers instead.*
+
 ---
 
 ## 10. Common Pitfalls
@@ -269,6 +355,28 @@ def handler(event, context):
 **Pitfall 3 — No DLQ on async/event sources.** Failures retry then silently vanish, losing data. FIX: configure a DLQ (SQS) with `maxReceiveCount` and alarm on its depth; replay after fixing the bug.
 
 **Pitfall 4 — Runaway concurrency / recursive triggers.** A Lambda writing to the same S3 bucket/prefix that triggers it creates an infinite loop and a huge bill; or unbounded fan-out exhausts account concurrency (default 1000) and throttles everything. FIX: scope triggers to distinct prefixes, set reserved concurrency caps, and add concurrency alarms.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    lambda["Lambda"] -->|"writes to"| s3prefix[("S3 prefix")]
+    s3prefix -.->|"ObjectCreated<br/>re-triggers"| lambda
+    lambda -->|"fan-out<br/>consumes"| pool["Account concurrency<br/>cap (1000 default)"]
+    pool -->|"exhausted"| throttled(["Other functions<br/>throttled"])
+
+    class lambda mathOp
+    class s3prefix,pool base
+    class throttled lossN
+```
+
+*Writing to the same S3 prefix that triggers the function creates a self-sustaining loop (dotted edge); unbounded fan-out then exhausts the account's default 1000-concurrency cap and throttles every other function sharing it.*
 
 ---
 

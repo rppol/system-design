@@ -80,25 +80,117 @@ Scheduling decides *where* a Pod runs; autoscaling decides *how many* Pods and *
 
 ## 5. Architecture Diagrams
 
+**Scheduling: filter then score.** The scheduler filters nodes down to the feasible set (enough allocatable resources for the Pod's requests, taints tolerated, affinity/topology satisfied), scores the survivors, and binds the Pod to the winner; if no node is feasible, the Pod stays Pending and triggers the node autoscaler.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P(["Pending Pod<br/>cpu 500m, mem 1Gi<br/>tolerates spot"]) --> F["FILTER nodes<br/>allocatable? taints?<br/>affinity? topology?"]
+    F --> D{"Any node<br/>feasible?"}
+    D -->|"yes: node2, node5"| S["SCORE nodes<br/>balance, spread, affinity"]
+    S --> B(["Bind to node5"])
+    D -->|"no"| PEND["Pod stays<br/>Pending"]
+    PEND -.-> AUTO["Triggers node<br/>autoscaler"]
+
+    class P io
+    class F,S,D mathOp
+    class B train
+    class PEND,AUTO lossN
 ```
-Scheduling: filter then score
 
-  Pending Pod (requests: cpu 500m, mem 1Gi; tolerates spot; anti-affinity app=web)
-        |
-        v
-  FILTER nodes: enough allocatable? taints tolerated? affinity ok? topology ok?
-        |  feasible: [node2, node5]
-        v
-  SCORE: resource balance, spread, affinity preference -> pick node5 -> bind
-        |  if NO feasible node -> Pod stays Pending -> triggers node autoscaler
+**Autoscaling control loops.** HPA and the node autoscaler close the loop in both directions — rising load adds replicas until some can't schedule, which triggers node scale-up; falling load shrinks replicas until nodes sit underused, which triggers consolidation.
 
-Autoscaling control loops
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  load up -> HPA: replicas 3 -> 8 -> some Pods Pending (no room)
-                                       |
-                                       v
-                          Karpenter/Cluster Autoscaler: launch node(s) -> Pods schedule
-  load down -> HPA: 8 -> 3 -> nodes underused -> autoscaler consolidates/removes nodes
+    subgraph UP["Scale-up"]
+        direction LR
+        LU(["Load up"]) --> H1["HPA: replicas<br/>3 to 8"]
+        H1 --> PP["Pods Pending<br/>no room"]
+        PP --> CA1["Karpenter / Cluster<br/>Autoscaler launches node(s)"]
+        CA1 --> SC(["Pods schedule"])
+    end
+    subgraph DOWN["Scale-down"]
+        direction LR
+        LD(["Load down"]) --> H2["HPA: replicas<br/>8 to 3"]
+        H2 --> UND["Nodes<br/>underused"]
+        UND --> CA2["Autoscaler consolidates<br/>/ removes nodes"]
+    end
+
+    class LU,LD io
+    class H1,H2 mathOp
+    class PP,UND lossN
+    class CA1,CA2 frozen
+    class SC train
+```
+
+**Diagnosing a Pending Pod.** `kubectl describe pod` names the exact blocking reason in its Events, so reading it points straight at the fix instead of guessing (see Q12).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PEND2(["Pod stuck<br/>Pending"]) --> DESC["kubectl describe pod<br/>read the Events reason"]
+    DESC --> R1["Insufficient<br/>cpu / memory"]
+    DESC --> R2["Taint not<br/>tolerated"]
+    DESC --> R3["Affinity / selector<br/>mismatch"]
+    DESC --> R4["Volume zone<br/>conflict"]
+    DESC --> R5["Topology spread<br/>unmet"]
+    R1 --> F1(["Add capacity or<br/>lower requests"])
+    R2 --> F2(["Add matching<br/>toleration"])
+    R3 --> F3(["Fix affinity /<br/>selector labels"])
+    R4 --> F4(["Fix zonal<br/>volume / AZ"])
+    R5 --> F5(["Relax skew or<br/>add nodes"])
+
+    class PEND2,R1,R2,R3,R4,R5 lossN
+    class DESC mathOp
+    class F1,F2,F3,F4,F5 train
+```
+
+**Taint effects on scheduling.** The three taint effects escalate from a soft preference to a hard block that also evicts Pods already running there (see Q6).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T(["Node tainted<br/>e.g. dedicated=gpu"]) --> TOL{"Pod tolerates<br/>the taint?"}
+    TOL -->|"yes"| SCHED(["Pod schedules<br/>normally"])
+    TOL -->|"no"| EFF{"Taint<br/>effect"}
+    EFF -->|"NoSchedule"| E1["Filtered out,<br/>never placed here"]
+    EFF -->|"PreferNoSchedule"| E2["Avoided if an<br/>alternative exists"]
+    EFF -->|"NoExecute"| E3["Filtered out AND<br/>running Pods evicted"]
+
+    class T frozen
+    class TOL,EFF mathOp
+    class SCHED train
+    class E1,E3 lossN
+    class E2 req
 ```
 
 ---
@@ -341,16 +433,35 @@ A CPU limit causes CFS throttling: once a Pod uses its quota within a 100ms peri
 
 A platform team's EKS bill jumps 2x over a quarter while traffic is flat, and a routine Kubernetes version upgrade (which drains nodes) caused a 4-minute outage of the checkout service.
 
-```
-Two problems, one root cause: bad resource hygiene + no disruption protection.
+**Two problems, one root cause: bad resource hygiene + no disruption protection.**
 
-Cost: every team copy-pasted requests: cpu 1, memory 2Gi -- regardless of real use
-   -> nodes "full" at ~30% real utilization -> Cluster Autoscaler keeps adding nodes
-   -> 2x the nodes needed.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Outage: checkout had 3 replicas, no PDB, no topology spread
-   -> upgrade drained a node holding 2 of 3 replicas, then the 3rd's node next
-   -> momentarily 0 ready replicas -> checkout down 4 minutes mid-upgrade.
+    subgraph COST["Cost: bad resource hygiene"]
+        direction LR
+        C1["Copy-pasted requests<br/>cpu 1, mem 2Gi<br/>regardless of real use"] --> C2["Nodes look full<br/>at ~30% real utilization"]
+        C2 --> C3["Cluster Autoscaler<br/>keeps adding nodes"]
+        C3 --> C4(["2x the nodes<br/>needed"])
+    end
+    subgraph OUTAGE["Outage: no disruption protection"]
+        direction LR
+        O1["checkout: 3 replicas<br/>no PDB, no topology spread"] --> O2["Upgrade drains node<br/>holding 2 of 3 replicas"]
+        O2 --> O3["Then drains the<br/>3rd replica's node"]
+        O3 --> O4(["0 ready replicas<br/>checkout down 4 min"])
+    end
+
+    class C1 req
+    class O1 base
+    class C2,C3,O2,O3 mathOp
+    class C4,O4 lossN
 ```
 
 ```yaml

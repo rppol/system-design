@@ -70,96 +70,153 @@ A GraphQL server (Apollo Federation, Spring for GraphQL) acts as the gateway. Se
 
 ### Standard Gateway vs BFF
 
-```
-STANDARD GATEWAY                    BFF PATTERN
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-                                  +------------------+
-+----------+                      | Mobile BFF       |
-|  Mobile  |---+                  | (compact payload)|
-+----------+   |                  +--------+---------+
-               |  +----------+            |
-+----------+   +->| API GW   |   +--------v---------+
-|  Web     |--->  | (one for |   | Web BFF          |
-+----------+   +->| all)     |   | (rich payload)   |
-               |  +----------+   +--------+---------+
-+----------+   |                          |
-|  Partner |---+                 +--------v---------+
-+----------+                     | Partner BFF      |
-                                  | (metered, keyed) |
-                                  +------------------+
-                                          |
-                          All BFFs call same downstream services
+    subgraph SG["Standard Gateway"]
+        m1(["Mobile"]) --> gw("API Gateway<br/>one for all")
+        w1(["Web"]) --> gw
+        p1(["Partner"]) --> gw
+    end
+
+    subgraph BFF["BFF Pattern"]
+        m2(["Mobile"]) --> mbff("Mobile BFF<br/>compact payload")
+        w2(["Web"]) --> wbff("Web BFF<br/>rich payload")
+        p2(["Partner"]) --> pbff("Partner BFF<br/>metered, keyed")
+        mbff --> ds(["Downstream<br/>Services"])
+        wbff --> ds
+        pbff --> ds
+    end
+
+    class m1,w1,p1,m2,w2,p2 io
+    class gw,mbff,wbff,pbff req
+    class ds base
 ```
+
+A single shared gateway routes every client type through identical logic, while the BFF pattern gives each client its own tailored gateway instance — owned by that client's team — that still calls the same downstream services.
 
 ### Spring Cloud Gateway Internals
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    req1(["Incoming Request"]) --> pred
+
+    subgraph SCG["Spring Cloud Gateway"]
+        pred{"Route Predicate<br/>Matching"} --> auth("AuthFilter")
+        auth --> rl("RateLimiterFilter")
+        rl --> log("LoggingFilter")
+        log --> up("HTTP call to upstream<br/>lb://USER-SERVICE")
+        up --> hdr("AddResponseHeader")
+        hdr --> metrics("MetricsFilter")
+    end
+
+    metrics --> resp(["Response to client"])
+
+    class req1,resp io
+    class pred,auth,rl,log,hdr,metrics mathOp
+    class up base
 ```
-Incoming Request
-      |
-      v
-+-----+------------------------------------------------------+
-| Spring Cloud Gateway                                        |
-|                                                             |
-|  Route Predicate Matching                                   |
-|  (Path=/api/v1/users/**, Header=X-Version: 2, ...)          |
-|      |                                                      |
-|      v                                                      |
-|  Pre-Filters (ordered chain)                                |
-|  [AuthFilter] -> [RateLimiterFilter] -> [LoggingFilter]     |
-|      |                                                      |
-|      v                                                      |
-|  HTTP call to upstream service (lb://USER-SERVICE)          |
-|      |                                                      |
-|      v                                                      |
-|  Post-Filters                                               |
-|  [AddResponseHeader] -> [MetricsFilter]                     |
-|      |                                                      |
-+------+------------------------------------------------------+
-       |
-       v
-  Response to client
-```
+
+Every request passes through predicate matching, an ordered pre-filter chain (Auth, RateLimiter, Logging), the proxied call to the upstream service, and a post-filter chain before the response returns to the client.
 
 ### API Composition
 
-```
-Client: GET /api/v1/products/123/detail
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Gateway:
-  +------+  parallel calls  +------------------+
-  |      |----------------> | Catalog Service  | (name, description, images)
-  | AGG  |                  +------------------+
-  |      |----------------> | Pricing Service  | (price, discounts)
-  |      |                  +------------------+
-  |      |----------------> | Inventory Svc    | (stock count)
-  |      |                  +------------------+
-  |      |----------------> | Review Service   | (rating, review count)
-  +------+
-       |
-       v  merged single response
-  { name, price, inStock, rating, images }
+    c(["GET /products/123/detail"]) --> agg("Gateway<br/>AGG")
+
+    agg --> cat("Catalog Service<br/>name, images")
+    agg --> price("Pricing Service<br/>price, discounts")
+    agg --> inv("Inventory Service<br/>stock count")
+    agg --> rev("Review Service<br/>rating, count")
+
+    cat --> merge((" + "))
+    price --> merge
+    inv --> merge
+    rev --> merge
+
+    merge --> out(["Merged response:<br/>name, price, inStock, rating"])
+
+    class c,out io
+    class agg,merge mathOp
+    class cat,price,inv,rev base
 ```
+
+The gateway fans out to four services in parallel (`Mono.zip`) and merges their responses into one payload — cutting client round trips from four to one.
 
 ### Single Point of Failure Mitigation
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    net(["Internet"]) --> lb{"Load Balancer<br/>AWS ALB / Nginx"}
+
+    subgraph GWT["Gateway Tier (3+ instances)"]
+        gw1("GW1")
+        gw2("GW2")
+        gw3("GW3")
+        gw4("GW4")
+    end
+
+    lb --> gw1
+    lb --> gw2
+    lb --> gw3
+    lb --> gw4
+
+    gw1 --> mesh{"Service Mesh /<br/>Internal LB"}
+    gw2 --> mesh
+    gw3 --> mesh
+    gw4 --> mesh
+
+    subgraph SVC["Downstream Services"]
+        sa("SvcA")
+        sb("SvcB")
+        sc("SvcC")
+        sd("SvcD")
+    end
+
+    mesh --> sa
+    mesh --> sb
+    mesh --> sc
+    mesh --> sd
+
+    class net io
+    class lb,mesh mathOp
+    class gw1,gw2,gw3,gw4 req
+    class sa,sb,sc,sd base
 ```
-Internet
-   |
-   v
-Load Balancer (AWS ALB / Nginx)
-   |
-   +-------+-------+-------+
-   |       |       |       |
-  GW1    GW2    GW3    GW4    (multiple gateway instances)
-   |       |       |       |
-   +-------+-------+-------+
-           |
-    Service Mesh / Internal LB
-           |
-   +-------+-------+-------+
-   |       |       |       |
-  SvcA   SvcB   SvcC   SvcD
-```
+
+A single gateway instance is a SPOF; running a minimum of three behind a load balancer, with an internal mesh routing to redundant service instances, removes the single point of failure.
 
 ---
 
@@ -410,6 +467,35 @@ public class FallbackController {
 - Client teams are large enough to own their BFF.
 - You want to prevent the API gateway team from becoming a bottleneck for every feature.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Start"]) --> q1{"Multiple<br/>microservices?"}
+
+    q1 -->|"no"| skip("Skip the gateway<br/>monolith, few services")
+    q1 -->|"yes"| q2{"Need sub-ms<br/>latency?"}
+
+    q2 -->|"yes"| mesh("Use a service mesh<br/>for internal traffic")
+    q2 -->|"no"| q3{"Client shapes diverge<br/>and teams can own it?"}
+
+    q3 -->|"no"| standard("Standard API Gateway<br/>one team, one gateway")
+    q3 -->|"yes"| bff("BFF per client type<br/>mobile / web / partner")
+
+    class start io
+    class q1,q2,q3 mathOp
+    class skip,mesh frozen
+    class standard,bff train
+```
+
+A monolith or a handful of services rarely justifies the added 5-20ms hop; once services multiply, the remaining choice is whether client needs diverge enough to warrant a BFF per client type instead of one shared gateway.
+
 ---
 
 ## 10. Common Pitfalls
@@ -418,6 +504,37 @@ public class FallbackController {
 Teams gradually add business logic to the gateway: "let's validate stock availability at the gateway level." Now the gateway calls the inventory service to check stock before routing to the order service. The gateway has business logic. A change in inventory rules requires a gateway deployment. The gateway team is on the critical path for every feature. Keep the gateway thin: routing, auth, rate limiting, logging only.
 
 Production war story: a major e-commerce company's gateway team became a 12-person team maintaining 4,000 lines of routing rules, coupon validation, A/B test routing, and personalization logic. A gateway deployment caused a 40-minute outage during peak hours. The gateway had become the most complex and fragile component in the system.
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Thin
+    state "Thin Gateway<br/>routing + auth only" as Thin
+    state "One Small Check<br/>added to routing" as Creep
+    state "Business Logic<br/>lives in the gateway" as Smart
+    state "Bottleneck<br/>12 devs, 4000 lines" as Bottleneck
+    state "40-Minute Outage<br/>at peak hours" as Outage
+
+    Thin --> Creep: team adds a stock check
+    Creep --> Smart: pattern repeats per feature
+    Smart --> Bottleneck: every feature waits on gateway team
+    Bottleneck --> Outage: routine deployment
+
+    class Thin train
+    class Creep mathOp
+    class Smart mathOp
+    class Bottleneck lossN
+    class Outage lossN
+```
+
+The anti-pattern is a slow drift, not one bad decision: each "just one small check" compounds until the gateway team owns 4,000 lines of business logic and sits on the critical path for every feature — exactly what caused the 40-minute peak-hour outage above.
 
 **Single Point of Failure with One Instance**
 Running a single gateway instance. A gateway crash or misconfiguration takes down all traffic. Always run a minimum of 3 gateway instances behind a load balancer. Use circuit breakers on gateway routes so a failing service does not cascade to the gateway becoming unresponsive.
@@ -531,20 +648,40 @@ Phase 1: Deploy Spring Cloud Gateway behind existing AWS ALB. Mirror 10% of traf
 
 Phase 2: Implement global JWT authentication filter. Strip auth code from 20 services over 6 weeks. All auth now centralized.
 
-```
-Old flow:
-Client -> Nginx -> UserService (validates JWT internally)
-                -> OrderService (validates JWT internally)
-                -> PaymentService (validates JWT internally)
-                -> 17 more services...
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-New flow:
-Client -> ALB -> Spring Cloud Gateway (validates JWT once)
-                    -> X-User-Id header injected
-                -> UserService (trusts X-User-Id)
-                -> OrderService (trusts X-User-Id)
-                -> PaymentService (trusts X-User-Id)
+    subgraph OLD["Old Flow — duplicated auth (20 services)"]
+        oc(["Client"]) --> nginx("Nginx<br/>no auth logic")
+        nginx --> ou("UserService<br/>validates JWT")
+        nginx --> oo("OrderService<br/>validates JWT")
+        nginx --> op("PaymentService<br/>validates JWT")
+        nginx --> omore("...17 more<br/>each validates JWT")
+    end
+
+    subgraph NEW["New Flow — centralized auth"]
+        nc(["Client"]) --> alb2("ALB")
+        alb2 --> scg("Spring Cloud Gateway<br/>validates JWT once")
+        scg --> nu("UserService<br/>trusts X-User-Id")
+        scg --> no("OrderService<br/>trusts X-User-Id")
+        scg --> np("PaymentService<br/>trusts X-User-Id")
+    end
+
+    class oc,nc io
+    class nginx,alb2 mathOp
+    class ou,oo,op,omore lossN
+    class scg req
+    class nu,no,np train
 ```
+
+Twenty services each re-implementing JWT validation (red) become three lines that trust a single gateway-injected header (green) — the same fix that let a JWT library patch ship in 2 hours instead of an estimated 3 weeks.
 
 Phase 3: Implement Redis-backed rate limiting. All 35 services now rate-limited by user ID. 100 requests/second per user, burst to 200.
 
@@ -553,27 +690,55 @@ Phase 4: Add circuit breakers with fallback routes for all 35 services. Fallback
 Phase 5: Introduce Mobile BFF and Web BFF. Mobile BFF returns compact payloads (no descriptions, reduced image URLs, pagination at 20 items). Web BFF returns full payloads with API composition for product detail pages.
 
 **Architecture after migration**:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    alb{"AWS ALB<br/>HTTPS"}
+
+    subgraph GWT["Gateway Tier (SCG instances)"]
+        mbff("Mobile BFF<br/>50 req/s/user")
+        wbff("Web BFF<br/>100 req/s")
+        pbff("Partner BFF<br/>API key + quota")
+    end
+
+    alb --> mbff
+    alb --> wbff
+    alb --> pbff
+
+    net("Internal Network<br/>Redis rate limits")
+
+    mbff --> net
+    wbff --> net
+    pbff --> net
+
+    subgraph SVC["35 Downstream Services"]
+        us("UserSvc")
+        os("OrderSvc")
+        ps("PaySvc")
+        cs("CatalogSvc")
+        more("...32 more")
+    end
+
+    net --> us
+    net --> os
+    net --> ps
+    net --> cs
+    net --> more
+
+    class alb mathOp
+    class mbff,wbff,pbff req
+    class net base
+    class us,os,ps,cs,more base
 ```
-                          +-------------------+
-                          |  AWS ALB (HTTPS)  |
-                          +---------+---------+
-                                    |
-                    +---------------+---------------+
-                    |               |               |
-          +---------v------+ +------v-------+ +-----v-----------+
-          | Mobile BFF     | | Web BFF      | | Partner BFF     |
-          | (SCG instance) | | (SCG instance| | (SCG instance)  |
-          | rate: 50/s/user| | rate:100/s   | | API key + quota |
-          +--------+-------+ +------+-------+ +--------+--------+
-                   |                |                   |
-                   +----------------+-------------------+
-                                    |
-                          Internal network (Redis for rate limits)
-                                    |
-                   +----------------+-------------------+
-                   |        |        |        |          |
-               UserSvc  OrderSvc PaySvc  CatalogSvc  ...32 more
-```
+
+All three BFFs share one ALB entry point and one Redis-backed rate-limit store, then fan out to the same 35 downstream services — the end state of the migration described above.
 
 **Results**:
 - JWT patching: 1 gateway deployment instead of 20 service deployments. Patch delivered in 2 hours vs estimated 3 weeks.

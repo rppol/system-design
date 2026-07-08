@@ -96,19 +96,15 @@ A **hash table** maps arbitrary keys to values using a hash function that conver
 
 ### Dynamic Array Growth
 
+```mermaid
+xychart-beta
+    title "Dynamic Array Growth: Copy Cost per Append"
+    x-axis ["Append 1", "Append 2", "Append 3", "Append 4", "Append 5"]
+    y-axis "Elements copied" 0 --> 4
+    bar [0, 1, 2, 0, 4]
 ```
-Append sequence:  [1] → [1,2] → [1,2,3] → [1,2,3,4] → [1,2,3,4,5]
 
-capacity:          1     2       4          4            8
-size:              1     2       3          4            5
-copy cost:         0     1       2          0            4
-                   ^            ^                        ^
-                   initial   resize (2→4,             resize (4→8,
-                             copy 2 elements)          copy 4 elements)
-
-Total copies after 5 appends: 0 + 1 + 2 + 0 + 4 = 7 < 2×5 = 10
-Amortized cost per append: O(1)
-```
+Capacity doubles at append 2 (1→2, copying the 1 existing element) and again at append 5 (4→8, copying 4 elements); appends 1, 3, and 4 land inside existing capacity and cost 0 copies (capacity sequence 1→2→4→4→8, size sequence 1→2→3→4→5). Total copies after 5 appends = 0+1+2+0+4 = 7, under the 2n = 10 bound that guarantees amortized O(1) append.
 
 ### Two Sum — Hash Table Solution
 
@@ -118,6 +114,35 @@ arr = [2, 7, 11, 15]   target = 9
 Step 1: x=2, need (9-2)=7, seen={},       7 not in seen, add seen[2]=0
 Step 2: x=7, need (9-7)=2, seen={2:0},    2 IS in seen → return (seen[2]=0, current=1)
 ```
+
+### Open Addressing — Linear Probing (Insert / Lookup Path)
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    K(["key"]) --> H("h = hash(key) mod cap")
+    H --> D{"slot h empty,<br/>tombstone, or match?"}
+    D -->|"yes"| U(["use slot h"])
+    D -->|"no"| C("collision:<br/>slot occupied<br/>by another key")
+    C --> P("h = (h + 1) mod cap")
+    P -.-> D
+
+    class K io
+    class H mathOp
+    class D mathOp
+    class U io
+    class C lossN
+    class P mathOp
+```
+
+This traces `_probe()` from the `HashMap` implementation in §6.2: starting at `hash(key) mod cap`, it walks forward one slot at a time until it lands on an empty slot, a tombstone, or the matching key. `put()`, `get()`, and `delete()` all reuse this same walk, which is why deletion must write a tombstone instead of nulling the slot — nulling would break the probe chain for any key that hashed earlier and landed past the deleted one.
 
 ---
 
@@ -492,6 +517,34 @@ Dict lookup uses `hash(key)` first, then `key == stored_key` (the `__eq__` metho
 **Problem**: given strings `s` and `t`, find the minimum window in `s` that contains all characters of `t`. Return `""` if no such window exists.
 
 **Approach**: sliding window with two frequency maps — `t_count` (required), `window_count` (current window). Track `formed` = number of character types that have reached their required frequency.
+
+**State machine view**: the scan alternates between two states — growing the window until it satisfies `t`, then harvesting the best answer while shrinking it.
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Expanding<br/>right++, grow window" as Expanding
+    state "Contracting<br/>left++, record best" as Contracting
+
+    [*] --> Expanding
+    Expanding --> Expanding: formed < required
+    Expanding --> Contracting: formed == required
+    Contracting --> Contracting: still formed == required
+    Contracting --> Expanding: formed < required
+    Expanding --> [*]: right == len(s)
+
+    class Expanding mathOp
+    class Contracting train
+```
+
+Each pointer only ever moves forward — `right` advances in Expanding, `left` advances in Contracting — so the total number of state transitions is O(|s|), matching the interview discussion's claim that "the two-pointer never backtracks."
 
 ```python
 from collections import Counter

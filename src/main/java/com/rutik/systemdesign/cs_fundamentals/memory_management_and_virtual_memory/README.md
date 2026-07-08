@@ -81,47 +81,72 @@ This module covers paging (the dominant memory management scheme), page table st
 Virtual address (48 bits used):
   [47:39] PGD index (9 bits) | [38:30] PUD index (9 bits) |
   [29:21] PMD index (9 bits) | [20:12] PTE index (9 bits) | [11:0] offset (12 bits)
-
-  CR3 register -> PGD (Page Global Directory) base
-  
-  PGD[index] -> PUD base address
-  PUD[index] -> PMD base address  
-  PMD[index] -> PTE base address
-  PTE[index] -> physical frame number + flags
-
-  Physical address = physical_frame * 4096 + offset (12-bit page offset)
-
-TLB hit:   VPN -> PFN in ~1 cycle (< 1 ns)
-TLB miss:  4 DRAM reads ~= 4 * 100ns = 400ns + OS fault handler if page not present
 ```
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    va([Virtual address]) --> tlb{"TLB hit?"}
+    tlb -->|"yes ~1 cycle<br/>under 1ns"| pa([Physical address])
+    tlb -->|"no"| cr3["CR3 register"]
+    cr3 --> pgd["PGD"]
+    pgd --> pud["PUD"]
+    pud --> pmd["PMD"]
+    pmd --> pte["PTE"]
+    pte -->|"400ns total<br/>4 DRAM reads"| pa
+
+    class va,pa io
+    class tlb mathOp
+    class cr3,pgd,pud,pmd,pte base
+```
+*The MMU checks the TLB first (~1 cycle, under 1 ns on a hit); a miss walks all four page-table levels — CR3 -> PGD -> PUD -> PMD -> PTE — costing about 400 ns for the four DRAM reads before the physical address (frame x 4096 + offset) is known.*
 
 ### Page Fault Handling
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    cpu(["CPU accesses<br/>virtual address V"]) --> tlbq{"TLB hit?"}
+    tlbq -->|"yes"| usepfn1(["Use PFN"])
+    tlbq -->|"no"| walk["Page table walk"]
+    walk --> pteq{"PTE present=1?"}
+    pteq -->|"yes"| usepfn2(["Use PFN"])
+    pteq -->|"no"| fault(["PAGE FAULT<br/>exception"])
+
+    subgraph handler["OS fault handler"]
+        direction TB
+        vma{"in process VMA?"}
+        vma -->|"no"| segv(["SIGSEGV"])
+        vma -->|"yes"| src["Find page source<br/>swap / file / zero"]
+        src --> alloc["Allocate physical frame"]
+        alloc --> load["Load page<br/>~100us SSD I/O"]
+        load --> setpte["Set PTE present=1"]
+        setpte --> retry(["Retry instruction"])
+    end
+
+    fault --> vma
+
+    class cpu io
+    class tlbq,pteq,vma mathOp
+    class usepfn1,usepfn2,retry train
+    class fault,segv lossN
+    class walk,src,alloc,load,setpte base
 ```
-CPU accesses virtual address V
-           |
-    +------v-------+
-    | MMU: TLB hit? |
-    +------+-------+
-         / \
-       Yes   No
-        |     |
-      Use PFN  Page table walk
-                 |
-         +-------v--------+
-         | PTE present=1? |
-         +-------+--------+
-               / \
-             Yes   No -> PAGE FAULT EXCEPTION
-              |              |
-           Use PFN    OS fault handler:
-                       1. Is address in process VMA? NO -> SIGSEGV
-                       2. Find page source (swap, file, zero)
-                       3. Allocate physical frame
-                       4. Load page (may require I/O ~100µs on SSD)
-                       5. Set PTE present=1, PFN
-                       6. Return from fault -> retry instruction
-```
+*A TLB miss triggers a page-table walk; if the PTE's present bit is 0, the MMU raises a page-fault exception and the OS handler resolves it in up to six steps — ending in a retried instruction, or a SIGSEGV if the address falls outside any VMA.*
 
 ### LRU Approximation — Clock Algorithm
 
@@ -131,17 +156,40 @@ CPU accesses virtual address V
 State: [A:1, B:1, C:0, D:1, E:0, F:1, G:1, H:0]
        (1 = recently used, 0 = not recently used)
 Clock hand points at C (use-bit=0).
-
-New page X needed: evict from clock hand position.
-  C: use-bit=0 -> EVICT C, load X, set X's use-bit=1
-     After: [..., X:1, D:1, E:0, ...]
-
-If C had use-bit=1:
-  C: use-bit=1 -> clear to 0, advance hand to D
-  D: use-bit=1 -> clear to 0, advance to E
-  E: use-bit=0 -> EVICT E
-  (Clock gives pages a "second chance" before eviction)
 ```
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    need(["Page X needed<br/>evict at hand"]) --> chk{"use-bit at hand?"}
+    chk -->|"0"| evict(["Evict page<br/>load X, use-bit=1"])
+    chk -->|"1"| clear["Clear use-bit to 0<br/>advance hand"]
+    clear --> chk
+
+    class need io
+    class chk mathOp
+    class evict lossN
+    class clear base
+```
+*Starting at C (use-bit 0), the hand evicts immediately; had C's use-bit been 1, the hand would clear C, then D (both use-bit 1), finally evicting E — the "second chance" every page gets before eviction.*
+
+### Memory Access Latency Ladder
+
+```mermaid
+xychart-beta
+    title "Memory Access Latency by Path (log10 ns)"
+    x-axis ["TLB hit (under 1ns)", "TLB miss walk (~400ns)", "Soft fault (~few us)", "Hard fault SSD (~100us)", "Hard fault HDD (~10ms)"]
+    y-axis "log10(latency in ns)" 0 --> 8
+    bar [0, 2.6, 3.5, 5, 7]
+```
+*Latencies span seven orders of magnitude: a TLB hit resolves in about a cycle, a TLB miss adds roughly 400 ns for the page-table walk, and a hard page fault costs ~100 us on SSD or ~10 ms on HDD — the y-axis is log10(ns) so the smallest bar stays visible next to the largest.*
 
 ---
 
@@ -324,6 +372,23 @@ def measure_tlb_impact(size_mb: int = 256, strides: list[int] = None) -> dict[in
 | LRU | Near-optimal | Expensive: needs exact recency order | Rarely (cost prohibitive) |
 | Clock | 5–10% worse than LRU | O(1) amortised | Yes (Linux's inactive/active list) |
 | LFU | Poor for bursty access | O(log n) | No |
+
+```mermaid
+quadrantChart
+    title "Page Replacement: Cost vs Miss Rate"
+    x-axis "Low cost" --> "High cost"
+    y-axis "Low miss rate" --> "High miss rate"
+    quadrant-1 Costly and inaccurate
+    quadrant-2 Cheap but inaccurate
+    quadrant-3 Practical sweet spot
+    quadrant-4 Accurate but expensive
+    OPT: [0.95, 0.05]
+    LRU: [0.8, 0.15]
+    FIFO: [0.1, 0.8]
+    LFU: [0.55, 0.65]
+    Clock: [0.15, 0.25]
+```
+*Clock sits in the practical sweet spot — O(1) amortised cost with a miss rate only 5–10% worse than LRU — while OPT is the unreachable ideal (needs future knowledge) and LRU pays for its near-optimal miss rate with expensive bookkeeping; FIFO and LFU land in the cheap-but-inaccurate zone, which is why Linux ships a Clock variant instead.*
 
 ### Page Size Tradeoffs
 

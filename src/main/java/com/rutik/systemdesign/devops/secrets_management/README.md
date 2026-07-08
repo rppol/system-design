@@ -84,44 +84,100 @@ In Kubernetes specifically, native `Secret` objects are only **base64-encoded (n
 
 ## 5. Architecture Diagrams
 
+**Dynamic secrets with Vault (the front-desk model)**
+
+```mermaid
+sequenceDiagram
+    participant App as App Pod
+    participant Vault as Vault
+    participant DB as Database
+
+    App->>Vault: auth (k8s service account JWT)
+    Vault-->>App: short-lived DB credential (lease TTL 1h)
+    App->>DB: connect using that credential
+    Note over App,DB: every access is audit-logged
+    Vault-->>DB: lease expires, auto-revoke DB user
+    Note over App,DB: nothing long-lived exists to leak
 ```
-Dynamic secrets with Vault (the front-desk model)
 
-  app pod --auth (k8s service account JWT)--> Vault
-       <-- short-lived DB credential (lease TTL 1h) --
-  app connects to DB with that user
-       ... lease expires -> Vault REVOKES the DB user automatically ...
-  (nothing long-lived exists to leak; every access is audit-logged)
+Vault authenticates the pod by its Kubernetes service account, mints a database user unique to that request with a 1-hour lease, and revokes it automatically when the lease ends — the "front-desk" model from Section 2's intuition.
 
+**External Secrets Operator (ESO) in Kubernetes**
 
-External Secrets Operator (ESO) in Kubernetes
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Vault / AWS Secrets Manager  (source of truth, encrypted)
-         ^   pull on refreshInterval (e.g. 1h)
-         |
-  [ External Secrets Operator ]
-         |  writes/refreshes
-         v
-  native K8s Secret  -->  mounted/env into pods
-  Git holds only the ExternalSecret CR (a REFERENCE), never the value
+    git(["Git<br/>ExternalSecret ref only"]) -.->|configures| eso("External Secrets<br/>Operator")
+    src(["Vault / Secrets Manager<br/>source of truth"]) -->|"pull every refreshInterval<br/>e.g. 1h"| eso
+    eso -->|"writes / refreshes"| ks(["native K8s Secret"])
+    ks --> pods(["Pods<br/>mounted / env"])
 
-
-Sealed Secrets vs SOPS (encrypt-then-commit-to-Git)
-
-  Sealed Secrets:  kubeseal --(cluster pub key)--> SealedSecret (ciphertext) -> Git
-                   controller in cluster decrypts with its private key -> Secret
-
-  SOPS:            sops -e secret.yaml --(KMS/age key)--> ciphertext file -> Git
-                   Flux/ArgoCD decrypts at apply time via KMS/age
-
-
-Rotation (zero-downtime, dual-secret window)
-
-  t0: app uses key_v1 ; create key_v2 (both valid)
-  t1: deploy app to use key_v2 ; key_v1 still accepted (overlap window)
-  t2: confirm no traffic on key_v1 -> revoke key_v1
-  (never a moment where the only valid key is one nobody has yet)
+    class git frozen
+    class src base
+    class eso mathOp
+    class ks io
+    class pods req
 ```
+
+Git holds only the `ExternalSecret` reference (never the value); ESO does the actual pull from Vault or a cloud secrets manager on every `refreshInterval` and writes a native K8s Secret that pods mount or read as env vars.
+
+**Sealed Secrets vs SOPS (encrypt-then-commit-to-Git)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SS["Sealed Secrets"]
+        direction LR
+        s1(["plaintext Secret"]) --> s2("kubeseal<br/>cluster pub key") --> s3(["SealedSecret<br/>ciphertext"]) --> s4(["Git"])
+        s4 --> s5("in-cluster controller<br/>decrypts with priv key") --> s6(["Secret in cluster"])
+    end
+
+    subgraph SO["SOPS"]
+        direction LR
+        o1(["secret.yaml"]) --> o2("sops -e<br/>KMS / age key") --> o3(["ciphertext file"]) --> o4(["Git"])
+        o4 --> o5("Flux / ArgoCD<br/>decrypts at apply") --> o6(["plaintext at apply"])
+    end
+
+    class s1,s6,o1,o6 io
+    class s2,o2 mathOp
+    class s3,o3 frozen
+    class s4,o4 base
+    class s5,o5 train
+```
+
+Both patterns let ciphertext live safely in Git and differ only in who decrypts it — a cluster-local controller for Sealed Secrets, or Flux/ArgoCD via KMS/age for SOPS — unlike ESO above, which never commits the value at all.
+
+**Rotation (zero-downtime, dual-secret window)**
+
+```mermaid
+stateDiagram-v2
+    [*] --> KeyV1Only
+
+    KeyV1Only --> Overlap: t0 - create key_v2, both valid
+    Overlap --> Overlap: t1 - deploy app to key_v2
+    Overlap --> KeyV2Only: t2 - confirm zero traffic, revoke key_v1
+
+    note right of Overlap
+        never a moment where the only
+        valid key is one nobody has yet
+    end note
+```
+
+The overlap state is the whole trick: key_v2 is provisioned and traffic migrates to it *before* key_v1 is revoked, so there is never a gap where the only valid key is one no client holds yet.
 
 ---
 
@@ -249,6 +305,34 @@ aws secretsmanager rotate-secret --secret-id prod/app/db \
 ## 9. When to Use / When NOT to Use
 
 **Use a dedicated secrets manager when:** you have any production credentials at all — which is essentially always. Use **Vault** when you want dynamic secrets, PKI, transit encryption, or multi-cloud and can run it; use a **cloud-native manager** (AWS Secrets Manager/GCP/Azure) when you're single-cloud and want managed rotation with minimal ops. In Kubernetes, use **ESO** as the default (references in Git, values in the backend), **Sealed Secrets/SOPS** when you must keep everything in Git for GitOps.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Choose a secrets<br/>architecture"]) --> d1{"Need dynamic secrets,<br/>PKI, or multi-cloud?"}
+    d1 -->|"yes, can operate it"| vault("HashiCorp Vault")
+    d1 -->|"no, single-cloud"| cloudmgr("Cloud-native manager<br/>AWS / GCP / Azure")
+
+    vault --> d2{"Kubernetes: must the<br/>secret live in Git?"}
+    cloudmgr --> d2
+    d2 -->|"yes (GitOps)"| gitenc("Sealed Secrets / SOPS<br/>ciphertext in Git")
+    d2 -->|"no"| eso("External Secrets Operator<br/>reference only in Git")
+
+    class start io
+    class d1,d2 mathOp
+    class vault,cloudmgr base
+    class gitenc frozen
+    class eso req
+```
+
+The backend choice (Vault vs. a cloud-native manager) and the Kubernetes delivery choice (ESO vs. Sealed Secrets/SOPS) are two independent decisions; chaining them into one path turns the "which tool" question into a lookup instead of a re-read of the prose above.
 
 **Reconsider when:** for a hobby project, a cloud manager or even encrypted local config may suffice over running Vault (which has real operational cost — unsealing, HA, storage backend). Don't put *non-secret* config in a secrets manager — that's [configuration_management](../configuration_management/) / app config. And never use native Kubernetes Secrets *alone* for sensitive data without etcd encryption-at-rest enabled, since they're only base64-encoded by default.
 
@@ -429,6 +513,16 @@ spec:
 The AWS access keys are deleted entirely — pods authenticate to AWS via IRSA (an IAM role bound to the service account), so there's no key to scrape. The shared DB password is replaced by Vault dynamic credentials: each service gets a unique, 1-hour Postgres user, so "rotation" happens continuously and automatically, and a leaked credential auto-expires. Git holds only references, and every secret read is audit-logged in Vault.
 
 **Outcome:** the leaked-key class of incident became impossible (no static AWS keys exist), the 12-way rotation problem evaporated (per-service dynamic creds rotate automatically every hour), and a compromised pod now leaks only a near-worthless 1-hour credential that Vault revokes. Secret scanning (`gitleaks`) was added as a required CI gate so a hardcoded credential can't merge again, and the team set up alerts on anomalous secret-access patterns in the Vault audit log.
+
+```mermaid
+xychart-beta
+    title "Services exposed by one leaked credential"
+    x-axis ["Static shared password (before)", "Vault dynamic credential (after)"]
+    y-axis "Services exposed" 0 --> 14
+    bar [12, 1]
+```
+
+The fix shrank the blast radius twelvefold: the old shared password compromised all 12 services that used it, while a leaked Vault dynamic credential exposes only the one service that requested it, and self-revokes within its 1-hour lease.
 
 **Discussion questions:**
 1. Why does replacing static AWS keys with IRSA eliminate the scraped-key attack entirely, rather than just reducing its likelihood?

@@ -163,108 +163,89 @@ Backend-agnostic async library. Runs on top of `asyncio` or `trio`. Provides `Ta
 
 ### Event Loop Main Loop
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["asyncio.run(main())"]) --> Create("Create loop<br/>run_until_complete(main)")
+    Create --> S1
+
+    subgraph Iteration["each iteration, ~5-50 µs on idle"]
+        S1("1. epoll_wait<br/>collect ready I/O events") --> S2("2. resolve Futures<br/>schedule callbacks on _ready")
+        S2 --> S3("3. run _ready callbacks<br/>Task.__step drives coro.send")
+        S3 --> S4("4. run expired timers<br/>call_later callbacks")
+    end
+
+    S4 -.->|"repeat"| S1
+    S4 -->|"no tasks remain"| Done(["loop exits"])
+
+    class Start,Done io
+    class Create base
+    class S1 req
+    class S2,S4 mathOp
+    class S3 train
 ```
-asyncio.run(main())
-       |
-       v
-+------------------+
-|  Create loop     |
-|  loop.run_until_ |
-|  complete(main)  |
-+------------------+
-       |
-       v  (each iteration, ~5-50 µs on idle)
-+----------------------------------------------+
-|                                              |
-|  1. epoll_wait(timeout=next_timer_delta)     |
-|     Collect ready I/O events                 |
-|                                              |
-|  2. For each I/O event:                      |
-|       resolve attached Future               |
-|       schedule its callbacks on _ready      |
-|                                              |
-|  3. Run all callbacks in _ready queue:       |
-|       Task.__step() -> coro.send(None)      |
-|       coro runs until next `await`           |
-|       if coro yields Future: register cb    |
-|       if coro returns: resolve Task         |
-|                                              |
-|  4. Run expired timers (call_later)          |
-|                                              |
-+----------------------------------------------+
-       |
-       v
-  repeat until no tasks remain
-```
+*Each iteration polls for ready I/O, resolves and runs the `_ready` callback queue, then fires expired timers before looping back — roughly 5–50 µs per cycle on an idle loop.*
 
 ### Coroutine State Machine
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> PENDING: asyncio.create_task(coro)
+    PENDING --> RUNNING: loop calls task.__step()
+    RUNNING --> SUSPENDED: awaits a<br/>pending Future
+    RUNNING --> DONE: returns value<br/>or raises
+    SUSPENDED --> RUNNING: future resolves<br/>(I/O ready or timer)
+    RUNNING --> CANCELLED: task.cancel() injects<br/>CancelledError at next<br/>suspension point
+    DONE --> [*]
+    CANCELLED --> [*]
+
+    class PENDING base
+    class RUNNING train
+    class SUSPENDED req
+    class DONE io
+    class CANCELLED lossN
 ```
-              asyncio.create_task(coro)
-                        |
-                        v
-              +-------------------+
-              |    PENDING        |  <-- Task created, not yet started
-              +-------------------+
-                        |
-              loop calls task.__step()
-                        |
-                        v
-              +-------------------+
-              |    RUNNING        |  <-- coro.send(None) executing
-              +-------------------+
-               /                 \
-   hits `await future`          returns value
-   (future not done)            or raises
-              |                    |
-              v                    v
-  +-------------------+  +-------------------+
-  |   SUSPENDED       |  |   DONE            |
-  | (yielded Future   |  | result or         |
-  |  to event loop)   |  | exception stored  |
-  +-------------------+  +-------------------+
-              |
-    future resolves
-    (I/O ready, timer)
-              |
-              v
-         RUNNING again
-              |
-    task.cancel() called
-              |
-    CancelledError injected
-    at next suspension point
-              |
-              v
-  +-------------------+
-  |   CANCELLED       |
-  +-------------------+
-```
+*A Task starts PENDING, moves to RUNNING once the loop drives it, and oscillates between RUNNING and SUSPENDED on every `await` until it reaches the terminal DONE or CANCELLED state.*
 
 ### TaskGroup Error Propagation
 
+```mermaid
+sequenceDiagram
+    participant TG as TaskGroup
+    participant A as Task A
+    participant B as Task B
+    participant C as Task C
+
+    TG->>A: create_task(task_A)
+    TG->>B: create_task(task_B)
+    TG->>C: create_task(task_C)
+    Note over A,C: all three running concurrently
+
+    B-->>TG: raises ValueError
+    Note over TG: notices the failure
+
+    TG->>A: cancel()
+    TG->>C: cancel()
+    Note over A,C: run cleanup, then finish
+
+    Note over TG: raises ExceptionGroup with<br/>all errors, at the async with exit
 ```
-async with asyncio.TaskGroup() as tg:
-    tg.create_task(task_A)   ----+
-    tg.create_task(task_B)   ----|--+
-    tg.create_task(task_C)   ----|--|--+
-                                 |  |  |
-            task_B raises -------+  |  |
-            ValueError             |  |
-                 |                 |  |
-                 v                 |  |
-   TaskGroup notices failure       |  |
-                 |                 |  |
-   task_A.cancel() <---------------+  |
-   task_C.cancel() <------------------+
-                 |
-   waits for A, C to finish cleanup
-                 |
-                 v
-   ExceptionGroup("unhandled errors in task group",
-       [ValueError(...)])
-   raised at the `async with` exit point
-```
+*When Task B raises, the TaskGroup cancels its siblings A and C, waits for their cleanup, then re-raises everything together as a single ExceptionGroup at the `async with` exit.*
 
 ---
 
@@ -690,6 +671,36 @@ For blocking CPU work use `asyncio.to_thread(fn, *args)` (3.9+) which internally
 ---
 
 ### Pitfall 2: Swallowing CancelledError
+
+`CancelledError` sits directly under `BaseException` as a sibling of `Exception`, not a subclass of
+it — this one fact is why a bare `except Exception` looks safe but `except BaseException` is not:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Root("BaseException") --> Exc("Exception<br/>ValueError, ConnectError, ...")
+    Root --> Canc("CancelledError")
+
+    Exc -->|"except Exception:"| Caught(["caught<br/>handled normally"])
+    Canc -.->|"except Exception:<br/>no match, propagates"| Safe(["Task stays<br/>cancellable"])
+    Canc -->|"except BaseException:<br/>matches too"| Swallowed(["silently swallowed<br/>Task never cancels"])
+
+    class Root base
+    class Exc mathOp
+    class Canc lossN
+    class Caught,Safe train
+    class Swallowed lossN
+```
+*`download_broken`'s bare `except Exception` correctly lets `CancelledError` propagate, but
+`download_broken_v2`'s `except BaseException` catches it too — silently swallowing the
+cancellation and leaving the Task permanently hung.*
 
 ```python
 # BROKEN: bare `except Exception` catches CancelledError in Python < 3.8
@@ -1197,6 +1208,40 @@ for r in results:
     status = r.body if r.body else f"ERR({r.error})"
     print(f"  {r.url[-10:]} → {status}")
 ```
+
+The winning shape gates all ten calls through one semaphore, keeps every worker inside a single
+structured-concurrency scope, and lets one outer deadline cut the whole batch short:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Urls(["10 supplier URLs"]) --> Sem{"Semaphore(3)<br/>gate"}
+
+    subgraph Scope["asyncio.timeout(2.0s) wraps TaskGroup scope"]
+        Sem --> W1("fetch_one<br/>worker")
+        Sem --> W2("fetch_one<br/>worker")
+        Sem --> W3("fetch_one<br/>worker")
+    end
+
+    W1 --> Res(["FetchResult list<br/>~4.0s full · ~2.0s w/ timeout"])
+    W2 --> Res
+    W3 --> Res
+
+    class Urls io
+    class Sem mathOp
+    class W1,W2,W3 train
+    class Res io
+```
+*Ten calls funnel through a `Semaphore(3)` gate, run as `fetch_one` workers inside a `TaskGroup`
+bounded by a 2-second `asyncio.timeout`, and the caller always gets back whatever `FetchResult`s
+finished in time.*
 
 **Performance summary:**
 

@@ -61,88 +61,138 @@ HTTP/1.1 added persistent connections and chunked transfer but remained fundamen
 
 ### HTTP/1.1 vs HTTP/2 Multiplexing
 
-```
-HTTP/1.1 (6 parallel connections per browser):
-  Conn 1: [Req1]---[Resp1]---[Req4]---[Resp4]
-  Conn 2: [Req2]---[Resp2]---[Req5]---[Resp5]
-  Conn 3: [Req3]---[Resp3]---[Req6]---[Resp6]
-  Wasted: head-of-line per connection; 6 TCP handshakes; 6 TLS handshakes
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
 
-HTTP/2 (1 connection, many streams):
-  Connection: -------------------------------------------->
-  Stream 1:   [Req1 H]----[Req1 D]     [Resp1 H][Resp1 D]
-  Stream 2:       [Req2 H][Req2 D] [Resp2 H][Resp2 D]
-  Stream 3:           [Req3 H][Req3 D]     [Resp3 H][Resp3 D]
-  (H=HEADERS frame, D=DATA frame; all interleaved on one TCP)
-  1 TCP handshake, 1 TLS handshake, better congestion window ramp-up
+    Note over C,S: HTTP/1.1 — 6 parallel TCP connections, serial per connection
+    par Connection 1
+        C->>S: Req1
+        S-->>C: Resp1
+        C->>S: Req4
+        S-->>C: Resp4
+    and Connection 2
+        C->>S: Req2
+        S-->>C: Resp2
+        C->>S: Req5
+        S-->>C: Resp5
+    and Connection 3
+        C->>S: Req3
+        S-->>C: Resp3
+        C->>S: Req6
+        S-->>C: Resp6
+    end
+    Note over C,S: Wasted — HoL blocking per connection, 6 TCP + 6 TLS handshakes
+
+    Note over C,S: HTTP/2 — 1 connection, streams interleaved
+    par Stream 1
+        C->>S: HEADERS + DATA (Req1)
+        S-->>C: HEADERS + DATA (Resp1)
+    and Stream 2
+        C->>S: HEADERS + DATA (Req2)
+        S-->>C: HEADERS + DATA (Resp2)
+    and Stream 3
+        C->>S: HEADERS + DATA (Req3)
+        S-->>C: HEADERS + DATA (Resp3)
+    end
+    Note over C,S: 1 TCP + 1 TLS handshake, better congestion window ramp-up
 ```
+
+HTTP/1.1 buys parallelism with six separate serial connections; HTTP/2 gets the same three-way concurrency from interleaved streams on a single connection — the multiplexing win described in Section 2, at the cost of sharing one TCP path.
 
 ### TLS 1.2 vs TLS 1.3 Handshake
 
-```
-TLS 1.2 (2 RTTs):
-  Client                    Server
-    |-- ClientHello -------->|  RTT 1
-    |<-- ServerHello --------|
-    |<-- Certificate --------|
-    |<-- ServerKeyExchange --|
-    |<-- ServerHelloDone ----|
-    |-- ClientKeyExchange -->|  RTT 2
-    |-- ChangeCipherSpec --->|
-    |-- Finished ----------->|
-    |<-- ChangeCipherSpec ---|
-    |<-- Finished -----------|
-    |==== Application Data ==|  Data after 2 RTTs
+**TLS 1.2 (2 RTTs):**
 
-TLS 1.3 (1 RTT):
-  Client                    Server
-    |-- ClientHello -------->|  RTT 1
-    |   (+ key_share,        |
-    |     supported_versions)|
-    |<-- ServerHello --------|
-    |<-- EncryptedExtensions-|
-    |<-- Certificate --------|
-    |<-- CertificateVerify --|
-    |<-- Finished -----------|
-    |-- Finished ----------->|
-    |==== Application Data ==|  Data after 1 RTT
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
 
-TLS 1.3 Session Resumption (0-RTT):
-    |-- ClientHello -------->|
-    |   (+ early_data,       |
-    |     session ticket)    |
-    |==== 0-RTT AppData ====>|  Data in first packet (replay risk)
-    |<-- ServerHello --------|
-    |<-- Finished -----------|
-    |-- Finished ----------->|
+    C->>S: ClientHello
+    Note right of C: RTT 1
+    S-->>C: ServerHello
+    S-->>C: Certificate
+    S-->>C: ServerKeyExchange
+    S-->>C: ServerHelloDone
+    C->>S: ClientKeyExchange
+    Note right of C: RTT 2
+    C->>S: ChangeCipherSpec
+    C->>S: Finished
+    S-->>C: ChangeCipherSpec
+    S-->>C: Finished
+    Note over C,S: Application Data — after 2 RTTs
 ```
+
+**TLS 1.3 (1 RTT):**
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: ClientHello<br/>+ key_share, supported_versions
+    Note right of C: RTT 1
+    S-->>C: ServerHello
+    S-->>C: EncryptedExtensions
+    S-->>C: Certificate
+    S-->>C: CertificateVerify
+    S-->>C: Finished
+    C->>S: Finished
+    Note over C,S: Application Data — after 1 RTT
+```
+
+**TLS 1.3 Session Resumption (0-RTT):**
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: ClientHello<br/>+ early_data, session ticket
+    C->>S: 0-RTT Application Data
+    Note right of C: Data in first packet<br/>replay risk
+    S-->>C: ServerHello
+    S-->>C: Finished
+    C->>S: Finished
+```
+
+TLS 1.3 collapses the handshake from 2 RTTs to 1 by folding the key exchange into the first ClientHello/ServerHello pair, and 0-RTT resumption skips the round trip entirely by replaying a prior session's key — at the cost of replay exposure for that first flight of data.
 
 ### HPACK Header Compression (HTTP/2)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph v1["HTTP/1.1 — every request"]
+        a1(["Full header set<br/>Host, Accept, Authorization..."]) --> a2("Send uncompressed")
+        a2 --> a3(["400-800 bytes<br/>on the wire"])
+    end
+
+    subgraph v2["HTTP/2 — HPACK"]
+        b1(["Request 1 headers"]) --> b2[("Static table<br/>61 predefined pairs")]
+        b2 --> b3[("Dynamic table<br/>store new values")]
+        b3 --> b4(["Request 1 on wire<br/>full headers"])
+        b5(["Request 2..N headers<br/>mostly unchanged"]) --> b6[("Dynamic table<br/>index lookup")]
+        b6 --> b7(["Request 2..N on wire<br/>30-50 bytes"])
+    end
+
+    class a1,b1,b5 io
+    class a2 mathOp
+    class a3 lossN
+    class b2,b3,b6 base
+    class b4,b7 train
 ```
-HTTP/1.1 headers (sent every request, uncompressed):
-  GET /api/users HTTP/1.1
-  Host: api.example.com
-  Accept: application/json
-  Authorization: Bearer eyJhbGciOiJSUzI1...
-  Content-Type: application/json
-  User-Agent: MyApp/1.0
-  (headers: 400-800 bytes per request)
 
-HTTP/2 HPACK:
-  Static table: 61 predefined header name/value pairs
-    Index 2: :method: GET
-    Index 7: :scheme: https
-    Index 1: :authority (name only)
-    ...
-
-  Dynamic table: per-connection growing table of recently sent headers
-    First request: send all headers, add to dynamic table
-    Subsequent requests: send only changed headers as index references
-    Authorization header: send once, then reference by index (2 bytes)
-
-Result: requests 2-N send 30-50 bytes instead of 400-800 bytes
-```
+HPACK's dynamic table turns the Authorization header into a one-time cost: sent in full on request 1 and added to the table, then referenced by a 2-byte index on every request after — cutting header bytes from 400-800 down to 30-50.
 
 ---
 
@@ -176,6 +226,34 @@ Key frames:
 - **WINDOW_UPDATE**: flow control — increases available window
 - **RST_STREAM**: aborts a stream without closing connection
 - **GOAWAY**: graceful shutdown — in-flight streams can complete; no new streams accepted
+
+The frame types above drive a per-stream state machine (the 8-bit Flags field carries the END_STREAM flag that moves a stream toward closed):
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Idle
+    Idle --> Open: HEADERS frame
+    Open --> HalfClosed: END_STREAM flag<br/>this side finished
+    HalfClosed --> Closed: END_STREAM flag<br/>other side finished
+    Open --> Closed: RST_STREAM<br/>abort, connection stays up
+    HalfClosed --> Closed: RST_STREAM
+    Closed --> [*]
+
+    class Idle req
+    class Open train
+    class HalfClosed mathOp
+    class Closed lossN
+```
+
+A stream moves Idle to Open on the first HEADERS frame, to HalfClosed once one side sends its END_STREAM flag, and to Closed when both sides finish — or straight to Closed via RST_STREAM, which aborts only that one stream while the TCP connection stays up for every other stream on it.
 
 ### 6.2 HTTP Caching Headers
 
@@ -212,24 +290,55 @@ Vary: Accept-Encoding
 # Browser requesting gzip gets a different cache entry than one requesting br
 ```
 
+Picking the right directive follows a strict precedence — sensitivity rules out storage entirely, mandatory revalidation skips straight to `no-cache`, and only genuinely cacheable responses get to choose a duration and audience:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"Response holds<br/>sensitive data?"} -->|"yes"| nostore(["no-store"])
+    start -->|"no"| revalidate{"Must always<br/>revalidate first?"}
+    revalidate -->|"yes"| nocache(["no-cache"])
+    revalidate -->|"no"| stale{"OK to serve stale<br/>while revalidating?"}
+    stale -->|"yes"| swr(["stale-while-revalidate=N"])
+    stale -->|"no"| shared{"Shared by<br/>CDNs/proxies?"}
+    shared -->|"yes"| pub(["public, max-age=N,<br/>s-maxage=N"])
+    shared -->|"no"| priv(["private, max-age=N"])
+
+    class start,revalidate,stale,shared mathOp
+    class nostore lossN
+    class nocache frozen
+    class swr train
+    class pub base
+    class priv io
+```
+
+`no-store` is reserved for genuinely sensitive data (bank statements); `no-cache` stores but forces revalidation; everything else is a tradeoff between freshness (`max-age`/`stale-while-revalidate`) and audience (`public`+`s-maxage` for CDNs vs `private` for the browser only).
+
 ### 6.3 ALPN and SNI
 
 ALPN (Application-Layer Protocol Negotiation) is a TLS extension that allows the client to advertise supported application protocols during the TLS ClientHello. The server selects the best match. This enables HTTPS to negotiate HTTP/1.1 vs HTTP/2 vs HTTP/3 in a single TLS handshake.
 
-```
-ClientHello extensions:
-  server_name: api.example.com   (SNI — Server Name Indication)
-  application_layer_protocol_negotiation: ["h2", "http/1.1"]
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
 
-ServerHello extension:
-  application_layer_protocol_negotiation: "h2"
-  -> Connection will use HTTP/2
+    C->>S: ClientHello<br/>SNI = api.example.com<br/>ALPN offers h2, http/1.1
+    Note over S: Picks protocol + certificate<br/>by SNI hostname
+    S-->>C: ServerHello<br/>ALPN selects h2
+    Note over C,S: Connection proceeds over HTTP/2
 
-SNI allows a single server to host multiple TLS certificates:
-  api.example.com  -> certificate A
-  app.example.com  -> certificate B
-  Same IP address, different certificates selected by SNI
+    Note over S: SNI routing (same IP, many certs)<br/>api.example.com to Certificate A<br/>app.example.com to Certificate B
 ```
+
+Both fields travel in the same ClientHello/ServerHello pair — ALPN settles the protocol version, SNI lets the server pick which certificate to present — before either side has exchanged a single encrypted byte.
 
 ### 6.4 HSTS (HTTP Strict Transport Security)
 

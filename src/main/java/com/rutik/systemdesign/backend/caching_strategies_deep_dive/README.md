@@ -87,88 +87,107 @@ For most caches: `allkeys-lru` or `allkeys-lfu`. LFU is better for workloads whe
 
 ### Cache Patterns Comparison
 
+```mermaid
+sequenceDiagram
+    participant Cl as Client
+    participant App as App
+    participant Ca as Cache
+    participant DB as DB
+
+    Note over App,DB: Cache-Aside — application controls every step
+    App->>Ca: GET item:123
+    Ca-->>App: miss
+    App->>DB: SELECT * FROM items WHERE id=123
+    App->>Ca: SET item:123 (data) EX 300
+    App->>Cl: return data
+    Note over App,Ca: Invalidation on update
+    App->>DB: UPDATE items ...
+    App->>Ca: DEL item:123
+
+    Note over App,DB: Read-Through — cache handles the miss itself
+    App->>Ca: GET item:123
+    Ca->>DB: fetch item:123 (on miss)
+    DB-->>Ca: row data
+    Ca->>Ca: store internally
+    Ca-->>App: return data
+
+    Note over App,DB: Write-Through — synchronous, atomic
+    App->>Ca: SET item:123 (new value)
+    Ca->>DB: UPDATE items ... (sync)
+    DB-->>Ca: ack
+
+    Note over App,DB: Write-Behind — async, batched
+    App->>Ca: SET item:123 (new value)
+    Ca-->>App: ack (immediate)
+    Ca-->>DB: UPDATE items ... (async, batched)
 ```
-CACHE-ASIDE (Application controls all):
-  App -> Cache: GET item:123
-  Cache miss
-  App -> DB: SELECT * FROM items WHERE id=123
-  App -> Cache: SET item:123 <data> EX 300
-  App -> Client: return data
 
-  Invalidation on update:
-  App -> DB: UPDATE items ...
-  App -> Cache: DEL item:123
-
-READ-THROUGH (Cache handles miss):
-  App -> Cache: GET item:123
-  Cache miss -> Cache -> DB: fetch item:123
-  Cache -> Cache: store internally
-  Cache -> App: return data
-
-  (Application never calls DB directly)
-
-WRITE-THROUGH:
-  App -> Cache: SET item:123 <new data>
-  Cache -> DB: UPDATE items ...  (synchronously)
-  Both updated atomically
-
-WRITE-BEHIND:
-  App -> Cache: SET item:123 <new data>
-  Return immediately
-  [Background] Cache -> DB: UPDATE items ... (async, batched)
-  Risk: crash before flush = data loss
-```
+All four patterns funnel through the same three participants — only who calls whom, and when, changes. Write-behind is the only pattern that acknowledges the client before the database write commits, which is exactly where its data-loss-on-crash risk comes from.
 
 ### Cache Stampede Prevention
 
+**The problem — thundering herd:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Expire(["Popular item<br/>expires, T=0"]) --> Burst("1000 concurrent<br/>requests arrive")
+    Burst --> Check{"Cache<br/>lookup"}
+    Check -->|"miss ×1000"| Hammer("All query DB<br/>simultaneously")
+    Hammer --> Overload("DB overwhelmed,<br/>queries fail")
+    Overload -.->|"cache still empty,<br/>repeat"| Burst
+
+    class Expire,Check mathOp
+    class Burst req
+    class Hammer,Overload lossN
 ```
-Problem:
-  Popular item expires at T=0
-  1000 concurrent requests at T=0
-  All 1000 get cache miss
-  All 1000 query DB simultaneously → thundering herd
-  DB overwhelmed, many fail → cache still empty → repeat
 
-Solution 1: Mutex/Lock
-  On miss: try to acquire distributed lock (Redis SETNX)
-  Winner: fetches from DB, populates cache, releases lock
-  Losers: wait for lock, then read from cache
+All 1,000 requests land inside the same expiry instant, so every one of them checks the cache before any single request can refill it — the resulting database overload feeds back into the same still-empty cache, repeating the cycle until something breaks it.
 
-  while (cache.get(key) == null) {
-    if (tryAcquireLock("lock:" + key, 5s)) {
-      // double-check after acquiring lock
-      data = cache.get(key);
-      if (data == null) {
-        data = db.fetch(key);
-        cache.set(key, data, TTL=300s);
-      }
-      releaseLock("lock:" + key);
-      return data;
-    }
-    sleep(10ms); // wait for winner
-  }
+**Three prevention strategies:**
 
-Solution 2: Probabilistic Early Expiry (XFetch)
-  Before TTL expires, randomly decide to refresh:
-  remaining = ttl - current_age
-  if (-beta * delta * ln(random())) > remaining:
-    refresh from DB now (proactive, no stampede)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  beta = tuning factor (default 1.0)
-  delta = time to recompute (measured)
-  random() = uniform [0,1)
+    Miss(["Popular item<br/>cache miss"]) --> Pick{"Prevention<br/>strategy"}
 
-  Items with expensive computation trigger early refresh more often.
-  Multiple requests seeing the item still valid return cached value.
-  Only ONE request (the first to win the early refresh lottery) refreshes.
+    Pick -->|"Mutex Lock"| Lock{"SETNX<br/>acquire lock"}
+    Lock -->|"winner"| Fetch("Fetch DB,<br/>populate cache")
+    Lock -->|"loser"| Wait("Wait 10ms,<br/>retry")
+    Wait -.-> Lock
+    Fetch --> Return(["Return data"])
 
-Solution 3: Stale-While-Revalidate
-  Return stale value immediately
-  Trigger background refresh
-  Client gets fast (stale) response
-  Next request gets fresh value
-  Requires: knowing when item is "stale but serving"
+    Pick -->|"XFetch"| Formula{"-β·δ·ln(random)<br/>over remaining TTL?"}
+    Formula -->|"yes, 1 winner"| Refresh("Refresh DB<br/>proactively")
+    Formula -->|"no"| Cached(["Return cached<br/>value"])
+    Refresh --> Return
+
+    Pick -->|"Stale-While-<br/>Revalidate"| Stale(["Return stale<br/>value now"])
+    Stale --> BG("Trigger background<br/>refresh")
+    BG --> Return
+
+    class Miss lossN
+    class Pick,Lock,Formula mathOp
+    class Fetch,Refresh,BG train
+    class Wait frozen
+    class Return,Cached,Stale io
 ```
+
+All three strategies intercept the same cache-miss moment but resolve the contention differently: the mutex lock guarantees exactly one winner while losers wait and retry, XFetch avoids locking altogether by making the refresh probabilistic as expiry nears, and stale-while-revalidate skips waiting entirely by serving the old value while a refresh runs in the background.
 
 ---
 
@@ -336,17 +355,32 @@ public String getWithStampedeProtection(String key) {
 
 ### 6.4 Cache Invalidation with CDC (Change Data Capture)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    wal[("PostgreSQL<br/>WAL")] --> deb("Debezium<br/>connector")
+    deb --> topic(["Kafka topic<br/>db.changes"])
+    topic --> svc("Cache Invalidation<br/>Service (consumer)")
+    svc -->|"map row change<br/>to cache key"| act{"Delete or<br/>update entry"}
+    act --> cache[("Redis<br/>cache")]
+
+    class wal frozen
+    class deb mathOp
+    class topic req
+    class svc,act mathOp
+    class cache base
 ```
-Architecture:
-  PostgreSQL WAL → Debezium → Kafka topic: db.changes
-  Cache Invalidation Service (consumer):
-    - Reads Kafka messages for changed rows
-    - Maps row changes to cache keys
-    - Deletes or updates cache entries
 
-  No application code needed for cache invalidation
-  All writes automatically propagate to cache invalidation
+Debezium tails the WAL so no application write path ever has to remember to invalidate the cache — every row change flows through Kafka to the invalidation service, which maps it to a cache key and deletes or updates the entry.
 
+```
 Configuration (Debezium):
   database.server.name: "myapp"
   table.include.list: "public.products,public.users"
@@ -385,6 +419,23 @@ Cache invalidation service:
 | Read-through | Eventual | Good (cache populates on miss) | Medium |
 | Write-through | Strong | Lower (extra cache write per DB write) | Medium |
 | Write-behind | Eventual | Best for writes | High (data loss risk) |
+
+```mermaid
+quadrantChart
+    title Cache Population Strategy: Performance vs Consistency
+    x-axis Low Performance --> High Performance
+    y-axis Low Consistency --> High Consistency
+    quadrant-1 Fast and safe
+    quadrant-2 Safe but slow
+    quadrant-3 Fragile
+    quadrant-4 Fast but stale
+    Cache-aside: [0.85, 0.35]
+    Read-through: [0.65, 0.4]
+    Write-through: [0.25, 0.85]
+    Write-behind: [0.9, 0.2]
+```
+
+None of the four strategies lands in the "fast and safe" quadrant — every real option pays for speed with staleness (cache-aside, read-through, write-behind) or pays for consistency with an extra synchronous write (write-through). Write-behind sits furthest into "fast but stale" because a crash before flush loses data outright, not just serves a stale read.
 
 | Cache Tier | Latency | Capacity | Shared |
 |-----------|---------|---------|--------|
@@ -536,3 +587,13 @@ public void refreshHotUserRecommendations() {
 ```
 
 **Final state**: Cache hit rate: 97%. DB CPU: 8%. Cold start from deployment: 2 minutes to warm top users, then normal traffic routed. Zero cascade failures in subsequent deployments.
+
+```mermaid
+xychart-beta
+    title "Case Study: Database CPU Across the Incident"
+    x-axis ["No cache", "Cache-aside, 60s TTL", "Cold-deploy stampede", "Warming + lock + SWR"]
+    y-axis "DB CPU %" 0 --> 100
+    bar [95, 10, 100, 8]
+```
+
+The cache-aside rollout alone cut DB CPU from 95% to 10%, but a cold deploy with no stampede protection spiked it right back to 100% — only after adding cache warming, the mutex lock, and stale-while-revalidate did the fix hold at 8% through every subsequent deployment.

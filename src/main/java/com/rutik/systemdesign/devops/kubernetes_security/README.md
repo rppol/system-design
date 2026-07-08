@@ -62,6 +62,41 @@ Kubernetes security spans the request lifecycle and the workload runtime:
 
 Subjects: users, groups (from the authenticator), and ServiceAccounts.
 
+**RBAC object relationships**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subj(["Subject<br/>user / group / SA"])
+    rb{"RoleBinding<br/>namespace-scoped"}
+    crb{"ClusterRoleBinding<br/>cluster-scoped"}
+    role["Role<br/>perms in 1 namespace"]
+    crole["ClusterRole<br/>perms cluster-wide"]
+    danger(["blast radius<br/>= whole cluster"])
+
+    subj --> rb
+    subj --> crb
+    rb --> role
+    rb -.->|"may bind a ClusterRole<br/>stays namespace-scoped"| crole
+    crb --> crole
+    crb -.->|"e.g. cluster-admin"| danger
+
+    class subj io
+    class rb,crb mathOp
+    class role base
+    class crole frozen
+    class danger lossN
+```
+
+Subject → RoleBinding → Role stays namespace-scoped even when the RoleBinding points at a ClusterRole; only a ClusterRoleBinding grants cluster-wide reach, which is why binding it to `cluster-admin` (Pitfall 1, §10) hands over the whole cluster.
+
 ### Pod Security Standards (replaced PodSecurityPolicy)
 
 | Profile | Allows | Use |
@@ -88,34 +123,62 @@ Enforced per namespace via labels (`pod-security.kubernetes.io/enforce: restrict
 
 ## 5. Architecture Diagrams
 
+**API request security pipeline** (every kubectl/Pod API call): authentication and RBAC gate the request before mutating and validating admission run; only a passing request is persisted to etcd.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reqIn(["request + credential"]) --> authn{"Authentication<br/>cert / OIDC / SA token"}
+    authn -->|"fail"| e401(["401 Unauthorized"])
+    authn -->|"ok"| authz{"Authorization RBAC<br/>allowed verb on resource?"}
+    authz -->|"fail"| e403(["403 Forbidden"])
+    authz -->|"ok"| mut("Admission: Mutating<br/>inject / default")
+    mut --> val{"Admission: Validating<br/>Gatekeeper / Kyverno / PSA"}
+    val -->|"fail"| erej(["Rejected"])
+    val -->|"ok"| etcd[("etcd")]
+
+    class reqIn io
+    class authn,authz,val mathOp
+    class e401,e403,erej lossN
+    class mut train
+    class etcd base
 ```
-The API request security pipeline (every kubectl/Pod API call)
 
-  request + credential
-     |
-     v
-  [Authentication]  -> who? (client cert / OIDC / SA token)  -- fail -> 401
-     |
-     v
-  [Authorization (RBAC)] -> allowed verb on resource?  -- fail -> 403
-     |
-     v
-  [Admission: Mutating]  -> inject/default (sidecars, securityContext defaults)
-     |
-  [Admission: Validating] -> policy check (Gatekeeper/Kyverno/PSA)  -- fail -> rejected
-     |
-     v
-  persisted to etcd
+A failure at any gate short-circuits the request — 401, 403, or an admission rejection — before it ever reaches etcd.
 
-Blast-radius minimization (assume the container is popped)
+**Blast-radius minimization** (assume the container is popped): each hardening control blocks one specific escalation path, so a single compromised container never becomes a cluster-wide breach.
 
-  compromised container
-     | runAsNonRoot + drop ALL caps + readOnlyRootFS  -> limited local damage
-     | no SA token auto-mounted (or least-priv RBAC)  -> can't query/modify cluster
-     | NetworkPolicy default-deny                      -> can't pivot to other Pods
-     | Secrets encrypted + tight RBAC                  -> can't read others' secrets
-     -> breach contained to one workload
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    popped(["compromised container"]) --> rc1("runAsNonRoot<br/>+ drop ALL caps<br/>+ read-only rootFS")
+    popped --> rc2("no SA token automount<br/>or least-priv RBAC")
+    popped --> rc3("NetworkPolicy<br/>default-deny")
+    popped --> rc4("Secrets encrypted<br/>+ tight RBAC")
+    rc1 -->|"limited local damage"| contained(["breach contained to<br/>one workload"])
+    rc2 -->|"can't query / modify cluster"| contained
+    rc3 -->|"can't pivot to other Pods"| contained
+    rc4 -->|"can't read others' secrets"| contained
+
+    class popped lossN
+    class rc1,rc2,rc3,rc4,contained train
 ```
+
+The case study in §14 walks this exact pattern through a real incident.
 
 ---
 
@@ -356,15 +419,31 @@ It's the assumption that a container *will* be compromised, so you architect to 
 
 A node-js service pulls a malicious npm dependency that executes a reverse shell on startup. Within an hour, cryptomining Pods appear across the cluster and the cloud bill spikes. Post-incident analysis traces the escalation path.
 
+**Escalation chain** (BROKEN posture):
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    dep(["malicious npm dependency"]) --> rce("RCE in web container<br/>root, writable rootfs")
+    rce --> token("reads auto-mounted<br/>ServiceAccount token")
+    token --> admin("SA bound to cluster-admin<br/>never reverted")
+    admin --> miner("kubectl create deployment miner<br/>--replicas=50, all namespaces")
+    miner --> spread(["miners reach internet<br/>+ other Pods, flat network"])
+    admin --> exfil(["reads S3 creds from<br/>base64 Secret, data exfil"])
+
+    class dep frozen
+    class rce,token,admin,miner lossN
+    class spread,exfil lossN
 ```
-Escalation chain (BROKEN posture)
-  1. malicious dep -> RCE in the `web` container (runs as ROOT, writable rootfs)
-  2. container reads its auto-mounted ServiceAccount token
-  3. that SA was bound to cluster-admin ("temporary, to debug", never reverted)
-  4. attacker uses the token: kubectl create deployment miner --replicas=50 across namespaces
-  5. flat network + no policy -> miners freely reach the internet and each other
-  6. cloud creds for S3 sat in a base64 Secret the SA could read -> data exfil attempt
-```
+
+One over-privileged binding (step 3) is the pivot: it enables both the cluster-wide miner spread (steps 4-5) and the Secret-read exfiltration attempt (step 6).
 
 ```yaml
 # BROKEN: the conditions that allowed full escalation.
@@ -404,6 +483,35 @@ metadata:
 ```
 
 **Outcome:** with the hardened posture, the same compromised dependency yields only a non-root shell in one container with no API token, no network path to other Pods or the internet beyond what's allowed, no readable cloud keys, and a Falco alert firing within seconds. The breach is contained to one workload instead of becoming a cluster takeover — and admission policy (Gatekeeper) would have *rejected* the root container and unsigned image in the first place.
+
+**Contained chain** (HARDENED posture, same RCE):
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    dep2(["same malicious<br/>npm dependency"])
+    rce2("RCE limited to<br/>non-root shell, read-only rootfs")
+    contained2(["breach contained<br/>to one workload"])
+
+    dep2 --> rce2
+    rce2 -->|"no SA token<br/>automount disabled"| contained2
+    rce2 -->|"no lateral path<br/>NetworkPolicy deny"| contained2
+    rce2 -->|"nothing to steal<br/>IRSA + encrypted Secret"| contained2
+    rce2 -.->|"Falco alert<br/>within seconds"| contained2
+
+    class dep2 frozen
+    class rce2 lossN
+    class contained2 train
+```
+
+The same exploit that took over the cluster in the BROKEN chain now dead-ends at three independent controls, with detection as a fourth, parallel layer.
 
 **Discussion questions:**
 1. Which single control would have most limited the blast radius, and why isn't relying on it alone sufficient?

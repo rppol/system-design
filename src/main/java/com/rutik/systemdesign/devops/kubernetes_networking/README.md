@@ -68,6 +68,43 @@ On top of Pod networking:
 | IPVS | Kernel hash-table LB | Better at large Service counts, more algorithms |
 | eBPF (Cilium, no kube-proxy) | eBPF programs | Best scale + observability |
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph iptablesG["iptables: linear chain"]
+        direction LR
+        pkt1(["Packet to<br/>ClusterIP"]) --> r1{"rule 1<br/>match?"}
+        r1 -->|"no"| r2{"rule 2<br/>match?"}
+        r2 -->|"no"| rN{"rule N<br/>up to ~1000s"}
+        rN -->|"match"| dnat1(["DNAT to<br/>Pod IP"])
+    end
+
+    subgraph ipvsG["IPVS: O(1) hash"]
+        direction LR
+        pkt2(["Packet to<br/>ClusterIP"]) --> hash{"hash table<br/>lookup"}
+        hash -->|"O(1)"| dnat2(["DNAT to<br/>Pod IP"])
+    end
+
+    subgraph ebpfG["eBPF: kernel hook"]
+        direction LR
+        pkt3(["Packet to<br/>ClusterIP"]) --> hook{"eBPF program<br/>at kernel hook"}
+        hook -->|"in-kernel"| dnat3(["DNAT to<br/>Pod IP"])
+    end
+
+    class pkt1,pkt2,pkt3 io
+    class r1,r2,rN,hash,hook mathOp
+    class dnat1,dnat2,dnat3 train
+```
+
+*Why scaling differs: iptables re-evaluates a growing chain of sequential rules per packet (linear in Service count — "rule updates slow at high churn"), IPVS does one O(1) hash lookup regardless of Service count, and eBPF runs a single in-kernel hook — the mechanical reason IPVS/eBPF stay fast past ~1000s of Services where iptables degrades.*
+
 ### Service discovery DNS
 
 ```
@@ -80,37 +117,87 @@ On top of Pod networking:
 
 ## 5. Architecture Diagrams
 
+**Internet to container — the full request path:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client"]) -->|"DNS: app.example.com<br/>to cloud LB IP"| lb(["Cloud LB"])
+    lb --> ing(["Ingress controller<br/>terminates TLS, routes by host/path"])
+    ing -->|"to Service ClusterIP"| vip{"ClusterIP (virtual)"}
+    vip -->|"kube-proxy iptables/IPVS DNAT"| pod(["Pod<br/>routable IP from CNI"])
+    pod --> container(["Container"])
+
+    class client,container io
+    class lb frozen
+    class ing,vip mathOp
+    class pod train
 ```
-Internet -> container: the full path
 
-  client
-    | DNS: app.example.com -> cloud LB IP
-    v
-  Cloud LB (provisioned by Service type=LoadBalancer or Ingress controller's LB)
-    | 
-    v
-  Ingress controller pod (e.g., ingress-nginx)  -- terminates TLS, routes by host/path
-    |  to Service ClusterIP
-    v
-  ClusterIP (virtual) --kube-proxy iptables/IPVS DNAT--> ready Pod IP
-    |
-    v
-  Pod (CNI gave it a routable IP) -> container
+*A cloud LB (from `type=LoadBalancer` or the Ingress controller's own LB) hands off to the ingress controller Pod, which terminates TLS and routes by host/path to a Service ClusterIP; kube-proxy's DNAT then rewrites the destination to a ready Pod IP.*
 
-Service VIP resolution
+**Service VIP resolution:**
 
-  app calls "orders" -> CoreDNS -> orders.default.svc.cluster.local -> 10.96.12.7 (ClusterIP)
-  packet to 10.96.12.7:80 -> iptables rule DNATs to one of [10.244.1.5, 10.244.2.9] (Pod IPs)
-  (round-robin / random across READY endpoints only)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    app(["App calls 'orders'"]) -->|"lookup"| dns("CoreDNS")
+    dns -->|"orders.default.svc.cluster.local"| vip2{"ClusterIP 10.96.12.7"}
+    vip2 -->|"iptables DNAT"| dnat{"pick READY endpoint<br/>round-robin / random"}
+    dnat --> pod1(["Pod IP<br/>10.244.1.5"])
+    dnat --> pod2(["Pod IP<br/>10.244.2.9"])
+
+    class app req
+    class dns,dnat mathOp
+    class vip2 base
+    class pod1,pod2 train
 ```
 
-```
-NetworkPolicy (default-deny ingress for a namespace)
+*CoreDNS resolves the Service name to its ClusterIP; the packet to that virtual IP is DNAT'd by an iptables rule to one of the ready endpoints only, round-robin or random.*
 
-  no policy:          Pod A  <----any---->  Pod B   (allow all)
-  policy selects B:   Pod A  --denied-->    Pod B   unless A's labels/namespace are allowed
-                      only explicitly-allowed sources reach B
+**NetworkPolicy — default-deny once a policy selects a Pod:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph before["No NetworkPolicy: Allow All"]
+        direction LR
+        A1(["Pod A"]) -->|"any traffic, both ways"| B1(["Pod B"])
+    end
+
+    subgraph after["Policy Selects Pod B: Default-Deny"]
+        direction LR
+        A2(["Pod A"]) -.->|"denied (no policy allows it)"| B2(["Pod B"])
+        C2(["Allowed source<br/>(matches selector)"]) -->|"allowed"| B2
+    end
+
+    class A1,A2,C2 req
+    class B1 train
+    class B2 frozen
 ```
+
+*No policy means Pod A and Pod B can reach each other freely; the instant a policy selects Pod B for a direction, that direction flips to default-deny and only explicitly-allowed sources still get through — the same Pod B shown healthy-open on the left, locked-down on the right.*
 
 ---
 
@@ -149,12 +236,22 @@ kubectl run -it --rm dnsutils --image=tutum/dnsutils -- bash
 
 With `ndots:5`, any name with fewer than 5 dots is first tried against every `search` domain. So an external lookup `api.vendor.com` (2 dots) becomes:
 
+```mermaid
+sequenceDiagram
+    participant App as App (ndots:5)
+    participant DNS as CoreDNS
+
+    App->>DNS: api.vendor.com.default.svc.cluster.local
+    DNS-->>App: NXDOMAIN
+    App->>DNS: api.vendor.com.svc.cluster.local
+    DNS-->>App: NXDOMAIN
+    App->>DNS: api.vendor.com.cluster.local
+    DNS-->>App: NXDOMAIN
+    App->>DNS: api.vendor.com
+    DNS-->>App: Answer (the real query)
 ```
-api.vendor.com.default.svc.cluster.local   (NXDOMAIN)
-api.vendor.com.svc.cluster.local           (NXDOMAIN)
-api.vendor.com.cluster.local               (NXDOMAIN)
-api.vendor.com                             (finally the real query)
-```
+
+*Every search-domain suffix is tried before the bare name — three wasted round trips before the one that succeeds.*
 
 Four queries instead of one — multiplied across every request, this overloads CoreDNS. Fix: use a trailing dot (`api.vendor.com.`), set `dnsConfig` to lower `ndots`, or cache with NodeLocal DNSCache.
 
@@ -177,6 +274,39 @@ spec:
 ```
 
 The newer **Gateway API** (GA) replaces Ingress with a richer, role-oriented model (`GatewayClass`/`Gateway`/`HTTPRoute`) supporting traffic splitting, header matching, and cross-namespace routing natively.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph perSvc["1 LoadBalancer per Service (costly)"]
+        direction LR
+        c1(["Client"]) --> lb1(["LB #1"]) --> s1("Service A")
+        c1 --> lb2(["LB #2"]) --> s2("Service B")
+        c1 --> lb3(["LB #3"]) --> s3("Service C")
+    end
+
+    subgraph shared["Ingress: One Shared LB (cheap)"]
+        direction LR
+        c2(["Client"]) --> lbS(["Cloud LB"]) --> ic{"Ingress controller<br/>routes by host/path"}
+        ic --> sA("Service A")
+        ic --> sB("Service B")
+        ic --> sC("Service C")
+    end
+
+    class c1,c2 io
+    class lb1,lb2,lb3,lbS frozen
+    class ic mathOp
+    class s1,s2,s3,sA,sB,sC train
+```
+
+*One `LoadBalancer` Service per app (left) multiplies cloud LB cost with no L7 features; an Ingress controller behind a single shared LB (right) fronts every Service by host/path — the pattern that lets ingress-nginx/Gateway API "front dozens of microservices behind one cloud LB" (see Real-World Examples).*
 
 ### NetworkPolicy (default-deny + explicit allow)
 
@@ -348,13 +478,31 @@ Cilium uses eBPF programs attached to kernel hooks to implement Service load bal
 
 A security initiative rolls out default-deny NetworkPolicies namespace by namespace. The `payments` namespace immediately starts throwing connection errors — but only on *some* calls, and DNS lookups in that namespace begin failing with resolution errors.
 
+Tracing the failure from stated intent to observed symptom:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    intent(["Intent: default-deny<br/>ingress + egress in payments"]) --> reality{"Reality: egress-deny<br/>also blocks DNS (UDP/TCP 53)"}
+    reality --> fail{"All name resolution<br/>in payments fails"}
+    fail --> ext(["External API calls fail"])
+    fail --> internal(["In-cluster Service calls fail<br/>(resolved by name)"])
+    ext --> symptom(("Looks 'intermittent':<br/>DNS cache masked it"))
+    internal --> symptom
+
+    class intent io
+    class reality,fail,ext,internal lossN
+    class symptom mathOp
 ```
-Intent: default-deny ingress AND egress in `payments`, allow only api->db.
-Reality: egress deny also blocked UDP/TCP 53 to CoreDNS (kube-system)
-   -> every name resolution in `payments` fails
-   -> calls to external APIs and even in-cluster Services (resolved by name) break
-   -> "intermittent" because cached DNS answers kept some calls working briefly
-```
+
+*Denying egress without a DNS carve-out silently kills every name lookup in the namespace; the outage looked intermittent only because cached DNS answers kept some calls alive briefly.*
 
 ```yaml
 # BROKEN: default-deny egress with no DNS carve-out.

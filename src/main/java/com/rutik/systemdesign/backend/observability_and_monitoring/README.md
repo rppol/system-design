@@ -50,45 +50,59 @@ Key insight: you cannot observe what you do not instrument. Instrumentation must
 
 ## 5. Architecture Diagrams
 
+**Request Flow with Observability**
+
+A single request fans out all three pillars at every hop — the API Gateway, Order Service, and Payment Service each emit their own MDC correlation ID, metric, and trace span alongside the call they make downstream.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Client"]) --> GW("API Gateway")
+    GW -->|"root span<br/>45ms"| OS("Order Service")
+    OS -->|"child span<br/>30ms"| PS("Payment Service")
+
+    GW -.-> GWSig("MDC traceId=abc123<br/>http_requests_total status=200")
+    OS -.-> OSSig("order created log<br/>order_processing_duration_seconds")
+    PS -.-> PSSig("payment processed log<br/>payment_amount_dollars<br/>leaf span 25ms")
+
+    class Client io
+    class GW,OS,PS mathOp
+    class GWSig,OSSig,PSSig base
 ```
-Request Flow with Observability
-================================
 
-Client
-  |
-  v
-[API Gateway]  --- MDC: traceId=abc123 correlationId=req456
-  |             --- METRICS: http_requests_total{method="POST", status="200"}
-  |             --- TRACE: root span (gateway → order-service 45ms)
-  |
-  v
-[Order Service]
-  |             --- LOG: {"level":"INFO","traceId":"abc123","msg":"Order created","orderId":"xyz"}
-  |             --- METRICS: order_processing_duration_seconds{status="success"}
-  |             --- TRACE: child span (order-service → payment-service 30ms)
-  |
-  v
-[Payment Service]
-                --- LOG: {"level":"INFO","traceId":"abc123","msg":"Payment processed","amount":99.99}
-                --- METRICS: payment_amount_dollars{currency="USD"}
-                --- TRACE: leaf span (payment-service internal 25ms)
+**OpenTelemetry Pipeline**
 
+The OTel Collector ingests OTLP from the app SDK, batches and enriches it, then fans out to three specialized backends — Prometheus for metrics, Jaeger/Tempo for traces, and Loki for logs — each feeding its own UI.
 
-OpenTelemetry Pipeline
-=======================
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    App (SDK)
-      |
-      | OTLP gRPC/HTTP
-      v
-  [OTel Collector]
-      |--- receiver: otlp
-      |--- processor: batch, resource_detection
-      |--- exporter: prometheus (metrics), jaeger (traces), loki (logs)
-      |
-      +--------> [Prometheus]   <-- Grafana dashboards
-      +--------> [Jaeger/Tempo] <-- Trace UI
-      +--------> [Loki]        <-- Log aggregation
+    App(["App SDK"]) -->|"OTLP gRPC/HTTP"| Collector("OTel Collector<br/>batch + resource_detection")
+    Collector -->|"exporter: prometheus"| Prom("Prometheus")
+    Collector -->|"exporter: jaeger"| Trace("Jaeger / Tempo")
+    Collector -->|"exporter: loki"| Log("Loki")
+    Prom --> Grafana(["Grafana Dashboards"])
+    Trace --> TraceUI(["Trace UI"])
+    Log --> LogUI(["Log Aggregation"])
+
+    class App io
+    class Collector mathOp
+    class Prom,Trace,Log base
+    class Grafana,TraceUI,LogUI train
 ```
 
 ---
@@ -160,6 +174,16 @@ if (currentSpan != null) {
     currentSpan.tag("user.id", userId);  // trace tag, not metric label
 }
 ```
+
+```mermaid
+xychart-beta
+    title "Time Series Count by Tag Choice (Prometheus)"
+    x-axis ["endpoint + method + status", "+ userId tag"]
+    y-axis "Unique time series" 0 --> 1000000
+    bar [20, 1000000]
+```
+
+*A bounded label set (endpoint, method, status) stays in the dozens of series; adding `userId` as a tag creates one series per user — 1M users means 1M unique time series, exactly the Prometheus-OOM math in the code comment above.*
 
 ### MDC Correlation ID — Spring Filter
 
@@ -267,6 +291,33 @@ Error Budget:
   If error budget is consumed → freeze feature releases, focus on reliability
   If error budget is healthy → deploy more aggressively
 ```
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SLI("SLI<br/>measured metric") --> SLO("SLO<br/>target 99.9%")
+    SLO --> SLA("SLA<br/>contractual 99.5%")
+    SLO --> Budget("Error budget<br/>0.1% = 43.2 min/month")
+    Budget --> Check{"budget<br/>status?"}
+    Check -->|"consumed"| Freeze("Freeze releases<br/>focus on reliability")
+    Check -->|"healthy"| Deploy("Deploy<br/>more aggressively")
+
+    class SLI io
+    class SLO,Check mathOp
+    class SLA frozen
+    class Budget base
+    class Freeze lossN
+    class Deploy train
+```
+
+*The 99.9% SLO leaves a 0.1% error budget, which converts to a hard number — 43.2 minutes per month — and that number drives a binary release decision: freeze when the budget is spent, ship aggressively while it is healthy.*
 
 ### Prometheus Alerting Rules
 

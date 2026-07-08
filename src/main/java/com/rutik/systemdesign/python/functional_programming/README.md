@@ -81,54 +81,82 @@ Use `collections.namedtuple` or `dataclasses.dataclass(frozen=True)` to model re
 
 ### Lazy Pipeline Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src(["Raw Data Source"]) --> filt("filter(predicate)<br/>O(1) mem/element") --> mapT("map(transform)<br/>O(1) mem/element") --> mapE("map(enrich)<br/>O(1) mem/element") --> sinkD{"Consumer (sink)"}
+    sinkD -->|"list()"| listN(["materializes<br/>O(n) memory"])
+    sinkD -->|"sum()"| sumN(["O(1) accumulation"])
+    sinkD -->|"csv.writer"| csvN(["streaming write"])
+
+    class src io
+    class filt,mapT,mapE,sinkD mathOp
+    class listN lossN
+    class sumN,csvN train
 ```
-Raw Data Source
-    |
-    v
-filter(predicate)   <-- O(1) memory per element
-    |
-    v
-map(transform)      <-- O(1) memory per element
-    |
-    v
-map(enrich)         <-- O(1) memory per element
-    |
-    v
-Consumer (sink)
-  - list()          <-- materializes: O(n) memory
-  - sum()           <-- O(1) memory accumulation
-  - csv.writer      <-- streaming write
-```
+
+*Every stage passes one element at a time; only the `list()` sink breaks the O(1) guarantee by materializing all n elements, while `sum()` and `csv.writer` stay O(1) by streaming.*
 
 ### functools.partial Application Chain
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    baseV("base_validator<br/>(schema, strict, value)") -->|"partial(schema=USER_SCHEMA)"| schemaV("schema_validator<br/>(strict, value)")
+    schemaV -->|"partial(strict=True)"| strictV("strict_user_validator<br/>(value)")
+    strictV -->|"called with<br/>actual record"| outD{"validate(value)"}
+    outD -->|"valid"| trueN(["True"])
+    outD -->|"invalid"| falseN(["False"])
+    outD -->|"unexpected keys"| errN(["raise<br/>ValidationError"])
+
+    class baseV base
+    class schemaV,strictV,outD mathOp
+    class trueN train
+    class falseN,errN lossN
 ```
-base_validator(schema, strict, value)
-        |
-        | partial(schema=USER_SCHEMA)
-        v
-schema_validator(strict, value)
-        |
-        | partial(strict=True)
-        v
-strict_user_validator(value)
-        |
-        | called with actual record
-        v
-True / False / raise ValidationError
-```
+
+*Each `partial()` call freezes one more argument and narrows the callable; the fully-applied `strict_user_validator(value)` either passes, fails validation, or raises on an unexpected key (see 6.3).*
 
 ### singledispatch Dispatch Table
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    call(["serialize(obj)"]) --> router{"type(obj)<br/>dict lookup"}
+    router -->|"int"| intImpl("serialize_int(obj)")
+    router -->|"str"| strImpl("serialize_str(obj)")
+    router -->|"list"| listImpl("serialize_list(obj)")
+    router -->|"datetime"| dtImpl("serialize_datetime(obj)")
+    router -->|"no match"| fallback(["raise TypeError"])
+
+    class call req
+    class router mathOp
+    class intImpl,strImpl,listImpl,dtImpl train
+    class fallback lossN
 ```
-serialize(obj)
-    |
-    |-- type(obj) is int      --> serialize_int(obj)
-    |-- type(obj) is str      --> serialize_str(obj)
-    |-- type(obj) is list     --> serialize_list(obj)
-    |-- type(obj) is datetime --> serialize_datetime(obj)
-    |-- fallback              --> raise TypeError
-```
+
+*Dispatch is O(1): the registry is a dict keyed by type, so `serialize(obj)` routes straight to the matching implementation, falling back to `TypeError` when no type is registered (see 6.4).*
 
 ---
 
@@ -396,6 +424,34 @@ summarize([3, 1, 4, 1, 5, 9])  # (1, 9, 23, 6)
 
 `cytoolz` is a Cython implementation of `toolz`. It is API-compatible and approximately 10x faster for pipeline-heavy workloads. Use `cytoolz` in production where throughput matters; use `toolz` in development for simpler installation.
 
+`pipe` and `compose` are easy to mix up because their argument order is reversed while their execution order is identical — the diagram below lines the two calls up side by side on the same three functions `f`, `g`, `h`:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph P["pipe(data, f, g, h)<br/>written left to right"]
+        direction LR
+        d1(["data"]) --> f1("f") --> g1("g") --> h1("h") --> r1(["result"])
+    end
+
+    subgraph C["compose(h, g, f)(data)<br/>written right to left"]
+        direction LR
+        d2(["data"]) --> f2("f") --> g2("g") --> h2("h") --> r2(["result"])
+    end
+
+    class d1,d2,r1,r2 io
+    class f1,g1,h1,f2,g2,h2 mathOp
+```
+
+*Both calls run `f` then `g` then `h` on the data — only the order the functions are listed in the call is reversed, not the order they execute. `pipe(x, f, g, h) == compose(h, g, f)(x)` (see Q9).*
+
 ### 6.8 Comprehension vs Generator Performance
 
 ```python
@@ -423,6 +479,30 @@ timeit.timeit("sum(x*x for x in range(1_000_000))", number=5)
 ```
 
 Rule of thumb: use a generator expression when the sequence is large (> 100,000 elements) and consumed in a single forward pass. Use a list comprehension when you need to iterate multiple times, index into it, check `len()`, or pass it to a function that requires a sequence.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Iterate a sequence"]) --> sizeQ{"Over 100,000<br/>elements?"}
+    sizeQ -->|"no"| listRes(["list comprehension"])
+    sizeQ -->|"yes"| passQ{"Single forward<br/>pass only?"}
+    passQ -->|"yes"| genRes(["generator expression"])
+    passQ -->|"no -- need len/<br/>index/multiple passes"| listRes
+
+    class start io
+    class sizeQ,passQ mathOp
+    class genRes train
+    class listRes base
+```
+
+*The rule of thumb above as a decision path: size crosses the 100,000-element line, then access pattern (single pass vs. multiple passes/indexing) picks generator or list comprehension.*
 
 ---
 

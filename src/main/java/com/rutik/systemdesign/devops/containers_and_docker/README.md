@@ -56,6 +56,16 @@ The build is driven by a **Dockerfile**: each instruction (`RUN`, `COPY`, `ADD`)
 | `distroless` (Google) | ~2–20 MB | No shell/package manager, minimal CVEs | Hard to debug (no shell) |
 | `scratch` | 0 | Absolute minimum (static binaries) | Only for fully static apps (Go) |
 
+```mermaid
+xychart-beta
+    title "Base image size by choice (approx. upper bound, MB)"
+    x-axis ["scratch", "alpine", "distroless", "slim", "ubuntu/debian"]
+    y-axis "Size (MB)" 0 --> 120
+    bar [0, 5, 20, 80, 120]
+```
+
+*Scratch ships nothing extra; ubuntu/debian ships 70–120 MB of packages before your app even starts — that gap is almost entirely attack surface and pull time, not functionality your app uses.*
+
 ### Multi-stage build (the standard pattern)
 
 Compile/build in a stage with the full toolchain, then `COPY --from=builder` only the final artifact into a minimal runtime image. The toolchain, source, and intermediate files never ship.
@@ -64,29 +74,63 @@ Compile/build in a stage with the full toolchain, then `COPY --from=builder` onl
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    base(["FROM node:20-slim<br/>shared, changes rarely"]) --> pkg["COPY package.json"]
+    pkg --> npmci["RUN npm ci<br/>changes when deps change"]
+    npmci --> appcode["COPY app code<br/>changes every commit"]
+    appcode -->|"keep LAST for<br/>max cache hits"| rw(["container R/W<br/>logs, tmp"])
+
+    class base base
+    class pkg frozen
+    class npmci mathOp
+    class appcode req
+    class rw train
 ```
-Image = read-only layers + writable container layer
 
-  +-----------------------------+  <- writable layer (per running container)
-  | container R/W (logs, tmp)   |
-  +=============================+  <- image layers (read-only, shared, cached)
-  | COPY app code      (digest) |   changes every commit -> keep LAST
-  | RUN npm ci         (digest) |   changes when deps change
-  | COPY package.json  (digest) |
-  | FROM node:20-slim  (digest) |   base, shared across many images
-  +-----------------------------+
+*Image = read-only layers (cached, shared) plus one writable layer per running container. Layers stack bottom-to-top by change frequency, so the volatile app-code layer sits right before the writable layer, never at the base.*
 
-Multi-stage build
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Stage 1 (builder: node:20)        Stage 2 (runtime: distroless)
-  +------------------------+        +---------------------------+
-  | COPY src               |        | COPY --from=builder       |
-  | RUN npm ci && build    | =====> |   /app/dist  /app/node_*  |
-  | -> dist/, node_modules |  only  | CMD ["server.js"]         |
-  | (toolchain 900MB)      | artifa.| (final image ~80MB)       |
-  +------------------------+        +---------------------------+
-       discarded                         shipped
+    subgraph builder["Stage 1 · builder (node:20)"]
+        direction LR
+        src(["COPY src"]) --> build["RUN npm ci && build<br/>toolchain ~900MB"]
+        build --> artifacts(["dist/, node_modules"])
+    end
+
+    subgraph runtime["Stage 2 · runtime (distroless)"]
+        direction LR
+        copyart["COPY --from=builder<br/>dist + node_modules"] --> cmd(["CMD server.js<br/>final image ~80MB"])
+    end
+
+    artifacts -->|"only artifacts<br/>copied"| copyart
+    build -.->|"toolchain + source<br/>left behind"| trash(("discarded<br/>900MB toolchain"))
+
+    class src io
+    class build mathOp
+    class artifacts train
+    class copyart req
+    class cmd train
+    class trash lossN
 ```
+
+*Multi-stage build: the builder's 900 MB toolchain and source are discarded when the stage ends — only `dist/` and `node_modules` cross into the ~80 MB runtime image that actually ships.*
 
 ---
 
@@ -212,6 +256,32 @@ RUN --mount=type=secret,id=npmtoken \
     npm config set //registry.npmjs.org/:_authToken="$(cat /run/secrets/npmtoken)" && npm ci
 # build: docker build --secret id=npmtoken,env=NPM_TOKEN .
 ```
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    secret(["NPM_TOKEN<br/>build secret"]) --> broken{"passed via<br/>ARG or mount?"}
+    broken -->|"ARG / ENV"| baked["baked into<br/>layer history"]
+    baked --> leak(("exposed via<br/>docker history"))
+    broken -->|"BuildKit<br/>secret mount"| tmpfs["mounted at<br/>/run/secrets/* only"]
+    tmpfs --> gone(("discarded when<br/>RUN exits"))
+
+    class secret io
+    class broken mathOp
+    class baked frozen
+    class leak lossN
+    class tmpfs req
+    class gone train
+```
+
+*`ARG`/`ENV` bakes the secret into permanent layer history (recoverable forever via `docker history --no-trunc`); a BuildKit secret mount exists only inside that one `RUN` and is gone the moment it exits.*
 
 **Pitfall 2 — Cache-busting layer order.** Putting `COPY . .` before `RUN npm ci` means every source edit re-runs the full dependency install (minutes per build). FIX: copy manifests, install, *then* copy source (see §6).
 

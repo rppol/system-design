@@ -35,6 +35,18 @@ Complexity analysis answers the fundamental question an engineer asks before cho
 - **Amortized analysis**: Average cost per operation *over a sequence*, accounting for occasional expensive operations. An O(1) amortized append to a dynamic array is not the same as O(1) worst-case append.
 - **Space complexity**: Same notation applied to memory usage, including auxiliary space (stack frames, allocations) but not the input itself unless stated.
 
+```mermaid
+xychart-beta
+    title "f(n) = n² + n sandwiched by 0.5·n² and 2·n²"
+    x-axis "n" [1, 2, 3, 4, 5, 6, 7, 8]
+    y-axis "operations" 0 --> 130
+    line [0.5, 2, 4.5, 8, 12.5, 18, 24.5, 32]
+    line [2, 6, 12, 20, 30, 42, 56, 72]
+    line [2, 8, 18, 32, 50, 72, 98, 128]
+```
+
+*The middle line is f(n) = n² + n; the bottom line is the lower bound 0.5·n² and the top line is the upper bound 2·n². f(n) stays sandwiched between them for every n ≥ 1 — exactly what `f(n) = Θ(n²)` requires, and why "drop the lower-order term" (above) is safe.*
+
 ---
 
 ## 4. Types / Complexity Classes
@@ -64,22 +76,31 @@ Complexity analysis answers the fundamental question an engineer asks before cho
 
 For divide-and-conquer recurrences of the form `T(n) = aT(n/b) + f(n)`:
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["T(n) = aT(n/b) + f(n)"]) --> cmp{"compare f(n)<br/>to n^(log_b a)"}
+    cmp -->|"f(n) = O(n^(log_b a - ε))"| c1["Case 1<br/>subproblems dominate"]
+    cmp -->|"f(n) = Θ(n^(log_b a))"| c2["Case 2<br/>balanced"]
+    cmp -->|"f(n) = Ω(n^(log_b a + ε))"| c3["Case 3<br/>merge cost dominates"]
+    c1 --> r1(["T(n) = Θ(n^(log_b a))"])
+    c2 --> r2(["T(n) = Θ(n^(log_b a) · log n)"])
+    c3 --> r3(["T(n) = Θ(f(n))"])
+
+    class start io
+    class cmp mathOp
+    class c1,c2,c3 base
+    class r1,r2,r3 io
 ```
-Master Theorem — three cases:
-  Compare f(n) with n^(log_b a):
 
-  Case 1: f(n) = O(n^(log_b a - ε)) for some ε > 0
-          → T(n) = Θ(n^(log_b a))
-          [subproblems dominate; merge cost is negligible]
-
-  Case 2: f(n) = Θ(n^(log_b a))
-          → T(n) = Θ(n^(log_b a) · log n)
-          [balanced; merge and subproblems contribute equally]
-
-  Case 3: f(n) = Ω(n^(log_b a + ε)) and regularity condition
-          → T(n) = Θ(f(n))
-          [merge cost dominates]
-```
+*Comparing f(n) against n^(log_b a) selects one of three cases — the worked examples below land merge sort and binary search in Case 2, and naive matrix multiply in Case 1.*
 
 Examples:
 - Merge sort: `T(n) = 2T(n/2) + O(n)`. `a=2, b=2, log_b a = 1`. `f(n) = n = Θ(n^1)` → Case 2 → `T(n) = Θ(n log n)`.
@@ -105,33 +126,45 @@ O(2^n):     2  1,024  10^30   (completely infeasible)
 
 ### Decision Tree: Choosing Time Complexity Class
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    q1{"answer precomputed<br/>or size fixed?"}
+    q1 -->|"yes"| a1["O(1)<br/>hash lookup, direct index"]
+    q1 -->|"no"| q2{"does each step halve<br/>the search space?"}
+    q2 -->|"yes"| a2["O(log n)<br/>binary search, balanced BST"]
+    q2 -->|"no"| q3{"must you touch<br/>every element once?"}
+    q3 -->|"yes, no nested work"| a3["O(n)"]
+    q3 -->|"yes, with sort/heap"| a4["O(n log n)"]
+    q3 -->|"yes, with nested scan"| a5["O(n²)"]
+    q3 -->|"exploring all subsets"| a6["O(2^n)"]
+
+    class q1,q2,q3 mathOp
+    class a1,a2 train
+    class a3,a4 base
+    class a5,a6 lossN
 ```
-Is the answer precomputed / size fixed?
-    |-> YES -> O(1) (hash lookup, direct index)
-    |
-    |-> NO: does each step halve the search space?
-               |-> YES -> O(log n) (binary search, balanced BST)
-               |
-               |-> NO: must you touch every element once?
-                          |-> YES, no nested work -> O(n)
-                          |
-                          |-> YES, with sort/heap -> O(n log n)
-                          |
-                          |-> YES, with nested scan -> O(n^2)
-                          |
-                          |-> exploring all subsets -> O(2^n)
-```
+
+*Walk the tree top to bottom, answering each question about the algorithm's access pattern, to land on its Big-O class — green marks the fast classes, gold the linear-family middle ground, red the classes worth re-examining.*
 
 ### Amortized Array Resize
 
-```
-capacity:  1  2  2  4  4  4  4  8  8  8  8  8  8  8  8  16
-append #:  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15  16
-copies:    0  1  0  2  0  0  0  4  0  0  0  0  0  0  0   8
-                                                  total copies = 15 ≈ n
+```mermaid
+xychart-beta
+    title "Copies per append (capacity doubles: 1, 2, 4, 8, 16)"
+    x-axis "append index" [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    y-axis "copies made" 0 --> 8
+    bar [0, 1, 0, 2, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 8]
 ```
 
-Total copies after n appends = n-1 < n. Amortized 1 copy per append → O(1) amortized.
+Copies spike only at the resize points (append 2, 4, 8, 16), each one copying the array's prior capacity (1, 2, 4, 8) into the doubled buffer. Total copies after n appends = n-1 < n. Amortized 1 copy per append → O(1) amortized.
 
 ---
 
@@ -276,6 +309,17 @@ def factorial_iter(n: int) -> int:
 - Comparing algorithms with the same Big-O: O(n log n) quicksort vs merge sort — cache behaviour, constant factors, and stability matter.
 - The problem is I/O-bound: 1 disk seek dominates 1000 CPU operations. The bottleneck is I/O, not compute complexity.
 - Space complexity matters: an O(n) space algorithm may be infeasible on an embedded device even if its time complexity is optimal.
+
+```mermaid
+xychart-beta
+    title "Crossover near n = 14,000: c1 = 1000 (n log n) vs c2 = 1 (n²) — see Q12"
+    x-axis "n" [8000, 10000, 12000, 14000, 16000, 18000]
+    y-axis "operations (millions)" 0 --> 330
+    line [103.73, 132.88, 162.61, 192.82, 223.45, 254.44]
+    line [64, 100, 144, 196, 256, 324]
+```
+
+*With the constants from Q12 (c1 = 1000 on the n log n term, c2 = 1 on the n² term), the top line (n log n) costs more than the bottom line (n²) until they cross around n ≈ 14,000 — below that, the huge constant on the "better" complexity class dominates.*
 
 ---
 
@@ -425,16 +469,25 @@ The Ω(n log n) lower bound applies to *comparison-based* sorting — any algori
 
 **Scenario**: You are building a real-time gaming leaderboard that must support: (a) update a player's score, (b) get top-10 players, (c) get a player's rank. Target: 100,000 active players, 10,000 score updates per second.
 
-**ASCII Architecture**:
+**Architecture**:
+```mermaid
+sequenceDiagram
+    participant GS as Game Service
+    participant LB as Leaderboard Store<br/>(Redis ZSET: skip list + hash map)
+
+    GS->>LB: updateScore(player, score)
+    Note over GS,LB: O(log n) per op
+
+    GS->>LB: getTopK(k)
+    LB-->>GS: top-K players
+    Note over GS,LB: O(k + log n)
+
+    GS->>LB: getRank(player)
+    LB-->>GS: rank
+    Note over GS,LB: O(log n)
 ```
-+-------------------+      score update       +-------------------+
-| Game Service      | --------------------->  | Leaderboard Store |
-|                   |      O(log n) per op    |                   |
-| - updateScore()   | <---------------------  | (Redis ZSET:      |
-| - getTopK()       |      get top-10         |  skip list +       |
-| - getRank()       |      O(k + log n)       |  hash map)        |
-+-------------------+                         +-------------------+
-```
+
+*All three Game Service operations route to the Redis-backed skip list, so update/top-K/rank all stay logarithmic — contrast with the BROKEN block below, which sorts on every request instead.*
 
 **Option A: Sorted array**
 - Update: O(n) (find position + shift). At 10,000/s with n = 100,000 → 10⁹ ops/s — infeasible.

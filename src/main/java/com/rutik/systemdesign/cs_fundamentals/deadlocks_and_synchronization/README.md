@@ -75,45 +75,46 @@ All four must hold simultaneously:
 
 ### Resource Allocation Graph — Deadlock Detection
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P1(["P1"]) -.->|"waits for"| R2(["R2 · 1 instance"])
+    R2 -->|"held by"| P2(["P2"])
+    P2 -.->|"waits for"| R1(["R1 · 1 instance"])
+    R1 -->|"held by"| P1
+
+    class P1,P2 req
+    class R1,R2 base
 ```
-Processes: P1, P2, P3
-Resources: R1 (1 instance), R2 (1 instance)
-
-P1 holds R1, waiting for R2
-P2 holds R2, waiting for R1
-
-Graph:
-  P1 ---holds---> R1
-  P1 <--waits---- R2
-  P2 ---holds---> R2
-  P2 <--waits---- R1
-
-Cycle: P1 -> waits R2 -> held by P2 -> waits R1 -> held by P1 -> ...
-DEADLOCK: Yes (cycle in single-instance resource graph)
-```
+Two processes, two single-instance resources — P3 is part of the scenario but never joins this cycle. P1 holds R1 while waiting on R2, and P2 holds R2 while waiting on R1; the dotted "waits for" edges close the loop back on themselves. In a single-instance resource-allocation graph, a cycle like this is both necessary and sufficient for deadlock.
 
 ### Dining Philosophers Problem
 
-```
-5 philosophers sitting at a round table.
-5 chopsticks (forks), one between each pair.
-To eat: must pick up BOTH adjacent chopsticks.
-To think: put down both chopsticks.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-             [Ph0]
-          /         \
-      [fork4]      [fork0]
-      /                  \
-  [Ph4]                 [Ph1]
-      \                  /
-      [fork3]       [fork1]
-          \          /
-           [Ph3]--[fork2]--[Ph2]
+    Ph0(["Ph0"]) --> F0(["fork0"]) --> Ph1(["Ph1"]) --> F1(["fork1"]) --> Ph2(["Ph2"])
+    Ph2 --> F2(["fork2"]) --> Ph3(["Ph3"]) --> F3(["fork3"]) --> Ph4(["Ph4"]) --> F4(["fork4"])
+    F4 --> Ph0
 
-Naive solution: each philosopher picks up left fork, then right fork.
-  All pick up left simultaneously -> all hold one fork, all waiting for right
-  -> DEADLOCK (circular wait)
+    class Ph0,Ph1,Ph2,Ph3,Ph4 req
+    class F0,F1,F2,F3,F4 base
 ```
+Five philosophers alternate with five forks around the ring, and each philosopher needs both neighboring forks to eat. In the naive protocol — pick up left, then right — all five grab their left fork at the same instant, so every philosopher ends up holding exactly one fork while waiting on a neighbor for the other: a five-way circular wait, i.e., deadlock.
 
 ### Banker's Algorithm — Safe State
 
@@ -140,6 +141,31 @@ Safety check (find safe sequence):
   P0 need 7,4,3 <= 10,4,7 -> run P0
 Safe sequence: <P1, P3, P4, P2, P0>
 ```
+
+### Banker's Algorithm — Request Decision Flow
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req(["Process requests<br/>resources"]) --> Tentative["Tentatively grant<br/>(update Allocation, Available)"]
+    Tentative --> Safe{"Resulting state has<br/>a safe sequence?"}
+    Safe -->|"yes"| Grant(["Commit the grant"])
+    Safe -->|"no"| Rollback["Roll back the<br/>tentative grant"]
+    Rollback --> Wait(["Process blocks<br/>and waits"])
+
+    class Req req
+    class Tentative,Safe mathOp
+    class Grant train
+    class Rollback,Wait lossN
+```
+The Banker's algorithm never grants a request outright: it tentatively applies the request, then re-runs the same safety check traced numerically above; only a request that still leaves a safe sequence (like `<P1, P3, P4, P2, P0>`) is committed, otherwise the tentative grant is rolled back and the process blocks.
 
 ---
 
@@ -670,6 +696,24 @@ def acquire_locks_ordered(locks: list[DistributedLock]):
 ```
 
 **BROKEN — acquiring distributed locks in arbitrary order**:
+
+```mermaid
+sequenceDiagram
+    participant A as Service A
+    participant B as Service B
+    participant R as Redis
+
+    A->>R: SET lock:SKU-123 NX EX
+    R-->>A: OK, lock acquired
+    B->>R: SET lock:SKU-456 NX EX
+    R-->>B: OK, lock acquired
+    A->>R: SET lock:SKU-456 NX EX
+    R-->>A: fail, held by B
+    B->>R: SET lock:SKU-123 NX EX
+    R-->>B: fail, held by A
+    Note over A,B: Each now waits on the other's lock, a circular wait that only breaks when the 30s TTL expires
+```
+Service A grabs SKU-123 first and Service B grabs SKU-456 first, so both initial acquires succeed; the deadlock forms one round-trip later, when each service's second request blocks on the lock the other already holds. This is the exact race the lexicographic-order fix below eliminates.
 
 ```python
 # BROKEN: service A and B acquire SKU locks in different orders -> circular wait

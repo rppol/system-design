@@ -96,51 +96,94 @@ Space: O(V^2) = O(9)
 
 ### Trie for words: ["cat", "car", "card", "care", "dog"]
 
-```
-root
-├── c
-│   └── a
-│       ├── t  [END]
-│       └── r  [END]
-│           ├── d  [END]
-│           └── e  [END]
-└── d
-    └── o
-        └── g  [END]
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Prefix "car" traversal: root→c→a→r
-search("car"): True (r.is_end = True)
-starts_with("ca"): True (a node exists)
+    ROOT([root]) --> C(c)
+    C --> A(a)
+    A --> T("t<br/>END: cat")
+    A --> R("r<br/>END: car")
+    R --> D1("d<br/>END: card")
+    R --> E("e<br/>END: care")
+    ROOT --> D2(d)
+    D2 --> O(o)
+    O --> G("g<br/>END: dog")
+
+    class ROOT io
+    class C,A,D2,O mathOp
+    class T,R,D1,E,G train
 ```
+
+Prefix `"car"` traversal: root → c → a → r. `search("car")` returns True because the `r` node has `is_end = True`; `starts_with("ca")` returns True simply because the `a` node exists. Green nodes mark completed words (`is_end = True`); orange nodes are prefix-only branch points.
 
 ### Union-Find Path Compression
 
-```
-Before find(6):
-  0 - 1 - 2 - 3 - 4 - 5 - 6   (chain, height=6)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-After find(6) with path compression:
-  0
-  |\ \ \ \ \
-  1 2 3 4 5 6   (all point directly to root 0)
+    subgraph Before["Before find(6): chain, height 6"]
+        direction LR
+        B6((6)) --> B5((5)) --> B4((4)) --> B3((3)) --> B2((2)) --> B1((1)) --> B0((0))
+    end
 
-Next find(6): O(1) — points directly to root
+    subgraph After["After find(6): path compression"]
+        direction LR
+        A1((1)) --> A0((0))
+        A2((2)) --> A0
+        A3((3)) --> A0
+        A4((4)) --> A0
+        A5((5)) --> A0
+        A6((6)) --> A0
+    end
+
+    Before -.->|"find(6) rewrites every<br/>pointer to root"| After
+
+    class B0,B1,B2,B3,B4,B5,B6 lossN
+    class A0,A1,A2,A3,A4,A5,A6 train
 ```
+
+Path compression rewrites every node touched by `find(6)` to point directly at the root — the next `find(6)` call is O(1) instead of walking the O(n) chain.
 
 ### Segment Tree for array [2, 3, 1, 5, 4]
 
-```
-                [0,4] sum=15
-              /              \
-         [0,2] sum=6      [3,4] sum=9
-         /      \           /     \
-     [0,1]=5  [2,2]=1  [3,3]=5  [4,4]=4
-     /    \
- [0,0]=2 [1,1]=3
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Range sum [1,3] = 3 + 1 + 5 = 9
-Query visits: [1,1], [2,2], [3,3] — O(log n) nodes
+    ROOT("[0,4]<br/>sum=15") --> N02("[0,2]<br/>sum=6")
+    ROOT --> N34("[3,4]<br/>sum=9")
+    N02 --> N01("[0,1]<br/>sum=5")
+    N02 --> N22("[2,2]<br/>sum=1")
+    N34 --> N33("[3,3]<br/>sum=5")
+    N34 --> N44("[4,4]<br/>sum=4")
+    N01 --> N00("[0,0]<br/>sum=2")
+    N01 --> N11("[1,1]<br/>sum=3")
+
+    class ROOT,N02,N34,N01,N00,N44 base
+    class N22,N33,N11 train
 ```
+
+Range-sum query `[1,3]` descends from the root and sums the three highlighted leaves — 3 + 1 + 5 = 9 — visiting O(log n) nodes instead of scanning all 5 array elements.
 
 ### Fenwick Tree (BIT) — responsible ranges
 
@@ -434,6 +477,16 @@ class FenwickTree:
 
 **Bloom filter — duplicate URL detection:** Google's web crawler uses Bloom filters (billions of bits, k≈7) to skip already-visited URLs without storing every URL explicitly. With a 1% FPR and 10 bits/element, 1 billion URLs costs only ~1.25 GB — vs ~8 GB for a hash set.
 
+```mermaid
+xychart-beta
+    title "Memory to track 1B URLs (1% FPR, 10 bits/element)"
+    x-axis ["Bloom filter", "Hash set"]
+    y-axis "Memory (GB)" 0 --> 10
+    bar [1.25, 8]
+```
+
+A Bloom filter needs ~1.25 GB to answer "have I seen this URL?" for 1 billion URLs at a 1% false-positive rate; a hash set storing full keys needs ~8 GB — a 6.4x gap for a structure that never needs to enumerate or delete members.
+
 **Bloom filter — CDN and cache layers:** Akamai and Cloudflare use Bloom filters as a pre-filter before expensive cache lookups. A false positive wastes one cache check; a false negative is impossible, so correctness is maintained.
 
 ---
@@ -474,6 +527,46 @@ Rule: Use Fenwick for prefix sums (simpler). Use Segment tree when you need rang
 ---
 
 ## 8. When to Use / When NOT to Use
+
+The five structures in this module answer different questions; matching problem shape to structure is the skill being tested.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q0{"what is the<br/>problem shape?"}
+
+    Q0 -->|"pairwise relationships<br/>(routes, deps, social)"| GQ{"weighted edges?"}
+    GQ -->|"yes"| DIJ([Dijkstra])
+    GQ -->|"no"| BFS([BFS])
+    Q0 -->|"DAG must be<br/>linearly ordered"| TOPO(["Topological sort<br/>(Kahn's algorithm)"])
+
+    Q0 -->|"prefix, autocomplete,<br/>longest-prefix match"| TRIE([Trie])
+    TRIE -.->|"only exact match needed"| HM([use HashMap instead])
+
+    Q0 -->|"connectivity, grouping,<br/>dynamic edge additions"| UF(["Union-Find / DSU"])
+    UF -->|"sort edges by weight"| MST(["Kruskal's MST"])
+
+    Q0 -->|"range query with<br/>point updates"| RQ{"need min or max,<br/>or lazy range updates?"}
+    RQ -->|"yes"| SEG([Segment tree])
+    RQ -->|"no, sum only"| FEN(["Fenwick tree / BIT"])
+    RQ -.->|"array never changes"| PSA([use prefix-sum array])
+
+    Q0 -->|"probabilistic set<br/>membership"| BLOOM([Bloom filter])
+    BLOOM -.->|"need exact answer<br/>or deletion"| EXACT([use hash set instead])
+
+    class Q0,GQ,RQ mathOp
+    class DIJ,BFS,TOPO,TRIE,UF,MST,SEG,FEN,BLOOM train
+    class HM,PSA,EXACT frozen
+```
+
+Solid arrows lead to the recommended structure for that problem shape; dotted arrows mark the anti-signal — the edge case where a simpler structure (HashMap, prefix-sum array, hash set) beats the one this module covers.
 
 **Graphs:**
 - Use when entities have pairwise relationships (dependencies, routes, social connections)

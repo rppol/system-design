@@ -80,31 +80,57 @@ The two leading tools: **ArgoCD** (UI-centric, `Application` CRD, app-of-apps, s
 
 ## 5. Architecture Diagrams
 
+**GitOps pull-based flow.** The agent watches the config repo and reconciles the cluster to match Git; if someone edits the live cluster directly, that out-of-band drift is detected and self-healed back to the committed state.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Dev([Developer]) -->|PR| AppRepo(App Repo)
+    AppRepo -->|CI builds & pushes| Image(Image<br/>registry/app:sha)
+    Image -->|CI bumps tag| ConfigRepo(Config Repo<br/>manifests / Helm values)
+    ConfigRepo -->|agent watches| Agent(ArgoCD / Flux<br/>reconcile loop)
+    Agent --> Compare{Desired vs<br/>actual?}
+    Compare -->|in sync| NoOp(No-op)
+    Compare -->|drift or new| Apply(Apply to cluster)
+    Apply --> Cluster(Live Cluster)
+    Operator([Operator<br/>kubectl edit]) -.->|out-of-band change| Cluster
+    Cluster -->|state diverges| Drift{DRIFT<br/>detected}
+    Drift --> Agent
+    Agent -->|selfHeal=true| Revert(Revert to<br/>Git state)
+    Revert --> Cluster
+
+    class Dev,Operator io
+    class AppRepo,Image,ConfigRepo,Cluster base
+    class Agent,Compare mathOp
+    class NoOp,Apply,Revert train
+    class Drift lossN
 ```
-GitOps pull-based flow
 
-  developer --PR--> app repo --CI--> build image registry/app:sha
-                                        |
-       CI bumps image tag in --> config repo (manifests / Helm values)  [git commit]
-                                        |  agent watches
-                                        v
-                            ArgoCD/Flux (in cluster) reconcile
-                                        |
-              +-------- compares desired (Git) vs actual (cluster) --------+
-              v                                                            v
-        in sync -> nothing                                  drift/new -> apply
-                                        |
-                              someone kubectl edits live -> DRIFT detected
-                                        v
-                              agent reverts to Git state (self-heal)
+**App-of-apps (ArgoCD).** One root `Application` manages a directory of child Applications — a single commit to `/apps` onboards or removes whole applications declaratively.
 
-App-of-apps (ArgoCD)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  root Application (points at config repo /apps)
-     +-> Application: ingress-nginx
-     +-> Application: monitoring (kube-prometheus-stack)
-     +-> Application: team-a/* (their apps)
-  one commit to /apps onboards/removes whole applications declaratively
+    Root(Root Application<br/>points at /apps) --> Ingress(Application:<br/>ingress-nginx)
+    Root --> Monitoring(Application:<br/>monitoring)
+    Root --> TeamA(Application:<br/>team-a/*)
+
+    class Root mathOp
+    class Ingress,Monitoring,TeamA train
 ```
 
 ---
@@ -161,14 +187,45 @@ spec:
 # CD (ArgoCD/Flux) reconciles the config repo -> deploys. CI never touches the cluster.
 ```
 
+**CI/CD handoff via image automation.** CI only ever writes to the registry and, indirectly, to Git — the image-updater and GitOps agent are what actually reach the cluster.
+
+```mermaid
+sequenceDiagram
+    participant CI
+    participant Registry
+    participant Updater as Image Updater
+    participant Git
+    participant Agent as ArgoCD / Flux
+    participant Cluster
+
+    CI->>Registry: push app:sha-abc123
+    Updater->>Registry: watch for new tag
+    Registry-->>Updater: new tag found
+    Updater->>Git: commit tag bump
+    Agent->>Git: detect new commit
+    Agent->>Cluster: reconcile and deploy
+    Note over CI,Cluster: CI never touches the cluster directly
+```
+
 ### Drift detection and self-heal
 
+```mermaid
+sequenceDiagram
+    participant Operator
+    participant Cluster
+    participant ArgoCD
+    participant Git
+
+    Operator->>Cluster: kubectl scale --replicas=10 (out of band)
+    ArgoCD->>Git: read desired state
+    Git-->>ArgoCD: replicas=3
+    ArgoCD->>Cluster: compare actual vs desired
+    Cluster-->>ArgoCD: actual replicas=10 (OutOfSync)
+    ArgoCD->>Cluster: selfHeal=true reverts to 3
+    Note over Operator,Git: Durable fix = commit replicas=10 to Git, not kubectl
 ```
-someone runs: kubectl scale deploy/orders --replicas=10   (out of band)
-  -> Git says replicas: 3
-  -> ArgoCD marks the app "OutOfSync", and with selfHeal=true reverts to 3
-  -> the only durable way to set 10 is to commit replicas: 10 to Git
-```
+
+A manual `kubectl` change creates drift from Git's desired state; ArgoCD detects the mismatch and, with self-heal on, reverts it — the only durable fix is a Git commit.
 
 ### Rollback
 
@@ -344,6 +401,29 @@ spec:
 ```
 
 Now every cluster's desired state is a per-cluster overlay in one repo; ArgoCD reconciles all 25, self-heals drift, and "what's deployed on cluster-17" is answered by reading `clusters/cluster-17` in Git. During incidents, the team changes Git (or pauses auto-sync for genuine break-glass), so fixes stick and there's no old pipeline to fight. Rebuilding a lost cluster is "register it; ArgoCD reconciles it from Git."
+
+**ApplicationSet fan-out.** One generator templates a per-cluster `Application` for all 25 clusters, each pointing at its own `clusters/{{name}}` overlay — one repo, no per-cluster copy-paste.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Gen(ApplicationSet<br/>generator: clusters) --> App1(Application<br/>platform-cluster-01)
+    Gen --> App2(Application<br/>platform-cluster-02)
+    Gen --> AppMore("+23 more<br/>per-cluster Applications")
+    App1 --> Ov1(clusters/cluster-01<br/>overlay)
+    App2 --> Ov2(clusters/cluster-02<br/>overlay)
+
+    class Gen mathOp
+    class App1,App2,AppMore train
+    class Ov1,Ov2 base
+```
 
 **Outcome:** configuration drift across the fleet went to zero (self-heal), the source of truth became unambiguous and auditable (Git history per cluster), incident fixes stopped getting reverted (change Git, not the cluster), and cluster recovery became a reconcile rather than a manual rebuild. The cultural shift — "production changes are Git changes" — was the hardest and most valuable part.
 

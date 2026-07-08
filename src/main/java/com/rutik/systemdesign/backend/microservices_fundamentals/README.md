@@ -62,25 +62,53 @@ DDD identifies core subdomains (competitive advantage — invest heavily), suppo
 **Strangler Fig Pattern**
 Incrementally migrate a monolith to microservices. Route traffic for specific features through an API gateway. Implement those features as new microservices behind the gateway. Once a feature is fully migrated, remove it from the monolith. Over time, the monolith "strangles" as its responsibilities shrink to zero.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph P1["Phase 1: Monolith Handles Everything"]
+        direction LR
+        C1(["Client"]) --> M1["Monolith<br/>users · orders · payments · notifications"]
+    end
+
+    subgraph P2["Phase 2: Extract Payments"]
+        direction LR
+        C2(["Client"]) --> G2{"API Gateway"}
+        G2 --> M2["Monolith<br/>users · orders · notifications"]
+        G2 --> PS2["Payment Service"]
+    end
+
+    subgraph P3["Phase 3: Extract Orders"]
+        direction LR
+        C3(["Client"]) --> G3{"API Gateway"}
+        G3 --> M3["Monolith<br/>users · notifications"]
+        G3 --> PS3["Payment Service"]
+        G3 --> OS3["Order Service"]
+    end
+
+    subgraph P4["Phase N: Monolith Fully Replaced"]
+        direction LR
+        C4(["Client"]) --> G4{"API Gateway"}
+        G4 --> US4["User Service"]
+        G4 --> PS4["Payment Service"]
+        G4 --> OS4["Order Service"]
+        G4 --> NS4["Notification Service"]
+    end
+
+    P1 --> P2 --> P3 --> P4
+
+    class C1,C2,C3,C4 io
+    class M1,M2,M3 frozen
+    class G2,G3,G4 mathOp
+    class PS2,PS3,PS4,OS3,OS4,US4,NS4 train
 ```
-Phase 1: Monolith handles everything
-  Client -> Monolith (users, orders, payments, notifications)
-
-Phase 2: Extract payments service
-  Client -> API Gateway -> Monolith (users, orders, notifications)
-                       -> Payment Service
-
-Phase 3: Extract orders service
-  Client -> API Gateway -> Monolith (users, notifications)
-                       -> Payment Service
-                       -> Order Service
-
-Phase N: Monolith fully replaced
-  Client -> API Gateway -> User Service
-                       -> Payment Service
-                       -> Order Service
-                       -> Notification Service
-```
+*Each phase peels one capability out from behind the API Gateway; the monolith's remaining responsibility list shrinks every phase until Phase N replaces it entirely.*
 
 ### Communication Patterns
 
@@ -96,74 +124,124 @@ Fire and forget or consume from queue. Caller does not block. Use for eventual c
 
 ### Microservices vs Monolith
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Mono["Monolith: Single Deployable Unit"]
+        direction TD
+        MU["Users"]
+        MO["Orders"]
+        MP["Pay"]
+        MN["Notify"]
+        MDB[("Single Database")]
+        MU --> MDB
+        MO --> MDB
+        MP --> MDB
+        MN --> MDB
+    end
+
+    subgraph Micro["Microservices — all communicate via APIs"]
+        direction LR
+        US(["User Service<br/>:8081"]) --> UDB[("DB")]
+        OS(["Order Service<br/>:8082"]) --> ODB[("DB")]
+        PS(["Payment Service<br/>:8083"]) --> PDB[("DB")]
+    end
+
+    class MU,MO,MP,MN frozen
+    class MDB base
+    class US,OS,PS train
+    class UDB,ODB,PDB base
 ```
-MONOLITH                          MICROSERVICES
-+--------------------------+      +----------+  +----------+  +----------+
-|   Single Deployable Unit  |      |  User    |  |  Order   |  | Payment  |
-|                           |      |  Service |  |  Service |  |  Service |
-|  +---------+  +--------+ |      |  :8081   |  |  :8082   |  |  :8083   |
-|  |  Users  |  | Orders | |      |  +------+|  |  +------+|  |  +------+|
-|  +---------+  +--------+ |      |  |  DB  ||  |  |  DB  ||  |  |  DB  ||
-|  +--------+  +--------+  |      |  +------+|  |  +------+|  |  +------+|
-|  | Pay    |  | Notify |  |      +----------+  +----------+  +----------+
-|  +--------+  +--------+  |
-|                           |           All communicate via APIs
-|  +---------------------+  |
-|  |   Single Database   |  |
-|  +---------------------+  |
-+--------------------------+
-```
+*The monolith bundles every capability behind one process and one shared database; each microservice owns its own port and database, and the two sides talk only through APIs.*
 
 ### Database Per Service Pattern
 
-```
-+----------------+          +------------------+          +-----------------+
-|  Order Service |  ------> |   Order Postgres |          | User Service    |
-+----------------+          +------------------+          +------+----------+
-       |                                                          |
-       | (HTTP or event, never direct DB)                        |
-       v                                                   +------v----------+
-+----------------+          +------------------+          | User MySQL      |
-| Payment Service| ------> | Payment Postgres  |          +-----------------+
-+----------------+          +------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-RULE: Service A NEVER connects to Service B's database.
-      Service A calls Service B's API to get data.
+    OrderSvc(["Order Service"]) --> OrderDB[("Order Postgres")]
+    PaymentSvc(["Payment Service"]) --> PaymentDB[("Payment Postgres")]
+    UserSvc(["User Service"]) --> UserDB[("User MySQL")]
+    OrderSvc -.->|"HTTP or event<br/>never direct DB"| PaymentSvc
+
+    class OrderSvc,PaymentSvc,UserSvc train
+    class OrderDB,PaymentDB,UserDB base
 ```
+*Rule: Service A never connects to Service B's database directly — it calls Service B's API (or reacts to its events) to get data.*
 
 ### Strangler Fig Migration
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Client"]) --> GW{"API Gateway"}
+    GW -->|"new traffic"| Payment["Payment Service<br/>(new, extracted)"]
+    GW -.->|"legacy traffic"| Mono["Monolith<br/>users · orders · notifications · ..."]
+
+    class Client io
+    class GW mathOp
+    class Payment train
+    class Mono frozen
 ```
-                     +-------------+
-    Client --------> | API Gateway |
-                     +------+------+
-                            |
-            +---------------+------------------+
-            |                                  |
-     (new traffic)                    (legacy traffic)
-            |                                  |
-   +--------v--------+              +----------v---------+
-   | Payment Service |              |     Monolith        |
-   | (new, extracted)|              | (users, orders,     |
-   +-----------------+              |  notifications, ..) |
-                                    +--------------------+
-```
+*The gateway is the single fork point: new, extracted capabilities get solid routes while everything not yet migrated keeps falling through to the monolith.*
 
 ### Sync vs Async Communication
 
-```
-SYNCHRONOUS (REST/gRPC)
-Order Service ---[HTTP POST /payments]--> Payment Service
-              <--[200 OK: {paymentId}]---
+**Synchronous (REST/gRPC)**
 
-ASYNCHRONOUS (Event-Driven)
-Order Service ---[order.placed event]--> Kafka Topic
-                                              |
-                             +----------------+----------------+
-                             |                |                |
-                    Notification Svc   Analytics Svc    Loyalty Svc
-                    (sends email)      (records event)  (adds points)
+```mermaid
+sequenceDiagram
+    participant O as Order Service
+    participant P as Payment Service
+
+    O->>P: HTTP POST /payments
+    P-->>O: 200 OK (paymentId)
 ```
+*Order Service blocks on the call — it cannot proceed until Payment Service replies.*
+
+**Asynchronous (Event-Driven)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Order(["Order Service"]) -.->|"order.placed event"| Kafka["Kafka Topic"]
+    Kafka --> Notify["Notification Svc<br/>(sends email)"]
+    Kafka --> Analytics["Analytics Svc<br/>(records event)"]
+    Kafka --> Loyalty["Loyalty Svc<br/>(adds points)"]
+
+    class Order train
+    class Kafka req
+    class Notify,Analytics,Loyalty train
+```
+*Order Service publishes once and returns immediately; three independent consumers react on their own schedule without blocking order creation.*
 
 ---
 
@@ -243,22 +321,31 @@ public void onOrderPlaced(OrderPlacedEvent event) {
 
 ### Distributed Transaction Problem
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Order saved<br/>committed"]) --> B["Payment Service fails"]
+    B --> C{"Order exists,<br/>payment never processed"}
+    C --> D["DATA<br/>INCONSISTENCY"]
+
+    D -.-> S1["Saga choreography:<br/>compensating events<br/>roll back prior steps"]
+    D -.-> S2["Saga orchestration:<br/>coordinator sends commands<br/>+ compensation"]
+    D -.-> S3["Outbox pattern:<br/>event + domain change,<br/>same DB txn"]
+
+    class A io
+    class B lossN
+    class C mathOp
+    class D lossN
+    class S1,S2,S3 train
 ```
-Without distributed transactions:
-Order Service saves order (committed) -> Payment Service fails ->
-Order exists but payment never processed -> DATA INCONSISTENCY
-
-Solutions:
-1. Saga Pattern (choreography): each service publishes events;
-   compensating transactions roll back previous steps on failure.
-
-2. Saga Pattern (orchestration): a saga orchestrator sends commands
-   to services and handles compensation on failure.
-
-3. Outbox Pattern: write event to an "outbox" table in same DB transaction
-   as the domain change. A relay process publishes outbox events to Kafka.
-   Guarantees at-least-once delivery.
-```
+*A partial failure between the order commit and the payment call leaves the system inconsistent; Saga (choreography or orchestration) and the outbox pattern are the three standard fixes, guaranteeing at-least-once delivery without a distributed transaction.*
 
 ### Outbox Pattern (Prevents Lost Events)
 
@@ -331,6 +418,34 @@ public Order placeOrder(PlaceOrderCommand cmd) {
 - You lack DevOps maturity: Kubernetes, service mesh, distributed tracing, and log aggregation are prerequisites. Without them, microservices become a debugging nightmare.
 - You are migrating from a monolith without a clear strangler fig plan: a "big bang" rewrite to microservices almost always fails.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["New system or<br/>scaling pain"]) --> Q1{"10+ engineers,<br/>multiple teams?"}
+    Q1 -->|"Yes"| Q2{"Domain boundaries<br/>well understood?"}
+    Q2 -->|"Yes"| Q3{"DevOps maturity:<br/>k8s, tracing, log agg?"}
+    Q3 -->|"Yes"| Q4{"Can tolerate<br/>eventual consistency?"}
+    Q4 -->|"Yes"| Micro["Extract microservices"]
+
+    Q1 -->|"No"| Mono["Modular monolith"]
+    Q2 -->|"No"| Mono
+    Q3 -->|"No"| Mono
+    Q4 -->|"No"| Mono
+
+    class Start io
+    class Q1,Q2,Q3,Q4 mathOp
+    class Mono frozen
+    class Micro train
+```
+*Each gate mirrors one bullet from the lists above; failing any single gate routes to a modular monolith rather than a premature microservices split.*
+
 **Start with a modular monolith**: enforce module boundaries (clear interfaces, no cross-module DB access) from day one. When a module consistently needs independent scaling or a separate team, extract it as a service with a clear boundary already established.
 
 ---
@@ -341,6 +456,40 @@ public Order placeOrder(PlaceOrderCommand cmd) {
 The most dangerous anti-pattern. Services are deployed separately but are tightly coupled: ServiceA calls ServiceB synchronously, which calls ServiceC synchronously, which calls ServiceD. All share a database via a common library. You get all the complexity of microservices (network failures, distributed tracing, deployment coordination) with none of the benefits (independent deployment, team autonomy). Symptoms: you must deploy all services together; a schema change requires coordinating five teams; a timeout in ServiceD takes down ServiceA.
 
 Production war story: a financial services company split their monolith into 12 "microservices" over 18 months. Each service called three others synchronously. Average call chain depth was 6 hops. A database query optimization in ServiceH required changes in ServiceA through ServiceG because all services shared the same "shared-models" library. Deployments still required coordinating all 12 teams. They had built a distributed monolith with 10x the operational complexity.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SA["Service A"] --> SB["Service B"]
+    SB --> SC["Service C"]
+    SC -->|"...avg 6 hops deep"| SH["Service H"]
+
+    SA -.-> Lib[("shared-models<br/>library")]
+    SB -.-> Lib
+    SC -.-> Lib
+    SH -.-> Lib
+
+    SA --> DB[("shared database")]
+    SB --> DB
+    SC --> DB
+    SH --> DB
+
+    SH --> Fail{"ServiceH<br/>schema change"}
+    Fail --> Result["ServiceA-G all<br/>redeploy together"]
+
+    class SA,SB,SC,SH frozen
+    class Lib,DB base
+    class Fail mathOp
+    class Result lossN
+```
+*Deployed separately but wired together by synchronous chains, a shared database, and a shared library — this 12-service system had all the network complexity of microservices with none of the independent-deployment benefit; one team's schema change forced seven other teams to redeploy.*
 
 **Premature Decomposition**
 Splitting services before domain boundaries are understood. Six months later you need to move a field from ServiceA to ServiceB, but now you have 200 consumers of ServiceA's API and a database migration that requires coordinating two teams. A monolith refactoring would have been a two-hour PR.
@@ -449,15 +598,35 @@ Three pillars: logs, metrics, traces. Logs: structured JSON logs with correlatio
 Domain workshop with business and engineering identifies: product catalog, order management, payment processing, inventory, customer, notifications, search, shipping. Payment processing is the highest-risk and highest-value extraction — it also has the clearest boundary and its own compliance team.
 
 **Phase 2: Extract Payment Service (3 months)**
-```
-Before:                          After:
-Client -> Rails Monolith         Client -> Nginx -> Rails Monolith
-          |                                             |
-          +--> payments_db                        (for /api/v1/payments)
-                                                        |
-                                                  Spring Boot Payment Service
-                                                        |
-                                                  payments_postgres
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Before["Before"]
+        direction LR
+        C1(["Client"]) --> M1["Rails Monolith"]
+        M1 --> DB1[("payments_db")]
+    end
+
+    subgraph After["After"]
+        direction LR
+        C2(["Client"]) --> N2{"Nginx"}
+        N2 --> M2["Rails Monolith<br/>(other routes)"]
+        N2 -->|"/api/v1/payments"| PS2["Spring Boot<br/>Payment Service"]
+        PS2 --> DB2[("payments_postgres")]
+    end
+
+    class C1,C2 io
+    class M1,M2 frozen
+    class N2 mathOp
+    class PS2 train
+    class DB1,DB2 base
 ```
 
 A Nginx routing rule forwards `/api/v1/payments/**` to the new Spring Boot Payment Service. The monolith's payment code is removed over two weeks. The payment team now deploys independently.
@@ -469,28 +638,39 @@ Order Service calls Payment Service synchronously (needs payment result to confi
 Notification Service extracted, subscribes to Kafka events from Order, Payment, Shipping services. Monolith no longer sends emails directly.
 
 **Architecture after 12 months**:
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Client"]) --> GW{"API Gateway"}
+    GW --> Catalog["Catalog Svc<br/>(Go)"]
+    GW --> Order["Order Svc<br/>(Spring Boot)"]
+    GW --> Payment["Payment Svc<br/>(Spring Boot)"]
+    GW --> Customer["Customer Svc<br/>(Spring Boot)"]
+
+    Catalog --> CatalogDB[("catalog_pg")]
+    Order --> OrderDB[("orders_pg")]
+    Payment --> PaymentDB[("payments_pg")]
+    Customer --> CustomerDB[("users_pg")]
+
+    Order -.->|"order.placed"| Kafka["Kafka"]
+    Kafka --> Notify["Notification<br/>Service"]
+    Kafka --> Inventory["Inventory Svc<br/>(reserve stock)"]
+
+    class Client io
+    class GW mathOp
+    class Catalog,Order,Payment,Customer train
+    class CatalogDB,OrderDB,PaymentDB,CustomerDB base
+    class Kafka req
+    class Notify,Inventory train
 ```
-+--------+        +-------------+
-| Client | -----> | API Gateway |
-+--------+        +------+------+
-                         |
-         +---------------+------------------+------------------+
-         |               |                  |                  |
-+--------v-----+  +------v-------+  +-------v------+  +-------v-------+
-| Catalog Svc  |  |  Order Svc   |  | Payment Svc  |  | Customer Svc  |
-| (Go)         |  | (Spring Boot)|  | (Spring Boot)|  | (Spring Boot) |
-| catalog_pg   |  | orders_pg    |  | payments_pg  |  | users_pg      |
-+--------------+  +------+-------+  +--------------+  +---------------+
-                         |
-                   Kafka: order.placed
-                         |
-              +----------+----------+
-              |                     |
-   +----------v----+     +----------v------+
-   | Notification  |     | Inventory Svc   |
-   | Service       |     | (reserve stock) |
-   +--------------+     +-----------------+
-```
+*Twelve months in: four gateway-routed services each own their database, and the order.placed event fans out to two more downstream consumers — the monolith is gone from this path entirely.*
 
 **Results**:
 - Payment team deploys 4 times per day independently (was once per week).

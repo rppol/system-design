@@ -124,18 +124,28 @@ dict object
 
 ### `deque` Block Structure
 
-```
-deque
-┌──────────────────────────────────────────┐
-│ leftblock ──► block[0..63]   ← appendleft writes here
-│ rightblock──► block[0..63]   ← append writes here
-│ maxlen (optional)                        │
-└──────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Each block = fixed array of 64 pointers.
-New blocks allocated as needed; old freed.
-→ appendleft / popleft: O(1), no element shifting.
+    AL(["appendleft<br/>popleft"]) -->|"O(1)"| LB["leftblock<br/>64-ptr array"]
+    AP(["append<br/>pop"]) -->|"O(1)"| RB["rightblock<br/>64-ptr array"]
+    LB --> D(("deque"))
+    RB --> D
+    D -.->|"if set"| ML["maxlen<br/>auto-evicts oldest"]
+
+    class AL,AP io
+    class LB,RB base
+    class D mathOp
+    class ML frozen
 ```
+*Each end writes into its own fixed 64-pointer block with no element shifting, so both `appendleft`/`popleft` and `append`/`pop` are O(1); new blocks are allocated on demand and freed once empty.*
 
 ### `heapq` Min-Heap Shape
 
@@ -550,6 +560,37 @@ def shortest_path(
 
 ## 9. When to Use / When NOT to Use
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["Dominant<br/>access pattern?"]) --> Idx{"Index by<br/>position?"}
+    Idx -->|"yes"| L(["list"])
+    Idx -->|"no"| Ends{"Mutate both<br/>front and back?"}
+    Ends -->|"yes"| DQ(["deque"])
+    Ends -->|"no"| Key{"Lookup by<br/>arbitrary key?"}
+    Key -->|"key + value"| D(["dict"])
+    Key -->|"membership only"| S(["set"])
+    Key -->|"no"| Order{"Repeated<br/>min / max?"}
+    Order -->|"yes"| H(["heapq"])
+    Order -->|"no"| Sorted{"Stays sorted,<br/>rare inserts?"}
+    Sorted -->|"yes"| B(["bisect on list"])
+    Sorted -->|"no"| Count{"Counting or<br/>grouping?"}
+    Count -->|"counting"| C(["Counter"])
+    Count -->|"grouping"| DD(["defaultdict"])
+
+    class Q io
+    class Idx,Ends,Key,Order,Sorted,Count mathOp
+    class L,DQ,D,S,H,B,C,DD train
+```
+*A quick triage map across the seven collections in this module — the subsections below spell out the exceptions each yes/no answer glosses over.*
+
 ### Use `list` when:
 - You need O(1) random access by integer index.
 - You append to the end and pop from the end (stack).
@@ -624,6 +665,15 @@ def process_event(event_id: int) -> bool:
 ```
 
 At 100,000 unique events, the list version scans ~50,000 entries on average per call (total ~5 billion pointer dereferences). The set version performs one hash computation per call. Benchmark difference: ~3 seconds vs ~0.015 seconds.
+
+```mermaid
+xychart-beta
+    title "100,000 Membership Checks: list scan vs set hash"
+    x-axis ["list O(n)", "set O(1)"]
+    y-axis "Total time (seconds)" 0 --> 3.2
+    bar [3, 0.015]
+```
+*The scan's cost grows with every stored id while the hash lookup stays flat — a ~200x gap at 100,000 events that only widens as the collection grows.*
 
 ---
 
@@ -954,20 +1004,36 @@ print(f"sorted() x{N_READS}:         {elapsed_sort*1000:.1f}ms total, "
 
 ### Architecture Summary
 
-```
-ScoreEvent (write path)
-        │
-        ▼
-  Counter[user_id]        ← cumulative scores, O(1) update
-  defaultdict[user_id]    ← per-user history list, O(1) append
-  deque(maxlen=1000)      ← rolling recent events, O(1) append + auto-evict
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Read paths:
-  get_top_k()       → heapq.nlargest(k, Counter.items())  O(n log k)
-  get_recent()      → list(deque)                          O(window_size)
-  get_user_total()  → Counter[user_id]                     O(1)
-  get_user_scores() → defaultdict.get(user_id, [])         O(1)
+    subgraph WP["Write Path"]
+        SE(["ScoreEvent"]) --> C1["Counter<br/>O(1) update"]
+        SE --> DD1["defaultdict<br/>O(1) append"]
+        SE --> DQ1["deque maxlen=1000<br/>O(1) append + evict"]
+    end
+
+    subgraph RP["Read Paths"]
+        TK(["get_top_k()"]) --> C2["heapq.nlargest<br/>O(n log k)"]
+        RE(["get_recent()"]) --> DQ2["list(deque)<br/>O(window_size)"]
+        UT(["get_user_total()"]) --> C3["Counter lookup<br/>O(1)"]
+        US(["get_user_scores()"]) --> DD2["defaultdict.get<br/>O(1)"]
+    end
+
+    class SE io
+    class TK,RE,UT,US req
+    class C1,C2,C3 train
+    class DD1,DD2 base
+    class DQ1,DQ2 frozen
 ```
+*Every write fans out to three O(1) structures; every read hits exactly one of them, which is why `get_top_k()` — at O(n log k) — is the only read costing more than O(1), and still far cheaper than the broken `sorted()` approach's O(n log n).*
 
 ### Key Lessons
 

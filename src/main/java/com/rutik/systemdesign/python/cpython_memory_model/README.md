@@ -39,6 +39,32 @@ cheap: every assignment/deletion adjusts a counter; zero count means immediate f
 like lists, dicts, instances) and reclaims groups of objects that are mutually reachable
 but unreachable from outside.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    decref(["Py_DECREF<br/>reference removed"]) --> zero{"refcount == 0?"}
+    zero -->|"yes"| dealloc["tp_dealloc<br/>Tier 1: immediate free"]
+    zero -->|"no"| cyclecheck{"part of a<br/>reference cycle?"}
+    cyclecheck -->|"no"| alive(["stays alive<br/>via real reference"])
+    cyclecheck -->|"yes"| trapped["trapped in cycle<br/>refcount stuck above 0"]
+    trapped -.->|"gen0 / gen1 / gen2<br/>periodic scan"| gcreclaim["cyclic GC reclaims<br/>Tier 2: batch, ms to 100ms+"]
+
+    class decref io
+    class zero,cyclecheck mathOp
+    class dealloc train
+    class alive base
+    class trapped frozen
+    class gcreclaim lossN
+```
+*The reclamation decision every object faces on each `Py_DECREF`: reference counting handles the common case immediately (Tier 1), and only objects trapped in reference cycles fall through to the batched, higher-latency cyclic GC (Tier 2).*
+
 **Why it matters.** In long-running FastAPI processes, failing to understand this model
 causes:
 - Memory leaks from uncollected cycles (especially with `__del__` finalizers).
@@ -121,62 +147,80 @@ allocation. Works at the Python level — it does not see C-level allocations th
 
 ### 5.1 CPython Allocator Hierarchy
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    osmalloc(["OS / libc malloc"]) --> sizecheck{"object size?"}
+    sizecheck -->|"up to 512B"| arenabox
+    sizecheck -->|"over 512B"| direct(["direct malloc<br/>bypasses pymalloc"])
+
+    subgraph arenabox["Arena · 256KB<br/>freed only when empty"]
+        pool1["Pool 4KB<br/>size class 32B<br/>used + free blocks"]
+        pool2["Pool 4KB<br/>size class 64B<br/>used + free blocks"]
+    end
+
+    class osmalloc frozen
+    class sizecheck mathOp
+    class direct frozen
+    class arenabox,pool1,pool2 base
 ```
-OS / libc malloc
-    |
-    v
-+----------------------------------------------+
-|  Arena  (256 KB, aligned to 256 KB boundary) |
-|  CPython keeps a list of up to N arenas       |
-|  Arenas are returned to OS when fully free    |
-|                                               |
-|  +------------------+  +------------------+  |
-|  |  Pool  (4 KB)    |  |  Pool  (4 KB)    |  |
-|  |  size class: 32B |  |  size class: 64B |  |
-|  |                  |  |                  |  |
-|  | [Block][Block].. |  | [Block][Block].. |  |
-|  | [Block][free ].. |  | [free ][free ].. |  |
-|  +------------------+  +------------------+  |
-|                                               |
-|  Each pool is dedicated to ONE size class     |
-|  Size classes: 8, 16, 24 ... 512 bytes        |
-+----------------------------------------------+
-          ^
-          | objects <= 512 bytes use pymalloc
-          | objects  > 512 bytes -> OS malloc directly
-```
+*Objects up to 512 bytes are served by pymalloc's arena/pool/block hierarchy; larger objects bypass it and go straight to the OS allocator. An arena (256 KB) holds many 4 KB pools, each dedicated to one 8-byte-stepped size class, and is returned to the OS only once every pool inside it is empty.*
 
 ### 5.2 Reference Count Lifecycle
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Refcnt1: a = MyObj()<br/>ob_refcnt = 1
+    Refcnt1 --> Refcnt2: b = a<br/>ob_refcnt = 2
+    Refcnt2 --> Refcnt1: del a<br/>b still holds ref
+    Refcnt1 --> Deallocated: del b<br/>ob_refcnt = 0
+    Deallocated --> [*]
+
+    class Refcnt1 train
+    class Refcnt2 req
+    class Deallocated lossN
 ```
-                  +------------------+
-  a = MyObj()     |   PyObject       |
-  ----------------> ob_refcnt = 1    |
-                  |   ob_type = ...  |
-                  +------------------+
-  b = a           ob_refcnt becomes 2
-  del a           ob_refcnt becomes 1  (b still holds ref)
-  del b           ob_refcnt becomes 0  -> tp_dealloc() called immediately
-```
+*Each assignment or deletion synchronously adjusts `ob_refcnt`; the instant it reaches zero, `tp_dealloc` frees the object immediately — no scheduler, no GC pause, just the Tier-1 fast path from the mental model in Section 2.*
 
 ### 5.3 Generational GC Collection Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    new(["New objects<br/>allocated"]) --> gen0["Gen 0<br/>threshold: 700 allocs<br/>collected frequently"]
+    gen0 -->|"survivors<br/>promoted"| gen1["Gen 1<br/>threshold: 10 gen0 collects<br/>less frequent"]
+    gen1 -->|"survivors<br/>promoted"| gen2["Gen 2<br/>threshold: 10 gen1 collects<br/>~100ms pause, rare"]
+    gen2 -.->|"gc.freeze()"| pinned(["pinned forever<br/>never rescanned"])
+
+    class new io
+    class gen0 req
+    class gen1 mathOp
+    class gen2 frozen
+    class pinned frozen
 ```
-  New objects allocated
-        |
-        v
-  [Gen 0]  threshold=700 (allocation delta)
-        |  collected frequently (~every 700 net allocs)
-        |  survivors promoted to Gen 1
-        v
-  [Gen 1]  threshold=10 (gen0 collections)
-        |  collected less frequently
-        |  survivors promoted to Gen 2
-        v
-  [Gen 2]  threshold=10 (gen1 collections)
-           collected rarely; pause can be ~100ms on large heaps
-           gc.freeze() pins long-lived objects here permanently
-```
+*Gen0's low threshold (700 net allocations) keeps collections cheap and frequent; survivors ratchet up through Gen1 and Gen2, where pauses can stretch to ~100 ms. `gc.freeze()` permanently exempts long-lived Gen2 survivors — module-level objects, for example — from ever being rescanned.*
 
 ### 5.4 PyObject C Struct Layout
 
@@ -240,6 +284,15 @@ print(sys.getsizeof({}))         # 232 (empty dict in CPython 3.11)
 print(sys.getsizeof(""))         # 49  (str header with Latin-1 kind)
 print(sys.getsizeof("a"))        # 50  (str header + 1 byte for Latin-1 char)
 ```
+
+```mermaid
+xychart-beta
+    title "Fixed Object Overhead: C vs CPython (bytes)"
+    x-axis ["C int", "CPython int(0)", "empty list", "empty dict"]
+    y-axis "Bytes" 0 --> 240
+    bar [4, 24, 56, 232]
+```
+*A plain C `int` costs 4 bytes; the same value as a CPython `PyLongObject` costs 24 bytes just for the header — the 6x overhead Q13 warns about for numeric-heavy workloads — and grows to 232 bytes for an empty `dict` before a single key is stored.*
 
 ### 6.2 Reference Counting Mechanics
 

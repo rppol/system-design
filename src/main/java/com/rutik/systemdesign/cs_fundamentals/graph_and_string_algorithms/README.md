@@ -77,17 +77,61 @@ The data structure foundations (adjacency list/matrix, Trie, Union-Find, segment
 
 ## 5. Architecture Diagrams
 
+### Shortest Path Algorithm Selection — Decision Flow
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Shortest path<br/>needed"]) --> q1{"All weights<br/>equal?"}
+    q1 -->|"yes"| bfs["BFS<br/>O(V+E)"]
+    q1 -->|"no"| q2{"Any negative<br/>weight edges?"}
+    q2 -->|"yes"| bf["Bellman-Ford<br/>O(VE)"]
+    q2 -->|"no"| q3{"All-pairs, V small<br/>(up to 500)?"}
+    q3 -->|"yes"| fw["Floyd-Warshall<br/>O(V^3)"]
+    q3 -->|"no"| dij["Dijkstra<br/>O((V+E) log V)"]
+
+    class start io
+    class q1,q2,q3 mathOp
+    class bfs,bf,fw,dij train
+```
+
+The algorithm choice is a strict function of the edge-weight regime (§2's key insight): each diamond asks one question about the weights, and negative weights always route to Bellman-Ford since it is the only one of the four whose correctness invariant tolerates them.
+
 ### Dijkstra — Priority Queue Relaxation
 
-```
-Graph (edges: u-v-weight):
-  0--1(4)--2(1)
-  |         |
-  3(2)      5(3)
-  |         |
-  4--6(1)---5
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Source = 0. dist = [0, inf, inf, inf, inf, inf]
+    n0(["0<br/>source"]) -->|"4"| n1("1<br/>dist 4")
+    n0 -->|"2"| n3("3<br/>dist 2")
+    n1 -->|"1"| n2("2<br/>dist 5")
+    n3 -->|"1"| n4("4<br/>dist 3")
+    n4 -->|"1"| n6("6<br/>dist 4")
+    n6 -->|"3"| n5("5<br/>dist 7")
+    n2 -.->|"3 no improvement"| n5
+
+    class n0 io
+    class n1,n2,n3,n4,n5,n6 train
+```
+
+Dijkstra always pops the smallest tentative distance from the heap and finalises it; the dotted edge from 2 to 5 is the relaxation that arrives too late (min(7, 5+3) = 7) and changes nothing. The heap trace below shows the pop order that produced these final distances.
+
+```
+Source = 0. dist = [0, inf, inf, inf, inf, inf, inf]
 
 Heap: [(0, 0)]
 Pop (0,0): relax 1->dist[1]=4, relax 3->dist[3]=2. Heap: [(2,3),(4,1)]
@@ -128,18 +172,67 @@ Search "ABCABCABCABD" for pattern:
   match 8 (C=C), match 9..11 (ABD=ABD) -> FOUND at text[3]
 ```
 
+The fail[] value at each index is the length of the longest prefix-that-is-also-a-suffix seen so far — kept as a column-aligned value table on purpose, since character alignment is the information Mermaid cannot draw. The search trace beneath it shows the payoff: on the mismatch at position 8 the pointer jumps straight to fail[7]=5 instead of restarting at 0, skipping 5 redundant comparisons.
+
 ### Bellman-Ford — Negative Cycle Detection
 
-```
-Graph:  0 --5--> 1 --(-3)--> 2 --(-2)--> 3 --(4)--> 1
-                                           (cycle: 1->2->3->1 = -3-2+4 = -1, negative!)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    n0(["0<br/>source"]) -->|"5"| n1("1")
+    n1 -->|"-3"| n2("2")
+    n2 -->|"-2"| n3("3")
+    n3 -->|"4"| n1
+
+    class n0 io
+    class n1,n2,n3 lossN
+```
+
+The cycle 1 to 2 to 3 to 1 sums to -3 + -2 + 4 = -1, a negative cycle, so every relaxation pass keeps lowering dist[1], dist[2], and dist[3] with no fixed point. The pass-by-pass trace below shows exactly that: the same three distances shrink every pass instead of converging.
+
+```
 Pass 1: dist = [0, 5, 2, 0, inf...]    (0->1=5, 1->2=2, 2->3=0)
 Pass 2: dist = [0, 4, 2, 0, ...]       (3->1=4 < 5 -> dist[1]=4)
 Pass 3: dist = [0, 3, 1, -1, ...]      (cycle reduces all three)
 ...
 Pass V: improvement detected -> NEGATIVE CYCLE REACHABLE
 ```
+
+### Kruskal's MST — Union-Find Cycle Check
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    edges(["Edges sorted<br/>by weight"]) --> next{"Next edge<br/>(u, v, w)"}
+    next --> find{"find(u) equals<br/>find(v)?"}
+    find -->|"yes: same<br/>component"| skip(["Skip<br/>would cycle"])
+    find -->|"no: different"| union["union(u, v)<br/>add to MST"]
+    skip -.-> next
+    union --> check{"V-1 edges<br/>in MST?"}
+    check -->|"no"| next
+    check -->|"yes"| done(["MST done"])
+
+    class edges,done io
+    class next,find,check mathOp
+    class union train
+    class skip lossN
+```
+
+Kruskal processes edges in weight order and uses Union-Find purely as a cycle oracle: `find(u) == find(v)` means u and v are already connected, so adding this edge would close a cycle and it is skipped; otherwise `union` merges the two components and the edge joins the MST. The loop stops once V-1 edges have been added, exactly as `kruskal_mst` in §6 implements it.
 
 ---
 

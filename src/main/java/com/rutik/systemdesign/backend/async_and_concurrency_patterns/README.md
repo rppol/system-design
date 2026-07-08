@@ -74,74 +74,120 @@ W/C is the wait-to-compute ratio. For a service that spends 50ms waiting for a D
 
 ### Bulkhead Thread Pool Isolation
 
-```
-Application receives request
-    |
-    +---> OrderService.getOrder() → OrderDB thread pool (size=10)
-    |     [slow DB query blocks this pool only]
-    |
-    +---> InventoryService.check() → InventoryDB thread pool (size=10)
-    |
-    +---> PaymentService.getPaymentMethods() → PaymentDB thread pool (size=5)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-WITHOUT bulkhead:
-  All services share one thread pool (size=20)
-  OrderDB slow → occupies 10 threads → only 10 left for all other services
-  InventoryDB also slow → now only 0 left → ALL requests fail
+    subgraph WOB["Without Bulkhead — Shared Pool (size=20)"]
+        direction LR
+        REQ1(["3 services<br/>share 1 pool"]) --> SLOW1{"OrderDB<br/>slow"}
+        SLOW1 -->|"occupies 10<br/>threads"| SLOW2{"InventoryDB<br/>also slow"}
+        SLOW2 -->|"occupies remaining<br/>10 threads"| FAIL(["0 threads left<br/>ALL requests fail"])
+    end
 
-WITH bulkhead:
-  OrderDB slow → occupies OrderDB pool (size=10) → InventoryDB pool unaffected
-  Payment and Inventory continue to function
-  Order service degrades gracefully (only Order calls fail)
+    subgraph WB["With Bulkhead — Isolated Pools"]
+        direction LR
+        OP[("OrderDB pool<br/>size=10")] -->|"OrderDB<br/>slow"| DEG(["Order degrades<br/>gracefully"])
+        IP[("InventoryDB pool<br/>size=10")] --> OK1(["Inventory<br/>unaffected"])
+        PP[("PaymentDB pool<br/>size=5")] --> OK2(["Payment<br/>unaffected"])
+    end
+
+    class REQ1 req
+    class SLOW1,SLOW2 mathOp
+    class FAIL lossN
+    class OP,IP,PP base
+    class DEG lossN
+    class OK1,OK2 train
 ```
+
+Without bulkhead isolation, one slow dependency (OrderDB) exhausts the shared pool of 20 threads and cascades into total failure once InventoryDB also slows down; with bulkhead isolation, each dependency's own pool (10/10/5) walls off the slowness, so a slow OrderDB only degrades Order calls while Inventory and Payment keep serving traffic.
 
 ### Virtual Threads vs Platform Threads
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph PT["Platform Thread"]
+        direction LR
+        PT1(["OS thread<br/>~1-2 MB stack"]) --> PT2{"Blocked<br/>on I/O"}
+        PT2 -->|"~1-10 μs<br/>kernel switch"| PT3["Sits idle<br/>wastes resources"]
+    end
+
+    subgraph VT["Virtual Thread (Java 21)"]
+        direction LR
+        VT1(["JVM thread<br/>~few KB stack"]) --> VT2{"Blocked<br/>on I/O"}
+        VT2 -->|"~100 ns<br/>mount/unmount"| VT3["Unmounts<br/>from carrier"]
+        VT3 --> VT4(["Carrier reused<br/>by another VT"])
+    end
+
+    subgraph SB["Spring Boot 3.2 Request Flow"]
+        direction LR
+        SB1(["HTTP request"]) --> SB2["New virtual thread<br/>per request"]
+        SB2 --> SB3{"Blocking<br/>DB call"}
+        SB3 --> SB4["VT unmounts<br/>platform thread freed"]
+        SB4 --> SB5[("DB responds")]
+        SB5 --> SB6(["VT remounted<br/>continues"])
+    end
+
+    class PT1,PT2,PT3 frozen
+    class VT1,VT2,VT3,VT4 train
+    class SB1,SB6 io
+    class SB2,SB3 mathOp
+    class SB4 train
+    class SB5 base
 ```
-Platform thread:
-  OS thread: ~1-2 MB stack, limited by OS (thousands max per JVM)
-  If blocked on I/O: OS thread sits idle, wasting system resources
-  Context switch: 1-10 microseconds (full kernel context switch)
 
-Virtual thread (Java 21):
-  JVM thread: ~few KB stack, millions possible
-  If blocked on I/O: virtual thread unmounted from carrier (platform) thread
-  Platform thread reused for another virtual thread
-  Context switch: ~100 nanoseconds (JVM-level mount/unmount)
-
-Server with 1000 concurrent requests:
-  Platform threads:  1000 * 1 MB = 1 GB RAM for thread stacks
-  Virtual threads:   1000 * few KB = ~10 MB RAM
-
-Spring Boot 3.2 with virtual threads:
-  spring.threads.virtual.enabled=true
-  Each HTTP request handler → new virtual thread
-  Blocking DB call: virtual thread unmounts, platform thread handles other request
-  DB responds: virtual thread remounted and continues
-  Net effect: 200 Tomcat threads can handle 10,000 concurrent requests
-```
+For 1000 concurrent requests, ~1-2 MB platform-thread stacks cost ~1 GB of RAM versus ~10 MB for ~few-KB virtual-thread stacks; the unmount/remount trick (~100 ns JVM-level switch instead of a ~1-10 μs kernel context switch) is what lets Spring Boot 3.2's 200 Tomcat threads serve 10,000 concurrent requests.
 
 ### CompletableFuture Chain
 
-```
-// Correct: all async, using dedicated executors
-CompletableFuture<Order> orderFuture =
-    CompletableFuture.supplyAsync(() -> fetchOrder(id), ioExecutor)        // IO
-    .thenApplyAsync(order -> enrichOrder(order), ioExecutor)               // IO
-    .thenApplyAsync(order -> computeTotal(order), cpuExecutor)             // CPU
-    .exceptionally(ex -> handleError(ex));                                  // error
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-// Correct: fan-out then fan-in
-CompletableFuture<User> userFuture =
-    CompletableFuture.supplyAsync(() -> fetchUser(id), ioExecutor);
-CompletableFuture<List<Order>> ordersFuture =
-    CompletableFuture.supplyAsync(() -> fetchOrders(id), ioExecutor);
+    subgraph SEQ["Sequential Async Chain"]
+        direction LR
+        S1(["fetchOrder(id)"]) -->|"supplyAsync<br/>ioExecutor"| S2["enrichOrder()"]
+        S2 -->|"thenApplyAsync<br/>ioExecutor"| S3["computeTotal()"]
+        S3 -->|"thenApplyAsync<br/>cpuExecutor"| S4{"exceptionally"}
+        S4 -->|"success"| S5(["orderFuture"])
+        S4 -.->|"failure"| S6(["handleError()"])
+    end
 
-CompletableFuture<UserProfile> profileFuture =
-    CompletableFuture.allOf(userFuture, ordersFuture)
-    .thenApply(v -> buildProfile(userFuture.join(), ordersFuture.join()));
-// Both user and orders fetched in parallel
+    subgraph FAN["Fan-Out / Fan-In"]
+        direction LR
+        U(["fetchUser(id)"]) -->|"supplyAsync<br/>ioExecutor"| MRG(("allOf"))
+        O(["fetchOrders(id)"]) -->|"supplyAsync<br/>ioExecutor"| MRG
+        MRG -->|"thenApply"| BP["buildProfile()"]
+        BP --> PF(["profileFuture"])
+    end
+
+    class S1,U,O io
+    class S2,S3,S4,MRG,BP mathOp
+    class S5,PF train
+    class S6 lossN
 ```
+
+The sequential chain alternates IO and CPU executors per stage so no single pool absorbs both wait time and computation, and `exceptionally` catches a failure from any upstream stage; the fan-out/fan-in half fetches the user and their orders concurrently and joins with `allOf` only once both complete.
 
 ---
 
@@ -208,6 +254,38 @@ CompletableFuture<Order> cf = CompletableFuture
 
 ### 6.2 Virtual Threads and Pinning
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph BROKEN["BROKEN — synchronized"]
+        direction LR
+        B1(["VT enters<br/>synchronized block"]) --> B2{"Acquires monitor<br/>on carrier"}
+        B2 --> B3["VT pinned<br/>to carrier"]
+        B3 -->|"blocking DB call"| B4(["Carrier thread<br/>blocked"])
+    end
+
+    subgraph FIXED["FIX — ReentrantLock"]
+        direction LR
+        F1(["VT calls<br/>lock.lock()"]) --> F2{"Acquires<br/>ReentrantLock"}
+        F2 --> F3["VT NOT pinned"]
+        F3 -->|"blocking DB call"| F4(["VT unmounts<br/>carrier freed"])
+    end
+
+    class B1,B2,B3 mathOp
+    class B4 lossN
+    class F1,F2,F3 mathOp
+    class F4 train
+```
+
+`synchronized` acquires the object monitor on the carrier thread itself, so the virtual thread cannot unmount during the blocking call and the carrier stays pinned; swapping in `ReentrantLock` removes that constraint, letting the virtual thread unmount normally and free its carrier for other work.
+
 ```java
 // Java 21 virtual threads
 // Enable in Spring Boot: spring.threads.virtual.enabled=true
@@ -256,6 +334,22 @@ try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
 ```
 
 ### 6.3 Reactive Backpressure
+
+```mermaid
+sequenceDiagram
+    participant P as Publisher
+    participant S as Subscriber
+
+    P->>S: onSubscribe(Subscription)
+    S->>P: request(N)
+    loop up to N items
+        P->>S: onNext(item)
+    end
+    Note over P,S: Publisher never sends more than requested
+    S->>P: request(N) when ready for more
+```
+
+The Reactive Streams protocol is pull-based: the Subscriber tells the Publisher exactly how many items it can absorb via `request(N)`, and the Publisher is contractually bound to send at most that many `onNext` calls before waiting on the next request — this is what makes backpressure possible without an explicit acknowledgment per item.
 
 ```java
 // Project Reactor backpressure strategies

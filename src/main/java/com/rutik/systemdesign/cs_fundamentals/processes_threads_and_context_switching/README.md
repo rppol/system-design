@@ -65,6 +65,48 @@ A **thread** is the OS's unit of execution. Every process has at least one threa
 
 **M:N is the most powerful**: blocking one OS thread does not block all user tasks; the scheduler moves user tasks to a free OS thread. Go's goroutine scheduler does this automatically — goroutines block on I/O, the OS thread continues with another goroutine.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph User["M user-level tasks<br/>(goroutines / virtual threads)"]
+        u1([Task 1])
+        u2([Task 2])
+        u3([Task 3])
+        u4([Task 4<br/>blocks on I/O])
+    end
+
+    SCHED{"M:N scheduler<br/>(Go runtime / JVM)"}
+
+    subgraph OS["N OS threads<br/>(carrier threads)"]
+        os1(OS thread 1)
+        os2(OS thread 2)
+    end
+
+    u1 --> SCHED
+    u2 --> SCHED
+    u3 --> SCHED
+    u4 -.->|"parked, not blocked"| SCHED
+    SCHED --> os1
+    SCHED --> os2
+    os1 --> CPU1((CPU core))
+    os2 --> CPU2((CPU core))
+
+    class u1,u2,u3 req
+    class u4 lossN
+    class SCHED mathOp
+    class os1,os2 train
+    class CPU1,CPU2 base
+```
+
+M user-level tasks are multiplexed onto only N OS threads by the runtime's own scheduler; when Task 4 blocks on I/O, the runtime parks that task instead of blocking an OS thread, freeing the carrier thread to run another task — the mechanism that lets Go run hundreds of thousands of goroutines and Java 21 run millions of virtual threads on a handful of OS threads.
+
 ### IPC Mechanisms
 
 | Mechanism | Latency | Throughput | Notes |
@@ -108,58 +150,87 @@ Note: ASLR (Address Space Layout Randomisation) randomises base addresses
 
 ### Context Switch — Register Save/Restore
 
+```mermaid
+sequenceDiagram
+    participant A as Process A<br/>(user mode)
+    participant CPU as CPU / Kernel
+    participant B as Process B<br/>(user mode)
+
+    Note over A: Running<br/>PC=0x4000, SP=0x7fff
+    A->>CPU: Timer interrupt<br/>(or blocking syscall)
+    CPU->>CPU: 1. Trap to kernel mode<br/>save user regs to kernel stack
+    CPU->>CPU: 2. Interrupt handler calls scheduler
+    CPU->>CPU: 3. Scheduler selects Process B
+    CPU->>CPU: 4. Save A's registers to A's TCB
+    CPU->>CPU: 5. Load B's registers from B's TCB
+    Note right of CPU: 6. Different process: switch CR3<br/>TLB flush costs ~200-300 ns per miss
+    CPU-->>B: 7. Return from interrupt
+    Note over B: Running<br/>PC=0x8000, SP=0x6fff (B's saved values)
+    Note over A,B: Total switch ~1-10 µs (TLB flush + cache cold-start)<br/>Same-process thread switch ~0.5-2 µs (no TLB flush)
 ```
-Running: Process A (user mode)
-    CPU registers: [PC=0x4000, SP=0x7fff, R0-R15...]
 
-Timer interrupt (or blocking syscall):
-  1. CPU traps to kernel mode (saves user registers to kernel stack)
-  2. Interrupt handler calls scheduler
-  3. Scheduler selects Process B (next ready process)
-  4. Save Process A's register state to A's TCB (in kernel memory)
-  5. Load Process B's register state from B's TCB
-  6. If B is a different process:
-       - Switch page table pointer (CR3 on x86) -> TLB flush!
-       - ~200-300 ns per TLB miss on subsequent memory accesses
-  7. Return from interrupt -> CPU is now running Process B in user mode
-
-Running: Process B (user mode)
-    CPU registers: [PC=0x8000, SP=0x6fff, R0-R15... (B's saved values)]
-
-Total switch time: ~1-10 µs (dominated by TLB flush and cache cold-start)
-Same-process thread switch: ~0.5-2 µs (no page table switch -> no TLB flush)
-```
+Steps 1–5 run entirely in the kernel and are identical whether A and B are threads in the same process or different processes; step 6 — the CR3 page-table switch — only fires between different processes, which is exactly why a same-process thread switch is roughly 5x cheaper (no TLB flush).
 
 ### Thread States
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> New : pthread_create()<br/>/ new Thread()
+    New --> Ready
+    Ready --> Running : scheduler selects
+    Running --> Ready : preempt/yield
+    Running --> Blocked : I/O call, lock wait,<br/>sleep()
+    Blocked --> Ready : I/O complete,<br/>mutex unlocked
+    Running --> Zombie : exit()
+    Zombie --> [*] : parent reaps via<br/>wait()/waitpid()
+
+    class New io
+    class Ready req
+    class Running train
+    class Blocked frozen
+    class Zombie lossN
 ```
-         +----------+
-         |   New    |  <- pthread_create() / new Thread()
-         +----------+
-               |
-               v
-         +----------+   scheduler selects   +----------+
-         |  Ready   |<--------------------->| Running  |
-         +----------+   preempt/yield       +----------+
-               ^                                 |
-               |         I/O complete            | I/O call, lock wait, sleep()
-               |         mutex unlocked          v
-               |                           +----------+
-               +---------------------------| Blocked  |
-                                           +----------+
-                                                |
-                                       exit()   |
-                                                v
-                                          +----------+
-                                          | Zombie   |  <- waiting for parent wait()
-                                          +----------+
-```
+
+Ready and Running loop back and forth under the scheduler (preemption or yield); Blocked can only re-enter through Ready, never straight back to Running; and Zombie is a dead end until the parent calls `wait()`/`waitpid()` to reap it (Q5) — an unreaped zombie is exactly the resource leak Pitfall 3 shows.
 
 ---
 
 ## 6. How It Works — Detailed Mechanics
 
 ### fork/exec Model
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P([Parent process]) --> F{"fork()"}
+    F --> COW["Shared pages<br/>marked read-only (COW)"]
+    COW --> C([Child process<br/>exact duplicate])
+    C --> E{"exec()"}
+    E --> N(["New program image<br/>(fresh address space)"])
+    F -.->|"parent continues<br/>unmodified"| P
+
+    class P,C io
+    class F,E mathOp
+    class COW frozen
+    class N train
+```
+
+`fork()` does not copy memory — it marks the parent's pages read-only and shares them with the child; a write from either side triggers the kernel to copy only that one page (Q7). If the child calls `exec()` immediately, as most programs do, zero pages are ever copied — the child's address space is simply replaced by the new program image, which is why fork+exec is O(1) in the common case instead of copying a full 4 GB process.
 
 ```python
 import os

@@ -96,78 +96,89 @@ Where K is typically 2. When the server starts rejecting requests, clients autom
 
 ### Token Bucket
 
+```mermaid
+xychart-beta
+    title "Token Bucket Fill Level (refill 10 tokens/sec, capacity 100)"
+    x-axis ["t=0", "t=1s", "t=5s", "t=10s"]
+    y-axis "Tokens available" 0 --> 100
+    bar [10, 19, 50, 100]
 ```
-  Refill rate: 10 tokens/sec
-  Bucket capacity: 100 tokens
 
-  t=0: [##########] 10 tokens
-       1 request consumed --> 9 tokens remaining
-
-  t=1s: refill 10 tokens --> [##################] 19 tokens
-        20 burst requests --> 0 tokens, 1 rejected
-
-  t=5s: refill 10 tokens each second --> [##################################################] 50 tokens
-        50 burst requests --> allowed (burst absorbed)
-
-  t=10s: bucket full at 100 tokens
-         101 requests --> 100 allowed, 1 rejected
-```
+*At t=0 the bucket holds 10 tokens after 1 request is consumed. A 20-request burst at t=1s drains the refilled 19 tokens to 0 (1 rejected). By t=5s a 50-request burst is fully absorbed. By t=10s the bucket is capped at its 100-token capacity, so only 100 of 101 requests are allowed.*
 
 ### Fixed Window Boundary Burst
 
-```
-  Window 1: 00:00 -- 01:00       Window 2: 01:00 -- 02:00
-  Limit: 100 req/min
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant RL as Rate Limiter<br/>Fixed Window
 
-  |<--- Window 1 --->|<--- Window 2 --->|
-  ...             [100 requests at 00:59] [100 requests at 01:01]
-                                          ^
-                                 200 requests in 2 seconds!
-                                 Limit intended: 100/min
-                                 Actual allowed: 200 in 2s
+    Note over C,RL: Limit = 100 requests per minute per window
+    Note over RL: Window 1: 00:00-01:00
+    C->>RL: 100 requests at 00:59
+    RL-->>C: 100 allowed
+    Note over RL: Window 2: 01:00-02:00
+    C->>RL: 100 requests at 01:01
+    RL-->>C: 100 allowed
+    Note over C,RL: 200 requests in 2 seconds - double the intended 100/min limit
 ```
+
+*A client sends 100 requests in the final second of Window 1 and 100 more in the first second of Window 2 — the hard counter reset at the boundary lets 200 requests through in 2 seconds, double the intended 100/min limit.*
 
 ### Sliding Window Counter Approximation
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    prev([Previous window<br/>count = 80]) --> weight["x 0.25<br/>1 - elapsed_fraction"]
+    frac(["elapsed_fraction = 0.75<br/>75% through window"]) -.-> weight
+    weight --> sum((" + "))
+    curr([Current window<br/>count = 30]) --> sum
+    sum --> est["estimated_count<br/>20 + 30 = 50"]
+    est --> cmp{"50 under limit of 100?"}
+    cmp -->|"yes"| allow(["Allow request"])
+    cmp -->|"no"| reject(["Reject 429"])
+
+    class prev,curr,frac io
+    class weight,sum,est,cmp mathOp
+    class allow train
+    class reject lossN
 ```
-  Window: 60 seconds, limit: 100
 
-  Previous window (00:00-01:00): count = 80
-  Current window  (01:00-02:00): count = 30
-  Current time: 01:45 (75% through current window)
-
-  elapsed_fraction = 0.75
-  estimated_count = 80 * (1 - 0.75) + 30 = 80 * 0.25 + 30 = 20 + 30 = 50
-
-  50 < 100 --> allow request
-```
+*Worked example at 01:45 (75% through the 60-second window): the previous window's 80 requests are discounted by 25%, added to the current window's 30, yielding an estimated count of 50 — under the limit of 100, so the request is allowed.*
 
 ### Distributed Rate Limiting with Redis
 
-```
-    Client A           Client B           Client C
-       |                   |                   |
-       v                   v                   v
-  +--------+          +--------+          +--------+
-  |  API   |          |  API   |          |  API   |
-  | Server |          | Server |          | Server |
-  |   #1   |          |   #2   |          |   #3   |
-  +---+----+          +---+----+          +---+----+
-      |                   |                   |
-      +-------------------+-------------------+
-                          |
-                    +-----+-----+
-                    |   Redis   |
-                    |  Cluster  |
-                    | (atomic   |
-                    |  INCR /   |
-                    |  ZADD)    |
-                    +-----------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  All three servers share the same counter in Redis.
-  Lua script executes atomically: ZADD + ZREMRANGEBYSCORE + ZCARD.
-  No race condition possible.
+    ca([Client A]) --> s1["API Server #1"]
+    cb([Client B]) --> s2["API Server #2"]
+    cc([Client C]) --> s3["API Server #3"]
+    s1 --> redis[("Redis Cluster<br/>atomic INCR / ZADD")]
+    s2 --> redis
+    s3 --> redis
+
+    class ca,cb,cc io
+    class s1,s2,s3 req
+    class redis base
 ```
+
+*All three API servers share one counter in Redis; a Lua script executes `ZADD` + `ZREMRANGEBYSCORE` + `ZCARD` atomically, so no race condition is possible across instances.*
 
 ### Rate Limit Response Headers
 
@@ -184,6 +195,33 @@ X-RateLimit-Remaining: 0
 X-RateLimit-Reset: 1698765432
 Retry-After: 23                     (seconds until requests are accepted again)
 ```
+
+### Adaptive Throttling (Client-Side)
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reqs([requests count]) --> calc["compute<br/>throttle_probability"]
+    acc([accepts count]) --> calc
+    k(["K = 2"]) --> calc
+    calc --> roll{"random draw under<br/>throttle_probability?"}
+    roll -->|"yes"| skip["Skip send<br/>self-throttle"]
+    roll -->|"no"| send(["Send request"])
+
+    class reqs,acc,k io
+    class calc,roll mathOp
+    class send train
+    class skip lossN
+```
+
+*The client tracks its own requests and accepts; as the server's rejection rate rises, `throttle_probability` climbs and a per-request random draw decides whether to self-throttle — stopping the retry storm on the client side before the server is overwhelmed. K=2 tolerates roughly a 33% server rejection rate before the client begins throttling itself.*
 
 ---
 
@@ -546,6 +584,35 @@ Slack uses Redis-based rate limiting for their message delivery pipeline. Each u
 
 ## 9. When to Use / When NOT to Use
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    q1{"Boundary burst<br/>(2x limit) unacceptable?"}
+    q1 -->|"yes - fraud/financial"| q2{"Need exact<br/>enforcement?"}
+    q1 -->|"no"| q3{"Clients need<br/>burst tolerance?"}
+
+    q2 -->|"yes"| log(["Sliding window log<br/>O(limit) memory, exact"])
+    q2 -->|"no, ~1% error ok"| counter(["Sliding window counter<br/>O(1) memory"])
+
+    q3 -->|"yes"| token(["Token bucket<br/>burst + avg rate"])
+    q3 -->|"no"| q4{"Need constant<br/>smooth output?"}
+
+    q4 -->|"yes"| leaky(["Leaky bucket<br/>queues + smooths"])
+    q4 -->|"no"| fixed(["Fixed window counter<br/>simplest, O(1)"])
+
+    class q1,q2,q3,q4 mathOp
+    class log,counter,token,leaky,fixed train
+```
+
+*A quick decision guide synthesized from the rules below: start with whether a 2x boundary burst is tolerable, then branch on exactness, burst tolerance, and output smoothness to land on one of the five algorithms.*
+
 ### Token Bucket — Use when:
 - API clients legitimately need burst capacity (e.g., a user refreshing many widgets at login)
 - You want to allow short bursts while enforcing a long-run average rate
@@ -746,28 +813,33 @@ You must decide: fail open (allow all requests when Redis is down) or fail close
 
 **Architecture:**
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    net([Internet]) --> cf["Cloudflare<br/>DDoS + IP limit<br/>50 req/s per IP"]
+    cf --> alb["AWS ALB<br/>TLS termination"]
+    alb --> s1["API #1"]
+    alb --> s2["API #2"]
+    alb --> s3["API #3<br/>...20 total"]
+    s1 --> redis[("Redis Cluster<br/>6 nodes, sliding window")]
+    s2 --> redis
+    s3 --> redis
+
+    class net io
+    class cf frozen
+    class alb mathOp
+    class s1,s2,s3 req
+    class redis base
 ```
-    Internet
-       |
-       v
-  Cloudflare (DDoS + IP-based limiting: 50 req/s per IP, unauthenticated)
-       |
-       v
-  AWS ALB (TLS termination)
-       |
-       v
-  +----+-----+----+-----+----+
-  | API  | API  | API  | ... |   20 Spring Boot instances
-  |  #1  |  #2  |  #3  |    |
-  +--+---+--+---+--+---+----+
-     |      |      |
-     +------+------+
-            |
-     +------+------+
-     | Redis Cluster|  6-node cluster (3 primary, 3 replica)
-     | Sliding window   latency: 0.8ms avg, 2ms p99
-     +--------------+
-```
+
+*Three defense layers: the external Cloudflare edge filters bots by IP before origin, the ALB terminates TLS and routes to 20 Spring Boot instances, and every instance enforces tier limits against a shared 6-node Redis cluster (3 primary, 3 replica) averaging 0.8ms latency (2ms p99).*
 
 **Rate Limiting Implementation:**
 

@@ -103,77 +103,106 @@ The server is tricked into making HTTP requests to attacker-controlled URLs. Use
 
 ### Layered Security Controls
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Browser / Mobile<br/>Client"]) -->|"HTTPS (TLS 1.2+)"| waf["WAF / CDN<br/>rate limit · IP reputation<br/>geo-blocking"]
+    waf --> gw["API Gateway<br/>token validation · throttling · CORS"]
+    gw --> app["Application Server<br/>input validation · AuthN/AuthZ<br/>PreparedStatements · output encoding<br/>CSRF protection · security headers"]
+    app --> db("Database<br/>least-privilege account<br/>encrypted at rest")
+    app -.->|"fetch credential"| secrets(["Secrets Store<br/>Vault · AWS Secrets Manager<br/>never in code"])
+
+    class client io
+    class waf req
+    class gw mathOp
+    class app train
+    class db base
+    class secrets frozen
 ```
-  Browser / Mobile Client
-         |
-         | HTTPS (TLS 1.2+)
-         v
-  +----------------+
-  |  WAF / CDN     |  <-- rate limiting, IP reputation, geo-blocking
-  +----------------+
-         |
-         v
-  +----------------+
-  |  API Gateway   |  <-- auth token validation, throttling, CORS
-  +----------------+
-         |
-         v
-  +------------------------------+
-  |  Application Server          |
-  |  - Input validation          |
-  |  - AuthN / AuthZ             |
-  |  - PreparedStatements        |
-  |  - Output encoding           |
-  |  - CSRF protection           |
-  |  - Security headers          |
-  +------------------------------+
-         |
-         v
-  +----------------+
-  |  Database      |  <-- least-privilege DB account, encrypted at rest
-  +----------------+
-         |
-  +----------------+
-  |  Secrets Store |  <-- Vault, AWS Secrets Manager (never in code)
-  +----------------+
-```
+
+Each layer narrows what the previous layer lets through; the Application Server pulls its database credential from the Secrets Store at runtime instead of embedding it, so a server compromise alone does not leak a long-lived password.
 
 ### SSRF Attack Flow vs Prevention
 
-```
-  ATTACK (no prevention):
-  Attacker --> POST /fetch?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/
-              --> Application Server fetches URL
-              --> Returns AWS IAM credentials to attacker
+**Attack — no prevention:**
 
-  PREVENTION:
-  POST /fetch?url=http://169.254.169.254/...
-       |
-       v
-  [URL Allowlist Check]
-       |--- BLOCKED: not in allowlist {api.partner.com, cdn.example.com}
-       |
-       v
-  [Private IP Range Check]
-       |--- BLOCKED: 169.254.x.x is link-local
-       |
-  403 Forbidden returned to attacker
+```mermaid
+sequenceDiagram
+    participant A as Attacker
+    participant S as Application Server
+    participant M as AWS Metadata Endpoint
+
+    A->>S: POST /fetch?url=http://169.254.169.254/...iam/security-credentials/
+    S->>M: GET /latest/meta-data/iam/security-credentials/
+    M-->>S: IAM credentials
+    S-->>A: 200 OK (credentials leaked)
 ```
+
+With no allowlist or IP check, the server blindly relays the caller's URL to the AWS metadata endpoint (169.254.169.254) and hands the IAM credentials straight back to the attacker — the Capital One 2019 breach (Section 7) followed this exact path.
+
+**Prevention — defense in depth:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reqIn(["POST /fetch?url=169.254.169.254/..."]) --> allow{"URL allowlist<br/>check"}
+    allow -->|"host not allowlisted"| blocked(["403 Forbidden"])
+    allow -->|"passes"| ipcheck{"Private IP<br/>range check"}
+    ipcheck -->|"link-local<br/>169.254.x.x"| blocked
+    ipcheck -->|"passes"| safe(["Safe to fetch"])
+
+    class reqIn req
+    class allow,ipcheck mathOp
+    class blocked lossN
+    class safe train
+```
+
+Two sequential gates — a hostname allowlist, then a private-IP-range check performed after DNS resolution — both reject the metadata-endpoint URL before any outbound fetch is attempted.
 
 ### SQL Injection — Broken vs Fixed
 
-```
-  BROKEN:
-  User input: email = "' OR '1'='1"
-  Query built: SELECT * FROM users WHERE email = '' OR '1'='1'
-  Result: returns ALL rows — authentication bypass
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  FIXED:
-  Query template: SELECT * FROM users WHERE email = ?
-  Parameter binding: ps.setString(1, email)
-  DB engine treats input as data, not SQL syntax
-  Result: returns 0 rows — correct behavior
+    subgraph broken["BROKEN - string concatenation"]
+        bIn(["email = ' OR '1'='1"]) --> bQuery["query built:<br/>...WHERE email='' OR '1'='1'"]
+        bQuery --> bOut(["ALL rows returned<br/>auth bypass"])
+    end
+
+    subgraph fixed["FIXED - parameter binding"]
+        fIn(["email = ' OR '1'='1"]) --> fQuery["query template:<br/>...WHERE email = ?"]
+        fQuery --> fBind["ps.setString(1, email)<br/>treated as data"]
+        fBind --> fOut(["0 rows returned<br/>correct behavior"])
+    end
+
+    class bIn,fIn req
+    class bQuery,fQuery,fBind mathOp
+    class bOut lossN
+    class fOut train
 ```
+
+The same attacker-supplied string becomes executable query syntax when concatenated (broken) but stays inert bound data when passed as a parameter (fixed) — the query structure itself never changes in the fixed path.
 
 ---
 
@@ -437,6 +466,26 @@ mvn dependency-check:check
 | Dependency-Check CVSS>=7    | Catches high-severity CVEs in CI      | False positives; maintenance overhead        |
 | HSTS preload                | Eliminates SSL stripping attacks      | Irreversible; hard to undo if you leave HTTPS |
 
+```mermaid
+quadrantChart
+    title Security Controls: Gain vs Friction
+    x-axis Low Friction --> High Friction
+    y-axis Low Security Gain --> High Security Gain
+    quadrant-1 Worth the friction
+    quadrant-2 Easy wins - do first
+    quadrant-3 Low priority
+    quadrant-4 Reconsider ROI
+    "BCrypt cost 12": [0.45, 0.78]
+    "SameSite=Strict": [0.68, 0.88]
+    "CSP strict-dynamic": [0.75, 0.82]
+    "Vault dynamic secrets": [0.58, 0.80]
+    "SSRF allowlist": [0.32, 0.75]
+    "Dependency-Check CVSS 7+": [0.48, 0.60]
+    "HSTS preload": [0.80, 0.85]
+```
+
+Positions come directly from the Security Gain and Cost / Friction columns above — BCrypt and the SSRF allowlist sit upper-left as low-friction wins, while HSTS preload and CSP strict-dynamic sit upper-right because their payoff is high but so is the cost of getting the rollout wrong.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -463,6 +512,39 @@ mvn dependency-check:check
 **Pitfall 3 — Verbose error messages expose internals (A05):** An API returned `org.postgresql.util.PSQLException: ERROR: relation "users" does not exist` in a JSON error response. This confirms the database type, table name, and ORM. Fix: catch all exceptions at a global handler, log internally, return only generic error codes to the client.
 
 **Pitfall 4 — alg:none JWT attack (A07):** A team implemented their own JWT parser. The attacker removed the signature, changed the header to `{"alg":"none"}`, and modified the payload to gain admin role. The custom parser accepted it because it only checked the algorithm after validating the signature was "present." Fix: always use a maintained JWT library. Specify the exact allowed algorithms; never accept `none` or `HS256` when the system is configured for `RS256`.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph broken["BROKEN - custom parser"]
+        bJwt(["JWT: alg=none<br/>signature stripped"]) --> bCheck{"alg field<br/>read"}
+        bCheck -->|"alg = none"| bAccept["signature check<br/>skipped"]
+        bAccept --> bAdmin(["payload trusted<br/>role=admin granted"])
+    end
+
+    subgraph fixed["FIXED - maintained library"]
+        fJwt(["JWT: alg=none<br/>signature stripped"]) --> fAllow{"alg in<br/>allowed set?"}
+        fAllow -->|"none not allowed"| fReject(["401 Unauthorized"])
+        fAllow -->|"RS256 allowed"| fVerify["verify signature<br/>with public key"]
+        fVerify --> fOk(["claims trusted"])
+    end
+
+    class bJwt,fJwt req
+    class bCheck,fAllow mathOp
+    class bAccept,bAdmin lossN
+    class fReject train
+    class fVerify mathOp
+    class fOk train
+```
+
+The broken parser reads `alg` from the untrusted header and treats `none` as already verified; the fixed path checks the algorithm against an explicit allow-list before attempting verification at all, so a stripped signature is rejected outright rather than silently accepted.
 
 **Pitfall 5 — SSRF via DNS rebinding:** An application validated the hostname against an allowlist before resolving DNS, but performed the actual HTTP request after a separate DNS resolution. An attacker set up a domain with a 0-second TTL: the first lookup returned a valid public IP (passed the allowlist check), and the second lookup returned an internal IP (used for the actual connection). Fix: resolve DNS once, validate the IP, then use the IP directly for the connection.
 
@@ -563,24 +645,27 @@ HSTS tells browsers to only access the site over HTTPS for a specified duration.
 
 **Threat Model:**
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    app(["Mobile App<br/>JWT Bearer token"]) -->|"HTTPS"| gw["API Gateway<br/>rate limit 100 req/min per user"]
+    gw --> svc["Spring Boot Transfer Service<br/>AuthN: JWT RS256 via JWKS<br/>AuthZ: PreAuthorize owns-check<br/>Input: JSR-380 validation<br/>Persistence: JPA + PreparedStatement<br/>Secrets: Vault dynamic credential"]
+    svc --> db("PostgreSQL<br/>dedicated account<br/>INSERT/UPDATE on transfers only")
+
+    class app io
+    class gw mathOp
+    class svc train
+    class db base
 ```
-Mobile App (JWT Bearer token)
-         |
-         | HTTPS
-         v
-  [API Gateway — rate limit 100 req/min per user]
-         |
-         v
-  [Spring Boot Transfer Service]
-   - AuthN: JWT RS256, validated against JWKS endpoint
-   - AuthZ: @PreAuthorize("@accountAuthz.owns(#fromAccountId)")
-   - Input: JSR-380 @NotNull, @Positive, @DecimalMax("100000")
-   - Persistence: JPA + PreparedStatement (no raw SQL)
-   - Secrets: DB password from Vault dynamic credential
-         |
-         v
-  [PostgreSQL — dedicated account: INSERT/UPDATE on transfers only]
-```
+
+Every hop narrows trust: the gateway throttles per user, the transfer service re-derives the caller's identity from the validated JWT rather than a client-supplied field, and the database account can only INSERT/UPDATE its own table.
 
 **Controls Implemented:**
 

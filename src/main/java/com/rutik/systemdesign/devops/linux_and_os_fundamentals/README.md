@@ -73,36 +73,79 @@ User space talks to the kernel through **system calls** (`read`, `write`, `opena
 
 ## 5. Architecture Diagrams
 
-```
-            USER SPACE                                KERNEL SPACE
-+--------------------------------------+   +-------------------------------+
-|  systemd (PID 1)                     |   |  Scheduler (CFS)              |
-|    |                                 |   |  Memory mgr (VM, page cache)  |
-|    +-- sshd                          |   |  VFS / block layer            |
-|    +-- containerd                    |   |  Network stack                |
-|         +-- container shim           |   |  Namespaces  cgroups  caps    |
-|              +-- app (PID 1 in ns)   |   +-------------------------------+
-|                   |  syscalls               ^   ^   ^   ^
-|                   +---- read/write/clone ----+   |   |   |
-+--------------------------------------+           |   |   |
-                                                   |   |   |
-   /proc/<pid>/  <----- introspection -------------+   |   |
-   /sys/fs/cgroup/ <--- limits + accounting ------------+   |
-   signals (SIGTERM/SIGKILL) <--- lifecycle ---------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph US["User Space"]
+        direction TB
+        systemd(["systemd (PID 1)"]) --> sshdProc(sshd)
+        systemd --> ctrd(containerd)
+        ctrd --> shim(container shim)
+        shim --> app(["app (PID 1 in ns)"])
+    end
+
+    subgraph KS["Kernel Space"]
+        direction TB
+        sched("Scheduler (CFS)")
+        memmgr("Memory mgr<br/>VM + page cache")
+        vfs("VFS / block layer")
+        net(Network stack)
+        nsc("Namespaces + cgroups<br/>+ capabilities")
+    end
+
+    app -->|"syscalls:<br/>read / write / clone"| KS
+    KS -.->|introspection| procfs(["/proc/PID/"])
+    KS -.->|"limits + accounting"| cgroupfs(["/sys/fs/cgroup/"])
+    KS -.->|lifecycle| signals(["signals<br/>SIGTERM / SIGKILL"])
+
+    class systemd,app io
+    class sshdProc,ctrd,shim train
+    class sched,memmgr,vfs,net,nsc mathOp
+    class procfs,cgroupfs,signals base
 ```
 
-```
-A "container" = a process with restricted views
+User-space processes reach the kernel only through syscalls; the kernel exposes its internal state back out through three interfaces — `/proc`, `/sys/fs/cgroup`, and signals — which is exactly where `strace`, `top`, and `kubectl top` get every number they show.
 
-   normal process                  containerized process
-   +-----------------+             +-----------------+
-   | sees all PIDs   |             | PID ns: sees    |
-   | sees host net   |    minus    | only own tree   |
-   | sees host fs    |  namespaces | NET ns: own eth0|
-   | unlimited RAM   |   + cgroups | MNT ns: own /   |
-   |                 |             | memory.max=512M |
-   +-----------------+             +-----------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph NP["Normal Process"]
+        direction TB
+        np1(Sees all PIDs)
+        np2(Sees host net)
+        np3(Sees host fs)
+        np4(Unlimited RAM)
+    end
+
+    subgraph CP["Containerized Process"]
+        direction TB
+        cp1(["PID ns: own tree only"])
+        cp2(["NET ns: own eth0"])
+        cp3(["MNT ns: own root fs"])
+        cp4(["memory.max = 512M"])
+    end
+
+    NP -->|"minus namespaces<br/>+ cgroups"| CP
+
+    class np1,np2,np3,np4 base
+    class cp1,cp2,cp3,cp4 frozen
 ```
+
+A "container" is a process with restricted views: namespaces narrow what it can see, cgroups cap what it can use — nothing is added, only subtracted (the Key Insight from §2).
 
 ---
 
@@ -150,6 +193,30 @@ cat /sys/fs/cgroup/kubepods.slice/.../memory.events  # oom_kill counter
 
 When memory cannot be reclaimed, the kernel computes an `oom_score` per process (roughly proportional to memory used, adjusted by `oom_score_adj` in `-1000..1000`) and kills the highest. In a cgroup-limited container, hitting `memory.max` triggers a **cgroup-local** OOM kill even if the node has free RAM:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pressure(["Memory cannot<br/>be reclaimed"]) --> scope{"Pressure<br/>scope?"}
+    scope -->|"node-wide"| nodescan("Score every process<br/>on the node")
+    scope -->|"cgroup memory.max hit"| cgroupscan("Score processes<br/>in that cgroup only")
+    nodescan --> pick(("Pick highest<br/>oom_score"))
+    cgroupscan --> pick
+    pick --> kill(["SIGKILL the victim"])
+
+    class pressure req
+    class scope,nodescan,cgroupscan,pick mathOp
+    class kill lossN
+```
+
+`oom_score_adj` (`-1000..1000`) shifts the ranking within whichever scope hit its ceiling — the whole node, or just the offending cgroup — which is exactly why a container can be OOM-killed while `kubectl top node` still shows free memory.
+
 ```bash
 dmesg -T | grep -i 'killed process'
 # [Tue ...] Memory cgroup out of memory: Killed process 12345 (java) total-vm:...
@@ -164,6 +231,23 @@ kill -HUP  <pid>   #  1: conventionally "reload config" (nginx, haproxy)
 ```
 
 Kubernetes sends **SIGTERM**, waits `terminationGracePeriodSeconds` (default **30s**), then **SIGKILL**. An app that ignores SIGTERM will always be hard-killed after the grace period — dropping in-flight requests.
+
+```mermaid
+sequenceDiagram
+    participant K as Kubelet
+    participant A as App process
+
+    K->>A: SIGTERM (please exit)
+    Note over A: stop accepting new work<br/>drain in-flight requests
+    alt exits before grace period
+        A-->>K: process exits (0)
+    else grace period expires (default 30s)
+        K->>A: SIGKILL (forced)
+        A-->>K: process killed (137)
+    end
+```
+
+Only two outcomes exist: the app traps SIGTERM and exits cleanly, or the grace period elapses and SIGKILL ends it unconditionally — this is why "always trap SIGTERM" (§13) is the single highest-leverage shutdown fix.
 
 ---
 
@@ -307,16 +391,28 @@ Linux uses free RAM as page cache for file I/O; tools that report "used" memory 
 
 A payments service running OpenJDK in Kubernetes is restarted every few hours with exit code 137 (128 + SIGKILL=9). The on-call engineer sees no application errors and `kubectl top node` shows 40% memory free.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pod(["Pod: payments<br/>limits.memory: 1Gi"]) --> noxmx("JVM started<br/>no -Xmx flag")
+    noxmx --> ergo("Ergonomics reads<br/>node memory: 32Gi")
+    ergo --> heap("Max heap set<br/>~= 8Gi")
+    heap --> grow{"Heap grows past<br/>memory.max (1Gi)"}
+    grow --> oom(["cgroup OOM kill<br/>exit 137"])
+
+    class pod io
+    class noxmx,ergo,heap mathOp
+    class grow,oom lossN
 ```
-+-------------------------------------------------------------+
-| Pod: payments  resources.limits.memory: 1Gi                 |
-|   JVM started with NO -Xmx flag                             |
-|   -> JVM ergonomics sees the *node's* memory (32Gi)         |
-|   -> sets max heap ~= 8Gi                                   |
-|   -> heap grows past cgroup memory.max (1Gi)                |
-|   -> cgroup OOM kill -> exit 137                            |
-+-------------------------------------------------------------+
-```
+
+Five hops from a missing `-Xmx` flag to `exit 137` — none of them visible in the application's own logs, which is why the diagnosis path below starts at `dmesg`, not the app.
 
 **Diagnosis path:**
 

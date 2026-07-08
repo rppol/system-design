@@ -26,6 +26,24 @@ Deployment strategies control *how traffic moves from the old version to the new
 
 **Mental model**: Every strategy is a point on two axes — **blast radius** (how many users hit a bad version before you notice) and **rollback speed** (how fast you can undo). Canary minimizes blast radius (only X% exposed); blue-green minimizes rollback time (flip back instantly); rolling is a cheap middle ground; feature flags decouple "the code is deployed" from "users see it," giving instant on/off without a redeploy.
 
+```mermaid
+quadrantChart
+    title Deployment strategies by blast radius vs rollback speed
+    x-axis Small blast radius --> Large blast radius
+    y-axis Slow rollback --> Instant rollback
+    quadrant-1 Wide exposure, fast recovery
+    quadrant-2 Safest overall
+    quadrant-3 Contained but slow to undo
+    quadrant-4 Cheap but riskiest
+    "Recreate": [0.97, 0.05]
+    "Rolling": [0.55, 0.35]
+    "Blue-green": [0.9, 0.95]
+    "Canary": [0.12, 0.6]
+    "Feature flags": [0.2, 0.95]
+```
+
+*Canary and feature flags sit in the safest quadrant (small blast radius, near-instant rollback); blue-green trades a full-exposure switch for the fastest possible recovery; recreate is worst on both axes, which is why it's reserved for non-prod.*
+
 **Why it matters**: Most outages are self-inflicted by deploys. The strategy decides whether a bad release affects 2% of users for 90 seconds (canary with auto-rollback) or 100% until someone notices and manually reverts (rolling with no gates). At scale, that difference is enormous in dollars and trust.
 
 **Key insight**: Deploy and release are different events. Feature flags (and canary) let you **deploy** code to production while controlling **release** (who actually experiences it). Separating them means you can ship continuously, dark-launch risky changes, and turn features off instantly without the latency and risk of a redeploy/rollback.
@@ -55,34 +73,92 @@ Deployment strategies control *how traffic moves from the old version to the new
 
 ### Progressive delivery (automated canary)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Deploy(["deploy new version<br/>0% traffic"]) --> Shift5["shift 5%"]
+    Shift5 --> Analyze1{"analyze metrics<br/>2 min"}
+    Analyze1 -->|"pass"| Shift25["shift 25%"]
+    Analyze1 -.->|"fail"| Rollback["shift back to 0%<br/>auto-rollback, alert"]
+    Shift25 --> Analyze2{"analyze"}
+    Analyze2 -->|"pass"| Shift50["shift 50%"]
+    Analyze2 -.->|"fail"| Rollback
+    Shift50 --> Analyze3{"analyze"}
+    Analyze3 -->|"pass"| Promote(["shift 100%<br/>promote"])
+    Analyze3 -.->|"fail"| Rollback
+
+    class Deploy,Promote io
+    class Shift5,Shift25,Shift50 req
+    class Analyze1,Analyze2,Analyze3 mathOp
+    class Rollback lossN
 ```
-deploy new version (0% traffic) -> shift 5% -> analyze metrics 2min
-  -> pass? shift 25% -> analyze -> 50% -> analyze -> 100% (promote)
-  -> fail any analysis? -> shift back to 0% (auto-rollback), alert
-```
+
+*The controller shifts traffic in steps (5% → 25% → 50% → 100%), pausing to analyze metrics at each step; any failed analysis snaps traffic back to 0% and alerts — no human in the loop.*
 
 ---
 
 ## 5. Architecture Diagrams
 
+**Blue-green (instant switch + instant rollback):**
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "BLUE v1 live (100%)<br/>GREEN v2 warmed (0%, smoke-tested)" as BlueLive
+    state "GREEN v2 live (100%)<br/>BLUE v1 kept warm for rollback" as GreenLive
+
+    [*] --> BlueLive
+    BlueLive --> GreenLive: switch (router/LB cutover)
+    GreenLive --> BlueLive: bad? flip router to BLUE<br/>(instant rollback)
+    GreenLive --> [*]: healthy, keep serving
+
+    class BlueLive base
+    class GreenLive train
 ```
-Blue-green (instant switch + instant rollback)
 
-  router/LB ---> [BLUE v1] (100% live)      [GREEN v2] (deployed, 0%, warmed + smoke-tested)
-  switch:
-  router/LB ---> [GREEN v2] (100% live)     [BLUE v1] (kept warm for instant rollback)
-  bad? flip router back to BLUE -> instant rollback
+*The router/LB always points at exactly one fully-live environment; cutover and rollback are the same operation — flipping where it points — so rollback is as fast as the original switch.*
 
-Canary / progressive delivery (metric-gated)
+**Canary / progressive delivery (metric-gated):**
 
-  Service --weighted--> [stable v1: 95%]
-                        [canary v2:  5%]
-            |
-   analysis: error-rate(v2) < 1%? p95-latency(v2) < 300ms?
-            |  pass                       | fail
-            v                             v
-   shift 5->25->50->100 (promote)    shift ->0 (abort), keep v1
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Svc(["Service"]) -->|"95% weighted"| Stable["stable v1"]
+    Svc -->|"5% weighted"| Canary["canary v2"]
+    Canary --> Analysis{"error rate under 1%?<br/>p95 latency under 300ms?"}
+    Analysis -->|"pass"| Promote(["ramp to 100%<br/>promote"])
+    Analysis -.->|"fail"| Abort(["shift to 0%<br/>abort, keep v1"])
+
+    class Svc io
+    class Stable train
+    class Canary req
+    class Analysis mathOp
+    class Promote train
+    class Abort lossN
 ```
+
+*The mesh/ingress splits traffic by weight; the canary's slice is analyzed against error-rate and latency thresholds each step — a pass advances the weight toward 100%, any failure snaps back to zero while stable keeps serving everyone.*
 
 ---
 
@@ -160,14 +236,29 @@ return old_checkout(user)
 
 ### The compatibility constraint
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Both(["v1 + v2 run together<br/>share one database"]) --> Expand["1) expand<br/>add nullable column"]
+    Expand --> DeployBoth["2) deploy code that<br/>reads/writes it"]
+    DeployBoth --> Contract["3) contract<br/>drop old column"]
+    Contract --> Safe(["compatible throughout<br/>the whole rollout"])
+    Both -.->|"skip expand-contract"| Broken["data corruption or<br/>500s on old pods"]
+
+    class Both io
+    class Expand,DeployBoth,Contract mathOp
+    class Safe train
+    class Broken lossN
 ```
-During ANY non-recreate strategy, v1 and v2 run simultaneously and may share a database.
-=> schema changes MUST be backward/forward compatible (expand-contract):
-   1) expand: add nullable column (both versions work)
-   2) deploy code that writes/reads it
-   3) contract: remove old column only after all old pods are gone
-Skipping this -> the canary or rolling deploy corrupts data or 500s on the old pods.
-```
+
+*Because v1 and v2 read/write the same database mid-rollout, schema changes must go expand → deploy → contract across separate releases, dropping the old column only after all old pods are gone; collapsing the steps into one release is what corrupts data or 500s the old pods (see the Pitfall 1 SQL example below).*
 
 ---
 
@@ -298,12 +389,28 @@ Under GitOps, the desired state (including the Rollout/canary spec) lives in Git
 
 A high-traffic shop uses Argo Rollouts canary. A release passes the canary and promotes to 100% — then checkout error rate spikes to 30% across all users. The canary had only checked container readiness and waited 2 minutes; it never analyzed real error metrics. The bug only manifested under the *full* traffic mix the canary never saw at 5%.
 
+**BROKEN canary (time-based, no metric analysis):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    W5["setWeight 5"] --> Pause["pause 2m<br/>just waits, no analysis"]
+    Pause --> Miss["5% slice never hit<br/>the rare cart type"]
+    Miss --> W100["setWeight 100<br/>marked passed"]
+    W100 --> Errors(["30% errors at 100%<br/>manual rollback: 8 min"])
+
+    class W5,Pause mathOp
+    class Miss,W100,Errors lossN
 ```
-BROKEN canary (time-based, no metric analysis)
-  setWeight 5 -> pause 2m (just waits) -> setWeight 100
-  the 5% slice didn't exercise the broken code path (rare cart type)
-  -> "passed" -> promoted -> 30% errors at 100%, manual rollback took 8 minutes
-```
+
+*The canary only paused on a timer and never queried real metrics, so the untested 5% slice was marked "passed" and promoted to 100%, where the rare cart type triggered 30% checkout errors and an 8-minute manual rollback.*
 
 ```yaml
 # FIX: metric-gated analysis at each step + a longer, representative canary + auto-abort.
@@ -343,6 +450,16 @@ spec:
 With real metric analysis, the bug would have driven `checkout_total{result="ok"}` down within the first 5% step, the analysis would have failed, and Argo Rollouts would have **automatically shifted traffic back to stable** — capping exposure at ~5% of users for a few minutes instead of 30% errors for everyone for 8 minutes. The team also extended the canary duration so rare-but-important code paths get exercised before promotion.
 
 **Outcome:** the next latent bug was caught at the 5% step with automatic rollback in under 3 minutes and ~5% blast radius, versus the prior 100%/8-minute incident. The lesson: a canary without metric analysis is just a slow full rollout.
+
+```mermaid
+xychart-beta
+    title "Blast radius: broken vs metric-gated canary"
+    x-axis ["Broken (time-based)", "Fixed (metric-gated)"]
+    y-axis "Users affected (%)" 0 --> 100
+    bar [100, 5]
+```
+
+*The time-based canary exposed 100% of users for 8 minutes before a manual rollback; the metric-gated fix caps exposure at about 5% and auto-rolls-back in under 3 minutes.*
 
 **Discussion questions:**
 1. Why did a 5% time-based canary fail to catch a bug that a metric-gated one would?

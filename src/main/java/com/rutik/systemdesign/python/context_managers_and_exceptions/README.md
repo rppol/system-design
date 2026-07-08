@@ -98,86 +98,138 @@ with suppress(FileNotFoundError):
 
 ### The `with` desugaring
 
-```
-with CM() as x:
-    BODY
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-# Desugars to approximately:
+    Start(["with CM as x"]) --> Enter["__enter__ called<br/>binds x"]
+    Enter --> Body["BODY executes"]
+    Body --> Q1{"BODY raised?"}
+    Q1 -->|"no"| ExitClean["finally:<br/>__exit__(None, None, None)"]
+    ExitClean --> Done1(["normal exit"])
+    Q1 -->|"yes"| ExitExc["except:<br/>__exit__(exc_type, exc_val, tb)"]
+    ExitExc --> Q2{"__exit__ returned truthy?"}
+    Q2 -->|"no, default"| Reraise["raise"]
+    Reraise --> Done2(["exception propagates"])
+    Q2 -->|"yes, rare"| Done3(["exception suppressed"])
 
-_cm = CM()
-x = _cm.__enter__()
-_exc = True
-try:
-    BODY
-except BaseException as e:
-    _exc = False
-    if not _cm.__exit__(type(e), e, e.__traceback__):
-        raise
-finally:
-    if _exc:
-        _cm.__exit__(None, None, None)
+    class Start io
+    class Enter,Q1,Q2 mathOp
+    class Body req
+    class ExitClean,Done1 train
+    class ExitExc,Reraise,Done2 lossN
+    class Done3 frozen
 ```
+
+`__exit__` always runs, whether `BODY` raises or not (green path). Its return value is the only thing that decides what happens next: falsy re-raises the original exception (red path, the default), truthy silently suppresses it (purple, the case you should almost never hit).
 
 ### Exception hierarchy tree
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    BE(["BaseException"]) --> SE["SystemExit<br/>sys.exit()"]
+    BE --> KI["KeyboardInterrupt<br/>Ctrl-C"]
+    BE --> GX["GeneratorExit<br/>generator.close()"]
+    BE --> EX(["Exception"])
+
+    EX --> SI["StopIteration"]
+    EX --> AE["ArithmeticError"]
+    AE --> ZD["ZeroDivisionError"]
+    AE --> OV["OverflowError"]
+    EX --> LE["LookupError"]
+    LE --> IX["IndexError"]
+    LE --> KY["KeyError"]
+    EX --> AT["AttributeError"]
+    EX --> IM["ImportError"]
+    IM --> MN["ModuleNotFoundError"]
+    EX --> OS["OSError"]
+    OS --> FN["FileNotFoundError"]
+    OS --> PM["PermissionError"]
+    OS --> TO["TimeoutError"]
+    EX --> RT["RuntimeError"]
+    RT --> RC["RecursionError"]
+    EX --> TY["TypeError"]
+    EX --> VA["ValueError"]
+    VA --> UN["UnicodeError"]
+    EX --> NM["NameError"]
+    NM --> UL["UnboundLocalError"]
+    EX --> MM["MemoryError"]
+    EX --> EO["EOFError"]
+    EX --> XG["ExceptionGroup<br/>3.11"]
+
+    class BE base
+    class SE,KI,GX frozen
+    class EX,AE,LE,IM,OS,RT,VA,NM mathOp
+    class SI,ZD,OV,IX,KY,AT,MN,FN,PM,TO,RC,TY,UN,UL,MM,EO,XG lossN
 ```
-BaseException
-├── SystemExit                   # sys.exit()
-├── KeyboardInterrupt            # Ctrl-C
-├── GeneratorExit                # generator.close()
-└── Exception
-    ├── StopIteration
-    ├── ArithmeticError
-    │   ├── ZeroDivisionError
-    │   └── OverflowError
-    ├── LookupError
-    │   ├── IndexError
-    │   └── KeyError
-    ├── AttributeError
-    ├── ImportError
-    │   └── ModuleNotFoundError
-    ├── OSError
-    │   ├── FileNotFoundError
-    │   ├── PermissionError
-    │   └── TimeoutError
-    ├── RuntimeError
-    │   └── RecursionError
-    ├── TypeError
-    ├── ValueError
-    │   └── UnicodeError
-    ├── NameError
-    │   └── UnboundLocalError
-    ├── MemoryError
-    ├── EOFError
-    └── ExceptionGroup          # [3.11]
-```
+
+`BaseException` splits into three signal exceptions that `except Exception` never catches (purple — `SystemExit`, `KeyboardInterrupt`, `GeneratorExit`) and the `Exception` branch (orange routing nodes) that fans out into the everyday catchable error types (red leaves). This is exactly why `except Exception` is safe for broad handlers but `except BaseException` is not (see Q7).
 
 ### ExitStack unwinding order
 
+```mermaid
+sequenceDiagram
+    participant Body as with-block body
+    participant Stack as ExitStack
+    participant CMA as CMA
+    participant CMB as CMB
+    participant FnC as fn_c callback
+
+    Body->>Stack: enter_context(CMA())
+    Stack->>CMA: __enter__()
+    CMA-->>Stack: a
+    Body->>Stack: enter_context(CMB())
+    Stack->>CMB: __enter__()
+    CMB-->>Stack: b
+    Body->>Stack: callback(fn_c)
+    Note over Stack,FnC: fn_c registered now, called later
+    Note over Body,Stack: body raises - unwind starts, LIFO order
+    Stack->>FnC: fn_c()
+    Stack->>CMB: __exit__(exc_type, exc_val, exc_tb)
+    Stack->>CMA: __exit__(exc_type, exc_val, exc_tb)
 ```
-with ExitStack() as stack:
-    a = stack.enter_context(CMA())    # enter: CMA
-    b = stack.enter_context(CMB())    # enter: CMB
-    stack.callback(fn_c)              # registered: fn_c
-    # ... body raises
-# Unwind (LIFO):
-# 1. fn_c()
-# 2. CMB.__exit__(...)
-# 3. CMA.__exit__(...)
-```
+
+`ExitStack` enters `CMA` then `CMB` and registers `fn_c`. When the body raises, teardown always runs in strict LIFO order: `fn_c()` first, then `CMB.__exit__`, then `CMA.__exit__` — the reverse of the entry order.
 
 ### Async CM in FastAPI dependency
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req(["FastAPI request"]) --> Resolver["Starlette dependency<br/>resolver"]
+    Resolver --> Enter["__aenter__<br/>opens session"]
+    Enter --> Handler["route_handler(db=db)<br/>business logic"]
+    Handler --> Exit["__aexit__<br/>commit or rollback"]
+
+    class Req io
+    class Resolver mathOp
+    class Enter train
+    class Handler req
+    class Exit lossN
 ```
-FastAPI request
-    |
-    v
-Starlette dependency resolver
-    |
-    +-- async with db_session() as db:   # __aenter__ → opens session
-    |       route_handler(db=db)          # business logic
-    +-- __aexit__: commit or rollback     # always runs
-```
+
+Every request opens the DB session through `__aenter__`, runs the handler against it, and always tears down through `__aexit__` (red — commit on success or rollback on exception, the path that must never be skipped).
 
 ---
 
@@ -339,6 +391,35 @@ def call_vendor_api(payload: dict) -> dict:
         raise ThirdPartyError("Vendor API unavailable") from None
 ```
 
+The three `raise` forms set different traceback attributes and print different display text — this is the mechanism behind Q5 and Q6:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Origin(["new exception raised<br/>inside except block"]) --> A["raise X from Y<br/>explicit"]
+    Origin --> B["raise X<br/>bare, implicit"]
+    Origin --> C["raise X from None<br/>suppressed"]
+
+    A --> A2(["__cause__ = Y<br/>shows: direct cause"])
+    B --> B2(["__context__ = active exc<br/>shows: during handling of"])
+    C --> C2(["__cause__ = None<br/>chain hidden from traceback"])
+
+    class Origin io
+    class A,B,C mathOp
+    class A2 train
+    class B2 req
+    class C2 frozen
+```
+
+Explicit chaining (green) is the recommended pattern for library boundaries that deliberately wrap an error; bare re-raise (teal) is what happens automatically if you do nothing special; `from None` (purple) locks the original cause away entirely, so use it only at stable API boundaries.
+
 ### 6.6 `ExceptionGroup` and `except*` [3.11]
 
 ```python
@@ -366,6 +447,31 @@ asyncio.run(main())
 ```
 
 `asyncio.TaskGroup` raises an `ExceptionGroup` collecting all task failures. `except*` matches a subset of the group by type and receives an `ExceptionGroup` containing only those matching exceptions. Multiple `except*` clauses can each handle different types from the same group.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T1(["task: fetch(good)"]) --> OK(["completes<br/>no exception"])
+    T2(["task: fetch(bad)"]) --> EG(("ExceptionGroup<br/>2x ValueError"))
+    T3(["task: fetch(also-bad)"]) --> EG
+    EG --> H1["except* ValueError<br/>eg.exceptions has 2 items"]
+    EG -.-> H2["except* ConnectionError<br/>not triggered this run"]
+
+    class T1,T2,T3 req
+    class OK train
+    class EG lossN
+    class H1 mathOp
+    class H2 frozen
+```
+
+Two of the three tasks fail with `ValueError`; `TaskGroup` merges both into one `ExceptionGroup` (red), and `except* ValueError` pulls out its matching subset. The sibling `except* ConnectionError` clause (dotted, purple) exists to handle a different failure type — it stays dormant on this particular run since no task raised one.
 
 Manual construction:
 
