@@ -792,6 +792,18 @@ const sfx = (() => {
   };
 })();
 
+// Haptics: a short buzz paired with the same beats as sfx. Gated on vibrate
+// support + a coarse pointer (phones/tablets only — desktops never buzz) + the
+// sound mute (one "quiet" toggle governs both) + reduced-motion. Silently no-ops
+// everywhere else, so call sites don't need their own guards.
+const haptic = (() => {
+  let coarse = false;
+  try { coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches; } catch { /* pre-matchMedia */ }
+  const canBuzz = () => coarse && ("vibrate" in navigator) && sfx.isOn() && !REDUCED();
+  const P = { correct: 8, wrong: [0, 26], combo: [0, 10, 40, 10], levelup: [0, 18, 55, 18, 55], tier: [0, 20, 40, 20], seal: [0, 30, 40, 12] };
+  return (kind) => { if (canBuzz()) { try { navigator.vibrate(P[kind] || 8); } catch { /* blocked */ } } };
+})();
+
 function confetti() {
   if (REDUCED()) return;
   const cs = getComputedStyle(document.documentElement);
@@ -841,11 +853,45 @@ function countUp(node, to) {
 /* ---------- persistence ---------- */
 // localStorage sd_progress is the single source of truth (Pages-only).
 function loadProgress() {
-  const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; if (!p.awards) p.awards = {}; if (p.deepReads == null) p.deepReads = 0; return p; };  /* [C] awards + deepReads backfill */
+  const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; if (!p.awards) p.awards = {}; if (p.deepReads == null) p.deepReads = 0; if (!p.readModules) p.readModules = {}; if (!p.reading) p.reading = { day: null, count: 0, streak: 0, longest: 0, todayKeys: {} }; return p; };  /* [C] awards + deepReads; reading-tracker backfill */
   let ls = null;
   try { ls = JSON.parse(localStorage.getItem("sd_progress")); } catch { /* corrupt -> reseed */ }
   return ls ? fill(ls)
     : { streak: 0, longestStreak: 0, lastPlayed: null, totalXP: 0, sections: {}, history: [], reviews: {}, freezes: 2, freezeUsedOn: [], awards: {}, deepReads: 0 };
+}
+
+// Reading feeds the game: mark a module read the first time its page is scrolled
+// through (>=90%) or dwelt on when it fits without scrolling. Additive to
+// sd_progress (readModules map + a daily reading tracker with its own streak);
+// never touches blitz XP/streak, so the quiz economy is unaffected. Returns true
+// on the first-ever read of that path (so callers can celebrate lightly if they want).
+function markModuleRead(path) {
+  const p = state.progress; if (!p || !path) return false;
+  if (!p.readModules) p.readModules = {};
+  if (!p.reading) p.reading = { day: null, count: 0, streak: 0, longest: 0, todayKeys: {} };
+  const t = todayISO(), r = p.reading;
+  if (r.day !== t) {                                 // roll the reading day + streak
+    const y = new Date(t + "T00:00:00"); y.setDate(y.getDate() - 1);
+    r.streak = r.day === y.toLocaleDateString("en-CA") ? (r.streak || 0) + 1 : 1;
+    r.longest = Math.max(r.longest || 0, r.streak);
+    r.day = t; r.count = 0; r.todayKeys = {};
+  }
+  const firstEver = !p.readModules[path];
+  if (firstEver) p.readModules[path] = t;
+  if (!r.todayKeys) r.todayKeys = {};
+  if (!r.todayKeys[path]) { r.todayKeys[path] = 1; r.count = (r.count || 0) + 1; }
+  try { localStorage.setItem("sd_progress", JSON.stringify(p)); } catch { /* quota — non-critical */ }
+  return firstEver;
+}
+// Called from the reader-body scroll handler (and once after render for pages
+// that fit without scrolling). Fires markModuleRead at most once per page open.
+function maybeMarkRead(path, body) {
+  if (!path || reader._read) return;
+  const ratio = body.scrollHeight > 0 ? (body.scrollTop + body.clientHeight) / body.scrollHeight : 1;
+  if (ratio >= 0.9) { reader._read = true; markModuleRead(path); }
+}
+function isModuleRead(path) {
+  return !!(state.progress && state.progress.readModules && state.progress.readModules[path]);
 }
 
 // SM-2-lite spaced-repetition scheduler. `ms` (time-to-answer, optional) is
@@ -1079,9 +1125,13 @@ function renderHome() {
   const freezes = state.progress.freezes || 0;
   const freezeBit = freezes > 0
     ? ` <span class="freeze-chip" title="Streak freezes auto-cover a single missed day">${ICON("snow", "i-snow")} ${freezes}</span>` : "";
-  const streakLine = streak > 0
+  const rd = state.progress.reading || {};
+  const readToday = rd.day === todayISO() ? (rd.count || 0) : 0;
+  const readChip = readToday > 0
+    ? ` <span class="read-chip" title="Modules you've read today${rd.streak > 1 ? ` · ${rd.streak}-day reading streak` : ""}">${ICON("scroll", "i-scroll")} ${readToday} read${rd.streak > 1 ? ` &middot; ${rd.streak}d` : ""}</span>` : "";
+  const streakLine = (streak > 0
     ? `You're on a <b>${streak}-day</b> streak. Keep it alive.${freezeBit}`
-    : `Start your streak today &mdash; just 5 minutes.${freezeBit}`;
+    : `Start your streak today &mdash; just 5 minutes.${freezeBit}`) + readChip;
   // Resume card: a same-day snapshot of an interrupted blitz (above review).
   const resume = resumeSummary();
   const resumeCard = resume
@@ -2235,7 +2285,7 @@ function gradeAnswer(i, conf) {
     // [A2] prime pretest: reveal-only grading — no XP, combo, or redemption loop.
     item.status = right ? "correct" : "wrong";
     if (!right) { item.picked = i; item.pickedOpt = opts[i]; }
-    right ? sfx.correct() : sfx.wrong();
+    if (right) { sfx.correct(); haptic("correct"); } else { sfx.wrong(); haptic("wrong"); }
   } else if (retryMode) {
     item.retried = true;
     if (right) { item.redeemed = true; state.sessionXp += 5; floatXP(5, optBtns[i]); sfx.correct(); }  // flat bonus, no combo
@@ -2256,12 +2306,12 @@ function gradeAnswer(i, conf) {
       floatXP(gain, optBtns[i]);
       state._missStreak = 0;
       state._answerLog.push("correct");
-      if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); }
-      else if (recovered) sfx.recovered();
-      else sfx.correct();
+      if (state.combo === 3 || state.combo === 5 || state.combo >= 7) { sfx.combo(); ripple(optBtns[i]); haptic("combo"); }
+      else if (recovered) { sfx.recovered(); haptic("correct"); }
+      else { sfx.correct(); haptic("correct"); }
     } else {
       item.status = "wrong"; item.picked = i; item.pickedOpt = opts[i];
-      state.combo = 0; sfx.wrong();
+      state.combo = 0; sfx.wrong(); haptic("wrong");
       state._missStreak = (state._missStreak || 0) + 1;
       state._maxMissStreak = Math.max(state._maxMissStreak || 0, state._missStreak);
       state._answerLog.push("wrong");
@@ -2640,6 +2690,9 @@ function progressSnapshot() {
 function moment({ tier = "", title, sub = "", icon = "" }) {
   return new Promise((resolve) => {
     const reduced = REDUCED();
+    // celebratory buzz on phones, keyed by tier (paired with the moment's own sfx)
+    const HAP = { title: "levelup", level: "levelup", gold: "tier", foil: "tier", silver: "tier", bronze: "tier", streak: "tier", gauntlet: "seal", ledger: "tier" };
+    if (HAP[tier]) haptic(HAP[tier]);
     const o = document.createElement("div");
     o.className = "moment" + (tier ? " m-" + tier : "") + (reduced ? " reduced" : "");
     o.setAttribute("role", "status");
@@ -4633,6 +4686,35 @@ function wireDiagramsAndCopy(root) {
   });
 }
 
+// Callout (admonition) blocks: a blockquote is promoted to a coloured "dark
+// island" when its first line is a GFM alert (`> [!NOTE]`) or a known bold label
+// (`> **Warning:** ...`). Anything else stays a plain <blockquote> — arbitrary
+// quotes are never restyled. Colour lives only inside the bordered island; prose
+// stays pure-white (reader invariant), same as code/diagram islands.
+const CALLOUT_TYPES = {
+  "note":        { type: "note",     label: "Note",        icon: "ℹ" },
+  "info":        { type: "note",     label: "Note",        icon: "ℹ" },
+  "important":   { type: "important", label: "Important",  icon: "★" },
+  "tip":         { type: "tip",      label: "Tip",         icon: "✓" },
+  "warning":     { type: "warning",  label: "Warning",     icon: "▲" },
+  "caution":     { type: "warning",  label: "Caution",     icon: "▲" },
+  "gotcha":      { type: "warning",  label: "Gotcha",      icon: "▲" },
+  "insight":     { type: "insight",  label: "Insight",     icon: "◆" },
+  "key insight": { type: "insight",  label: "Key Insight", icon: "◆" },
+  "war story":   { type: "warstory", label: "War Story",   icon: "⚑" },
+  "example":     { type: "example",  label: "Example",     icon: "▸" },
+};
+function calloutOf(bodyLines) {
+  if (!bodyLines.length) return null;
+  const first = bodyLines[0].trim();
+  const finish = (spec, rest, tail) => ({ ...spec, text: (rest ? [rest] : []).concat(tail).join(" ").trim() });
+  let m = first.match(/^\[!(\w+)\]\s*(.*)$/);                 // GFM alert: [!NOTE] ...
+  if (m) { const s = CALLOUT_TYPES[m[1].toLowerCase()]; return s ? finish(s, m[2], bodyLines.slice(1)) : null; }
+  m = first.match(/^\*\*([^*]+?):\*\*\s*(.*)$/);             // bold label: **Warning:** ...
+  if (m) { const s = CALLOUT_TYPES[m[1].trim().toLowerCase()]; if (s) return finish(s, m[2], bodyLines.slice(1)); }
+  return null;
+}
+
 function mdRender(src) {
   const lines = src.replace(/\r\n/g, "\n").split("\n");
   const out = [];
@@ -4683,7 +4765,12 @@ function mdRender(src) {
     if (/^>\s?/.test(line)) {
       const body = [];
       while (i < lines.length && /^>\s?/.test(lines[i])) { body.push(lines[i].replace(/^>\s?/, "")); i++; }
-      out.push(`<blockquote>${mdInline(body.join(" "))}</blockquote>`);
+      const co = calloutOf(body);
+      if (co) {
+        out.push(`<div class="callout callout-${co.type}"><p class="callout-label"><span class="callout-icon">${co.icon}</span>${esc(co.label)}</p><div class="callout-body">${mdInline(co.text)}</div></div>`);
+      } else {
+        out.push(`<blockquote>${mdInline(body.join(" "))}</blockquote>`);
+      }
       qaPending = false; continue;
     }
     const listOpen = line.match(/^\s*(\d+)\.\s+/) || line.match(/^\s*([-*+])\s+/);
@@ -4816,6 +4903,7 @@ function restoreReaderWidth() {
   const modPref = localStorage.getItem("sd_reader_modules");
   reader.modules = modPref == null ? window.innerWidth >= 1400 : modPref === "1";
   applyReaderFont();
+  applyReaderTypography();
 }
 
 // Reader font size: A− / A+ in the reader head, persisted, clamped 12–19px.
@@ -4826,6 +4914,51 @@ function applyReaderFont(delta = 0) {
   document.documentElement.style.setProperty("--rd-fs", fs + "px");
 }
 
+// Reader typography prefs (serif / measure / drop-cap). Applied to <html> — which
+// survives reader navigations — so they persist without re-applying per page.
+// Colour is never touched (prose stays pure-white, hard invariant); only the
+// typeface, line measure, and a drop-cap on the lead paragraph change.
+const READER_MEASURE = { narrow: "620px", cozy: "760px", wide: "960px" };
+function applyReaderTypography() {
+  const de = document.documentElement;
+  de.classList.toggle("rd-serif", localStorage.getItem("sd_reader_font") === "serif");
+  de.classList.toggle("rd-dropcap", localStorage.getItem("sd_reader_dropcap") !== "0");  // default on
+  const mw = READER_MEASURE[localStorage.getItem("sd_reader_measure")];
+  if (mw) de.style.setProperty("--reader-measure", mw);
+  else de.style.removeProperty("--reader-measure");
+}
+// The "Aa" popover: three segmented controls. Toggling this button again (or an
+// outside click / Esc) closes it. Choices persist and apply live.
+function openReaderTypeMenu(anchorBtn) {
+  const panel = el("#reader"); if (!panel) return;
+  const existing = el("#readerTypePop");
+  if (existing) { existing.remove(); return; }
+  const font = localStorage.getItem("sd_reader_font") || "sans";
+  const measure = localStorage.getItem("sd_reader_measure") || "default";
+  const dropcap = localStorage.getItem("sd_reader_dropcap") !== "0";
+  const seg = (k, opts, cur) => `<div class="rtp-seg" data-k="${k}">` +
+    opts.map(([v, lbl]) => `<button data-v="${v}" class="${v === cur ? "on" : ""}">${lbl}</button>`).join("") + `</div>`;
+  const pop = document.createElement("div");
+  pop.id = "readerTypePop"; pop.className = "reader-typepop"; pop.setAttribute("role", "menu");
+  pop.innerHTML =
+    `<div class="rtp-row"><span class="rtp-lbl">Font</span>${seg("sd_reader_font", [["sans", "Sans"], ["serif", "Serif"]], font)}</div>` +
+    `<div class="rtp-row"><span class="rtp-lbl">Width</span>${seg("sd_reader_measure", [["narrow", "Narrow"], ["cozy", "Cozy"], ["wide", "Wide"], ["default", "Auto"]], measure)}</div>` +
+    `<div class="rtp-row"><span class="rtp-lbl">Drop-cap</span>${seg("sd_reader_dropcap", [["1", "On"], ["0", "Off"]], dropcap ? "1" : "0")}</div>`;
+  panel.appendChild(pop);
+  pop.querySelectorAll(".rtp-seg").forEach((s) => s.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+    localStorage.setItem(s.dataset.k, b.dataset.v);
+    s.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    applyReaderTypography();
+  })));
+  setTimeout(() => {
+    const done = () => { pop.remove(); document.removeEventListener("mousedown", off); document.removeEventListener("keydown", esc, true); };
+    const off = (ev) => { if (!pop.contains(ev.target) && ev.target !== anchorBtn) done(); };
+    // capture + stopPropagation so Esc closes only the menu, not the reader behind it
+    const esc = (ev) => { if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); done(); } };
+    document.addEventListener("mousedown", off); document.addEventListener("keydown", esc, true);
+  }, 0);
+}
+
 // Populate the always-accessible sidebar index from the rendered headings (ids
 // assigned by mdRender, so anchors always match). Returns the heading count so the
 // caller can hide the Index toggle when there's nothing to index.
@@ -4834,13 +4967,169 @@ function buildToc(tocEl, main) {
   if (!heads.length) { tocEl.innerHTML = ""; return 0; }
   const items = heads.map((h) =>
     `<li class="${h.tagName === "H3" ? "lvl3" : ""}"><a href="#" data-tid="${esc(h.id)}" title="${esc(h.textContent)}">${esc(h.textContent)}</a></li>`).join("");
-  tocEl.innerHTML = `<div class="toc-h">Contents</div><ul>${items}</ul>`;
+  tocEl.innerHTML = `<div class="toc-h">Contents<span class="toc-pos"></span></div><ul>${items}</ul>`;
   tocEl.querySelectorAll("a[data-tid]").forEach((a) => a.addEventListener("click", (e) => {
     e.preventDefault();
     const t = main.querySelector("#" + CSS.escape(a.dataset.tid));
     if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
   }));
   return heads.length;
+}
+
+// Reading-time chip: prepend "~N min read · M sections" to the content. Uses the
+// rendered text so code/diagram noise is included at roughly the right weight.
+function prependReadingMeta(main) {
+  const words = (main.textContent.trim().match(/\S+/g) || []).length;
+  const mins = Math.max(1, Math.round(words / 200));
+  const secs = main.querySelectorAll("h2[id]").length;
+  const meta = document.createElement("div");
+  meta.className = "reading-meta";
+  meta.innerHTML = `<span>~${mins} min read</span>${secs ? `<span class="rm-dot">·</span><span>${secs} section${secs > 1 ? "s" : ""}</span>` : ""}`;
+  main.insertBefore(meta, main.firstChild);
+}
+
+// Scroll-spy: highlight the section currently at the top of the viewport in the
+// TOC, and update the "§X / M" counter in the TOC header. Stored on `reader._spy`
+// and driven by the reader-body scroll handler (which already runs on scroll), so
+// there is no second scroll listener to leak across navigations.
+function wireScrollSpy(main, scrollBox) {
+  const heads = [...main.querySelectorAll("h2[id], h3[id]")];
+  const toc = el("#readerToc");
+  const links = toc ? new Map([...toc.querySelectorAll("a[data-tid]")].map((a) => [a.dataset.tid, a])) : new Map();
+  const h2count = main.querySelectorAll("h2[id]").length;
+  const posEl = toc ? toc.querySelector(".toc-pos") : null;
+  if (!heads.length) { reader._spy = null; return; }
+  let activeId = null;
+  reader._spy = () => {
+    const top = scrollBox.scrollTop + 90;               // "reading line" ~90px below the fold top
+    let cur = heads[0], h2seen = 0, h2idx = 0;
+    for (const h of heads) {
+      if (h.tagName === "H2") h2seen++;
+      if (h.offsetTop <= top) { cur = h; if (h.tagName === "H2") h2idx = h2seen; }
+      else break;
+    }
+    if (cur.id !== activeId) {
+      if (activeId && links.get(activeId)) links.get(activeId).classList.remove("toc-active");
+      const a = links.get(cur.id);
+      if (a) { a.classList.add("toc-active"); a.scrollIntoView({ block: "nearest" }); }
+      activeId = cur.id;
+    }
+    if (posEl && h2count) posEl.textContent = `§ ${Math.max(1, h2idx)} / ${h2count}`;
+  };
+  reader._spy();
+}
+
+// Reading-position memory: remember the scroll offset per path so revisiting a
+// long module resumes where you left off (first-ever open still starts at top).
+// Debounced to avoid a localStorage write on every scroll tick.
+let _scrollSaveT = null;
+function scheduleScrollSave(path, offset) {
+  if (!path) return;
+  clearTimeout(_scrollSaveT);
+  _scrollSaveT = setTimeout(() => {
+    try {
+      const m = JSON.parse(localStorage.getItem("sd_reader_scroll") || "{}");
+      if (offset > 40) m[path] = Math.round(offset); else delete m[path];
+      const keys = Object.keys(m);
+      if (keys.length > 60) delete m[keys[0]];          // cap the map
+      localStorage.setItem("sd_reader_scroll", JSON.stringify(m));
+    } catch { /* quota / parse — non-critical */ }
+  }, 400);
+}
+function savedScrollFor(path) {
+  try { return (JSON.parse(localStorage.getItem("sd_reader_scroll") || "{}"))[path] || 0; }
+  catch { return 0; }
+}
+
+// ---------- reader in-page find ----------
+// Reader-scoped find (Ctrl/Cmd+F while the reader is open, or the head button).
+// Wraps matches in <mark> by walking TEXT NODES only — never innerHTML — so code
+// and ASCII-diagram DOM survive intact; clearing unwraps + normalize()s back to
+// the original tree. Mermaid SVG subtrees are skipped (can't wrap text there).
+const _find = { open: false, matches: [], idx: -1 };
+function readerFindClear(main) {
+  main.querySelectorAll("mark.rd-find").forEach((m) => m.replaceWith(document.createTextNode(m.textContent)));
+  main.normalize();
+  _find.matches = []; _find.idx = -1;
+}
+function readerFindRun(main, q) {
+  readerFindClear(main);
+  const needle = (q || "").toLowerCase();
+  if (needle) {
+    const walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
+        for (let p = node.parentElement; p && p !== main; p = p.parentElement) {
+          const tag = (p.tagName || "").toLowerCase();
+          if (tag === "script" || tag === "style" || tag === "svg" || (p.classList && p.classList.contains("mermaid"))) return NodeFilter.FILTER_REJECT;
+        }
+        return node.nodeValue.toLowerCase().includes(needle) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      },
+    });
+    const targets = []; let n; while ((n = walker.nextNode())) targets.push(n);
+    for (const node of targets) {
+      const text = node.nodeValue, low = text.toLowerCase();
+      const frag = document.createDocumentFragment();
+      let last = 0, hit;
+      while ((hit = low.indexOf(needle, last)) !== -1) {
+        if (hit > last) frag.appendChild(document.createTextNode(text.slice(last, hit)));
+        const mk = document.createElement("mark"); mk.className = "rd-find";
+        mk.textContent = text.slice(hit, hit + needle.length);
+        frag.appendChild(mk);
+        last = hit + needle.length;
+      }
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    }
+    _find.matches = [...main.querySelectorAll("mark.rd-find")];
+    _find.idx = _find.matches.length ? 0 : -1;
+  }
+  readerFindFocus();
+}
+function readerFindFocus() {
+  _find.matches.forEach((m, k) => m.classList.toggle("rd-find-cur", k === _find.idx));
+  const cur = _find.matches[_find.idx];
+  if (cur) cur.scrollIntoView({ block: "center", behavior: REDUCED() ? "auto" : "smooth" });
+  const c = el(".rd-find-count");
+  if (c) c.textContent = _find.matches.length ? `${_find.idx + 1} / ${_find.matches.length}` : "0 / 0";
+}
+function readerFindStep(d) {
+  if (!_find.matches.length) return;
+  _find.idx = (_find.idx + d + _find.matches.length) % _find.matches.length;
+  readerFindFocus();
+}
+function openReaderFind() {
+  const panel = el("#reader"); if (!panel) return;
+  let bar = el("#readerFind");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "readerFind"; bar.className = "reader-find";
+    bar.innerHTML = `<span class="rd-find-ic" aria-hidden="true">&#8981;</span>
+      <input type="text" class="rd-find-input" placeholder="Find in page" aria-label="Find in page">
+      <span class="rd-find-count">0 / 0</span>
+      <button class="rd-find-btn" data-d="-1" title="Previous (Shift+Enter)" aria-label="Previous match">&lsaquo;</button>
+      <button class="rd-find-btn" data-d="1" title="Next (Enter)" aria-label="Next match">&rsaquo;</button>
+      <button class="rd-find-btn rd-find-x" title="Close (Esc)" aria-label="Close find">&times;</button>`;
+    panel.appendChild(bar);
+    const input = bar.querySelector(".rd-find-input");
+    input.addEventListener("input", () => { const m = el("#readerMain"); if (m) readerFindRun(m, input.value); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); readerFindStep(e.shiftKey ? -1 : 1); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeReaderFind(); }
+    });
+    bar.querySelectorAll(".rd-find-btn[data-d]").forEach((b) => b.addEventListener("click", () => readerFindStep(+b.dataset.d)));
+    bar.querySelector(".rd-find-x").addEventListener("click", closeReaderFind);
+  }
+  _find.open = true; bar.classList.add("show");
+  const input = bar.querySelector(".rd-find-input");
+  input.focus(); input.select();
+  const m = el("#readerMain");
+  if (m && input.value) readerFindRun(m, input.value);
+}
+function closeReaderFind() {
+  const bar = el("#readerFind"); if (bar) bar.classList.remove("show");
+  _find.open = false;
+  const m = el("#readerMain"); if (m) readerFindClear(m);
 }
 
 // Populate the left module-list sidebar from the current navCtx.
@@ -4864,7 +5153,7 @@ function buildModuleNav(modEl, navCtx, currentPath) {
 
     if (mFiles.length <= 1) {
       const isActive = m.path === currentPath;
-      return `<li><a href="#" class="mod-item${isActive ? " active" : ""}" data-midx="${i}" title="${esc(m.title)}">${esc(m.title)}</a></li>`;
+      return `<li><a href="#" class="mod-item${isActive ? " active" : ""}${isModuleRead(m.path) ? " read" : ""}" data-midx="${i}" title="${esc(m.title)}">${esc(m.title)}</a></li>`;
     }
 
     // Multi-file module: collapsible folder
@@ -4873,7 +5162,7 @@ function buildModuleNav(modEl, navCtx, currentPath) {
       const filePath = `${mKey}/${fn}`;
       const isFileCurrent = filePath === currentPath;
       const label = fn === "README.md" ? "readme" : fn.replace(".md", "").replace(/_/g, " ");
-      return `<li><a href="#" class="mod-file${isFileCurrent ? " active" : ""}" data-path="${esc(filePath)}" title="${esc(label)}">${esc(label)}</a></li>`;
+      return `<li><a href="#" class="mod-file${isFileCurrent ? " active" : ""}${isModuleRead(filePath) ? " read" : ""}" data-path="${esc(filePath)}" title="${esc(label)}">${esc(label)}</a></li>`;
     }).join("");
 
     return `<li class="mod-group${isOpen ? " open" : ""}">
@@ -4923,6 +5212,41 @@ function applyReaderModes() {
   const ib = el("#readerIdx"); if (ib) ib.classList.toggle("on", reader.toc);
   const mb = el("#readerMod"); if (mb) mb.classList.toggle("on", reader.modules);
 }
+
+// Native Fullscreen API — best-effort, with the old webkit spelling for Safari.
+// Requested on #reader (already position:fixed full-viewport) so the FS layer is
+// exactly the reading surface. All calls are guarded/try-catch: if the browser
+// blocks fullscreen (no user gesture, iframe policy, unsupported) the in-app
+// immersive layer still applies, so the toggle always does something.
+function enterNativeFS() {
+  const t = el("#reader"); if (!t) return;
+  const req = t.requestFullscreen || t.webkitRequestFullscreen;
+  if (!req) return;
+  try { const r = req.call(t); if (r && r.catch) r.catch(() => {}); } catch { /* blocked — in-app immersive still applied */ }
+}
+function exitNativeFS() {
+  const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  if (!fsEl) return;
+  const ex = document.exitFullscreen || document.webkitExitFullscreen;
+  if (!ex) return;
+  try { const r = ex.call(document); if (r && r.catch) r.catch(() => {}); } catch { /* ignore */ }
+}
+// Single entry point for immersive on/off: persist, reflect to DOM, and layer
+// native fullscreen on top. `reader.full` is the in-app immersive pref (restored
+// at boot); native FS is ephemeral (browsers require a fresh gesture to re-enter).
+function setReaderFull(on) {
+  reader.full = on;
+  localStorage.setItem("sd_reader_full", on ? "1" : "0");
+  applyReaderModes();
+  if (on) enterNativeFS(); else exitNativeFS();
+}
+// Keep a body class in sync with native FS so CSS can react (e.g. drop the pane
+// shadow at the screen edge). Fires on OS/Esc-driven exit too, not just our calls.
+["fullscreenchange", "webkitfullscreenchange"].forEach((ev) =>
+  document.addEventListener(ev, () => {
+    const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    document.body.classList.toggle("native-fs", !!fsEl);
+  }));
 
 // Wire in-body links: relative repo links open in the reader (with back-stack);
 // in-page anchors scroll within the pane.
@@ -5022,17 +5346,21 @@ async function openReaderPath(path, title, navCtx, frag) {
     ? `<button class="reader-nav" id="readerPrev" title="Previous topic" ${nav.idx <= 0 ? "disabled" : ""}>&lsaquo; Prev</button>
        <button class="reader-nav" id="readerNext" title="Next topic" ${nav.idx >= nav.list.length - 1 ? "disabled" : ""}>Next &rsaquo;</button>` : "";
   panel.innerHTML = `<div class="reader-grip" id="readerGrip"></div>
+    <div class="reader-peek" aria-hidden="true"></div>
     <div class="reader-head">
       ${backBtn}${modBtn}
       <span class="reader-title">${esc(reader.titleText)}</span>
       ${navBtns}
       <button class="reader-nav reader-icon rfs" id="readerFsDn" title="Smaller text">A&#8722;</button>
       <button class="reader-nav reader-icon rfs" id="readerFsUp" title="Larger text">A+</button>
+      <button class="reader-nav reader-icon" id="readerType" title="Reading options (font, width, drop-cap)">Aa</button>
+      <button class="reader-nav reader-icon" id="readerFindBtn" title="Find in page (Ctrl/Cmd+F)">&#8981;</button>
       <button class="reader-nav reader-icon" id="readerIdx" title="Contents">&#8801;</button>
-      <button class="reader-nav reader-icon" id="readerFull" title="Fullscreen (F)">&#11036;</button>
+      <button class="reader-nav reader-icon" id="readerFull" title="Immersive reading (F)">&#11036;</button>
       <button class="reader-close" id="readerClose" title="Close (Esc)">&times;</button>
     </div>
     <div class="reader-progress" aria-hidden="true"><i id="readerProg"></i></div>
+    <button class="reader-exit" id="readerExit" title="Exit immersive reading (Esc)" aria-label="Exit immersive reading">&#10530; Exit</button>
     <div class="reader-body" id="readerBody"><div class="loading">Loading&hellip;</div></div>
     <button class="reader-top" id="readerTop" title="Back to top" aria-label="Back to top">&uarr;</button>`;
   document.body.classList.add("reader-open");
@@ -5041,6 +5369,7 @@ async function openReaderPath(path, title, navCtx, frag) {
   el("#readerClose").addEventListener("click", closeReader);
   el("#readerFsDn").addEventListener("click", () => applyReaderFont(-1));
   el("#readerFsUp").addEventListener("click", () => applyReaderFont(1));
+  el("#readerType").addEventListener("click", (e) => openReaderTypeMenu(e.currentTarget));
   // Reading progress bar + back-to-top, driven by the body's scroll position.
   {
     const body = el("#readerBody"), prog = el("#readerProg"), top = el("#readerTop");
@@ -5048,6 +5377,10 @@ async function openReaderPath(path, title, navCtx, frag) {
       const max = body.scrollHeight - body.clientHeight;
       prog.style.width = max > 0 ? (body.scrollTop / max) * 100 + "%" : "0";
       top.classList.toggle("show", body.scrollTop > 600);
+      if (panel.classList.contains("head-peek")) panel.classList.remove("head-peek");
+      if (reader._spy) reader._spy();
+      scheduleScrollSave(reader.path, body.scrollTop);
+      maybeMarkRead(reader.path, body);              // reading feeds the game (Phase 6)
     }, { passive: true });
     top.addEventListener("click", () => body.scrollTo({ top: 0, behavior: REDUCED() ? "auto" : "smooth" }));
   }
@@ -5061,13 +5394,16 @@ async function openReaderPath(path, title, navCtx, frag) {
   el("#readerIdx").addEventListener("click", () => {
     reader.toc = !reader.toc; localStorage.setItem("sd_reader_toc", reader.toc ? "1" : "0"); applyReaderModes();
   });
-  el("#readerFull").addEventListener("click", () => {
-    reader.full = !reader.full;
-    if (reader.full) reader.toc = true;            // entering fullscreen reveals the index
-    localStorage.setItem("sd_reader_full", reader.full ? "1" : "0");
-    localStorage.setItem("sd_reader_toc", reader.toc ? "1" : "0");
-    applyReaderModes();
-  });
+  el("#readerFull").addEventListener("click", () => setReaderFull(!reader.full));
+  el("#readerExit").addEventListener("click", () => setReaderFull(false));
+  el("#readerFindBtn").addEventListener("click", openReaderFind);
+  // Touch has no hover: tapping the top peek strip momentarily reveals the head
+  // (so font/nav/close stay reachable without leaving immersive). Auto-hides on
+  // the next scroll or a second tap.
+  {
+    const peek = el(".reader-peek");
+    if (peek) peek.addEventListener("click", () => panel.classList.toggle("head-peek"));
+  }
   if (backBtn) el("#readerBack").addEventListener("click", () => { const p = reader.back.pop(); if (p) openReaderPath(p.path, p.title, p.nav); });
   if (nav) {
     el("#readerPrev").addEventListener("click", () => { if (nav.idx > 0) openReaderPath(nav.list[nav.idx - 1].path, nav.list[nav.idx - 1].title, { list: nav.list, idx: nav.idx - 1 }); });
@@ -5087,12 +5423,18 @@ async function openReaderPath(path, title, navCtx, frag) {
     buildModuleNav(el("#readerModules"), reader.nav, path);
     const headCount = buildToc(el("#readerToc"), main);
     el("#readerIdx").style.display = headCount >= 3 ? "" : "none";   // nothing to index -> hide toggle
+    prependReadingMeta(main);                      // "~N min read · M sections"
     wireReaderBody(main);
     wireDiagramsAndCopy(main);                     // copy buttons + ASCII-diagram zoom
     renderMermaid(main);                           // no-op when page has no mermaid fences
     appendEvalBlock(main, path);                   // "Evaluate me" quiz launcher
-    b.scrollTop = 0;
-    if (frag) { const t = main.querySelector("#" + CSS.escape(frag)); if (t) t.scrollIntoView({ block: "start" }); }
+    wireScrollSpy(main, b);                        // active-section highlight + §X/M
+    reader._read = false;                          // reset per-page read-completion latch (Phase 6)
+    // Restore scroll: an explicit #frag wins; else resume the saved offset; else top.
+    if (frag) { b.scrollTop = 0; const t = main.querySelector("#" + CSS.escape(frag)); if (t) t.scrollIntoView({ block: "start" }); }
+    else { b.scrollTop = savedScrollFor(path); if (reader._spy) reader._spy(); }
+    // Pages that fit without scrolling still count as read after a short dwell.
+    setTimeout(() => { if (reader.path === path && !reader._read) maybeMarkRead(path, b); }, 1600);
     localStorage.setItem("sd_last_read", JSON.stringify({ path, title: reader.titleText }));   // Study's "Continue reading"
   } catch {
     // [E1] reader failure keeps its own in-panel error (not the full errorScreen
@@ -5766,19 +6108,25 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "/" && !typing && !_palette) { e.preventDefault(); openPalette(); return; }
   if (e.key === "?" && !typing) { e.preventDefault(); toggleHelp(); return; }
   if (document.body.classList.contains("reader-open")) {
-    if (e.key === "Escape") {                       // exit fullscreen first, then close
+    if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {   // find-in-page
       e.preventDefault();
-      if (reader.full) { reader.full = false; localStorage.setItem("sd_reader_full", "0"); applyReaderModes(); }
+      openReaderFind();
+      return;
+    }
+    if (_find.open && e.key === "Escape") {          // close find before touching the reader
+      e.preventDefault();
+      closeReaderFind();
+      return;
+    }
+    if (e.key === "Escape") {                        // exit immersive first, then close
+      e.preventDefault();
+      if (reader.full) setReaderFull(false);
       else closeReader();
       return;
     }
     if ((e.key === "f" || e.key === "F") && (e.target.tagName || "").toLowerCase() !== "input") {
       e.preventDefault();
-      reader.full = !reader.full;
-      if (reader.full) reader.toc = true;
-      localStorage.setItem("sd_reader_full", reader.full ? "1" : "0");
-      localStorage.setItem("sd_reader_toc", reader.toc ? "1" : "0");
-      applyReaderModes();
+      setReaderFull(!reader.full);
       return;
     }
     return;   // reader is open: never let keys drive the quiz hidden behind it

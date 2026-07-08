@@ -392,6 +392,16 @@ button:active { transform: scale(0.98); }
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   vertical-align: middle;
 }
+/* "modules read today" chip on Home (reading feeds the game) */
+.read-chip {
+  display: inline-block; margin-left: 6px; padding: 1px 9px; border-radius: 999px;
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  color: color-mix(in srgb, var(--good) 75%, var(--text));
+  background: color-mix(in srgb, var(--good) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--good) 42%, transparent);
+  vertical-align: middle;
+}
+.read-chip svg.icon { width: 12px; height: 12px; vertical-align: -1px; }
 .freeze-saved {
   margin: 0 0 16px; padding: 9px 14px; border-radius: var(--radius-sm);
   font-weight: 600; font-size: 14px; display: inline-block;
@@ -857,16 +867,97 @@ body.reader-resizing #reader { animation: none; }
 .reader-close { background: transparent; color: var(--od-muted); font-size: 22px; line-height: 1; padding: 1px 10px; border: 1px solid var(--od-line); border-radius: 8px; }
 .reader-close:hover { color: var(--od-text); border-color: var(--accent); }
 
-/* fullscreen mode */
+/* immersive reading mode (.full): distraction-free. Native fullscreen (when the
+   browser grants it) + every piece of app chrome hidden. The head auto-hides and
+   is revealed by a top-edge hover (desktop) or a tap on the peek strip (touch);
+   a floating Exit pill is the always-there control. Prose centers on a
+   measure-capped column against the pitch-black void. */
 #reader.full { width: 100vw; }
 #reader.full .reader-grip { display: none; }
 body.reader-full main { margin-right: 0 !important; }
-#reader.full .reader-body { padding: 20px 28px 80px; }
-#reader.full #readerMain { max-width: 860px; margin: 0 auto; }
+body.reader-full .topbar,
+body.reader-full .tabbar { display: none !important; }
+body.native-fs #reader { box-shadow: none; border-left: none; }
+
+.reader-peek { display: none; position: absolute; top: 0; left: 0; right: 0; height: 46px; z-index: 41; }
+#reader.full .reader-peek { display: block; }
+#reader.full .reader-head {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 42;
+  background: color-mix(in srgb, var(--rd-bg) 82%, transparent);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  padding-top: calc(11px + env(safe-area-inset-top));
+  transform: translateY(-100%); opacity: 0;
+  transition: transform 0.22s var(--ease-out), opacity 0.22s var(--ease-out);
+}
+#reader.full .reader-peek:hover + .reader-head,
+#reader.full .reader-head:hover,
+#reader.full.head-peek .reader-head { transform: none; opacity: 1; }
+
+/* floating Exit pill — the reliable cross-device control (touch has no hover) */
+.reader-exit { display: none; }
+#reader.full .reader-exit {
+  display: inline-flex; align-items: center; gap: 6px;
+  position: absolute; z-index: 43;
+  top: calc(12px + env(safe-area-inset-top)); right: calc(14px + env(safe-area-inset-right));
+  padding: 6px 12px; border-radius: 999px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; color: var(--od-muted);
+  background: color-mix(in srgb, var(--rd-bg) 70%, transparent);
+  border: 1px solid var(--od-line);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  opacity: 0.5; transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+#reader.full .reader-exit:hover { opacity: 1; color: var(--od-text); border-color: var(--accent); }
+
+#reader.full .reader-body {
+  padding: 40px max(28px, env(safe-area-inset-right)) calc(80px + env(safe-area-inset-bottom)) max(28px, env(safe-area-inset-left));
+}
+#reader.full #readerMain { max-width: var(--reader-measure, 860px); margin: 0 auto; }
+@media (prefers-reduced-motion: reduce) { #reader.full .reader-head { transition: none; } }
+
+/* in-page find bar (reader-scoped, opened by Ctrl/Cmd+F or the head button) */
+.reader-find {
+  position: absolute; top: 10px; right: 14px; z-index: 44;
+  display: none; align-items: center; gap: 6px; padding: 5px 8px;
+  background: var(--od-bg2); border: 1px solid var(--od-line); border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+}
+.reader-find.show { display: flex; }
+#reader.full .reader-find { top: calc(10px + env(safe-area-inset-top)); right: 96px; }
+.rd-find-ic { color: var(--od-muted); font-size: 14px; line-height: 1; }
+.rd-find-input { background: transparent; border: none; outline: none; color: var(--od-text); font: inherit; font-size: 13px; width: 150px; }
+.rd-find-input::placeholder { color: var(--od-muted); }
+.rd-find-count { font-family: var(--mono); font-size: 11px; color: var(--od-muted); min-width: 46px; text-align: right; }
+.rd-find-btn { background: transparent; border: 1px solid var(--od-line); border-radius: 7px; color: var(--od-muted); font-size: 14px; line-height: 1; padding: 3px 8px; }
+.rd-find-btn:hover { color: var(--od-text); border-color: var(--accent); }
+mark.rd-find { background: color-mix(in srgb, var(--warn) 38%, transparent); color: var(--od-text); border-radius: 2px; padding: 0 1px; }
+mark.rd-find-cur { background: var(--accent); color: #05070d; }
 
 /* reader body: three-column flex — [modules] [content] [toc] */
 .reader-body { overflow-y: auto; padding: 16px 20px 72px; display: flex; align-items: flex-start; gap: 20px; }
-.reader-body > #readerMain { flex: 1 1 auto; min-width: 0; }
+.reader-body > #readerMain { flex: 1 1 auto; min-width: 0; max-width: var(--reader-measure, none); margin: 0 auto; }
+
+/* Reader typography options (set on <html> by applyReaderTypography). Colour is
+   never touched — only typeface, measure, and the lead drop-cap. */
+.rd-serif .md-body { font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif; }
+.rd-dropcap .md-body > p:first-of-type::first-letter {
+  float: left; font-size: 2.9em; line-height: 0.82; font-weight: 700;
+  padding: 4px 8px 0 0; color: var(--od-text);
+}
+.reader-typepop {
+  position: absolute; top: 50px; right: 14px; z-index: 44;
+  min-width: 200px; padding: 10px 12px; display: grid; gap: 9px;
+  background: var(--od-bg2); border: 1px solid var(--od-line); border-radius: 12px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+}
+.reader-typepop .rtp-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.reader-typepop .rtp-lbl { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--od-muted); }
+.reader-typepop .rtp-seg { display: inline-flex; border: 1px solid var(--od-line); border-radius: 8px; overflow: hidden; }
+.reader-typepop .rtp-seg button { background: transparent; color: var(--od-muted); font-size: 11.5px; padding: 4px 9px; border: none; border-left: 1px solid var(--od-line); }
+.reader-typepop .rtp-seg button:first-child { border-left: none; }
+.reader-typepop .rtp-seg button:hover { color: var(--od-text); }
+.reader-typepop .rtp-seg button.on { color: var(--od-text); background: color-mix(in srgb, var(--accent) 20%, transparent); }
 
 .reader-modules, .reader-toc {
   position: sticky; top: 0; flex-shrink: 0; align-self: flex-start;
@@ -891,6 +982,8 @@ a.mod-item {
 }
 a.mod-item:hover { color: var(--od-text); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 a.mod-item.active { color: var(--od-text); border-right-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
+/* read-completion tick on module-tree entries (reading feeds the game) */
+a.mod-item.read::before, a.mod-file.read::before { content: "\2713 "; color: var(--good); font-weight: 700; }
 
 .mod-folder { display: flex; align-items: center; gap: 5px; padding: 4px 8px; cursor: pointer; border-radius: 6px 0 0 6px; user-select: none; }
 .mod-folder:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
@@ -927,6 +1020,8 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .reader-toc a:hover { color: var(--od-text); border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.reader-toc a.toc-active { color: var(--od-text); border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
+.reader-toc .toc-pos { float: right; font-weight: 400; color: var(--accent); letter-spacing: 0.02em; }
 
 /* ---------- 12. Markdown & code -------------------------------------------- */
 /* Prose follows the theme; code, ASCII diagrams, and Mermaid stay dark islands
@@ -953,6 +1048,43 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body a { color: var(--md-link); text-decoration: none; }
 .md-body a:hover { text-decoration: underline; }
 .md-body a.md-link { border-bottom: 1px dotted color-mix(in srgb, var(--md-link) 50%, transparent); }
+
+/* Callout / admonition blocks (promoted from blockquotes by calloutOf() in app.js).
+   Each is a coloured dark island — a tinted-into-black fill + a left accent + a
+   mono label — so long prose gains rhythm. Body text stays pure-white (invariant);
+   only the fill/border/label carry the semantic hue. The left accent is the
+   canonical admonition idiom (GitHub/Obsidian/docs), not a decorative side-tab. */
+.md-body .callout {
+  margin: 14px 0; padding: 10px 14px 10px 15px; border-radius: 8px;
+  border-left: 3px solid var(--co, var(--accent));
+  background: color-mix(in srgb, var(--co, var(--accent)) 8%, #000);
+}
+.md-body .callout-label {
+  display: flex; align-items: center; gap: 7px; margin: 0 0 4px;
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--co, var(--accent));
+}
+.md-body .callout-icon { font-size: 12px; line-height: 1; }
+.md-body .callout-body { color: var(--od-text); }
+.md-body .callout-body p { margin: 4px 0; }
+.md-body .callout-body p:first-child { margin-top: 0; }
+.md-body .callout-body p:last-child { margin-bottom: 0; }
+.md-body .callout-note      { --co: var(--accent); }
+.md-body .callout-tip       { --co: var(--good); }
+.md-body .callout-warning   { --co: var(--warn); }
+.md-body .callout-important { --co: var(--accent-2); }
+.md-body .callout-insight   { --co: var(--accent-2); }
+.md-body .callout-warstory  { --co: var(--bad); }
+.md-body .callout-example   { --co: var(--md-h3); }
+
+/* reading-time chip at the top of the content ("~7 min read · 11 sections") */
+.md-body .reading-meta {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 16px; padding-bottom: 12px;
+  border-bottom: 1px solid var(--od-line);
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em;
+  color: var(--od-muted); text-transform: uppercase;
+}
+.md-body .reading-meta .rm-dot { opacity: 0.5; }
 .md-body code {
   background: var(--md-code-bg); border: 1px solid var(--md-code-brd); border-radius: 4px;
   padding: 1px 5px; font-size: 12.5px; font-family: var(--mono); color: var(--md-code-fg);
