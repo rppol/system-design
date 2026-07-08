@@ -38,43 +38,81 @@ A ship's hull is divided into watertight compartments (bulkheads) — if one com
 
 ## 5. Architecture Diagrams
 
+**Bulkhead Pattern — Thread Pool Isolation**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    OS([Order Service]) --> TPA{"Thread Pool A<br/>size=10"}
+    OS --> TPB{"Thread Pool B<br/>size=10"}
+    OS --> TPC{"Thread Pool C<br/>size=5"}
+
+    TPA -->|"exhausted, fails fast"| PAY([Payment Service])
+    TPB -->|"still available"| INV([Inventory Service])
+    TPC -->|"still available"| NOT([Notification Service])
+
+    class OS io
+    class TPA lossN
+    class TPB,TPC train
+    class PAY,INV,NOT frozen
 ```
-Bulkhead Pattern — Thread Pool Isolation
-==========================================
+*Order Service isolates each downstream dependency behind its own thread pool. When Payment Service turns slow, only Thread Pool A (size 10) exhausts and fails fast — Inventory and Notification traffic keeps flowing through their separate pools (size 10 and size 5). Without this isolation, one slow dependency would exhaust all threads and cause a full outage.*
 
-[Order Service]
-  |
-  +--- Thread Pool A (size=10) ---> [Payment Service]
-  |
-  +--- Thread Pool B (size=10) ---> [Inventory Service]
-  |
-  +--- Thread Pool C (size=5)  ---> [Notification Service]
+**Strangler Fig Migration**
 
-Payment service slow (10 threads all in use):
-  Thread Pool A exhausted -> requests to Payment fail fast
-  Thread Pool B still available -> Inventory calls unaffected
-  Thread Pool C still available -> Notification calls unaffected
-  (Without bulkhead: one slow dependency = ALL threads exhausted = full outage)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    subgraph P1["Phase 1 — Monolith Handles Everything"]
+        direction LR
+        C1([Client]) --> G1(Gateway) --> M1[Monolith]
+    end
 
-Strangler Fig Migration
-========================
+    subgraph P2["Phase 2 — Search Extracted"]
+        direction LR
+        C2([Client]) --> G2(Gateway)
+        G2 -->|"/search/*"| S2[Search Service]
+        G2 -->|"/*"| M2[Monolith]
+    end
 
-Phase 1: Monolith handles everything
-  [Client] --> [Gateway] --> [Monolith]
+    subgraph P3["Phase 3 — + Inventory Extracted"]
+        direction LR
+        C3([Client]) --> G3(Gateway)
+        G3 -->|"/search/*"| S3[Search Service]
+        G3 -->|"/inventory/*"| I3[Inventory Service]
+        G3 -->|"/*"| M3[Monolith]
+    end
 
-Phase 2: Extract Search service
-  [Client] --> [Gateway] --/search/--> [Search Service]
-                         --/*-------> [Monolith]
+    subgraph PN["Phase N — Monolith Retired"]
+        direction LR
+        CN([Client]) --> GN(Gateway)
+        GN --> SA[Service A]
+        GN --> SB[Service B]
+        GN --> SC[Service N]
+    end
 
-Phase 3: Extract Inventory service
-  [Client] --> [Gateway] --/search/---> [Search Service]
-                         --/inventory-> [Inventory Service]
-                         --/*---------> [Monolith]
+    P1 --> P2 --> P3 --> PN
 
-Phase N: Monolith retired
-  [Client] --> [Gateway] --> [Service A] / [Service B] / [Service N]
+    class C1,C2,C3,CN io
+    class G1,G2,G3,GN mathOp
+    class M1,M2,M3 frozen
+    class S2,S3,I3,SA,SB,SC train
 ```
+*Each phase peels one more bounded context off the monolith and adds a new gateway route for it — Search first (read-only, lowest risk), then Inventory — until Phase N routes 100% of traffic to independently deployable services and the monolith is retired.*
 
 ---
 
@@ -298,6 +336,27 @@ public ProducerFactory<String, String> producerFactory() {
 }
 ```
 
+One correlation ID must survive the trip from the entry filter through an outbound HTTP call to an async Kafka hop:
+
+```mermaid
+sequenceDiagram
+    participant CL as Client
+    participant SA as Order Service
+    participant SB as Payment Service
+    participant KQ as Kafka Topic
+    participant SC as Notify Service
+
+    CL->>SA: HTTP request<br/>(no correlation ID)
+    Note over SA: CorrelationIdFilter generates UUID,<br/>stores it in MDC
+    SA-->>CL: 200 OK<br/>X-Correlation-ID: uuid
+    SA->>SB: RestTemplate call<br/>X-Correlation-ID: uuid
+    Note over SB: Interceptor reads MDC,<br/>attaches same header
+    SB->>KQ: Publish event<br/>header X-Correlation-ID: uuid
+    KQ->>SC: Deliver event
+    Note over SC: Consumer extracts header,<br/>restores MDC before processing
+```
+*The filter generates the ID once and echoes it back to the client; the RestTemplate interceptor forwards it on the synchronous HTTP hop, and the Kafka header carries it across the asynchronous hop so the consumer can restore it into MDC before processing — the same ID traces the whole request across both sync and async boundaries.*
+
 ### Spring Cloud Config Server
 
 ```yaml
@@ -402,6 +461,32 @@ spec:
                 # but iptables rules may take a few seconds to propagate
                 # The preStop sleep ensures no in-flight requests are dropped
 ```
+
+SIGTERM and endpoint removal fire at the same instant, which is exactly why the preStop sleep is needed:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running
+
+    Running --> Terminating: SIGTERM + endpoint<br/>removal fire together
+
+    state Terminating {
+        [*] --> DrainingLB
+        DrainingLB --> ReadyToStop: preStop sleeps 5s<br/>while iptables propagates
+    }
+
+    Terminating --> ShuttingDown: preStop hook completes
+
+    state ShuttingDown {
+        [*] --> RejectingNew
+        RejectingNew --> FlushingInFlight: Tomcat stops<br/>accepting connections
+        FlushingInFlight --> FlushingKafka: in-flight requests<br/>drain, up to 30s
+    }
+
+    ShuttingDown --> Terminated: Kafka flush + close,<br/>within 60s grace period
+    Terminated --> [*]
+```
+*Kubernetes sends SIGTERM and removes the pod from Service endpoints in parallel, so the preStop sleep is what buys time for iptables to finish propagating before the process is signaled. Only after preStop completes does Spring's graceful shutdown reject new connections, drain in-flight requests, and flush the Kafka producer — all inside the 60s `terminationGracePeriodSeconds` budget.*
 
 ---
 

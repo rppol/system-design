@@ -61,25 +61,57 @@ A "fault" is one component deviating from spec; a "failure" is the whole system 
 Reliability is about *tolerating faults so they don't become failures*. This vocabulary is
 introduced here and made precise in Chapter 1.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    flt(["Fault<br/>one component deviates"]) --> tol{"Does the system<br/>tolerate it?"}
+    tol -->|"yes"| ok(["No failure<br/>service keeps working"])
+    tol -->|"no"| bad(["Failure<br/>whole system stops"])
+
+    class flt req
+    class tol mathOp
+    class ok train
+    class bad lossN
+```
+
+Caption: reliability engineering lives entirely in the branch on the right — you cannot
+prevent faults, so the discipline is maximizing how often "tolerate it?" resolves to yes.
+Netflix's Chaos Monkey embodies this: it injects faults on purpose to prove they stay on
+the green path instead of sliding into the red one.
+
 ## P.3 The Map of the Book (three parts)
 
 Kleppmann lays out the three-part structure in the preface; internalizing it tells you what
 question each chapter is answering.
 
-```
-PART I  — FOUNDATIONS (one machine)
-   The fundamental ideas that apply whether you run on a single node or a cluster:
-   data models, storage engines, and encoding. No distribution yet.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-PART II — DISTRIBUTED DATA (many machines)
-   What happens when data is spread or replicated across machines for scalability,
-   fault tolerance, or low latency. This is where the hard problems live: replication,
-   partitioning, transactions, unreliable networks/clocks, consistency & consensus.
+    p1("Part I — Foundations (one machine)<br/>data models · storage engines · encoding") --> p2("Part II — Distributed Data (many machines)<br/>replication · partitioning · transactions · consensus")
+    p2 --> p3("Part III — Derived Data (combining systems)<br/>batch and stream processing · integration")
 
-PART III — DERIVED DATA (combining systems)
-   Systems that derive one dataset from another: batch and stream processing, and how
-   to integrate many storage systems into a coherent, correct application.
+    class p1 base
+    class p2 lossN
+    class p3 train
 ```
+
+Caption: Part II is colored as the critical/hot path on purpose — the text above calls it
+"where the hard problems live," and the interview Q&A below confirms Chapters 7-9 are where
+study time is best spent.
 
 **Systems of record vs derived data** — a distinction introduced here and central to
 Part III: a *system of record* holds the authoritative, canonical version of data (written
@@ -87,6 +119,22 @@ once, the source of truth). *Derived data* is the result of transforming or comb
 from a system of record — caches, denormalized values, indexes, materialized views. Derived
 data is redundant by definition: you could rebuild it from the source. That redundancy is
 what makes read performance good and is the unifying idea behind Part III.
+
+**Difficulty is not evenly spread** — the three parts form a curve, not a ramp, and Part II
+is the spike:
+
+```mermaid
+xychart-beta
+    title "Relative difficulty by part (illustrative, for interview prep)"
+    x-axis ["Part I - Foundations", "Part II - Distributed Data", "Part III - Derived Data"]
+    y-axis "Relative difficulty (1-10)" 0 --> 10
+    bar [4, 9, 6]
+```
+
+Caption: illustrative, not the book's own numbers — but the shape matches the text: Part II
+(replication, partitioning, unreliable networks/clocks, consensus) is the hard core, while
+Part III is conceptually unifying yet still easier than Part II's peak. Weight interview
+prep time accordingly.
 
 ## P.4 Who the Book Is For & What It Is Not
 
@@ -104,17 +152,27 @@ The single most useful mental model from the front matter is the data-system-as-
 your "application" is really a façade over many specialized stores, and you (the app code)
 are responsible for the consistency between them.
 
-```
-            ┌──────────────────────────────────────────────┐
-  client →  │              YOUR APPLICATION CODE            │   ← you own the glue & the
-            │  (the "data system" the user actually sees)   │     guarantees BETWEEN stores
-            └───┬───────┬──────────┬───────────┬────────────┘
-                │       │          │           │
-            ┌───▼──┐ ┌──▼───┐ ┌────▼────┐ ┌────▼─────┐
-            │  DB  │ │Cache │ │ Search  │ │  Queue   │
-            │(SoR) │ │(deriv)│ │ (deriv) │ │ (stream) │
-            └──────┘ └──────┘ └─────────┘ └──────────┘
-   SoR = system of record (authoritative)   deriv = derived data (rebuildable)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["client"]) --> app("Your Application Code<br/>owns the glue and<br/>cross-store guarantees")
+    app --> db("DB<br/>system of record")
+    app --> cache("Cache<br/>derived, rebuildable")
+    app --> search("Search Index<br/>derived, rebuildable")
+    app --> queue("Queue<br/>stream")
+
+    class client io
+    class app mathOp
+    class db base
+    class cache,search train
+    class queue req
 ```
 
 Caption: the preface's core picture. The DB is the system of record; cache and search index

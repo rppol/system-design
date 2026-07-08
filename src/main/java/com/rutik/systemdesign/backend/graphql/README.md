@@ -54,6 +54,33 @@ GraphQL defines a strongly-typed schema as the contract between client and serve
 | Mutation | Modify data | Sequential (one at a time per spec) |
 | Subscription | Real-time updates | WebSocket or SSE-based |
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph QP["Query: parallel"]
+        R1([Root]) --> FA["resolve field A"]
+        R1 --> FB["resolve field B"]
+        R1 --> FC["resolve field C"]
+    end
+
+    subgraph MS["Mutation: sequential"]
+        R2([Root]) --> G1["createOrder"] --> G2["sendConfirmation"]
+    end
+
+    class R1,R2 io
+    class FA,FB,FC train
+    class G1,G2 req
+```
+
+Per the GraphQL spec, query root fields may resolve in parallel, but mutation root fields execute strictly one after another — the reason `createOrder` is guaranteed to finish before `sendConfirmation` starts.
+
 ### 4.3 Schema Composition Approaches
 
 | Approach | Description | Use Case |
@@ -68,106 +95,87 @@ GraphQL defines a strongly-typed schema as the contract between client and serve
 
 ### GraphQL Request Lifecycle
 
-```
-Client sends:
-POST /graphql
-{
-  "query": "query GetUser($id: ID!) {
-    user(id: $id) {
-      name
-      email
-      orders(last: 5) {
-        id
-        total
-        status
-      }
-    }
-  }",
-  "variables": { "id": "123" }
-}
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as GraphQL Server
+    participant UR as UserResolver
+    participant OR as OrderResolver
 
-Server execution:
-1. Parse: build AST from query string
-2. Validate: check AST against schema (field exists? types match?)
-3. Execute:
-   a. Resolve Query.user(id: "123") → calls UserResolver.user()
-      → fetches User{id:123, name:"Alice", email:"alice@example.com"}
-   b. Resolve User.orders(last: 5) → calls OrderResolver.orders()
-      → fetches orders for user 123
-   c. For each Order, resolve id, total, status (field accessors, no DB calls)
-4. Collect results into response shape:
-{
-  "data": {
-    "user": {
-      "name": "Alice",
-      "email": "alice@example.com",
-      "orders": [
-        { "id": "1", "total": 99.99, "status": "DELIVERED" },
-        ...
-      ]
-    }
-  }
-}
+    C->>S: POST /graphql<br/>query GetUser(id: "123")
+    S->>S: 1. Parse: build AST from query string
+    S->>S: 2. Validate: check AST against schema
+    S->>UR: 3a. resolve Query.user(id: "123")
+    UR-->>S: User{id:123, name:"Alice", email:"alice@example.com"}
+    S->>OR: 3b. resolve User.orders(last: 5)
+    OR-->>S: orders for user 123
+    Note over S: 3c. resolve id/total/status per order<br/>(field accessors, no DB calls)
+    S-->>C: 4. JSON response {data: {user: {...}}}
 ```
+
+The server treats one query as a four-stage pipeline — parse to an AST, validate against the schema, execute field resolvers (each independently callable), then collect results into a response tree that mirrors the query shape.
 
 ### N+1 Problem and DataLoader Solution
 
-```
-Query: list 10 users with their departments
-{
-  users {
-    id
-    name
-    department {
-      name
-    }
-  }
-}
+Query: list 10 users with their departments (`{ users { id name department { name } } }`).
 
-WITHOUT DataLoader:
-  1. SELECT * FROM users LIMIT 10           → 10 users
-  2. SELECT * FROM departments WHERE id=1   → user[0]'s dept
-  3. SELECT * FROM departments WHERE id=2   → user[1]'s dept
-  4. SELECT * FROM departments WHERE id=3   → user[2]'s dept
-  ...
-  11. SELECT * FROM departments WHERE id=10  → user[9]'s dept
-  Total: 11 queries (1 + N where N=10)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-WITH DataLoader:
-  1. SELECT * FROM users LIMIT 10              → 10 users
-     DataLoader collects dept IDs: [1,2,3,...,10]
-  2. SELECT * FROM departments WHERE id IN (1,2,3,...,10)  → all depts at once
-  Total: 2 queries (batched)
+    subgraph noDL["Without DataLoader<br/>11 total queries"]
+        U1(["SELECT users<br/>LIMIT 10"]) --> D1["SELECT dept<br/>WHERE id=1"]
+        U1 --> D2["SELECT dept<br/>WHERE id=2"]
+        U1 --> D3["SELECT dept<br/>WHERE id=3"]
+        U1 --> D4["... 7 more<br/>one-by-one queries"]
+    end
+
+    subgraph withDL["With DataLoader<br/>2 total queries"]
+        U2(["SELECT users<br/>LIMIT 10"]) --> COL{"DataLoader collects<br/>10 dept IDs"}
+        COL --> D5["SELECT dept<br/>WHERE id IN (1..10)"]
+    end
+
+    class U1,U2 io
+    class D1,D2,D3,D4 lossN
+    class COL mathOp
+    class D5 train
 ```
+
+Without batching, resolving each user's department independently fans out into 10 extra one-by-one queries (11 total); DataLoader collects every pending department ID and fetches them in a single `WHERE id IN (...)` query (2 total).
 
 ### Apollo Federation Architecture
 
-```
-Client
-  |
-  v
-Apollo Gateway (or Router)
-  |
-  +------ User Service (/graphql)
-  |         type User @key(fields: "id") {
-  |           id: ID!
-  |           name: String!
-  |         }
-  |
-  +------ Order Service (/graphql)
-  |         extend type User @key(fields: "id") {
-  |           orders: [Order]
-  |         }
-  |         type Order { ... }
-  |
-  +------ Product Service (/graphql)
-            extend type Order @key(fields: "id") {
-              items: [Product]
-            }
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Gateway composes schemas, routes fields to owning services,
-joins results using @key references.
+    C([Client]) --> GW["Apollo Gateway<br/>routes and composes"]
+    GW --> US["User Service<br/>owns User.id, name"]
+    GW --> OS["Order Service<br/>extends User: orders"]
+    GW --> PS["Product Service<br/>extends Order: items"]
+    US --> J(("Join via<br/>key refs"))
+    OS --> J
+    PS --> J
+    J --> R([Response to client])
+
+    class C,R io
+    class GW,J mathOp
+    class US,OS,PS frozen
 ```
+
+The gateway composes the three services' schemas, routes each field to the service that owns it, and joins the partial results back together using each type's `@key` reference.
 
 ---
 
@@ -290,6 +298,32 @@ public class UserResolver implements GraphQLResolver<User> {
 
 ### 6.3 Query Complexity and Depth Limiting
 
+Every incoming query is checked against two independent gates before execution — either one tripping rejects the query outright:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q([Incoming query]) --> P{"depth over 10?"}
+    P -->|"yes"| REJ1["Reject:<br/>DoS protection"]
+    P -->|"no"| C{"complexity score<br/>over 100?"}
+    C -->|"yes"| REJ2["Reject:<br/>DoS protection"]
+    C -->|"no"| EXEC([Execute query])
+
+    class Q io
+    class P,C mathOp
+    class REJ1,REJ2 lossN
+    class EXEC train
+```
+
+`MaxQueryDepthInstrumentation` and `MaxQueryComplexityInstrumentation` must both be configured — a query can be shallow but expensive (wide fan-out) or deep but cheap, so either limit alone leaves a DoS gap.
+
 ```java
 // Prevent DoS via deeply nested or expensive queries
 @Configuration
@@ -330,33 +364,27 @@ public class GraphQLSecurityConfig {
 
 ### 6.4 Persisted Queries
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C: Build time: SHA-256 hash<br/>of query string = a1b2c3d4...
+    C->>S: hash only (sha256Hash=a1b2c3d4)
+    S-->>C: 404 PersistedQueryNotFound (miss)
+    C->>S: full query + hash (first use)
+    S-->>C: result (stores hash to query mapping)
+    Note over C,S: Subsequent requests
+    C->>S: hash only (sha256Hash=a1b2c3d4)
+    S-->>C: result (cache hit, executes stored query)
 ```
-Client flow with persisted queries:
-1. During build: compute SHA-256 of all query strings
-   hash("query GetUser($id: ID!) { user(id: $id) { name } }")
-   = "a1b2c3d4..."
 
-2. Runtime request (first use):
-   { "extensions": { "persistedQuery": {
-       "version": 1, "sha256Hash": "a1b2c3d4..."
-   }}}
-   Server: miss, responds with 404/PersistedQueryNotFound
-
-3. Client retries with full query:
-   { "query": "...", "extensions": { "persistedQuery": {
-       "version": 1, "sha256Hash": "a1b2c3d4..."
-   }}}
-   Server: stores hash→query mapping, returns result
-
-4. Subsequent requests:
-   { "extensions": { "persistedQuery": { "sha256Hash": "a1b2c3d4..." }}}
-   Server: cache hit, executes stored query, returns result
+The client sends only a hash at runtime; on a miss the server asks for the full query once, then remembers it under that hash for every later request.
 
 Benefits:
 - GET requests (cacheable by CDN) for queries with persisted hashes
 - Reduced request payload size
 - Security: reject arbitrary query strings (only allow registered hashes)
-```
 
 ---
 

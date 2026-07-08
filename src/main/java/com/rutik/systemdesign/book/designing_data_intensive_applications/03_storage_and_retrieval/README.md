@@ -58,18 +58,48 @@ newest segment, then older ones. A background process runs **compaction + mergin
 **Log-Structured Merge-tree (LSM-tree)** — the basis of LevelDB, RocksDB, Cassandra, HBase,
 Lucene.
 
-```
-LSM-TREE WRITE/READ PATH
+**LSM-tree write/read path:**
 
-  write ──▶ [ WAL append ]  +  [ memtable (in-RAM sorted tree) ]
-                                      │ exceeds ~MB threshold
-                                      ▼ flush (already sorted ⇒ sequential write)
-            disk:  [SSTable-3 newest] [SSTable-2] [SSTable-1 oldest]
-                          ▲ compaction merges & discards overwritten keys ▲
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  read  ──▶ memtable? ──no──▶ SSTable-3? ──no──▶ SSTable-2? ──no──▶ SSTable-1?
-            (a missing key checks EVERY level ⇒ slow; fixed by Bloom filters)
+    subgraph WP["Write path"]
+        direction LR
+        W([write]) --> WAL(WAL append)
+        W --> MT(memtable<br/>in-RAM sorted tree)
+        MT -->|"exceeds ~MB<br/>threshold"| FL(flush<br/>sequential write)
+        FL --> S3(SSTable-3<br/>newest)
+        S3 -.->|"compaction merges,<br/>discards overwritten"| S2(SSTable-2)
+        S2 -.->|compaction| S1(SSTable-1<br/>oldest)
+    end
+
+    subgraph RP["Read path"]
+        direction LR
+        R([read]) --> MQ{memtable?}
+        MQ -->|no| Q3{SSTable-3?}
+        Q3 -->|no| Q2{SSTable-2?}
+        Q2 -->|no| Q1{SSTable-1?}
+    end
+
+    class W,R io
+    class WAL train
+    class MT req
+    class FL mathOp
+    class S3,S2,S1 base
+    class MQ,Q3,Q2,Q1 lossN
 ```
+
+Writes fan out to the WAL for durability and the in-RAM memtable; once the memtable exceeds
+its threshold (a few MB) it flushes as a new sorted SSTable, and background compaction merges
+older segments. Reads check the memtable first, then each SSTable from newest to oldest — a
+missing key must check every level, which is exactly why Bloom filters exist.
 
 - **Crash recovery:** the memtable is volatile, so each write also appends to an unsorted
   **write-ahead log (WAL)** on disk; replay it after a crash.
@@ -128,6 +158,48 @@ The defining difference is **where the work goes**:
   a separate **heap file** (the indirection avoids duplicating data across multiple secondary
   indexes). A **covering index** stores *some* columns in the index so common queries are
   answered from the index alone, without touching the heap.
+
+**Clustered vs non-clustered vs covering index — where the extra hop happens:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph CL["Clustered index"]
+        direction LR
+        Q1([query]) --> CI(index holds<br/>the row itself)
+        CI --> R1([row])
+    end
+
+    subgraph NC["Non-clustered + heap"]
+        direction LR
+        Q2([query]) --> SI(secondary index<br/>holds a reference)
+        SI -.->|"extra hop"| HEAP(heap file)
+        HEAP --> R2([row])
+    end
+
+    subgraph CV["Covering index"]
+        direction LR
+        Q3([query]) --> COV(index holds<br/>needed columns)
+        COV --> R3([row])
+    end
+
+    class Q1,Q2,Q3,R1,R2,R3 io
+    class CI,COV train
+    class SI mathOp
+    class HEAP lossN
+```
+
+A clustered index stores the row itself, so a lookup is one hop; a non-clustered (secondary)
+index stores only a reference, adding a second hop into the heap file to fetch the row; a
+covering index answers the query from the index's own columns, skipping the heap entirely.
+
 - **Multi-column / concatenated indexes:** combine fields (e.g. `(lastname, firstname)`) for
   multi-field queries. For geospatial/multi-dimensional data, specialized structures like
   **R-trees** (and space-filling-curve tricks) handle "within this lat/long box."
@@ -164,6 +236,35 @@ fact table is in the middle with dimensions radiating out. A **snowflake schema*
 normalizes dimensions into sub-dimensions (more normalized, more joins, less common). Fact
 tables are enormous (trillions of rows, petabytes), and a typical query touches only a few of
 their many columns.
+
+**Star schema fan-out (and the snowflake extension):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    FACT(Fact table<br/>one row per event) --> PRODUCT(Product)
+    FACT --> CUSTOMER(Customer)
+    FACT --> STORE(Store)
+    FACT --> DATE(Date)
+    PRODUCT -.->|"snowflake:<br/>further normalize"| BRAND(Brand)
+    PRODUCT -.->|snowflake| CATEGORY(Category)
+
+    class FACT base
+    class PRODUCT,CUSTOMER,STORE,DATE frozen
+    class BRAND,CATEGORY mathOp
+```
+
+A star schema is literally shaped like its name: the fact table sits at the center with
+dimension tables (product, customer, store, date) radiating outward, one join away. A
+snowflake schema takes it further, normalizing a dimension like product into sub-dimensions
+(brand, category) — more normalized and more joins, which is why it's less common in practice.
 
 ## 3.3 Column-Oriented Storage
 
@@ -206,15 +307,38 @@ ROW-ORIENTED vs COLUMN-ORIENTED (an analytics query reads 3 of 100 columns)
   of every row, then discard 97                                   and each column compresses
 ```
 
-```
-WRITE AMPLIFICATION — WHERE EACH ENGINE PAYS
+**Write amplification — where each engine pays:**
 
-  B-TREE  (random, in-place):           LSM-TREE (sequential, then rewrite):
-    write ─▶ WAL  (write #1)              write ─▶ WAL + memtable (1 sequential write)
-          ─▶ page (write #2)                       ▼ flush as SSTable
-          ─▶ split? more pages                     ▼ compaction rewrites data again
-    ⇒ random I/O, lower write tput        ⇒ sequential I/O, higher write tput, but
-      predictable reads                     compaction competes with reads (tail spikes)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph BT["B-tree: random, in-place"]
+        direction LR
+        BW([write]) --> BWAL(WAL<br/>write #1)
+        BWAL --> BPG(page<br/>write #2)
+        BPG --> BSPLIT(split?<br/>more pages)
+        BSPLIT --> BOUT(random I/O,<br/>lower tput,<br/>predictable reads)
+    end
+
+    subgraph LT["LSM-tree: sequential, then rewrite"]
+        direction LR
+        LW([write]) --> LWAL(WAL + memtable<br/>1 sequential write)
+        LWAL --> LFLUSH(flush as<br/>SSTable)
+        LFLUSH --> LCOMP(compaction<br/>rewrites data)
+        LCOMP --> LOUT(sequential I/O,<br/>higher tput,<br/>compaction tail spikes)
+    end
+
+    class BW,LW io
+    class BWAL,LWAL train
+    class BPG,BSPLIT,LFLUSH,LCOMP lossN
+    class BOUT,LOUT base
 ```
 
 Caption: column orientation wins analytics by reading only needed columns and compressing

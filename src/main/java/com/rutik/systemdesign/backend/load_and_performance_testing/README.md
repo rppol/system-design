@@ -39,40 +39,56 @@ Key insight: performance problems are almost always caused by a small number of 
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    k6("k6 engine") --> vus(["Virtual Users<br/>VUs"])
+    k6 --> scen["Scenarios<br/>arrival patterns"]
+    k6 --> thr{"Thresholds<br/>pass / fail"}
+    k6 --> chk["Checks<br/>per-request asserts"]
+    k6 --> met["Metrics<br/>duration · failed ·<br/>vus · iterations"]
+
+    class k6 mathOp
+    class vus io
+    class scen,chk req
+    class thr lossN
+    class met base
 ```
-k6 Test Execution Model
-========================
 
-k6 engine
-  |--- Virtual Users (VUs): simulate concurrent users
-  |--- Scenarios: define arrival patterns
-  |--- Thresholds: pass/fail criteria
-  |--- Checks: per-request assertions (counted, not fail-fast)
-  |--- Metrics: http_req_duration, http_req_failed, vus, iterations
-  |
-  [VU 1] ---> HTTP request ---> [Service Under Test]
-  [VU 2] ---> HTTP request --->   |
-  [VU N] ---> HTTP request --->   +---> [Database]
-                                       [Cache]
+*k6 separates who arrives (VUs) and how (Scenarios) from what passes: Checks count per-request assertions without failing fast, while Thresholds are the actual pass/fail gate. Both read from the same Metrics stream — http_req_duration, http_req_failed, vus, iterations.*
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Performance Test Architecture
-================================
+    gen(["k6 / Gatling<br/>VUs drive load"]) --> lb{"Load Balancer"}
+    lb --> i1["Instance 1"]
+    lb --> i2["Instance 2"]
+    i1 --> pg["PostgreSQL"]
+    i1 --> rc["Redis"]
+    i2 --> pg
+    i2 --> rc
 
-[k6 / Gatling] --> [Load Balancer]
-                       |
-              +--------+--------+
-              |                 |
-        [Instance 1]      [Instance 2]
-              |                 |
-         [PostgreSQL]       [Redis]
-
-Monitor during test:
-  - API: p50/p95/p99/p999, error rate, throughput (RPS)
-  - JVM: GC pause time, heap usage, thread count
-  - DB: active connections, slow query log, lock waits
-  - System: CPU%, memory, network I/O, disk I/O
+    class gen req
+    class lb mathOp
+    class i1,i2 train
+    class pg,rc base
 ```
+
+*The load generator's VUs drive traffic through the load balancer to both instances, which share a single PostgreSQL and Redis. Monitor four layers together during the run: API (p50/p95/p99/p999, error rate, RPS), JVM (GC pause, heap, thread count), DB (connections, slow query log, lock waits), and System (CPU%, memory, network/disk I/O).*
 
 ---
 
@@ -219,18 +235,17 @@ class OrderSimulation extends Simulation {
 
 ### Percentile Analysis
 
+```mermaid
+xychart-beta
+    title "Response Time Distribution — 100K Requests"
+    x-axis [p50, p75, p90, p95, p99, p999, avg]
+    y-axis "Latency (ms)" 0 --> 2200
+    bar [45, 78, 120, 180, 450, 2100, 62]
 ```
-Response time distribution for 100K requests:
 
-p50  =  45ms  (half of requests faster than this)
-p75  =  78ms
-p90  = 120ms
-p95  = 180ms  (SLO target: p95 < 200ms -- PASSING)
-p99  = 450ms  (SLO target: p99 < 500ms -- PASSING)
-p999 = 2100ms (1 in 1000 users waits > 2 seconds)
+*Latency climbs non-linearly toward the tail: p50-p90 stay under 120ms while p99 (450ms) and especially p999 (2100ms) expose the 1-in-100 and 1-in-1000 worst cases that the 62ms average hides entirely — both p95 and p99 still clear their 200ms / 500ms SLOs.*
 
-Average = 62ms (misleading: looks great, hides p999 issue)
-
+```
 Rule: NEVER alert or SLO on averages.
       A p999 of 2100ms means 100 users/minute at 100K RPS experience > 2 second latency.
 
@@ -266,6 +281,32 @@ ORDER BY mean_exec_time DESC LIMIT 20;
 -Xlog:gc*:file=/tmp/gc.log:time,uptime:filecount=5,filesize=20m
 # Look for: long GC pauses (> 200ms), frequent full GCs, allocation rate > 500MB/s
 ```
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["p99 latency<br/>climbs under load"]) --> c1{"Flame graph:<br/>wide hot frames?"}
+    c1 -->|"yes"| cpu["CPU-bound<br/>hot code path"]
+    c1 -->|"no"| c2{"Slow query log /<br/>pg_stat_statements hot?"}
+    c2 -->|"yes"| db["DB-bound<br/>missing index / seq scan"]
+    c2 -->|"no"| c3{"HikariCP pending<br/>connections above zero?"}
+    c3 -->|"yes"| pool["Pool exhaustion<br/>too few connections"]
+    c3 -->|"no"| c4{"GC pause over 200ms<br/>or frequent full GCs?"}
+    c4 -->|"yes"| gc["GC-bound<br/>allocation pressure"]
+
+    class start io
+    class c1,c2,c3,c4 mathOp
+    class cpu,db,pool,gc lossN
+```
+
+*Each "no" pushes the search to the next signal — flame graph, then slow-query log, then HikariCP pool metrics, then GC log — the same order as the four checks above; the first "yes" is usually the real bottleneck.*
 
 ---
 
@@ -379,5 +420,15 @@ Run the breakpoint test to find the maximum sustainable RPS (where error rate fi
 4. The promotions query was executed once per checkout request but was never profiled in unit tests
 
 **Fix**: Added composite index `(user_id, active, created_at)`. Re-ran load test: p99 dropped to 95ms. Breakpoint test: service now handles 2200 RPS before degradation.
+
+```mermaid
+xychart-beta
+    title "Checkout p99 Latency Before/After Index Fix"
+    x-axis [Baseline, "With promo bug", "After index fix"]
+    y-axis "p99 latency (ms)" 0 --> 3000
+    bar [120, 2800, 95]
+```
+
+*One missing index turned a 120ms p99 into 2800ms at the same 500 RPS — a 23x collapse — the composite index brought it back to 95ms and raised breakpoint capacity to 2200 RPS.*
 
 **Lesson**: One missing index on a new query path collapsed p99 by 23x. Performance test caught it before production launch. The fix took 30 minutes; production impact would have been a complete checkout outage during peak.

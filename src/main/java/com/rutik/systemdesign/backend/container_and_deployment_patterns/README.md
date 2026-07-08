@@ -40,49 +40,69 @@ A deployment without a strategy is like replacing airplane engines mid-flight wi
 
 ## 5. Architecture Diagrams
 
+**Docker Multi-Stage Build**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph ST1["Stage 1: Builder (JDK)"]
+        jdk(["FROM ...21-jdk"]) --> pomCache["COPY pom.xml<br/>+ go-offline<br/>cached layer"]
+        pomCache --> srcBuild["COPY src<br/>mvn package<br/>rebuilds on change"]
+        srcBuild --> extract["layertools<br/>extract"]
+    end
+
+    subgraph ST2["Stage 2: Runtime (JRE only)"]
+        jre(["FROM ...21-jre"]) --> stableLayers["COPY deps + loader<br/>layers, rarely change"]
+        stableLayers --> appLayer["COPY application<br/>layer, smallest,<br/>changes most"]
+        appLayer --> entry(["ENTRYPOINT<br/>JarLauncher"])
+    end
+
+    extract -.-> jre
+    entry --> result(["~180MB image<br/>vs ~800MB w/ JDK"])
+
+    class jdk,jre base
+    class pomCache,stableLayers frozen
+    class srcBuild,appLayer train
+    class extract mathOp
+    class entry,result io
 ```
-Docker Multi-Stage Build
-=========================
+*The builder stage compiles with the full JDK toolchain; the runtime stage copies only compiled layers into a JRE-only image, ordered from least-changing (dependencies) to most-changing (application code) to maximize Docker layer-cache reuse — this ordering is what takes the final image from ~800MB down to ~180MB.*
 
-Stage 1: Builder
-  FROM eclipse-temurin:21-jdk AS builder
-  COPY pom.xml .
-  RUN mvn dependency:go-offline     <-- cache this layer (rarely changes)
-  COPY src .
-  RUN mvn package -DskipTests       <-- rerun only when src changes
-  RUN java -Djarmode=layertools -jar target/*.jar extract
+**Canary Deployment (Istio)**
 
-Stage 2: Runtime (only the JRE, not the JDK)
-  FROM eclipse-temurin:21-jre AS runtime
-  COPY --from=builder /app/layers/dependencies/ ./
-  COPY --from=builder /app/layers/snapshot-dependencies/ ./
-  COPY --from=builder /app/layers/spring-boot-loader/ ./
-  COPY --from=builder /app/layers/application/ ./     <-- smallest layer, changes most
-  ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Result: ~180MB image vs ~800MB if JDK included
+    client(["Client Traffic<br/>100%"]) --> svc["Kubernetes Service"]
+    svc -->|"90%"| v1["Deployment v1<br/>(stable) Pod-1..3"]
+    svc -->|"10%"| v2["Deployment v2<br/>(canary) Pod-4"]
+    v2 --> mon{"Monitor v2:<br/>error rate, p99"}
+    mon -->|"healthy"| ramp["Ramp 50% to 100%<br/>retire v1"]
+    mon -.->|"errors"| rollback["Rollback to 0%<br/>no new pods needed"]
 
-
-Canary Deployment (Istio)
-===========================
-
-VirtualService weight routing:
-
-[Client Traffic 100%]
-        |
-        v
-[Kubernetes Service]
-        |
-        +--- 90% ---> [Deployment v1 (stable)]
-        |               Pod-1, Pod-2, Pod-3
-        |
-        +--- 10% ---> [Deployment v2 (canary)]
-                        Pod-4
-
-Monitor v2: error rate, p99 latency
-If healthy: 50% → 100% → retire v1
-If errors:  0% → rollback complete (no new pods needed)
+    class client io
+    class svc mathOp
+    class v1 train
+    class v2 req
+    class mon mathOp
+    class ramp train
+    class rollback lossN
 ```
+*Istio's VirtualService splits traffic by weight (90/10 here); monitoring the canary's error rate and p99 latency decides whether to ramp toward 100% and retire v1, or roll back to 0% — with no new pods required either way.*
 
 ---
 
@@ -385,6 +405,24 @@ data:
 | Blue-Green | Zero | Instant (switch selector) | 2x | Medium |
 | Canary | Zero | Instant (set weight to 0%) | ~1.2x | High |
 
+**Visualizing the tradeoff space** (resource cost vs. rollback speed):
+
+```mermaid
+quadrantChart
+    title Deployment Strategy - Cost vs Rollback Speed
+    x-axis Low Resource Cost --> High Resource Cost
+    y-axis Slow Rollback --> Instant Rollback
+    quadrant-1 Costly but instant
+    quadrant-2 Cheap and instant
+    quadrant-3 Cheap but slow
+    quadrant-4 Costly and slow
+    Recreate: [0.1, 0.85]
+    Rolling Update: [0.3, 0.15]
+    Blue-Green: [0.9, 0.85]
+    Canary: [0.32, 0.8]
+```
+*Rolling Update and Canary carry the same ~1.2x resource cost, but only Canary gets instant rollback (set weight to 0%) — Rolling Update must roll forward again, costing minutes. Blue-Green's instant rollback costs a full 2x in standing resources, the premium for keeping two complete environments live.*
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -396,6 +434,35 @@ Use **Blue-Green** when: you need instant rollback capability, the deployment in
 Use **Canary** when: deploying high-risk changes, validating new features on a small percentage of users before full exposure, or running A/B tests. Requires Istio or Argo Rollouts for percentage-based traffic splitting.
 
 Use **Recreate** only when: old and new versions cannot run simultaneously (incompatible DB schema, singleton-requiring stateful process).
+
+**Decision path** (the guidance above, as a flow):
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["New deployment"]) --> q1{"Old + new versions<br/>cannot coexist?"}
+    q1 -->|"yes"| recreate["Recreate<br/>brief downtime"]
+    q1 -->|"no"| q2{"Need instant rollback or<br/>atomic DB cutover?"}
+    q2 -->|"yes"| bluegreen["Blue-Green<br/>2x resources"]
+    q2 -->|"no"| q3{"High-risk change or<br/>gradual validation?"}
+    q3 -->|"yes"| canary["Canary<br/>progressive traffic shift"]
+    q3 -->|"no"| rolling["Rolling Update<br/>default, ~1.2x cost"]
+
+    class start io
+    class q1,q2,q3 mathOp
+    class recreate lossN
+    class bluegreen frozen
+    class canary req
+    class rolling train
+```
+*Rolling Update sits at the end of the chain — you land there only after ruling out an incompatible-version migration (Recreate), a need for instant atomic rollback (Blue-Green), and a high-risk change that needs gradual exposure (Canary).*
 
 Do NOT set CPU limits on JVM applications unless absolutely necessary — CFS (Completely Fair Scheduler) CPU throttling causes latency spikes and p99 degradation even when physical CPU is available. Set CPU requests (for scheduling) but omit CPU limits.
 

@@ -72,80 +72,82 @@ Every byte transmitted across the internet passes through all layers twice — d
 
 ### Packet Encapsulation Lifecycle
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SA(["Sender Application<br/>HTTP request bytes"]) --> S7("L7 Application<br/>add HTTP headers")
+    S7 --> S4("L4 Transport<br/>+TCP hdr: port, seq, ack")
+    S4 --> S3("L3 Network<br/>+IP hdr: src/dst IP, TTL")
+    S3 --> S2("L2 Data Link<br/>+Eth hdr/trailer: MAC, FCS")
+    S2 --> S1(["L1 Physical<br/>bits on wire"])
+    S1 -->|"traverses routers<br/>and switches"| R1(["Receiver L1 Physical<br/>bits to frame"])
+    R1 --> R2("L2 Data Link<br/>strip Eth, verify FCS")
+    R2 --> R3("L3 Network<br/>strip IP, route, check TTL")
+    R3 --> R4("L4 Transport<br/>strip TCP, reassemble, verify seq")
+    R4 --> R7("L7 Application<br/>deliver to app")
+    R7 --> RA(["Receiver Application<br/>HTTP response delivered"])
+
+    class SA,RA io
+    class S7,R7 req
+    class S4,R4 train
+    class S3,R3 mathOp
+    class S2,R2 frozen
+    class S1,R1 base
 ```
-Sender Application
-        |
-        | [HTTP Request bytes]
-        v
-   Application Layer (L7)
-        |  add HTTP headers
-        v
-   Transport Layer (L4)
-        |  [TCP Header | HTTP data]  ← src/dst port, seq no, ack, flags
-        v
-   Network Layer (L3)
-        |  [IP Header | TCP Header | HTTP data]  ← src/dst IP, TTL, protocol
-        v
-   Data Link Layer (L2)
-        |  [Eth Header | IP Hdr | TCP Hdr | HTTP data | Eth Trailer]  ← MAC, FCS
-        v
-   Physical Layer (L1)
-        |  101101001010... bits on wire
-        |
-        v  (traverses routers, switches)
-        |
-Receiver Physical Layer (L1)
-        |  bits → frame
-        v
-   Data Link Layer (L2)
-        |  strip Ethernet header/trailer, verify FCS
-        v
-   Network Layer (L3)
-        |  strip IP header, route/forward, check TTL
-        v
-   Transport Layer (L4)
-        |  strip TCP header, reassemble segments, verify seq numbers
-        v
-   Application Layer (L7)
-        |  HTTP response delivered to application
-        v
-Receiver Application
-```
+
+Each layer adds a header on the way down the sender's stack (encapsulation) and strips the matching header in the same order climbing back up the receiver's stack (decapsulation) — the nesting-dolls model from Section 2 made concrete.
 
 ### ARP Resolution
 
+```mermaid
+sequenceDiagram
+    participant A as Host A<br/>10.0.0.1
+    participant B as Host B<br/>10.0.0.2
+
+    Note over A: ARP cache miss<br/>no entry for 10.0.0.2
+    A->>B: ARP Request (broadcast FF:FF:FF:FF:FF:FF)<br/>Who has 10.0.0.2? Tell 10.0.0.1
+    Note over B: sees its own IP matches
+    B-->>A: ARP Reply (unicast)<br/>10.0.0.2 is at AA:BB:CC:DD:EE:FF
+    Note over A: caches the MAC,<br/>sends IP packet using B's MAC
+    Note over A,B: ARP cache entry: 10.0.0.2 to AA:BB:CC:DD:EE:FF<br/>TTL about 20 min by default
 ```
-Host A (10.0.0.1) wants to reach Host B (10.0.0.2) on same subnet
 
-1. A checks ARP cache — no entry for 10.0.0.2
-2. A broadcasts ARP Request:
-   "Who has 10.0.0.2? Tell 10.0.0.1"
-   Ethernet dst: FF:FF:FF:FF:FF:FF (broadcast)
-
-3. B receives broadcast, sees its IP matches
-4. B sends ARP Reply (unicast) to A:
-   "10.0.0.2 is at AA:BB:CC:DD:EE:FF"
-
-5. A caches the MAC, sends IP packet using B's MAC
-
-ARP Cache (on Host A):
-  10.0.0.2  ->  AA:BB:CC:DD:EE:FF  (TTL ~20 min by default)
-```
+Host A broadcasts the ARP request to the whole subnet, but only Host B — the owner of 10.0.0.2 — replies with a unicast ARP reply; Host A then caches the mapping for about 20 minutes before repeating the broadcast.
 
 ### NAT Traversal
 
-```
-Internal Network             NAT Gateway           Internet
-10.0.0.5:49152 ------> (translate) ------> 203.0.113.1:8000
-10.0.0.6:49153 ------> (translate) ------> 203.0.113.1:8001
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-NAT Table:
-  External Port  |  Internal IP:Port
-  8000           |  10.0.0.5:49152
-  8001           |  10.0.0.6:49153
+    H1(["Internal<br/>10.0.0.5:49152"]) -->|"outbound"| NAT("NAT Gateway<br/>translate")
+    H2(["Internal<br/>10.0.0.6:49153"]) -->|"outbound"| NAT
+    NAT --> E1(["Internet<br/>203.0.113.1:8000"])
+    NAT --> E2(["Internet<br/>203.0.113.1:8001"])
+    NAT -->|"records mapping"| NT("NAT Table<br/>8000 to 10.0.0.5:49152<br/>8001 to 10.0.0.6:49153")
+    E1 -.->|"return traffic,<br/>dst 8000"| NT
+    NT -.->|"lookup, forward"| H1
 
-Return traffic: dst:8000 -> lookup -> forward to 10.0.0.5:49152
+    class H1,H2 io
+    class NAT mathOp
+    class NT base
+    class E1,E2 frozen
 ```
+
+The NAT gateway rewrites each internal source IP:port to a shared public IP with a unique external port and remembers the mapping in its translation table, so return traffic addressed to port 8000 is looked up and forwarded back to 10.0.0.5:49152.
 
 ---
 
@@ -157,18 +159,60 @@ Maximum Transmission Unit (MTU) is the largest frame the data link layer can car
 
 If an IP packet exceeds the MTU of a link, IP fragments it:
 
-```
-Original packet: 3000 bytes
-MTU: 1500 bytes
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Fragment 1: bytes 0-1479, offset=0, MF=1 (more fragments)
-Fragment 2: bytes 1480-2959, offset=185 (1480/8), MF=1
-Fragment 3: bytes 2960-2999, offset=370, MF=0 (last fragment)
+    P(["Original packet<br/>3000 bytes"]) --> SPLIT{"MTU 1500:<br/>fragment"}
+    SPLIT --> F1("Fragment 1<br/>bytes 0-1479<br/>offset 0, MF=1")
+    SPLIT --> F2("Fragment 2<br/>bytes 1480-2959<br/>offset 185, MF=1")
+    SPLIT --> F3("Fragment 3<br/>bytes 2960-2999<br/>offset 370, MF=0")
+    F1 --> R(("Reassembled<br/>at destination"))
+    F2 --> R
+    F3 --> R
 
-Reassembly happens at the DESTINATION, not at intermediate routers.
+    class P io
+    class SPLIT mathOp
+    class F1,F2,F3 req
+    class R train
 ```
+
+Reassembly happens only at the destination host, never at intermediate routers — each fragment carries the offset shown above so the receiver can reorder the 1480/1480/40-byte pieces back into the original 3000-byte packet.
 
 Path MTU Discovery (PMTUD): TCP uses the DF (Don't Fragment) bit. If a router cannot forward and must fragment, it sends ICMP "Fragmentation Needed" back. The sender reduces its packet size. Blocked ICMP causes "black hole" connections.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S(["Sender<br/>1500B packet, DF=1"]) --> RTR{"Fits outbound<br/>link MTU?"}
+    RTR -->|"yes"| DST(["Delivered"])
+    RTR -->|"no, e.g. 1400B link"| IC("ICMP Type 3 Code 4<br/>Fragmentation Needed")
+    IC --> FW{"Firewall allows<br/>ICMP through?"}
+    FW -.->|"yes, reaches sender"| SHRINK("Sender lowers MSS,<br/>retransmits")
+    SHRINK --> DST
+    FW -.->|"no, blocked"| HOLE("Black hole:<br/>silent hang")
+
+    class S io
+    class RTR,FW mathOp
+    class IC req
+    class DST,SHRINK train
+    class HOLE lossN
+```
+
+PMTUD depends on the ICMP Fragmentation-Needed message reaching the sender; block it at the firewall and the sender never learns to shrink its segments, producing the exact silent-hang failure diagnosed in the Case Study (Section 14) below.
 
 ### 6.2 ICMP
 
@@ -182,21 +226,29 @@ Traceroute exploits TTL: sends packets with TTL=1, then TTL=2, etc. Each router 
 
 ### 6.3 DNS Resolution Chain
 
-```
-1. Browser checks local DNS cache
-2. OS checks /etc/hosts
-3. Query sent to recursive resolver (e.g., 8.8.8.8)
-4. Recursive resolver checks its cache
-5. If miss: queries root nameservers (.)
-6. Root refers to TLD nameserver (.com)
-7. TLD refers to authoritative nameserver (example.com NS)
-8. Authoritative returns A/AAAA record
-9. Recursive resolver caches with TTL, returns to client
+```mermaid
+sequenceDiagram
+    participant C as Browser / OS
+    participant R as Recursive Resolver<br/>8.8.8.8
+    participant Root as Root NS
+    participant TLD as TLD NS (.com)
+    participant Auth as Authoritative NS<br/>example.com
 
-Typical latency: ~50-100ms uncached, <1ms cached
-DNS TTL: commonly 300s (5 min) to 86400s (24 hours)
-Low TTL required for fast failover; high TTL reduces resolver load
+    Note over C: 1. check local DNS cache<br/>2. check /etc/hosts
+    C->>R: 3. query example.com
+    Note over R: 4. check resolver cache — miss
+    R->>Root: 5. query root nameservers
+    Root-->>R: 6. refer to .com TLD
+    R->>TLD: query .com TLD nameserver
+    TLD-->>R: 7. refer to authoritative NS
+    R->>Auth: query example.com NS
+    Auth-->>R: 8. return A/AAAA record
+    R-->>C: 9. cache with TTL, return answer
+
+    Note over C,Auth: uncached about 50 to 100ms, cached under 1ms<br/>TTL commonly 300s (5 min) to 86400s (24h)
 ```
+
+Only a cache miss at the client or resolver escalates all the way to root and TLD nameservers; the recursive resolver caches the final answer for the record's TTL, which is why lowering TTL to 60-300s ahead of a migration is standard practice (see Best Practices below).
 
 ### 6.4 Subnetting
 
@@ -239,6 +291,23 @@ Last host: 192.168.10.254
 | Layer 7 LB | Slightly higher | High + smart routing | Medium |
 | Overlay network (VXLAN) | 5-10% overhead | High | High |
 | Direct routing | Lowest | Medium | Medium |
+
+```mermaid
+quadrantChart
+    title Complexity vs Latency Across Approaches
+    x-axis Low Complexity --> High Complexity
+    y-axis Low Latency --> High Latency
+    quadrant-1 Costly overhead
+    quadrant-2 Rarely worth it
+    quadrant-3 Sweet spot
+    quadrant-4 Smart but heavy
+    Layer 4 LB: [0.15, 0.25]
+    Layer 7 LB: [0.5, 0.4]
+    VXLAN overlay: [0.88, 0.6]
+    Direct routing: [0.55, 0.05]
+```
+
+Direct routing wins on latency but needs direct reachability between endpoints; Layer 4 load balancing is the low-complexity, low-latency default; VXLAN's 5-10% encapsulation overhead pushes it into the high-complexity, high-latency corner.
 
 | Protocol | Stateful | Reliable | Ordered | Use Case |
 |----------|----------|----------|---------|----------|

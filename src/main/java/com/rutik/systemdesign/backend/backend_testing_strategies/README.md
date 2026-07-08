@@ -31,6 +31,24 @@ Unit tests are like testing each LEGO brick in isolation — cheap and fast. Int
 - **Mock**: pre-programmed with expectations; verified at end (`verify(emailService).sendEmail(any())`)
 - **Fake**: working implementation with shortcuts (in-memory DB replacing real PostgreSQL)
 
+```mermaid
+quadrantChart
+    title Test Double Taxonomy
+    x-axis No real logic --> Real working logic
+    y-axis Checks state --> Verifies behavior
+    quadrant-1 Spy
+    quadrant-2 Mock
+    quadrant-3 Dummy and Stub
+    quadrant-4 Fake
+    Dummy: [0.04, 0.08]
+    Stub: [0.22, 0.2]
+    Mock: [0.24, 0.85]
+    Spy: [0.8, 0.78]
+    Fake: [0.82, 0.18]
+```
+
+Stub and Mock both script canned behavior and look alike until the vertical axis splits them — a Stub is never verified, a Mock's expectations are checked at the end. Spy and Fake both run real logic but split the same way — a Spy is verified by call tracking, a Fake is verified by querying its resulting state.
+
 **Testing layers in Spring**:
 - `@SpringBootTest`: full application context; slow; for integration/E2E tests
 - `@WebMvcTest`: only Spring MVC layer (controllers, filters, security); no service/repo beans
@@ -42,38 +60,53 @@ Unit tests are like testing each LEGO brick in isolation — cheap and fast. Int
 
 ## 5. Architecture Diagrams
 
+**Testing Pyramid**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    E2E("E2E Tests<br/>10% - critical flows only")
+    CONTRACT("Contract Tests<br/>5% - consumer-driven Pact")
+    INTEGRATION("Integration Tests<br/>20% - Testcontainers, real DB/queue")
+    UNIT("Unit Tests<br/>70% - JUnit 5 + Mockito")
+
+    E2E --> CONTRACT --> INTEGRATION --> UNIT
+
+    class E2E lossN
+    class CONTRACT frozen
+    class INTEGRATION train
+    class UNIT base
 ```
-Testing Pyramid
-================
-          /\
-         /E2E\          <-- 10% — slow, brittle, high confidence for critical flows
-        /------\
-       / Contract\      <-- 5%  — consumer-driven contract tests
-      /------------\
-     / Integration  \   <-- 20% — Testcontainers, real DB/queue
-    /----------------\
-   /   Unit Tests     \  <-- 70% — fast, isolated, JUnit 5 + Mockito
-  /____________________\
 
+The pyramid narrows from a broad base of fast unit tests (70%) to a thin peak of slow, brittle E2E tests (10%) — each layer up trades speed for confidence, which is why the suite should stay bottom-heavy.
 
-Consumer-Driven Contract Testing with Pact
-==========================================
+**Consumer-Driven Contract Testing with Pact**
 
-[Consumer Service]
-  |  1. writes consumer test
-  |     defines: expected request + expected response
-  |  2. Pact generates contract file (JSON)
-  |
-  v
-[Pact Broker] <-- stores contracts, tracks verification status
-  |
-  v
-[Provider Service]
-     3. provider test reads contract from broker
-     4. replays each interaction against running provider
-     5. verifies actual response matches expected response
-     6. publishes verification result to broker
+```mermaid
+sequenceDiagram
+    participant C as Consumer Service
+    participant B as Pact Broker
+    participant P as Provider Service
+
+    Note over C: 1. Write consumer test<br/>(expected request + response)
+    C->>C: 2. Generate contract file (JSON)
+    C->>B: Publish contract
+    Note over B: Stores contract,<br/>tracks verification status
+    P->>B: 3. Read contract from broker
+    B-->>P: Contract (JSON)
+    P->>P: 4. Replay each interaction<br/>against running provider
+    P->>P: 5. Verify actual response<br/>matches expected
+    P->>B: 6. Publish verification result
 ```
+
+The consumer and provider never call each other directly — the Pact Broker is the shared source of truth, so a provider change that breaks any consumer's contract fails in CI before it reaches a shared environment.
 
 ---
 

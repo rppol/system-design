@@ -86,78 +86,115 @@ Entire UDP header is 8 bytes vs TCP's 20+ bytes. Minimal overhead for small mess
 
 ### TCP vs QUIC Connection Setup
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: TCP + TLS 1.2 — 3 RTTs before data
+    C->>S: SYN
+    S-->>C: SYN+ACK
+    C->>S: ACK
+    Note over C,S: RTT 1 — TCP handshake
+    C->>S: ClientHello
+    S-->>C: ServerHello + Certificate + ServerDone
+    Note over C,S: RTT 2 — TLS handshake
+    C->>S: Finished
+    S-->>C: Finished
+    Note over C,S: RTT 3 — TLS key exchange
+    C->>S: Application Data
+    Note over C,S: First data arrives after 3 RTTs
+
+    Note over C,S: TCP + TLS 1.3 — 2 RTTs
+    C->>S: SYN
+    S-->>C: SYN+ACK
+    Note over C,S: RTT 1 — TCP handshake
+    C->>S: ACK + ClientHello
+    S-->>C: ServerHello + Finished
+    Note over C,S: RTT 2 — TLS 1.3 combined
+    C->>S: Application Data
+    Note over C,S: First data after 2 RTTs
+
+    Note over C,S: QUIC first connection — 1 RTT
+    C->>S: Initial + ClientHello
+    S-->>C: Initial + ServerHello
+    S-->>C: Handshake + Finished
+    Note over C,S: RTT 1 — QUIC + TLS 1.3 combined
+    C->>S: Handshake + Finished
+    C->>S: Application Data
+    Note over C,S: First data after 1 RTT
+
+    Note over C,S: QUIC resumed connection — 0-RTT
+    C->>S: Initial + 0-RTT Data
+    Note over C,S: 0 RTT — client sends data immediately
+    S-->>C: ServerHello + Finished
+    C->>S: Application Data
+    Note over C,S: Data in flight before handshake completes
 ```
-TCP + TLS 1.2 (3 RTTs before data):
-  Client                    Server
-    |------ SYN ----------->|  RTT 1: TCP handshake
-    |<----- SYN+ACK --------|
-    |------ ACK ----------->|
-    |------ ClientHello --->|  RTT 2: TLS handshake
-    |<----- ServerHello ----|
-    |       + Certificate   |
-    |<----- ServerDone -----|
-    |------ Finished ------>|  RTT 3: TLS key exchange
-    |<----- Finished --------|
-    |====== Data ===========>|  First data arrives after 3 RTTs
 
-TCP + TLS 1.3 (2 RTTs):
-    |------ SYN ----------->|  RTT 1: TCP handshake
-    |<----- SYN+ACK --------|
-    |------ ACK, ClientHello|  RTT 2: TLS 1.3 combined
-    |<-- ServerHello+Fin----|
-    |------ Application Data|  First data after 2 RTTs
-
-QUIC (1 RTT, 0 RTT on resume):
-  First connection (1 RTT):
-    |--- Initial + ClientHello -->|  RTT 1: QUIC + TLS 1.3 combined
-    |<-- Initial + ServerHello ---|
-    |<-- Handshake + Finished ----|
-    |--- Handshake + Finished --->|
-    |=== Application Data ========|  First data after 1 RTT
-
-  Resumed connection (0 RTT):
-    |--- Initial + 0-RTT Data --->|  0 RTT: client sends data immediately
-    |<-- ServerHello + Finished --|
-    |=== Application Data ========|  Data in flight before handshake complete
-```
+Every extra round trip before data flows is pure setup tax: TCP with TLS 1.2 spends 3 RTTs before the first application byte, TCP with TLS 1.3 folds the handshake down to 2, and QUIC collapses transport and crypto into a single combined handshake — 1 RTT on a fresh connection, 0 RTT when resuming with a cached session ticket.
 
 ### QUIC Head-of-Line Blocking vs TCP
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TCP["HTTP/2 over TCP — Stream 1 segment lost"]
+        direction LR
+        T1a(["S1-A"]) --> T1x{"segment<br/>LOST"}
+        T2a(["S2-A"]) --> T2b("S2-B") --> T2c("S2-C")
+        T3a(["S3-A"]) --> T3b("S3-B") --> T3c("S3-C")
+        T1x -.-> Tapp((" app gets<br/>nothing "))
+        T2c -.-> Tapp
+        T3c -.-> Tapp
+    end
+
+    subgraph QUIC["HTTP/3 over QUIC — Stream 1 packet lost"]
+        direction LR
+        Q1a(["P1-A"]) --> Q1x{"packet<br/>LOST"}
+        Q1x -.-> Qretx("stream 1<br/>retransmits")
+        Q2a(["P2-A"]) --> Q2b("P2-B") --> Q2c("P2-C") --> Qd2(["delivered"])
+        Q3a(["P3-A"]) --> Q3b("P3-B") --> Q3c("P3-C") --> Qd3(["delivered"])
+    end
+
+    class T1a,T2a,T3a,Q1a,Q2a,Q3a io
+    class T2b,T2c,T3b,T3c frozen
+    class T1x,Q1x,Tapp lossN
+    class Qretx frozen
+    class Q2b,Q2c,Q3b,Q3c,Qd2,Qd3 train
 ```
-HTTP/2 over TCP — Stream 1 segment lost:
-  Stream 1: [S1-A][   LOST   ][S1-C]
-  Stream 2: [S2-A][S2-B][S2-C]
-  Stream 3: [S3-A][S3-B][S3-C]
 
-  TCP retransmits lost S1-B segment.
-  During retransmit, ALL streams stall — TCP delivers bytes in order.
-  Stream 2 and Stream 3 data sits in kernel buffer, not delivered to app.
-
-HTTP/3 over QUIC — Stream 1 packet lost:
-  Stream 1: [P1-A][   LOST   ][P1-C]   <- only Stream 1 stalls
-  Stream 2: [P2-A][P2-B][P2-C]         <- delivered immediately
-  Stream 3: [P3-A][P3-B][P3-C]         <- delivered immediately
-
-  QUIC retransmits in-stream. Other streams unaffected.
-```
+TCP's strict in-order delivery means one lost segment on Stream 1 freezes bytes already received for Streams 2 and 3 in the kernel buffer (purple), never reaching the app; QUIC's independent per-stream sequencing means only Stream 1 waits on retransmission while Streams 2 and 3 (green) are delivered immediately.
 
 ### QUIC Connection Migration
 
-```
-Client (mobile) moves from WiFi to LTE:
+```mermaid
+sequenceDiagram
+    participant C as Client (mobile)
+    participant S as Server
 
-TCP:
-  Old connection: IP=192.168.1.5:50000 <-> Server:443
-  After IP change: IP=10.0.0.5:50000   <- different IP
-  TCP: new 4-tuple = new connection. TLS must be re-established.
-  Result: connection dropped, full reconnect + TLS handshake needed.
+    Note over C,S: Connected over WiFi — 192.168.1.5:50000 to Server:443
+    Note over C: Client hands off WiFi to LTE<br/>new IP 10.0.0.5:50000
 
-QUIC:
-  Connection ID: 0xABCDEF1234567890 (not tied to IP:port)
-  After IP change: sends packet from new IP with same Connection ID
-  Server recognizes Connection ID, validates new path, migrates.
-  Result: sub-millisecond migration, no reconnect, no TLS re-handshake.
+    Note over C,S: TCP path
+    C->>S: Packet from new IP:port (new 4-tuple)
+    S-->>C: Unrecognized — connection dropped
+    Note over C,S: Full reconnect + TLS handshake required
+
+    Note over C,S: QUIC path
+    C->>S: Packet from new IP, same Connection ID 0xABCDEF1234567890
+    S-->>C: Connection ID recognized — path validated
+    Note over C,S: Sub-millisecond migration, no reconnect, no TLS re-handshake
 ```
+
+TCP identifies a connection by its 4-tuple, so a WiFi-to-LTE IP change looks like a brand-new connection and forces a full reconnect plus TLS re-handshake; QUIC identifies the connection by a 64-bit Connection ID that survives the IP change, so the server only needs to validate the new path.
 
 ---
 
@@ -205,6 +242,23 @@ DNS servers answer short queries with large responses. An attacker sends DNS que
 
 QUIC includes anti-amplification limits: until the server validates the client's address (3-way equivalent), the server sends at most 3x the bytes received. This prevents QUIC from being used as an amplification attack vector.
 
+```mermaid
+sequenceDiagram
+    participant A as Attacker
+    participant R as DNS Resolver
+    participant V as Victim
+
+    A->>R: DNS query, about 50 bytes<br/>spoofed source = Victim IP
+    Note over A,R: attacker's real address is never revealed
+    R-->>V: DNS response, up to 5 KB<br/>sent to the spoofed victim IP
+    Note over R,V: 10x to 100x amplification —<br/>the resolver becomes an unwitting cannon
+
+    Note over R: mitigation — Response Rate Limiting<br/>plus DNSSEC validation per source IP
+    Note over A,V: QUIC's anti-amplification rule — server replies with<br/>at most 3x bytes received until the client address is validated
+```
+
+The attacker never queries from its own address; a tiny spoofed request triggers a large reply aimed at the victim, amplifying traffic 10 to 100x and turning the resolver into the attack's cannon. QUIC closes this loophole for itself by capping server-to-client bytes at 3x what it has received until the client's address is validated.
+
 ---
 
 ## 7. Real-World Examples
@@ -246,6 +300,39 @@ QUIC includes anti-amplification limits: until the server validates the client's
 **Use QUIC/HTTP/3 when**: Building APIs for mobile clients (frequent IP changes benefit from connection migration), serving high-throughput endpoints with multiple parallel resources (avoids TCP HoL blocking), or when TLS 1.3 0-RTT session resumption is important for latency.
 
 **Do not use QUIC when**: Your network infrastructure does not allow UDP (some enterprise firewalls block UDP on port 443), or you need transparent load balancing that inspects TCP headers.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["choose a<br/>transport"]) --> lossTol{"tolerates<br/>packet loss?"}
+
+    lossTol -->|"no"| needsMux{"need HoL-free streams,<br/>0-RTT, or IP roaming?"}
+    lossTol -->|"yes"| fitsOne{"fits in one<br/>datagram?"}
+
+    needsMux -->|"no"| tcp(["TCP<br/>HTTP, databases"])
+    needsMux -->|"yes"| udpOk{"path allows<br/>UDP on 443?"}
+
+    udpOk -->|"yes"| quic(["QUIC<br/>HTTP/3, many streams"])
+    udpOk -->|"blocked"| fallback(["TCP<br/>HTTP/2 fallback"])
+
+    fitsOne -->|"yes"| udp(["UDP<br/>DNS, NTP"])
+    fitsOne -->|"no"| custom(["UDP + app-level<br/>selective reliability"])
+
+    class start io
+    class lossTol,needsMux,fitsOne,udpOk mathOp
+    class tcp,fallback frozen
+    class quic,custom train
+    class udp req
+```
+
+The two questions that actually decide the protocol are loss tolerance and whether the network path even permits UDP on port 443 — everything else in the four bullets above is a refinement of one of these two branches.
 
 ---
 
@@ -341,23 +428,33 @@ Game engines need to send high-frequency position updates (60–120 per second) 
 - TCP option rejected: TCP's reliability would buffer state updates behind retransmitted old state updates. A 100ms TCP retransmit would stall delivery of 6 state updates, causing visible jitter worse than 2% random loss.
 
 **Solution**: Custom reliability layer over UDP:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    dg(["UDP datagram<br/>4B seq + 4B ack + 1B flag"]) --> flag{"reliability<br/>flag?"}
+    flag -->|"0: state update"| noretx("no retransmit<br/>discard out-of-order")
+    flag -->|"1: critical event"| retx("retransmit until ack<br/>50ms timeout, 3 retries")
+    retx --> dedupe("dedupe by<br/>event ID")
+    noretx --> rate1(["60 updates/s"])
+    dedupe --> rate2(["99.997% delivered"])
+    noretx -.-> batch("batch ACK<br/>8 seq# per bitfield")
+    dedupe -.-> batch
+    batch --> ackrate(["ACK rate<br/>60/s to ~15/s"])
+
+    class dg io
+    class flag,batch mathOp
+    class noretx,rate1 train
+    class retx,dedupe,rate2 lossN
+    class ackrate base
 ```
-Every UDP datagram:
-  - 4-byte sequence number
-  - 4-byte ack number (acknowledges received datagrams)
-  - 1-byte reliability flag
 
-State updates (reliability=0):
-  - No retransmit
-  - Receiver discards out-of-order state
-
-Critical events (reliability=1):
-  - Sender retransmits until ack received (with 50ms timeout, 3 retries)
-  - Receiver deduplicates by event ID
-
-Optimization:
-  - Batch ACKs: one ACK covers 8 received sequence numbers (bitfield)
-  - Reduces ACK packet rate from 60/s to ~15/s per player
-```
+The reliability flag is the routing decision: state updates take the no-retransmit hot path (green) since a stale position is worthless, while critical events take the retry-until-ack path (red) since losing a damage or respawn event breaks game consistency; batching acks into one 8-slot bitfield then cuts the ack rate 4x (60/s to about 15/s) without touching either path's semantics.
 
 After deploying this hybrid approach: critical events delivered 99.997% of the time, state update loss of 2% remained unchanged but was acceptable, and player-perceived jitter was eliminated compared to TCP. This is the approach used by every major game engine (Valve's Source engine, Epic's NetDriver, Unity Netcode).

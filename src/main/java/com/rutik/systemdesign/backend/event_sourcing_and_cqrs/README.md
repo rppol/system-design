@@ -45,43 +45,64 @@ CQRS recognizes that reading data and writing data have different requirements. 
 
 ## 5. Architecture Diagrams
 
+**Event Sourcing — Write Path**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client([Client]) -->|"POST /orders"| cmdHandler(Order Command<br/>Handler)
+    cmdHandler --> loadAgg(Load aggregate<br/>replay events)
+    loadAgg --> validate{Validate<br/>invariants}
+    validate --> emit(Emit new events)
+    emit --> store(Event Store)
+    store --> v1(v1: OrderCreated)
+    v1 --> v2(v2: ItemAdded)
+    v2 --> v3(v3: OrderConfirmed)
+    v3 --> v4(v4: OrderShipped)
+
+    class client io
+    class cmdHandler req
+    class loadAgg,emit,validate mathOp
+    class store base
+    class v1,v2,v3,v4 frozen
 ```
-Event Sourcing — Write Path
-============================
 
-Client --- POST /orders ---> [Order Command Handler]
-                                  |
-                          Load aggregate (replay events)
-                                  |
-                          Validate invariants
-                                  |
-                          Emit new events
-                                  |
-                                  v
-                          [Event Store]
-                          orders-stream-123:
-                            v1: OrderCreated{userId, items}
-                            v2: ItemAdded{sku, quantity}
-                            v3: OrderConfirmed{confirmedAt}
-                            v4: OrderShipped{trackingNo}
+The command handler replays `orders-stream-123`'s existing events to rebuild the aggregate, validates invariants, then appends the next one — v1 through v4 are the immutable, strictly ordered stream for a single order.
 
+**CQRS — Read Path**
 
-CQRS — Read Path
-=================
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-[Event Store] --events--> [Projection Service]
-                                  |
-                        Event handlers update
-                        denormalized read models
-                                  |
-                    +-------------+-------------+
-                    |                           |
-             [order_read_model]         [order_search_index]
-             (PostgreSQL)               (Elasticsearch)
-                    |                           |
-            GET /orders/:id              GET /orders/search
-              (fast key lookup)           (full-text search)
+    store(Event Store) -.->|"events"| projSvc(Projection<br/>Service)
+    projSvc --> handlers(Event handlers update<br/>denormalized read models)
+    handlers --> readModel(order_read_model<br/>PostgreSQL)
+    handlers --> searchIndex(order_search_index<br/>Elasticsearch)
+    readModel --> getById([GET /orders/:id<br/>fast key lookup])
+    searchIndex --> getSearch([GET /orders/search<br/>full-text search])
+
+    class store base
+    class projSvc req
+    class handlers mathOp
+    class readModel,searchIndex base
+    class getById,getSearch io
 ```
+
+Projections consume the event stream asynchronously and fan out into denormalized, independently-optimized read models — one for key lookups, one for full-text search.
 
 ---
 
@@ -232,6 +253,33 @@ SELECT * FROM event_store
 WHERE aggregate_id = $1
 ORDER BY event_version ASC;
 ```
+
+**Optimistic Concurrency Check — Version Conflict and Retry**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    handler(Command handler) --> load(Load aggregate<br/>expected version N)
+    load --> emit(Emit event<br/>INSERT version N+1)
+    emit --> check{Unique index still<br/>free at N+1?}
+    check -->|"yes"| commit(Commit<br/>append succeeds)
+    check -->|"no: conflict"| conflict(Optimistic concurrency<br/>exception)
+    conflict -.->|"reload & retry"| load
+
+    class handler req
+    class load,emit,check mathOp
+    class commit train
+    class conflict lossN
+```
+
+The unique index on `(aggregate_id, event_version)` from the schema above is what makes this possible: two command handlers racing to append the same next version collide at the database level, and only one `INSERT` succeeds — the loser reloads the aggregate and retries.
 
 ### Snapshot Pattern
 

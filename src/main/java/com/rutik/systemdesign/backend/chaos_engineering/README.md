@@ -50,61 +50,75 @@ Key insight: systems fail in ways their designers never anticipated. Chaos engin
 - Continuous chaos: automated recurring experiments (Chaos Monkey kills random instances daily)
 - Exploratory: unplanned experiments to test a specific hypothesis after observing a near-miss
 
+```mermaid
+quadrantChart
+    title Chaos Practice — Frequency vs Blast Radius
+    x-axis Small blast radius --> Catastrophic blast radius
+    y-axis Infrequent --> Continuous
+    quadrant-1 Rare - mature orgs only
+    quadrant-2 Everyday steady-state chaos
+    quadrant-3 Ad hoc exploration
+    quadrant-4 Scheduled Game Day / DR
+    Continuous chaos - daily: [0.15, 0.9]
+    Exploratory: [0.3, 0.2]
+    Game Day: [0.55, 0.45]
+    Chaos Kong / AZ failure: [0.8, 0.6]
+    DR testing - DiRT: [0.92, 0.1]
+```
+
+*Continuous chaos and DR testing sit at opposite corners of the same plane — one trades blast radius for frequency, the other trades frequency for blast radius. Netflix's Chaos Kong (Section 7) is the rare practice mature enough to push toward both axes at once.*
+
 ---
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Define Steady State<br/>p99 under 200ms, error rate<br/>under 0.1%, orders/min over 1000"]) --> B("Form Hypothesis<br/>predict how a resilience<br/>mechanism will respond")
+    B --> C("Design Experiment<br/>fault + duration<br/>+ blast radius")
+    C --> D("Run Experiment<br/>monitor dashboards,<br/>kill switch ready")
+    D --> E("Observe Results<br/>steady state held?<br/>breaker behavior? side effects?")
+    E --> F(["Learn and Improve<br/>update runbook,<br/>fix weaknesses"])
+
+    class A io
+    class B mathOp
+    class C mathOp
+    class D lossN
+    class E req
+    class F train
 ```
-Chaos Engineering Experiment Lifecycle
-========================================
 
-Define Steady State
-  |  p99 < 200ms, error_rate < 0.1%, orders/min > 1000
-  v
-Form Hypothesis
-  |  "If the inventory service has 100ms added latency,
-  |   the checkout service circuit breaker will open and
-  |   return a graceful degraded response within 5 seconds"
-  v
-Design Experiment
-  |  Inject: tc netem delay 100ms on inventory-service pods
-  |  Duration: 5 minutes
-  |  Blast radius: 10% of inventory pods in one AZ
-  v
-Run Experiment (monitor continuously)
-  |  - Watch Grafana dashboards
-  |  - Ready to abort (kill switch)
-  v
-Observe Results
-  |  - Did steady state hold?
-  |  - Did circuit breaker open as expected?
-  |  - Were there unexpected side effects?
-  v
-Learn and Improve
-     - Update runbook
-     - Fix discovered weaknesses
-     - Adjust circuit breaker thresholds
+*Every chaos run traces this loop once: a measurable steady state (p99 under 200ms, error rate under 0.1%, orders/min over 1000) anchors the hypothesis, the experiment is scoped and injected, and the outcome — confirmed or rejected — feeds directly back into the runbook and the circuit breaker thresholds.*
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Blast Radius Expansion
-========================
+    S1(["Stage 1: Non-production<br/>staging, no real traffic"]) --> S2("Stage 2: Canary<br/>1 of 20 pods")
+    S2 --> S3("Stage 3: Small group<br/>1 AZ, 5% of instances")
+    S3 --> S4(["Stage 4: Full AZ<br/>full AZ failure sim"])
 
-Stage 1: Non-production
-  Staging environment, no real user traffic
-  Goal: basic validation of experiment tooling
-
-Stage 2: Production canary (1 pod)
-  1 of 20 pods receives fault
-  Goal: validate hypothesis with minimal exposure
-
-Stage 3: Production small group (5%)
-  1 AZ, 5% of instances
-  Goal: confirm behavior at small scale
-
-Stage 4: Production full (one AZ)
-  Full AZ failure simulation
-  Goal: validate multi-AZ failover
+    class S1 frozen
+    class S2 req
+    class S3 mathOp
+    class S4 lossN
 ```
+
+*Blast radius widens one deliberate step at a time — from a risk-free staging run to a full availability-zone failure — so confidence is earned before the next stage runs against real production traffic.*
 
 ---
 
@@ -450,3 +464,16 @@ Blameless postmortems where findings from chaos experiments are shared openly. T
 - Circuit breaker opened after 3 consecutive failures
 - Users received cached recommendations, product pages loaded normally
 - p99 remained at 280ms during the full 10-minute experiment
+
+```mermaid
+stateDiagram-v2
+    state "Half-Open" as HalfOpen
+    [*] --> Closed
+    Closed --> Open: 3 consecutive<br/>failures trip it
+    Open --> HalfOpen: wait/backoff<br/>window elapses
+    HalfOpen --> Closed: trial request<br/>succeeds
+    HalfOpen --> Open: trial request<br/>fails
+    Closed --> Closed: request succeeds
+```
+
+*The chaos re-run exercised exactly this machine: 3 consecutive failures tripped Closed to Open, the fallback held p99 at 280ms while Open, and a single successful trial request in Half-Open is what closes the loop again.*

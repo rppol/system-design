@@ -58,38 +58,39 @@ This module covers TCP deeply: the complete state machine, flow and congestion c
 
 ### 4.3 TCP State Machine
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> CLOSED
+    CLOSED --> SYN_SENT: active open<br/>send SYN
+    CLOSED --> LISTEN: passive open
+    LISTEN --> SYN_RECEIVED: SYN received<br/>send SYN+ACK
+    SYN_SENT --> ESTABLISHED: SYN+ACK received<br/>send ACK
+    SYN_RECEIVED --> ESTABLISHED: ACK received
+    ESTABLISHED --> FIN_WAIT_1: app close<br/>send FIN
+    ESTABLISHED --> CLOSE_WAIT: FIN received<br/>send ACK
+    FIN_WAIT_1 --> FIN_WAIT_2: ACK received<br/>of local FIN
+    CLOSE_WAIT --> LAST_ACK: app close<br/>send FIN
+    FIN_WAIT_2 --> TIME_WAIT: FIN received<br/>send ACK
+    LAST_ACK --> CLOSED: ACK received
+    TIME_WAIT --> CLOSED: 2×MSL timeout
+
+    class CLOSED io
+    class LISTEN req
+    class SYN_SENT,SYN_RECEIVED mathOp
+    class ESTABLISHED train
+    class FIN_WAIT_1,CLOSE_WAIT,LAST_ACK frozen
+    class TIME_WAIT lossN
 ```
-                   CLOSED
-                     |
-              [active open /  [passive open]
-               send SYN]         |
-                     |       LISTEN
-                     |           |
-                SYN_SENT    [SYN received /
-                     |       send SYN+ACK]
-              [SYN+ACK recv/   |
-               send ACK]   SYN_RECEIVED
-                     |           |
-                     +-----> ESTABLISHED <---+
-                     |                       |
-              [app close /           [app close /
-               send FIN]              send FIN]
-                     |                       |
-               FIN_WAIT_1           CLOSE_WAIT
-                     |                       |
-              [FIN+ACK recv]         [app close /
-                     |                send FIN]
-               FIN_WAIT_2                    |
-                     |                  LAST_ACK
-              [FIN recv /                    |
-               send ACK]           [ACK recv]
-                     |                       |
-               TIME_WAIT               CLOSED
-                     |
-           [2*MSL timeout]
-                     |
-                  CLOSED
-```
+
+The active opener (client) walks CLOSED → SYN_SENT → ESTABLISHED while the passive opener (server) walks CLOSED → LISTEN → SYN_RECEIVED → ESTABLISHED; on close, the active closer's path (FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT) forces the 2×MSL wait (60–240s on Linux) that drives the TIME_WAIT accumulation problem in Section 6.2, while the passive closer takes the shorter CLOSE_WAIT → LAST_ACK path straight to CLOSED.
 
 ---
 
@@ -97,38 +98,47 @@ This module covers TCP deeply: the complete state machine, flow and congestion c
 
 ### 3-Way Handshake
 
-```
-Client                              Server
-  |                                   |
-  |------ SYN (seq=x) --------------->|  Client sends SYN, enters SYN_SENT
-  |                                   |  Server enters SYN_RECEIVED
-  |<----- SYN+ACK (seq=y, ack=x+1) --|  Server reserves buffer, sends SYN+ACK
-  |                                   |
-  |------ ACK (ack=y+1) ------------->|  Client enters ESTABLISHED
-  |                                   |  Server enters ESTABLISHED
-  |                                   |
-  |===== Data Transfer Begins ========|
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
 
-SYN flood attack: attacker sends many SYNs without completing ACK
-Defense: SYN cookies (encode state in initial sequence number)
+    C->>S: SYN (seq=x)
+    Note over C: enters SYN_SENT
+    Note over S: enters SYN_RECEIVED
+    S-->>C: SYN+ACK (seq=y, ack=x+1)
+    Note over S: reserves buffer
+    C->>S: ACK (ack=y+1)
+    Note over C: enters ESTABLISHED
+    Note over S: enters ESTABLISHED
+    Note over C,S: Data transfer begins
+
+    Note over C,S: SYN flood: attacker sends many SYNs, never completes ACK<br/>Defense: SYN cookies encode state in the initial sequence number
 ```
+
+Three steps are required because both sides must independently confirm their initial sequence numbers before data flows; SYN cookies defend the handshake against floods by encoding connection state in the ISN instead of consuming a SYN-backlog entry (see Section 6.6).
 
 ### 4-Way Teardown (Active Close)
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: FIN (seq=m)
+    Note over C: enters FIN_WAIT_1
+    S-->>C: ACK (ack=m+1)
+    Note over S: enters CLOSE_WAIT<br/>(can still send data)
+    Note over C: FIN_WAIT_2:<br/>waiting for FIN
+    S->>C: FIN (seq=n)
+    Note over S: enters LAST_ACK
+    C-->>S: ACK (ack=n+1)
+    Note over C: enters TIME_WAIT<br/>(2×MSL = 60-240s)
+    Note over S: enters CLOSED
+    Note over C: after 2×MSL wait,<br/>enters CLOSED
 ```
-Client (initiates close)           Server
-  |                                   |
-  |------ FIN (seq=m) --------------->|  Client enters FIN_WAIT_1
-  |<------ ACK (ack=m+1) ------------|  Server enters CLOSE_WAIT
-  |                                   |  (server can still send data)
-  |  [FIN_WAIT_2: waiting for FIN]   |
-  |<------ FIN (seq=n) --------------|  Server finishes, enters LAST_ACK
-  |------ ACK (ack=n+1) ------------>|  Client enters TIME_WAIT (2*MSL)
-  |                                   |  Server enters CLOSED
-  |  [Wait 2*MSL = 60-240s]          |
-  |                                   |
-  CLOSED
-```
+
+The active closer (here, the client) pays the 2×MSL TIME_WAIT cost (60–240s on Linux) while the passive closer (server) reaches CLOSED immediately after its final ACK — the asymmetry behind TIME_WAIT accumulation on servers that initiate their own outbound closes (Section 6.2).
 
 ### Sliding Window Flow Control
 
@@ -145,25 +155,34 @@ Window scale option (WSopt): allows rwnd up to 1GB (beyond 64KB default)
 
 ### Slow Start & Congestion Avoidance
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Slow Start<br/>(exponential: 1,2,4,8 MSS...)" as SlowStart
+    state "Congestion Avoidance<br/>(linear: about 1 MSS/RTT)" as CongestionAvoidance
+    state "Fast Recovery" as FastRecovery
+
+    [*] --> SlowStart
+    SlowStart --> SlowStart: cwnd doubles per RTT
+    SlowStart --> CongestionAvoidance: cwnd reaches<br/>ssthresh (e.g. 64 KB)
+    CongestionAvoidance --> CongestionAvoidance: cwnd += MSS·(MSS/cwnd)<br/>per ACK
+    CongestionAvoidance --> FastRecovery: triple dup ACK<br/>ssthresh = cwnd × 0.7
+    FastRecovery --> CongestionAvoidance: cwnd = ssthresh
+    CongestionAvoidance --> SlowStart: timeout<br/>ssthresh = cwnd / 2, cwnd = 1 MSS
+
+    class SlowStart mathOp
+    class CongestionAvoidance train
+    class FastRecovery lossN
 ```
-cwnd growth during slow start (exponential):
-  Round 1: cwnd = 1 MSS,  send 1 segment
-  Round 2: cwnd = 2 MSS,  send 2 segments
-  Round 3: cwnd = 4 MSS,  send 4 segments
-  Round 4: cwnd = 8 MSS,  send 8 segments
-  [reach ssthresh (e.g., 64 KB)]
 
-Congestion avoidance (linear, after ssthresh):
-  cwnd += MSS * (MSS / cwnd) per ACK  → ~1 MSS per RTT
-
-On loss (triple duplicate ACK — CUBIC):
-  ssthresh = cwnd * 0.7
-  cwnd reduced to ssthresh (fast recovery, not slow start)
-
-On timeout:
-  ssthresh = cwnd / 2
-  cwnd = 1 MSS (full slow start restart)
-```
+Slow start doubles cwnd every RTT (1, 2, 4, 8 MSS…) until ssthresh (e.g. 64 KB), then congestion avoidance grows linearly by about 1 MSS per RTT; a triple-duplicate ACK triggers fast recovery (ssthresh = cwnd × 0.7) while a full timeout resets to slow start (ssthresh = cwnd / 2, cwnd = 1 MSS).
 
 ---
 
@@ -208,22 +227,31 @@ echo 6  > /proc/sys/net/ipv4/tcp_keepalive_probes
 
 Nagle's algorithm (RFC 896) batches small TCP writes: it holds outgoing data until either a full MSS can be sent or all outstanding unacknowledged data is ACKed. This reduces packet count on congested networks but adds up to 40ms (one delayed ACK timeout) of latency for request-response protocols.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    data([Data to send]) --> chk{"Unacked data pending<br/>AND size under MSS?"}
+    chk -->|yes| buf[Buffer write<br/>wait for ACK]
+    chk -->|no| send([Send immediately])
+    buf -.->|"delayed ACK<br/>up to 40ms"| wait((ACK arrives))
+    wait --> send
+    nodelay[TCP_NODELAY<br/>disables Nagle] -.->|bypass| chk
+
+    class data,send io
+    class chk mathOp
+    class buf lossN
+    class wait frozen
+    class nodelay train
 ```
-Nagle's algorithm:
-  if (data to send):
-    if (outstanding unacked data AND data < MSS):
-      buffer it  // wait for ACK
-    else:
-      send immediately
 
-Delayed ACK:
-  receiver waits up to 40ms before sending ACK, hoping to piggyback
-  on outgoing data
-
-Nagle + Delayed ACK = 40ms latency for small sends
-
-Fix: TCP_NODELAY socket option disables Nagle's algorithm
-```
+Nagle's algorithm buffers a small write until the prior write is ACKed; paired with a receiver's 40ms delayed-ACK timer, this is the classic request-response latency bug — TCP_NODELAY bypasses the check entirely (see Section 14's case study for a production example of this exact interaction).
 
 ```java
 // In Java, disable Nagle's for low-latency connections
@@ -244,20 +272,33 @@ Redis clients, gRPC, and JDBC drivers all set TCP_NODELAY by default. MySQL Conn
 
 A half-open connection occurs when one end of a TCP connection has closed but the other does not know. Common cause: network partition, process crash without graceful close, idle connection through a stateful firewall that expired the state.
 
-```
-Client crashes without sending FIN
-Server still has ESTABLISHED socket
-Server sends data → gets RST (client process is gone)
-Server removes connection
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-BUT: if no data is sent, the server holds the ESTABLISHED socket forever
-→ Connection leak
+    crash([Client crashes<br/>no FIN sent]) --> stale[Server socket<br/>stays ESTABLISHED]
+    stale --> chk{Does server<br/>send data?}
+    chk -->|yes| rst[Gets RST<br/>connection removed]
+    chk -->|no| leak[Connection leak<br/>socket held forever]
+    leak -.->|prevention| ka[TCP Keep-Alive<br/>probes]
+    leak -.->|prevention| hb[App-level<br/>heartbeat]
+    leak -.->|prevention| to[Short read<br/>timeout]
 
-Prevention:
-  1. TCP Keep-Alive: kernel sends probe packets on idle connections
-  2. Application-level heartbeat (preferred — more reliable)
-  3. Short read timeout in the application
+    class crash frozen
+    class stale mathOp
+    class chk mathOp
+    class rst train
+    class leak lossN
+    class ka,hb,to base
 ```
+
+A half-open connection leaks memory silently when no data is ever sent on the stale socket; TCP Keep-Alive, application heartbeats, and short read timeouts are the three standard mitigations, with application heartbeats preferred as the most reliable.
 
 ### 6.5 SO_REUSEPORT
 
@@ -272,6 +313,33 @@ Nginx and newer Java runtimes use `SO_REUSEPORT` for their acceptor threads.
 The TCP handshake creates two queues:
 - **SYN backlog** (incomplete queue): half-open connections (SYN received, SYN+ACK sent, waiting for ACK). Default: `net.ipv4.tcp_max_syn_backlog` = 128–256.
 - **Accept queue** (complete queue): completed 3-way handshakes waiting for `accept()` call. Default: `net.core.somaxconn` = 128.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    syn([Client SYN<br/>arrives]) --> synq{"SYN backlog full?<br/>(tcp_max_syn_backlog)"}
+    synq -->|no| halfopen[Half-open:<br/>SYN+ACK sent]
+    synq -->|yes| dropsyn[SYN dropped<br/>client retransmits]
+    halfopen --> finalack([Client ACK<br/>arrives])
+    finalack --> acceptq{"Accept queue full?<br/>(somaxconn)"}
+    acceptq -->|no| ready[Completed conn<br/>queued for accept]
+    acceptq -->|yes| dropack[Final ACK dropped<br/>or RST sent]
+    ready --> app([Application<br/>calls accept])
+
+    class syn,finalack,app io
+    class synq,acceptq mathOp
+    class halfopen,ready train
+    class dropsyn,dropack lossN
+```
+
+A SYN traverses two queues before reaching the application: the incomplete SYN backlog (half-open connections) and the complete accept queue (finished handshakes awaiting `accept()`); either one filling under burst load silently drops packets instead of erroring, which is why "Accept queue overflow under burst load" (Section 10) is so easy to misdiagnose.
 
 When queues fill, new SYNs are dropped (causing client retransmit). For high-traffic servers:
 
@@ -309,6 +377,22 @@ echo 65535 > /proc/sys/net/ipv4/tcp_max_syn_backlog
 | CUBIC | Good | Medium | Poor | Low |
 | BBR | Variable | Excellent | Good | Medium |
 | Reno | Good | Poor | Poor | Low |
+
+```mermaid
+quadrantChart
+    title Congestion algorithm fit: high-BDP vs lossy-link performance
+    x-axis Low BDP-link throughput --> High BDP-link throughput
+    y-axis Poor lossy-link robustness --> Good lossy-link robustness
+    quadrant-1 Satellite / long-haul links
+    quadrant-2 Bandwidth-limited niches
+    quadrant-3 Reno: legacy / simple nets
+    quadrant-4 CUBIC: datacenter / low-loss
+    CUBIC: [0.55, 0.25]
+    BBR: [0.85, 0.7]
+    Reno: [0.2, 0.2]
+```
+
+BBR's bandwidth-and-RTT model — rather than reacting to loss alone — lets it dominate the high-BDP, lossy quadrant where Google reported 2–25% throughput gains after deploying it (Section 7), while CUBIC remains the safer default for low-loss, high-BDP datacenter networks.
 
 ---
 

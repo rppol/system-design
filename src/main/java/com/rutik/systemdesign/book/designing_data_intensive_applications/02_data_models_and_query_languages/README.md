@@ -18,6 +18,31 @@ recurring theme: there is no universal best model; the right one depends on the
 - Declarative query languages (SQL, Cypher, SPARQL) beat imperative because the engine — not
   you — chooses the execution strategy and can parallelize.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["what shape is <br/> your data?"]) --> Q1{"one-to-many tree, <br/> read whole at once?"}
+    Q1 -->|"yes"| DOC(["Document"])
+    Q1 -->|"no"| Q2{"many-to-many and <br/> highly connected?"}
+    Q2 -->|"yes — deep traversal"| GRAPH(["Graph"])
+    Q2 -->|"no — joins suffice"| REL(["Relational"])
+
+    class START io
+    class Q1,Q2 mathOp
+    class DOC,REL,GRAPH train
+```
+
+Caption: the chapter's TL;DR redrawn as a decision path — tree-shaped, read-mostly-whole data
+goes to documents; everything else hinges on whether many-to-many connectivity needs
+variable-depth traversal (graph) or a bounded number of joins suffices (relational).
+
 ## The Big Question
 
 > "How should I shape my data — and does the shape of the *relationships* in my domain
@@ -68,6 +93,20 @@ with many-to-many. The **network model (CODASYL)** used access paths (manual poi
 out plainly and letting a **query optimizer** decide access paths automatically. Document
 databases are, in a sense, the hierarchical model reborn — same strengths, same weakness with
 many-to-many.
+
+```mermaid
+timeline
+    title Data model lineage: the 1970s debate echoes into the 2010s
+    1970s : IMS hierarchical model (trees) : CODASYL network model (pointer chasing)
+    1970 : Codd publishes the relational model
+    1980s : Relational model becomes dominant
+    2010s : NoSQL movement : Document databases echo the hierarchical model
+```
+
+Caption: the hierarchical and document models rhyme four decades apart — trees, same
+many-to-many weakness both times — while CODASYL's network model lost outright and left no
+modern heir; the relational model, unbroken since Codd's 1970 paper, is what both eras had to
+route around.
 
 ### Relational vs document today
 
@@ -152,32 +191,65 @@ underlies systems like Datomic and Cascalog.
 
 ## Visual Intuition
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TREE["one-to-many (a tree) <br/> DOCUMENT wins"]
+        direction TB
+        RESUME(["resume"]) --> JOB1("job 1")
+        RESUME --> JOB2("job 2")
+        RESUME --> EDU("education")
+        EDU --> SCHOOL1("school 1")
+        EDU --> SCHOOL2("school 2")
+    end
+
+    subgraph WEB["many-to-one / many-to-many (a web) <br/> RELATIONAL / GRAPH win"]
+        direction TB
+        ALICE("Alice") -->|"works_at"| ACME(("AcmeCo"))
+        ALICE -->|"follows"| BOB("Bob")
+        ALICE -->|"follows"| CAROL("Carol")
+        CAROL -->|"works_at"| ACME
+    end
+
+    class RESUME,EDU base
+    class JOB1,JOB2,SCHOOL1,SCHOOL2 train
+    class ALICE,BOB,CAROL io
+    class ACME base
 ```
-WHICH MODEL FITS WHICH RELATIONSHIP SHAPE?
 
-  one-to-many (a tree)            many-to-one / many-to-many (a web)
-                                          ┌──────┐
-      résumé                              │ Alice│───works_at──▶┌────────┐
-      ├─ job1                             └──┬───┘              │ AcmeCo │
-      ├─ job2                  follows│      │             ┌───▶└────────┘
-      └─ education                    ▼      ▼             │
-         ├─ school1               ┌──────┐ ┌──────┐  works_at
-         └─ school2               │ Bob  │ │ Carol│──────┘
-                                  └──────┘ └──────┘
-  ◀── DOCUMENT wins ──▶            ◀──── RELATIONAL / GRAPH win ────▶
-  (locality, schema flex,         (joins resolve shared entities once;
-   maps to app objects)            graph excels when edges are the point)
-```
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-```
-DECLARATIVE LETS THE ENGINE PARALLELIZE; IMPERATIVE PINS THE ORDER
+    subgraph IMP["imperative <br/> you pin the order"]
+        direction TB
+        I1("for row in table") --> I2{"row.color is red?"}
+        I2 --> I3("result.append(row)")
+    end
 
-  imperative:  for row in table:          ← you fixed a sequential loop;
-                   if row.color=="red":     the engine cannot safely split it
-                       result.append(row)    across cores without proving it's safe
+    subgraph DEC["declarative <br/> optimizer is free"]
+        direction TB
+        D1(["SELECT WHERE color is red"]) -.-> D2("parallel scan")
+        D1 -.-> D3("use an index")
+        D1 -.-> D4("reorder joins")
+    end
 
-  declarative: SELECT * WHERE color='red' ← no order specified ⇒ optimizer is free to
-                                             scan in parallel, use an index, reorder joins
+    class I1,I2,I3 lossN
+    class D1 req
+    class D2,D3,D4 train
 ```
 
 Caption: the two load-bearing ideas of the chapter — relationship shape picks the model, and

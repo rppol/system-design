@@ -62,6 +62,33 @@ Java has a rich profiling ecosystem: async-profiler for CPU and allocation profi
 | WAITING | Waiting indefinitely (Object.wait, park) | Thread pool idle or deadlock |
 | TIMED_WAITING | Waiting with timeout (sleep, wait(ms), join(ms)) | Sleeping, scheduled task idle |
 
+Threads move through these states as they contend for locks, park, or sleep — a thread dump is really a snapshot sample of these transitions. BLOCKED and WAITING are the two states to search for first when diagnosing contention or a stuck pool (see Section 6.4):
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> RUNNABLE: start()
+    RUNNABLE --> BLOCKED: enter synchronized<br/>monitor held elsewhere
+    BLOCKED --> RUNNABLE: monitor acquired
+    RUNNABLE --> WAITING: Object.wait()<br/>LockSupport.park()
+    WAITING --> RUNNABLE: notify()/notifyAll()<br/>unpark()
+    RUNNABLE --> TIMED_WAITING: sleep(ms)<br/>wait(ms), join(ms)
+    TIMED_WAITING --> RUNNABLE: timeout elapses<br/>or notified early
+    RUNNABLE --> [*]: run() returns
+
+    class RUNNABLE train
+    class BLOCKED lossN
+    class WAITING frozen
+    class TIMED_WAITING mathOp
+```
+
 ---
 
 ## 5. Architecture Diagrams
@@ -250,6 +277,29 @@ Found 1 deadlock:
 # Thread pool exhaustion: WAITING in pool.take() + many tasks queued
 # Slow dependency: many threads WAITING/BLOCKED in external call
 ```
+
+The jstack excerpt above is a textbook circular wait: Thread-1 is BLOCKED on a lock held by Thread-2, while Thread-2 is BLOCKED on a lock held by Thread-1. Drawing the wait-for graph makes the cycle — and why neither thread can ever proceed — immediately obvious:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T1(["Thread-1<br/>BLOCKED"]) -->|"waits for lock B<br/>held by"| T2(["Thread-2<br/>BLOCKED"])
+    T2 -->|"waits for lock A<br/>held by"| T1
+    T1 -.-> D{"Deadlock:<br/>no progress"}
+    T2 -.-> D
+
+    class T1,T2 lossN
+    class D mathOp
+```
+
+jstack's automatic deadlock detector flags exactly this pattern — each thread holds the lock the other is waiting for, so the cycle never breaks without external intervention (thread kill or JVM restart).
 
 ---
 

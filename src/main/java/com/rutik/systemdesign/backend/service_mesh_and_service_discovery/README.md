@@ -45,45 +45,86 @@ Without a service mesh, every service must implement its own retry logic, circui
 
 ## 5. Architecture Diagrams
 
+**Service Mesh Architecture (Istio)**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph CP["Control Plane (Istiod)"]
+        Pilot("Pilot<br/>routing rules")
+        Citadel("Citadel<br/>mTLS cert authority")
+        Galley("Galley<br/>config validation")
+    end
+
+    xDS{"xDS API<br/>LDS · RDS · CDS · EDS"}
+
+    subgraph PodA["Pod A"]
+        AppA(["App Container<br/>port 8080"]) --> EnvoyA["Envoy Sidecar<br/>15001/15006"]
+    end
+
+    subgraph PodB["Pod B"]
+        AppB(["App Container<br/>port 8080"]) --> EnvoyB["Envoy Sidecar<br/>15001/15006"]
+    end
+
+    Pilot --> xDS
+    Citadel --> xDS
+    Galley --> xDS
+    xDS -.->|"push config"| EnvoyA
+    xDS -.->|"push config"| EnvoyB
+    EnvoyA -->|"mTLS"| EnvoyB
+
+    class Pilot,Citadel,Galley base
+    class xDS mathOp
+    class AppA,AppB io
+    class EnvoyA,EnvoyB train
 ```
-Service Mesh Architecture (Istio)
-===================================
+*Istiod's three components compute the mesh configuration and push it to every Envoy sidecar over the xDS API (LDS, RDS, CDS, EDS); iptables then transparently redirects each pod's traffic into its local sidecar, and sidecars encrypt pod-to-pod traffic with mTLS.*
 
-Control Plane (Istiod)
-  |--- Pilot: distributes routing rules to Envoy proxies (xDS API)
-  |--- Citadel: certificate authority, issues/rotates mTLS certs
-  |--- Galley: validates and distributes config
-  |
-  | xDS: LDS (listener), RDS (route), CDS (cluster), EDS (endpoint)
-  |
-Data Plane (per pod)
-  [Pod A]                          [Pod B]
-  +------------------+             +------------------+
-  | [App Container]  |             | [App Container]  |
-  |   port: 8080     |             |   port: 8080     |
-  |        |         |             |        |         |
-  | [Envoy Sidecar]  |  mTLS       | [Envoy Sidecar]  |
-  |   15001/15006    |------------>|   15001/15006    |
-  +------------------+             +------------------+
-  iptables redirect all traffic through Envoy
+**Service Discovery Mechanisms**
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Service Discovery Mechanisms
-==============================
+    subgraph CS["Client-Side (Eureka / Ribbon)"]
+        direction LR
+        csA(["Service A"]) -->|"query"| csReg["Eureka Registry"]
+        csReg -->|"instance list"| csPick{"pick instance<br/>round robin / random"}
+        csPick --> csB(["Service B instance"])
+    end
 
-Client-Side (Eureka/Ribbon):
-  [Service A] --> query Eureka --> [instance list]
-                                       |
-  [Service A] --> pick instance (Round Robin/Random) --> [Service B instance]
+    subgraph SS["Server-Side (AWS ALB)"]
+        direction LR
+        ssA(["Service A"]) -->|"HTTP request"| ssALB["ALB"]
+        ssALB -->|"query target group"| ssB(["Service B instance"])
+    end
 
-Server-Side (AWS ALB):
-  [Service A] --> HTTP request --> [ALB] --> query target group --> [Service B instance]
+    subgraph DNSSD["DNS-Based (Kubernetes)"]
+        direction LR
+        dnsA(["Service A"]) -->|"DNS lookup"| dnsKube["kube-dns"]
+        dnsKube -->|"ClusterIP"| dnsIptables{"iptables / IPVS"}
+        dnsIptables --> dnsB(["healthy pod"])
+    end
 
-DNS-Based (Kubernetes):
-  [Service A] --> DNS lookup: order-service.default.svc.cluster.local
-                --> kube-dns returns ClusterIP
-                --> iptables/IPVS routes to healthy pod
+    class csA,ssA,dnsA io
+    class csB,ssB,dnsB io
+    class csReg,ssALB,dnsKube base
+    class csPick,dnsIptables mathOp
 ```
+*Client-side discovery puts the registry query and load-balancing choice inside the caller; server-side and DNS-based discovery move that decision into shared infrastructure (the ALB or kube-dns) at the cost of one extra hop — see the tradeoffs in §8.*
 
 ---
 
@@ -159,6 +200,18 @@ spec:
       labels:
         version: v2
 ```
+
+**Outlier Detection State Machine (Envoy)**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> Healthy: re-evaluated<br/>every 30s interval
+    Healthy --> Ejected: 5 consecutive<br/>gateway 5xx errors
+    Ejected --> Healthy: baseEjectionTime<br/>30s elapses, re-admitted
+    note right of Ejected: maxEjectionPercent 50 - never eject more than half the pool
+```
+*Envoy re-evaluates outlier status on the 30s `interval`; five consecutive gateway errors ejects an instance from the load-balancing pool for `baseEjectionTime` (30s), after which it is re-admitted — `maxEjectionPercent` caps ejections at 50% so a partial bad deploy can never take the whole pool down.*
 
 ### mTLS Configuration
 
@@ -287,6 +340,20 @@ spec:
             periodSeconds: 5
             failureThreshold: 3     # 3 consecutive failures -> remove from Service
 ```
+
+**Kubernetes Probe Lifecycle**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Starting
+    Starting --> NotReady: startup probe passes<br/>(failureThreshold 30 x 10s = 5 min max)
+    NotReady --> Ready: readiness probe passes<br/>(DB reachable, cache warm)
+    Ready --> NotReady: readiness fails 3x<br/>(pod removed from Service endpoints)
+    NotReady --> Restarting: liveness fails 3x<br/>(JVM deadlocked)
+    Ready --> Restarting: liveness fails 3x<br/>(JVM deadlocked)
+    Restarting --> Starting: container restarted
+```
+*Before the startup probe passes, liveness and readiness are not evaluated at all; once running, a readiness failure only pulls the pod out of the Service's endpoint list (no restart) while a liveness failure restarts the container — the distinction the database-connectivity-in-liveness pitfall in §10 gets wrong.*
 
 ```java
 // Spring Boot Actuator health endpoints

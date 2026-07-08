@@ -55,49 +55,64 @@ Zero-downtime migration is the hardest part: deploying a schema change while old
 | Blue-Green DB | Two databases, cutover | High | Major restructuring |
 | Feature flag | Code supports both schemas behind flag | Low | Complex data migration |
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["schema change<br/>needed"]) --> Q1{"column rename or<br/>type change?"}
+    Q1 -->|"yes"| S1("Expand-Contract<br/>risk: low")
+    Q1 -->|"no"| Q2{"large table ALTER<br/>on MySQL?"}
+    Q2 -->|"yes"| S2("ghost table<br/>pt-osc / gh-ost<br/>risk: medium")
+    Q2 -->|"no"| Q3{"complex multi-step<br/>data migration?"}
+    Q3 -->|"yes"| S3("feature flag<br/>dual schema in code<br/>risk: low")
+    Q3 -->|"no"| S4("blue-green DB<br/>full cutover<br/>risk: high")
+
+    class Start io
+    class Q1,Q2,Q3 mathOp
+    class S1 train
+    class S2 base
+    class S3 base
+    class S4 frozen
+```
+
+Walking the table above as a decision path: default to expand-contract for an ordinary column rename or type change, and reach for ghost-table copying, a feature flag, or a full blue-green cutover only when the change does not fit that low-risk case.
+
 ---
 
 ## 5. Architecture Diagrams
 
 ### Expand-Contract (Parallel Change) Pattern
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["rename phone to<br/>phone_number<br/>100M rows · zero downtime"]) -->|"Week 1"| P1("PHASE 1 — EXPAND<br/>V15: ADD COLUMN phone_number<br/>new code dual-writes both")
+    P1 -->|"Week 2"| P2("PHASE 2 — MIGRATE<br/>V16: backfill phone_number<br/>from phone, batched")
+    P2 -->|"Week 3"| P3("PHASE 3 — SWAP<br/>new code reads/writes<br/>phone_number only")
+    P3 -->|"Week 4"| P4("PHASE 4 — CONTRACT<br/>V17: DROP COLUMN phone")
+    P4 --> Done(["zero downtime achieved<br/>no code ever saw<br/>a missing column"])
+
+    class Start,Done io
+    class P1 base
+    class P2 mathOp
+    class P3 train
+    class P4 frozen
 ```
-Scenario: Rename column `phone` to `phone_number` in `users` table
-(100M rows, live production, zero downtime required)
 
-Old code reads/writes: phone
-New code reads/writes: phone_number
-
-PHASE 1 — EXPAND (add new schema):
-  Migration V15:
-    ALTER TABLE users ADD COLUMN phone_number VARCHAR(20);
-    -- Both columns exist; old code uses phone, new code uses phone_number
-
-  Deploy: new code writes to BOTH phone and phone_number
-  Old code: still reads phone (unaffected)
-
-PHASE 2 — MIGRATE DATA:
-  Migration V16:
-    UPDATE users SET phone_number = phone WHERE phone_number IS NULL;
-    -- Backfill existing rows. Run in batches for large tables.
-
-PHASE 3 — SWAP (deploy code using only phone_number):
-  New code reads/writes: phone_number only
-  Old code: removed from production
-
-PHASE 4 — CONTRACT (remove old schema):
-  Migration V17:
-    ALTER TABLE users DROP COLUMN phone;
-    -- Safe: no code uses phone anymore
-
-Timeline:
-  Week 1: V15 + phase-1 code deployed
-  Week 2: V16 data migration completed, verified
-  Week 3: New code deployed (phone_number only)
-  Week 4: V17 + cleanup deployed
-
-  At no point does any running code reference a missing column
-```
+Each phase ships as its own Flyway migration (V15 to V17); old and new application code stay compatible with the schema at every step, and `phone` is dropped only in the final phase, once nothing references it, matching the 4-week rollout described above.
 
 ### Flyway Migration File Structure
 
@@ -191,6 +206,35 @@ ALTER TABLE orders ALTER COLUMN status TYPE VARCHAR(50);  -- locks table
 ```
 
 ### 6.3 gh-ost for Large Table Alterations
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Orig("original table<br/>live traffic") -->|"chunked row copy"| Ghost("ghost table<br/>new schema")
+    Orig -.->|"binlog stream"| Binlog("replay binlog<br/>onto ghost")
+    Binlog -.-> Ghost
+    Ghost --> Ready{"copy + binlog<br/>fully caught up?"}
+    Ready -->|"no"| Binlog
+    Ready -->|"yes"| Swap("atomic rename<br/>swap")
+    Swap --> Live(["ghost is now<br/>the production table"])
+    Swap --> Retired("original table<br/>renamed away")
+
+    class Orig,Ghost base
+    class Binlog req
+    class Ready mathOp
+    class Swap train
+    class Live io
+    class Retired frozen
+```
+
+gh-ost copies rows into a new ghost table in chunks while replaying the MySQL binlog to keep it in sync, then atomically renames the tables once caught up — no triggers and no long-held lock, unlike a plain `ALTER TABLE`.
 
 ```bash
 # gh-ost creates a ghost table, copies rows, uses MySQL binlog for changes

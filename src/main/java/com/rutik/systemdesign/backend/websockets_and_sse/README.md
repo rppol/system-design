@@ -72,94 +72,91 @@ STOMP (Simple Text Oriented Messaging Protocol) adds a pub/sub messaging layer o
 
 ### WebSocket Upgrade Handshake
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: GET /ws HTTP/1.1<br/>Upgrade: websocket<br/>Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+    S-->>C: 101 Switching Protocols<br/>Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+    Note over C,S: TCP connection reused as a WebSocket frame channel
+
+    C->>S: text frame: "hello"
+    S-->>C: text frame: "world"
+    C->>S: binary frame (bytes)
+    C->>S: ping frame (keepalive probe)
+    S-->>C: pong frame
+    C->>S: close frame (1000 Normal)
+    S-->>C: close frame (1000 Normal, echoed)
+    Note over C,S: TCP connection closed
 ```
-Client                              Server
-  |                                   |
-  |-- HTTP/1.1 GET /ws HTTP/1.1 ----->|
-  |   Host: ws.example.com            |
-  |   Upgrade: websocket              |
-  |   Connection: Upgrade             |
-  |   Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
-  |   Sec-WebSocket-Version: 13       |
-  |                                   |
-  |<-- HTTP/1.1 101 Switching Proto --|
-  |    Upgrade: websocket             |
-  |    Connection: Upgrade            |
-  |    Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
-  |                                   |
-  |===== WebSocket Frame Protocol ====|
-  |                                   |
-  |--[text frame: "hello"] ---------->|  client sends text
-  |<-[text frame: "world"] -----------|  server sends text
-  |--[binary frame: <bytes>]--------->|  binary data
-  |--[ping frame] ------------------->|  keepalive probe
-  |<-[pong frame] --------------------|  server responds
-  |--[close frame: 1000 Normal] ----->|  graceful close
-  |<-[close frame: 1000 Normal] ------|  server echoes close
-  |===== TCP Connection Closed =======|
-```
+
+One 101 response upgrades the same TCP connection into a persistent, full-duplex frame channel — every line after it is a WebSocket frame, not a new HTTP request.
 
 The `Sec-WebSocket-Accept` is computed as:
 SHA1(Sec-WebSocket-Key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"), Base64-encoded.
 
 ### SSE Event Stream
 
+```mermaid
+sequenceDiagram
+    participant C as Client (EventSource)
+    participant S as Server
+
+    C->>S: GET /events<br/>Accept: text/event-stream
+    S-->>C: 200 OK<br/>Content-Type: text/event-stream<br/>X-Accel-Buffering: no
+    Note over S: nginx buffering disabled, events flush immediately
+
+    S-->>C: id: 1 · event: user-joined<br/>data: userId 123, name Alice
+    S-->>C: id: 2 · data: type ping (no event name)
+    S-->>C: comment line starting with a bare colon (keepalive, ignored by client)
+    S-->>C: retry: 5000 (reconnect interval, ms)
+
+    Note over C,S: connection drops
+    C->>S: GET /events<br/>Last-Event-ID: 2
+    Note over S: resumes the stream after event 2
+    S-->>C: id: 3 · event: ...
 ```
-Client EventSource:
-  new EventSource('https://api.example.com/events')
 
-HTTP Response:
-  HTTP/1.1 200 OK
-  Content-Type: text/event-stream
-  Cache-Control: no-cache
-  Connection: keep-alive
-  X-Accel-Buffering: no   (disable nginx buffering!)
-
-Event stream (plain text, UTF-8):
-  id: 1\n
-  event: user-joined\n
-  data: {"userId": 123, "name": "Alice"}\n
-  \n                          <- empty line terminates event
-
-  id: 2\n
-  data: {"type":"ping"}\n     <- single-line data, no event type
-  \n
-
-  : this is a comment\n       <- ignored by client, useful for keepalive
-
-  retry: 5000\n               <- set reconnect interval to 5000ms
-  \n
-
-Auto-reconnect:
-  If connection drops, EventSource automatically reconnects after retry ms.
-  Sends: Last-Event-ID: 2  (the last received id)
-  Server resumes from that event.
-```
+Each `id:`/`event:`/`data:` triplet is one SSE message terminated by a blank line; on reconnect the browser automatically resends `Last-Event-ID`, so the server only has to replay what the client missed.
 
 ### Scaling WebSocket with Redis Pub/Sub
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph without["Without shared state"]
+        direction LR
+        alice1(["Alice sends<br/>to Room 1"]) --> srv1a["Server 1<br/>hosts Alice, Bob"]
+        srv1a -.->|"no visibility"| srv2a{"Server 2 unaware<br/>of Room 1"}
+        srv2a --> lost(["Charlie, Dave<br/>never see it"])
+    end
+
+    subgraph withredis["With Redis Pub/Sub"]
+        direction LR
+        alice2(["Alice sends<br/>to Room 1"]) --> srv1b["Server 1"]
+        srv1b -->|"PUBLISH room:1"| redis["Redis Pub/Sub"]
+        redis -->|"broadcast"| srv2b["Server 2<br/>subscribed to room:1"]
+        srv2b --> delivered(["Charlie, Dave<br/>receive it"])
+    end
+
+    without -.->|"fix"| withredis
+
+    class alice1,alice2 io
+    class srv1a,srv1b,srv2b mathOp
+    class srv2a,lost lossN
+    class redis base
+    class delivered train
 ```
-Users connected across servers:
-  Server 1: Alice (ws session), Bob (ws session)
-  Server 2: Charlie (ws session), Dave (ws session)
 
-Without shared state:
-  Alice sends message to Room 1
-  Server 1 knows Alice and Bob are in Room 1
-  Server 1 does NOT know Charlie and Dave are in Room 1 (on Server 2)
-  Charlie and Dave never see Alice's message
-
-With Redis Pub/Sub:
-  Server 1 publishes to Redis channel: "room:1"
-  Redis broadcasts to all subscribers of "room:1"
-  Server 2 is subscribed to "room:1"
-  Server 2 delivers message to Charlie and Dave
-
-  Redis Pub/Sub channel per room:
-    room:1 -> [Server1, Server2] (all servers subscribe to all active rooms)
-
-  Or topic-based: each server subscribes only to rooms with local participants
-```
+Without a shared channel, each server only knows about the sessions it holds locally, so Room 1's message silently stops at Server 1; publishing it to a Redis channel that every server subscribes to lets any server deliver to any connected client, regardless of which process the message originated on.
 
 ---
 
@@ -330,6 +327,18 @@ WebSocket keeps connections alive with ping-pong frames:
 - Recipient must respond with a Pong frame (opcode 10, same payload) as soon as possible
 - If no Pong received within timeout, the sender should close the connection
 
+```mermaid
+stateDiagram-v2
+    [*] --> Open
+    Open --> AwaitingPong: send Ping (opcode 9)
+    AwaitingPong --> Open: Pong received (opcode 10, same payload)
+    AwaitingPong --> Closed: no Pong before timeout
+    Open --> Closed: Close frame (1000 Normal)
+    Closed --> [*]
+```
+
+The only way out of `AwaitingPong` without a matching Pong is a timeout that forces the connection closed — this is the mechanism that turns silent, half-dead TCP connections into detectable failures instead of leaked phantom sessions (see Common Pitfalls).
+
 Spring configures STOMP heartbeats (not WebSocket ping-pong, but application-level heartbeats in the STOMP protocol):
 ```java
 registry.enableSimpleBroker("/topic").setHeartbeatValue(new long[]{10000, 10000});
@@ -363,6 +372,32 @@ registry.enableSimpleBroker("/topic").setHeartbeatValue(new long[]{10000, 10000}
 ---
 
 ## 9. When to Use / When NOT to Use
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Real-time push<br/>needed?"]) --> bidir{"Client also sends<br/>at high frequency?"}
+
+    bidir -->|"yes: gaming, trading,<br/>collaborative editing"| ws(["WebSocket"])
+    bidir -->|"no: server-to-client or<br/>occasional client sends"| proxy{"Strict corporate proxy<br/>blocks persistent streams?"}
+
+    proxy -->|"yes"| lp(["Long polling<br/>(SockJS fallback)"])
+    proxy -->|"no"| sse(["SSE<br/>(+ REST POST if client<br/>sends occasionally)"])
+
+    class start io
+    class bidir,proxy mathOp
+    class ws,sse train
+    class lp lossN
+```
+
+The decision collapses to two questions: does the client need to send at high frequency, and does the network path even allow a persistent connection — SSE (optionally paired with REST POST, as Twitter/X does) and long polling are both server-push-oriented fallbacks for when the answer to the first question is no.
 
 **SSE**: Use when only the server needs to push data to the client, and the data is text/JSON. SSE works through HTTP/2 transparently (each SSE stream is one HTTP/2 stream), through most corporate proxies, and has built-in reconnection with Last-Event-ID resume.
 
@@ -464,24 +499,52 @@ Last-Event-ID is a header sent by the EventSource on reconnection containing the
 **Problem**: A live trading platform serving 50,000 concurrent traders was running a single WebSocket server process. WebSocket connections were stateful per process, and horizontal scaling was impossible without breaking sessions. A deployment required a 30-second maintenance window that disconnected all traders simultaneously — unacceptable.
 
 **Architecture before**:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    traders(["50,000 traders"]) --> srv["Single WebSocket Server"]
+    srv --> sessions["In-memory<br/>session map"]
+
+    class traders io
+    class srv lossN
+    class sessions base
 ```
-All traders ——> Single WebSocket Server —> In-memory session map
-```
+
+Every trader's session lives only in this one process's memory, so there is no way to add a second server or restart this one without dropping all 50,000 connections at once — the 30-second maintenance window described above.
 
 **Architecture after (Redis Pub/Sub fan-out)**:
-```
-                          +--> WebSocket Server 1 (10k connections)
-                          |       subscribes to Redis channels for its users
-Load Balancer (sticky) ——>+--> WebSocket Server 2 (10k connections)
-                          |       subscribes to Redis channels for its users
-                          +--> WebSocket Server 3 (10k connections)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Any server -> publishes to Redis -> Redis broadcasts -> correct server delivers
+    lb(["Load Balancer<br/>(sticky)"]) --> s1["WebSocket Server 1<br/>10k connections"]
+    lb --> s2["WebSocket Server 2<br/>10k connections"]
+    lb --> s3["WebSocket Server 3<br/>10k connections"]
 
-Price Feed Service:
-  PUBLISH redis:channel "AAPL:151.23:151.24"
-  All WebSocket servers receive, deliver to subscribed traders
+    feed(["Price Feed Service"]) -->|"PUBLISH AAPL:151.23:151.24"| redis["Redis Pub/Sub"]
+    redis -.->|"broadcast"| s1
+    redis -.->|"broadcast"| s2
+    redis -.->|"broadcast"| s3
+
+    class lb,feed io
+    class s1,s2,s3 train
+    class redis base
 ```
+
+Sticky routing only decides which of the 3 servers a trader's connection lands on; delivery itself goes through Redis, so any server can publish a price tick and every server — and therefore every subscribed trader — receives it.
 
 **Zero-downtime deployment**:
 1. Start new server with the same load balancer entry.

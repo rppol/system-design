@@ -41,43 +41,83 @@ Every database is a set of engineering tradeoffs encoded in its storage engine. 
 
 ## 5. Architecture Diagrams
 
+**B+tree (PostgreSQL, MySQL InnoDB):** writes require random I/O (update in-place), but reads are fast via O(log n) binary search — internal index pages are cached in memory (`shared_buffers`), which is why this engine wins for read-heavy, random-access workloads.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Root("Root node") --> Internal("Internal nodes<br/>cached in shared_buffers")
+    Internal --> Leaf("Leaf nodes<br/>data + pointers to heap pages")
+
+    class Root mathOp
+    class Internal,Leaf base
 ```
-B+tree vs LSM-Tree Storage Engines
-=====================================
 
-B+tree (PostgreSQL, MySQL InnoDB):
-  Random I/O for writes (update in-place)
-  Fast reads (binary search O(log n))
-  Good for read-heavy, random access
+**LSM-tree (Cassandra, RocksDB, LevelDB):** writes are always sequential I/O (MemTable to SSTable), which wins for write-heavy, append-mostly workloads — the tradeoff is read amplification, since a read may have to check the MemTable, a Bloom filter, and several immutable SSTables before merging results.
 
-  [Root node]
-      |
-  [Internal nodes] -- index pages in memory (shared_buffers)
-      |
-  [Leaf nodes] -- actual data + pointers to heap pages
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-LSM-tree (Cassandra, RocksDB, LevelDB):
-  Sequential I/O for writes (MemTable → SSTable)
-  Read amplification (must check multiple SSTables)
-  Good for write-heavy, append-mostly
+    subgraph WP["Write Path"]
+        direction LR
+        W(["Write"]) --> MT("MemTable<br/>RAM")
+        MT -->|"flush"| SS("SSTable<br/>disk, immutable")
+        SS --> CP("Compaction:<br/>merge SSTables")
+    end
 
-  Write path:
-  [Write] --> [MemTable (RAM)] --> flush --> [SSTable (disk, immutable)]
-                                              |
-                                         [Compaction: merge SSTables]
+    subgraph RP["Read Path"]
+        direction LR
+        R(["Read"]) --> MT2("MemTable")
+        R --> BF("Bloom Filter")
+        R --> SST("SSTable 1, 2, 3…")
+        MT2 --> MG(("merge"))
+        BF --> MG
+        SST --> MG
+    end
 
-  Read path:
-  [Read] --> [MemTable] + [Bloom Filter] + [SSTable 1, 2, 3...] --> merge
+    class W,R io
+    class MT,MT2 train
+    class SS,SST frozen
+    class CP,BF,MG mathOp
+```
 
+**PostgreSQL on-disk layout:** tuples live in 8KB heap blocks carrying MVCC (`xmin`/`xmax`) metadata, the WAL (`pg_wal/`) captures every commit with sequential writes for crash recovery, and TOAST (`pg_toast/`) stores values over about 2KB out-of-line and compressed.
 
-PostgreSQL Storage Layout:
-  [Heap file: base/16384/12345]
-    |-- Block 0: PageHeader + ItemIds + Tuples (MVCC: xmin, xmax per tuple)
-    |-- Block 1: ...
-  [WAL: pg_wal/]
-    |-- Sequential write, fsync on commit, crash recovery
-  [TOAST: pg_toast/]
-    |-- Large values > ~2KB stored out-of-line, compressed
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Data(["PostgreSQL Data Directory"]) --> Heap("Heap file<br/>base/16384/12345")
+    Data --> WAL("WAL<br/>pg_wal/")
+    Data --> Toast("TOAST<br/>pg_toast/")
+    Heap --> Block0("Block 0: PageHeader + ItemIds<br/>+ Tuples (MVCC xmin/xmax)")
+    Heap --> Block1("Block 1 …")
+    WAL --> WALDesc("Sequential write, fsync on<br/>commit, crash recovery")
+    Toast --> ToastDesc("Values over ~2KB stored<br/>out-of-line, compressed")
+
+    class Data,Heap,Block0,Block1 base
+    class WAL,WALDesc train
+    class Toast,ToastDesc frozen
 ```
 
 ---
@@ -352,6 +392,34 @@ Neo4j traversal (finding friends of friends):
   -- Cost depends on local neighborhood, not global data size
 ```
 
+Each relational hop re-runs a B-tree index lookup (cost tied to total data size), while Neo4j follows a relationship pointer stored directly on the node record, so each hop stays O(1) regardless of how large the graph grows:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph REL["Relational: 2 JOINs"]
+        direction LR
+        U1(["users u1"]) -->|"B-tree lookup<br/>O(log n)"| F1{"friendships<br/>row"}
+        F1 -->|"B-tree lookup<br/>O(log n)"| U2(["users u2"])
+    end
+
+    subgraph GRAPH["Neo4j: 2 hops"]
+        direction LR
+        N1(["User A"]) -->|"relationship ptr<br/>O(1)"| N2(["User B"])
+        N2 -->|"relationship ptr<br/>O(1)"| N3(["User C"])
+    end
+
+    class U1,U2,N1,N2,N3 io
+    class F1 lossN
+```
+
 **Graph algorithms (GDS library)**:
 - PageRank: importance score based on incoming link quality and quantity
 - Community detection (Louvain): groups densely connected nodes
@@ -429,6 +497,30 @@ Full Comparison Matrix
 ---
 
 ## 9. When to Use / When NOT to Use
+
+A quick decision guide distilled from the detailed use-cases below — always validate against the full when-to-use/when-not-to-use guidance that follows.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start{"What's the primary<br/>access pattern?"} -->|"ACID + complex<br/>joins, single node"| PG(["PostgreSQL"])
+    Start -->|"SQL + horizontal<br/>scale, geo-distributed"| CRDB(["CockroachDB"])
+    Start -->|"flexible or<br/>hierarchical schema"| Mongo(["MongoDB"])
+    Start -->|"sub-ms cache,<br/>session, leaderboard"| Redis(["Redis"])
+    Start -->|"write-heavy<br/>time-series, TTL"| Cass(["Cassandra"])
+    Start -->|"full-text search,<br/>log analytics"| ES(["Elasticsearch"])
+    Start -->|"relationship-centric<br/>traversal"| Neo(["Neo4j"])
+
+    class Start mathOp
+    class PG,CRDB,Mongo,Redis,Cass,ES,Neo io
+```
 
 **Relational (PostgreSQL)**: use for financial transactions (ACID required), systems with complex queries and ad-hoc reporting, data with complex relationships and referential integrity constraints. Do NOT use when horizontal write scaling is required (partitioned writes across many nodes), when schema changes must happen without downtime at very large scale, or when the primary access pattern is always by a single key.
 

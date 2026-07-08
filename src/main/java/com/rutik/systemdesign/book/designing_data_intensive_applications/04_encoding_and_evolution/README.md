@@ -54,6 +54,19 @@ from a string; JSON can't distinguish integers from floats and loses precision o
 size); optional/complicated schema support; CSV has no schema and is fragile. They're verbose.
 Despite the flaws, they're "good enough" as a lingua franca and dominate public APIs.
 
+```mermaid
+xychart-beta
+    title "Scale mismatch: JSON-safe integers vs 64-bit IDs"
+    x-axis ["JSON safe max 2^53", "64-bit ID space 2^63"]
+    y-axis "exponent (power of 2)" 0 --> 70
+    bar [53, 63]
+```
+
+Caption: JSON can represent integers exactly only up to 2^53 (about 9 quadrillion), but a 64-bit
+ID space reaches 2^63 (about 9.2 quintillion) — 10 extra bits, a 1,024x gap. Any ID above 2^53
+silently loses precision when parsed as a JSON number, which is exactly why Twitter had to return
+tweet IDs as both a number and a string.
+
 ### Binary encoding
 
 For internal data (within one organization), binary formats win on **size** and **speed**.
@@ -74,6 +87,42 @@ compact. Evolution rules:
 - **Remove a field:** only remove optional fields, and never reuse their tag number.
 - **Change a type:** risky — may lose precision or truncate (e.g. 32-bit → 64-bit int: new code
   reading old data is fine, old code reading new data truncates).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"Evolving a<br/>Thrift/Protobuf schema"}
+    addField(["Add a field"])
+    removeField(["Remove a field"])
+    changeType(["Change a field's type"])
+
+    addRule["new tag number +<br/>optional or default"]
+    removeRule["only remove<br/>optional fields"]
+    changeRule["risky: may truncate<br/>or lose precision"]
+    neverReuse(("NEVER reuse<br/>a tag number"))
+
+    start --> addField --> addRule
+    start --> removeField --> removeRule
+    start --> changeType --> changeRule
+    addRule --> neverReuse
+    removeRule --> neverReuse
+
+    class start mathOp
+    class addField,removeField,changeType req
+    class addRule,removeRule train
+    class changeRule,neverReuse lossN
+```
+
+Caption: the three schema-change operations funnel into their own compatibility rule, and adding
+or removing a field both answer to the same non-negotiable constraint — a retired tag number is
+never reused, since that would let new code misread old bytes under the wrong field.
 
 ### Avro
 
@@ -153,29 +202,66 @@ those messages across nodes — but rolling upgrades still require message compa
 
 ## Visual Intuition
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TL["Records written over time"]
+        v1a(["v1"]) --> v1b(["v1"]) --> v2a(["v2<br/>adds email field"]) --> v2b(["v2"])
+    end
+
+    newCode(["New code v2"]) -->|"reads OLD data"| v1b
+    oldCode(["Old code v1"]) -->|"reads NEW data"| v2a
+
+    v1b -->|"BACKWARD compat:<br/>email missing"| backOut["field must be<br/>optional + default"]
+    v2a -->|"FORWARD compat:<br/>email unknown"| fwdOut["must ignore field,<br/>preserve on rewrite"]
+
+    class v1a,v1b,v2a,v2b base
+    class newCode,oldCode req
+    class backOut mathOp
+    class fwdOut lossN
 ```
-BACKWARD vs FORWARD COMPATIBILITY (both needed during a rolling deploy)
 
-  timeline of records written:  [v1]......[v1]......[v2 adds "email"]......[v2]
-                                                       ▲ field added here
-  NEW code (v2) reading OLD (v1) data  ── needs BACKWARD compat ──▶ "email" missing
-                                          ⇒ field must be optional / have a default
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  OLD code (v1) reading NEW (v2) data  ── needs FORWARD compat ──▶ "email" unknown
-                                          ⇒ old code must IGNORE the unknown field
-                                            (and PRESERVE it if it rewrites the record!)
-```
+    subgraph W["Writer schema v.A"]
+        wName(["name = Lucy"])
+        wColour(["colour = red"])
+        wBorn(["born = 1985"])
+    end
 
-```
-AVRO: WRITER SCHEMA  ≠  READER SCHEMA, resolved by FIELD NAME
+    subgraph R["Reader schema v.B"]
+        rName(["name"])
+        rFav(["favourite_colour<br/>default = ?"])
+        rBorn(["born"])
+    end
 
-  writer wrote:   { name:"Lucy", colour:"red", born:1985 }   (writer schema v.A)
-  reader expects: { name,          favourite_colour(def "?"), born }   (reader schema v.B)
+    dflt(["schema default"])
+    ignored["ignored<br/>dropped"]
 
-  resolution:  name ──match──▶ name
-               colour ─(reader has no "colour")─▶ IGNORED
-               favourite_colour ─(writer lacked it)─▶ filled with DEFAULT "?"
-  ⇒ no field tags in the bytes; the two schemas are reconciled by name + defaults
+    wName -->|"match by name"| rName
+    wBorn -->|"match by name"| rBorn
+    wColour -->|"reader has<br/>no such field"| ignored
+    dflt -->|"writer lacked<br/>this field"| rFav
+
+    class wName,wColour,wBorn frozen
+    class rName,rFav,rBorn req
+    class dflt mathOp
+    class ignored lossN
 ```
 
 Caption: the chapter's core mechanic — evolution works only if old and new code stay mutually
