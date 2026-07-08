@@ -56,21 +56,35 @@ Sub-pattern 2: Frequency counting
   char with Counter[char] == 1 -> 'c'
 ```
 
+**Sub-pattern 3: Grouping by derived key**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    eat(["eat"]) -->|"sort chars"| aet(("aet"))
+    tea(["tea"]) -->|"sort chars"| aet
+    ate(["ate"]) -->|"sort chars"| aet
+    tan(["tan"]) -->|"sort chars"| ant(("ant"))
+    nat(["nat"]) -->|"sort chars"| ant
+    bat(["bat"]) -->|"sort chars"| abt(("abt"))
+
+    aet --> g1["eat, tea, ate"]
+    ant --> g2["tan, nat"]
+    abt --> g3["bat"]
+
+    class eat,tea,ate,tan,nat,bat io
+    class aet,ant,abt mathOp
+    class g1,g2,g3 train
 ```
-Sub-pattern 3: Grouping by derived key
 
-  words = ["eat", "tea", "tan", "ate", "nat", "bat"]
-
-  key("eat") = key("tea") = key("ate") = "aet"  (sorted chars)
-  key("tan") = key("nat") = "ant"
-  key("bat") = "abt"
-
-  groups = {
-    "aet": ["eat", "tea", "ate"],
-    "ant": ["tan", "nat"],
-    "abt": ["bat"]
-  }
-```
+*Six words collapse to three canonical keys via one sort-and-compare step; words landing on the same key (`"aet"`, `"ant"`, `"abt"`) merge into the same output group, exactly like items landing in the same hash bucket.*
 
 ```
 Sub-pattern 4: Set-based existence (Longest Consecutive Sequence)
@@ -270,6 +284,16 @@ def longest_consecutive_fixed(nums: list[int]) -> int:
 
 **Trigger**: `nums = list(range(10000))` (one long run of 10,000 consecutive numbers). The broken version performs roughly `10000 + 9999 + ... + 1 ≈ 5*10^7` set lookups — likely to TLE under a tight time limit, and certainly does unnecessary O(n^2) work. The fixed version performs the inner `while` loop only once (starting from `0`, since `-1 not in num_set`), doing exactly `10000` total lookups across the whole run — O(n).
 
+```mermaid
+xychart-beta
+    title "Set lookups for n = 10,000 consecutive numbers"
+    x-axis ["Broken (no start check)", "Fixed (start check)"]
+    y-axis "Total set lookups" 0 --> 55000000
+    bar [50000000, 10000]
+```
+
+*Omitting one `if` check turns 10,000 lookups into roughly 5*10^7 — a ~5,000x blowup, entirely from re-scanning every number in the run instead of only its start.*
+
 ---
 
 ## 9. Related Patterns & When to Switch
@@ -279,6 +303,33 @@ def longest_consecutive_fixed(nums: list[int]) -> int:
 - **[Cyclic Sort](cyclic_sort.md)** — when values are constrained to `[1, n]` (or `[0, n-1]`) and O(1) space is required, cyclic sort achieves "find duplicate/missing" without a hashmap by using the array itself as the hash table.
 - **[Top-K Elements](top_k_elements.md)** — frequency counting (`Counter`) is often the *first step* before a heap-based top-K selection; hashing gives you the frequencies, the heap gives you the order.
 - **Trie** ([trie_patterns.md](trie_patterns.md)) — when keys are strings and you need *prefix*-based queries (not just exact-match), a trie generalizes the hashmap to support "starts with" queries in O(L).
+
+The five escape hatches above collapse into one router — walk it whenever a hashing solution feels like it is fighting a constraint:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sig(["hashing works,<br/>but a constraint shifts"]) --> router{"what changed about<br/>the problem?"}
+    router -->|"sorted array,<br/>need constant space"| tp["Two Pointers"]
+    router -->|"keys are<br/>cumulative sums"| ps["Prefix Sum<br/>same trick, new key"]
+    router -->|"values confined to<br/>1..n, constant space"| cs["Cyclic Sort"]
+    router -->|"need K-th or<br/>frequency order"| tk["Heap layered<br/>on the counts"]
+    router -->|"string keys,<br/>prefix queries"| tr["Trie"]
+
+    class sig req
+    class router mathOp
+    class tp,cs,tr train
+    class ps,tk base
+```
+
+*Two Pointers, Cyclic Sort, and Trie fully replace hashing once their constraint is met (green); Prefix Sum and Top-K instead build on top of it with a different key or a heap stacked on the counts (gold).*
 
 ---
 

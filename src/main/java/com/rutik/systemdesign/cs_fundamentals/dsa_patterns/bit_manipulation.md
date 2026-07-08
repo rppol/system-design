@@ -57,6 +57,36 @@ integers (32 or 64 bits).
   [Hashing Patterns](hashing_patterns.md); bit tricks here assume small,
   fixed-width integers.
 
+The eight positive signals above collapse into six technique families — the
+router below maps "what the problem looks like" to "which trick to reach
+for" (each family is detailed in Section 6, Variations & Sub-patterns):
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sig(["problem signal"]) --> router{"what repeats,<br/>or what's asked?"}
+    router -->|"others repeat 2x"| xorFam["XOR cancellation<br/>a^a = 0"]
+    router -->|"others repeat 3+ times"| modFam["bit-count mod k<br/>per position"]
+    router -->|"power of two / four"| pow2Fam["n AND (n-1) == 0"]
+    router -->|"n under 20, need all subsets"| maskFam["bitmask enumeration<br/>0..2^n - 1"]
+    router -->|"get/set/clear/toggle bit i"| utilFam["bit-level<br/>utility ops"]
+    router -->|"max XOR of a pair"| trieFam["binary trie<br/>greedy walk"]
+
+    class sig req
+    class router,xorFam,modFam,pow2Fam,maskFam,utilFam,trieFam mathOp
+```
+
+Six families, one router: everything in this file reduces to picking the
+right branch above, then applying the matching template from Section 3 or
+the matching sub-pattern from Section 6.
+
 ---
 
 ## 2. Mental Model & Intuition
@@ -237,6 +267,39 @@ O(n)?"
 - [Single Number III (LC 260)](https://leetcode.com/problems/single-number-iii/) — TWO elements appear once, rest twice: XOR everything to get `a ^ b`, find any set bit in that XOR to partition the array into two groups (one containing `a`, the other `b`), then XOR each group separately
 - [Missing Number (LC 268)](https://leetcode.com/problems/missing-number/) — XOR all array values with all indices `0..n`; every present value cancels with its index, leaving the missing one
 - [Find the Difference (LC 389)](https://leetcode.com/problems/find-the-difference/) — XOR all characters of both strings together
+
+Single Number III's partition step is the trickiest part of the XOR family —
+XOR-ing the whole array only gets you `a ^ b`; a second pass, split by one
+differing bit, is what actually separates the two uniques:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    nums(["nums array"]) --> xorAll["XOR every element<br/>= a XOR b"]
+    xorAll --> isolate["isolate one set bit<br/>diff = axorb AND -axorb"]
+    isolate --> partition{"element has<br/>diff bit set?"}
+    partition -->|"yes"| groupA["group A"]
+    partition -->|"no"| groupB["group B"]
+    groupA --> xorA["XOR group A"]
+    groupB --> xorB["XOR group B"]
+    xorA --> a(["unique value a"])
+    xorB --> b(["unique value b"])
+
+    class nums,a,b io
+    class xorAll,isolate,partition,xorA,xorB mathOp
+    class groupA,groupB req
+```
+
+Every duplicated value still lands in the same group as its twin (they agree
+on every bit, including `diff`), so it cancels inside that group exactly
+like plain Single Number — only `a` and `b` survive, one per group.
 
 **2. Counting / parity-with-modulus family** — when XOR's "cancel pairs"
 isn't enough (every-other-value appears `k > 2` times):

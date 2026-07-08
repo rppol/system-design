@@ -26,17 +26,61 @@ Two pointers traverse a linked list (or implicit functional graph) at different 
 
 The defining test: **is there an implicit or explicit "next" function that could loop back on itself, and do you need to detect/locate that loop in O(1) space?** If yes → fast/slow. If you just need "the element at position n/2" of a *known-finite* sequence, you can compute the length first and index directly — fast/slow is for when you *can't* know the length without traversing (linked lists have no `len()`).
 
+The signals above collapse into one routing decision — walk the tree below from "does a looping `next` exist" down to which variant answers the question:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sig(["problem signal"]) --> next{"implicit or explicit<br/>next that could loop?"}
+    next -->|"no, finite &<br/>known length"| single["single pass /<br/>direct index"]
+    next -->|"yes"| space{"need O(1) space?"}
+    space -->|"no, O(n) ok"| hashset["hash set of<br/>visited nodes"]
+    space -->|"yes"| ask{"what's actually asked?"}
+    ask -->|"cycle exists / start?"| cycle["fast 2x, slow 1x<br/>meet, reset, meet again"]
+    ask -->|"midpoint?"| middle["fast 2x, slow 1x<br/>until fast hits null"]
+    ask -->|"kth from end?"| fixedgap["fixed gap of k<br/>both at speed 1"]
+
+    class sig req
+    class next,space,ask mathOp
+    class single,hashset base
+    class cycle,middle,fixedgap train
+```
+
+Every branch terminates in a variant covered by §3 (template) and §6 (sub-patterns); the O(1)-space branch is what separates fast/slow from the simpler-but-costlier hash-set fallback.
+
 ---
 
 ## 2. Mental Model & Intuition
 
+**Cycle detection (Floyd's Tortoise and Hare)** — slow and fast both start at node 1; node 5 loops back to node 3, so the list never truly ends.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    N1(["1<br/>slow & fast start"]) --> N2(2) --> N3("3<br/>cycle start") --> N4("4<br/>MEET at step 3") --> N5(5)
+    N5 -.->|"cycle edge"| N3
+
+    class N1 io
+    class N2,N5 train
+    class N3 frozen
+    class N4 lossN
 ```
-Cycle detection (Floyd's Tortoise and Hare)
 
-  1 -> 2 -> 3 -> 4 -> 5
-            ^         |
-            +---------+
-
+```
 Step 0:  slow=1, fast=1
 Step 1:  slow=2, fast=3
 Step 2:  slow=3, fast=5
@@ -76,13 +120,26 @@ Finding the cycle START (after slow == fast detected)
   reset -------L -------> [cycle start]  <- both pointers arrive here together
 ```
 
+**Finding the middle (no cycle case)** — S and F both start at node 1; F moves twice as fast, so when F falls off the end, S sits on the middle.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    M1(["1<br/>S & F start"]) --> M2(2) --> M3("3<br/>middle: S stops here") --> M4(4) --> M5(5) --> MN(["null"])
+
+    class M1,MN io
+    class M2,M4,M5 train
+    class M3 mathOp
 ```
-Finding the middle (no cycle case)
 
-  1 -> 2 -> 3 -> 4 -> 5 -> None
-  S
-  F
-
+```
   step1: S=2, F=3
   step2: S=3, F=5
   step3: F=None (fast.next.next is None) -> stop. S=3 is the middle.
@@ -176,6 +233,35 @@ def remove_nth_from_end(head: ListNode | None, n: int) -> ListNode | None:
 **Brute force**: traverse with a hash set of visited nodes; the first revisited node is the cycle start. O(n) time, O(n) space.
 
 **Key insight**: the math derivation in §2 shows that after `slow` and `fast` first meet inside the cycle, resetting one pointer to `head` and advancing both at speed 1 causes them to meet *exactly* at the cycle's start node. This gets you to O(1) space.
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Phase1
+    Phase1 --> Phase1: slow+1, fast+2 each step
+    Phase1 --> NoCycle: fast or fast.next is null
+    Phase1 --> Met: slow == fast
+    NoCycle --> [*]: return None
+    Met --> ResetSlow: slow = head, fast stays
+    ResetSlow --> Phase2: advance both by 1
+    Phase2 --> Phase2: slow != fast
+    Phase2 --> CycleStart: slow == fast
+    CycleStart --> [*]: return slow
+
+    class Phase1,Phase2 mathOp
+    class Met,CycleStart train
+    class NoCycle lossN
+    class ResetSlow base
+```
+
+Floyd's algorithm is two phases, not one: Phase 1 races `fast` against `slow` until they meet inside the cycle or `fast` falls off the end; Phase 2 resets `slow` to `head` and walks both at speed 1 until they meet again — that second meeting point is guaranteed to be the cycle's start.
 
 **Trace on `1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 3` (cycle starts at node 3, L=2, C=4)**
 

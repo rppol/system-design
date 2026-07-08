@@ -268,6 +268,40 @@ instead of O(n)?).
 
 ## 6. Variations & Sub-patterns
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Core(["lo/hi narrowing<br/>template"])
+    V1("Lower / Upper Bound<br/>bisect_left / bisect_right")
+    V2("Rotated Sorted Array<br/>which half is sorted")
+    V3("Peak Finding<br/>go uphill")
+    V4("Search on the Answer<br/>minimize max / maximize min")
+    V5("Partition Search<br/>median of two arrays")
+    V6("2D Matrix Search<br/>flatten to 1D")
+
+    Core --> V1
+    Core --> V2
+    Core --> V3
+    Core --> V4
+    Core --> V5
+    Core --> V6
+
+    class Core base
+    class V1,V2,V3,V4,V5,V6 mathOp
+```
+
+All six variations below fan out from the same `[lo, hi]`-narrowing template —
+they differ only in what `lo`/`hi` represent and what the mid-point comparison
+checks, so recognizing which branch a problem falls into matters more than
+re-deriving the loop each time.
+
 **1. Lower bound / upper bound (`bisect_left` / `bisect_right`).**
 Python's `bisect` module implements exactly `lower_bound`/`upper_bound`.
 `bisect_left(arr, x)` is the first index where `x` could be inserted keeping
@@ -384,6 +418,39 @@ avoid the same stall on the opposite side.
 ---
 
 ## 9. Related Patterns & When to Switch
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S1("Sorted array,<br/>need a pair")
+    S2("Unsorted array,<br/>k-th largest")
+    S3("Feasibility depends<br/>on which elements chosen")
+    S4("Missing/duplicate<br/>number in 1..n")
+
+    P1(["Two Pointers"])
+    P2(["Top-K / Heap"])
+    P3(["Dynamic Programming"])
+    P4(["Cyclic Sort"])
+
+    S1 --> P1
+    S2 --> P2
+    S3 --> P3
+    S4 --> P4
+
+    class S1,S2,S3,S4 io
+    class P1,P2,P3,P4 train
+```
+
+Each problem shape below is a signal to switch away from modified binary
+search entirely — matching the anti-signals from Section 1 to the sibling
+pattern that actually fits the shape.
 
 - **[Two Pointers](two_pointers.md)** — if the array is sorted and you're
   looking for a *pair* that satisfies a condition (not a single boundary),

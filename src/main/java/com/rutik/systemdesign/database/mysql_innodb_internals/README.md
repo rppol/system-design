@@ -18,26 +18,36 @@ InnoDB's design philosophy: make writes durable and fast while enabling concurre
 
 ### InnoDB Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph MEM["InnoDB Memory - RAM"]
+        BP("Buffer Pool<br/>~75% of RAM")
+        RLB("Redo Log Buffer<br/>16MB default")
+        CB("Change Buffer<br/>non-unique secondary<br/>index DML")
+    end
+
+    subgraph DISK["InnoDB Disk"]
+        TS("Tablespace Files<br/>*.ibd - data + PK index")
+        RL("Redo Log iblog<br/>circular buffer")
+        UL("Undo Log<br/>system tablespace")
+    end
+
+    BP -.->|"flush dirty pages"| TS
+    RLB -.->|"fsync on commit"| RL
+    CB -.->|"merge on read or idle"| TS
+
+    class BP,RLB,CB base
+    class TS,RL,UL frozen
 ```
-+------------------------------------------------------------------+
-|                    InnoDB Memory                                 |
-|  +------------------+  +------------------+  +--------------+   |
-|  |   Buffer Pool    |  |   Redo Log Buffer |  | Change Buffer|   |
-|  | (innodb_buffer_  |  | (innodb_log_     |  | (DML for     |   |
-|  |  pool_size=75%   |  |  buffer_size=16M)|  |  non-unique  |   |
-|  |  RAM)            |  |                  |  |  secondary   |   |
-|  +------------------+  +------------------+  |  indexes)    |   |
-|                                              +--------------+   |
-+------------------------------------------------------------------+
-|                    InnoDB Disk                                    |
-|  +------------------+  +------------------+  +--------------+   |
-|  | Tablespace files |  | Redo Log (iblog) |  |  Undo Log    |   |
-|  | (*.ibd per table)|  | Circular buffer  |  | (system tbsp)|   |
-|  | data + pk index  |  | innodb_log_file  |  |              |   |
-|  +------------------+  | _size            |  +--------------+   |
-|                        +------------------+                      |
-+------------------------------------------------------------------+
-```
+InnoDB splits its footprint into an in-memory tier (buffer pool, redo log buffer, change buffer) and a durable on-disk tier (tablespace files, circular redo log, undo log); the dotted edges are the background flush and merge paths that move data from memory to disk.
 
 ---
 
@@ -113,50 +123,92 @@ InnoDB defers writes to non-unique secondary index pages that are not in the buf
 
 Risk: large change buffer outstanding on crash → long recovery time.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    W(["DML on non-unique<br/>secondary index"]) --> P{"Index page already<br/>in buffer pool?"}
+    P -->|"Yes"| DIRECT("Update page<br/>directly in memory")
+    P -->|"No"| CB("Record change in<br/>Change Buffer")
+    CB -.->|"merge on read<br/>or idle time"| MERGE("Apply to index page<br/>on next load")
+    CB -->|"crash with large<br/>backlog"| RISK(["Slow startup<br/>merges before accepting<br/>connections"])
+
+    class W io
+    class P mathOp
+    class DIRECT train
+    class CB base
+    class MERGE frozen
+    class RISK lossN
+```
+A page not resident in the buffer pool gets its change deferred into the Change Buffer instead of triggering a random disk read; the deferred entries are merged lazily, which is exactly why an 8GB outstanding change buffer (see Real-World Examples) can turn a crash restart into a 45-minute merge before MySQL accepts connections.
+
 ---
 
 ## 5. Architecture Diagrams
 
+**InnoDB Write Path**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C(["Client<br/>INSERT / UPDATE / DELETE"]) --> U("1. Write undo log<br/>for MVCC and rollback")
+    U --> R("2. Write redo log entry<br/>to log buffer in memory")
+    R --> D("3. Update data page<br/>in buffer pool, dirty")
+    D --> COM{"4. COMMIT"}
+    COM -->|"flush_log_at_trx_commit=1"| FR("fsync redo log<br/>to disk")
+    COM -->|"sync_binlog=1"| FB("fsync binary log<br/>to disk")
+    FR --> ACK(["5. ACK to client"])
+    FB --> ACK
+    D -.->|"background: checkpoint<br/>or buffer pool pressure"| BG("6. Flush dirty pages<br/>to disk")
+
+    class C,ACK io
+    class U,R,D train
+    class COM mathOp
+    class FR,FB base
+    class BG frozen
 ```
-INNODB WRITE PATH:
+The redo log (and binlog) are fsynced synchronously before the client is ACKed, while dirty data pages are flushed to disk lazily in the background — the gap between these two paths is exactly what `innodb_flush_log_at_trx_commit` and the background flusher are tuning.
 
-Client INSERT/UPDATE/DELETE
-         |
-         v
-1. Undo log entry written (for MVCC/rollback)
-         |
-         v
-2. Redo log entry written to redo log buffer (in memory)
-         |
-         v
-3. Data page updated in buffer pool (dirty page)
-         |
-         v
-4. On COMMIT: flush redo log buffer to disk (fsync if flush_log_at_trx_commit=1)
-   └── Binary log entry also written and fsynced (if sync_binlog=1)
-         |
-         v
-5. ACK to client
-         |
-         v (background)
-6. Dirty pages flushed to disk by background flusher
-   (triggered by checkpoint, buffer pool pressure)
+**InnoDB Buffer Pool LRU**
 
-INNODB BUFFER POOL LRU:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-New blocks inserted here:  ← INSERT POINT (3/8 from tail)
-+----------+-----------+
-|  Young   |    Old    |
-| Sublist  |  Sublist  |
-|  (5/8)   |   (3/8)   |
-+----------+-----------+
-↑ Most     ↑ Insert    ↑ Least
-  recently   point       recently
-  accessed              accessed (evicted)
+    NEW(["New page read"]) --> INS("Insert point<br/>3/8 from tail")
+    INS --> OLD("Old Sublist<br/>3/8 of pool")
+    OLD --> Q{"Re-accessed after<br/>innodb_old_blocks_time?<br/>default 1s"}
+    Q -->|"Yes - hot page"| YOUNG("Young Sublist<br/>5/8 of pool, MRU head")
+    Q -->|"No - one-off scan"| EVICT(["Evicted<br/>LRU tail"])
+    YOUNG -.->|"ages without re-access"| OLD
 
-Pages that survive innodb_old_blocks_time (default 1s) in old sublist → promoted to young
-Large scans: pages only in old sublist for <1s → evicted without polluting young sublist
+    class NEW io
+    class INS mathOp
+    class OLD frozen
+    class Q mathOp
+    class YOUNG train
+    class EVICT lossN
 ```
+New pages enter mid-list (3/8 from the tail) rather than at the MRU head; only pages re-touched after `innodb_old_blocks_time` (default 1s) get promoted to the young sublist, so a full table scan's pages age out of the old sublist without ever evicting genuinely hot data.
 
 ---
 
@@ -164,19 +216,20 @@ Large scans: pages only in old sublist for <1s → evicted without polluting you
 
 ### innodb_flush_log_at_trx_commit Settings
 
+```mermaid
+quadrantChart
+    title innodb_flush_log_at_trx_commit — durability vs performance
+    x-axis Low Performance --> High Performance
+    y-axis Low Durability --> High Durability
+    quadrant-1 Ideal but rare
+    quadrant-2 Safe but slow
+    quadrant-3 Risky and slow
+    quadrant-4 Fast but risky
+    "flush=1 ACID default": [0.12, 0.95]
+    "flush=2 OS-crash safe": [0.55, 0.55]
+    "flush=0 fastest": [0.9, 0.15]
 ```
-=0: Redo log buffer flushed to OS cache once per second.
-    On crash: up to 1 second of committed data lost.
-    Fastest writes.
-
-=1 (default, ACID): Redo log buffer flushed AND fsynced to disk on every commit.
-    On crash: 0 data loss for committed transactions.
-    Slowest (one fsync per commit ≈ 1-10ms on HDD, 0.05-0.5ms on NVMe).
-
-=2: Redo log buffer flushed to OS cache on every commit (but not fsynced).
-    On crash: OS crash safe (data in OS cache survives), hardware crash loses up to 1s.
-    Middle ground: ~2x faster than =1, ~5x slower than =0.
-```
+Plotting the three settings on a durability-vs-performance plane makes the tradeoff explicit: `=1` buys full ACID durability at the cost of an fsync per commit, `=0` is fastest but risks up to a second of committed data on any crash, and `=2` splits the difference — surviving a mysqld crash but not a hardware failure.
 
 For replicated setups with sync binlog: use `=2` on replicas (binlog is authoritative), `=1` on primary.
 
@@ -216,6 +269,33 @@ ALTER TABLE t ADD INDEX idx_email (email), ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE t MODIFY COLUMN name VARCHAR(500), ALGORITHM=COPY;
 -- For large tables: use gh-ost or pt-online-schema-change instead
 ```
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ALT(["ALTER TABLE change"]) --> Q1{"Add column at end<br/>or drop column only?"}
+    Q1 -->|"Yes"| INSTANT("ALGORITHM=INSTANT<br/>zero-copy, zero-lock<br/>MySQL 8.0+")
+    Q1 -->|"No"| Q2{"InnoDB supports an<br/>online rebuild?"}
+    Q2 -->|"Yes"| INPLACE("ALGORITHM=INPLACE<br/>LOCK=NONE<br/>background rebuild")
+    Q2 -->|"No, needs full<br/>table rewrite"| Q3{"Table size and<br/>traffic?"}
+    Q3 -->|"Small, low traffic"| COPY("ALGORITHM=COPY<br/>blocks all DML<br/>avoid in production")
+    Q3 -->|"Large or high traffic"| EXT("gh-ost or<br/>pt-online-schema-change")
+
+    class ALT io
+    class Q1,Q2,Q3 mathOp
+    class INSTANT train
+    class INPLACE base
+    class COPY lossN
+    class EXT frozen
+```
+MySQL 8's `ALGORITHM=INSTANT` handles simple metadata-only changes with zero copying and zero locking; anything needing a rebuild falls back to `INPLACE` (online, no full copy) or, for large or high-traffic tables, an external tool like gh-ost that tails the binlog instead of taking a lock.
 
 ### GTID-Based Replication
 

@@ -93,6 +93,47 @@ follower kept in sync by the CDC stream — no dual writes. Tools: Debezium, Kaf
 logical decoding. **Log compaction** (Kafka) keeps only the latest value per key, so a CDC topic can
 serve as a complete, replayable snapshot to rebuild a derived store from scratch.
 
+**Broken: Dual Writes vs Fixed: Change Data Capture**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph DW["Broken: Dual Writes"]
+        direction LR
+        app1(["application"]) -->|"write 1"| db1("database")
+        app1 -->|"write 2"| idx1("search index")
+        db1 -.-> race{"race or<br/>partial failure"}
+        idx1 -.-> race
+        race --> incons("permanently<br/>inconsistent")
+    end
+
+    subgraph CDC2["Fixed: Change Data Capture"]
+        direction LR
+        app2(["application"]) -->|"single write"| db2("database<br/>of record")
+        db2 --> log2("change log<br/>CDC stream")
+        log2 --> idx2("search index")
+        log2 --> cache2("cache")
+    end
+
+    class app1,app2 io
+    class db1,db2 base
+    class log2 mathOp
+    class idx1,race,incons lossN
+    class idx2,cache2 train
+```
+
+Caption: dual writes race or partially fail because the two writes aren't atomic, leaving the
+database and the index permanently inconsistent; CDC removes the second write entirely — every
+downstream store instead follows the database's own ordered change log, so there is only ever one
+write to race with.
+
 ### Event sourcing
 
 A related idea from a different community: instead of storing *current state* and overwriting it,
@@ -191,40 +232,115 @@ Techniques:
 The throughline: reprocessing after a crash is only safe if the input is **replayable** (log-based
 broker) and the output is **idempotent or transactional**.
 
+**Recovering From a Crash: Replayability + Idempotence = Exactly-Once**
+
+```mermaid
+stateDiagram-v2
+    state "Crash Mid-Stream" as Crashed
+    state "Resume From Checkpoint" as Resumed
+    state "Replay From Saved Offset" as Replaying
+    state "Some Events Reprocessed" as Reprocessed
+    state "Exactly-Once Effect" as Done
+
+    [*] --> Processing
+    Processing --> Crashed: processor dies
+    Crashed --> Resumed: restart
+    Resumed --> Replaying: read log from<br/>saved offset
+    Replaying --> Reprocessed: duplicates<br/>possible
+    Reprocessed --> Done: idempotent write<br/>or atomic commit
+    Done --> Processing: converge, resume<br/>normal flow
+
+    note right of Reprocessed
+        safe only if input is REPLAYABLE
+        (log-based broker) and output is
+        IDEMPOTENT or TRANSACTIONAL
+    end note
+```
+
+Caption: the crash-recovery mechanic all four exactly-once techniques share — checkpointing decides
+*where* to resume, replay decides *what* to reprocess, and idempotence or atomic commit is what makes
+reprocessing safe rather than a double-charge.
+
 ---
 
 ## Visual Intuition
 
+**Log-Based Broker (Kafka) vs Traditional Broker (JMS/AMQP)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TRAD["Traditional Broker (JMS/AMQP)"]
+        direction LR
+        tp(["producer"]) --> tq(queue)
+        tq --> tc(["consumer"])
+        tc -->|"ack"| td("deleted<br/>gone forever, no replay")
+    end
+
+    subgraph LOG["Log-Based Broker (Kafka)"]
+        direction LR
+        lp(["producer"]) --> ll("e0 e1 e2 e3 e4 e5 ...<br/>durable, retained")
+        ll -->|"offset A"| lca(["consumer A"])
+        ll -->|"offset B"| lcb(["consumer B"])
+    end
+
+    class tp,tc,lp,lca,lcb io
+    class tq req
+    class td lossN
+    class ll base
 ```
-LOG-BASED BROKER (Kafka) vs TRADITIONAL BROKER (JMS/AMQP)
 
-  TRADITIONAL: message delivered + acked ─▶ DELETED from broker
-     producer ─▶ [ queue ] ─▶ consumer (ack) ─▶ (gone forever; no replay)
+**Event Time vs Processing Time — Why Processing-Time Windows Lie**
 
-  LOG-BASED:  append-only, RETAINED; consumers track their own offset
-     producer ─▶ [ e0 e1 e2 e3 e4 e5 ... ]  (durable, replayable)
-                        ▲offsetA   ▲offsetB     a NEW consumer can start at e0
-                 consumer A reads behind consumer B; both replay independently
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    E1(["events 10:01-10:03<br/>received on time"]) --> A{"bucket by<br/>which clock?"}
+    E2(["event 10:04 (phone offline)<br/>arrives 10:09, +5 min late"]) --> A
+    A -->|"processing time"| W1("window 10:05-10:10<br/>wrong bucket")
+    A -->|"event time + watermark"| W2("window 10:00-10:05<br/>correct / corrected")
+
+    class E1,E2 io
+    class A mathOp
+    class W1 lossN
+    class W2 train
 ```
 
-```
-EVENT TIME vs PROCESSING TIME (why processing-time windows lie)
+**State as a Materialized View of an Immutable Log (the Ledger Principle)**
 
-  events actually occurred:   e@10:01  e@10:02  e@10:03  ... e@10:04 (phone was offline)
-  processor RECEIVES them:    10:01    10:02    10:03         10:09  ◀── 5-min late!
-                                                                │
-  window [10:00–10:05] by PROCESSING time misses the late event (counts it in 10:05–10:10) ✗
-  window by EVENT time + WATERMARK can still place it correctly (or emit a correction)   ✓
-```
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-```
-STATE = A MATERIALIZED VIEW OF AN IMMUTABLE LOG (the ledger principle)
+    L("immutable event log<br/>+5 +3 -2 +10 -4<br/>append-only, never edited") --> R("fold / replay")
+    R --> S1(["balance = 12"])
+    R --> S2(["search index"])
+    R --> S3(["cache"])
+    R --> S4(["report"])
 
-  immutable event log (truth):  [+5] [+3] [-2] [+10] [-4]  (append-only, never edited)
-                                              │ fold/replay
-                                              ▼
-  derived current state (view):  balance = 12     ◀── rebuildable any time;
-  can ALSO derive: a search index, a cache, a report — all from the SAME log
+    class L base
+    class R mathOp
+    class S1,S2,S3,S4 train
 ```
 
 Caption: the chapter's three big pictures — retained replayable logs enable reprocessing; event time

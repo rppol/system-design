@@ -27,27 +27,49 @@ Most of the book is spent making those guarantees precise and showing what they 
 
 ## The Three Parts (ASCII Map)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root(["DDIA"]) --> P1
+    root --> P2
+    root --> P3
+
+    subgraph P1["Part I — Foundations<br/>(single machine)"]
+        C1["Ch 1<br/>Reliable, Scalable,<br/>Maintainable"] --> C2["Ch 2<br/>Data Models and<br/>Query Languages"] --> C3["Ch 3<br/>Storage and Retrieval"] --> C4["Ch 4<br/>Encoding and Evolution"]
+    end
+
+    subgraph P2["Part II — Distributed Data<br/>(many machines)"]
+        C5["Ch 5<br/>Replication"] --> C6["Ch 6<br/>Partitioning"] --> C7["Ch 7<br/>Transactions"] --> C8["Ch 8<br/>Trouble with<br/>Distributed Systems"] --> C9["Ch 9<br/>Consistency and<br/>Consensus"]
+    end
+
+    subgraph P3["Part III — Derived Data<br/>(composing systems)"]
+        C10["Ch 10<br/>Batch Processing"] --> C11["Ch 11<br/>Stream Processing"] --> C12["Ch 12<br/>The Future of<br/>Data Systems"]
+    end
+
+    class root io
+    class C1,C2,C3 base
+    class C4 mathOp
+    class C5 frozen
+    class C6 mathOp
+    class C7 train
+    class C8 lossN
+    class C9 mathOp
+    class C10 mathOp
+    class C11 req
+    class C12 train
 ```
-DESIGNING DATA-INTENSIVE APPLICATIONS
-│
-├─ PART I — FOUNDATIONS OF DATA SYSTEMS         (single machine, conceptual groundwork)
-│   ├─ Ch 1  Reliable, Scalable, Maintainable   the three concerns; percentiles
-│   ├─ Ch 2  Data Models & Query Languages       relational vs document vs graph
-│   ├─ Ch 3  Storage & Retrieval                 LSM-trees vs B-trees; OLTP vs OLAP
-│   └─ Ch 4  Encoding & Evolution                schema evolution; dataflow modes
-│
-├─ PART II — DISTRIBUTED DATA                    (many machines: why & how it breaks)
-│   ├─ Ch 5  Replication                         leaders, lag, multi-leader, quorums
-│   ├─ Ch 6  Partitioning                        sharding, secondary indexes, rebalancing
-│   ├─ Ch 7  Transactions                        ACID, weak isolation, serializability
-│   ├─ Ch 8  Trouble with Distributed Systems    networks, clocks, truth & lies
-│   └─ Ch 9  Consistency & Consensus             linearizability, ordering, consensus
-│
-└─ PART III — DERIVED DATA                       (combining systems into a whole)
-    ├─ Ch 10 Batch Processing                    MapReduce, dataflow engines
-    ├─ Ch 11 Stream Processing                   logs, CDC, event time, exactly-once
-    └─ Ch 12 The Future of Data Systems          unbundling, correctness, ethics
-```
+
+*Color follows the content: storage foundations in gold (Ch 1–3), hashing/coordination
+mechanics in orange (Ch 4, 6, 9, 10), replication in purple (Ch 5), committed/transactional
+paths in green (Ch 7, 12), Ch 8's network-and-clock failures in red, and Ch 11's event
+streams in teal.*
 
 Part I reasons about a *single node*. Part II asks what changes when data lives on *many*
 nodes (the answer: almost everything). Part III shows how to *compose* multiple systems —
@@ -85,6 +107,34 @@ batch and stream — into a correct, maintainable whole, then closes on ethics.
 - **"I build CRUD apps" path:** Ch 1 → 2 → 3 → 7. Data models, storage, and transactions
   cover most day-to-day backend work.
 - **Data-engineering path:** Ch 3 (columnar) → 10 → 11 → 12. Batch and stream processing.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    goal{"Why are you<br/>reading DDIA?"}
+
+    goal -->|"master it all"| p1(["Preface → Ch 1 → Ch 2<br/>→ … → Ch 12"])
+    goal -->|"interview prep"| p2(["Ch 5 → 6 → 7 → 8 → 9"])
+    goal -->|"build CRUD apps"| p3(["Ch 1 → 2 → 3 → 7"])
+    goal -->|"data engineering"| p4(["Ch 3 → 10 → 11 → 12"])
+
+    class goal mathOp
+    class p1 base
+    class p2 lossN
+    class p3 train
+    class p4 req
+```
+
+*Four goals, four subsets of the same twelve chapters — the interview-prep path (red)
+concentrates on Ch 5–9, the chapters most heavily cross-linked to this repo's `database/`
+deep dives (see the Cross-Reference Map below).*
 
 ---
 

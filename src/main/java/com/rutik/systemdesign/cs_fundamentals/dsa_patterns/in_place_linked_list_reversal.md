@@ -26,6 +26,32 @@ Reverse (all or part of) a linked list by re-pointing `.next` references using a
 
 The defining test: **do you need to change the *direction* of `.next` pointers for some contiguous run of nodes, in O(1) space?** If yes, the `prev/curr/next_temp` triple is the tool.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    q(["Linked-list problem"]) --> d1{"Rewire .next pointers<br/>in O(1) space?"}
+    d1 -.->|"no"| na("Wrong pattern family:<br/>two pointers or<br/>fast/slow instead")
+    d1 -->|"yes"| d2{"Which cue phrase?"}
+    d2 -->|"reverse whole list"| t1("Reverse entire list<br/>prev / curr / next_temp")
+    d2 -->|"reverse a sub-range"| t2("Reverse left..right<br/>dummy + 3 reconnects")
+    d2 -->|"k-group or swap pairs"| t3("Reverse k-group<br/>check-then-reverse")
+    d2 -->|"reorder or palindrome"| t4("Find middle, reverse<br/>2nd half, merge or compare")
+
+    class q io
+    class d1,d2 mathOp
+    class na lossN
+    class t1,t2,t3,t4 train
+```
+
+The recognition test collapses to two questions — does the problem require rewiring `.next` pointers in O(1) space, and which cue phrase names the template — and the four terminal boxes map directly onto the four templates built in Section 3.
+
 ---
 
 ## 2. Mental Model & Intuition
@@ -221,6 +247,29 @@ Final list: 2 -> 1 -> 4 -> 3 -> 5
 ```
 
 This matches the expected output: groups `[1,2]` and `[3,4]` are each reversed, and the leftover `[5]` (fewer than `k=2` nodes) remains unchanged.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    c1["Call 1<br/>head = node 1"] --> c2["Call 2<br/>head = node 3"]
+    c2 --> c3["Call 3<br/>head = node 5<br/>base case"]
+    c3 -.->|"return head unchanged"| c2
+    c2 -.->|"return prev = 4<br/>(head3.next = 5)"| c1
+    c1 -.->|"return prev = 2<br/>(head1.next = 4)"| result(["Final head = node 2"])
+
+    class c1,c2 mathOp
+    class c3 frozen
+    class result io
+```
+
+The same trace from a bird's-eye view: three calls descend one k-group at a time (solid), then three returns climb back up performing the `head.next = result` reconnection at each level (dotted) — this call/return shape is exactly why the original head of each group ends up as its tail.
 
 ---
 

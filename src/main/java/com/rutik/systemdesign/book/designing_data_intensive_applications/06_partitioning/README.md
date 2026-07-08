@@ -127,6 +127,38 @@ network/disk I/O).
   node joins, it randomly picks existing partitions to split and takes half of each. Used by
   Cassandra and Ketama. Keeps partition size stable as the dataset and cluster grow together.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph FIXED["Fixed number of partitions"]
+        F1["1000 partitions<br/>pre-created"] -->|"new node<br/>joins"| F2{"move whole<br/>partitions"}
+        F2 --> F3["key-to-partition<br/>map unchanged"]
+    end
+
+    subgraph DYNAMIC["Dynamic split / merge"]
+        D1["partition grows<br/>past threshold"] --> D2{"split in two"}
+        D3["partition<br/>shrinks"] --> D4{"merge"}
+    end
+
+    subgraph PROP["Proportional to nodes"]
+        PR1["fixed partitions<br/>per node"] -->|"new node<br/>joins"| PR2{"pick existing<br/>partitions"}
+        PR2 --> PR3["take half of<br/>each, randomly"]
+    end
+
+    class F1,D1,D3,PR1 base
+    class F2,D2,D4,PR2 mathOp
+    class F3,PR3 train
+```
+
+Caption: each strategy differs in what triggers a rebalance and what stays fixed — fixed partitions keep the key-to-partition map constant and move whole partitions; dynamic partitioning reacts to a size threshold; proportional-to-nodes keeps partition count per node stable as the cluster grows.
+
 ### Automatic versus manual rebalancing
 
 Fully **automatic** rebalancing is convenient but dangerous: rebalancing is expensive
@@ -154,6 +186,41 @@ tracks the cluster's partition-to-node mapping; nodes register there and routing
 subscribe to changes (HBase, Kafka, SolrCloud). Cassandra/Riak instead gossip the mapping among
 nodes. Routing decisions ultimately depend on a consensus/coordination layer (→ Ch 9).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CLIENT(["client request"])
+
+    CLIENT -->|"1: hits any node"| ANY{"right<br/>partition?"}
+    ANY -->|"no: forward"| RIGHT1(("owning<br/>node"))
+    ANY -->|"yes"| RIGHT1
+
+    CLIENT -->|"2: hits routing tier"| TIER["routing tier,<br/>partition-aware LB"]
+    TIER --> RIGHT2(("owning<br/>node"))
+
+    CLIENT -->|"3: partition-aware client"| DIRECT["client computes<br/>partition itself"]
+    DIRECT --> RIGHT3(("owning<br/>node"))
+
+    COORD["ZooKeeper<br/>or gossip"] -.->|"partition-to-node<br/>mapping"| ANY
+    COORD -.-> TIER
+    COORD -.-> DIRECT
+
+    class CLIENT io
+    class ANY,DIRECT mathOp
+    class TIER req
+    class RIGHT1,RIGHT2,RIGHT3 train
+    class COORD base
+```
+
+Caption: all three routing shapes ultimately depend on the same partition-to-node mapping — ZooKeeper centralizes it (nodes register, routers subscribe) while Cassandra/Riak gossip it peer-to-peer instead.
+
 **Parallel query execution.** Simple key-value access only needs to route to one partition. But
 **massively parallel processing (MPP)** analytic databases break a complex query into stages
 that run across many partitions in parallel and combine results — foreshadowing the batch/stream
@@ -163,37 +230,87 @@ processing of Part III.
 
 ## Visual Intuition
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph KR["By key range"]
+        KRP1("P1: A to F") --- KRP2("P2: G to M") --- KRP3("P3: N to Z")
+        KRP1 -.-> KRpro["range scan G-K<br/>= 1 partition"]
+        KRP3 -.->|"today's writes<br/>all land here"| KRhot(("P3<br/>overloaded"))
+    end
+
+    subgraph HK["By hash of key"]
+        HKP1("P1: hash 0-1/3") --- HKP2("P2: hash 1/3-2/3") --- HKP3("P3: hash 2/3-1")
+        HKP1 -.-> HKpro["even spread,<br/>no sequential<br/>hot spot"]
+        HKP3 -.-> HKcon["G-K scattered<br/>across ALL partitions"]
+    end
+
+    class KRP1,KRP2,KRP3,HKP1,HKP2,HKP3 base
+    class KRpro,HKpro train
+    class KRhot lossN
+    class HKcon lossN
 ```
-KEY-RANGE vs HASH PARTITIONING (same keys, opposite tradeoffs)
 
-  BY KEY RANGE                          BY HASH OF KEY
-  P1: A..F   P2: G..M   P3: N..Z        P1: hash 0..⅓  P2: ⅓..⅔  P3: ⅔..1
-  ──────────────────────────           ──────────────────────────
-  ✓ range scan "G..K" = 1 partition    ✓ even spread, no sequential hot spot
-  ✗ today's timestamps all hit P3      ✗ "G..K" scattered across ALL partitions
-    (hot spot) ─────────────┐            (no efficient range scan)
-                            ▼
-            [P3 overloaded]  ◀── the hot-spot failure mode partitioning meant to avoid
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TRAP["hash mod N (N: 3 to 4 nodes)"]
+        K1(["key k<br/>hash=123"]) -->|"mod 3"| N0["node 0"]
+        K1 -->|"mod 4"| N3["node 3"]
+        N3 -.->|"key MOVED<br/>~ALL keys"| BOOM(("near-total<br/>reshuffle"))
+    end
+
+    subgraph FIX["Fix: fixed partitions"]
+        K2(["key k"]) -->|"hash"| P17["partition 17<br/>never changes"]
+        P17 -->|"hosted by"| NODE["current node<br/>can change"]
+    end
+
+    class K1,K2 io
+    class N0,N3 mathOp
+    class BOOM lossN
+    class P17 base
+    class NODE train
 ```
 
-```
-WHY hash mod N IS A REBALANCING TRAP (N: 3 → 4 nodes)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  key=k, hash(k)=123
-  N=3:  123 mod 3 = 0  ──▶ node 0
-  N=4:  123 mod 4 = 3  ──▶ node 3      ⇒ key MOVED. This happens to ~ALL keys.
+    subgraph LOCAL["Local index (by document)"]
+        LW(["write"]) -->|"update 1<br/>partition"| LWok["cheap"]
+        LR1(["read color=red"]) -->|"ask P1, P2, P3"| LRmerge{"merge"}
+        LRmerge -->|"scatter/gather"| LRbad["slow,<br/>tail-latency-prone"]
+    end
 
-  FIX (fixed partitions): hash(k) ─▶ partition 17 (NEVER changes); only the
-       node that HOSTS partition 17 changes ⇒ move whole partitions, not keys.
-```
+    subgraph GLOBAL["Global index (by term)"]
+        GW(["write"]) -->|"update many<br/>index partitions"| GWbad["costly,<br/>often async"]
+        GR1(["read color=red"]) -->|"go to the ONE<br/>partition holding red"| GRok["targeted,<br/>fast"]
+    end
 
-```
-SECONDARY INDEX: LOCAL (by document) vs GLOBAL (by term)
-
-  LOCAL (document-partitioned)         GLOBAL (term-partitioned)
-  write: update 1 partition  ✓ cheap   write: update many index partitions ✗ costly
-  read "color=red": ask P1,P2,P3       read "color=red": go to the ONE partition
-        then merge  ✗ scatter/gather         holding "red"  ✓ targeted, fast
+    class LW,LR1,GW,GR1 io
+    class LWok,GRok train
+    class LRmerge mathOp
+    class LRbad,GWbad lossN
 ```
 
 Caption: every partitioning decision is a read-vs-write and even-spread-vs-range-scan tradeoff;

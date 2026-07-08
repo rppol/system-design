@@ -68,21 +68,43 @@ Cross-reference: [Dependency Injection in FastAPI](../README.md)
 
 ### Scope Decision Tree
 
-```
-Is the resource expensive to create (>1ms)?
-  YES → Is it safe to share across requests?
-    YES → lifespan (app scope)
-    NO  → yield dep with its own creation
-  NO  → yield dep or plain dep, either works
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Does the resource have per-request identity (e.g., user session)?
-  YES → yield dep (request scope, always)
-  NO  → consider lifespan
+    subgraph SG1["Cost to create?"]
+        Q1{"Expensive to create?<br/>(over 1ms)"}
+        Q1 -->|"Yes"| Q2{"Safe to share<br/>across requests?"}
+        Q1 -->|"No"| A1(["yield dep or plain dep<br/>- either works"])
+        Q2 -->|"Yes"| A2(["lifespan<br/>(app scope)"])
+        Q2 -->|"No"| A3(["yield dep with<br/>its own creation"])
+    end
 
-Does the resource need cleanup (close/commit/rollback)?
-  YES → yield dep
-  NO  → plain dep
+    subgraph SG2["Per-request identity?"]
+        Q3{"Has per-request identity?<br/>(e.g. user session)"}
+        Q3 -->|"Yes"| A4(["yield dep<br/>(request scope, always)"])
+        Q3 -->|"No"| A5(["consider lifespan"])
+    end
+
+    subgraph SG3["Needs cleanup?"]
+        Q4{"Needs cleanup?<br/>(close / commit / rollback)"}
+        Q4 -->|"Yes"| A6(["yield dep"])
+        Q4 -->|"No"| A7(["plain dep"])
+    end
+
+    class Q1,Q2,Q3,Q4 mathOp
+    class A2,A5 base
+    class A1,A3,A4,A6 req
+    class A7 io
 ```
+
+Three independent checks decide scope: cost-to-create routes to `lifespan` vs `yield`, per-request identity always forces request scope, and any cleanup requirement rules out a plain dependency.
 
 ### Nested Dependency Patterns
 
@@ -92,85 +114,133 @@ Does the resource need cleanup (close/commit/rollback)?
 
 **Diamond dependency** — A depends on B and C; both B and C depend on D. D is instantiated once (cached), torn down last.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SG_LIN["Linear chain"]
+        direction LR
+        A1["A"] --> B1["B"] --> C1["C"]
+    end
+
+    subgraph SG_SHARE["Shared dependency"]
+        direction LR
+        A2["A"] --> C2(("C<br/>cached once"))
+        B2["B"] --> C2
+    end
+
+    subgraph SG_DIA["Diamond dependency"]
+        direction LR
+        A3["A"] --> B3["B"]
+        A3 --> C3["C"]
+        B3 --> D3(("D<br/>cached once,<br/>torn down last"))
+        C3 --> D3
+    end
+
+    class A1,B1,C1,A2,B2,A3,B3,C3 req
+    class C2,D3 base
+```
+
+All three shapes resolve through the same identity-keyed cache: `C` and `D` are each instantiated once no matter how many dependents reference them, and are torn down only after every dependent using them has finished.
+
 ---
 
 ## 5. Architecture Diagrams
 
 ### Single Yield Dependency Lifecycle
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    REQ(["HTTP request<br/>arrives"]) --> RESOLVE["FastAPI resolves<br/>dependency graph"]
+    RESOLVE --> SETUP["yield dep: setup<br/>session = Session()"]
+    SETUP -->|"yields session"| HANDLER["Route handler runs<br/>result = handler(session)"]
+    HANDLER --> RESP(["Response sent to client<br/>(received HERE)"])
+    RESP --> TEARDOWN["yield dep: teardown<br/>session.close()"]
+    TEARDOWN --> DESTROY(["Request context<br/>destroyed"])
+
+    class REQ,RESP io
+    class RESOLVE mathOp
+    class SETUP req
+    class HANDLER train
+    class TEARDOWN frozen
+    class DESTROY lossN
 ```
-HTTP Request arrives
-        |
-        v
-FastAPI resolves dependency graph
-        |
-        v
-+-------------------------------+
-|  yield dependency: setup      |  <-- code before yield executes
-|  e.g., session = Session()   |
-+-------------------------------+
-        |
-        | yields session
-        v
-+-------------------------------+
-|  Route handler executes       |  <-- session injected as argument
-|  result = handler(session)    |
-+-------------------------------+
-        |
-        v
-Response serialized and sent to client   <-- client receives response HERE
-        |
-        v
-+-------------------------------+
-|  yield dependency: teardown   |  <-- code after yield / finally block
-|  e.g., session.close()       |
-+-------------------------------+
-        |
-        v
-Request context destroyed
-```
+
+Setup runs before the handler and teardown runs after the response is already on the wire — client latency is unaffected by cleanup work.
 
 ### Nested Yield Dependencies — Execution Order
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    REQ(["Request"]) --> A["get_tenant()<br/>dep A - outer<br/>setup"]
+    A --> B["get_db()<br/>dep B - inner<br/>setup"]
+    B --> C["get_user()<br/>dep C - innermost<br/>setup"]
+    C --> H["Route Handler"]
+    H -.->|"teardown begins"| TC["teardown C<br/>innermost, first"]
+    TC -.-> TB["teardown B"]
+    TB -.-> TA["teardown A<br/>outermost, last"]
+
+    class REQ io
+    class A,B,C req
+    class H train
+    class TC,TB,TA frozen
 ```
-Request
-  |
-  +-- get_tenant()     [yield dep A — outer]
-        |
-        +-- get_db()   [yield dep B — inner, depends on A]
-              |
-              +-- get_user()  [yield dep C — innermost]
-                    |
-                    v
-              Route Handler
-                    |
-              [teardown C]    <-- innermost tears down first
-              [teardown B]
-              [teardown A]    <-- outermost tears down last
-```
+
+Setup nests outer to inner — A wraps B wraps C — and teardown unwinds LIFO: innermost (C) first, outermost (A) last.
 
 ### Exception Flow Through a Yield Dependency
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    RH["Route handler raises<br/>ValueError('bad input')"] --> CATCH["FastAPI catches<br/>the exception"]
+    CATCH --> THROW["FastAPI calls<br/>generator.throw(exc)"]
+    THROW --> EXC["except Exception:<br/>await session.rollback()"]
+    EXC --> RAISE["raise<br/>(propagate, don't swallow)"]
+    RAISE --> FIN["finally:<br/>await session.close()"]
+    FIN --> DECISION{"Custom exception<br/>handler registered?"}
+    DECISION -->|"Yes"| HANDLED(["Handler runs -<br/>custom response"])
+    DECISION -->|"No"| DEFAULT500(["500 Internal<br/>Server Error"])
+
+    class RH lossN
+    class CATCH,THROW mathOp
+    class EXC,RAISE lossN
+    class FIN frozen
+    class DECISION mathOp
+    class HANDLED train
+    class DEFAULT500 lossN
 ```
-Route Handler raises ValueError("bad input")
-        |
-        v
-FastAPI catches exception
-        |
-        v
-FastAPI calls generator.throw(ValueError("bad input"))
-        |
-        v  (inside yield dep)
-except Exception as exc:
-    await session.rollback()   <-- compensation
-    raise                      <-- re-raise (or swallow to suppress)
-        |
-finally:
-    await session.close()      <-- always runs
-        |
-        v
-Exception propagates up → 500 response (or handled by exception handler)
-```
+
+FastAPI drives the exception into the dependency via `generator.throw()`, guaranteeing rollback and the `finally` close run before the response resolves to either a registered exception handler or the default 500.
 
 ---
 
@@ -631,6 +701,34 @@ async def send_email(
 
 **Fix**: Pass only serializable IDs to background tasks, never live ORM objects or session references. The background task opens its own session via `async with AsyncSessionLocal() as session:`.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    H["Route handler<br/>returns"] --> R(["Response sent<br/>to client"])
+    R --> TD["yield dep teardown<br/>session.close()"]
+    TD -.->|"session now closed"| BG["Background task<br/>runs after response"]
+    BG --> DEC{"Task touches a live<br/>ORM object?"}
+    DEC -->|"Yes"| FAIL(["DetachedInstanceError /<br/>ResourceClosedError"])
+    DEC -->|"No - passes ID only"| OK(["Opens its own session<br/>- succeeds"])
+
+    class H train
+    class R io
+    class TD frozen
+    class BG req
+    class DEC mathOp
+    class FAIL lossN
+    class OK train
+```
+
+Teardown fires as soon as the response is sent — before any background task runs — so a task that captures the ORM object instead of its ID touches an already-closed session.
+
 ```python
 # BROKEN: background task captures closed session from outer scope
 @router.post("/process")
@@ -868,17 +966,38 @@ FastAPI drives the generator with `next()` (or `send()`) once to get the yielded
 
 **Architecture**:
 
-```
-lifespan (app scope)
-  |-- app.state.pool         asyncpg.Pool  (min=5, max=20, created once)
-  |-- app.state.redis        aioredis.Redis  (pool, max_connections=20)
-  |-- app.state.http_client  httpx.AsyncClient  (persistent, keep-alive)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-yield deps (request scope)
-  |-- get_conn()    asyncpg.Connection  (acquired from pool, returned after request)
-  |-- get_redis()   aioredis.Redis      (shared reference, no per-request cleanup needed)
-  |-- get_http()    httpx.AsyncClient   (shared reference — plain dep, no yield)
+    subgraph LIFESPAN["lifespan (app scope)"]
+        POOL["app.state.pool<br/>asyncpg.Pool<br/>min=5, max=20"]
+        REDIS["app.state.redis<br/>aioredis.Redis<br/>max_connections=20"]
+        HTTPC["app.state.http_client<br/>httpx.AsyncClient<br/>persistent, keep-alive"]
+    end
+
+    subgraph REQSCOPE["yield deps (request scope)"]
+        CONN(["get_conn()<br/>asyncpg.Connection"])
+        GRED(["get_redis()<br/>aioredis.Redis"])
+        GHTTP(["get_http()<br/>httpx.AsyncClient"])
+    end
+
+    POOL -->|"acquire, release<br/>after request"| CONN
+    REDIS -->|"shared reference<br/>no cleanup"| GRED
+    HTTPC -->|"shared reference<br/>plain dep"| GHTTP
+
+    class POOL,REDIS,HTTPC base
+    class CONN req
+    class GRED,GHTTP io
 ```
+
+Shared, expensive resources live once in `lifespan` (app scope); each yield dep is a thin per-request accessor — `get_conn()` truly acquires/releases per request, while `get_redis()`/`get_http()` are plain deps that just hand back the shared reference.
 
 **Implementation**:
 

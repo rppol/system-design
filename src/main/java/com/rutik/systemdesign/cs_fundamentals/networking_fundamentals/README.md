@@ -121,6 +121,16 @@ The initiator enters TIME_WAIT for 2×MSL (Maximum Segment Lifetime, typically 6
 - Congestion avoidance (AIMD): once cwnd exceeds ssthresh, increase by 1 MSS per RTT; halve on packet loss
 - Modern: CUBIC (default Linux), BBR (Google, latency-based)
 
+```mermaid
+xychart-beta
+    title "TCP Congestion Window (cwnd) Growth Per RTT"
+    x-axis [RTT1, RTT2, RTT3, RTT4, RTT5, RTT6, RTT7, RTT8, RTT9, RTT10]
+    y-axis "cwnd (MSS)" 0 --> 20
+    line [1, 2, 4, 8, 16, 17, 18, 19, 9, 10]
+```
+
+The classic TCP sawtooth: slow start doubles cwnd every RTT (1 to 2 to 4 to 8 to 16 MSS) until it nears ssthresh, congestion avoidance then creeps up by 1 MSS per RTT, and a packet loss halves cwnd — after which the AIMD climb starts again.
+
 **Use cases**: HTTP, HTTPS, database connections, SSH, email — anything requiring reliable ordered delivery.
 
 ### 4.4 UDP — User Datagram Protocol
@@ -139,24 +149,28 @@ UDP is **unreliable, connectionless, minimal-overhead**. It adds only port multi
 
 ### 4.5 DNS Resolution Chain
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client stub<br/>resolver"]) --> recursive["Recursive resolver<br/>ISP / 8.8.8.8 / 1.1.1.1<br/>caches by TTL"]
+    recursive --> root["Root name server<br/>13 clusters"]
+    root --> tld["TLD name server<br/>.com / .org / .io"]
+    tld --> auth["Authoritative<br/>name server"]
+    auth --> answer(["Answer: A record<br/>93.184.216.34"])
+
+    class client,answer io
+    class recursive base
+    class root,tld,auth frozen
 ```
-Client stub resolver
-    |
-    v
-Recursive resolver (ISP / 8.8.8.8 / 1.1.1.1)  [caches by TTL]
-    |
-    v
-Root name server (.)                              [13 root server clusters]
-    |
-    v
-TLD name server (.com, .org, .io)
-    |
-    v
-Authoritative name server (ns1.example.com)
-    |
-    v
-Answer: A record → 93.184.216.34
-```
+
+Each hop is a cache-or-forward decision: the recursive resolver (gold) answers from cache when the TTL hasn't expired, otherwise walks the frozen upstream hierarchy — root, TLD, then the authoritative server — one referral at a time.
 
 **Record types**:
 
@@ -207,74 +221,106 @@ The **backlog** parameter to `listen()` bounds how many completed connections th
 
 ### TCP 3-Way Handshake and Data Transfer
 
-```
-CLIENT                              SERVER
-  |                                    |
-  |------ SYN (seq=1000) ---------->   |  t=0
-  |                                    |
-  |<----- SYN-ACK (seq=2000,          |  t=0.5 RTT
-  |        ack=1001) ---------------   |
-  |                                    |
-  |------ ACK (ack=2001) ---------->   |  t=1 RTT
-  |------ DATA (GET /index.html) -->   |  (data piggybacked on ACK or immediately after)
-  |                                    |
-  |<----- DATA (HTTP 200 OK) ------    |  t=1.5 RTT (response)
-  |                                    |
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
 
-Total: 1.5 RTT before first data byte received
+    C->>S: SYN (seq=1000)
+    Note right of S: t = 0
+    S-->>C: SYN-ACK (seq=2000, ack=1001)
+    Note left of C: t = 0.5 RTT
+    C->>S: ACK (ack=2001)
+    C->>S: DATA (GET /index.html)
+    Note right of S: t = 1 RTT - data piggybacked on the ACK
+    S-->>C: DATA (HTTP 200 OK)
+    Note left of C: t = 1.5 RTT - first data byte received
 ```
+
+Total: 1.5 RTT before the first application data byte arrives — the SYN/SYN-ACK pair costs 1 RTT, and the response only lands after the client's third-leg ACK reaches the server.
 
 ### DNS Resolution Chain
 
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant St as Stub Resolver
+    participant Re as Recursive Resolver
+    participant Ro as Root Server
+    participant T as TLD Server (.com)
+    participant A as Authoritative Server
+
+    B->>St: query api.example.com
+    St->>Re: query
+    Re->>Ro: query
+    Ro-->>Re: NS: .com TLD
+    Re->>T: query TLD
+    T-->>Re: NS: ns1.example.com
+    Re->>A: query authoritative
+    A-->>Re: A: 93.184.216.34
+    Note over Re: cache TTL = 300s
+    Re-->>St: answer
+    St-->>B: 93.184.216.34
 ```
-Browser                  Stub       Recursive     Root        TLD (.com)  Authoritative
-  |                     Resolver    Resolver      Server      Server      Server
-  |-- query: api.ex.com ->|            |             |            |           |
-  |                       |-- query -->|             |            |           |
-  |                       |            |-- query  -->|            |           |
-  |                       |            |<-- NS: .com TLD ---------|           |
-  |                       |            |-- query TLD ------------->|           |
-  |                       |            |<-- NS: ns1.example.com ---|           |
-  |                       |            |-- query authoritative ----------------->|
-  |                       |            |<-- A: 93.184.216.34 ------------------|
-  |                       |            | (cache TTL=300s)                       |
-  |                       |<-- answer--|                                        |
-  |<-- 93.184.216.34 -----|            |                                        |
-```
+
+Every hop the recursive resolver makes on a cache miss costs a fresh round trip; the `cache TTL=300s` note is why a warm resolver skips straight from the browser's query to the cached answer.
 
 ### TLS 1.3 Handshake (1 RTT)
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: ClientHello (ECDHE key_share)
+    Note right of C: Flight 1
+    S-->>C: ServerHello (key_share)
+    Note left of S: Flight 2 - encrypted with derived key
+    S-->>C: Certificate, CertVerify, Finished
+    S-->>C: Application Data (optional early data)
+    C->>S: Finished
+    Note right of C: Flight 3 - 1 RTT total
+    C->>S: Application Data (HTTP GET)
+    S-->>C: Application Data (HTTP 200)
 ```
-CLIENT                                      SERVER
-  |                                              |
-  |-- ClientHello (ECDHE key_share) ---------->  |  Flight 1
-  |                                              |
-  |<-- ServerHello (key_share) ----------------  |  Flight 2
-  |<-- {Certificate, CertVerify, Finished}  ---  |  (encrypted with derived key)
-  |<-- [Application Data: optional early]  ----  |
-  |                                              |
-  |-- {Finished} ----------------------------->  |  Flight 3
-  |-- [Application Data: HTTP GET] ----------->  |  (1 RTT total)
-  |                                              |
-  |<-- [Application Data: HTTP 200] ----------  |
-```
+
+The server pushes its certificate and `Finished` in the same flight as `ServerHello`, so the client can answer with `Finished` plus its first request one RTT after `ClientHello` — versus 2 RTTs on TLS 1.2.
 
 ### OSI vs TCP/IP Layer Mapping
 
-```
-OSI Model            TCP/IP Model         Protocols
------------          ------------         -------------------
-Application (7)  \
-Presentation (6)  >  Application          HTTP, DNS, TLS, SSH
-Session (5)      /
-                     
-Transport (4)        Transport            TCP, UDP, QUIC
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Network (3)          Internet             IPv4, IPv6, ICMP
+    subgraph OSI["OSI 7-Layer Model"]
+        L7["Application (7)"]
+        L6["Presentation (6)"]
+        L5["Session (5)"]
+        L4o["Transport (4)"]
+        L3o["Network (3)"]
+        L2["Data Link (2)"]
+        L1["Physical (1)"]
+    end
 
-Data Link (2)    \   Network              Ethernet, Wi-Fi
-Physical (1)     /   Access              Cables, fiber, radio
+    L7 --> App["TCP/IP: Application<br/>HTTP, DNS, TLS, SSH"]
+    L6 --> App
+    L5 --> App
+    L4o --> Trans["TCP/IP: Transport<br/>TCP, UDP, QUIC"]
+    L3o --> Inet["TCP/IP: Internet<br/>IPv4, IPv6, ICMP"]
+    L2 --> Net["TCP/IP: Network Access<br/>Ethernet, Wi-Fi, fiber"]
+    L1 --> Net
+
+    class L7,L6,L5,L4o,L3o,L2,L1 io
+    class App,Trans,Inet,Net base
 ```
+
+OSI's top three layers (5-7) collapse into a single TCP/IP Application layer, and the bottom two (1-2) collapse into Network Access — which is why engineers talk about L3/L4/L7 instead of all seven OSI layers.
 
 ### IP Subnetting — CIDR /24 Example
 
@@ -298,6 +344,32 @@ Total usable: 254 addresses
 ## 6. How It Works — Detailed Mechanics
 
 ### 6.1 TCP Connection Lifecycle Simulation
+
+The `TCPState` enum below is the state machine every TCP socket walks through — the accept path (`LISTEN`) and connect path (`SYN_SENT`) converge on `ESTABLISHED`, and the two teardown paths (active close vs. passive close) diverge from there:
+
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+
+    CLOSED --> LISTEN: server calls listen()
+    CLOSED --> SYN_SENT: client calls connect()
+
+    LISTEN --> SYN_RECEIVED: recv SYN
+    SYN_SENT --> ESTABLISHED: recv SYN-ACK, send ACK
+    SYN_RECEIVED --> ESTABLISHED: recv ACK
+
+    ESTABLISHED --> FIN_WAIT_1: active close - send FIN
+    ESTABLISHED --> CLOSE_WAIT: passive close - recv FIN
+
+    FIN_WAIT_1 --> FIN_WAIT_2: recv ACK
+    FIN_WAIT_2 --> TIME_WAIT: recv FIN, send ACK
+    TIME_WAIT --> [*]: 2 x MSL elapsed (~60s)
+
+    CLOSE_WAIT --> LAST_ACK: send FIN
+    LAST_ACK --> [*]: recv ACK
+```
+
+The initiator of the close (active closer) is the side that spends 2×MSL in `TIME_WAIT`; the passive closer exits via the shorter `CLOSE_WAIT` to `LAST_ACK` path — this asymmetry is why TIME_WAIT accumulation (Pitfall 2, Section 10) only bites the side that initiates connection teardown.
 
 ```python
 from __future__ import annotations

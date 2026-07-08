@@ -67,25 +67,36 @@ For anything past ~50 lines or needing data structures, JSON, or robust error ha
 
 ## 5. Architecture Diagrams
 
-```
-A robust container entrypoint script
+*A robust container entrypoint script — guardrails go on first, config and dependency checks happen next, then `exec` hands the process off to the app.*
 
-start
-  |
-  v
-set -euo pipefail            # guardrails ON
-  |
-  v
-render config from env  -----> /etc/app/config.yaml
-  |   (envsubst < tmpl)
-  v
-wait-for dependency  --------> nc -z db 5432  (loop w/ timeout)
-  |   (fail after 30s -> exit 1)
-  v
-trap 'graceful_shutdown' TERM INT   # forward signals
-  |
-  v
-exec "$@"                    # replace shell with app -> app becomes PID 1
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start([start]) --> Flags(set -euo pipefail<br/>guardrails ON)
+    Flags --> Render(render config from env<br/>via envsubst)
+    Render -.-> ConfigFile(/etc/app/config.yaml)
+    Render --> Wait(wait-for dependency<br/>nc -z db 5432, looped)
+    Wait -.-> Timeout{"ready within 30s?"}
+    Timeout -- "no" --> Fail(exit 1)
+    Timeout -- "yes" --> Trap(trap graceful_shutdown<br/>TERM INT)
+    Trap --> Exec(["exec $@ <br/>app becomes PID 1"])
+
+    class Start io
+    class Flags mathOp
+    class Render mathOp
+    class ConfigFile base
+    class Wait mathOp
+    class Timeout mathOp
+    class Fail lossN
+    class Trap mathOp
+    class Exec train
 ```
 
 ---
@@ -130,6 +141,39 @@ echo $?   # 0  even if the health string was absent!
 set -o pipefail
 curl -s https://api.example.com/health | grep -q '"status":"ok"'
 echo $?   # 1  -> script with set -e exits here
+```
+
+*How `$?` propagates through the same three-stage pipeline with and without `pipefail` — the middle command's failure is invisible until `pipefail` makes the pipeline report it.*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph WO["without pipefail"]
+        C1(curl -s health) --> G1(grep -q pattern<br/>fails, exit 1)
+        G1 --> T1(tee /dev/null<br/>exit 0)
+        T1 --> R1(["$? = 0 - reports success"])
+    end
+
+    subgraph WP["with set -o pipefail"]
+        C2(curl -s health) --> G2(grep -q pattern<br/>fails, exit 1)
+        G2 --> T2(tee /dev/null<br/>exit 0)
+        T2 --> R2(["$? = 1 - set -e aborts"])
+    end
+
+    WO ~~~ WP
+
+    class C1,C2 io
+    class G1,G2 lossN
+    class T1,T2 mathOp
+    class R1 lossN
+    class R2 train
 ```
 
 ### jq for JSON (don't parse JSON with grep/awk)
@@ -199,6 +243,34 @@ retry 5 2 curl -sf https://api.example.com/ready   # 2s,4s,8s,16s backoff
 **Use shell when:** orchestrating CLI tools, writing entrypoints/probes, quick log/`/proc` diagnosis, and minimal-dependency bootstrap scripts.
 
 **Escalate to Python/Go when:** you need data structures, robust error handling, JSON/HTTP work, concurrency, or the script exceeds ~100 lines. "If it has more than two `if`s and a loop over structured data, it wants to be Python."
+
+*The escalation call as a decision tree — the same criteria as the tradeoffs table above, applied in the order that catches most scripts fastest.*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start([new automation script]) --> Q1{"gluing CLIs,<br/>short pipeline?"}
+    Q1 -- "yes" --> Bash(["stay in bash"])
+    Q1 -- "no" --> Q2{"JSON/YAML, HTTP+retries,<br/>or concurrency?"}
+    Q2 -- "yes" --> Py(["escalate to Python"])
+    Q2 -- "no" --> Q3{"over 100 lines,<br/>2+ ifs over structured data?"}
+    Q3 -- "yes" --> Py
+    Q3 -- "no" --> Bash
+
+    class Start io
+    class Q1 mathOp
+    class Q2 mathOp
+    class Q3 mathOp
+    class Bash train
+    class Py frozen
+```
 
 ---
 
@@ -304,18 +376,30 @@ Use `jq`: `jq -r '.items[].metadata.name'`. It understands JSON structure, handl
 
 A cron job dumps a database to S3 nightly. After a schema migration renamed a credential env var, backups became 0-byte files — but the job kept exiting 0, so monitoring stayed green. The gap surfaced only when a restore was attempted.
 
-```
-cron -> backup.sh
-   pg_dump (fails: bad creds, writes nothing to stdout)
-        |  (no pipefail -> failure masked)
-        v
-   gzip  (compresses empty stream -> tiny valid .gz)
-        |
-        v
-   aws s3 cp  (uploads the empty .gz -> exit 0)
-        |
-        v
-   script exits 0 -> monitoring "success"
+*The silent-failure cascade: pg_dump's bad-credential failure is masked without `pipefail`, so gzip and `aws s3 cp` happily process and upload an empty stream, and the job still exits 0 — a false green in monitoring.*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Cron([cron]) --> BackupSh(backup.sh)
+    BackupSh --> PgDump(pg_dump<br/>bad creds, empty stdout)
+    PgDump -. "no pipefail:<br/>failure masked" .-> Gzip(gzip<br/>empty stream to tiny .gz)
+    Gzip --> S3Cp(aws s3 cp<br/>uploads empty .gz)
+    S3Cp --> FalseGreen(["exit 0, monitoring shows success"])
+
+    class Cron req
+    class BackupSh mathOp
+    class PgDump lossN
+    class Gzip mathOp
+    class S3Cp base
+    class FalseGreen lossN
 ```
 
 ```bash

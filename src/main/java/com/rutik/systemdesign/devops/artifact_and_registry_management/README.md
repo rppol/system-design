@@ -75,26 +75,83 @@ Two overlapping product categories: **universal artifact managers** (JFrog Artif
 
 ## 5. Architecture Diagrams
 
+**Build-once, promote across registries (no rebuild)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A([CI build]) -->|"push"| B([dev registry<br/>app@sha256:abc])
+    B --> C(scan Trivy<br/>+ sign cosign)
+    C --> D{gate: scan passed<br/>and signed?}
+    D -->|"yes"| E(promote:<br/>copy same digest)
+    D -->|"no"| R(build blocked)
+    E --> F([prod registry<br/>app@sha256:abc])
+    F --> G([cluster admission:<br/>signed + scanned only])
+
+    class A io
+    class B,F base
+    class C,D mathOp
+    class E,G train
+    class R lossN
 ```
-Build-once, promote across registries (no rebuild)
 
-  CI build -> push registry/dev/app@sha256:abc   (immutable digest)
-                 | scan (Trivy) + sign (cosign)
-                 v
-        gate: scan passed? signed?  -- yes -->
-                 |
-        promote (copy/replicate the SAME digest) -> registry/prod/app@sha256:abc
-                 |
-        cluster admission: only signed + scanned digests from registry/prod run
+*The exact digest that clears the scan-and-sign gate is copied — never rebuilt — into the prod registry, and cluster admission enforces that only signed, scanned digests from that registry are allowed to run.*
 
-Proxy/cache insulating builds from public registries
+**Proxy/cache insulating builds from public registries**
 
-  build --pull--> [virtual repo]
-                     |  cache hit -> served locally (fast, no rate limit)
-                     |  miss -> [remote proxy] -> Docker Hub / npm / Maven Central
-                     |            caches the result for next time
-   public registry down or rate-limited? cached artifacts still build.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A([build]) -->|"pull"| B(virtual repo)
+    B --> C{cache hit?}
+    C -->|"hit"| D([served locally<br/>fast, no rate limit])
+    C -->|"miss"| E(remote proxy)
+    E --> F([Docker Hub / npm<br/>Maven Central])
+    F -.->|"caches result<br/>for next time"| B
+
+    class A io
+    class B base
+    class C mathOp
+    class D train
+    class E req
+    class F frozen
 ```
+
+*A cache hit is served locally with no rate-limit exposure; a miss falls through to the remote proxy and the public registry, whose result is cached for next time — so a public-registry outage or rate limit no longer blocks the build.*
+
+**Artifact lifecycle: build to rollback or retirement**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Built
+    Built --> Pushed: push tag + digest
+    Pushed --> Scanned: Trivy scan
+    Scanned --> Blocked: CVE found, exit 1
+    Scanned --> Signed: clean, cosign sign
+    Signed --> Promoted: copy same digest to prod
+    Promoted --> Deployed: cluster admission, signed + scanned only
+    Deployed --> RolledBack: incident, redeploy prior digest
+    RolledBack --> Deployed: prior digest verified good
+    Deployed --> Expired: retention policy, age or count threshold
+    Blocked --> [*]
+    Expired --> [*]
+```
+
+*One digest moves through every state here without ever being rebuilt: a failed scan blocks it before signing, a bad deploy rolls back to the exact prior digest instead of an unknown rebuild, and retention only expires it once enough newer releases exist.*
 
 ---
 
@@ -279,13 +336,30 @@ Hosted (local) repos store artifacts your org publishes. Proxy (remote) repos ar
 
 A scaling startup's CI pulls base images directly from Docker Hub. As the team grows, builds start failing intermittently with `toomanyrequests`. Separately, an incident requires answering "which build is in prod?" — but prod runs `app:latest`, which has been re-pushed dozens of times, so nobody can map it to a commit, and a rollback deploys an unknown previous `latest`.
 
+**BROKEN**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(CI pulls node:20<br/>anonymously from Hub) --> B(over 100 pulls<br/>per 6h limit hit)
+    B --> C(random toomanyrequests<br/>failures across fleet)
+    D(prod image:<br/>registry/app:latest) --> E(mutable tag<br/>re-pushed constantly)
+    E --> F(what runs in prod<br/>is unknowable)
+
+    class A req
+    class B mathOp
+    class D base
+    class C,E,F lossN
 ```
-BROKEN
-  - CI: FROM node:20  (pulled from Docker Hub anonymously) -> hits ~100 pulls/6h limit
-        -> random "toomanyrequests" failures across the fleet
-  - Prod: image: registry/app:latest  (mutable, re-pushed constantly)
-        -> "what's in prod?" = unknowable; rollback target = unknown
-```
+
+*Two independent failures compound: anonymous Docker Hub pulls trip the rate limit and break CI at random, while the mutable `latest` tag in prod means nobody can say what is actually running or which digest to roll back to.*
 
 ```hcl
 # FIX 1: pull-through cache for base images (Terraform, ECR pull-through cache rule).

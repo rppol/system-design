@@ -73,66 +73,77 @@ Samples the call stack at a fixed interval (100 Hz by default). Overhead: <1%. S
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Src(["Python Source Code"]) --> Comp("CPython Compiler<br/>compile()")
+    Comp --> CodeObj("Code Object<br/>bytecode + constants")
+    CodeObj --> Loop("CPython Interpreter Loop<br/>ceval.c")
+    Loop --> Spec("Specializing Adaptive<br/>Interpreter (3.11)<br/>~8 warmup runs")
+    Spec --> Exec(["Execution<br/>frames + value stack"])
+    Exec --> CProf("cProfile hook<br/>sys.setprofile per call/return")
+    Exec --> LineProf("line_profiler hook<br/>sys.settrace per line")
+    Exec -.-> PySpy("py-spy<br/>external process sampling")
+    Exec --> TraceMalloc("tracemalloc hook<br/>allocation per malloc")
+
+    class Src io
+    class Comp,Loop,Spec mathOp
+    class CodeObj base
+    class Exec train
+    class CProf,LineProf,TraceMalloc req
+    class PySpy frozen
 ```
-Python Source Code
-       |
-       v
-  CPython Compiler (compile())
-       |
-       v
-  Code Object (bytecode + constants)
-       |
-       v
-  CPython Interpreter Loop (ceval.c)
-       |
-   [3.11] Specializing Adaptive Interpreter
-       |    observes N~8 executions of same instruction
-       |    rewrites LOAD_ATTR -> LOAD_ATTR_INSTANCE_VALUE
-       |    rewrites CALL -> CALL_PY_EXACT_ARGS
-       |
-       v
-  Execution (frames, value stack)
-       |
-       +---> cProfile hook: sys.setprofile() per call/return
-       |
-       +---> line_profiler hook: sys.settrace() per line
-       |
-       +---> py-spy: PTRACE / proc sampling (external process)
-       |
-       +---> tracemalloc: allocation hook per malloc
 
+*Source-to-execution pipeline: the specializing adaptive interpreter (3.11) rewrites hot bytecode after roughly 8 observed executions, then four independent hooks attach at the execution stage with very different costs — three instrument the interpreter directly, while py-spy alone samples the process from outside.*
 
-Profiling Output Pipeline
---------------------------
-cProfile.run()
-    |
-    v
-pstats.Stats  -->  sort_stats('cumtime')  -->  print_stats(20)
-    |
-    v
-snakeviz (browser flamegraph)   /   gprof2dot (call graph)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    Run(["cProfile.run()"]) --> Stats("pstats.Stats")
+    Stats --> Sort("sort_stats<br/>by cumtime")
+    Sort --> Print("print_stats(20)")
+    Print --> Snake(["snakeviz<br/>browser flamegraph"])
+    Print --> Gprof(["gprof2dot<br/>call graph"])
 
-py-spy Output
---------------
+    class Run io
+    class Stats base
+    class Sort,Print mathOp
+    class Snake,Gprof io
+```
+
+*Profiling output pipeline: raw call/return counts collected by `cProfile.run()` flow into `pstats.Stats`, get sorted by cumulative time, and either print inline or feed a flamegraph/call-graph visualizer.*
+
+**py-spy Output**
+
+```
 py-spy top --pid PID              # live top-like view
 py-spy record -o profile.svg      # SVG flamegraph, no restart needed
 ```
 
+```mermaid
+stateDiagram-v2
+    [*] --> Generic
+    state "LOAD_ATTR (generic)" as Generic
+    state "LOAD_ATTR_INSTANCE_VALUE<br/>(specialized, type-checked inline)" as Specialized
+    Generic --> Specialized: observed same type<br/>8 times
+    Specialized --> Generic: type mismatch, deoptimize
 ```
-Specializing Adaptive Interpreter — instruction lifecycle [3.11]
-----------------------------------------------------------------
 
-LOAD_ATTR (generic)
-   |
-   | observed same type 8 times
-   v
-LOAD_ATTR_INSTANCE_VALUE  (specialized, type-checked inline)
-   |
-   | type mismatch detected
-   v
-LOAD_ATTR (deoptimize, back to generic)
-```
+*Instruction lifecycle for a single `LOAD_ATTR` site [3.11]: it starts generic, specializes after roughly 8 consistent-type observations, and deoptimizes back to generic the instant the observed type changes — the same warmup-then-fallback cycle applies to `CALL`, `BINARY_OP`, and `COMPARE_OP` (see the table in 6.3).*
 
 ---
 
@@ -480,6 +491,28 @@ timeit.timeit(stmt, setup="import gc; gc.enable()", number=10_000)
 | PyPy (alternative runtime) | 2-10x            | Low       | Medium      | C extension compatibility     |
 | CPython 3.11 upgrade       | ~25%             | Low       | High        | None for most code            |
 
+```mermaid
+quadrantChart
+    title Effort vs speedup potential by optimization technique
+    x-axis Low effort --> High effort
+    y-axis Low speedup --> High speedup
+    quadrant-1 High effort high payoff
+    quadrant-2 Best ROI first
+    quadrant-3 Low priority
+    quadrant-4 Reconsider
+    "Algorithmic improvement": [0.5, 0.95]
+    "NumPy vectorization": [0.48, 0.68]
+    "Cython": [0.78, 0.7]
+    "C extension (manual)": [0.95, 0.78]
+    "mypyc": [0.48, 0.32]
+    "PyPy (alt runtime)": [0.22, 0.38]
+    "orjson / ujson": [0.08, 0.35]
+    "Local var aliasing": [0.18, 0.18]
+    "CPython 3.11 upgrade": [0.08, 0.15]
+```
+
+*Plotting the table above by effort (x) and speedup potential (y) makes the ROI clusters visible at a glance: `orjson` and the free 3.11 upgrade sit in the low-effort/solid-payoff quadrant, while C extensions and Cython demand the most engineering for their gains.*
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -596,6 +629,31 @@ After profiling reveals a hot function, developers sometimes optimize a secondar
 | `memory_profiler` | Line (memory)    | 5-10x      | No              | No           | Annotated source + MB     |
 | `tracemalloc`     | Allocation site  | 2-3x       | Careful         | No           | Snapshot diff / top allocs|
 | `VizTracer`       | Function + args  | 1-2x       | No              | Yes (JSON)   | Chrome trace viewer       |
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q(["What do you<br/>need to know?"]) --> Prod{"Running in<br/>production?"}
+    Prod -->|"yes, need under 1% overhead"| PySpy("py-spy<br/>stack sampling")
+    Prod -->|"no, staging is fine"| Gran{"What granularity?"}
+    Gran -->|"which function?"| CProf("cProfile<br/>exact call counts")
+    Gran -->|"which line?"| LineProf("line_profiler<br/>per-line timing")
+    Gran -->|"memory growth?"| Trace("tracemalloc<br/>allocation snapshots")
+
+    class Q io
+    class Prod,Gran mathOp
+    class PySpy train
+    class CProf,LineProf,Trace req
+```
+
+*Production-safety and required granularity are the two decisions that route you to a specific tool: py-spy is the only one safe to attach directly to a live process, so everything else waits for a staging replica.*
 
 **Additional tools:**
 

@@ -174,107 +174,140 @@ def send_invoice(order_id: int) -> None:
 
 ### 5.1 BackgroundTasks (no broker)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["HTTP Request"]) --> B("FastAPI Handler")
+    B -->|"response sent<br/>fast"| C(["Client"])
+    B -.->|"in-process<br/>after response"| D("Task List<br/>in memory")
+    D --> E{"Worker process<br/>killed?"}
+    E -->|"SIGKILL / OOM<br/>/ deploy"| F("Tasks Lost<br/>no recovery")
+
+    class A,C io
+    class B mathOp
+    class D req
+    class E,F lossN
 ```
-HTTP Request
-     |
-     v
-+-----------+
-| FastAPI   |  -----> Response returned to client (fast)
-| Handler   |
-+-----------+
-     |
-     v (in-process, after response)
-+-----------+
-| Task list |  send_email(), audit_log(), ...
-| (memory)  |
-+-----------+
-     |
-  PROCESS CRASH
-     |
-     v
-  TASKS LOST (no recovery)
-```
+
+The task list lives only in the handler's own process memory, so a worker crash between enqueue and execution drops the work with no trace — the reason `BackgroundTasks` is unsuitable for anything durable.
 
 ### 5.2 ARQ Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["POST /orders/<br/>save_order()"]) -->|"pool.enqueue_job()"| B("arq:queue<br/>job_id, fn, args")
+    B -->|"poll<br/>BRPOPLPUSH"| C("ARQ Worker<br/>asyncio loop")
+    C -->|"send_email()<br/>generate_report()"| D{"Task<br/>result?"}
+    D -.->|"failure"| E("Re-enqueue")
+    E -.-> B
+    D -->|"exhausted<br/>retries"| F("arq:failed_jobs")
+
+    class A io
+    class B base
+    class C mathOp
+    class D mathOp
+    class E train
+    class F lossN
 ```
-FastAPI Worker (Uvicorn)                Redis
-+----------------------+         +----------------+
-| POST /orders/        |         | arq:queue      |
-|   save_order()       |  enqueue| {job_id, fn,   |
-|   pool.enqueue_job() +-------->| args, kwargs,  |
-|   return response    |         | enqueue_time}  |
-+----------------------+         +-------+--------+
-                                         |
-                                         | poll (BRPOPLPUSH)
-                                         v
-                               +-------------------+
-                               | ARQ Worker        |
-                               | (asyncio loop)    |
-                               |                   |
-                               | send_email()      |
-                               | generate_report() |
-                               | [concurrent coros]|
-                               +-------------------+
-                                         |
-                               on failure: re-enqueue
-                               on exhaustion: arq:failed_jobs
-```
+
+FastAPI enqueues the job payload into Redis and returns immediately; the ARQ worker polls with a blocking `BRPOPLPUSH`, re-enqueues on failure, and only lands in `arq:failed_jobs` once retries are exhausted.
 
 ### 5.3 Celery Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["task.apply_async()"]) --> B{"Broker<br/>Redis / RabbitMQ"}
+
+    subgraph QS["Priority Queues"]
+        direction LR
+        Q1("Queue: high")
+        Q2("Queue: default")
+        Q3("Queue: low")
+    end
+
+    B --> Q1
+    B --> Q2
+    B --> Q3
+
+    subgraph WS["Celery Workers (prefork)"]
+        direction LR
+        W1("Worker 1")
+        W2("Worker 2")
+        W3("Worker 3")
+    end
+
+    Q1 --> W1
+    Q2 --> W2
+    Q3 --> W3
+
+    W1 --> M(("done"))
+    W2 --> M
+    W3 --> M
+    M --> C{"Task<br/>succeeded?"}
+    C -.->|"no: retry<br/>w/ backoff"| B
+    C -->|"retries<br/>exhausted"| D("Dead-letter Queue<br/>Redis key")
+    C -->|"yes"| E("Result Backend<br/>Redis / Postgres")
+
+    class A io
+    class B mathOp
+    class Q1,Q2,Q3 req
+    class W1,W2,W3 train
+    class M mathOp
+    class C mathOp
+    class D lossN
+    class E base
 ```
-FastAPI Worker                 Broker (Redis/RabbitMQ)
-+------------------+           +---------------------+
-| task.apply_async +---------->| Queue: default      |
-| (returns         |           | Queue: high         |
-|  AsyncResult)    |           | Queue: low          |
-+------------------+           +----------+----------+
-                                           |
-                            ______________|______________
-                           |              |              |
-                           v              v              v
-                    +----------+  +----------+  +----------+
-                    | Celery   |  | Celery   |  | Celery   |
-                    | Worker 1 |  | Worker 2 |  | Worker 3 |
-                    | (prefork)|  | (prefork)|  | (prefork)|
-                    +----------+  +----------+  +----------+
-                           |
-                    on failure: retry w/ backoff
-                    on max_retries: -> Dead-letter queue (Redis key)
-                           |
-                    +----------+
-                    | Result   |
-                    | Backend  |
-                    | (Redis/  |
-                    |  Postgres|
-                    +----------+
-```
+
+Requests fan out across three priority queues to dedicated prefork worker pools; a failed task retries with backoff back through the broker, and only exhausted retries reach the dead-letter queue, while successes land in the result backend.
 
 ### 5.4 Idempotency Key Pattern
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant F as FastAPI
+    participant R as Redis
+    participant W as Worker
+
+    C->>F: POST /orders/ (X-Idempotency-Key: abc123)
+    F->>R: SET NX EX 86400 idem:abc123
+    R-->>F: OK (set)
+    F->>R: enqueue job
+    F-->>C: 202 Accepted
+    R->>W: dequeue
+
+    Note over C,F: Client retries with the same idempotency key
+    C->>F: POST /orders/ (X-Idempotency-Key: abc123, retry)
+    F->>R: SET NX EX 86400 idem:abc123
+    R-->>F: nil (exists)
+    F-->>C: 202 Accepted (deduplicated)
+    Note over F,R: No duplicate job enqueued
 ```
-Client                        FastAPI             Redis           Worker
-  |                               |                  |               |
-  | POST /orders/ X-Idempotency-Key: abc123           |               |
-  |------------------------------>|                  |               |
-  |                               | SET NX EX 86400  |               |
-  |                               |  "idem:abc123"   |               |
-  |                               |----------------->|               |
-  |                               |<-- OK (set)      |               |
-  |                               | enqueue job      |               |
-  |                               |----------------->|               |
-  |<-- 202 Accepted               |                  | dequeue       |
-  |                               |                  |-------------->|
-  |                               |                  |               |
-  | POST /orders/ X-Idempotency-Key: abc123 (retry)  |               |
-  |------------------------------>|                  |               |
-  |                               | SET NX EX 86400  |               |
-  |                               |----------------->|               |
-  |                               |<-- nil (exists!) |               |
-  |<-- 202 Accepted (deduplicated)|                  |               |
-  |  (no duplicate job enqueued)  |                  |               |
-```
+
+The atomic `SET NX EX` check makes the second request with the same `X-Idempotency-Key` a no-op — Redis returns `nil` instead of `OK`, so FastAPI skips the second enqueue and no duplicate job ever reaches a worker.
 
 ---
 
@@ -496,6 +529,43 @@ report_chord.delay()
 True exactly-once is impossible without distributed transactions. Production systems
 implement idempotent at-least-once as the practical equivalent.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph AE["Ack-Early (Celery default)"]
+        direction LR
+        A1("Broker<br/>delivers") --> A2("Ack sent<br/>message removed")
+        A2 --> A3("Task executes")
+        A3 --> A4{"Worker<br/>SIGKILL?"}
+        A4 -->|"yes"| A5("Task lost<br/>forever")
+        A4 -->|"no"| A6("Task<br/>completes")
+    end
+
+    subgraph AL["Ack-Late (task_acks_late=True)"]
+        direction LR
+        B1("Broker<br/>delivers") --> B2("Task executes<br/>not yet acked")
+        B2 --> B3{"Worker<br/>SIGKILL?"}
+        B3 -->|"yes"| B4("Message<br/>requeued")
+        B3 -->|"no"| B5("Task completes<br/>then acked")
+    end
+
+    class A1,B1 req
+    class A2 frozen
+    class A3,B2 mathOp
+    class A4,B3 mathOp
+    class A5 lossN
+    class A6,B4,B5 train
+```
+
+Ack-early removes the message from the broker before the handler runs, so a mid-task `SIGKILL` loses it forever; ack-late defers the ack until the handler succeeds, so the same crash just requeues the message — the exact mechanic behind `task_acks_late` (Pitfall 3, Q3).
+
 ---
 
 ## 7. Real-World Examples
@@ -563,6 +633,31 @@ instances for 1,000 concurrent outbound calls total.
 ---
 
 ## 9. When to Use / When NOT to Use
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A{"Must the result<br/>return synchronously?"} -->|"yes"| B("await directly<br/>no queue")
+    A -->|"no"| C{"Is an occasional<br/>drop acceptable?"}
+    C -->|"yes, task under 10ms<br/>and non-critical"| D("BackgroundTasks<br/>fire-and-forget")
+    C -->|"no, must survive<br/>crash and retry"| E{"Is the work<br/>CPU-bound?"}
+    E -->|"yes"| F("Celery prefork<br/>or ProcessPoolExecutor")
+    E -->|"no, I/O-bound"| G("Durable queue<br/>ARQ or Celery")
+
+    class A,C,E mathOp
+    class B io
+    class D req
+    class F,G train
+```
+
+Three questions in sequence — synchronous need, acceptable drop risk, and CPU-vs-I/O-bound — route straight to the right tool from the detailed bullet lists below.
 
 ### Use background jobs when:
 
@@ -893,23 +988,32 @@ response latency.
 
 #### Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["FastAPI<br/>POST /orders/<br/>HTTP 202 in 8ms"]) -->|"~2ms"| B("ARQ Job Queue<br/>arq:queue")
+    B --> C("ARQ Workers<br/>4 processes<br/>50 jobs each")
+    C --> D1("Email SMTP<br/>SES")
+    C --> D2("Webhook<br/>httpx")
+    C --> D3("Points DB<br/>Postgres")
+    C -.->|"idempotency<br/>guard"| K("email_sent:12345<br/>Redis TTL 24h")
+
+    class A io
+    class B base
+    class C train
+    class D1,D2 frozen
+    class D3 base
+    class K base
 ```
-+------------------+        +-------------------+        +------------------+
-| FastAPI          |  Redis  | ARQ Job Queue     |        | ARQ Workers      |
-| POST /orders/    +-------->| arq:queue         +------->| (4 processes,    |
-|                  |  ~2ms   | {send_email,      |        |  50 jobs each)   |
-| HTTP 202 in 8ms  |         |  order_id: 12345} |        |                  |
-+------------------+         +-------------------+        +--------+---------+
-                                                                    |
-                                                      +-------------+----------+
-                                                      |             |          |
-                                                 Email SMTP    Webhook    Points DB
-                                                 (SES)        (httpx)    (Postgres)
-                                                      |
-                                               idempotency key:
-                                               "email_sent:12345"
-                                               in Redis (TTL 24h)
-```
+
+Redis absorbs the write in about 2ms so the HTTP response returns in 8ms total; each of the three fan-out jobs — email, webhook, loyalty points — carries its own idempotency guard so a retried order never double-sends.
 
 #### Implementation
 

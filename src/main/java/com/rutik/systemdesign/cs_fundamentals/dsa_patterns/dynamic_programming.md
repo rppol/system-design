@@ -52,25 +52,43 @@ subproblems **recur** regardless of the order choices were made.
 The classic illustration: naive recursive Fibonacci recomputes `fib(2)` and
 `fib(1)` many times. DP computes each distinct `(state)` exactly once.
 
+Naive recursion tree for `fib(5)` — every red node is `fib(2)`, recomputed
+three times from scratch; every blue leaf is a base case (`fib(0)` or `fib(1)`):
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R("fib(5)") --> A("fib(4)")
+    R --> B("fib(3)")
+    A --> C("fib(3)")
+    A --> D("fib(2)<br/>duplicate #2")
+    C --> E("fib(2)<br/>duplicate #1")
+    C --> F(["fib(1)"])
+    D --> G(["fib(1)"])
+    D --> H(["fib(0)"])
+    B --> I("fib(2)<br/>duplicate #3")
+    B --> J(["fib(1)"])
+    E --> K(["fib(1)"])
+    E --> L(["fib(0)"])
+    I --> M(["fib(1)"])
+    I --> N(["fib(0)"])
+
+    class R,A,B,C mathOp
+    class D,E,I lossN
+    class F,G,H,J,K,L,M,N io
 ```
-Naive recursion tree for fib(5) -- note fib(2) computed THREE times:
 
-                    fib(5)
-                  /        \
-             fib(4)          fib(3)
-            /     \          /     \
-        fib(3)   fib(2)  fib(2)   fib(1)
-        /   \     /  \    /  \
-   fib(2) fib(1) fib(1)fib(0) fib(1)fib(0)
-    /  \
-fib(1)fib(0)
-
-With memoization: each fib(k) is computed ONCE, cached, and reused --
-the tree COLLAPSES into a chain of 6 distinct subproblems: fib(0)..fib(5).
-
-dp[0]=0, dp[1]=1, dp[2]=dp[1]+dp[0]=1, dp[3]=dp[2]+dp[1]=2,
-dp[4]=dp[3]+dp[2]=3, dp[5]=dp[4]+dp[3]=5
-```
+With memoization, each `fib(k)` is computed ONCE, cached, and reused — the
+tree COLLAPSES into a chain of 6 distinct subproblems: `fib(0)..fib(5)`:
+`dp[0]=0`, `dp[1]=1`, `dp[2]=dp[1]+dp[0]=1`, `dp[3]=dp[2]+dp[1]=2`,
+`dp[4]=dp[3]+dp[2]=3`, `dp[5]=dp[4]+dp[3]=5`.
 
 **The DP recipe**: (1) define `dp[state]` = the answer to the subproblem
 identified by `state`; (2) write the **recurrence** — `dp[state]` in terms of
@@ -278,6 +296,32 @@ at most k transactions). State = `(day, holding_or_not, ...)`; transitions =
 (states as nodes, transitions as edges with costs) makes the recurrence
 almost mechanical to write down.
 
+Redrawing the Buy/Sell-with-Cooldown recurrence as an explicit state machine
+(`Free` = not holding, `Held` = holding a share, `Cooldown` = just sold and
+must wait one day) turns three formulas into a graph read at a glance:
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Free
+    Free --> Free: stay free
+    Free --> Held: buy
+    Held --> Held: hold
+    Held --> Cooldown: sell
+    Cooldown --> Free: cooldown ends
+
+    class Free train
+    class Held frozen
+    class Cooldown lossN
+```
+
 **Bitmask DP** — Traveling Salesman, assignment problems, "minimum cost to
 visit all of these `n` items" where `n <= ~20`. State =
 `(bitmask_of_visited, current_position)`; `2^n * n` states, each with `O(n)`
@@ -427,6 +471,32 @@ answer (for `amount=0`), making it a uniquely bad sentinel here.
   path in a DAG is DP where the "order of evaluation" is exactly the
   topological order — a clean illustration of "bottom-up DP needs a
   dependency-respecting iteration order."
+
+Chaining all four bullets into one decision path:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S(["Optimal substructure<br/>detected"]) --> D1{"Need to list<br/>ALL solutions?"}
+    D1 -->|"yes"| BT("Backtracking")
+    D1 -->|"no, count/optimize only"| D2{"Greedy choice<br/>provably optimal?"}
+    D2 -->|"yes"| GR("Greedy")
+    D2 -->|"no, can't prove it"| D3{"Graph is a DAG?"}
+    D3 -->|"yes"| TS("Topological Sort<br/>+ DP")
+    D3 -->|"no"| DP("Dynamic Programming<br/>(this pattern)")
+
+    class S io
+    class D1,D2,D3 mathOp
+    class BT,GR,TS frozen
+    class DP train
+```
 
 ---
 

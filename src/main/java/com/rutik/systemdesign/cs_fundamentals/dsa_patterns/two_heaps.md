@@ -80,6 +80,37 @@ it belongs to (compare against `left`'s root), (2) **rebalance** if one heap
 has grown more than one larger than the other by moving its root to the other
 heap, (3) read the median in O(1) from the two roots.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    numIn(["new value<br/>num"]) --> route{"num at or below<br/>left's max?"}
+    route -->|"yes"| pushL["push to LEFT<br/>(max-heap)"]
+    route -->|"no"| pushR["push to RIGHT<br/>(min-heap)"]
+    pushL --> balCheck{"sizes off<br/>by more than 1?"}
+    pushR --> balCheck
+    balCheck -->|"yes"| move["move root<br/>to other heap"]
+    balCheck -->|"no"| readM(["read median<br/>O(1) from roots"])
+    move --> readM
+
+    class numIn,readM io
+    class route,balCheck mathOp
+    class pushL train
+    class pushR req
+    class move lossN
+```
+
+The two decision diamonds are the whole algorithm: `route` picks which heap
+receives the new value, `balCheck` decides whether a root must migrate to
+keep the size invariant — both cost O(log n), while the final median read is
+O(1), the asymmetry the pattern is built around.
+
 ---
 
 ## 3. The Template
@@ -189,11 +220,30 @@ for removal, pop it and decrement its pending-removal count. Track the
 "effective size" of each heap (`actual_size - pending_removals`) for the
 balance invariant.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["check heap top"]) --> stale{"top marked<br/>stale?"}
+    stale -->|"yes"| pop["pop it,<br/>decrement counter"]
+    pop --> stale
+    stale -->|"no"| clean(["read / rebalance<br/>using clean top"])
+
+    class start io
+    class stale mathOp
+    class pop lossN
+    class clean train
 ```
-heap top is "stale" (marked for removal)?
-   -> pop it, decrement its pending-removal counter, repeat
-   -> THEN read/rebalance using the now-clean top
-```
+
+This clean-before-read loop runs before every peek or rebalance, so lazy
+deletion never lets a phantom (already-removed) element surface as the
+median.
 
 **2. IPO / Maximize Capital (LC 502) — "pool of available items" two heaps.**
 A different two-heap shape: a **min-heap of projects ordered by required
@@ -350,6 +400,37 @@ error.
 - **Monotonic deque** (see [monotonic_stack.md §6](monotonic_stack.md#6-variations--sub-patterns))
   — for sliding window **maximum/minimum** (a single extreme), not median;
   O(1) amortized vs. O(log k).
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    q0(["need a boundary value<br/>from a growing stream?"]) --> q1{"fixed-size k<br/>best-so-far?"}
+    q1 -->|"yes"| topk["Top-K Elements<br/>one heap, size k"]
+    q1 -->|"no"| q2{"merging k already-<br/>sorted sources?"}
+    q2 -->|"yes"| kmerge["K-Way Merge<br/>one entry per source"]
+    q2 -->|"no"| q3{"need one extreme<br/>over a window?"}
+    q3 -->|"yes"| deque["Monotonic Deque<br/>O(1) amortized"]
+    q3 -->|"no"| q4{"data static and<br/>already sorted?"}
+    q4 -->|"yes"| binsearch["Binary Search<br/>on partition point"]
+    q4 -->|"no"| twoheaps(["Two Heaps<br/>this pattern"])
+
+    class q0 io
+    class q1,q2,q3,q4 mathOp
+    class topk,kmerge,deque,binsearch frozen
+    class twoheaps train
+```
+
+K-way merge keeps one heap entry per source sequence, the monotonic deque
+answers a single extreme in O(1) amortized versus two heaps' O(log k), and
+binary search on a partition point is O(log(min(m,n))) for static pre-sorted
+arrays — reach for two heaps only after each narrower question answers "no."
 
 ---
 

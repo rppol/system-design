@@ -162,14 +162,29 @@ router = APIRouter(
 
 ### 4.4 Response Class Hierarchy
 
-```
-Response (base)
-├── JSONResponse       ← default; media_type=application/json
-├── HTMLResponse       ← media_type=text/html
-├── PlainTextResponse  ← media_type=text/plain
-├── RedirectResponse   ← 307/302/301 with Location header
-├── FileResponse       ← streams a file with proper headers
-└── StreamingResponse  ← async generator body
+All specific response classes extend the base `Response`; `JSONResponse` is the implicit default
+whenever a route returns a `dict` or Pydantic model without setting `response_class`.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Base("Response<br/>(base class)") --> JSON(["JSONResponse<br/>default · application/json"])
+    Base --> HTML(["HTMLResponse<br/>text/html"])
+    Base --> Plain(["PlainTextResponse<br/>text/plain"])
+    Base --> Redirect(["RedirectResponse<br/>307 / 302 / 301 + Location"])
+    Base --> File(["FileResponse<br/>streams file + headers"])
+    Base --> Streaming(["StreamingResponse<br/>async generator body"])
+
+    class Base base
+    class JSON train
+    class HTML,Plain,Redirect,File,Streaming io
 ```
 
 ---
@@ -178,70 +193,143 @@ Response (base)
 
 ### 5.1 Request Lifecycle
 
-```
-HTTP Request
-     |
-     v
-Uvicorn / ASGI server
-     |  ASGI scope={type, method, path, headers, query_string}
-     v
-Starlette Router
-     |  matches path pattern → selects route
-     v
-FastAPI dependant resolver
-     |  resolves Depends() tree → injects into handler args
-     v
-Parameter extraction & validation
-     |  path   → path_params dict
-     |  query  → query_params
-     |  body   → request.body() → Pydantic model
-     |  header → headers dict (auto-converted _ to -)
-     |  cookie → cookies dict
-     v
-Handler function (async def or sync def in thread pool)
-     |  returns: dict | Pydantic model | Response subclass
-     v
-Response serialisation
-     |  response_model filter → model.model_dump() → json.dumps()
-     v
-JSONResponse / custom Response
-     |  status_code, headers, body
-     v
-Uvicorn sends HTTP response
+Every request passes through the same nine stages regardless of route: the ASGI server, the
+router, FastAPI's dependency resolver, parameter validation, the handler, and serialisation back
+into an HTTP response.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["HTTP Request"]) --> B("Uvicorn /<br/>ASGI server")
+    B -->|"ASGI scope:<br/>type, method, path,<br/>headers, query_string"| C("Starlette<br/>Router")
+    C -->|"matches path<br/>selects route"| D("FastAPI dependant<br/>resolver")
+    D -->|"resolves Depends()<br/>tree"| E("Parameter extraction<br/>& validation")
+    E -->|"path · query · body<br/>header · cookie"| F("Handler function<br/>async or thread pool")
+    F -->|"dict, model, or<br/>Response subclass"| G("Response<br/>serialisation")
+    G -->|"response_model filter<br/>to JSON"| H(["JSONResponse /<br/>custom Response"])
+    H --> I(["Uvicorn sends<br/>HTTP response"])
+
+    class A,H,I io
+    class B base
+    class C,D,G mathOp
+    class E req
+    class F train
 ```
 
 ### 5.2 APIRouter Assembly
 
-```
- FastAPI app
- ┌──────────────────────────────────────────────────┐
- │  app.include_router(users.router, prefix="/api") │
- │  app.include_router(orders.router, prefix="/api")│
- │  app.include_router(health.router)               │
- └──────────────────────────────────────────────────┘
-         |                  |                 |
-   users.router        orders.router    health.router
-   prefix=/users       prefix=/orders   (no prefix)
-   tag=users           tag=orders       tag=ops
-   deps=[get_user_db]  deps=[get_db]
-         |
-   /users/{id}   GET
-   /users/       POST
-   /users/me     GET   ← must be declared BEFORE /{id}
+The app assembles three independently defined routers, each with its own prefix, tag, and
+dependency list. Within `users.router`, `/users/me` must be registered before `/users/{id}` or
+the parameterised route shadows it (see Pitfall 1).
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    App(["FastAPI app"]) --> Users("users.router<br/>prefix=/users · tag=users<br/>deps=get_user_db")
+    App --> Orders("orders.router<br/>prefix=/orders · tag=orders<br/>deps=get_db")
+    App --> Health("health.router<br/>no prefix · tag=ops")
+
+    Users --> Me(["GET /users/me<br/>registered before /id"])
+    Users --> ById(["GET /users/{id}"])
+    Users --> Create(["POST /users/"])
+
+    class App io
+    class Users,Orders,Health mathOp
+    class Me train
+    class ById,Create req
 ```
 
 ### 5.3 BackgroundTasks Flow
 
+The response is sent to the client as soon as the handler returns; the queued task only runs
+afterwards, in the same event loop, so it never blocks or delays the 202 Accepted reply.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant H as Handler
+    participant BG as BackgroundTasks<br/>Queue
+
+    C->>H: POST /send-email
+    H-->>C: 202 Accepted
+    H->>BG: add_task(send_email)
+    Note over BG: Runs after response is sent
+    BG->>BG: send_email(to, subject, body)
 ```
-Client ─────────────── POST /send-email ──────────────► Handler
-                                                             |
-                             202 Accepted ◄─────────────────┤
-                                                             |
-                                                    BackgroundTasks queue
-                                                             |
-                                                    task runs after response sent
-                                                             |
-                                                    send_email(to, subject, body)
+
+### 5.4 Sync vs Async Route Dispatch
+
+Whether a handler is declared `def` or `async def` decides its execution path: sync handlers are
+safely offloaded to a thread pool (~40 threads), while async handlers run directly on the event
+loop — where a blocking call stalls every other in-flight request (see Pitfall 2).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Route(["Route handler<br/>declared"]) --> Check{"async def<br/>or def?"}
+    Check -->|"async def"| Loop("Runs directly<br/>on event loop")
+    Check -->|"def (sync)"| Pool("Dispatched to<br/>thread pool")
+    Loop --> Fast(["Non-blocking:<br/>other requests proceed"])
+    Pool --> Safe(["Blocking I/O safe<br/>up to ~40 threads"])
+    Loop -.->|"blocking call<br/>inside async"| Stall(["Stalls entire<br/>event loop"])
+
+    class Route io
+    class Check mathOp
+    class Loop,Fast train
+    class Pool req
+    class Safe base
+    class Stall lossN
+```
+
+### 5.5 Route Matching Order — First Match Wins
+
+FastAPI/Starlette is a static router: it tests routes strictly in registration order and
+dispatches on the first match, with no specificity scoring — a broader pattern registered
+earlier always wins, which is why the route-ordering pitfalls in Section 10 exist at all.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req(["Incoming<br/>request path"]) --> C1{"Matches route 1?<br/>(registration order)"}
+    C1 -->|"yes"| H1(["Dispatch to<br/>route 1 handler"])
+    C1 -->|"no"| C2{"Matches<br/>route 2?"}
+    C2 -->|"yes"| H2(["Dispatch to<br/>route 2 handler"])
+    C2 -->|"no"| C3{"Matches<br/>route N?"}
+    C3 -->|"yes"| H3(["Dispatch to<br/>route N handler"])
+    C3 -->|"no"| NotFound(["404 Not Found"])
+
+    class Req io
+    class C1,C2,C3 mathOp
+    class H1,H2,H3 train
+    class NotFound lossN
 ```
 
 ---
@@ -858,20 +946,32 @@ An e-commerce SaaS platform needs to expose a REST API that:
 
 ### Architecture
 
-```
-                          FastAPI app
-                               |
-         ┌─────────────────────┼─────────────────────┐
-         |                     |                     |
-   v1_router             v2_router              health_router
-   prefix=/api/v1        prefix=/api/v2         (no prefix)
-   deps=[jwt_auth]       deps=[jwt_auth]        include_in_schema=False
-         |                     |
-   /orders (GET,POST)    /orders (GET,POST)     ← same domain, new models
-   /orders/{id} (GET)    /orders/{id} (GET)
-   /orders/export        /orders/export (CSV stream)
-         |
-    BackgroundTask: send_confirmation_email
+Both API versions share the same domain and mount under the same app, each behind its own
+JWT-gated router; only `v2_router`'s `create_order` handler queues the confirmation email.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    App(["FastAPI app"]) --> V1("v1_router<br/>prefix=/api/v1<br/>deps=jwt_auth")
+    App --> V2("v2_router<br/>prefix=/api/v2<br/>deps=jwt_auth")
+    App --> Health("health_router<br/>no prefix<br/>include_in_schema=False")
+
+    V1 --> V1Routes(["/orders (GET, POST)<br/>/orders/{id} (GET)<br/>/orders/export"])
+    V2 --> V2Routes(["/orders (GET, POST)<br/>/orders/{id} (GET)<br/>/orders/export (CSV stream)"])
+    V2Routes -.->|"on order create"| BGTask(["BackgroundTask:<br/>send_confirmation_email"])
+
+    class App io
+    class V1,V2 mathOp
+    class Health base
+    class V1Routes,V2Routes req
+    class BGTask train
 ```
 
 ### Implementation

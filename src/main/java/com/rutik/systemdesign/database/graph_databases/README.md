@@ -18,49 +18,66 @@ Relational databases store relationships as foreign keys — finding connected d
 
 ### Property Graph Model
 
-```
-Property Graph:
-  Nodes: entities with labels (type tags) and properties (key-value pairs)
-  Relationships: directed, typed connections between nodes with properties
+Nodes carry labels (type tags) and properties; relationships are directed, typed, and can carry their own properties. RDF triple stores instead reduce everything to bare subject-predicate-object atoms, so properties have to be reified as extra triples.
 
-Example: Social network
-  (User {id: 1, name: "Alice", age: 30})
-    -[:FOLLOWS {since: 2023-01-15}]→
-  (User {id: 2, name: "Bob", age: 25})
-    -[:WORKS_AT {from: 2022-06-01, role: "Engineer"}]→
-  (Company {id: 10, name: "Acme Corp"})
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-vs RDF/Triple Store (W3C standard):
-  Subject → Predicate → Object
-  (alice) → (follows) → (bob)
-  (bob)   → (works_at)→ (acme)
-  No native property support — attributes are additional triples
-  Used for: semantic web, knowledge graphs, linked data
+    subgraph LPG["Property Graph (LPG)"]
+        A1("Alice<br/>age: 30") -->|"FOLLOWS<br/>since: 2023-01-15"| B1("Bob<br/>age: 25")
+        B1 -->|"WORKS_AT<br/>role: Engineer"| C1("Acme Corp")
+    end
+
+    subgraph RDF["RDF Triple Store"]
+        A2("alice") -->|follows| B2("bob")
+        B2 -->|works_at| C2("acme")
+    end
+
+    class A1,B1,A2,B2 io
+    class C1,C2 base
 ```
+
+Both models describe the same Alice-Bob-Acme chain; the property graph attaches `since` and `role` directly to typed edges, while RDF triples stay bare atoms — properties require additional reified triples, and RDF is the model of choice for semantic web, knowledge graphs, and linked data.
 
 ### Index-Free Adjacency
 
-```
-Relational (finding friends of friends):
-  SELECT u.name FROM users u
-  JOIN friendships f1 ON f1.user_id = 1
-  JOIN friendships f2 ON f2.user_id = f1.friend_id AND f2.friend_id != 1
-  JOIN users u ON u.id = f2.friend_id;
-  → Each JOIN: O(log n) index lookup × N rows = O(N log n)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Neo4j native graph (index-free adjacency):
-  MATCH (alice:User {id: 1})-[:FRIENDS]->(:User)-[:FRIENDS]->(fof:User)
-  WHERE fof.id != 1 RETURN fof.name;
-  → alice's node record → pointer to FRIENDS rel records (O(1))
-  → Each rel record → pointer to friend node (O(1))
-  → Repeat per friend → total O(degree), not O(N log N)
+    subgraph SQL["Relational: finding friends of friends"]
+        S1("users<br/>id = 1") -->|"JOIN<br/>O(log n)"| S2("friendships f1")
+        S2 -->|"JOIN<br/>O(log n)"| S3("friendships f2")
+        S3 -->|"JOIN<br/>O(log n)"| S4("users<br/>fof")
+    end
 
-Concrete numbers:
-  Neo4j relationship traversal: ~O(1) per hop (following stored pointer)
-  PostgreSQL recursive CTE: O(log n) per hop for indexed FK lookup
-  At 6 degrees of separation: Neo4j ~millions of hops in seconds;
-    relational: O(n^6) — impractical for 1M+ nodes
+    subgraph CYPHER["Neo4j: index-free adjacency"]
+        N1("alice node") -->|"pointer<br/>O(1)"| N2("FRIENDS rel")
+        N2 -->|"pointer<br/>O(1)"| N3("friend node")
+        N3 -->|"pointer<br/>O(1)"| N4("FRIENDS rel")
+        N4 -->|"pointer<br/>O(1)"| N5("fof node")
+    end
+
+    class S1,S4 io
+    class S2,S3 lossN
+    class N1,N5 io
+    class N2,N3,N4 train
 ```
+
+**Concrete numbers**: Neo4j relationship traversal is ~O(1) per hop (following a stored pointer); a PostgreSQL recursive CTE is O(log n) per hop for an indexed FK lookup. At 6 degrees of separation, Neo4j resolves millions of hops in seconds while the relational equivalent is O(n^6) — impractical for 1M+ nodes.
 
 ### Neo4j Record Files
 
@@ -158,28 +175,64 @@ CALL gds.shortestPath.dijkstra.stream('road-network', {
 
 ## 5. Architecture Diagrams
 
+**Fraud detection schema and ring pattern** — an `Account` links to other accounts via `SENT_TO`, and to its owning `Person`, whose `Address` and `Device` round out the identity graph. A ring of three `SENT_TO` edges closing back on the origin account is the classic fraud signature.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SCHEMA["Fraud Detection Schema"]
+        ACC1("Account") -->|SENT_TO| ACC2("Account")
+        ACC1 -->|OWNED_BY| PER("Person")
+        PER -->|LIVES_AT| ADDR("Address")
+        PER -->|USES_DEVICE| DEV("Device")
+    end
+
+    subgraph RING["Ring Fraud Pattern (3-hop cycle)"]
+        RA("Account A") -->|SENT_TO| RB("Account B")
+        RB -->|SENT_TO| RC("Account C")
+        RC -.->|SENT_TO| RA
+    end
+
+    class ACC1,ACC2 base
+    class PER io
+    class ADDR,DEV frozen
+    class RA,RB,RC lossN
 ```
-FRAUD DETECTION GRAPH SCHEMA:
 
-(:Account {id, balance, created_at})
-  -[:SENT_TO {amount, timestamp}]→ (:Account)
-  -[:OWNED_BY]→ (:Person {name, ssn, dob})
-                   -[:LIVES_AT]→ (:Address)
-                   -[:USES_DEVICE]→ (:Device {ip, fingerprint})
-
-Ring fraud pattern:
-Account A ──SENT_TO──→ Account B ──SENT_TO──→ Account C ──SENT_TO──→ Account A
-
-Query:
+```cypher
 MATCH (a:Account)-[:SENT_TO]->(b:Account)-[:SENT_TO]->(c:Account)-[:SENT_TO]->(a)
 WHERE a.id <> c.id AND a.id <> b.id
 RETURN a.id, b.id, c.id, "ring_fraud" AS pattern
+```
 
-SOCIAL RECOMMENDATION GRAPH:
-(:User)-[:WATCHED {rating, timestamp}]→ (:Movie)
-(:User)-[:FRIENDS_WITH]-(:User)
+**Social recommendation graph** — movies a friend watched that "me" has not yet watched are surfaced by traversing `FRIENDS_WITH` then `WATCHED`, filtering out any movie already reachable directly from `me`.
 
-"Movies my friends watched that I haven't":
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ME("User: me") -->|FRIENDS_WITH| FRIEND("User: friend")
+    FRIEND -->|WATCHED| MOVIE("Movie")
+    ME -.->|"not yet<br/>WATCHED"| MOVIE
+
+    class ME,FRIEND io
+    class MOVIE base
+```
+
+```cypher
 MATCH (me:User {id: 42})-[:FRIENDS_WITH]-(friend:User)-[:WATCHED]->(movie:Movie)
 WHERE NOT (me)-[:WATCHED]->(movie)
 RETURN movie.title, count(friend) AS friends_who_watched, avg(friend.rating) AS avg_rating
@@ -272,6 +325,35 @@ RETURN count(p) > 0 AS allowed
 - Relationship structure is simple (one relationship type, few properties)
 - The rest of the data is relational and adding another database is not worth the operational overhead
 
+The three criteria above resolve into a single decision cascade — ask them in this order:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START{"Relationship-<br/>traversal-heavy?"} -->|no| OLAP{"Aggregating over<br/>all rows (OLAP)?"}
+    START -->|yes| DEPTH{"Depth bounded<br/>under 5 hops?"}
+
+    OLAP -->|yes| PG1(["PostgreSQL /<br/>ClickHouse"])
+    OLAP -->|no| KV(["Key-value /<br/>document store"])
+
+    DEPTH -->|"yes, simple<br/>rel. type"| CTE(["PostgreSQL<br/>recursive CTE"])
+    DEPTH -->|"no, variable-depth<br/>or multi-type"| GRAPH(["Graph database<br/>Neo4j"])
+
+    class START,OLAP,DEPTH mathOp
+    class PG1,CTE base
+    class KV frozen
+    class GRAPH train
+```
+
+Relationship-traversal-heavy and shallow-and-simple both point away from a graph database; only variable-depth or multi-relationship-type traversal earns the extra operational cost of running Neo4j alongside the primary store.
+
 ---
 
 ## 10. Common Pitfalls
@@ -289,6 +371,36 @@ RETURN count(p) > 0 AS allowed
 
 **Pitfall 2: Supernode problem (high-degree nodes)**
 A "celebrity" user with 50 million followers. Every traversal starting from or passing through this user (e.g., "who follows people who follow @celebrity?") must navigate 50M relationships. Solution: (1) Filter by additional criteria before traversing the high-degree node. (2) Cache popular traversal results. (3) Use sampling for recommendations (don't traverse all 50M edges). (4) Store popularity separately as a property and filter before graph traversal.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph NAIVE["Naive: hits the supernode directly"]
+        Q1("query node") --> CEL1{"@celebrity<br/>50M followers"}
+        CEL1 --> F1("scans 50M edges")
+    end
+
+    subgraph FILTERED["Mitigated: pre-filter first"]
+        Q2("query node") --> PRE{"pre-filter<br/>mutual + recent"}
+        PRE --> CEL2{"@celebrity<br/>50M followers"}
+        CEL2 --> F2("scans hundreds of edges")
+    end
+
+    class Q1,Q2 io
+    class CEL1,CEL2 lossN
+    class PRE mathOp
+    class F1 lossN
+    class F2 train
+```
+
+A traversal that reaches the 50M-follower supernode unfiltered scans all 50M relationships; pushing a predicate (mutual connections, recency) before the hop — strategy (1) above — shrinks that same hop to hundreds of edges.
 
 **Pitfall 3: Treating Neo4j as a general database**
 A team replaced their entire PostgreSQL with Neo4j. Simple queries like "count all users by country" required full graph scans (no columnar optimization). Customer reports taking 30 minutes. Graph databases are not good at aggregation over all nodes. Fix: use PostgreSQL for tabular analytics, Neo4j only for relationship-heavy queries.

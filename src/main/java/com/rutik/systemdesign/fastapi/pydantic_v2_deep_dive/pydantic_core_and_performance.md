@@ -225,51 +225,86 @@ class EventEnvelope(BaseModel):
 
 For unions with 10+ branches, the untagged approach can be 10–15x slower than a discriminated union, because every failed branch generates and discards a partial validator state.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph untagged["Untagged union - O(n) branches"]
+        direction LR
+        p1(["purchase payload"]) --> c1["try ClickEvent<br/>fails"]
+        c1 --> c2["try PageViewEvent<br/>fails"]
+        c2 --> c3["try PurchaseEvent<br/>matches"]
+    end
+
+    subgraph tagged["Tagged union - O(1) dispatch"]
+        direction LR
+        p2(["purchase payload"]) --> disc["read event_type<br/>discriminator"]
+        disc --> hop["hash lookup<br/>to PurchaseEvent"]
+    end
+
+    class p1,p2 io
+    class c1,c2 lossN
+    class c3 train
+    class disc mathOp
+    class hop train
+```
+
+*Untagged unions try each branch in sequence — worst case is O(n) attempts when the correct type is last in the union (see Pitfall 4 in Section 10); a `Field(discriminator=...)` reads one field and jumps straight to the match, which is why 10+ branch unions see the 10–15x speedup above.*
+
 ---
 
 ## 5. Architecture Diagram
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    code(["Your model class<br/>type annotations"]) --> meta["ModelMetaclass.__new__<br/>collect + resolve annotations<br/>build CoreSchema dict"]
+    meta -->|"CoreSchema"| rust["pydantic-core Rust/PyO3<br/>SchemaValidator::build<br/>compile validator tree"]
+    rust --> stored(["validator + serializer<br/>stored on class, once"])
+
+    class code io
+    class meta mathOp
+    class rust frozen
+    class stored base
 ```
-Class Definition Time (once per class)
-======================================
 
-Your Python code                   Pydantic Python Layer
-┌─────────────────────┐            ┌──────────────────────────────┐
-│ class Order(Base    │            │ ModelMetaclass.__new__        │
-│   order_id: int     │  ───────>  │  - collect annotations        │
-│   amount: float     │            │  - resolve ForwardRefs        │
-│   address: Address  │            │  - build CoreSchema dict      │
-└─────────────────────┘            └──────────────┬───────────────┘
-                                                  │ CoreSchema
-                                                  ▼
-                                   pydantic-core (Rust/PyO3)
-                                   ┌──────────────────────────────┐
-                                   │ SchemaValidator::build()      │
-                                   │  - compile validator tree     │
-                                   │  - allocate Rust structs      │
-                                   │  - store on class as          │
-                                   │    __pydantic_validator__     │
-                                   └──────────────────────────────┘
+*Class Definition Time (once per class): annotations become a CoreSchema, and pydantic-core compiles it into a Rust validator/serializer pair stored on the class forever — the one-time cost that the 5–50x throughput gains from Section 1 are amortized against.*
 
-Request Time (per call, millions of times)
-==========================================
+```mermaid
+sequenceDiagram
+    participant U as User code
+    participant F as FFI boundary
+    participant R as Rust validator
 
-User code                          FFI boundary              Rust
-┌─────────────────────┐            │                ┌───────────────────────┐
-│ Order.model_validate│  ───────>  │  validate_     │ Walk validator tree   │
-│ (data)              │            │  python(data)  │ Coerce types          │
-│                     │  <───────  │                │ Check constraints     │
-│ order: Order        │            │                │ Build model instance  │
-└─────────────────────┘            │                └───────────────────────┘
+    Note over U,R: Request Time - model_validate(data)
+    U->>F: Order.model_validate(data)
+    F->>R: validate_python(data)
+    Note right of R: walk validator tree<br/>coerce types, check constraints
+    R-->>F: model instance built
+    F-->>U: order: Order
 
-JSON Fast Path (model_validate_json)
-┌─────────────────────┐            │                ┌───────────────────────┐
-│ Order.model_validate│  ───────>  │  validate_     │ Parse JSON (sonic-rs) │
-│ _json(raw_bytes)    │            │  json(bytes)   │ Walk validator tree   │
-│                     │  <───────  │                │ No Python dict alloc  │
-│ order: Order        │            │                │ Build model instance  │
-└─────────────────────┘            │                └───────────────────────┘
+    Note over U,R: JSON fast path - model_validate_json(raw)
+    U->>F: Order.model_validate_json(raw_bytes)
+    F->>R: validate_json(bytes)
+    Note right of R: parse JSON via sonic-rs<br/>no Python dict allocated
+    R-->>F: model instance built
+    F-->>U: order: Order
 ```
+
+*Request Time (per call, millions of times): every call crosses the FFI boundary once and returns; the JSON fast path follows the identical three-actor shape but skips the intermediate Python `dict` entirely, which is why `model_validate_json` measures roughly 2x faster than `model_validate(json.loads(...))` for payloads over 1 KB (Section 4.4).*
 
 ---
 
@@ -311,6 +346,20 @@ class HeavyModel(BaseModel):
 m = HeavyModel.model_validate({"field_a": "x", "field_b": []})
 # Compilation happens here (once). Subsequent calls use the compiled validator.
 ```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Uncompiled: class defined<br/>defer_build True
+
+    Uncompiled --> Compiling: first validate call
+    Uncompiled --> Compiling: model_rebuild<br/>called explicitly
+
+    Compiling --> Compiled: SchemaValidator built<br/>0.5 to 4 ms
+
+    Compiled --> Compiled: later calls reuse<br/>cached validator
+```
+
+*With `defer_build=True`, the class skips compilation at import time; the first `model_validate()` call — or an explicit `model_rebuild()` (the fix for the forward-reference pitfall in Section 10) — triggers the one-time 0.5–4 ms build, after which every subsequent call reuses the cached validator.*
 
 Use `defer_build=True` when:
 - Your application has 200+ models at module level.

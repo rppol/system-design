@@ -65,25 +65,37 @@ values. The smallest value across *all* frontiers must be the smallest
 remaining value overall — pop it, emit it, and advance that one list's
 pointer to reveal its next frontier element.
 
-```
-List A: [1, 4, 5]      pointer -> 1
-List B: [1, 3, 4]      pointer -> 1
-List C: [2, 6]         pointer -> 2
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-heap = {1(A), 1(B), 2(C)}     <- one entry per list
+    LA(["List A: 1, 4, 5"])
+    LB(["List B: 1, 3, 4"])
+    LC(["List C: 2, 6"])
+    HP("Heap holds one<br/>frontier per list")
+    POP{"Pop global min"}
+    OUT(["Emit to<br/>merged output"])
+    ADV("Advance winner's<br/>pointer, push next")
 
-pop 1(A) -> emit 1 -> advance A's pointer to 4
-heap = {1(B), 2(C), 4(A)}
+    LA -->|"frontier=1"| HP
+    LB -->|"frontier=1"| HP
+    LC -->|"frontier=2"| HP
+    HP --> POP
+    POP -->|"min=1 from A"| OUT
+    POP -.->|"push A's next: 4"| ADV
+    ADV -.->|"refill"| HP
 
-pop 1(B) -> emit 1 -> advance B's pointer to 3
-heap = {2(C), 3(B), 4(A)}
-
-pop 2(C) -> emit 2 -> advance C's pointer to 6
-heap = {3(B), 4(A), 6(C)}
-
-... continues until all lists are exhausted ...
-
-merged output so far: [1, 1, 2, ...]
+    class LA,LB,LC frozen
+    class HP base
+    class POP mathOp
+    class OUT io
+    class ADV mathOp
 ```
 
 At every step, the heap contains **at most k elements** — one per list still
@@ -223,6 +235,20 @@ there's more than one element per list. The gap widens as `k` shrinks
 relative to `N` (e.g., merging 3 lists of 1000 elements each: `log 3 ~= 1.6`
 vs `log 3000 ~= 11.5`).
 
+```mermaid
+xychart-beta
+    title "log2(k) cost per heap op as sources grow (N fixed at 3000)"
+    x-axis ["k=2", "k=3", "k=8", "k=32", "k=128", "k=3000"]
+    y-axis "log2(k) comparisons per pop/push" 0 --> 12
+    bar [1, 1.6, 3, 5, 7, 11.5]
+```
+
+Even as `k` grows 1500x (2 to 3000), the per-operation cost `log2(k)` only
+crawls from 1 to about 11.5 — the last bar (`k = 3000 = N`) is the degenerate
+case where the heap approach collapses to the same cost as sorting everything,
+which is exactly why keeping `k` small relative to `N` is what makes k-way
+merge worth it.
+
 ---
 
 ## 6. Variations & Sub-patterns
@@ -356,6 +382,44 @@ pass small hand-written test cases and fail on real data.
 ---
 
 ## 9. Related Patterns & When to Switch
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{"Exactly k = 2<br/>sorted sequences?"}
+    Q2{"ONE unsorted<br/>collection, want top-k?"}
+    Q3{"ONE stream, want<br/>running median?"}
+    Q4{"k-th smallest in sorted<br/>matrix, k near n^2?"}
+    R1(["Two Pointers"])
+    R2(["Top-K Elements"])
+    R3(["Two Heaps"])
+    R4(["Modified Binary Search"])
+    R5(["K-Way Merge"])
+
+    Q1 -->|"yes"| R1
+    Q1 -->|"no"| Q2
+    Q2 -->|"yes"| R2
+    Q2 -->|"no"| Q3
+    Q3 -->|"yes"| R3
+    Q3 -->|"no"| Q4
+    Q4 -->|"yes, k huge"| R4
+    Q4 -->|"no, k small"| R5
+
+    class Q1,Q2,Q3,Q4 mathOp
+    class R1,R2,R3,R4 frozen
+    class R5 train
+```
+
+This collapses the anti-signals from §1 and the alternatives below into one
+switch-or-stay flow: default to k-way merge unless one of the four narrower
+shapes above fits better.
 
 - **[Top-K Elements](top_k_elements.md)** — a single heap of *fixed size k*
   holding "the best k seen so far" from one stream, vs. k-way merge's heap of

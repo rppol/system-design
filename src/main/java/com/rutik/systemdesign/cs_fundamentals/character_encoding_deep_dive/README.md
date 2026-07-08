@@ -114,6 +114,25 @@ Both render identically and are defined by the Unicode Standard as canonically e
 
 **NFKC** and **NFKD** add *compatibility* folding on top of canonical folding: they additionally collapse "the same character in a different presentation" — the ligature `ﬁ` becomes `f` + `i`, full-width `Ａ` becomes ASCII `A`, superscript `²` becomes plain `2`. This is **lossy** — it destroys a real typographic distinction the author may have intended — so NFKC/NFKD are appropriate for search, matching, and security screening (Section 9), never for stored or displayed content.
 
+A 2x2 grid makes the relationship among the four forms explicit — canonical vs. compatibility folding on one axis, composed vs. decomposed on the other:
+
+```mermaid
+quadrantChart
+    title Normalization Forms: Composition vs Losslessness
+    x-axis Decomposed --> Composed
+    y-axis Lossy --> Lossless
+    quadrant-1 NFC - storage default
+    quadrant-2 NFD - macOS filenames
+    quadrant-3 NFKD - decomposed search
+    quadrant-4 NFKC - composed search
+    NFC: [0.8, 0.8]
+    NFD: [0.2, 0.8]
+    NFKD: [0.2, 0.2]
+    NFKC: [0.8, 0.2]
+```
+
+NFC and NFD both sit on the lossless (canonical) row and differ only on the composition axis; NFKC and NFKD apply that same compatibility fold to both ends of the composition axis, which is why NFKC is best understood as NFD's decomposition step followed by canonical recomposition, with compatibility characters folded first (Q12).
+
 ---
 
 ## 5. Architecture Diagrams
@@ -141,23 +160,30 @@ exactly why "my code worked until someone typed an emoji" is such a common bug r
 
 ### Surrogate Pair Arithmetic
 
-```
-Encoding U+1F600 (an astral-plane code point) as a UTF-16 surrogate pair
+Encoding `U+1F600` (128512 decimal, an astral-plane code point above `U+FFFF`) as a UTF-16 surrogate pair — the same code point's UTF-8 form, `F0 9F 98 80`, is derived independently in Section 6.1:
 
-  code point          0x1F600                  (128512 decimal, above U+FFFF)
-  step 1: subtract     -0x10000
-  ----------------------------------------------------------------------
-  offset              0x0F600  =  0000 1111 0110 0000 0000   (20 bits, padded)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  step 2: split the 20-bit offset into two 10-bit halves
-           high 10 bits:  00 0011 1101          low 10 bits:  10 0000 0000
+    CP(["U+1F600<br/>code point"]) -->|"subtract 0x10000"| OFF("offset 0x0F600<br/>20 bits, padded")
+    OFF --> SPLIT{"split into<br/>two 10-bit halves"}
+    SPLIT -->|"high 10 bits"| HI("0x03D")
+    SPLIT -->|"low 10 bits"| LO("0x200")
+    HI -->|"+ 0xD800 base"| HISUR(["high surrogate<br/>0xD83D"])
+    LO -->|"+ 0xDC00 base"| LOSUR(["low surrogate<br/>0xDE00"])
+    HISUR --> PAIR(["UTF-16 pair<br/>D83D DE00 · 4 bytes"])
+    LOSUR --> PAIR
 
-  step 3: add the fixed surrogate base to each half
-           high surrogate = 0xD800 + 0x03D  =  0xD83D
-           low  surrogate = 0xDC00 + 0x200  =  0xDE00
-
-  UTF-16 code units:  D83D DE00     (2 code units = 4 bytes)
-  UTF-8 bytes:        F0 9F 98 80   (4 bytes, independently derived in 6.1)
+    class CP,PAIR io
+    class OFF,SPLIT,HI,LO mathOp
+    class HISUR,LOSUR train
 ```
 Reversing this arithmetic (subtract the surrogate bases, recombine the two 10-bit
 halves, add 0x10000 back) is exactly how a correct UTF-16 decoder recovers the
@@ -166,23 +192,22 @@ buggy decoder skips when it treats each surrogate half as an independent charact
 
 ### Four Ways to Measure the Length of One Emoji Sequence
 
-```
-One visible glyph, four different correct "lengths" for a family emoji sequence:
-  MAN + ZWJ + WOMAN + ZWJ + GIRL + ZWJ + BOY  ->  renders as ONE glyph (ZWJ-aware fonts)
+One visible glyph, four different correct "lengths," for the family emoji sequence `MAN + ZWJ + WOMAN + ZWJ + GIRL + ZWJ + BOY` — which renders as ONE glyph in ZWJ-aware fonts:
 
-  measured as...              count   why
-  --------------------------  ------  ---------------------------------------------
-  grapheme clusters (visual)     1    what a user perceives as "one character"
-  Unicode code points            7    4 people + 3 ZERO WIDTH JOINER (U+200D)
-  UTF-16 code units              11   each person is astral-plane -> 2 units each
-                                      (4 x 2 = 8) + 3 ZWJ x 1 unit = 11
-  UTF-8 bytes                    25   each person is 4 bytes (4 x 4 = 16) + 3 ZWJ
-                                      x 3 bytes each (9) = 25
-
-  "How long is this string?" has four different correct answers depending on
-  which unit is being counted - str.length in most languages is a code-unit or
-  code-point count, and was NEVER a promise about visible-character count.
+```mermaid
+xychart-beta
+    title "Same Emoji, Four Different Correct Lengths"
+    x-axis ["Grapheme clusters", "Code points", "UTF-16 units", "UTF-8 bytes"]
+    y-axis "Count" 0 --> 28
+    bar [1, 7, 11, 25]
 ```
+
+- **Grapheme clusters — 1**: what a user perceives as "one character."
+- **Unicode code points — 7**: 4 people + 3 ZERO WIDTH JOINER (U+200D).
+- **UTF-16 code units — 11**: each person is astral-plane, so 2 units each (4 x 2 = 8), plus 3 ZWJ x 1 unit = 11.
+- **UTF-8 bytes — 25**: each person is 4 bytes (4 x 4 = 16), plus 3 ZWJ x 3 bytes each (9) = 25.
+
+"How long is this string?" has four different correct answers depending on which unit is being counted — `str.length` in most languages is a code-unit or code-point count, and was NEVER a promise about visible-character count.
 
 ---
 
@@ -320,6 +345,28 @@ and network transmission (Section 4.3).
 when bytes encoded in one encoding are decoded as if they were a different encoding —
 critically, this usually does **not** raise an error, because most legacy 8-bit
 encodings accept every possible byte value as *some* character.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    BYTES(["bytes<br/>63 61 66 C3 A9"]) --> DEC{"decoded as<br/>which charset?"}
+    DEC -->|"UTF-8 (matches source)"| OK(["café<br/>correct"])
+    DEC -->|"Latin-1 (wrong guess)"| BAD(["cafÃ©<br/>mojibake"])
+
+    class BYTES io
+    class DEC mathOp
+    class OK train
+    class BAD lossN
+```
+
+The same five bytes fork into two different outcomes depending on which decoder reads them — the UTF-8 path matches how the bytes were actually produced, while the Latin-1 path never raises an error, which is exactly why mojibake propagates silently instead of crashing.
 
 ```python
 text = "café"

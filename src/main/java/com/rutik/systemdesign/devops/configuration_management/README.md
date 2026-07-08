@@ -83,37 +83,112 @@ The big shift over the last decade: CM moved from "carefully tend pet servers" t
 
 ## 5. Architecture Diagrams
 
+**Push model (Ansible) vs. pull model (Puppet / Chef)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph PUSH["Push — Ansible (agentless)"]
+        direction LR
+        ctrl("control node<br/>CI / laptop") -->|"ssh + python"| w1(["web-01"])
+        ctrl --> w2(["web-02"])
+        ctrl --> d1(["db-01"])
+    end
+
+    subgraph PULL["Pull — Puppet / Chef (agent)"]
+        direction LR
+        n1(["node1"]) -->|"poll ~30 min"| mstr("puppet master /<br/>chef server")
+        n2(["node2"]) --> mstr
+        nN(["nodeN"]) --> mstr
+        mstr -.->|"serves catalog"| n1
+        mstr -.-> n2
+        mstr -.-> nN
+    end
+
+    class ctrl,mstr mathOp
+    class w1,w2,d1,n1,n2,nN train
 ```
-Push model (Ansible)                      Pull model (Puppet/Chef)
 
- control node (CI / laptop)                puppet master / chef server
-    |  ssh + python                           ^   serves catalog/recipes
-    +--> web-01  run tasks                    |  agent polls every ~30 min
-    +--> web-02  run tasks                  +-+----+-----+-----+
-    +--> db-01   run tasks                  v      v     v     v
- (agentless; runs when invoked)          node1  node2  node3  nodeN
-                                         (each self-converges on interval)
+Ansible's control node runs tasks over SSH the moment it is invoked and needs no agent on the targets; Puppet/Chef instead run an agent on every node that polls its master roughly every 30 minutes and self-converges, which is what gives pull mode continuous drift correction between explicit runs.
 
+**Immutable pipeline (the modern default)**
 
-Immutable pipeline (the modern default)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Packer template (+ Ansible provisioner)
-        |  packer build
-        v
-  golden AMI ami-0abc  (nginx, app, hardening baked in, versioned)
-        |
-  Terraform: launch template -> Auto Scaling Group
-        |  deploy = new ASG with new AMI; drain + terminate old
-        v
-  fleet of IDENTICAL instances; "patch" = new AMI, never ssh-and-edit
+    tmpl("Packer template<br/>+ Ansible provisioner") -->|"packer build"| ami(["golden AMI<br/>ami-0abc · versioned"])
+    ami --> lt("Terraform<br/>launch template")
+    lt --> asg("Auto Scaling<br/>Group")
+    asg -->|"new AMI: drain +<br/>terminate old"| fleet(["fleet of IDENTICAL<br/>instances"])
 
-
-Idempotency (the defining property)
-
-  run 1: file /etc/app.conf absent -> CREATE it          (changed=1)
-  run 2: file /etc/app.conf already correct -> NO-OP       (changed=0)  <- idempotent
-  (a non-idempotent `echo line >> file` would append every run -> drift)
+    class tmpl io
+    class ami frozen
+    class lt base
+    class asg mathOp
+    class fleet train
 ```
+
+Packer bakes a versioned, immutable AMI using the same Ansible playbook as a provisioner; Terraform then rolls that AMI through an Auto Scaling Group, so a "patch" is always a new AMI replacing instances wholesale, never an SSH-and-edit on a live host.
+
+**Idempotency (the defining property)**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Absent
+    Absent --> Created: run 1, file missing so CREATE (changed=1)
+    Created --> Created: run 2, already correct so NO-OP (changed=0)
+
+    note right of Created
+        idempotent: repeated runs converge
+        and stop changing; a non-idempotent
+        shell append would instead grow
+        the file forever (drift)
+    end note
+```
+
+The first run finds `/etc/app.conf` absent and creates it (`changed=1`); every run after that finds it already correct and reports `changed=0` — the exact property a raw `echo line >> file` would violate by appending on every single run.
+
+**Choosing where configuration management fits**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["need to configure<br/>a workload"]) --> q1{"fully<br/>containerized?"}
+    q1 -->|"yes"| a1(["skip CM<br/>bake into Dockerfile"])
+    q1 -->|"no"| q2{"provisioning the<br/>hosts themselves?"}
+    q2 -->|"yes"| a2(["use Terraform<br/>not CM"])
+    q2 -->|"no"| q3{"long-lived fleet needing<br/>continuous compliance?"}
+    q3 -->|"yes"| a3(["pull CM<br/>Puppet / Chef"])
+    q3 -->|"no"| a4(["push CM<br/>Ansible — bootstrap,<br/>fleet ops, image bake"])
+
+    class start io
+    class q1,q2,q3 mathOp
+    class a1,a2 frozen
+    class a3,a4 train
+```
+
+This operationalizes Section 9's guidance into a single path: containerized workloads skip CM entirely (the image is the config), provisioning the boxes themselves is Terraform's job, long-lived fleets needing continuous drift correction want pull-mode Puppet/Chef, and everything else — bootstrap, fleet-wide ops, image-baking — defaults to push-mode Ansible.
 
 ---
 
@@ -357,6 +432,26 @@ When you run everything in containers, the container image *is* the configuratio
 ### Scenario: A team's hand-tended fleet drifts, and one bad SSH fix takes down the tier
 
 A team runs 80 long-lived EC2 web servers configured by years of ad-hoc SSH commands plus a half-maintained shell script. The script appends to `/etc/hosts` on every run, no two servers are identical, and there's no way to reproduce a host. During an incident, an engineer SSHes into one server, edits nginx by hand, the fix works there — then a separate cron-driven script re-applies the old config and the change vanishes. A later "fix everywhere" loop runs an unguarded script across all 80 hosts simultaneously and crashes the tier.
+
+**Anatomy of the incident: two competing convergence loops**
+
+```mermaid
+sequenceDiagram
+    participant Eng as Engineer
+    participant Srv as web server
+    participant Cron as cron-driven script
+    participant Fleet as all 80 hosts
+
+    Eng->>Srv: SSH in, hand-edit nginx
+    Srv-->>Eng: fix works locally, unrecorded
+    Cron->>Srv: scheduled re-apply of old config
+    Srv-->>Eng: fix silently vanishes
+    Eng->>Fleet: fleet-wide fix script, no canary
+    Fleet-->>Eng: all 80 hosts break at once
+    Note over Eng,Fleet: two competing convergence loops<br/>write the same file — the later one always wins
+```
+
+The engineer's manual SSH fix and the cron-driven script are two independent convergence loops writing the same file, so the scheduled run always overwrites the hand-edit — and because there was no canary, the next "fix everywhere" pass took down all 80 hosts simultaneously (see Pitfall 5 and Discussion Q2 below).
 
 ```yaml
 # BROKEN: non-idempotent shell, big-bang fan-out, no canary, secret inline.

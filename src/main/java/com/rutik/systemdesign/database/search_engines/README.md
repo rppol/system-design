@@ -102,9 +102,33 @@ Routing:
 
 ### Index Lifecycle Management (ILM)
 
-```
-Hot → Warm → Cold → Frozen → Delete
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    [*] --> Hot
+    Hot --> Warm: rollover<br/>50GB / 100M docs / 7d
+    Warm --> Cold: min_age 7d<br/>force merge, shrink
+    Cold --> Frozen: min_age 30d<br/>replicas=0
+    Frozen --> Deleted: object storage<br/>S3 / GCS
+    Deleted --> [*]: min_age 90d
+
+    class Hot train
+    class Warm base
+    class Cold frozen
+    class Frozen frozen
+    class Deleted lossN
+```
+
+Each transition fires automatically off an age or size threshold — the index rolls from expensive NVMe (hot) down to object storage (frozen) and finally deletion with no manual intervention once the policy below is attached.
+
+```
 Hot tier: NVMe SSDs, active writes and reads
   Rollover: when index.lifecycle.rollover_alias triggers (max size=50GB or max_docs=100M or max_age=7d)
 
@@ -199,34 +223,65 @@ Aggregation types:
 
 ## 5. Architecture Diagrams
 
+**ELASTICSEARCH CLUSTER**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CLIENT(["Client"]) --> COORD("Coordinating node<br/>receives, routes")
+    COORD -->|"partial query"| P1("Primary 1<br/>shard 0")
+    COORD -->|"partial query"| P2("Primary 2<br/>shard 1")
+    COORD -->|"partial query"| P3("Primary 3<br/>shard 2")
+    P1 -.->|"HA copy"| R1("Replica 1<br/>shard 0")
+    P2 -.->|"HA copy"| R2("Replica 2<br/>shard 1")
+    P3 -.->|"HA copy"| R3("Replica 3<br/>shard 2")
+    P1 --> MERGE(("merge<br/>+ rank"))
+    P2 --> MERGE
+    P3 --> MERGE
+    MERGE --> RESULT(["Top-N results"])
+
+    class CLIENT io
+    class COORD mathOp
+    class P1,P2,P3 train
+    class R1,R2,R3 frozen
+    class MERGE mathOp
+    class RESULT io
 ```
-ELASTICSEARCH CLUSTER:
 
-                    Client
-                      ↓
-              Coordinating Node
-              (receives request, routes)
-                    /    \
-           Primary 1     Primary 2      Primary 3
-           (shard 0)     (shard 1)     (shard 2)
-               |              |              |
-           Replica 1      Replica 2      Replica 3
-           (shard 0)     (shard 1)     (shard 2)
+The coordinating node fans a partial query out to one copy of each shard (primary or replica), then merges and ranks the partial result sets before returning the top-N to the client.
 
-Search: coordinating node sends partial query to all primaries (or replicas)
-        Each node returns partial results
-        Coordinating node merges, ranks, returns top-N
+**NEAR-REAL-TIME (NRT) INDEXING**
 
-NEAR-REAL-TIME (NRT) INDEXING:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Document indexed → Lucene segment in memory (translog)
-                              ↓ (refresh, default 1 second)
-            New immutable Lucene segment on disk → searchable
-                              ↓ (flush, default 30 seconds or 512MB translog)
-                  Translog fsynced to disk (durability)
-                              ↓ (force merge or automatic merge)
-              Multiple segments merged into fewer, larger segments
+    DOC(["Document<br/>indexed"]) --> MEM("Segment in memory<br/>translog")
+    MEM -->|"refresh<br/>default 1s"| DISK("Immutable segment<br/>on disk, searchable")
+    DISK -->|"flush<br/>30s or 512MB"| DUR("Translog fsynced<br/>durable")
+    DUR -->|"merge"| MRG("Segments merged<br/>fewer, larger")
+
+    class DOC io
+    class MEM req
+    class DISK train
+    class DUR base
+    class MRG frozen
 ```
+
+Refresh (default every 1 second) makes new writes searchable without durability; flush (every 30 seconds or 512MB of translog) fsyncs to disk for crash recovery; a later merge still consolidates the growing pile of small segments into fewer, larger ones.
 
 ---
 
@@ -284,6 +339,16 @@ GET /products/_search { "pit": { "id": "..." }, "search_after": [...] }
 → Consistent snapshot + search_after pagination
 ```
 
+```mermaid
+xychart-beta
+    title "Deep Pagination: Documents Loaded Into Coordinator Memory (5 shards)"
+    x-axis ["Page 100 (offset 9,900)", "Page 1,000 (offset 100,000)"]
+    y-axis "Documents loaded" 0 --> 500000
+    bar [50000, 500000]
+```
+
+Coordinator memory scales with `(from + size) × shard count`, not with the 100 rows actually requested — a 10x deeper page loads 10x more documents (50,000 to 500,000) just to return the same page size, which is why `max_result_window` caps `from + size` at 10,000 by default.
+
 ### Zero-Downtime Index Mapping Changes
 
 ```
@@ -309,6 +374,33 @@ Zero-downtime alias pattern:
 
 Application always queries "products" alias, not the versioned index.
 ```
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    APP(["Application<br/>queries alias only"]) --> ALIAS("products<br/>alias")
+    ALIAS -.->|"points to<br/>before swap"| V1("products_v1<br/>old mapping")
+    V1 -->|"Reindex API"| V2("products_v2<br/>new mapping")
+    V2 --> SWAP{"Atomic swap:<br/>add v2, remove v1"}
+    SWAP -.->|"points to<br/>after swap"| ALIAS
+    SWAP --> DEL("Delete<br/>products_v1")
+
+    class APP io
+    class ALIAS base
+    class V1 frozen
+    class V2 train
+    class SWAP mathOp
+    class DEL lossN
+```
+
+The application only ever queries the `products` alias; a single `_aliases` call adds it to `products_v2` and removes it from `products_v1` atomically, so there is no instant where the alias resolves to nothing — that indirection is what makes the reindex invisible to callers.
 
 ---
 

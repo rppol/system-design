@@ -186,101 +186,97 @@ via `request.app.state` in route handlers.
 
 ### Request / Response flow through the middleware stack
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    httpReq(["HTTP Request<br/>via Uvicorn"]) --> cors["CORSMiddleware<br/>added last · outermost"]
+    cors --> corr["CorrelationIDMiddleware<br/>added 2nd-to-last"]
+    corr --> timing["TimingMiddleware<br/>added first · innermost"]
+    timing --> router["Starlette Router<br/>path matching"]
+    router --> exc["Exception Handler<br/>chain"]
+    exc --> di["Dependency Injection<br/>DAG"]
+    di --> handler["Route Handler<br/>business logic"]
+    handler -.->|"response reverses<br/>through same stack"| httpResp(["HTTP Response"])
+
+    class httpReq,httpResp io
+    class cors,corr,timing,router mathOp
+    class exc lossN
+    class di base
+    class handler train
 ```
-HTTP Request arrives at Uvicorn
-           |
-           v
-  +-------------------+   add_middleware called LAST (outermost)
-  |  CORSMiddleware   |   Runs FIRST on request, LAST on response
-  +-------------------+
-           |
-           v
-  +----------------------------+
-  |  CorrelationIDMiddleware   |   add_middleware called second-to-last
-  +----------------------------+
-           |
-           v
-  +------------------------+
-  |  TimingMiddleware      |   add_middleware called first (innermost after app)
-  +------------------------+
-           |
-           v
-  +------------------------+
-  |   Starlette Router     |   Route matching, path param extraction
-  +------------------------+
-           |
-           v
-  +----------------------------+
-  |  Exception Handler chain   |   @app.exception_handler hooks here
-  +----------------------------+
-           |
-           v
-  +----------------------------+
-  |  Dependency Injection DAG  |   Depends() resolved here
-  +----------------------------+
-           |
-           v
-  +------------------------+
-  |   Route Handler        |   Business logic runs here
-  +------------------------+
-           |
-           v
-        Response travels back UP through the same stack in reverse
-```
+
+The last middleware registered sits outermost, so it runs first on the way in and last on
+the way out — shown here as the dotted return arrow straight back to the client, reversing
+through the exact same stack it entered through.
 
 ### Lifespan timeline
 
+```mermaid
+stateDiagram-v2
+    [*] --> Startup: process start
+
+    state "Startup Block" as Startup
+    note right of Startup
+        DB pool created
+        Redis client connected
+        ML model loaded, 2.3 GB VRAM
+    end note
+
+    Startup --> Serving: yield
+
+    state "Serving Requests" as Serving
+    note right of Serving
+        Request 1 reads app.state.db
+        Request 2 reads app.state.redis
+    end note
+
+    Serving --> Draining: SIGTERM received
+
+    state "Draining Connections" as Draining
+
+    Draining --> Shutdown: drain complete
+
+    state "Shutdown Block" as Shutdown
+    note right of Shutdown
+        DB pool closed
+        Redis connection closed
+    end note
+
+    Shutdown --> [*]: process exit
 ```
-Process start
-    |
-    v
-[lifespan startup block executes]
-    |  - DB pool created
-    |  - Redis client connected
-    |  - ML model loaded (e.g., 2.3 GB VRAM)
-    v
-[yield — app is now serving requests]
-    |
-    |  Request 1 --> Route handler reads app.state.db
-    |  Request 2 --> Route handler reads app.state.redis
-    |  ...
-    v
-[SIGTERM received — Uvicorn drains connections]
-    |
-    v
-[lifespan shutdown block executes]
-    |  - DB pool closed (all connections returned)
-    |  - Redis connection closed
-    v
-Process exit
-```
+
+Startup runs exactly once before the first request and shutdown runs exactly once after the
+last; every resource created in the startup block — the DB pool, the Redis client, the 2.3 GB
+ML model — lives for the entire serving window in between.
 
 ### CORS preflight sequence
 
+```mermaid
+sequenceDiagram
+    participant B as Browser (app.example.com)
+    participant S as Server (api.example.com)
+
+    B->>S: OPTIONS /api/items<br/>Origin: app.example.com<br/>Access-Control-Request-Method: POST
+    Note over B,S: preflight request
+    S-->>B: 200 OK · ~1 ms overhead<br/>Access-Control-Allow-Origin<br/>Access-Control-Allow-Methods: POST<br/>Access-Control-Max-Age: 600
+    Note over B,S: preflight response
+
+    B->>S: POST /api/items<br/>Origin: app.example.com<br/>Authorization: Bearer token
+    Note over B,S: actual request
+    S-->>B: 201 Created<br/>Access-Control-Allow-Origin
+    Note over B,S: actual response
 ```
-Browser (origin: app.example.com)        Server (api.example.com)
-         |                                         |
-         |  OPTIONS /api/items                     |
-         |  Origin: app.example.com                |
-         |  Access-Control-Request-Method: POST    |
-         |  Access-Control-Request-Headers: Auth   |
-         | --------- preflight request ----------> |
-         |                                         |
-         |  200 OK (empty body, ~1 ms overhead)    |
-         |  Access-Control-Allow-Origin: ...       |
-         |  Access-Control-Allow-Methods: POST     |
-         |  Access-Control-Max-Age: 600            |
-         | <-------- preflight response ---------- |
-         |                                         |
-         |  POST /api/items                        |
-         |  Origin: app.example.com                |
-         |  Authorization: Bearer <token>          |
-         | --------- actual request ------------> |
-         |                                         |
-         |  201 Created                            |
-         |  Access-Control-Allow-Origin: ...       |
-         | <-------- actual response ------------ |
-```
+
+The browser caches the preflight result for `max_age` seconds (600 by default), so only the
+first cross-origin request to a given endpoint pays the roughly 1 ms `OPTIONS` round-trip —
+every request after that within the cache window skips straight to the actual request.
 
 ---
 
@@ -491,6 +487,36 @@ class UnhandledExceptionMiddleware(BaseHTTPMiddleware):
             return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    handler["Route Handler<br/>raises exception"] --> check{"Matching<br/>@app.exception_handler?"}
+    check -->|"yes"| inside["Handled inside<br/>routing layer"]
+    check -->|"no"| escape["Escapes past all<br/>exception handlers"]
+    inside --> resp1(["JSON error response<br/>correct status code"])
+    escape --> mw["Middleware try/except<br/>catches as last resort"]
+    mw --> resp2(["Generic 500<br/>Internal Server Error"])
+
+    class handler train
+    class check mathOp
+    class inside train
+    class escape lossN
+    class mw lossN
+    class resp1,resp2 io
+```
+
+An exception only reaches `@app.exception_handler` if a handler is registered for its exact
+type; anything unregistered escapes the routing layer entirely and is caught only by a
+middleware `try`/`except` wrapping the whole app — which is why a global last-resort 500
+handler belongs in middleware, not in `@app.exception_handler`.
+
 ---
 
 ## 7. Real-World Examples
@@ -535,6 +561,24 @@ non-zero code, triggering a Kubernetes `CrashLoopBackOff` and alerting on-call.
 | `@app.middleware("http")` | ~20-30 µs | No (buffers body) | Low | Yes |
 | `BaseHTTPMiddleware` subclass | ~20-30 µs | No (buffers body) | Medium | Yes |
 | Pure ASGI middleware | ~1-2 µs | Yes | High | No (raw scope only) |
+
+```mermaid
+quadrantChart
+    title Choosing a middleware implementation
+    x-axis Low Overhead --> High Overhead
+    y-axis Not Streaming-Safe --> Streaming-Safe
+    quadrant-1 Rarely needed
+    quadrant-2 Best for hot paths
+    quadrant-3 Uncommon combination
+    quadrant-4 Convenient but blocks streaming
+    "Pure ASGI middleware": [0.12, 0.88]
+    "BaseHTTPMiddleware": [0.68, 0.15]
+    "app.middleware decorator": [0.62, 0.10]
+```
+
+Pure ASGI middleware is the only option in the low-overhead, streaming-safe quadrant; both
+`BaseHTTPMiddleware` and the `@app.middleware` decorator land in the same high-overhead,
+streaming-unsafe corner because they share the same double-buffering mechanism under the hood.
 
 ### Lifecycle approach comparison
 
@@ -930,45 +974,34 @@ up to 500 req/s. The requirements:
 
 #### ASCII Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    incoming(["Incoming Request"]) --> cors["CORSMiddleware<br/>added last · outermost<br/>preflight returns here"]
+    cors --> security["SecurityHeadersMiddleware<br/>pure ASGI · CSP, HSTS"]
+    security --> corr["CorrelationIDMiddleware<br/>sets correlation_id"]
+    corr --> timing["TimingMiddleware<br/>added first · innermost"]
+    timing --> router["FastAPI Router<br/>route matching"]
+    router --> depends["Depends graph<br/>DB session, tenant, auth"]
+    depends --> handler["Route Handler<br/>business logic only"]
+
+    class incoming io
+    class cors,security,corr,timing,router mathOp
+    class depends base
+    class handler train
 ```
-Incoming Request
-       |
-       v
-+---------------------------+  add_middleware LAST (outermost)
-|   CORSMiddleware          |  preflight returns here; actual requests pass through
-+---------------------------+
-       |
-       v
-+-------------------------------+
-|  SecurityHeadersMiddleware    |  pure ASGI — adds CSP, HSTS, X-Frame-Options
-+-------------------------------+
-       |
-       v
-+-------------------------------+
-|  CorrelationIDMiddleware      |  injects or generates X-Correlation-ID
-|  (BaseHTTPMiddleware)         |  sets request.state.correlation_id
-+-------------------------------+
-       |
-       v
-+---------------------------+  add_middleware FIRST (innermost non-app)
-|   TimingMiddleware        |  measures time after CORS + security pass
-+---------------------------+
-       |
-       v
-+---------------------------+
-|   FastAPI Router          |  route matching, path params
-+---------------------------+
-       |
-       v
-+---------------------------+
-|   Depends() graph         |  DB session, tenant context, auth
-+---------------------------+
-       |
-       v
-+---------------------------+
-|   Route Handler           |  business logic only
-+---------------------------+
-```
+
+Four middlewares wrap the router in this tenant stack: `CORSMiddleware` is registered last
+(outermost) so preflight requests never reach business logic, and `TimingMiddleware` is
+registered first (innermost) so it measures only the work done after CORS and security checks
+pass.
 
 #### Implementation
 

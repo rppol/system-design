@@ -167,27 +167,34 @@ async def with_timeout() -> None:
 
 ### Structured vs Unstructured Task Lifetime
 
-```
-UNSTRUCTURED (create_task)
-───────────────────────────────────────────────────
-Caller:  [====== run =======>]  <-- exits here
-Task A:  [============ still running =========>]
-Task B:  [== done ==]
-Task C:  [======== RAISED EXCEPTION (lost) ===>]
-                                ^
-                       caller never sees this
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant A as Task A
+    participant B as Task B
+    participant C as Task C
 
-STRUCTURED (TaskGroup)
-───────────────────────────────────────────────────
-TaskGroup scope:  [══════════════════════════]  <-- waits
-Task A:           [===== done ============]
-Task B:           [== done ==]
-Task C:           [== RAISED ===]
-                              ^
-                   cancels A; ExceptionGroup raised
-                   to TaskGroup owner; scope exits
-Caller:                                        [resumes with exception or clean exit]
+    Note over Caller,C: UNSTRUCTURED (create_task) - caller does not wait
+    Caller->>A: create_task()
+    Caller->>B: create_task()
+    Caller->>C: create_task()
+    Note over Caller: returns immediately,<br/>while A, B, C still run
+    B-->>Caller: done (result discarded)
+    C-->>Caller: raises exception
+    Note over Caller: exception lost - only<br/>logged to stderr
+    Note over A: still running after<br/>caller has exited
+
+    Note over Caller,C: STRUCTURED (TaskGroup) - scope waits for all
+    Caller->>A: create_task()
+    Caller->>B: create_task()
+    Caller->>C: create_task()
+    B-->>Caller: done
+    C-->>Caller: raises exception
+    Caller->>A: cancel()
+    A-->>Caller: cancelled
+    Note over Caller: ExceptionGroup raised only<br/>after every task exits
 ```
+*Bare `create_task()` lets the caller return before Task A and Task C finish, silently losing Task C's exception; `TaskGroup` blocks the caller until every child finishes, cancels stragglers the moment one fails, and always surfaces the failure.*
 
 ### Exception Group Hierarchy
 
@@ -215,20 +222,38 @@ Handled with:
 
 ### Cancellation Propagation Tree
 
-```
-Request Handler (asyncio Task)
-│
-└── TaskGroup scope
-    ├── fetch_user()      Task
-    ├── fetch_permissions() Task
-    └── fetch_config()    Task
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Client disconnects → request handler receives CancelledError
-→ TaskGroup.__aexit__ catches it
-→ cancels fetch_user, fetch_permissions, fetch_config
-→ waits for each to acknowledge cancellation
-→ re-raises CancelledError up to uvicorn
+    RH(["Request Handler<br/>(asyncio Task)"]) --> TG["TaskGroup scope"]
+    TG --> FU["fetch_user() Task"]
+    TG --> FP["fetch_permissions()<br/>Task"]
+    TG --> FC["fetch_config() Task"]
+
+    DISC(["Client disconnects"]) -.->|"CancelledError"| RH
+    RH -.->|"__aexit__ catches it"| TG
+    TG -.->|"cancel"| FU
+    TG -.->|"cancel"| FP
+    TG -.->|"cancel"| FC
+    FU -.->|"ack"| TG
+    FP -.->|"ack"| TG
+    FC -.->|"ack"| TG
+    TG -.->|"re-raise<br/>CancelledError"| UV(["uvicorn"])
+
+    class RH io
+    class TG mathOp
+    class FU,FP,FC req
+    class DISC lossN
+    class UV frozen
 ```
+*The request handler owns the TaskGroup, which owns three sibling fetch tasks; a client disconnect delivers `CancelledError` down through `__aexit__`, every task cancels and acknowledges, and the exception re-raises up to uvicorn.*
 
 ---
 
@@ -248,20 +273,65 @@ The internal wait uses `asyncio.wait` with `return_when=ALL_COMPLETED` in a loop
 stragglers if a new exception arrives while waiting — ensuring fail-fast semantics even when a
 second task fails after the first.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["__aexit__ called"]) --> Q1{"exception in body<br/>before task launch?"}
+    Q1 -->|"yes"| CANCELALL["cancel all tasks<br/>and wait"]
+    Q1 -->|"no"| WAIT["asyncio.wait(tasks)<br/>ALL_COMPLETED, inner<br/>cancel scope"]
+    CANCELALL --> WAIT
+    WAIT --> COLLECT["collect exceptions via<br/>task.exception()"]
+    COLLECT --> Q2{"any task raised?"}
+    Q2 -->|"yes"| BUILD(["build ExceptionGroup<br/>and raise"])
+    Q2 -->|"no"| Q3{"group cancelled<br/>externally?"}
+    Q3 -->|"yes"| RERAISE(["re-raise<br/>CancelledError"])
+    Q3 -->|"no"| DONE(["scope exits cleanly"])
+
+    class START io
+    class Q1,Q2,Q3 mathOp
+    class CANCELALL,BUILD,RERAISE lossN
+    class WAIT,COLLECT req
+    class DONE train
+```
+*`TaskGroup.__aexit__` runs this fixed decision sequence on every exit, re-cancelling stragglers if a second exception arrives while the first is still being handled — the mechanism behind fail-fast semantics.*
+
 ### 6.2 CancelledError and Shielding
 
 `asyncio.CancelledError` is a subclass of `BaseException` (not `Exception`) since Python 3.8, so
 bare `except Exception` does not accidentally catch it. Cancellation flows like this:
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["parent.cancel()"]) --> B["task.__step() raises<br/>CancelledError at current<br/>await point"]
+    B --> C["task is in TaskGroup:<br/>TaskGroup catches<br/>CancelledError"]
+    C --> D["cancels all<br/>sibling tasks"]
+    D --> E["waits for siblings"]
+    E --> F["re-raises CancelledError"]
+    F --> G(["parent handles it<br/>(e.g. uvicorn closes<br/>the connection)"])
+
+    class A io
+    class B mathOp
+    class C req
+    class D,E lossN
+    class F lossN
+    class G frozen
 ```
-parent.cancel()
-  └─ task.__step() raises CancelledError at current await point
-     └─ if task is in TaskGroup: TaskGroup catches CancelledError
-        └─ cancels all sibling tasks
-        └─ waits for siblings
-        └─ re-raises CancelledError
-           └─ parent handles it (e.g., uvicorn closes connection)
-```
+*Because `CancelledError` is a `BaseException` (not `Exception`) since Python 3.8, cancellation always reaches the TaskGroup, which cancels every sibling and waits for them before re-raising to the parent.*
 
 To protect a critical section from cancellation (e.g., a database commit):
 
@@ -575,6 +645,36 @@ async def parallel_queries(queries: list[str]) -> list[list[dict]]:
 **Do NOT use `TaskGroup` for persistent background workers.** A task group waits for all tasks
 before the `async with` block exits. For an application-lifetime background task (e.g., a queue
 consumer), create the task in a lifespan context manager, not inside a request handler's TaskGroup.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["need 2+ coroutines<br/>to run concurrently"]) --> Q1{"failure OK to ignore?<br/>(e.g. telemetry)"}
+    Q1 -->|"yes"| LEAF1(["untracked create_task<br/>+ explicit error callback"])
+    Q1 -->|"no"| Q2{"must outlive this<br/>request/scope?"}
+    Q2 -->|"yes"| LEAF2(["create in lifespan<br/>TaskGroup instead"])
+    Q2 -->|"no"| Q3{"library code needing<br/>asyncio + Trio?"}
+    Q3 -->|"yes"| LEAF3(["anyio.create_task_group()"])
+    Q3 -->|"no"| Q4{"stuck on<br/>Python 3.8-3.10?"}
+    Q4 -->|"yes"| LEAF4(["asyncio.gather()<br/>return_exceptions if needed"])
+    Q4 -->|"no"| LEAF5(["asyncio.TaskGroup"])
+
+    class START io
+    class Q1,Q2,Q3,Q4 mathOp
+    class LEAF1 lossN
+    class LEAF2 frozen
+    class LEAF3 req
+    class LEAF4 base
+    class LEAF5 train
+```
+*Every concurrency-primitive choice above collapses to one routing decision: ignorable failure keeps a bare `create_task`, an outlives-the-scope task moves to `lifespan`, dual-backend library code needs `anyio`, pre-3.11 code falls back to `gather`, and everything else is `asyncio.TaskGroup`.*
 
 ```python
 from contextlib import asynccontextmanager

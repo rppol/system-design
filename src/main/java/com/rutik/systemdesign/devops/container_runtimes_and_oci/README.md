@@ -61,27 +61,53 @@ The **OCI specs** define three things: the **image spec** (layered image format)
 | gVisor (runsc) | User-space kernel intercepts syscalls | Moderate (syscall cost) | Untrusted/multi-tenant code |
 | Kata Containers | Each container in a lightweight VM (Firecracker/QEMU) | Higher (VM boot, memory) | Strong isolation, hostile multi-tenancy |
 
+```mermaid
+quadrantChart
+    title Isolation Strength vs Performance Overhead
+    x-axis Low Overhead --> High Overhead
+    y-axis Weak Isolation --> Strong Isolation
+    quadrant-1 Strong isolation, high cost
+    quadrant-2 Strong isolation, low cost
+    quadrant-3 Weak isolation, low cost
+    quadrant-4 Weak isolation, high cost
+    runc: [0.1, 0.15]
+    crun: [0.05, 0.15]
+    gVisor: [0.55, 0.6]
+    Kata Containers: [0.85, 0.92]
+```
+
+*runc and crun sit in the cheap/weak-isolation corner — minimal overhead because both share the host kernel. gVisor's user-space kernel buys real isolation at a moderate syscall-interception cost, while Kata's per-container VM lands in the strong-isolation/high-overhead corner, trading VM boot time and memory for hardware-level separation.*
+
 ---
 
 ## 5. Architecture Diagrams
 
-```
-Kubernetes node runtime stack
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  kubelet
-    | CRI (gRPC over unix socket /run/containerd/containerd.sock)
-    v
-  containerd ----------------------------+
-    |  image pull (OCI distribution)     |  snapshotter (overlayfs)
-    |  unpack layers -> OCI bundle        |
-    v                                     v
-  containerd-shim-runc-v2  (one per container; survives containerd restart)
-    |
-    v
-  runc  ---- clone() with CLONE_NEW* + cgroup writes ----> [ app process (PID 1 in ns) ]
+    kubelet(["kubelet"]) -->|"CRI gRPC over<br/>containerd.sock"| containerd("containerd")
+    containerd -->|"image pull<br/>OCI distribution"| snap{"snapshotter<br/>overlayfs"}
+    snap -->|"unpack layers to<br/>OCI bundle"| shim("containerd-shim<br/>-runc-v2")
+    shim -->|"clone() CLONE_NEW*<br/>+ cgroup writes"| runc{"runc"}
+    runc --> app(["app process<br/>PID 1 in ns"])
+    runc -.->|"swap for<br/>stronger isolation"| runsc(["runsc (gVisor)"])
 
-  Swap runc -> runsc (gVisor): same CRI above, stronger isolation below.
+    class kubelet io
+    class containerd req
+    class snap,runc mathOp
+    class shim base
+    class app train
+    class runsc frozen
 ```
+
+*The kubelet never talks to runc directly — it speaks CRI gRPC to containerd, which pulls and unpacks the image via a snapshotter, then hands off to a per-container shim that invokes runc. Swapping runc for runsc (gVisor) changes only the isolation layer below the shim; every layer above is unchanged.*
 
 ```
 OCI bundle that runc consumes
@@ -147,13 +173,31 @@ spec:
 
 ### Why the shim exists
 
-```
-containerd restart (upgrade) ----X (daemon down briefly)
-   running containers KEEP RUNNING because each is parented to its own shim,
-   not to containerd. The shim reports exit status back when containerd returns.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    running("containerd<br/>running") --> upgrade{"upgrade /<br/>restart triggered"}
+    upgrade -.->|"daemon down<br/>briefly"| down(["containerd<br/>briefly unavailable"])
+    upgrade --> shim("per-container shim<br/>parented independently")
+    shim --> proc(["app process<br/>keeps running"])
+    down -->|"daemon<br/>returns"| back("containerd<br/>back up")
+    shim -.->|"reports exit<br/>status"| back
+
+    class running,back train
+    class upgrade mathOp
+    class down lossN
+    class shim base
+    class proc train
 ```
 
-Without shims, upgrading the runtime daemon would kill every pod on the node.
+*Restarting containerd never kills a running container because each one is parented to its own shim, not to containerd — the shim keeps the process alive through the brief outage and reports its exit status back once containerd returns. Without shims, upgrading the runtime daemon would kill every pod on the node.*
 
 ---
 
@@ -183,6 +227,40 @@ Without shims, upgrading the runtime daemon would kill every pod on the node.
 **Care about the runtime layer when:** debugging node-level container issues, running untrusted/multi-tenant code (choose gVisor/Kata via RuntimeClass), optimizing pod density/startup (crun), or migrating off Docker shim.
 
 **Don't over-engineer when:** you run trusted first-party workloads — the default containerd + runc is the right answer and tuning the runtime adds complexity without benefit.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    trust{"workload trust<br/>level?"}
+    compat{"exotic syscalls or<br/>need full VM parity?"}
+    density{"need max pod density<br/>or fastest startup?"}
+    kata(["Kata<br/>lightweight VM"])
+    gvisor(["gVisor<br/>user-space kernel"])
+    crun(["crun<br/>C-based OCI runtime"])
+    runc(["runc<br/>default OCI runtime"])
+
+    trust -->|"untrusted /<br/>multi-tenant"| compat
+    trust -->|"trusted<br/>first-party"| density
+    compat -->|"yes"| kata
+    compat -->|"no / unsure"| gvisor
+    density -->|"yes"| crun
+    density -->|"no, default"| runc
+
+    class trust,compat,density mathOp
+    class kata frozen
+    class gvisor mathOp
+    class runc base
+    class crun train
+```
+
+*Trust level is the first fork: untrusted/multi-tenant code needs gVisor or Kata (choose Kata when the workload needs broader syscall parity and can absorb VM boot cost); trusted first-party workloads stay on runc by default, moving to crun only when pod density or startup latency is the binding constraint.*
 
 ---
 
@@ -282,12 +360,29 @@ Firecracker is a minimal VMM that boots a stripped microVM in ~125 ms with a tin
 
 A CI SaaS runs customer-supplied build jobs as pods on shared nodes. A customer's job attempts a container escape via a known kernel exploit. On the default runc, success would compromise the node and every other tenant's job on it.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    kernel(["node kernel<br/>single trust boundary"]) --> tenantA("tenant A job")
+    kernel --> tenantB("tenant B job<br/>malicious")
+    tenantB --> cve{"kernel CVE"}
+    cve --> escape("container escape")
+    escape --> steal(["read tenant A's<br/>source + secrets"])
+    steal -.->|"cross-tenant<br/>breach"| tenantA
+
+    class kernel base
+    class tenantA req
+    class tenantB,cve,escape,steal lossN
 ```
-Before: all jobs on runc (shared kernel)
-  node kernel  <--- single trust boundary --->  tenant A job
-                                                tenant B job (malicious)
-   one kernel CVE -> escape -> read tenant A's source + secrets -> cross-tenant breach
-```
+
+*The shared node kernel is the only trust boundary between tenant A and tenant B — one kernel CVE lets the malicious tenant escape its container and read straight across into tenant A's source and secrets.*
 
 ```yaml
 # BROKEN: untrusted jobs scheduled with no isolation beyond namespaces.

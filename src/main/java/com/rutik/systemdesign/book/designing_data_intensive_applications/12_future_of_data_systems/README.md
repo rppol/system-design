@@ -114,6 +114,40 @@ routing all operations on the same constrained value to the **same log partition
 decision (the first request for a username in the ordered log wins; later ones are rejected). This is
 how you get strong constraints without a global distributed transaction.
 
+**Enforcing Uniqueness Without a Distributed Transaction**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R1(["request A:<br/>register alice"]) --> H{"route by key:<br/>hash(username)"}
+    R2(["request B:<br/>register alice"]) --> H
+    H -->|"same key routes<br/>to same partition"| P("Partition N<br/>single consumer,<br/>strict order")
+    P --> F("processed 1st")
+    P --> S("processed 2nd")
+    F --> ACC(["ACCEPTED"])
+    S --> REJ(["REJECTED:<br/>username taken"])
+
+    class R1 req
+    class R2 req
+    class H mathOp
+    class P base
+    class F train
+    class S lossN
+    class ACC train
+    class REJ lossN
+```
+
+Caption: two concurrent requests for the same key hash to the same partition, where a single consumer
+processes them strictly in order — turning Chapter 9's distributed-uniqueness problem into a local,
+sequential accept/reject decision.
+
 **Timeliness and integrity.** Kleppmann splits "consistency" into two needs that are often conflated:
 **timeliness** (a read sees recent data — being *up to date*; staleness here is temporary and
 self-correcting) and **integrity** (data is correct and not corrupted/contradictory — no lost or
@@ -149,33 +183,94 @@ they build, not just their technical correctness.
   deletion and security, and take ethical responsibility rather than hiding behind "we just build the
   tools." Just because something *can* be built doesn't mean it *should* be.
 
+**The Bias Feedback Loop**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    HIST("Historical Data<br/>encodes past bias") --> MDL("Model Trained<br/>on biased data")
+    MDL --> DEC{"Decision:<br/>loan, hiring, parole"}
+    DEC -->|"denies or<br/>flags"| WORSE("Worse<br/>Circumstances")
+    WORSE -.->|"reads as<br/>confirmation"| HIST
+
+    class HIST frozen
+    class MDL mathOp
+    class DEC mathOp
+    class WORSE lossN
+```
+
+Caption: a model trained on biased historical data denies or flags people, whose resulting worse
+circumstances then look like confirmation the model was right — a self-reinforcing loop that entrenches
+discrimination under a veneer of objectivity.
+
 ---
 
 ## Visual Intuition
 
+**The Database, Turned Inside Out**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph BUNDLED["BUNDLED: one monolithic DB"]
+        MONO("storage + indexes<br/>views + replication<br/>cache + query engine<br/>all hidden internals")
+    end
+
+    subgraph UNBUNDLED["UNBUNDLED: dataflow architecture"]
+        W(["writes"]) --> LOG(("EVENT LOG<br/>= the public interface"))
+        LOG --> PG("Postgres<br/>system of record")
+        LOG --> ES("Elasticsearch<br/>search index<br/>derived")
+        LOG --> RD("Redis<br/>cache<br/>derived")
+        LOG --> DW("Warehouse<br/>analytics<br/>derived")
+    end
+
+    MONO -.->|"turned<br/>inside out"| LOG
+
+    class MONO frozen
+    class W io
+    class LOG mathOp
+    class PG train
+    class ES base
+    class RD base
+    class DW base
 ```
-THE DATABASE, TURNED INSIDE OUT (unbundling)
 
-  BUNDLED (one monolithic DB):        UNBUNDLED (dataflow architecture):
-  ┌──────────────────────────┐         writes ─▶ [ EVENT LOG ]  (the "transaction log",
-  │  storage  indexes         │                       │            now the public interface)
-  │  views    replication     │          ┌────────────┼────────────┬──────────────┐
-  │  cache    query engine    │          ▼            ▼            ▼              ▼
-  │   (all hidden internals)  │      [Postgres]  [Elasticsearch] [Redis]     [Warehouse]
-  └──────────────────────────┘      system of    search index   cache       analytics
-                                      record     (derived)      (derived)    (derived)
-                                      each is a derived materialized view, kept in sync by the log
-```
+**Timeliness vs. Integrity**
 
-```
-TIMELINESS vs INTEGRITY (relax one, never the other)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  TIMELINESS  = "is this read up to date?"   violation = TEMPORARY staleness (self-heals)
-  INTEGRITY   = "is this data correct?"        violation = PERMANENT corruption (lost/dup)
+    D(("Asynchronous<br/>Dataflow")) -->|"relax"| TML("Timeliness<br/>is this read up to date?")
+    D -->|"never relax"| INT("Integrity<br/>is this data correct?")
+    TML --> OK(["OK: derived views<br/>lag a bit, self-heals"])
+    INT --> MUST(["MUST hold: exactly-once<br/>+ idempotence"])
 
-  asynchronous dataflow:  timeliness  ──relaxed──▶ derived views lag a bit         OK
-                          integrity   ──preserved─▶ exactly-once + idempotence      MUST
-  ⇒ you CAN be eventually-timely AND always-correct; never trade away integrity for speed
+    class D mathOp
+    class TML io
+    class INT base
+    class OK train
+    class MUST lossN
 ```
 
 Caption: the architectural thesis (the database inside out) and the correctness rule (eventual

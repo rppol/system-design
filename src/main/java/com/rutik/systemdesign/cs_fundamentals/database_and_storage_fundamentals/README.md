@@ -158,6 +158,34 @@ COMMIT;
   [../../database/database_fundamentals](../../database/database_fundamentals/) for SAGA patterns
   that avoid coordinator SPOF.
 
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant A as Participant A
+    participant B as Participant B
+
+    Note over C,B: Phase 1 - Prepare
+    C->>A: PREPARE - can you commit?
+    C->>B: PREPARE - can you commit?
+    A->>A: write prepare record to WAL, lock resources
+    B->>B: write prepare record to WAL, lock resources
+    A-->>C: YES
+    B-->>C: YES
+
+    Note over C,B: Phase 2 - Commit
+    C->>C: write commit record
+    C->>A: COMMIT
+    C->>B: COMMIT
+    A-->>C: ACK
+    B-->>C: ACK
+
+    Note over C,B: Blocking failure mode
+    C--xA: coordinator crashes before sending COMMIT
+    Note right of A: A already voted YES and is locked - it cannot<br/>commit or abort until the coordinator recovers
+```
+
+The blocking weakness is visible in the last exchange above: once Participant A has replied YES to PREPARE, it must hold its locks until it hears back — if the coordinator dies before Phase 2, A is stuck until the coordinator restarts (or an operator intervenes), which is exactly why SAGA-style compensation is preferred for long-running distributed transactions.
+
 ### 4.3 B+Tree Index
 
 A B+Tree is a balanced tree where:
@@ -258,35 +286,38 @@ WAL enables:
 
 ### 5.1 Storage Hierarchy
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph cpu["CPU"]
+        direction TD
+        reg("Registers<br/>~0.3 ns, ~1 KB")
+        l1("L1 Cache<br/>~1 ns, ~64 KB")
+        l2("L2 Cache<br/>~4 ns, ~1 MB")
+        l3("L3 Cache<br/>~30 ns, ~16 MB")
+        reg --> l1 --> l2 --> l3
+    end
+
+    dram("DRAM RAM<br/>~100 ns, ~64 GB<br/>Buffer Pool lives here")
+    nvme("NVMe SSD<br/>~100 µs, ~2 TB<br/>WAL + heap files")
+    hdd("HDD<br/>~10 ms, ~10 TB<br/>Archive / backup")
+
+    l3 --> dram --> nvme --> hdd
+
+    class reg,l1,l2,l3 mathOp
+    class dram train
+    class nvme base
+    class hdd frozen
 ```
-+----------------------------------------------------------+
-|                  STORAGE HIERARCHY                       |
-+----------------------------------------------------------+
-|                                                          |
-|  CPU                                                     |
-|  +------------------+                                    |
-|  | Registers ~0.3ns |  ~1 KB                             |
-|  +------------------+                                    |
-|  | L1 Cache   ~1 ns |  ~64 KB                            |
-|  +------------------+                                    |
-|  | L2 Cache   ~4 ns |  ~1 MB                             |
-|  +------------------+                                    |
-|  | L3 Cache  ~30 ns |  ~16 MB                            |
-|  +------------------+                                    |
-|          |                                               |
-|  +-------------------+                                   |
-|  |  DRAM (RAM) ~100ns|  ~64 GB    <-- Buffer Pool lives  |
-|  +-------------------+                   here            |
-|          |                                               |
-|  +-------------------+                                   |
-|  |  NVMe SSD ~100 µs |  ~2 TB     <-- WAL + heap files   |
-|  +-------------------+                                   |
-|          |                                               |
-|  +-------------------+                                   |
-|  |   HDD     ~10 ms  |  ~10 TB    <-- Archive / backup   |
-|  +-------------------+                                   |
-+----------------------------------------------------------+
-```
+
+Latency grows roughly three orders of magnitude at each tier below the CPU caches (~100 ns DRAM vs. ~100 µs NVMe vs. ~10 ms HDD), which is why keeping the working set in the DRAM buffer pool is the single biggest lever on database performance (see §4.5).
 
 ### 5.2 B+Tree Index Structure
 
@@ -305,57 +336,65 @@ WAL enables:
 
 ### 5.3 Write-Ahead Log Flow
 
-```
- Client
-   |
-   | SQL: UPDATE accounts SET balance=900 WHERE id=1
-   v
-+-------------------+        +------------------+
-| Transaction Mgr   |------> | WAL Buffer       |
-|                   |        | LSN: 10042       |
-|  1. Generate log  |        | Before: bal=1000 |
-|     record        |        | After:  bal=900  |
-|  2. Write to WAL  |        +------------------+
-|     (fsync)       |               |
-|  3. Modify page   |               | fsync to disk
-|     in buffer     |               v
-|  4. Return OK     |       [WAL File on SSD]
-+-------------------+
-        |
-        | (later, checkpoint)
-        v
-   [Heap File on SSD]   <-- data page written asynchronously
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-CRASH RECOVERY:
-  1. Read last checkpoint LSN
-  2. Replay all WAL records after that LSN
-  3. Roll back any uncommitted transactions (using undo log)
-  4. Database is consistent at the last committed state
+    client([Client]) -->|"UPDATE balance=900"| txn("Transaction Manager<br/>1 generate log record<br/>2 write WAL, fsync<br/>3 modify buffer page<br/>4 return OK")
+    txn --> walbuf("WAL Buffer<br/>LSN 10042<br/>before=1000 after=900")
+    walbuf -->|fsync| walfile("WAL File on SSD")
+    walfile -.->|"checkpoint<br/>async flush"| heap("Heap File on SSD")
+
+    subgraph recovery["Crash Recovery"]
+        direction LR
+        crashpt("Crash") --> readckpt("Read last<br/>checkpoint LSN") --> replay("Replay WAL<br/>records") --> undo("Roll back uncommitted<br/>via undo log") --> consistent(["Consistent state"])
+    end
+
+    walfile -.-> crashpt
+
+    class client io
+    class txn mathOp
+    class walbuf,heap base
+    class walfile train
+    class crashpt lossN
+    class readckpt,replay,undo mathOp
+    class consistent train
 ```
+
+The WAL buffer is fsynced to a durable WAL file *before* the transaction manager returns OK to the client; the heap file is updated only later, asynchronously, at the next checkpoint. On crash, recovery replays WAL records since the last checkpoint and undoes anything that never committed.
 
 ### 5.4 Isolation Level Anomaly Map
 
-```
-                     +---------------+
-   T1: READ balance  | Time 1        |
-                     |   T1 reads    |
-   T2: UPDATE bal    |   balance=100 |
-       COMMIT        |               |
-                     | Time 2        |
-                     |   T2 updates  |
-                     |   balance=200 |
-                     |   T2 commits  |
-                     |               |
-   T1: READ balance  | Time 3        |
-       again         |   T1 re-reads |
-                     |   balance=200 |  <-- Non-Repeatable Read
-                     +---------------+
+```mermaid
+sequenceDiagram
+    participant T1 as T1 Reader
+    participant Row as balance row
+    participant T2 as T2 Writer
 
-   READ UNCOMMITTED: T1 could read T2's un-committed write at Time 2
-   READ COMMITTED:   T1 avoids dirty reads; still sees T2's committed change at Time 3
-   REPEATABLE READ:  T1 always sees balance=100 for the same row (snapshot)
-   SERIALIZABLE:     T1 and T2 appear to run one-at-a-time
+    Note over T1,Row: Time 1
+    T1->>Row: READ balance
+    Row-->>T1: balance = 100
+
+    Note over T2,Row: Time 2
+    T2->>Row: UPDATE balance = 200
+    T2->>Row: COMMIT
+
+    Note over T1,Row: Time 3, T1 re-reads
+    T1->>Row: READ balance again
+    Row-->>T1: balance = 200
+
+    Note right of T1: Non-Repeatable Read - same row, two different values in one transaction
+
+    Note over T1,T2: READ UNCOMMITTED - could see the uncommitted 200 at Time 2<br/>READ COMMITTED - no dirty read, still sees 200 at Time 3<br/>REPEATABLE READ - sees 100 for the whole transaction, snapshot<br/>SERIALIZABLE - T1 and T2 appear to run one at a time
 ```
+
+T1's second read observes T2's committed write from Time 2 — whether that is visible at all depends entirely on isolation level, from Read Uncommitted (sees even the *uncommitted* write) up to Serializable (T1 and T2 appear fully ordered).
 
 ---
 
@@ -709,6 +748,23 @@ This is possible only because WAL records every committed change in sequence wit
 | Repeatable Read | High | Medium | Longer read snapshots | Financial reads; inventory checks |
 | Serializable | Highest | Lowest | Full conflict detection | Bank ledger; ticket allocation |
 
+```mermaid
+quadrantChart
+    title Isolation level: safety vs throughput
+    x-axis Low Throughput --> High Throughput
+    y-axis Low Safety --> High Safety
+    quadrant-1 High safety and high throughput
+    quadrant-2 High safety and low throughput
+    quadrant-3 Low safety and low throughput
+    quadrant-4 Low safety and high throughput
+    Read Uncommitted: [0.85, 0.08]
+    Read Committed: [0.6, 0.45]
+    Repeatable Read: [0.4, 0.7]
+    Serializable: [0.15, 0.95]
+```
+
+No isolation level sits in the high-safety-and-high-throughput quadrant — the four levels trace a straight tradeoff line from Read Uncommitted (bottom right) to Serializable (top left), which is exactly why picking the *lowest* isolation level that is still safe for the workload matters (see Best Practices, §13).
+
 ### 8.2 ACID vs. BASE
 
 | Dimension | ACID (PostgreSQL, MySQL) | BASE (Cassandra, DynamoDB) |
@@ -913,24 +969,27 @@ def transfer_fixed(conn: sqlite3.Connection, from_id: int, to_id: int, amount: f
 
 ### Pitfall 3 — Wrong Isolation Level for Use Case (Phantom Read in Inventory)
 
-```
-Scenario: Ticket booking system.
-T1: SELECT COUNT(*) FROM tickets WHERE event_id=1 AND status='available'  -> 1
-T1: Decides to book the last ticket.
-T2: (runs concurrently at Read Committed)
-    SELECT COUNT(*) FROM tickets WHERE event_id=1 AND status='available'  -> 1
-    T2 also decides to book the last ticket.
-T1: INSERT INTO bookings ...
-    UPDATE tickets SET status='booked' WHERE id=999
-    COMMIT
-T2: INSERT INTO bookings ...            <- oversells the event; phantom scenario
-    UPDATE tickets SET status='booked' WHERE id=999   <- overbooks
+```mermaid
+sequenceDiagram
+    participant T1 as T1
+    participant Tix as tickets table
+    participant T2 as T2 (Read Committed)
 
-FIX options:
-  1. Use SERIALIZABLE isolation: T2's range query conflicts with T1's write; T2 is aborted/retried.
-  2. Use SELECT ... FOR UPDATE: locks the row; T2 blocks until T1 commits.
-  3. Optimistic locking: add a version column; T2's UPDATE WHERE version=N fails if T1 already
-     incremented the version.
+    T1->>Tix: SELECT COUNT(*) WHERE available
+    Tix-->>T1: 1
+    Note right of T1: decides to book the last ticket
+
+    T2->>Tix: SELECT COUNT(*) WHERE available
+    Tix-->>T2: 1
+    Note right of T2: also decides to book the last ticket
+
+    T1->>Tix: INSERT booking, UPDATE status=booked
+    T1->>Tix: COMMIT
+
+    T2->>Tix: INSERT booking, UPDATE status=booked
+    Note over T2,Tix: phantom scenario - event is now overbooked
+
+    Note over T1,T2: Fix 1: SERIALIZABLE - T2's range query conflicts with T1's write, T2 aborted/retried<br/>Fix 2: SELECT ... FOR UPDATE - locks the row, T2 blocks until T1 commits<br/>Fix 3: optimistic locking - version column, T2's UPDATE WHERE version=N fails
 ```
 
 ---

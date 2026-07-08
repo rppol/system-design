@@ -48,6 +48,28 @@ Python 3.11 and 3.12 are the current production targets. Python 3.12 ships `toml
 
 **Library projects** (packages published to PyPI): declare dependencies with loose upper bounds or no upper bounds (`fastapi>=0.100.0`). Never commit a lock file to a library repo — let the user's resolver pick compatible versions. The lock file is for development only and listed in `.gitignore`.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    q{"Project type?"} -->|"application<br/>(FastAPI service)"| app["Lower bound only<br/>on each dependency"]
+    q -->|"library<br/>(published to PyPI)"| lib["Loose or no<br/>upper bound"]
+    app --> lockYes(["Commit the<br/>lock file"])
+    lib --> lockNo(["Never commit it —<br/>consumer resolves"])
+
+    class q mathOp
+    class app,lockYes train
+    class lib,lockNo frozen
+```
+
+*Applications own their deployment environment, so pinning and committing the lock file buys reproducibility; libraries are consumed by many different resolvers, so a committed lock file would be ignored — or worse, mistaken for a hard requirement.*
+
 ### Build Distribution Types
 
 **Wheel** (`.whl`): A ZIP archive with a standardized naming convention. Pre-built — no compilation needed at install time. For pure Python packages the tag is `py3-none-any` (works on any platform). For C extension packages separate wheels exist per Python version and platform (e.g., `cp312-cp312-manylinux_2_17_x86_64.whl`). Install time: milliseconds.
@@ -102,42 +124,50 @@ my-fastapi-service/
 
 ### Build Pipeline
 
-```
-Developer workstation                      PyPI / Registry
-┌─────────────────────────────┐            ┌──────────────────┐
-│  pyproject.toml             │            │                  │
-│  + source files             │            │  .whl artifact   │
-│          │                  │            │  .tar.gz artifact│
-│          ▼                  │            │                  │
-│  build frontend (uv/pip)    │            └──────────────────┘
-│          │                  │                     ▲
-│          ▼                  │                     │
-│  build backend (hatchling)  │──── python -m ──────┤
-│          │                  │    build            │
-│          ▼                  │                     │
-│   dist/                     │──── twine upload ───┘
-│   ├── myservice-1.0.0.whl   │    or uv publish
-│   └── myservice-1.0.0.tar.gz│
-└─────────────────────────────┘
+**Build & publish flow** — source moves through the PEP 517 frontend/backend split into `dist/`, then out to the registry via `twine` or `uv publish`.
 
-Resolver + Installer Flow
-┌───────────────────────────────────────────────────────┐
-│  pyproject.toml (direct deps with loose bounds)        │
-│          │                                             │
-│          ▼                                             │
-│  uv pip compile / poetry lock                          │
-│  (SAT solver resolves full dependency graph)           │
-│          │                                             │
-│          ▼                                             │
-│  uv.lock / requirements.txt (pinned hashes)            │
-│          │                                             │
-│          ▼                                             │
-│  uv sync / pip install -r requirements.txt             │
-│  (downloads wheels from PyPI cache, installs)          │
-│          │                                             │
-│          ▼                                             │
-│  .venv/  (isolated, reproducible environment)          │
-└───────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src(["pyproject.toml<br/>+ source files"]) --> fe["build frontend<br/>(uv / pip)"]
+    fe --> be["build backend<br/>(hatchling)"]
+    be -->|"python -m build"| dist(["dist/<br/>.whl + .tar.gz"])
+    dist -->|"twine upload /<br/>uv publish"| registry(["PyPI / Registry"])
+
+    class src io
+    class fe,be mathOp
+    class dist train
+    class registry base
+```
+
+**Resolver & installer flow** — the SAT solver expands loose bounds into a fully pinned lock file before anything reaches the isolated `.venv/`.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pt(["pyproject.toml<br/>(loose bounds)"]) --> resolve("uv pip compile /<br/>poetry lock<br/>(SAT solver)")
+    resolve --> lock("uv.lock /<br/>requirements.txt<br/>(pinned hashes)")
+    lock --> sync("uv sync / pip install<br/>-r requirements.txt")
+    sync --> venv([".venv/<br/>isolated & reproducible"])
+
+    class pt io
+    class resolve,sync mathOp
+    class lock base
+    class venv train
 ```
 
 ---
@@ -450,6 +480,16 @@ twine upload --repository testpypi dist/*
 ## 7. Real-World Examples
 
 **Astral (uv, ruff)**: Astral built both `ruff` and `uv` in Rust. `ruff` replaces an entire ecosystem (`flake8` + 50 plugins + `isort` + `pyupgrade` + `black`) with a single binary that runs 10-100x faster. On the CPython codebase (500k+ lines), `ruff check` completes in under 1 second vs. flake8's 30+ seconds. `uv` resolves the full Django dependency graph in under 100ms vs. pip's 10-30 seconds.
+
+```mermaid
+xychart-beta
+    title "Astral tooling: speedup vs. legacy baseline"
+    x-axis ["Lint (ruff/flake8)", "Dependency resolve (uv/pip)", "Warm-cache install (uv/pip)"]
+    y-axis "Times faster" 0 --> 120
+    bar [30, 100, 20]
+```
+
+*Three unrelated operations — linting CPython (30+s to under 1s), resolving Django's full dependency graph (10-30s to under 100ms), and a warm-cache single-package install (about 200ms to about 10ms) — all land in the same 20-100x band, showing the Rust rewrite is not a one-off win on a single code path.*
 
 **FastAPI itself**: Uses `pyproject.toml` with `hatchling` as the build backend. Has separate optional dependency groups: `[all]`, `[dev]`, `[doc]`, `[test]`. Maintains type stubs and ships `py.typed` so IDE integrations provide full type inference for FastAPI applications.
 

@@ -31,6 +31,38 @@ The defining test: **for each element, do you need to find the nearest element (
 
 ## 2. Mental Model & Intuition
 
+The stack's shape follows directly from what you're hunting for -- decreasing for "next greater," increasing for "next smaller," and a deque once the window itself slides.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q{"What are you<br/>looking for?"}
+    G(["Next / previous<br/>GREATER element"])
+    S(["Next / previous<br/>SMALLER element"])
+    W(["Sliding window<br/>max or min"])
+    DEC("Decreasing stack<br/>pop while top is smaller<br/>than current")
+    INC("Increasing stack<br/>pop while top is bigger<br/>than current")
+    DQ("Monotonic deque<br/>pop expired front,<br/>smaller values off the back")
+
+    Q --> G
+    G --> DEC
+    Q --> S
+    S --> INC
+    Q --> W
+    W --> DQ
+
+    class Q mathOp
+    class G,S,W req
+    class DEC,INC,DQ train
+```
+
 ```
 "Next Greater Element" -- decreasing stack
 
@@ -297,6 +329,42 @@ def daily_temperatures_fixed(temperatures: list[int]) -> list[int]:
 - **[Two Pointers](two_pointers.md)** — "Trapping Rain Water" and similar problems often have *both* a monotonic-stack solution and a two-pointer solution with `left_max`/`right_max`; the two-pointer version is usually O(1) space vs the stack's O(n), but the stack version generalizes more easily to "largest rectangle"-style problems.
 - **[Top-K Elements](top_k_elements.md)** — if the question becomes "k-th largest" rather than "next greater", you need *global* ordering (heap), not *local/relative* ordering (stack).
 - **[Dynamic Programming](dynamic_programming.md)** — "Largest Rectangle in Histogram" can also be approached with DP (precompute left/right boundaries via DP arrays), but the monotonic stack achieves the same O(n) with less state.
+
+Framed as one decision hub, the four escape hatches above collapse to this:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    HUB(["Monotonic Stack<br/>looks like a fit"])
+    Q1{"Window only needs<br/>a sum or count,<br/>not a min/max?"}
+    Q2{"Also solvable with<br/>converging pointers,<br/>O(1) space OK?"}
+    Q3{"Question is really<br/>k-th largest --<br/>a global rank?"}
+    Q4{"Fine trading more<br/>state for the<br/>same O(n)?"}
+    R1(["Plain running<br/>aggregate"])
+    R2(["Two Pointers"])
+    R3(["Top-K Heap"])
+    R4(["Dynamic<br/>Programming"])
+
+    HUB --> Q1
+    Q1 -->|yes| R1
+    HUB --> Q2
+    Q2 -->|yes| R2
+    HUB --> Q3
+    Q3 -->|yes| R3
+    HUB --> Q4
+    Q4 -->|"yes, either works"| R4
+
+    class HUB base
+    class Q1,Q2,Q3,Q4 mathOp
+    class R1,R2,R3,R4 frozen
+```
 
 ---
 

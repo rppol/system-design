@@ -47,6 +47,36 @@ small (`n <= 12-20`).
   [`graph_traversal.md`](graph_traversal.md) (though Word Search-style "find
   THIS exact path" still uses the mark/unmark backtracking mechanism)
 
+**The decision at a glance** — the signals above collapse into one routing
+question:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q{"What does the<br/>problem ask for?"} -->|"enumerate ALL solutions<br/>(subsets/perms/combos/paths)"| BT(["Backtracking<br/>(this pattern)"])
+    Q -->|"tiny constraints<br/>(n under 20)"| BT
+    Q -->|"count the ways<br/>(overlapping subproblems)"| DP(["dynamic_programming.md"])
+    Q -->|"existence only<br/>(boolean yes/no)"| DFS(["single DFS / greedy pass"])
+    Q -->|"subsets, n up to ~30,<br/>sum/existence only"| BM(["bit_manipulation.md<br/>bitmask DP"])
+    Q -->|"simple grid<br/>connectivity only"| GT(["graph_traversal.md"])
+
+    class Q mathOp
+    class BT train
+    class DP,DFS,BM,GT frozen
+```
+
+Two edges land on **Backtracking** because enumerate-all-solutions and a tiny
+`n` are independent confirmations of the same exponential-is-intended signal;
+the other four edges each redirect to the file that actually owns that
+problem shape.
+
 ---
 
 ## 2. Mental Model & Intuition
@@ -57,24 +87,67 @@ candidates. The recursion visits this tree depth-first; the "undo" step is
 what lets the same `path` variable represent a *different* node as the
 recursion returns up and back down.
 
+**Subsets of `[1, 2]`** — each edge is an "include or exclude" choice:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R(["start<br/>path: none"]) -->|"include 1"| A(["path: 1"])
+    R -->|"exclude 1"| B(["path: none"])
+    A -->|"include 2"| L1(["path: 1, 2"])
+    A -->|"exclude 2"| L2(["path: 1"])
+    B -->|"include 2"| L3(["path: 2"])
+    B -->|"exclude 2"| L4(["path: none"])
+
+    class R io
+    class A,B mathOp
+    class L1,L2,L3,L4 train
 ```
-Subsets of [1, 2] -- "include or exclude each element":
 
-                          path=[]
-                    /                \
-            include 1                exclude 1
-              path=[1]                 path=[]
-             /        \               /        \
-      include 2    exclude 2   include 2    exclude 2
-      path=[1,2]   path=[1]    path=[2]     path=[]
+Leaves left to right — `[1,2]`, `[1]`, `[2]`, `[]` — are all `2^2 = 4`
+subsets, one per leaf. The "undo" (`path.pop()`) is what turns `path` from
+`[1,2]` back into `[1]`, and from `[1]` back into `[]`, so the *same* list
+object can represent every node in the tree as the DFS moves through it.
 
-Leaves (left to right): [1,2]  [1]  [2]  []
-All 4 = 2^2 subsets, one per leaf.
+Every template's CHOOSE / EXPLORE / UN-CHOOSE comments (§3) are one generic
+four-step cycle, with a constraint check added before committing to a choice:
 
-The "undo" (path.pop()) is what turns path from [1,2] back into [1],
-and from [1] back into [], so the SAME list object can represent
-every node in the tree as the DFS moves through it.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    N(["next candidate<br/>choice"]) --> V{"violates a<br/>constraint?"}
+    V -->|"yes"| P(["PRUNE<br/>skip, no recurse"])
+    V -->|"no"| C(["CHOOSE<br/>mutate shared state"])
+    C --> E(["EXPLORE<br/>recurse deeper"])
+    E --> U(["UN-CHOOSE<br/>restore shared state"])
+    P -.-> N
+    U -.-> N
+
+    class N req
+    class V mathOp
+    class P lossN
+    class C train
+    class E mathOp
+    class U frozen
 ```
+
+N-Queens' `if col in cols or ...: continue` (§4) is this PRUNE branch firing
+*before* `CHOOSE` — the search never wastes a recursive call building a
+board it would only reject later.
 
 ---
 

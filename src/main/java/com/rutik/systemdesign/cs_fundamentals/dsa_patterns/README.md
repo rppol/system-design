@@ -14,15 +14,34 @@ The pattern-recognition and strategy-selection layer for coding interviews. This
 
 **The pattern-recognition workflow:**
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S1(["Read problem<br/>statement"]) --> S2["Consult §3<br/>Constraints→Complexity"]
+    S2 --> S3["Consult §4<br/>Cue→Pattern table"]
+    S3 --> D1{"Pattern<br/>converges?"}
+    D1 -->|"no, unsure"| S4["Walk §5<br/>decision tree"]
+    D1 -->|"yes"| S5["Open pattern file,<br/>confirm §1 signals"]
+    S4 --> S5
+    S5 --> S6["Adapt §3<br/>Template"]
+    S6 --> S7(["Warm up with an<br/>easy §7 problem"])
+
+    class S1 io
+    class S2,S3 mathOp
+    class D1 mathOp
+    class S4 lossN
+    class S5,S6 req
+    class S7 train
 ```
-1. Read the problem statement → identify constraints (n, k, range, sorted?)
-2. Consult §3 (Constraints → Complexity table) — read n, derive required complexity
-3. Consult §4 (Cue → Pattern table) — match phrases / data shapes in the problem
-4. If unsure, walk §5 (decision tree) — branching on input shape
-5. Open the matched pattern's .md file — read §1 (Recognition Signals) to confirm
-6. Apply §3 (Template) → adapt to the specific problem
-7. Fill §7 (Problem Bank) — pick an easy instance of the same pattern to warm up first
-```
+
+*Steps 2–3 are a fast table lookup; step 4 (red) is the fallback escape hatch only when the tables don't converge on their own.*
 
 This section is organized so steps 2–4 are mechanical: you are not "figuring out" the pattern from scratch; you are *looking it up* using the signals you read in the problem.
 
@@ -31,6 +50,32 @@ This section is organized so steps 2–4 are mechanical: you are not "figuring o
 ## 1. The Universal Problem-Solving Method — UMPIRE
 
 Use UMPIRE as a timed scaffold during interviews. Each stage has a target time budget for a 45-minute loop.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    U(["Understand<br/>3–5 min"]) -->|"restate + 2 examples"| M["Match<br/>2–3 min"]
+    M -->|"name pattern<br/>+ structure"| P["Plan<br/>3–5 min"]
+    P -->|"brute force,<br/>then optimize"| I["Implement<br/>15–20 min"]
+    I -->|"typed code,<br/>one step at a time"| R["Review<br/>3–5 min"]
+    R -->|"trace + check<br/>edge cases"| E(["Evaluate<br/>2–3 min"])
+
+    class U io
+    class M mathOp
+    class P base
+    class I train
+    class R lossN
+    class E req
+```
+
+*The six UMPIRE stages fill the 45-minute loop in order — Implement (green) is the biggest single chunk at 15–20 min, and Review (red) is the last checkpoint before you run out of clock.*
 
 **U — Understand (3–5 min)**
 Clarify requirements before writing any code. Ask: What are the input types and ranges? Can the array be empty? Are values unique? Is the array sorted? Is it a 0-indexed or 1-indexed problem? Can I modify the input in place? What should I return — an index, a value, a list? Restate the problem in your own words and confirm. Write down 2 concrete examples (one normal, one edge).
@@ -80,6 +125,16 @@ The single highest-leverage habit: **look at the input size constraint before th
 **Reading a grid (m × n):** treat the total cells m*n as your effective n. A 1000×1000 grid has n=10^6; O(m*n) is fine, O(m*n * log(mn)) may be tight.
 
 **Reading k (number of results / window size):** constraints on k (e.g., k ≤ 10^4 separately from n ≤ 10^5) can open O(n*k) windows. Read both.
+
+```mermaid
+xychart-beta
+    title "Max affordable complexity shrinks as n grows"
+    x-axis ["n≤12", "n≤20", "n≤25", "n≤500", "n≤10^4", "n≤5x10^5", "n≤10^7", "n≤10^8", "n over 10^9"]
+    y-axis "Complexity tier (9=O(n!) ... 1=O(log n))" 0 --> 10
+    bar [9, 8, 7, 6, 5, 4, 3, 2, 1]
+```
+
+*Same table as above, collapsed to one bar per complexity tier: the staircase only ever steps down — a larger n never buys you a more expensive complexity class, it takes one away.*
 
 ---
 
@@ -202,98 +257,117 @@ Scan the problem statement for these signals. The match does not have to be word
 
 Use this when the cue table does not immediately converge. Branch on the primary structure of the problem.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ROOT{"Primary data shape<br/>/ constraint?"}
+
+    subgraph SG1["Array / String"]
+        C1{"Array or<br/>String?"}
+        C1 -->|"contiguous subarray<br/>/ substring?"| L_SW["SLIDING WINDOW"]
+        C1 -->|"sorted pair/triplet, or<br/>two indices same direction?"| L_TP["TWO POINTERS"]
+        C1 -->|"frequency / grouping<br/>/ complement?"| L_HASH["HASHING"]
+        C1 -->|"range sum /<br/>prefix query?"| L_PREFIX["PREFIX SUM<br/>(+ Fenwick if updates)"]
+        C1 -->|"binary search<br/>candidate?"| L_BSEARCH["MODIFIED<br/>BINARY SEARCH"]
+        C1 -->|"numbers in 1..n,<br/>missing/dup?"| L_CYCLIC["CYCLIC SORT"]
+        C1 -->|"stack ordering<br/>(next greater)?"| L_MONOSTACK["MONOTONIC STACK"]
+        C1 -->|"window<br/>max/min?"| L_MONODEQUE["MONOTONIC DEQUE"]
+    end
+
+    subgraph SG2["Linked List"]
+        C2{"Linked<br/>List?"}
+        C2 -->|"cycle / middle /<br/>kth from end?"| L_FASTSLOW["FAST & SLOW<br/>POINTERS"]
+        C2 -->|"reverse /<br/>reorder?"| L_LLREV["IN-PLACE LL<br/>REVERSAL"]
+    end
+
+    subgraph SG3["Tree"]
+        C3{"Tree?"}
+        C3 -->|"level-by-level /<br/>width / view?"| L_TREEBFS["TREE BFS"]
+        C3 -->|"path / depth /<br/>diameter / LCA?"| L_TREEDFS["TREE DFS<br/>(post-order)"]
+        C3 -->|"BST property<br/>(sorted order)?"| L_INORDER["IN-ORDER DFS"]
+    end
+
+    subgraph SG4["Matrix / Grid — transform"]
+        C4{"Transform or traverse<br/>(not connectivity)?"}
+        C4 -->|"spiral / diagonal<br/>order?"| L_MATRIXTRAV["MATRIX<br/>TRAVERSAL"]
+        C4 -->|"rotate / transpose /<br/>set-zeroes in place?"| L_MATRIXTRAV
+        C4 -->|"search a sorted<br/>matrix?"| L_MATRIXSEARCH["MATRIX (staircase)<br/>or BINARY SEARCH"]
+        C4 -.->|"connectivity /<br/>islands / path?"| L_SEEGRAPH["see Graph<br/>/ Grid"]
+    end
+
+    subgraph SG5["Graph / Grid — connectivity"]
+        C5{"Graph or<br/>Grid?"}
+        C5 -->|"unweighted<br/>shortest path?"| L_GBFS["GRAPH BFS"]
+        C5 --> W5{"weighted<br/>shortest path?"}
+        W5 -->|"all non-negative?"| L_DIJKSTRA["DIJKSTRA"]
+        W5 -->|"negative<br/>edges?"| L_BELLMAN["BELLMAN-FORD"]
+        W5 -->|"0/1<br/>weights?"| L_01BFS["0-1 BFS<br/>(deque)"]
+        W5 -->|"all pairs,<br/>V ≤ 500?"| L_FLOYD["FLOYD-WARSHALL"]
+        C5 -->|"connected components<br/>/ islands?"| L_GRAPHDFSBFS["GRAPH DFS<br/>or BFS"]
+        C5 -->|"dependencies /<br/>ordering (DAG)?"| L_TOPOSORT["TOPOLOGICAL SORT"]
+        C5 -->|"dynamic grouping<br/>/ cycle?"| L_UNIONFIND["UNION-FIND"]
+        C5 -->|"string word search<br/>/ prefix?"| L_TRIE["TRIE"]
+        C5 -->|"MST, span all<br/>nodes min cost?"| L_MST["KRUSKAL<br/>or PRIM"]
+    end
+
+    subgraph SG6["Optimize a value"]
+        C6{"min cost / max value<br/>/ #ways?"}
+        C6 -->|"locally greedy<br/>always optimal?"| L_GREEDY["GREEDY<br/>(exchange argument)"]
+        C6 -->|"overlapping<br/>subproblems?"| L_DP["DYNAMIC<br/>PROGRAMMING"]
+        L_DP -->|"1 sequence?"| L_DP1["1-D DP<br/>(house robber, LIS,<br/>coin change)"]
+        L_DP -->|"2 sequences?"| L_DP2["2-D DP<br/>(LCS, edit distance)"]
+        L_DP -->|"grid?"| L_DPGRID["GRID DP"]
+        L_DP -->|"intervals?"| L_DPINTERVAL["INTERVAL DP"]
+        L_DP -->|"bitmask / subset<br/>of items?"| L_DPBITMASK["BITMASK DP"]
+        L_DP -->|"state<br/>machine?"| L_DPSTATE["STATE DP<br/>(stocks)"]
+    end
+
+    subgraph SG7["Generate all"]
+        C7{"subsets / perms<br/>/ combinations?"}
+        C7 -->|"fixed-size or<br/>constrained?"| L_BTCOMBO["BACKTRACKING<br/>(combinations)"]
+        C7 -->|"all<br/>arrangements?"| L_BTPERM["BACKTRACKING<br/>(permutations)"]
+        C7 -->|"constraint<br/>satisfaction?"| L_BTCONSTRAINT["BACKTRACKING<br/>(with pruning)"]
+    end
+
+    subgraph SG8["K things / K-th"]
+        C8{"K-th<br/>something?"}
+        C8 -->|"K-th largest/<br/>smallest / top K?"| L_HEAPTOPK["HEAP<br/>(top-K)"]
+        C8 -->|"median, balance<br/>halves?"| L_TWOHEAPS["TWO HEAPS"]
+        C8 -->|"merge K<br/>sorted sources?"| L_KWAYMERGE["K-WAY MERGE<br/>(heap)"]
+    end
+
+    ROOT --> C1
+    ROOT --> C2
+    ROOT --> C3
+    ROOT --> C4
+    ROOT --> C5
+    ROOT --> C6
+    ROOT --> C7
+    ROOT --> C8
+    ROOT -->|"single number /<br/>XOR / bit trick?"| L_BIT["BIT<br/>MANIPULATION"]
+
+    class ROOT io
+    class C1,C2,C3,C4,C5,W5,C6,C7,C8 mathOp
+    class L_SW,L_TP,L_HASH,L_PREFIX,L_BSEARCH,L_CYCLIC,L_MONOSTACK,L_MONODEQUE train
+    class L_FASTSLOW,L_LLREV train
+    class L_TREEBFS,L_TREEDFS,L_INORDER train
+    class L_MATRIXTRAV,L_MATRIXSEARCH train
+    class L_SEEGRAPH frozen
+    class L_GBFS,L_DIJKSTRA,L_BELLMAN,L_01BFS,L_FLOYD,L_GRAPHDFSBFS,L_TOPOSORT,L_UNIONFIND,L_TRIE,L_MST train
+    class L_GREEDY,L_DP,L_DP1,L_DP2,L_DPGRID,L_DPINTERVAL,L_DPBITMASK,L_DPSTATE train
+    class L_BTCOMBO,L_BTPERM,L_BTCONSTRAINT train
+    class L_HEAPTOPK,L_TWOHEAPS,L_KWAYMERGE train
+    class L_BIT train
 ```
-What is the PRIMARY data shape / constraint?
-|
-+-- Array or String?
-|   |
-|   +-- Contiguous subarray/substring?  ---> SLIDING WINDOW
-|   |
-|   +-- Sorted array, pair/triplet?     ---> TWO POINTERS
-|   |
-|   +-- Two indices sweeping same direction? --> TWO POINTERS (remove dups, partition)
-|   |
-|   +-- Frequency / grouping / complement?  --> HASHING
-|   |
-|   +-- Range sum / prefix query?       ---> PREFIX SUM (+ Fenwick if updates)
-|   |
-|   +-- Binary search candidate?        ---> MODIFIED BINARY SEARCH
-|   |       (search on sorted array, or search on ANSWER SPACE)
-|   |
-|   +-- Numbers in [1..n], find missing/dup?  --> CYCLIC SORT
-|   |
-|   +-- Stack-based ordering (next greater)?  --> MONOTONIC STACK
-|   |
-|   +-- Window max/min?                 ---> MONOTONIC DEQUE
-|
-+-- Linked List?
-|   |
-|   +-- Cycle / middle / kth from end?  ---> FAST & SLOW POINTERS
-|   |
-|   +-- Reverse / reorder?              ---> IN-PLACE LL REVERSAL
-|
-+-- Tree?
-|   |
-|   +-- Level-by-level / width / view?  ---> TREE BFS
-|   |
-|   +-- Path / depth / diameter / LCA?  ---> TREE DFS (usually post-order)
-|   |
-|   +-- BST property (sorted order)?    ---> IN-ORDER DFS
-|
-+-- Matrix / Grid — TRANSFORM or TRAVERSE (not connectivity)?
-|   |
-|   +-- Spiral / diagonal order?        ---> MATRIX TRAVERSAL
-|   +-- Rotate / transpose / set-zeroes in place?  ---> MATRIX TRAVERSAL
-|   +-- Search a sorted matrix?         ---> MATRIX (staircase) or BINARY SEARCH
-|   +-- Connectivity / islands / path?  ---> (see Graph / Grid below)
-|
-+-- Graph / Grid?
-|   |
-|   +-- Unweighted shortest path?       ---> GRAPH BFS
-|   |
-|   +-- Weighted shortest path?
-|   |   +-- All non-negative?           ---> DIJKSTRA
-|   |   +-- Negative edges?             ---> BELLMAN-FORD
-|   |   +-- 0/1 weights?                ---> 0-1 BFS (deque)
-|   |   +-- All pairs, V ≤ 500?         ---> FLOYD-WARSHALL
-|   |
-|   +-- Connected components / islands? ---> GRAPH DFS or BFS
-|   |
-|   +-- Dependencies / ordering (DAG)?  ---> TOPOLOGICAL SORT
-|   |
-|   +-- Dynamic grouping / cycle?       ---> UNION-FIND
-|   |
-|   +-- String word search / prefix?    ---> TRIE
-|   |
-|   +-- MST (span all nodes min cost)?  ---> KRUSKAL or PRIM
-|
-+-- "Optimize a value" (min cost, max value, #ways)?
-|   |
-|   +-- Locally greedy always optimal?  ---> GREEDY
-|   |   (verify with exchange argument)
-|   |
-|   +-- Overlapping subproblems?        ---> DYNAMIC PROGRAMMING
-|       +-- 1 sequence?                 ---> 1-D DP (house robber, LIS, coin change)
-|       +-- 2 sequences?                ---> 2-D DP (LCS, edit distance)
-|       +-- Grid?                       ---> GRID DP
-|       +-- Intervals?                  ---> INTERVAL DP
-|       +-- Bitmask / subset of items?  ---> BITMASK DP
-|       +-- State machine?              ---> STATE DP (stocks)
-|
-+-- "Generate all" (subsets / permutations / combinations)?
-|   |
-|   +-- Fixed-size or constrained?      ---> BACKTRACKING (combinations)
-|   +-- All arrangements?               ---> BACKTRACKING (permutations)
-|   +-- Constraint satisfaction?        ---> BACKTRACKING (with pruning)
-|
-+-- K things / K-th something?
-|   |
-|   +-- K-th largest/smallest / top K?  ---> HEAP (top-K, size k min-heap)
-|   +-- Median (balance halves)?         ---> TWO HEAPS
-|   +-- Merge K sorted sources?          ---> K-WAY MERGE (heap)
-|
-+-- Single number / XOR / bit trick?    ---> BIT MANIPULATION
-```
+
+*Eight branches off the root question (blue), each a subgraph of decision points (orange) fanning to the matched pattern (green); the Matrix/Grid connectivity case (purple, dashed) hands off to the Graph/Grid branch instead of duplicating it.*
 
 ---
 
@@ -438,18 +512,36 @@ Topological sort       + DP (longest path in DAG)    Longest Increasing Path in 
 
 ### When You're Stuck
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    D1{"Where are<br/>you stuck?"}
+    D1 -->|"recognition"| A1["Re-read problem;<br/>find the primary<br/>data shape"]
+    A1 --> A2["Run the decision<br/>tree (§4)"]
+    D1 -->|"optimization"| B1["State brute force.<br/>Ask “what am I<br/>recomputing?”"]
+    B1 --> B2["Subarray →<br/>sliding window /<br/>prefix sum"]
+    B1 --> B3["Tree → pass state<br/>down / return<br/>state up"]
+    B1 --> B4["Min/max → heap<br/>or binary search"]
+    D1 -->|"implementation"| C1["Write the invariant<br/>as a comment"]
+    C1 --> C2["Write base case,<br/>one loop variable<br/>at a time"]
+    D1 -->|"completely blank"| E1["Say “start with brute<br/>force, then optimize”"]
+    E1 --> E2["Never sit silent for<br/>over 90 seconds"]
+
+    class D1 mathOp
+    class A1,A2 req
+    class B1,B2,B3,B4 req
+    class C1,C2 req
+    class E1,E2 lossN
 ```
-Stuck at recognition?  → Re-read problem. Look for the primary data shape.
-                          Run the decision tree from §4.
-Stuck at optimization? → State the brute force. Ask: "what am I recomputing?"
-                          If a subarray: try sliding window / prefix sum.
-                          If a tree: try passing state down / returning up.
-                          If a min/max: try heap or binary search.
-Stuck at implementation?→ Write the invariant in a comment. Write the base case.
-                          One loop variable at a time.
-Completely blank?       → Say: "Let me start with brute force and optimize."
-                          Never sit silent for >90 seconds.
-```
+
+*Diagnose which of the four stuck-states you're in, then apply the matching remedy — "completely blank" (red) is the only branch that doesn't re-derive anything, it just buys you time to start talking.*
 
 ### Complexity Communication Script
 

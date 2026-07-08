@@ -27,34 +27,65 @@ Sort intervals by start time, then sweep left to right, merging the current inte
 
 The defining test: **do you have a collection of `[start, end]` ranges, and does the answer depend on which ranges overlap, how they combine, or what gaps exist between them?** If the sort key should be **start** time and the goal is to **combine/merge/count overlaps**, it's this pattern. If the sort key should be **end** time and the goal is to **select a maximum subset**, it's greedy interval scheduling.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    in(["collection of<br/>start-end ranges"]) --> d1{"question is a<br/>sum over indices?"}
+    d1 -->|"yes"| pfx["Prefix Sum<br/>(range sum query)"]
+    d1 -->|"no"| d2{"ranges are 2D<br/>rectangles, need area?"}
+    d2 -->|"yes"| sweep["sweep line +<br/>segment tree"]
+    d2 -->|"no"| d3{"goal: MAXIMIZE count<br/>of ranges selected?"}
+    d3 -->|"yes"| greedy["Greedy<br/>(sort by END)"]
+    d3 -->|"no"| here["Merge Intervals<br/>(sort by START)"]
+
+    class in io
+    class d1,d2,d3 mathOp
+    class pfx,sweep,greedy frozen
+    class here train
+```
+
+*Walk the anti-signals in order: only a candidate that clears all three checks lands on sort-by-start-and-merge — everything else routes to a neighboring pattern.*
+
 ---
 
 ## 2. Mental Model & Intuition
 
+**Merging overlapping intervals** — the sweep keeps one `current` interval and, for each next interval, either merges it in or pushes `current` to the result and starts fresh:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sorted(["sorted by start:<br/>(1,3) (2,6) (8,10) (15,18)"]) --> cur0["current = (1,3)"]
+    cur0 --> d1{"end 3 ≥ start 2?"}
+    d1 -->|"yes: merge"| cur1["current = (1,6)"]
+    cur1 --> d2{"end 6 ≥ start 8?"}
+    d2 -->|"no"| push1["push (1,6)<br/>current = (8,10)"]
+    push1 --> d3{"end 10 ≥ start 15?"}
+    d3 -->|"no"| push2["push (8,10)<br/>current = (15,18)"]
+    push2 --> final["end of list:<br/>push (15,18)"]
+    final --> result(["result:<br/>(1,6) (8,10) (15,18)"])
+
+    class sorted,result io
+    class cur0,cur1 train
+    class d1,d2,d3 mathOp
+    class push1,push2,final base
 ```
-Merging overlapping intervals
 
-  intervals = [[1,3], [2,6], [8,10], [15,18]]
-
-  Step 1: SORT by start time (already sorted here)
-    [1,3] [2,6] [8,10] [15,18]
-
-  Step 2: SWEEP, maintaining a "current merged interval"
-
-  current = [1,3]
-  next = [2,6]:  does [1,3] overlap [2,6]?  current.end(3) >= next.start(2)? YES
-                 merge: current = [1, max(3,6)] = [1,6]
-
-  next = [8,10]: does [1,6] overlap [8,10]? current.end(6) >= next.start(8)? NO
-                 push [1,6] to result. current = [8,10]
-
-  next = [15,18]: does [8,10] overlap [15,18]? 10 >= 15? NO
-                  push [8,10] to result. current = [15,18]
-
-  end of list: push current = [15,18]
-
-  result = [[1,6], [8,10], [15,18]]
-```
+*Each next interval either extends `current` (overlap found — green) or forces a push into `result` and a reset (no overlap — gold), tracing `intervals = [[1,3], [2,6], [8,10], [15,18]]` end to end.*
 
 ```
 Why sort by START time (for merging)?
@@ -66,22 +97,35 @@ Why sort by START time (for merging)?
   or later, requiring O(n^2) pairwise checks.
 ```
 
+**Minimum meeting rooms (overlap counting, not merging)** — separate the starts and ends, sort each independently, then sweep both with two pointers:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["intervals:<br/>(0,30) (5,10) (15,20)"]) --> split["sort starts and ends<br/>independently"]
+    split --> in(["starts: 0, 5, 15<br/>ends: 10, 20, 30"])
+    in --> d1{"s=0: start 0<br/>before end 10?"}
+    d1 -->|"yes"| r1["new room<br/>rooms = 1"]
+    r1 --> d2{"s=1: start 5<br/>before end 10?"}
+    d2 -->|"yes"| r2["new room<br/>rooms = 2"]
+    r2 --> d3{"s=2: start 15<br/>before end 10?"}
+    d3 -->|"no"| r3["room freed<br/>rooms stays 2"]
+    r3 --> result(["max concurrent<br/>rooms = 2"])
+
+    class raw,in,result io
+    class split,d1,d2,d3 mathOp
+    class r1,r2 train
+    class r3 base
 ```
-Minimum meeting rooms (overlap COUNTING, not merging)
 
-  intervals = [[0,30],[5,10],[15,20]]
-
-  Separate starts and ends, sort independently:
-    starts = [0, 5, 15]
-    ends   = [10, 20, 30]
-
-  Two-pointer sweep over starts/ends:
-    s=0: starts[0]=0 < ends[0]=10 -> need a NEW room. rooms=1. s++
-    s=1: starts[1]=5 < ends[0]=10 -> need a NEW room. rooms=2. s++
-    s=2: starts[2]=15 >= ends[0]=10 -> a room FREED UP. rooms stays 2. e++, s++
-
-  max concurrent rooms needed = 2
-```
+*Each start-before-end comparison either opens a new room (green) or frees one back to the pool (gold); the running `rooms` count peaks at 2, matching `intervals = [[0,30],[5,10],[15,20]]`.*
 
 ---
 
@@ -170,6 +214,28 @@ def min_meeting_rooms(intervals: list[list[int]]) -> int:
 **Brute force**: append `new_interval` to the list, sort everything, then run the standard merge — O(n log n). This is *correct* but doesn't exploit the fact that the input was already sorted (could be O(n)).
 
 **Key insight**: because the input is already sorted and non-overlapping, you can process it in a **single linear pass** with three distinct phases: (1) intervals entirely *before* the new one (no overlap — copy directly), (2) intervals that *overlap* the new one (absorb them by expanding `new_start`/`new_end`), (3) intervals entirely *after* (copy directly). This achieves O(n) instead of O(n log n).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    in(["sorted intervals +<br/>new interval"]) --> p1["Phase 1: copy intervals<br/>ending before new_start"]
+    p1 --> p2["Phase 2: absorb overlapping<br/>intervals into new_interval"]
+    p2 --> p3["Phase 3: copy remaining<br/>intervals untouched"]
+    p3 --> out(["result: merged,<br/>sorted, non-overlapping"])
+
+    class in,out io
+    class p1,p3 frozen
+    class p2 train
+```
+
+*A single linear pass through three phases — no sort needed, since the input is already sorted — is what makes Insert Interval O(n) instead of O(n log n); the trace below walks the exact values.*
 
 **Trace on `intervals = [[1,3],[6,9]]`, `new_interval = [2,5]`**
 

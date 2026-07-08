@@ -24,6 +24,38 @@ A database is a race car. Configuration tuning adjusts tire pressure, fuel mix, 
 
 **Avoid over-tuning**: Changing one parameter at a time, measuring impact, and reverting if no improvement. Changing 10 parameters simultaneously makes causality impossible to determine.
 
+**Tuning Methodology — Measure, Diagnose, Fix**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Instrument(["Instrument<br/>slow query log · pg_stat_statements"]) --> Diagnose{"Diagnose:<br/>limiting resource?"}
+    Diagnose -->|"CPU / bad plan"| Idx("Indexes &<br/>query rewrites<br/>10-100x")
+    Diagnose -->|"I/O bound"| HwIo("Hardware / I-O tuning<br/>1.5-3x")
+    Diagnose -->|"memory misconfigured"| Cfg("Configuration changes<br/>work_mem · shared_buffers<br/>2-10x")
+    Diagnose -->|"lock contention"| Lock("Lock timeouts &<br/>VACUUM tuning<br/>10-100x")
+    Idx -.->|remeasure| Instrument
+    HwIo -.->|remeasure| Instrument
+    Cfg -.->|remeasure| Instrument
+    Lock -.->|remeasure| Instrument
+
+    class Instrument io
+    class Diagnose mathOp
+    class Idx train
+    class HwIo base
+    class Cfg base
+    class Lock lossN
+```
+
+Tuning is iterative: instrument first, diagnose which resource is the actual bottleneck, then apply the matching fix and remeasure. Index and lock fixes typically return 10-100x, dwarfing the 1.5-3x and 2-10x available from hardware and configuration changes alone — the numeric reason this module says "index first, configure second."
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -45,46 +77,68 @@ Hardware: RAM        | 2-5×    | Memory bound  | Increase shared_buffers
 
 ## 5. Architecture Diagrams
 
+**Query Execution Path — Where Time Is Spent**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client([Client]) --> Parser(Parser) --> Rewriter(Rewriter) --> Planner("Planner<br/>CBO") --> Executor(Executor) --> Storage(Storage)
+    Planner -.-> Stats("pg_stat_statements<br/>EXPLAIN ANALYZE")
+    Storage --> Buf("Buffer Pool<br/>shared_buffers")
+    Buf -->|miss| OSCache(OS Page Cache)
+    OSCache -->|miss| Disk[("Disk<br/>SSD / HDD")]
+
+    class Client io
+    class Parser,Rewriter,Planner,Executor mathOp
+    class Storage base
+    class Stats frozen
+    class Buf train
+    class OSCache base
+    class Disk lossN
 ```
-Query Execution Path — Where Time Is Spent
-==========================================
 
-Client → Parser → Rewriter → Planner (CBO) → Executor → Storage
-                                  │                          │
-                           pg_stat_statements         Buffer Pool (shared_buffers)
-                           EXPLAIN ANALYZE             ↓ miss
-                                                  OS Page Cache
-                                                       ↓ miss
-                                                  Disk (SSD/HDD)
+A query flows through parse, rewrite, plan, and execute stages before touching storage; the planner is instrumented by pg_stat_statements and EXPLAIN ANALYZE, and a storage read cascades from the fast in-memory buffer pool down to the OS page cache and finally disk on each miss.
 
-Time profile:
-  Parse + Plan:   0.1–1ms (negligible for most queries)
-  Buffer hit:     0.01ms per page (shared_buffers hit)
-  OS cache hit:   0.1ms per page (page cache hit)
-  SSD read:       0.1ms per I/O (NVMe random read)
-  HDD read:       5–10ms per I/O (disk seek + rotation)
+```mermaid
+xychart-beta
+    title "Per-Page Access Latency by Tier (worst case, ms)"
+    x-axis ["Buffer hit", "OS cache hit", "SSD read", "Parse+Plan", "HDD read"]
+    y-axis "Milliseconds" 0 --> 10
+    bar [0.01, 0.1, 0.1, 1, 10]
+```
 
+A shared_buffers hit costs 0.01ms; a full miss cascading down to a spinning disk costs up to 1,000× more per page (10ms) — parsing and planning (up to 1ms) barely register next to a disk seek, which is why avoiding disk I/O dominates every other optimization.
 
-PostgreSQL Memory Hierarchy
-============================
+**PostgreSQL Memory Hierarchy**
 
-┌──────────────────────────────────────────────────┐
-│  shared_buffers (25% RAM, e.g., 8GB for 32GB)   │
-│  Global: shared across all backend processes     │
-│  Buffer pool: page-level cache of table/index    │
-└──────────────────────────────────────────────────┘
-         │ miss
-┌──────────────────────────────────────────────────┐
-│  OS page cache (remaining RAM ≈ 55% effective)   │
-│  effective_cache_size = shared_buffers + OS cache│
-│  e.g., 24GB for a 32GB server with 8GB shared   │
-└──────────────────────────────────────────────────┘
-         │ miss
-┌──────────────────────────────────────────────────┐
-│  Disk storage (SSD / NVMe)                       │
-└──────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    SB("shared_buffers<br/>25% RAM · 8GB of 32GB<br/>page cache of table/index") -->|miss| OSC("OS page cache<br/>≈55% effective RAM<br/>effective_cache_size ≈ 24GB")
+    OSC -->|miss| Disk[("Disk storage<br/>SSD / NVMe")]
 
+    class SB train
+    class OSC base
+    class Disk lossN
+```
+
+Each tier is checked in order — a shared_buffers miss falls through to the OS page cache, and a page-cache miss falls through to disk; sizing shared_buffers and effective_cache_size correctly keeps most reads in the first two, faster tiers.
+
+```
 Per-Query Memory
 ================
 
@@ -177,6 +231,33 @@ LIMIT 10;
 --   Sort Method: heapsort (good for top-N), external merge (bad, spills to disk)
 --   Hash Batches > 1: hash join spilled to disk (increase work_mem)
 ```
+
+**Reading the Plan Tree**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Limit("Limit<br/>234.128ms total · rows=10") --> Sort("Sort<br/>top-N heapsort · 25kB")
+    Sort --> HashAgg("HashAggregate<br/>233.9ms · peak 2049kB")
+    HashAgg --> HashJoin("Hash Join<br/>220.3ms · read=8834 pages")
+    HashJoin --> SeqScan("Seq Scan on orders<br/>180.4ms · read=6000 pages<br/>full table scan")
+    HashJoin --> Hash("Hash<br/>5.1ms · 73kB")
+    Hash --> IdxScan("Index Scan on users<br/>idx_users_created_at")
+
+    class Limit,Sort,HashAgg,HashJoin mathOp
+    class SeqScan lossN
+    class Hash mathOp
+    class IdxScan train
+```
+
+The text output nests bottom-up but reads top-down; walking it as a tree shows the Seq Scan on orders alone costs 180.4ms of the 234.128ms total (about 77%), while the Index Scan on users off the small hash side resolves in a few milliseconds — the red node is the one worth indexing.
 
 ### Memory Configuration (PostgreSQL)
 

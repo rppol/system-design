@@ -80,34 +80,43 @@ On top of that substrate sit the workload orchestrators — **Kubeflow** (pipeli
 
 GPU platform on EKS, end to end:
 
-```
-                            ┌──────────────────────────────────────┐
-                            │         ML Platform Control            │
-                            │  Kubeflow Pipelines / Ray / Argo       │
-                            │  Kueue (quotas) + Volcano (gang sched) │
-                            └───────────────┬────────────────────────┘
-                                            │ creates PyTorchJob / RayJob / InferenceService
-                                            v
-   ┌───────────────────────────── Kubernetes API + Scheduler ─────────────────────────────┐
-   │  Pod requests:  resources.limits["nvidia.com/gpu"]: 1   (or mig-1g.10gb, etc.)        │
-   └───────────────┬───────────────────────────────────────────────┬──────────────────────┘
-                   │ scale-up: no GPU node fits                      │ Pod bound to node
-                   v                                                 v
-        ┌────────────────────┐                          ┌───────────────────────────────┐
-        │     Karpenter      │  provisions              │   GPU Node (p4d.24xlarge)      │
-        │  NodePool: gpu     │─────────────────────────>│  ┌──────────────────────────┐  │
-        │  - g5/p4d/p5       │   EC2 (Spot or On-Demand)│  │ NVIDIA GPU Operator        │  │
-        │  - taint: nvidia   │                          │  │  driver + container-toolkit│  │
-        └────────────────────┘                          │  │  device-plugin (advertises │  │
-                                                         │  │   nvidia.com/gpu)          │  │
-                                                         │  │  DCGM exporter (metrics)   │  │
-                                                         │  │  MIG manager (partitions)  │  │
-                                                         │  └──────────────────────────┘  │
-                                                         │   8 × A100 80GB, NVLink mesh    │
-                                                         └───────────────┬─────────────────┘
-                                                                         │ DCGM_FI_DEV_GPU_UTIL
-                                                                         v
-                                                              Prometheus ──> Grafana / alerts
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    control(["ML Platform Control<br/>Kubeflow / Ray / Argo<br/>Kueue quotas + Volcano gang-sched"])
+    api{"Kubernetes API + Scheduler<br/>requests: nvidia.com/gpu: 1<br/>(or mig-1g.10gb, etc.)"}
+    karpenter("Karpenter<br/>NodePool: gpu · g5/p4d/p5<br/>taint: nvidia")
+
+    subgraph gpunode ["GPU Node (p4d.24xlarge)"]
+        operator("NVIDIA GPU Operator<br/>driver + container-toolkit")
+        devplugin("device-plugin<br/>advertises nvidia.com/gpu")
+        dcgm("DCGM exporter<br/>(metrics)")
+        migmgr("MIG manager<br/>(partitions)")
+        hw(["8 x A100 80GB<br/>NVLink mesh"])
+        operator --> devplugin --> dcgm --> migmgr --> hw
+    end
+
+    prom("Prometheus")
+    grafana(["Grafana / alerts"])
+
+    control -->|"creates PyTorchJob /<br/>RayJob / InferenceService"| api
+    api -.->|"scale-up:<br/>no GPU node fits"| karpenter
+    api -->|"Pod bound<br/>to node"| hw
+    karpenter -->|"provisions EC2<br/>Spot or On-Demand"| operator
+    dcgm -->|"DCGM_FI_DEV_GPU_UTIL"| prom
+    prom --> grafana
+
+    class control req
+    class api,karpenter mathOp
+    class operator,devplugin,dcgm,migmgr,hw,prom base
+    class grafana io
 ```
 
 MIG vs time-slicing on a single A100:
@@ -271,6 +280,48 @@ spec:
 # 32 GPUs total; Kueue admits the job only when all 32 are available, then releases together.
 ```
 
+Without gang scheduling, partial placement deadlocks the job; Kueue/Volcano's all-or-nothing admission avoids it:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    job(["4-worker PyTorchJob<br/>needs 4 GPUs at once"])
+
+    subgraph default_sched ["Default scheduler (places Pods one at a time)"]
+        d1{"3 of 4 Pods<br/>placed"}
+        d2["4th Pod: Pending<br/>no capacity left"]
+        d3["NCCL all-reduce<br/>never starts"]
+        d1 --> d2 --> d3
+    end
+
+    subgraph gang_sched ["Gang scheduler (Kueue / Volcano)"]
+        g1{"all 4 GPUs<br/>available upfront?"}
+        g4["job queued,<br/>zero Pods placed"]
+        g2["admit all 4 Pods<br/>together"]
+        g3["training proceeds"]
+        g1 -.->|"no"| g4
+        g1 -->|"yes"| g2
+        g2 --> g3
+    end
+
+    job --> d1
+    job --> g1
+    d3 --> deadlock(("resource<br/>deadlock"))
+
+    class job req
+    class d1,g1 mathOp
+    class d2,d3,deadlock lossN
+    class g4 frozen
+    class g2,g3 train
+```
+
 ---
 
 ## 7. Real-World Examples
@@ -299,6 +350,23 @@ spec:
 | Exclusive | ~30–50% (typical) | Total | None (1 tenant per card) |
 | MIG | ~50–70% | Hardware | Contained to the slice |
 | Time-slicing | ~70–90% | None | Co-tenants crash/OOM together |
+
+The same tension plotted on two axes: no strategy reaches the top-right corner, MIG is the closest compromise, and time-slicing buys its ~70–90% utilization by giving up isolation entirely.
+
+```mermaid
+quadrantChart
+    title GPU sharing strategies — isolation vs utilization
+    x-axis Low Utilization --> High Utilization
+    y-axis Low Isolation --> High Isolation
+    quadrant-1 Ideal but rare
+    quadrant-2 Safe, wastes capacity
+    quadrant-3 Worst of both — avoid
+    quadrant-4 Packed but risky
+    "Exclusive": [0.4, 0.95]
+    "MIG": [0.6, 0.75]
+    "MPS": [0.7, 0.3]
+    "Time-slicing": [0.8, 0.05]
+```
 
 ---
 

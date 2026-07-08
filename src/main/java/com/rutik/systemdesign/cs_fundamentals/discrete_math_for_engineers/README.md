@@ -75,6 +75,41 @@ Prove two quantities are equal by exhibiting a **bijection** between the two set
 | Strong induction | Step needs more than the immediately preceding case | Claim built from several smaller sub-cases at once |
 | Combinatorial / bijective | Two different-looking counts are claimed equal | "The number of A equals the number of B" |
 
+The table above is a lookup; the flow below is the actual triage a candidate should run against an unfamiliar claim, top to bottom, before committing to a proof strategy:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Claim to prove"]) --> Q1{"Indexed by n?<br/>(code correctness)"}
+    Q1 -->|"yes"| Q2{"Step needs more than<br/>one prior case?"}
+    Q1 -->|"no"| Q3{"Existence or<br/>impossibility claim?"}
+
+    Q2 -->|"yes"| Strong["Strong Induction"]
+    Q2 -->|"no"| Reg["Induction"]
+
+    Q3 -->|"yes"| Contra["Contradiction"]
+    Q3 -->|"no"| Q4{"Two counts<br/>claimed equal?"}
+
+    Q4 -->|"yes"| Bij["Combinatorial /<br/>Bijective"]
+    Q4 -->|"no"| Q5{"Backward direction<br/>cleaner than forward?"}
+
+    Q5 -->|"yes"| Contrap["Contraposition"]
+    Q5 -->|"no"| Direct["Direct Proof"]
+
+    class Start io
+    class Q1,Q2,Q3,Q4,Q5 mathOp
+    class Direct,Contrap,Contra,Reg,Strong,Bij train
+```
+
+Recognizing which branch a claim falls into is the tested skill (Section 2's "which primitive does this claim need?"); the six leaves are exactly the six rows of the table above, reached by asking one cheap question at a time instead of pattern-matching the whole claim at once.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -113,31 +148,54 @@ a small, fixed number of propositions.
 
 ### Induction: One Proof That Covers Every n
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P0(["P(0)<br/>base case<br/>proved by hand"]) -->|"same argument"| P1(["P(1)"])
+    P1 -->|"same argument"| P2(["P(2)"])
+    P2 -->|"same argument"| P3(["P(3)"])
+    P3 -.->|"repeats without limit"| Pn1(["P(n-1)"])
+    Pn1 -->|"same argument"| Pn(["P(n)"])
+
+    class P0 base
+    class P1,P2,P3,Pn1,Pn train
 ```
-BASE CASE:            P(0) is true                    [proved directly, by hand]
 
-INDUCTIVE STEP (k=0): P(0) true  ==>  P(1) true        [one reusable argument]
-INDUCTIVE STEP (k=1): P(1) true  ==>  P(2) true        [same argument, k=1]
-INDUCTIVE STEP (k=2): P(2) true  ==>  P(3) true        [same argument, k=2]
-                       ...                             [repeats without limit]
-INDUCTIVE STEP (k=n-1): P(n-1) true ==> P(n) true      [same argument, k=n-1]
+One proved base case plus one reusable step covers EVERY n — like a row of dominoes: knock over domino 0, and "domino k falling knocks over k+1" does the rest. Skip or misalign the base case and the whole chain never starts.
 
-One proved base case + one reusable step covers EVERY n -- like a row of
-dominoes: knock over domino 0, and 'domino k falling knocks over k+1' does
-the rest. Skip or misalign the base case and the whole chain never starts.
-```
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-```
-REGULAR INDUCTION -- step may use ONLY the immediately preceding case:
+    subgraph REG["Regular Induction"]
+        direction LR
+        R1(["P(1)"]) -.-> R2(["P(2)"]) -.-> Rdots(["..."]) -.-> Rk(["P(k)"])
+        Rk -->|"only case usable"| Rk1(["P(k+1)"])
+    end
 
-  P(1)   P(2)   P(3)   P(4)   ...   P(k) ----> P(k+1)
-                                     ^only P(k) is usable here
+    subgraph STR["Strong Induction"]
+        direction LR
+        S1(["P(1)"]) --> Sk1(["P(k+1)"])
+        S2(["P(2)"]) --> Sk1
+        Sdots(["..."]) --> Sk1
+        Sk(["P(k)"]) --> Sk1
+    end
 
-STRONG INDUCTION -- step may use ANY (or all) of the earlier cases:
-
-  P(1)   P(2)   P(3)   P(4)   ...   P(k) ----> P(k+1)
-   |______|______|______|___________|
-                    all usable here
+    class R1,R2,Rdots,Rk,S1,S2,Sdots,Sk frozen
+    class Rk1,Sk1 train
 ```
 
 Regular induction's step may reach back exactly one case; strong induction's
@@ -156,19 +214,22 @@ pigeons (n+1=6):   P       P       P       P       P     P
                                         has one -- it MUST double up
 ```
 
+64 keys (all multiples of 4) hashed by `key mod N`:
+
+```mermaid
+xychart-beta
+    title "N=16 (power of two): only 4 of 16 buckets ever used"
+    x-axis ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
+    y-axis "keys in bucket" 0 --> 18
+    bar [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0]
 ```
-64 keys (all multiples of 4) hashed by (key mod N):
 
-N=16 (power of two)  -- only 4 of 16 buckets ever receive a key:
-bucket:  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
-count:  16  0  0  0 16  0  0  0 16  0  0  0 16  0  0  0
-        ^^          ^^          ^^          ^^
-        4x overloaded buckets (0, 4, 8, 12); the other 12 buckets: 0 keys
-
-N=17 (prime)  -- gcd(4,17)=1, so every bucket receives a near-equal share:
-bucket:  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16
-count:   4  3  4  4  4  3  4  4  4  3  4  4  4  3  4  4  4
-        all 17 buckets land within 1 key of the average (64/17 = 3.76)
+```mermaid
+xychart-beta
+    title "N=17 (prime): all 17 buckets land within 1 key of average"
+    x-axis ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"]
+    y-axis "keys in bucket" 0 --> 5
+    bar [4, 3, 4, 4, 4, 3, 4, 4, 4, 3, 4, 4, 4, 3, 4, 4, 4]
 ```
 
 The pigeonhole guarantee ("6 pigeons, 5 holes, someone doubles up") and the
@@ -673,13 +734,15 @@ Run a BFS or DFS that assigns alternating colors to adjacent vertices, and the g
 
 **Scenario**: a distributed session cache assigns each key to one of N = 1,000 shard servers via `server = hash(key) mod N`, targeting M = 10,000,000 keys (active user sessions). The design must answer three questions: how many keys must each server be provisioned for, does the modulus choice matter, and how do you prove it before deploying.
 
+```mermaid
+sequenceDiagram
+    participant C as Client<br/>(key, val)
+    participant S as Shard 0-999<br/>(independent cache nodes)
+    C->>S: bucket = hash(key) mod N
+    S-->>C: value / ack
 ```
-+-------------+       bucket = hash(key) mod N       +-------------------------+
-|   Client    |  ----------------------------------> |  Shard 0 ... Shard 999   |
-|  (key, val) |                                      |  (each an independent    |
-|             |  <---------------------------------  |   cache node)            |
-+-------------+           value / ack                +-------------------------+
-```
+
+Every read or write is a single hash-and-route hop with no coordination between shards, which is exactly why the sizing questions below reduce to pure counting and probability arguments.
 
 **1. The pigeonhole floor.** With M = 10,000,000 keys and N = 1,000 servers, the average load per server is M / N = 10,000 keys. By the generalized Pigeonhole Principle (Section 6.4), at least one server must hold at least ⌈M / N⌉ = 10,000 keys — this is a hard floor on capacity, not a target: no assignment scheme, however clever, can provision every server for fewer than the average and still fit all M keys.
 
@@ -730,6 +793,16 @@ The demonstrated overload ratio is exact and measured, not estimated: the broken
 | `key % 16`, patterned keys | 4 of 16 | 16 | 4.00x |
 | `key % 17`, same keys | 17 of 17 | 4 | 1.06x |
 | Pigeonhole floor (any scheme, M=10M, N=1000) | — | ≥ 10,000 | 1.00x (theoretical minimum) |
+
+```mermaid
+xychart-beta
+    title "Shard overload vs. average load, by scheme"
+    x-axis ["mod 16 (patterned keys)", "mod 17 (prime)", "pigeonhole floor"]
+    y-axis "overload ratio (x average)" 0 --> 4.5
+    bar [4.00, 1.06, 1.00]
+```
+
+The prime modulus lands within 6% of the theoretical pigeonhole floor; the power-of-two modulus on patterned keys sits 4x above it — the same gap Section 6.4's toy example demonstrated at 64-key scale now confirmed at the production 10M-key scale.
 
 **Discussion Q&As**:
 

@@ -78,29 +78,54 @@ mychart/
 
 ## 5. Architecture Diagrams
 
+**Helm render + release lifecycle.** Values flow into the Go template engine to produce concrete manifests; `helm upgrade --install` applies them and records a new Release revision, and a failed rollout can be reverted atomically with `helm rollback`.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    V(["values.yaml<br/>+ values-prod.yaml<br/>+ --set image.tag=2.1"]) --> T("Go template engine<br/>renders templates")
+    T -->|"concrete manifests"| U("helm upgrade --install")
+    U -->|"apply"| C[("Cluster<br/>Release revision N")]
+    C --> D{"Bad deploy?"}
+    D -->|"yes"| R("helm rollback N-1")
+    R -.->|"atomic revert"| C
+    D -->|"no"| S("Release N stable")
+
+    class V io
+    class T,D mathOp
+    class U req
+    class C base
+    class R lossN
+    class S train
 ```
-Helm render + release lifecycle
 
-  values.yaml + -f values-prod.yaml + --set image.tag=2.1
-        |
-        v
-  Go template engine renders templates/*.yaml -> concrete manifests
-        |
-        v
-  helm upgrade --install -> apply to cluster, record Release revision N
-        |
-   bad deploy?
-        v
-  helm rollback myapp N-1   -> atomically revert to previous revision
+**Kustomize overlay model.** A base of common manifests merges with a per-environment overlay's patches at apply time — the output is exactly base + patch, so it stays predictable and diffable.
 
-Kustomize overlay model
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  base/                          overlays/prod/
-    deployment.yaml (replicas:1)   kustomization.yaml
-    service.yaml                     patches: replicas -> 10, image -> v2
-        \                          /
-         \                        /
-          kubectl apply -k overlays/prod   -> base + prod patches = final manifests
+    B(["base/<br/>deployment.yaml (replicas: 1)<br/>service.yaml"]) --> K("kubectl apply -k<br/>overlays/prod")
+    O(["overlays/prod/<br/>kustomization.yaml<br/>patches: replicas to 10, image to v2"]) --> K
+    K --> F("Final manifests<br/>= base + prod patches")
+
+    class B base
+    class O io
+    class K mathOp
+    class F train
 ```
 
 ---
@@ -195,6 +220,30 @@ kubectl kustomize overlays/prod    # render to stdout (inspect before applying)
 
 ArgoCD/Flux can render a Helm chart *and* post-process with Kustomize, or use either natively. A common pattern: third-party software via Helm charts, first-party apps via Kustomize overlays, all committed to a GitOps repo (see [gitops_argocd_flux](../gitops_argocd_flux/)).
 
+**Combined GitOps flow.** Both artifact types live in the same Git repo; ArgoCD/Flux renders each and reconciles the live cluster to match, so the Git repo — not `helm history` — becomes the single source of truth for what's running.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    HC(["Helm charts<br/>(third-party)"]) --> GR[("GitOps repo")]
+    KO(["Kustomize overlays<br/>(first-party)"]) --> GR
+    GR --> AF("ArgoCD / Flux<br/>renders + reconciles")
+    AF --> CL[("Cluster")]
+
+    class HC frozen
+    class KO io
+    class GR base
+    class AF mathOp
+    class CL train
+```
+
 ---
 
 ## 7. Real-World Examples
@@ -226,6 +275,28 @@ ArgoCD/Flux can render a Helm chart *and* post-process with Kustomize, or use ei
 **Kustomize when:** managing first-party apps across environments where you value transparency and diffability, especially under GitOps (which supplies revisioning). **Both** is common: Helm for third-party, Kustomize for first-party.
 
 **Avoid:** over-templating Helm charts into unreadable logic; putting secrets in `values.yaml`; using Helm's Tiller-era mental model (Helm 3 is client-only, no Tiller).
+
+**Which tool do I reach for?** The decision collapses to two questions: does the software need packaging or template logic, and does GitOps already provide release revisioning — if not, Helm's built-in rollback earns its place even for first-party apps.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{"Third-party software<br/>or need template logic?"} -->|"yes"| H("Helm")
+    Q1 -->|"no"| Q2{"GitOps already<br/>revisions the cluster?"}
+    Q2 -->|"no"| H
+    Q2 -->|"yes"| K("Kustomize")
+
+    class Q1,Q2 mathOp
+    class H frozen
+    class K train
+```
 
 ---
 
@@ -320,12 +391,28 @@ GitOps tools (ArgoCD/Flux) natively render Helm charts or Kustomize overlays fro
 
 A team manages three environments (dev/staging/prod) by maintaining three near-duplicate copies of ~20 YAML files. A new env var added to dev/staging is forgotten in prod's copy; a deploy ships and prod crashes on startup because the var is missing. The duplicated YAML has silently diverged in a dozen places.
 
-```
-BROKEN: three full copies, hand-edited, drifting
-  k8s/dev/*.yaml      (20 files)   <- new ENABLE_CACHE var added
-  k8s/staging/*.yaml  (20 files)   <- new ENABLE_CACHE var added
-  k8s/prod/*.yaml     (20 files)   <- forgotten -> app reads missing var -> crashloop
-  + replica counts, image tags, limits all diverged ad hoc across copies
+**BROKEN: three hand-edited copies drift apart.** The same `ENABLE_CACHE` change reaches dev and staging but is never copied into prod — replica counts, image tags, and limits have also diverged ad hoc across the three trees, and nothing catches it until prod crashloops on deploy.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CH(["New env var<br/>ENABLE_CACHE added"]) --> DEV("k8s/dev/*.yaml<br/>20 files, updated")
+    CH --> STG("k8s/staging/*.yaml<br/>20 files, updated")
+    CH --> PROD("k8s/prod/*.yaml<br/>20 files, NOT updated")
+    DEV --> DEVOK("Dev: OK")
+    STG --> STGOK("Staging: OK")
+    PROD --> CRASH("App reads missing var<br/>Prod: crashloop")
+
+    class CH io
+    class DEV,STG,DEVOK,STGOK train
+    class PROD,CRASH lossN
 ```
 
 ```yaml

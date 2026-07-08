@@ -35,15 +35,24 @@ term **data system** — the composite you assemble from these tools plus your a
 code. The user sees one system with one set of guarantees; you're responsible for those
 guarantees even though no single tool provides them all.
 
-```
-   ┌─────────────────────────────────────────────────────┐
-   │   Application code (the "data system" to the user)   │
-   │  ┌───────────┐   ┌──────────┐   ┌─────────────────┐  │
-   │  │  primary  │   │  Redis   │   │ Elasticsearch / │  │
-   │  │    DB     │──▶│  cache   │   │  search index   │  │
-   │  └───────────┘   └──────────┘   └─────────────────┘  │
-   │   invalidate cache + update index on every write     │
-   └─────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph App["Application code (the data system to the user)"]
+        direction LR
+        DB(["primary DB"]) -->|"invalidate"| Cache(["Redis cache"])
+        DB -->|"update index"| Index(["Elasticsearch /<br/>search index"])
+    end
+
+    class DB base
+    class Cache,Index frozen
 ```
 
 Caption: the chapter's framing — your app is a composite data system, and the consistency
@@ -87,6 +96,36 @@ mistakes happen (sandboxes with real data, no real users); testing thoroughly at
 allowing quick and easy *recovery* (fast rollback, gradual rollout); and detailed monitoring
 (telemetry).
 
+All three fault categories funnel into the same question — does fault-tolerance contain
+this one, or does it cascade into a failure?
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    HW(["hardware fault<br/>~10-25%, uncorrelated"]) --> Boundary{"contained by<br/>fault-tolerance?"}
+    SW(["software fault<br/>correlated"]) --> Boundary
+    HE(["human error<br/>~75-90%, leading cause"]) --> Boundary
+    Boundary -->|"yes"| OK(["system keeps working<br/>no failure"])
+    Boundary -->|"no, cascades"| Fail(["failure:<br/>whole system stops"])
+
+    class HW,SW,HE req
+    class Boundary mathOp
+    class OK train
+    class Fail lossN
+```
+
+Caption: the fault/failure boundary — hardware (~10-25% of outages, uncorrelated), software
+(correlated, triggered on every node by the same condition), and human error (the rest,
+~75-90%, the leading cause) all cross the same fault-tolerance boundary; you can never drive
+faults to zero, so reliability engineering lives entirely at this boundary.
+
 ## 1.3 Scalability
 
 **Scalability** is *not* a one-dimensional label ("X is scalable"). It's the question: *if
@@ -103,17 +142,27 @@ architecture.** Kleppmann's running example is Twitter's timeline:
 > (~300k req/s). The hard part isn't tweet *volume* — it's **fan-out**: each user follows
 > many, and each user is followed by many.
 
-```
-Approach 1 — fan-out on READ (pull):  timeline = JOIN at read time
-   read:  SELECT tweets WHERE author IN (people I follow)  ← expensive, 300k/s of these
-   write: INSERT one tweet                                 ← cheap
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Approach 2 — fan-out on WRITE (push):  precompute each user's timeline cache
-   write: INSERT tweet into the timeline cache of EACH follower ← amplified by fan-out
-   read:  SELECT from my precomputed timeline                   ← cheap, just a lookup
+    Tweet(["new tweet"]) --> Check{"author has huge<br/>follower count?"}
+    Check -->|"no: normal user"| Push("fan-out on WRITE<br/>push to every follower")
+    Check -->|"yes: celebrity,<br/>30M followers"| Pull("fan-out on READ<br/>merge at read time")
+    Push --> CheapRead(["cheap read:<br/>precomputed lookup"])
+    Pull --> ExpensiveRead(["expensive read:<br/>JOIN, 300k/s of these"])
 
-   Celebrity with 30M followers ⇒ one tweet = 30M cache writes. Twitter went hybrid:
-   push for normal users, pull (merge at read) for the handful of celebrities.
+    class Tweet,CheapRead io
+    class Check mathOp
+    class Push train
+    class Pull frozen
+    class ExpensiveRead lossN
 ```
 
 Caption: the canonical "describe the load correctly" lesson — the relevant load parameter is
@@ -138,21 +187,58 @@ performance affected? And, to hold performance steady, how much must you grow re
   often hits many backends in parallel, and the *slowest* one determines the user's wait.
   The more backends, the higher the chance at least one is slow — so the tail dominates.
 
-```
 Why tails dominate (head-of-line blocking + fan-out):
 
-  one slow request at the front of a queue stalls everyone behind it:
-    [ 1ms ][ 1ms ][████ 2000ms ████][ 1ms ][ 1ms ]   ← all 5 now report ~2000ms
-                       ^ one slow request
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  fan-out: user request waits on the SLOWEST of N parallel backend calls:
-    backend A  ─ 10ms ─┐
-    backend B  ─ 12ms ─┤  user waits 250ms (the max), not the average
-    backend C  ─250ms ─┘  with 100 backends, p99-per-backend ⇒ ~63% of users see a tail
+    subgraph HOL["Head-of-line blocking"]
+        direction LR
+        R1(["1 ms"]) --> R2(["1 ms"]) --> R3(["2000 ms<br/>slow request"]) --> R4(["1 ms"]) --> R5(["1 ms"])
+    end
+    R5 -.->|"all 5 now report<br/>~2000 ms"| Stalled(["queue stalled"])
+
+    subgraph FO["Fan-out across N backends"]
+        direction LR
+        A(["backend A<br/>10 ms"]) --> Max((" max "))
+        B(["backend B<br/>12 ms"]) --> Max
+        C(["backend C<br/>250 ms"]) --> Max
+    end
+    Max --> Wait(["user waits 250 ms<br/>the max, not the average"])
+
+    class R1,R2,R4,R5 train
+    class R3,Stalled lossN
+    class A,B train
+    class C lossN
+    class Max mathOp
+    class Wait io
 ```
 
 Caption: percentiles must be measured on the *client* and aggregated correctly — you cannot
 average percentiles across machines; you must keep the histogram of raw response times.
+
+The chance that *at least one* of N parallel backend calls lands in its own p99 tail
+compounds quickly as fan-out grows — this is the mechanic behind "tails dominate":
+
+```mermaid
+xychart-beta
+    title "P(at least one of N backends is slow) — per-backend p99 = 1%"
+    x-axis ["N=1", "N=10", "N=25", "N=50", "N=100", "N=200"]
+    y-axis "chance the user sees a tail (%)" 0 --> 100
+    line [1, 9.6, 22.2, 39.5, 63.4, 86.6]
+```
+
+Caption: the compounding-probability mechanic behind "tails dominate" — each extra backend
+is one more chance for at least one call to land in its own p99 tail (1 - 0.99^N); by
+N = 100 backends that is already ~63% of users, matching the number above, which is why
+fan-out-heavy services must drive down tail latency itself, not just the median.
 
 ### Approaches for coping with load
 
@@ -191,21 +277,19 @@ requirements, paying down technical debt. Design for three principles:
 
 ## Visual Intuition
 
-```
-THE MEAN HIDES THE OUTLIER; THE PERCENTILE EXPOSES IT
-
 response times of 1000 requests, sorted:
 
-  fast  |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■|  ← p50 = 10 ms (typical user)
-        |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■   |  ← p95 = 80 ms
-        |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■           |  ← p99 = 400 ms
-  slow  |■■■■■■■■■■■■                                |  ← p999 = 2.5 s (your best customers)
-                                              mean = 35 ms  ← describes NOBODY
-
-  The mean (35 ms) is dragged up by the tail yet still understates it. Only the
-  percentile vector (10 / 80 / 400 / 2500) tells the real story. SLOs are written
-  as "p99 < 200 ms", never "average < 200 ms".
+```mermaid
+xychart-beta
+    title "The mean hides the outlier — the percentile exposes it"
+    x-axis ["p50", "mean", "p95", "p99", "p999"]
+    y-axis "response time (ms)" 0 --> 2600
+    bar [10, 35, 80, 400, 2500]
 ```
+
+The mean (35 ms) is dragged up by the tail yet still understates it. Only the
+percentile vector (10 / 80 / 400 / 2500) tells the real story. SLOs are written
+as "p99 < 200 ms", never "average < 200 ms".
 
 Caption: the chapter's signature lesson made visible — report the percentile vector, set
 SLOs on the tail (p95/p99/p999), and remember the tail hits your highest-value users hardest.

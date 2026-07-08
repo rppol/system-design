@@ -73,35 +73,65 @@ This is the **operator pattern**: domain expertise (how to safely back up/upgrad
 
 ## 5. Architecture Diagrams
 
+**CRD + operator**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    crd("CRD: PostgresCluster<br/>registers the type") --> user(["kubectl apply<br/>replicas:3, v16, backup:daily"])
+    user --> etcd("apiserver stores<br/>CR in etcd")
+    etcd -->|"watch"| recon("Reconcile:<br/>observe → diff → act")
+    recon --> build("Create StatefulSet+PVCs,<br/>configure replication,<br/>schedule backup CronJob")
+    build --> healthy{"Primary healthy?"}
+    healthy -->|"no"| promote("Promote a replica")
+    healthy -->|"yes"| status(["Update CR.status"])
+    promote --> status
+    status -.->|"repeat, level-triggered"| recon
+
+    class crd,etcd base
+    class user,status io
+    class recon,healthy mathOp
+    class build train
+    class promote lossN
 ```
-CRD + operator
+*A user's `kubectl apply` is stored in etcd and picked up by the operator's watch; the reconcile loop provisions the StatefulSet, promotes a replica on primary failure, publishes `status`, and loops back on a periodic requeue.*
 
-  CRD: PostgresCluster (registers the type with the apiserver)
-        |
-  user: kubectl apply PostgresCluster{replicas:3, version:16, backup: daily}
-        |
-        v
-  apiserver stores the CR in etcd
-        |  watch
-        v
-  Postgres Operator (controller) reconcile loop:
-     observe: how many pods? primary healthy? backup ran?
-     diff spec vs reality
-     act: create StatefulSet+PVCs, configure replication, schedule backup CronJob,
-          on primary failure -> promote a replica, update CR.status
-     repeat (level-triggered, idempotent)
+**Reconcile loop (the heart of any operator)**
 
-Reconcile loop (the heart of any operator)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Reconcile(req):
-     cr := get(req)                        # the PostgresCluster instance
-     if not exists: return                 # deleted -> finalizer cleanup
-     actual := observeRealWorld(cr)
-     for step in diff(cr.spec, actual):
-        apply(step)                        # idempotent: skip if already correct
-     cr.status = actual; update(cr)
-     return requeue(after: 30s)            # periodic resync = level-triggered safety
+    start(["Reconcile(req)"]) --> get("cr := get(req)")
+    get --> exists{"CR exists?"}
+    exists -->|"no, deleted"| cleanup("Finalizer cleanup,<br/>return")
+    exists -->|"yes"| observe("actual := observeRealWorld(cr)")
+    observe --> diff("diff(cr.spec, actual)")
+    diff --> apply("apply(step)<br/>idempotent: skip if correct")
+    apply --> upd("cr.status = actual<br/>update(cr)")
+    upd --> requeue(["requeue after 30s"])
+    requeue -.->|"level-triggered<br/>safety net"| start
+
+    class start,upd io
+    class get,exists,observe,diff mathOp
+    class cleanup frozen
+    class apply train
+    class requeue req
 ```
+*The generic shape every operator's `Reconcile` function follows: fetch the CR, exit early if deleted, diff spec against observed reality, apply idempotent steps, publish status, and requeue — the dotted loop-back is the periodic resync that makes this level-triggered and self-healing.*
 
 ---
 
@@ -172,6 +202,30 @@ func (r *PGReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Re
 
 ### Finalizers (clean up external resources on delete)
 
+A finalizer gates a CR's deletion behind a lifecycle state, not just a boolean check:
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Active
+    Active --> Terminating: kubectl delete (DeletionTimestamp set)
+    Terminating --> Removed: finalizer cleans up, then removes itself
+    Removed --> [*]
+    note right of Terminating: blocked from actual deletion until the finalizer list is empty
+
+    class Active train
+    class Terminating lossN
+    class Removed frozen
+```
+*A CR cannot leave `Terminating` until the operator's cleanup step removes the finalizer — this is exactly what protects the S3 bucket / EBS volumes below from being orphaned.*
+
 ```go
 // Without a finalizer, deleting the CR could orphan cloud resources (S3 backup bucket, EBS vols).
 // A finalizer blocks deletion until cleanup runs:
@@ -225,6 +279,33 @@ controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error { mutate(cj, &cr);
 **Prefer a mature community operator** over writing your own unless your need is genuinely novel — operators are subtle (idempotency, finalizers, status, leader election) and a buggy operator can destroy data.
 
 **Don't build an operator when:** a Helm chart or plain manifests suffice (no ongoing reconciliation/day-2 logic needed), or a managed cloud service is a better fit than running the software at all.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    need(["Need day-2 automation<br/>for stateful software?"]) --> chart{"Static install is enough,<br/>no ongoing reconciliation?"}
+    chart -->|"yes"| helm("Use a Helm chart<br/>or plain manifests")
+    chart -->|"no"| mature{"Mature community<br/>operator exists?"}
+    mature -->|"yes"| adopt("Adopt it:<br/>Prometheus Operator, cert-manager,<br/>CloudNativePG")
+    mature -->|"no"| novel{"Genuinely novel need,<br/>no managed service fits?"}
+    novel -->|"no"| managed("Prefer a managed<br/>cloud service")
+    novel -->|"yes"| build[["Build your own<br/>Kubebuilder / controller-runtime"]]
+
+    class need io
+    class chart,mature,novel mathOp
+    class helm base
+    class adopt train
+    class managed frozen
+    class build lossN
+```
+*Community operators are subtle (idempotency, finalizers, status, leader election) and a buggy one can destroy data, so the decision tree only reaches "build your own" after ruling out a static install, an existing operator, and a managed service.*
 
 ---
 
@@ -324,15 +405,36 @@ A CRD includes an OpenAPI v3 schema; the API server validates every custom resou
 
 A team wrote a simple operator: when a `Database` CR is *created*, it sets up a backup CronJob. It worked in testing. Months later they discover several production databases have no recent backups — and a restore is needed after a corruption incident.
 
+**BROKEN operator behavior — the failure cascade**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    design("Edge-triggered,<br/>non-idempotent design") --> onCreate("Reconciles only on<br/>the CR create event")
+    design --> noLeader("Multiple replicas,<br/>no leader election")
+    onCreate --> reschedule("Operator pod rescheduled<br/>6 weeks later")
+    reschedule --> noReplay("Restart replays<br/>no create events")
+    noReplay --> stale("Existing Databases<br/>never re-reconciled")
+    stale --> drift("Backup CronJobs drift<br/>or get deleted")
+    drift --> silent("No status field:<br/>gap goes unnoticed")
+    noLeader --> dup("Duplicate CronJobs<br/>appear earlier")
+    silent --> incident(("Corruption incident<br/>forces a restore"))
+    dup --> incident
+
+    class design,noReplay mathOp
+    class onCreate,noLeader req
+    class reschedule frozen
+    class stale,drift,silent,dup lossN
+    class incident lossN
 ```
-BROKEN operator behavior
-  - Reconciles only on the CR "create" event (edge-triggered).
-  - Operator pod was rescheduled (node upgrade) 6 weeks ago.
-     -> on restart, no "create" events replay -> existing Databases never re-reconciled
-     -> backup CronJobs that were manually deleted / drifted were never recreated
-  - No status, so nobody noticed "backup: missing".
-  - Multiple replicas ran without leader election -> earlier, duplicate CronJobs existed too.
-```
+*Two independent design flaws — edge-triggered reconciliation and missing leader election — trace back to the same root cause and converge on the same outcome: weeks of silent backup drift discovered only during a real restore.*
 
 ```go
 // BROKEN: edge-triggered, non-idempotent, no status, no leader election.

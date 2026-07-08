@@ -48,6 +48,35 @@ natural fit.
   (trees never need `visited` since there's exactly one path between any two
   nodes).
 
+The decision is really one branch point per problem — what it asks you to
+compute determines which pattern owns it:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P(["Problem mentions a tree"]) --> Q{"What does it ask for?"}
+    Q -->|"level order / zigzag / side view /<br/>connect-next / min depth / cousins"| BFS(["Tree BFS<br/>you are here"])
+    Q -->|"path sum / diameter /<br/>LCA / max path sum"| DFS["Tree DFS<br/>bubble up from children"]
+    Q -->|"serialize / deserialize"| DFS
+    Q -->|"has cycles /<br/>general graph"| GT["Graph Traversal<br/>needs visited set"]
+
+    class P io
+    class Q mathOp
+    class BFS train
+    class DFS,GT frozen
+```
+
+Strong signals route straight to Tree BFS; each anti-signal reroutes to the
+pattern that actually owns that shape — DFS once the answer needs a value
+bubbled up from children, Graph Traversal once cycles enter the picture.
+
 ---
 
 ## 2. Mental Model & Intuition
@@ -300,6 +329,37 @@ appending to `result[depth]` (creating a new list if `depth == len(result)`).
 This avoids an explicit queue but processes nodes in a different order
 (depth-first, not strictly level-by-level) — fine when only the *grouping* by
 level matters, not the visiting order within a level.
+
+All seven variations are the same skeleton with exactly one line changed —
+seeing them fan out from the shared template makes the reuse obvious:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CORE(["Core template<br/>queue + level_size snapshot"])
+    CORE -->|"alternate append<br/>direction"| V1["Zigzag order"]
+    CORE -->|"track first / last<br/>index per level"| V2["Side view"]
+    CORE -->|"link siblings<br/>inside the loop"| V3["Next pointers"]
+    CORE -->|"push all children,<br/>not left/right"| V4["N-ary level order"]
+    CORE -->|"track parent<br/>+ depth"| V5["Cousins"]
+    CORE -->|"track positional<br/>index 2i / 2i+1"| V6["Max width"]
+    CORE -.->|"depth param,<br/>no explicit queue"| V7["Recursive<br/>DFS-flavored"]
+
+    class CORE base
+    class V1,V2,V3,V4,V5,V6 train
+    class V7 frozen
+```
+
+Six variations stay queue-based, changing only what gets tracked or how the
+output is arranged; only the recursive version (dotted edge) drops the queue
+entirely, trading strict level-by-level order for a simpler call stack.
 
 ---
 

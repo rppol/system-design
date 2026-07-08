@@ -51,13 +51,33 @@ unmet." A node with in-degree 0 has no unmet prerequisites — it's safe to
 process *now*. Processing a node "removes" it, decrementing the in-degree of
 everything it points to. Repeat until done.
 
-```
 Courses: 0 has no prereqs. 1 and 2 require 0. 3 requires both 1 and 2.
 
-   0 ----> 1 ----> 3
-   |               ^
-   +------> 2 -----+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    n0("0<br/>no prereqs") --> n1("1")
+    n0 --> n2("2")
+    n1 --> n3("3")
+    n2 --> n3
+
+    class n0 io
+    class n1,n2 mathOp
+    class n3 train
+```
+
+*Course 0 has in-degree 0 (nothing points to it), so it is the only safe
+starting point; 1 and 2 each wait on 0; 3 waits on both 1 and 2 — its
+in-degree of 2 must reach 0 before it can run.*
+
+```
 In-degrees:  0:0   1:1   2:1   3:2
 
 Step 1: queue = [0]  (only node with in-degree 0)
@@ -163,6 +183,41 @@ def find_order(num_courses: int, prerequisites: list[list[int]]) -> list[int]:
     edges = [(b, a) for a, b in prerequisites]
     return topological_sort_kahn(num_courses, edges)
 ```
+
+**The state machine Template 2's three colors encode**: every node starts
+`WHITE`, turns `GRAY` the moment it's pushed onto the DFS call stack, and
+turns `BLACK` only after every node reachable from it has finished. An edge
+that lands on a node still `GRAY` is a back edge to a live ancestor — the one
+signal a plain boolean `visited` can't produce, because it can't distinguish
+"currently on the stack" from "already finished."
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Cycle Found" as CycleFound
+
+    [*] --> WHITE
+    WHITE --> GRAY: visit<br/>(push on stack)
+    GRAY --> BLACK: all descendants<br/>done (pop)
+    GRAY --> CycleFound: edge hits a<br/>GRAY ancestor
+    BLACK --> [*]
+
+    class WHITE frozen
+    class GRAY mathOp
+    class BLACK train
+    class CycleFound lossN
+```
+
+*Reaching `BLACK` means "safe, fully explored"; landing back on a `GRAY` node
+mid-traversal is the exact moment both Kahn's final length check and DFS's
+3-color check are designed to catch.*
 
 ---
 
@@ -400,6 +455,44 @@ unreachable, instead of signaling "impossible."
 - **[`backtracking.md`](backtracking.md)** — "generate ALL valid topological
   orderings" (rather than just one) requires exploring and undoing choices —
   exponential in the worst case.
+
+**The full decision at a glance** — collapsing the anti-signals from §1 and
+the switch-points above into the questions that actually discriminate between
+the six patterns:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    d1{"Directed<br/>graph?"} -->|"no"| d2{"Cycle check<br/>only?"}
+    d2 -->|"yes"| uf(["Union-Find"])
+    d2 -->|"no"| gt(["Graph Traversal<br/>(BFS / DFS)"])
+
+    d1 -->|"yes"| d3{"Single root,<br/>tree shape?"}
+    d3 -->|"yes"| tb(["Tree BFS / DFS"])
+
+    d3 -->|"no"| d5{"Guaranteed<br/>acyclic (DAG)?"}
+    d5 -->|"no — cyclic<br/>+ weighted"| sp(["Shortest Path<br/>(Dijkstra / Bellman-Ford)"])
+
+    d5 -->|"yes"| d4{"Need ALL valid<br/>orderings?"}
+    d4 -->|"yes, enumerate"| bt(["Backtracking"])
+    d4 -->|"no — one order<br/>or DAG DP"| ts(["Topological Sort<br/>(this pattern)"])
+
+    class d1,d2,d3,d4,d5 mathOp
+    class uf,gt,tb,bt,sp frozen
+    class ts train
+```
+
+*Directedness, then shape, then cyclicity, then "one ordering or all of
+them" — four yes/no questions route any graph-adjacent problem to the right
+pattern; the DAG DP branch is §6's longest-path variation, still topological
+sort underneath.*
 
 ---
 

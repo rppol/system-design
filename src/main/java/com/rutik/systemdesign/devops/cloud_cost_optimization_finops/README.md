@@ -61,6 +61,23 @@ Rightsizing matches resource size to actual utilization; tagging attributes ever
 | Savings Plans (Compute) | ~30-66% | 1 or 3 yr, $/hr | Spend commitment | Steady spend, flexible across families |
 | Savings Plans (EC2 Instance) | ~up to 72% | 1 or 3 yr, family in Region | Less flexible than Compute SP | Stable EC2 family usage |
 
+```mermaid
+quadrantChart
+    title Pricing models: discount depth vs commitment lock-in
+    x-axis Low Commitment --> High Commitment
+    y-axis Low Discount --> High Discount
+    quadrant-1 Deep discount / locked in
+    quadrant-2 Deep discount / flexible
+    quadrant-3 Full flexibility / full price
+    quadrant-4 Locked in / modest discount
+    On-Demand: [0.05, 0.05] color: #56b6c2, stroke-color: #0097a7
+    Spot: [0.15, 0.88] color: #e06c75, stroke-color: #c0392b
+    Savings Plans: [0.55, 0.55] color: #98c379, stroke-color: #27ae60
+    Reserved Instances: [0.85, 0.7] color: #e5c07b, stroke-color: #f39c12
+```
+
+The two axes explain why the cheapest options aren't free: Spot buys its up-to-90% discount with zero commitment but full interruption risk (top-left), while Reserved Instances/Savings Plans buy ~30-72% off by locking in spend for 1-3 years (top-right) — On-Demand pays full price for full flexibility (bottom-left).
+
 ### Cross-cloud commitment mapping
 
 | Concept | AWS | GCP | Azure |
@@ -85,46 +102,106 @@ Rightsizing matches resource size to actual utilization; tagging attributes ever
 
 ### Commitment strategy (layered)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ri(["Reserved Instances<br/>steady 24/7 baseline"]) --> sp(["Savings Plans<br/>flexible mid-layer"])
+    sp --> od(["On-Demand / Spot<br/>variable peak, burst"])
+
+    class ri base
+    class sp train
+    class od req
 ```
-                On-Demand / Spot (the variable peak, burst)
-   usage  ----  --------------------------------------------
-                Savings Plans (flexible mid-layer)
-          ----  --------------------------------------------
-                Reserved Instances (the steady 24/7 baseline)
-          ------------------------------------------------- time
-   Cover the stable baseline with the cheapest commitment; flex the top.
-```
+
+Cover the stable baseline with the cheapest commitment; flex the top.
 
 ---
 
 ## 5. Architecture Diagrams
 
+**FinOps lifecycle (continuous loop)**
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Inform<br/>visibility · allocation · showback" as Inform
+    state "Optimize<br/>rightsize · commit · kill waste" as Optimize
+    state "Operate<br/>govern · automate · alert" as Operate
+
+    [*] --> Inform
+    Inform --> Optimize
+    Optimize --> Operate
+    Operate --> Inform: feedback loop
+
+    class Inform req
+    class Optimize mathOp
+    class Operate train
 ```
-FinOps lifecycle (continuous loop)
 
-  +-----------+      +------------+      +-----------+
-  |  INFORM   | ---> |  OPTIMIZE  | ---> |  OPERATE  |
-  | visibility|      | rightsize, |      | govern,   |
-  | allocation|      | commit,    |      | automate, |
-  | showback  |      | kill waste |      | alert     |
-  +-----------+      +------------+      +-----------+
-        ^                                       |
-        +------------- feedback loop -----------+
+The FinOps Foundation's three phases run as a continuous loop, not a one-time project: Inform's visibility feeds Optimize's actions, which feed Operate's governance, which feeds back into Inform.
 
-Tag-driven cost allocation
+**Tag-driven cost allocation**
 
-  resources --(tags: team, env, product, cost-center)--> Cost Explorer
-       |
-       +--> grouped by tag --> showback report per team
-       +--> untagged spend --> "unallocated" bucket (minimize this!)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Spot + On-Demand mixed fleet (resilient + cheap)
+    res(["Resources"]) -->|"tags: team, env,<br/>product, cost-center"| ce("Cost Explorer")
+    ce -->|"grouped by tag"| sb(["Showback report<br/>per team"])
+    ce -.->|"untagged spend"| un(["Unallocated bucket<br/>(minimize this)"])
 
-  Auto Scaling Group / Karpenter
-     |-- 70% Spot (up to 90% off, interruptible) -- workload drains on 2-min notice
-     |-- 30% On-Demand (guaranteed baseline)
-  behind queue/LB so an interruption is absorbed, not an outage
+    class res io
+    class ce mathOp
+    class sb train
+    class un lossN
 ```
+
+Every resource's tags flow into Cost Explorer, which groups tagged spend into a per-team showback report; anything untagged drops into the unallocated bucket that FinOps practice tries to shrink to zero.
+
+**Spot + On-Demand mixed fleet (resilient + cheap)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    asg{"Auto Scaling Group<br/>/ Karpenter"} -->|"70%"| spot("Spot<br/>up to 90% off, interruptible")
+    asg -->|"30%"| ondemand("On-Demand<br/>guaranteed baseline")
+    spot -.->|"drains on<br/>2-min notice"| lb(["Queue / Load Balancer"])
+    ondemand --> lb
+
+    class asg mathOp
+    class spot lossN
+    class ondemand train
+    class lb base
+```
+
+The Auto Scaling Group (or Karpenter) splits capacity 70/30 between Spot and On-Demand; a queue or load balancer in front absorbs the 2-minute Spot reclaim as a graceful retry, not an outage.
 
 ---
 
@@ -168,6 +245,32 @@ def rightsize(instance, p95_cpu, p95_mem):
     return "OK"
 # Also consider Graviton (arm64): ~20% cheaper at equal/better perf for many workloads
 ```
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Instance metrics<br/>p95 CPU, p95 mem"]) --> chk1{"p95 CPU under 40%<br/>and mem under 50%?"}
+    chk1 -->|"yes"| down(["DOWNSIZE<br/>e.g. 2xlarge to xlarge,<br/>~50% cost"])
+    chk1 -->|"no"| chk2{"p95 CPU under 15%<br/>and mem under 20%?"}
+    chk2 -->|"yes"| stop(["STOP_OR_SCHEDULE<br/>idle: shutdown or terminate"])
+    chk2 -->|"no"| ok(["OK<br/>no change"])
+
+    class start io
+    class chk1 mathOp
+    class chk2 mathOp
+    class down train
+    class stop lossN
+    class ok frozen
+```
+
+The checks run in order and return on first match: DOWNSIZE's wider band (under 40%/50%) is tested before STOP_OR_SCHEDULE's narrower idle band (under 15%/20%), so only instances clearing both fall through to OK.
 
 ### Spot with graceful interruption handling
 

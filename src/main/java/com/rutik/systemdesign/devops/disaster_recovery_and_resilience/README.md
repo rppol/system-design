@@ -58,6 +58,23 @@ The four AWS DR strategies, ordered by increasing cost and decreasing RTO/RPO:
 
 - **Multi-Site Active/Active** — Full production capacity runs in 2+ regions simultaneously, both serving live traffic behind Route53 latency/weighted routing. Data replicates bidirectionally (Aurora Global Database, DynamoDB Global Tables). On region loss, Route53 drains the dead region; surviving regions absorb the load. RTO: seconds. RPO: near zero (Aurora Global DB RPO typically <1s). Cost: highest — 2× full footprint plus replication egress.
 
+Plotting the four strategies by relative cost against recovery speed shows why the choice is a straight line, not a free lunch — there is no cheap-and-fast option in the top-left quadrant:
+
+```mermaid
+quadrantChart
+    title DR Strategy: Cost vs Recovery Speed
+    x-axis Low Cost --> High Cost
+    y-axis Slow Recovery --> Fast Recovery
+    quadrant-1 Fast but Expensive
+    quadrant-2 Ideal Rare Zone
+    quadrant-3 Cheap and Slow
+    quadrant-4 Overpriced and Slow
+    Backup and Restore: [0.12, 0.08]
+    Pilot Light: [0.38, 0.42]
+    Warm Standby: [0.62, 0.72]
+    Active-Active: [0.90, 0.95]
+```
+
 Failover mechanisms layered on top:
 
 - **DNS failover (Route53 health checks)**: health checks probe an endpoint every 30s (or 10s "fast" mode); after a configurable failure threshold (default 3), Route53 marks the record unhealthy and serves the failover record. End-to-end DNS failover completes in roughly 60–90s plus client TTL.
@@ -70,42 +87,66 @@ Failover mechanisms layered on top:
 
 Warm standby with Route53 DNS failover and cross-region replication:
 
-```
-                        +---------------------------+
-                        |    Route53 (DNS)          |
-                        |  failover routing policy  |
-                        |  health check every 30s   |
-                        +------------+--------------+
-                              PRIMARY |  SECONDARY (on fail)
-                  +-------------------+------------------+
-                  v                                      v
-   ===== us-east-1 (PRIMARY) =====        ===== us-west-2 (DR / WARM) =====
-   +---------------------------+          +---------------------------+
-   |  ALB  -> ASG (20 nodes)   |          |  ALB  -> ASG (2 nodes)    |
-   |         full capacity     |          |    scaled-down, live      |
-   +-------------+-------------+          +-------------+-------------+
-                 |                                      |
-                 v                                      v
-   +---------------------------+   async   +---------------------------+
-   |  Aurora PRIMARY writer    |==========>|  Aurora replica (RO)      |
-   |  RPO target < 1s          |  replica  |  promote on failover      |
-   +---------------------------+   lag     +---------------------------+
-                 |                                      ^
-                 v   S3 Cross-Region Replication        |
-   +---------------------------+  (<15min p99.99)  +----+----------------+
-   |  S3 bucket (assets)       |==================>| S3 DR bucket        |
-   +---------------------------+                   +---------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R53("Route53 DNS<br/>failover routing policy<br/>health check every 30s")
+
+    subgraph USE1["us-east-1 (PRIMARY)"]
+        direction TB
+        ALB1(["ALB"]) --> ASG1("ASG 20 nodes<br/>full capacity")
+        ASG1 --> AUR1[("Aurora PRIMARY writer<br/>RPO target under 1s")]
+        S3_1[("S3 bucket<br/>assets")]
+    end
+
+    subgraph USW2["us-west-2 (DR / WARM)"]
+        direction TB
+        ALB2(["ALB"]) --> ASG2("ASG 2 nodes<br/>scaled-down, live")
+        ASG2 --> AUR2[("Aurora replica RO<br/>promote on failover")]
+        S3_2[("S3 DR bucket")]
+    end
+
+    R53 -->|"PRIMARY"| ALB1
+    R53 -.->|"SECONDARY<br/>on fail"| ALB2
+    AUR1 -.->|"async replica lag"| AUR2
+    S3_1 -.->|"S3 CRR<br/>under 15min p99.99"| S3_2
+
+    class R53 mathOp
+    class ALB1,ALB2 io
+    class ASG1,AUR1 train
+    class ASG2,AUR2 frozen
+    class S3_1 base
+    class S3_2 frozen
 ```
 
 Failover timeline (warm standby):
 
-```
-t=0s      Region us-east-1 fails (writer unreachable)
-t=0-30s   Route53 health check probes fail
-t=~90s    3 consecutive failures -> Route53 serves DR record
-t=~90s    Promote Aurora replica in us-west-2 to writer (~30-60s)
-t=~120s   ASG scales 2 -> 20 nodes (warm pool / pre-baked AMIs)
-t=~180s   Full capacity restored.  RTO ~3 min, RPO ~ replica lag (seconds)
+```mermaid
+sequenceDiagram
+    participant R53 as Route53
+    participant P as us-east-1 (Primary)
+    participant A as Aurora (us-west-2)
+    participant ASG as ASG (us-west-2)
+
+    Note over P: t=0s - region fails<br/>writer unreachable
+    R53->>P: health check probe (every 30s)
+    P--xR53: no response
+    Note over R53: t=0-30s - probes fail
+    Note over R53: t~90s - 3 consecutive failures
+    R53-->>A: fail over DNS to DR record
+    activate A
+    Note over A: promote replica to writer<br/>(~30-60s)
+    deactivate A
+    R53-->>ASG: route live traffic to DR region
+    Note over ASG: t~120s - scale 2 to 20 nodes<br/>(warm pool / pre-baked AMIs)
+    Note over R53,ASG: t~180s - full capacity restored<br/>RTO ~3 min, RPO ~ replica lag (seconds)
 ```
 
 ---
@@ -185,6 +226,36 @@ resource "aws_route53_record" "secondary" {
 **S3 Cross-Region Replication (CRR)** replicates objects asynchronously; with S3 Replication Time Control (RTC) AWS contractually replicates 99.99% of objects within 15 minutes. Enabling object lock on the destination protects against ransomware deletes.
 
 **Failback** is the reverse: once the primary region recovers, you re-establish replication *back* into it (now as a secondary), let it catch up, then perform a planned, low-traffic-window failover to promote it again. Skipping the catch-up step risks split-brain and data loss.
+
+The region lifecycle below makes the "gate failback" rule concrete: the happy path (green) resyncs and promotes deliberately, while skipping fencing on the primary's return falls into the split-brain danger path (red) instead:
+
+```mermaid
+stateDiagram-v2
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    [*] --> Healthy
+    state "Primary Down" as PrimaryDown
+    state "DR Active" as DRActive
+    state "Split-Brain" as SplitBrain
+    state "Resyncing Primary" as Resyncing
+    state "Planned Failback" as PlannedFailback
+
+    Healthy --> PrimaryDown: region outage<br/>writer unreachable
+    PrimaryDown --> DRActive: Route53 fails over<br/>Aurora replica promoted
+    DRActive --> SplitBrain: primary returns<br/>with no fencing (broken)
+    DRActive --> Resyncing: primary recovers,<br/>replication re-armed
+    Resyncing --> PlannedFailback: catch-up complete,<br/>low-traffic window
+    PlannedFailback --> Healthy: promote primary,<br/>demote DR replica
+    SplitBrain --> [*]: divergent writes,<br/>manual reconciliation
+
+    class Healthy,PlannedFailback train
+    class DRActive frozen
+    class Resyncing mathOp
+    class PrimaryDown,SplitBrain lossN
+```
 
 ---
 

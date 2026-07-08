@@ -66,48 +66,108 @@ This module assumes you already understand pod-level controls (see [`../kubernet
 | L3 | Non-falsifiable provenance, isolated builds | A malicious build job |
 | L4 | Hermetic + reproducible builds, two-party review | Insider compromise of build platform |
 
+Each level only defends against a strictly stronger adversary than the one before it; the climb is cumulative, not additive — you cannot skip from L1 to L3.
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "L1: provenance exists,<br/>scripted build" as L1
+    state "L2: hosted build service,<br/>signed provenance" as L2
+    state "L3: non-falsifiable provenance,<br/>isolated builder" as L3
+    state "L4: hermetic + reproducible,<br/>two-party review" as L4
+
+    [*] --> L1
+    L1 --> L2: resists tampering<br/>after build
+    L2 --> L3: resists a malicious<br/>build job
+    L3 --> L4: resists insider<br/>compromise
+    L4 --> [*]
+
+    class L1 lossN
+    class L2 mathOp
+    class L3 train
+    class L4 frozen
+```
+
+The L2-to-L3 jump matters most: it is the point where even a malicious build job running inside your own pipeline can no longer forge its own provenance, which is why most mature platforms target L3 as a pragmatic ceiling and treat L4's hermetic reproducibility as an expensive final step.
+
 ---
 
 ## 5. Architecture Diagrams
 
-```
-SUPPLY CHAIN — END TO END
+**Supply chain — end to end.**
 
-  Developer                CI (hosted, OIDC identity)            Registry        K8s Cluster
-  ─────────                ─────────────────────────            ────────        ───────────
-  git push ──► [secret scan] ──► [SAST] ──► build image
-                                              │
-                                              ├─► [Trivy scan] ── CVE gate (fail on HIGH/CRIT)
-                                              │
-                                              ├─► syft ──► SBOM (CycloneDX JSON)
-                                              │
-                                              ├─► cosign sign  ◄── Fulcio cert (OIDC, 10-min TTL)
-                                              │        │
-                                              │        └──► Rekor (append-only log, entry UUID)
-                                              │
-                                              └─► cosign attest (SLSA provenance) ──► push
-                                                                                      │
-                                                                                      ▼
-                                          ┌──────────────────────────────────────────┐
-                                          │  Admission Controller (policy-controller) │
-                                          │  cosign verify: signature + identity +    │
-                                          │  Rekor inclusion proof  ──► ADMIT / DENY   │
-                                          └──────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    dev(["Developer<br/>git push"]) --> secretscan("Secret Scan")
+    secretscan --> sast("SAST")
+    sast --> build("Build Image")
+
+    subgraph CI["CI - hosted, OIDC identity"]
+        build --> trivy("Trivy Scan")
+        trivy --> cve{"CVE Gate<br/>fail on HIGH/CRIT"}
+
+        build --> syftnode("syft")
+        syftnode --> sbom(["SBOM<br/>CycloneDX JSON"])
+
+        fulcio("Fulcio cert<br/>OIDC, 10-min TTL") -.-> sign("cosign sign")
+        build --> sign
+        sign --> rekor[["Rekor<br/>append-only log"]]
+
+        build --> attest("cosign attest<br/>SLSA provenance")
+    end
+
+    attest --> push(["push"])
+    push --> registry[("Registry")]
+    registry --> admission{"Admission Controller<br/>verify sig + identity + Rekor"}
+    admission -->|"pass"| admit(["ADMIT"])
+    admission -->|"fail"| deny(["DENY"])
+
+    class dev io
+    class secretscan,sast,build,trivy,syftnode,sign,attest,admission,cve mathOp
+    class fulcio,rekor frozen
+    class sbom,push io
+    class registry base
+    class admit train
+    class deny lossN
 ```
 
-```
-KEYLESS SIGNING TRUST FLOW
+Every artifact fans out from the build step into four parallel checks — the Trivy CVE gate, the syft SBOM, keyless signing through Fulcio and Rekor, and the SLSA attestation — before the registry hands the image to the cluster, where the admission controller performs the one non-bypassable gate: verifying signature, identity, and Rekor inclusion before it admits or denies the pod.
 
-  CI job ──OIDC token──► Fulcio ──issues──► X.509 cert (subject = repo identity)
-     │                                          │
-     │  sign digest with ephemeral key          │
-     ▼                                          ▼
-  signature  ───────────────────────────► Rekor log entry (UUID, inclusion proof)
-                                                │
-  Verifier ◄── fetch cert + entry ── checks: cert issuer = Fulcio,
-                                     identity matches policy,
-                                     entry present in Rekor
+**Keyless signing trust flow.**
+
+```mermaid
+sequenceDiagram
+    participant CI as CI Job
+    participant Fulcio as Fulcio
+    participant Rekor as Rekor
+    participant Verifier as Verifier
+
+    CI->>Fulcio: OIDC token
+    Fulcio-->>CI: X.509 cert (subject = repo identity)
+    Note over CI: sign digest with<br/>ephemeral key
+    CI->>Rekor: publish signature
+    Rekor-->>CI: log entry (UUID, inclusion proof)
+    Verifier->>Rekor: fetch cert + entry
+    Rekor-->>Verifier: cert + entry
+    Note over Verifier: checks: cert issuer = Fulcio,<br/>identity matches policy,<br/>entry present in Rekor
 ```
+
+The CI job never holds a long-lived key: it trades a short-lived OIDC token for a 10-minute Fulcio certificate, signs with an ephemeral key, and publishes the event to Rekor; a verifier later fetches the cert and log entry to confirm the issuer, the identity, and transparency-log inclusion before trusting the artifact.
 
 ---
 
@@ -350,3 +410,29 @@ cosign attest --yes --type slsaprovenance --predicate provenance.json myrepo/api
 ```
 
 **Outcome.** After a 3-week staged rollout (warn → enforce per namespace), 100% of production images are signed and provenance-bearing. The next typosquat attempt is caught at the Trivy gate, and an attempted manual `kubectl apply` of a laptop-built image is denied by the webhook in ~200ms with a clear "no matching signatures" error. The SBOM store later answers a Log4Shell-style query across all 40 services in under 5 seconds. See [`../kubernetes_security/README.md`](../kubernetes_security/README.md) for the complementary pod-runtime controls and [`../secrets_management/README.md`](../secrets_management/README.md) for the OIDC-to-cloud trust setup.
+
+**The staged rollout that got there without an outage:**
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Warn Mode<br/>(unsigned images still admitted)" as Warn
+    state "Enforce Mode<br/>(per namespace, low-risk first)" as Enforce
+
+    [*] --> Warn
+    Warn --> Warn: sign all artifacts in CI,<br/>watch warnings drop
+    Warn --> Enforce: warnings near zero AND<br/>break-glass path tested
+    Enforce --> [*]: 100% signed,<br/>provenance-bearing
+
+    class Warn lossN
+    class Enforce train
+```
+
+The policy spends its first stretch in warn mode, admitting everything but logging every violation, and only flips to enforce — namespace by namespace, low-risk first — once the warning rate has fallen to near zero and the break-glass path has been tested; that ordering is what let this rollout finish in three weeks with zero blocked deploys.

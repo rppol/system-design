@@ -85,29 +85,47 @@ The unifying theme: as the *number* of states, teams, and compliance requirement
 
 ## 5. Architecture Diagrams
 
+### Layered IaC platform
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PR([PR opened]) --> TG("Terragrunt<br/>generate backend + provider<br/>resolve inputs, order by deps")
+    TG -->|"run-all plan"| TF("Terraform / OpenTofu<br/>plan to JSON")
+    TF --> G1("tfsec / checkov<br/>static scan, fast fail")
+    TF --> G2("OPA / Conftest<br/>policy eval, deny public S3")
+    TF --> G3("Terratest, nightly<br/>sandbox deploy, assert, destroy")
+    G1 --> GATE{"all gates pass?"}
+    G2 --> GATE
+    G3 --> GATE
+    GATE -->|"yes"| AP("Apply via TFC / Atlantis / CI<br/>policy re-checked by Sentinel")
+    AP --> CLOUD([cloud resources])
+
+    class PR req
+    class TG mathOp
+    class TF mathOp
+    class G1 mathOp
+    class G2 mathOp
+    class G3 mathOp
+    class GATE mathOp
+    class AP train
+    class CLOUD base
 ```
-Layered IaC platform
 
-   PR opened
-     |
-     v
-  [ Terragrunt ]  generate backend + provider, resolve inputs, order by deps
-     |  run-all plan
-     v
-  [ Terraform / OpenTofu ]  plan -> JSON plan
-     |
-     +--> [ tfsec / checkov ]   static scan (fast fail)
-     +--> [ OPA / Conftest ]    policy eval on plan JSON  -> deny "public S3"
-     +--> [ Terratest (nightly) ] real deploy in sandbox -> assert -> destroy
-     |
-   all gates pass -> apply (TFC / Atlantis / CI), policy re-checked by Sentinel
-     |
-     v
-   cloud resources
+A PR's plan fans out to three independent gates — static scan, policy evaluation, and a nightly real-deploy test — and only reaches `apply` once every gate passes and Sentinel re-checks policy one more time.
 
+### Terragrunt DRY layout
 
-Terragrunt DRY layout (one source of truth, many environments)
+One source of truth, many environments: every child directory supplies only its deltas (`cidr`, `dependency`), while the root's `remote_state`/`provider` blocks are inherited, not repeated. This is a literal directory listing, not a topology, so it stays ASCII.
 
+```
   live/
    +- terragrunt.hcl              # root: remote_state, generate provider
    +- prod/
@@ -116,14 +134,36 @@ Terragrunt DRY layout (one source of truth, many environments)
    +- dev/
        +- vpc/terragrunt.hcl       # same module, inputs = {cidr=10.1..}
   one module definition; environments differ ONLY by inputs
-
-
-Pulumi vs Terraform (engine difference)
-
-  Terraform:  HCL  -> graph -> provider CRUD
-  Pulumi:     TS/Py code -> graph (via language host) -> same providers (Terraform bridge or native)
-  CDK:        TS/Py code -> synth CloudFormation template -> AWS deploys
 ```
+
+### Pulumi vs Terraform (engine difference)
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TFENG["Terraform"]
+        TF1("HCL") --> TF2("Graph") --> TF3("Provider CRUD")
+    end
+    subgraph PULENG["Pulumi"]
+        P1("TS / Python code") --> P2("Graph<br/>via language host") --> P3("Same providers<br/>TF bridge or native")
+    end
+    subgraph CDKENG["CDK"]
+        C1("TS / Python code") --> C2("Synth CloudFormation<br/>template") --> C3("AWS deploys")
+    end
+
+    class TF1,P1,C1 io
+    class TF2,P2,C2 mathOp
+    class TF3,P3,C3 base
+```
+
+All three compile down to a provider call, but Pulumi and CDK reach it through a language host and a synth step instead of Terraform's native HCL graph — that extra hop is the entire "engine difference."
 
 ---
 
@@ -286,6 +326,69 @@ pulumi.export("vpc_id", vpc.id)
 ---
 
 ## 9. When to Use / When NOT to Use
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PAIN(["What's the actual pain point?"]) --> P1{"Environments<br/>copy-pasted, drifting?"}
+    PAIN --> P2{"Changes untested<br/>before prod?"}
+    PAIN --> P3{"Risky change can<br/>reach prod ungated?"}
+    PAIN --> P4{"Team / lock-in<br/>doesn't fit the engine?"}
+
+    P1 -->|"yes"| DRY("Add Terragrunt<br/>DRY orchestration")
+    P2 -->|"yes"| TEST("Add Terratest /<br/>terraform test")
+    P3 -->|"yes"| POL("Add OPA / Sentinel<br/>policy gate")
+    P4 -->|"yes"| ENG("Reconsider the engine<br/>see diagram below")
+
+    class PAIN io
+    class P1 mathOp
+    class P2 mathOp
+    class P3 mathOp
+    class P4 mathOp
+    class DRY train
+    class TEST train
+    class POL train
+    class ENG frozen
+```
+
+Each pain point maps to one layer, and three of the four are narrow, safe additions on top of the existing engine. Only the fourth — the engine itself not fitting the team or the lock-in profile — ever justifies touching the engine layer; the module's recurring warning is that teams reach for that lever far more often than this diagram says they should.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["Reconsidering the engine"]) --> Q1{"AWS-only, want native<br/>drift detection + rollback?"}
+    Q1 -->|"yes"| CDK("CloudFormation / CDK")
+    Q1 -->|"no"| Q2{"Team strongest in a<br/>general-purpose language?"}
+    Q2 -->|"yes"| PULUMI("Pulumi")
+    Q2 -->|"no"| Q3{"BUSL license<br/>a blocker?"}
+    Q3 -->|"yes"| TOFU("OpenTofu")
+    Q3 -->|"no"| TF("Terraform")
+
+    class START io
+    class Q1 mathOp
+    class Q2 mathOp
+    class Q3 mathOp
+    class CDK frozen
+    class PULUMI train
+    class TOFU train
+    class TF base
+```
+
+This sub-decision only applies once the engine is genuinely the bottleneck: AWS-native drift detection favors CloudFormation/CDK, a language/abstraction need favors Pulumi, and a pure licensing objection favors OpenTofu over plain Terraform.
 
 **Use Terragrunt when:** you have many environments/states that share structure and you're tired of copy-pasted backends and inputs — but you're keeping Terraform/OpenTofu as the engine. **Use Pulumi when:** your team is strongest in a general-purpose language and you need real abstractions/loops, or you want infra and app code unified. **Use CloudFormation/CDK when:** you're AWS-only and value native drift detection, stack rollback, and zero extra state to manage. **Use OpenTofu when:** the BUSL license is a concern or you want its open-governance features.
 

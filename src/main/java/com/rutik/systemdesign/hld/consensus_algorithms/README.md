@@ -117,50 +117,54 @@ etcd is the canonical production Raft system; it stores all Kubernetes cluster s
 
 **Raft Leader Election**
 
-```
-Initial state: all Followers, term=1
+```mermaid
+sequenceDiagram
+    participant A as Node A (times out first)
+    participant B as Node B
+    participant C as Node C
 
-Node A (timeout first)          Node B                    Node C
-|                               |                         |
-|--- RequestVote(term=2) ------>|                         |
-|--- RequestVote(term=2) ----------------------------------->|
-|                               |                         |
-|<-- VoteGranted(term=2) -------|                         |
-|<-- VoteGranted(term=2) -------------------------------------|
-|                               |                         |
-| (Leader elected, term=2)      |                         |
-|                               |                         |
-|--- AppendEntries(heartbeat) ->|                         |
-|--- AppendEntries(heartbeat) ------------------------------->|
-|<-- Success -------------------|                         |
-|<-- Success -------------------------------------------------|
+    Note over A,C: Initial state - all Followers, term=1
 
-Election timeout randomized: 150-300ms
-Heartbeat interval:          50-150ms
+    A->>B: RequestVote(term=2)
+    A->>C: RequestVote(term=2)
+    B-->>A: VoteGranted(term=2)
+    C-->>A: VoteGranted(term=2)
+
+    Note over A: quorum reached, Leader elected term=2
+
+    A->>B: AppendEntries (heartbeat)
+    A->>C: AppendEntries (heartbeat)
+    B-->>A: Success
+    C-->>A: Success
 ```
+
+Election timeout is randomized 150–300ms to avoid split votes; once elected, the leader's 50–150ms heartbeat keeps Followers from starting a new election.
 
 **Raft Log Replication**
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant A as Leader (A)
+    participant B as Follower (B)
+    participant C as Follower (C)
+
+    Client->>A: write(x=5)
+    Note over A: append idx=4, x=5 to local log (uncommitted)
+
+    A->>B: AppendEntries(4)
+    A->>C: AppendEntries(4)
+    B-->>A: ACK(4)
+    C-->>A: ACK(4)
+
+    Note over A: quorum = 2 ACKs, commit idx=4, apply x=5 to SM
+
+    A-->>Client: OK
+    A->>B: AppendEntries(commit=4)
+    A->>C: AppendEntries(commit=4)
 ```
-Client          Leader (A)           Follower (B)         Follower (C)
-  |                |                      |                     |
-  |-- write(x=5)-->|                      |                     |
-  |               | Append [idx=4,x=5]    |                     |
-  |               | to local log          |                     |
-  |               |                       |                     |
-  |               |--AppendEntries(4)---->|                     |
-  |               |--AppendEntries(4)------------------------>  |
-  |               |                       |                     |
-  |               |<-- ACK(4) ------------|                     |
-  |               |<-- ACK(4) ----------------------------------|
-  |               |                       |                     |
-  |               | quorum = 2 ACKs       |                     |
-  |               | commit idx=4          |                     |
-  |               | apply x=5 to SM       |                     |
-  |               |                       |                     |
-  |<-- OK --------|                       |                     |
-  |               |--AppendEntries(commit=4)----------------->  |
-```
+
+Commit requires a quorum of ACKs (2 of 3 nodes here) before the leader applies the entry and replies to the client; `leaderCommit` is then piggybacked to the remaining followers on the next `AppendEntries`.
 
 **Quorum Sizing**
 
@@ -176,22 +180,27 @@ N=7: quorum=4, tolerates 3 crash failures
 
 **Single-Decree Paxos — two phases**
 
-```
-Proposer            Acceptor1         Acceptor2         Acceptor3
-  |                   |                 |                 |
-  |--Prepare(n=5)---->|                 |                 |
-  |--Prepare(n=5)------------------>    |                 |
-  |--Prepare(n=5)-------------------------------------->  |
-  |                   |                 |                 |
-  |<-Promise(5,null)--|                 |                 |   Phase 1
-  |<-Promise(5,null)----------------    |                 |   (quorum of 2/3 promises)
-  |                   |                 |                 |
-  |--Accept(n=5,v=X)->|                 |                 |
-  |--Accept(n=5,v=X)--------------->    |                 |   Phase 2
-  |                   |                 |                 |
-  |<-Accepted(5,X)----|                 |                 |
-  |<-Accepted(5,X)------------------    |                 |   value X committed
-  |                                                       |   (quorum accepted)
+```mermaid
+sequenceDiagram
+    participant P as Proposer
+    participant A1 as Acceptor1
+    participant A2 as Acceptor2
+    participant A3 as Acceptor3
+
+    Note over P,A3: Phase 1 - Prepare / Promise
+    P->>A1: Prepare(n=5)
+    P->>A2: Prepare(n=5)
+    P->>A3: Prepare(n=5)
+    A1-->>P: Promise(5, null)
+    A2-->>P: Promise(5, null)
+    Note over P: quorum of 2/3 promises
+
+    Note over P,A3: Phase 2 - Accept / Accepted
+    P->>A1: Accept(n=5, v=X)
+    P->>A2: Accept(n=5, v=X)
+    A1-->>P: Accepted(5, X)
+    A2-->>P: Accepted(5, X)
+    Note over P: value X committed (quorum accepted)
 ```
 
 If a Promise returns a previously accepted value, the Proposer MUST re-propose
@@ -199,19 +208,17 @@ that value (not its own) in Phase 2 -- this is what preserves Agreement.
 
 **Raft State Transitions**
 
+```mermaid
+stateDiagram-v2
+    [*] --> Follower
+
+    Follower --> Candidate: times out,<br/>starts election
+    Candidate --> Follower: discovers leader<br/>or higher term
+    Candidate --> Leader: wins quorum<br/>of votes
+    Leader --> Follower: discovers<br/>higher term
 ```
-                  times out,            discovers leader
-                  starts election       or higher term
-   +----------+   ---------------->   +-----------+   ----------->   +----------+
-   | Follower |                       | Candidate |                  | Follower |
-   +----------+   <----------------   +-----------+                  +----------+
-        ^         discovers higher          |
-        |         term / new leader         | wins quorum of votes
-        |                                    v
-        |        discovers higher      +----------+
-        +------------------------------|  Leader  |
-                 term                  +----------+
-```
+
+Only a Candidate that wins a quorum of votes becomes Leader; any node that sees a higher term reverts to Follower immediately — the mechanism that makes stale leaders harmless.
 
 ---
 
@@ -232,36 +239,59 @@ that value (not its own) in Phase 2 -- this is what preserves Agreement.
 
 **BROKEN: naive replication ignores term numbers → split-brain on partition**
 
-```
-Before partition: 5-node cluster, Leader=A, term=3
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Network partition separates {A,B} from {C,D,E}
+    start(["5-node cluster<br/>Leader=A, term=3"]) --> split{"network<br/>partition"}
 
-Partition side {A,B}:
-  A still thinks it is Leader and accepts writes from clients.
-  B follows A.
-  But quorum = 3 -- A can NEVER commit (only 2 nodes reachable).
-  A's new writes stay uncommitted and are never applied to the SM.
+    split --> ab["side A,B:<br/>A still thinks<br/>it is Leader"]
+    ab --> abq{"quorum=3 needs<br/>3 nodes,<br/>only 2 reachable"}
+    abq --> abr(("writes stay<br/>uncommitted"))
 
-Partition side {C,D,E}:
-  Election timeout fires on C (heartbeats from A stopped arriving).
-  C wins the election with term=4 (a HIGHER term).
-  C,D,E form a quorum (3 nodes) and accept new writes.
-  These writes ARE committed (quorum of 3 satisfied).
+    split --> cde["side C,D,E:<br/>C times out,<br/>elects term=4"]
+    cde --> cdeq{"C,D,E form<br/>a quorum of 3"}
+    cdeq --> cder(("writes<br/>committed"))
+
+    class start base
+    class split mathOp
+    class ab frozen
+    class cde train
+    class abq,cdeq mathOp
+    class abr lossN
+    class cder train
 ```
 
 If the algorithm ignored term numbers, A and C would both be "leaders" with divergent committed state — irreconcilable split-brain.
 
 **FIX: term numbers make the stale leader step down**
 
-```
-Partition heals:
-  A receives a message stamped term=4 (from C or one of C's followers).
-  A immediately reverts to Follower (higher-term rule) and adopts term=4.
-  A's uncommitted entries (idx after the partition) are overwritten by C's log
-  via the AppendEntries log-repair walk-back.
-  No split-brain: the entries committed on the {C,D,E} quorum win,
-  and A never committed anything during the partition.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    heal(["partition<br/>heals"]) --> msg["A receives<br/>message, term=4"]
+    msg --> step["A reverts to Follower,<br/>adopts term=4"]
+    step --> repair["log-repair walk-back<br/>overwrites A's<br/>uncommitted entries"]
+    repair --> ok(("no split-brain:<br/>C,D,E quorum wins"))
+
+    class heal io
+    class msg req
+    class step mathOp
+    class repair mathOp
+    class ok train
 ```
 
 The key invariant: **only one leader can commit per term**, and a stale leader can never reach quorum in the minority partition.
@@ -318,20 +348,61 @@ The five rules above are the entire safety core of Raft replication. Note that t
 
 **Membership changes (joint consensus):** Changing the voting set (e.g., 3 → 5 nodes) is dangerous — if old and new configurations were active at once, two disjoint majorities could elect two leaders. Raft uses *joint consensus*: a transitional configuration `C_old,new` requires quorums from *both* the old and the new set for every decision. Once `C_old,new` is committed, the leader switches to `C_new`. etcd exposes this via single-node add/remove (one membership change at a time) to keep the math simple and avoid losing quorum mid-change.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    oldc(["C_old<br/>3 voters"]) -->|"leader proposes<br/>3 to 5"| joint{"C_old,new<br/>quorum needs BOTH<br/>old set and new set"}
+    joint -->|"joint config<br/>committed"| newc(["C_new<br/>5 voters"])
+    oldc -.->|"unsafe: direct<br/>switch"| bad(("2 disjoint<br/>majorities"))
+
+    class oldc frozen
+    class joint mathOp
+    class newc train
+    class bad lossN
+```
+
+Only after the joint configuration commits does Raft cut over to `C_new` — a direct switch risks two disjoint majorities each electing a leader, which is exactly the danger this two-step protocol closes off.
+
 **Fencing tokens — making distributed locks safe.** A consensus-backed lock service (etcd, ZooKeeper, Chubby) hands out a monotonically increasing *fencing token* with every lock grant. The problem it solves: client A acquires the lock, stalls in a GC pause past the lease TTL, the lock expires, client B acquires it — now both A and B think they hold the lock. Without fencing, A's delayed write corrupts shared state.
 
-```
-BROKEN: lock without fencing
-  A acquires lock, token ignored
-  A stalls (GC pause > lease TTL)
-  lock expires; B acquires it
-  A resumes, writes to storage  -> storage now has interleaved A and B writes (corruption)
+**BROKEN — lock without fencing:**
 
-FIX: every grant carries an increasing token; storage rejects stale tokens
-  A acquires lock -> token=33
-  A stalls; lock expires; B acquires -> token=34
-  B writes with token=34 -> storage records lastToken=34
-  A resumes, writes with token=33 -> storage rejects (33 < 34)  -> no corruption
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant B as Client B
+    participant S as Storage
+
+    A->>S: acquire lock (token ignored)
+    Note over A: A stalls - GC pause over lease TTL
+    Note over S: lock expires
+    B->>S: acquire lock
+    A->>S: resumes, writes (stale)
+    Note over S: interleaved A and B writes — corruption
+```
+
+**FIX — every grant carries an increasing token; storage rejects stale tokens:**
+
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant B as Client B
+    participant S as Storage
+
+    A->>S: acquire lock, token=33
+    Note over A: A stalls, lock expires
+    B->>S: acquire lock, token=34
+    B->>S: write with token=34
+    S-->>B: lastToken=34 recorded
+    A->>S: resumes, writes with token=33
+    S-->>A: rejected - 33 is less than 34, no corruption
 ```
 
 etcd implements this via the key's `mod_revision` (a monotonically increasing revision number); ZooKeeper via the znode's `zxid`/version. The storage layer must enforce the check — the lock service alone cannot prevent a delayed client from writing.
@@ -376,6 +447,30 @@ etcd implements this via the key's `mod_revision` (a monotonically increasing re
 | ReadIndex reads | One heartbeat per read, no skew assumption | Strict linearizability, untrusted clocks |
 
 **Decision shortcut for interviews.** Need agreement among trusted nodes that may crash? Raft (use etcd/Consul, do not hand-roll). Need it across mutually distrusting organizations? PBFT or a blockchain ordering service. Already on Kafka and need ordering? Use the log directly — do not add a consensus round per message. Need only eventual agreement at huge scale? CRDTs or gossip, not consensus.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"coordination<br/>need?"} -->|"trusted nodes,<br/>crash faults"| raft(["Raft<br/>etcd / Consul"])
+    start -->|"mutually distrusting<br/>organizations"| pbft(["PBFT or<br/>blockchain ordering"])
+    start -->|"already on Kafka,<br/>need ordering"| kafkalog(["use the log directly,<br/>no per-message consensus"])
+    start -->|"eventual agreement,<br/>huge scale"| crdt(["CRDTs or gossip,<br/>not consensus"])
+
+    class start mathOp
+    class raft train
+    class pbft frozen
+    class kafkalog base
+    class crdt req
+```
+
+The four branches map directly to the guidance above: match the trust model and existing infrastructure to the right tool before reaching for a full consensus protocol.
 
 **Safety vs availability.** Every algorithm here chooses safety: with no quorum, the system stops accepting writes rather than risk divergence. This is the CP corner of CAP — see `../cap_theorem/`.
 
@@ -529,15 +624,32 @@ Consensus algorithms are CP: they choose Consistency and Partition-tolerance ove
 - Keyspace: hundreds of thousands of objects; with history, etcd DB size must be bounded by compaction (keep under the 8GB default quota).
 
 #### 3. High-Level Architecture
-```
-            +---------------------------+
-            |  500 stateless API servers|
-            +-------------+-------------+
-                          | gRPC (linearizable)
-            +-------------v-------------+
-            |   etcd Raft quorum (CP)   |
-            |  AZ-a   AZ-b   AZ-c       |  3 voting members + 2 learners
-            +---------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    api(["500 stateless<br/>API servers"])
+
+    subgraph quorum["etcd Raft quorum (CP)"]
+        azA["AZ-a<br/>voter"]
+        azB["AZ-b<br/>voter"]
+        azC["AZ-c<br/>voter"]
+    end
+
+    learners(("2 learners<br/>non-voting"))
+
+    api -->|"gRPC<br/>linearizable"| quorum
+    quorum -.->|"snapshot<br/>catch-up"| learners
+
+    class api io
+    class azA,azB,azC base
+    class learners frozen
 ```
 - **5-node** etcd cluster: quorum=3, tolerates 2 simultaneous failures.
 - 3 voting members spread across AZ-a, AZ-b, AZ-c; 2 **learners** (non-voting) for DR / fast promotion.

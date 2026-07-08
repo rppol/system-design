@@ -87,76 +87,88 @@ Messages that repeatedly fail processing are moved to a dead-letter destination 
 
 ### 5.1 Kafka Consumer Group in FastAPI
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    app(["FastAPI App<br/>3 instances"]) -->|"producer.send(orders)"| topic["Kafka Topic: orders<br/>6 partitions, RF=3"]
+
+    subgraph grp["Consumer Group: order-svc"]
+        c1["Consumer-1<br/>P-0, P-1"]
+        c2["Consumer-2<br/>P-2, P-3"]
+        c3["Consumer-3<br/>P-4, P-5"]
+    end
+
+    topic --> c1
+    topic --> c2
+    topic --> c3
+    c1 -.->|"retries exhausted"| dlt(["orders.DLT<br/>retries = 3"])
+    c2 -.-> dlt
+    c3 -.-> dlt
+
+    class app io
+    class topic base
+    class c1,c2,c3 req
+    class dlt lossN
 ```
-  FastAPI App (3 instances)
-  ┌───────────────────────────────────────────────┐
-  │  Route: POST /orders                          │
-  │    └─> AIOKafkaProducer.send("orders", msg)   │
-  └───────────────────────────────────────────────┘
-                    │
-                    ▼
-  ┌─────────────────────────────────────────────────┐
-  │  Kafka Cluster                                  │
-  │  Topic: orders  (6 partitions, RF=3)            │
-  │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐           │
-  │  │ P-0  │ │ P-1  │ │ P-2  │ │ P-3  │  ...      │
-  │  └──────┘ └──────┘ └──────┘ └──────┘           │
-  └─────────────────────────────────────────────────┘
-         │           │           │
-         ▼           ▼           ▼
-  ┌──────────┐ ┌──────────┐ ┌──────────┐
-  │Consumer-1│ │Consumer-2│ │Consumer-3│   group_id="order-svc"
-  │ P-0,P-1  │ │  P-2,P-3 │ │  P-4,P-5 │
-  └──────────┘ └──────────┘ └──────────┘
-         │
-         ▼
-  ┌─────────────┐
-  │  DLT topic  │  orders.DLT
-  │  (retries=3)│
-  └─────────────┘
-```
+
+Each consumer in the `order-svc` group owns a disjoint subset of partitions, so adding consumers up to the partition count scales throughput linearly; a message that exhausts its retry budget is redirected to the shared `orders.DLT` topic instead of blocking its partition.
 
 ### 5.2 Outbox Pattern
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    route(["FastAPI Route"]) -->|"1 SQLAlchemy txn"| insOrders["INSERT INTO orders"]
+    route -->|"1 SQLAlchemy txn"| insOutbox["INSERT INTO outbox<br/>sent = False"]
+    insOutbox -.->|"background task"| poller["Outbox Poller<br/>SELECT ... WHERE sent = False<br/>LIMIT 100"]
+    poller --> producer["AIOKafkaProducer<br/>.send()"]
+    producer --> update["UPDATE outbox<br/>SET sent = True"]
+
+    class route io
+    class insOrders,insOutbox train
+    class poller mathOp
+    class producer req
+    class update train
 ```
-  FastAPI Route
-       │  (single SQLAlchemy transaction)
-       ├──> INSERT INTO orders ...
-       └──> INSERT INTO outbox (event_type, payload, sent=False)
-                    │
-                    │  (separate process / background task)
-                    ▼
-       ┌──────────────────────┐
-       │  Outbox Poller       │
-       │  SELECT * FROM outbox│
-       │  WHERE sent = False  │
-       │  LIMIT 100           │
-       └──────────────────────┘
-                    │
-                    ▼
-       AIOKafkaProducer.send()
-                    │
-       UPDATE outbox SET sent=True WHERE id=...
-```
+
+The business row and the outbox row commit atomically in one transaction; a separate poller — decoupled from the request path — is the only process that talks to Kafka, so a crash mid-request can never leave the two systems out of sync.
 
 ### 5.3 RabbitMQ Topic Exchange Fan-out
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    producer(["Producer<br/>routing_key = order.created"]) --> exch["Topic Exchange<br/>events"]
+    exch -->|"binding: order.*"| qa["Queue A<br/>invoicing"]
+    exch -->|"binding: #.created"| qb["Queue B<br/>audit-log"]
+
+    class producer io
+    class exch mathOp
+    class qa,qb req
 ```
-  Producer: routing_key = "order.created"
-       │
-       ▼
-  ┌──────────────────┐
-  │  Topic Exchange  │  "events"
-  └──────────────────┘
-        │          │
-  binding: order.* │  binding: #.created
-        │          │
-        ▼          ▼
-  ┌──────────┐  ┌──────────────┐
-  │  Queue A │  │   Queue B    │
-  │ invoicing│  │  audit-log   │
-  └──────────┘  └──────────────┘
-```
+
+A single topic exchange fans the same event out to multiple independently-bound queues — `order.*` and `#.created` both match `order.created`, so invoicing and audit-log each receive a copy without the producer knowing either queue exists.
 
 ---
 
@@ -191,6 +203,22 @@ async def publish_order_event(producer: AIOKafkaProducer, order_id: str) -> None
 `acks=0` — fire-and-forget, max throughput, no durability.
 `acks=1` — leader acknowledges, followers might not have replicated.
 `acks="all"` — all in-sync replicas acknowledge; survives a leader failure.
+
+`enable_idempotence=True` deduplicates producer retries using a per-producer sequence number, independently of the `acks` durability setting:
+
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant B as Broker
+
+    P->>B: send(seq=42, order.created)
+    Note over P,B: ack lost to a network timeout
+    P->>B: retry send(seq=42, order.created)
+    Note over B: seq 42 already committed for this producer ID
+    B-->>P: ack, no duplicate append
+```
+
+The broker tracks the last committed sequence number per producer ID; a retried batch carrying a sequence number it has already seen is acknowledged without a second append, which is what makes producer retries safe even though the original ack never reached the producer.
 
 ### 6.2 aiokafka Consumer — Manual Offset Commit
 
@@ -540,6 +568,16 @@ async for msg in consumer:
 
 Consumer lag (difference between latest offset and committed offset) is the primary health signal for a Kafka consumer. Teams that only monitor HTTP error rates miss growing backlogs. With a 6-partition topic and each consumer processing 500 msg/s, a consumer processing 400 msg/s accumulates 36 k messages of lag per minute. At that rate, a 30-minute outage creates an 18-million-message backlog requiring 10 hours to drain at normal throughput. Alert when lag exceeds a threshold that would breach your processing SLA.
 
+```mermaid
+xychart-beta
+    title "Consumer Lag: 30-min Outage, Then Drain at Normal Throughput"
+    x-axis ["outage start", "+10m", "+20m", "outage ends (30m)", "+2h30", "+5h", "+7h30", "drained (+10h)"]
+    y-axis "Backlog (millions of messages)" 0 --> 18
+    line [0, 6, 12, 18, 12, 8, 4, 0]
+```
+
+A 30-minute outage lets the entire producer rate pile up as backlog; draining those 18 million messages at normal throughput then takes 10 hours — 20x longer than the outage itself, and invisible to anyone watching only HTTP error rates.
+
 ---
 
 ## 11. Technologies & Tools
@@ -633,41 +671,35 @@ Cancel the consumer asyncio task on `SIGTERM`, catch `CancelledError`, and call 
 
 ### Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["POST /orders"]) --> fastapi["FastAPI, 3 replicas<br/>create_order(): 1 txn<br/>INSERT orders + INSERT outbox"]
+    fastapi -->|"DB commit (PostgreSQL)"| poller["Outbox Poller<br/>poll every 500ms<br/>SELECT ... FOR UPDATE SKIP LOCKED"]
+    poller -->|"send_and_wait, mark sent"| topic["Kafka Topic: orders<br/>12 partitions, RF=3<br/>retention = 7d"]
+
+    topic --> invoiceSvc["invoice-svc<br/>group: invoice<br/>manual commit, idempotent"]
+    topic --> inventorySvc["inventory-svc<br/>group: invnty<br/>manual commit, idempotent"]
+    topic --> notifySvc["notification-svc<br/>group: notify<br/>at-most-once ok"]
+
+    invoiceSvc -.->|"3 retries exhausted"| dlt["orders.DLT topic"]
+
+    class client io
+    class fastapi req
+    class poller mathOp
+    class topic base
+    class invoiceSvc,inventorySvc,notifySvc train
+    class dlt lossN
 ```
-  POST /orders  ─────────────────────────────────────────────┐
-                                                              │
-  ┌────────────────────────────────────────────────────────── ▼ ──┐
-  │  FastAPI (3 replicas)                                         │
-  │  create_order() ──> SQLAlchemy AsyncSession (one transaction) │
-  │    INSERT INTO orders (id, ...)                               │
-  │    INSERT INTO outbox (event_type="order.created", sent=False)│
-  └──────────────────────────────────────────────────────────────┘
-                                 │
-                   DB commit (PostgreSQL)
-                                 │
-  ┌──────────────────────────────▼────────────────────────────────┐
-  │  Outbox Poller (asyncio task in lifespan, poll interval 500ms)│
-  │  SELECT ... FROM outbox WHERE sent=False LIMIT 100             │
-  │  FOR UPDATE SKIP LOCKED                                        │
-  │  AIOKafkaProducer.send_and_wait("orders", payload)             │
-  │  UPDATE outbox SET sent=True WHERE id IN (...)                 │
-  └──────────────────────────────────────────────────────────────┘
-                                 │
-  ┌──────────────────────────────▼────────────────────────────────┐
-  │  Kafka: Topic "orders" (12 partitions, RF=3, retention=7d)    │
-  └──────────────────────────────────────────────────────────────┘
-              │                  │                  │
-  ┌───────────▼──────┐  ┌────────▼──────┐  ┌───────▼──────────┐
-  │  invoice-svc     │  │ inventory-svc │  │ notification-svc │
-  │ group: invoice   │  │group: invnty  │  │ group: notify    │
-  │ manual commit    │  │ manual commit │  │ at-most-once ok  │
-  │ idempotent       │  │ idempotent    │  │                  │
-  └──────────────────┘  └───────────────┘  └──────────────────┘
-              │
-  ┌───────────▼──────┐
-  │ orders.DLT topic │  (after 3 retries via retry logic in consumer)
-  └──────────────────┘
-```
+
+The single database transaction (`INSERT orders` + `INSERT outbox`) is the only synchronous write on the request path; the poller is the sole process that talks to Kafka, and a message that exhausts its 3 retries on `invoice-svc` is routed to `orders.DLT` rather than blocking the partition.
 
 ### Implementation
 

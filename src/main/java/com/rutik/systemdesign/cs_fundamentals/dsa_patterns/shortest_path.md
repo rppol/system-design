@@ -8,6 +8,31 @@ by the **shape of the edge weights**: non-negative -> Dijkstra; negative
 allowed -> Bellman-Ford; only `{0, 1}` -> 0-1 BFS; need *all pairs* ->
 Floyd-Warshall.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"Edge weight<br/>shape?"} -->|"only 0 or 1"| zbfs(["0-1 BFS<br/>O(V+E)"])
+    start -->|"negative allowed"| bf(["Bellman-Ford<br/>O(V*E)"])
+    start -->|"non-negative"| allPairs{"Need all<br/>pairs?"}
+    allPairs -->|"no — single source"| dij(["Dijkstra<br/>O((V+E) log V)"])
+    allPairs -->|"yes — all pairs"| fw(["Floyd-Warshall<br/>O(V^3)"])
+
+    class start,allPairs mathOp
+    class zbfs,dij train
+    class bf,fw frozen
+```
+
+*The whole decision in one picture: at most two questions about edge-weight
+shape pick the algorithm — same rule as the "One-line cue" and "Typical
+complexity" below, just drawn as a tree.*
+
 **One-line cue**: "Shortest/cheapest/minimum cost path" with **weighted**
 edges (if unweighted, it's plain BFS — see
 [`graph_traversal.md`](graph_traversal.md)).
@@ -53,26 +78,49 @@ Dijkstra grows a "settled" region outward from the source, always picking the
 closest *unsettled* node next — a min-heap replaces "scan all nodes for the
 minimum."
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A("A<br/>source") -->|"1"| B("B")
+    A -->|"4"| C("C")
+    B -->|"1"| D("D")
+    C -->|"2"| D
+
+    class A io
+    class B,C mathOp
+    class D train
 ```
-Graph (directed, weighted):           Dijkstra from A:
 
-   A --1--> B --1--> D                dist = {A:0, B:inf, C:inf, D:inf}
-   |                 ^                heap = [(0,A)]
-   4                 |
-   |                 2                pop (0,A): relax B (0+1=1), relax C (0+4=4)
-   v                 |                heap = [(1,B), (4,C)]
-   C ----------------+
-                                       pop (1,B): relax D (1+1=2)
-                                       heap = [(2,D), (4,C)]
+*The directed, weighted graph Dijkstra runs on below: source `A`, edges
+`A->B(1)`, `A->C(4)`, `B->D(1)`, `C->D(2)`.*
 
-                                       pop (2,D): D has no outgoing edges
-                                       heap = [(4,C)]
+```
+Dijkstra from A:
 
-                                       pop (4,C): relax D via C (4+2=6),
-                                                   but dist[D]=2 < 6, no update
-                                       heap = []
+dist = {A:0, B:inf, C:inf, D:inf}
+heap = [(0,A)]
 
-                                       Final: dist = {A:0, B:1, C:4, D:2}
+pop (0,A): relax B (0+1=1), relax C (0+4=4)
+heap = [(1,B), (4,C)]
+
+pop (1,B): relax D (1+1=2)
+heap = [(2,D), (4,C)]
+
+pop (2,D): D has no outgoing edges
+heap = [(4,C)]
+
+pop (4,C): relax D via C (4+2=6),
+            but dist[D]=2 < 6, no update
+heap = []
+
+Final: dist = {A:0, B:1, C:4, D:2}
 ```
 
 **The greedy invariant**: when a node is popped from the heap, its `dist`
@@ -342,6 +390,29 @@ def dijkstra_broken(n, edges, src):
 
 **Trace the bug** on graph `A=0, B=1, C=2, D=3` with edges
 `A->B (1)`, `A->C (2)`, `C->B (-5)`, `B->D (1)`:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A("A") -->|"1"| B("B")
+    A -->|"2"| C("C")
+    C -.->|"-5 negative!"| B
+    B -->|"1"| D("D")
+
+    class A io
+    class B,C mathOp
+    class D train
+```
+
+*The dotted edge is the negative weight that breaks Dijkstra: `C->B (-5)`
+offers a cheaper route into `B` only after `B` is already finalized at `1`.*
 
 ```
 True shortest distances from A:

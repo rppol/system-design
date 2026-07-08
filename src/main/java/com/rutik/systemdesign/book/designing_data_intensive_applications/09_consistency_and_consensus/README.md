@@ -145,16 +145,30 @@ The simplest "consensus-like" problem: a transaction spanning multiple nodes/par
 **commit on all or abort on all** (atomic commit) — you can't have it commit on one partition and
 abort on another. **Two-phase commit (2PC)** solves this with a **coordinator**:
 
-```
-TWO-PHASE COMMIT (2PC)
+**Two-Phase Commit (2PC)**
 
-  Phase 1 (PREPARE):  coordinator ──"can you commit?"──▶ all participants
-                      each participant: write to durable log, reply YES or NO
-                      A YES is an irrevocable PROMISE — it can no longer abort unilaterally.
-  Phase 2 (COMMIT):   if ALL said YES ─▶ coordinator logs "commit" (the point of no return)
-                                          ──"COMMIT"──▶ all  (each must obey; retries forever)
-                      if ANY said NO  ─▶ ──"ABORT"──▶ all
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant P as Participants
+
+    Note over C,P: Phase 1 — PREPARE
+    C->>P: "can you commit?"
+    P->>P: write to durable log
+    P-->>C: reply YES or NO<br/>(YES = irrevocable promise)
+
+    Note over C,P: Phase 2 — COMMIT
+    alt all voted YES
+        C->>C: log "commit"<br/>(the point of no return)
+        C->>P: COMMIT<br/>(must obey; retries forever)
+    else any voted NO
+        C->>P: ABORT
+    end
 ```
+
+Caption: the coordinator drives two synchronous rounds — a PREPARE vote that must be unanimous,
+then an irrevocable COMMIT/ABORT broadcast; the crash failure mode this creates is diagrammed
+separately below in Visual Intuition.
 
 The fatal flaw: if the **coordinator crashes** after participants voted YES but before sending the
 decision, participants are stuck **in doubt** — they promised to commit and may not abort, but they
@@ -195,36 +209,118 @@ built consensus core.
 
 ## Visual Intuition
 
-```
-THE CONSISTENCY / ORDERING / CONSENSUS LADDER
+**The Consistency / Ordering / Consensus Ladder**
 
-  eventual consistency      — replicas converge "someday"; reads stale & out of order
-        │  (add: preserve causal order between related events)
-  causal consistency        — partial order; achievable WITHOUT coordination, stays
-        │                      available under partition; often "enough"
-        │  (add: a single total order everyone agrees on)
-  total order broadcast  ≡  CONSENSUS  ≡  linearizable compare-and-set
-        │                      (deliver same msgs, same order, to all nodes)
-  linearizability           — single up-to-date copy; recency guaranteed; but slow
-                              (round-trips) and CP under partition (CAP)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Eventual consistency<br/>replicas converge someday<br/>reads stale and out of order"]) -->|"add: preserve<br/>causal order"| B("Causal consistency<br/>partial order, no coordination<br/>stays available under partition")
+    B -->|"add: one total order<br/>everyone agrees on"| C(("Total order broadcast<br/>≡ CONSENSUS<br/>≡ linearizable CAS"))
+    C -->|"deliver same msgs,<br/>same order, to all nodes"| D(["Linearizability<br/>single up-to-date copy<br/>recency guaranteed, but slow"])
+
+    class A base
+    class B train
+    class C mathOp
+    class D frozen
 ```
 
-```
-WHY 2PC BLOCKS (the in-doubt window the coordinator owns)
+**Why 2PC Blocks** — the in-doubt window the coordinator owns
 
-  participant voted YES ──┐ (promised: cannot abort on its own)
-                          ▼
-  ████ coordinator CRASHES before broadcasting decision ████
-                          │
-  participant is IN DOUBT: "I promised to commit, but commit or abort?"
-   ⇒ must WAIT (holding locks) until coordinator recovers ⇒ BLOCKING.
-  Fault-tolerant consensus (Raft/Paxos) avoids this by using a MAJORITY, not ALL,
-  so a minority failure (incl. the leader) doesn't freeze the decision.
+```mermaid
+stateDiagram-v2
+    state "Voted YES" as VotedYes
+    state "In Doubt" as InDoubt
+
+    [*] --> VotedYes: participant votes YES<br/>(promised, cannot abort alone)
+    VotedYes --> InDoubt: coordinator CRASHES<br/>before broadcasting decision
+    InDoubt --> Blocked: must WAIT, holding locks
+    Blocked --> Committed: coordinator recovers,<br/>sends COMMIT
+    Blocked --> Aborted: coordinator recovers,<br/>sends ABORT
+    Committed --> [*]
+    Aborted --> [*]
+
+    note right of Blocked
+        Raft/Paxos avoid this — decide via a MAJORITY,
+        not ALL, so a minority failure (incl. the
+        leader) can't freeze the decision
+    end note
 ```
 
 Caption: the chapter's arc made visible — climb only as high as you need (causal is often enough),
 and recognize that total order broadcast, consensus, and a linearizable CAS register are the *same*
 problem, packaged for you by ZooKeeper/etcd.
+
+**CAP vs PACELC: the Nested Decision**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["PACELC"]) --> P{"Network<br/>partition?"}
+    P -->|"if Partition (CAP)"| PC{"Consistency<br/>or Availability?"}
+    P -->|"Else (no partition)"| EC{"Latency<br/>or Consistency?"}
+    PC -->|"pick C"| CPN(["CP: refuse minority-side<br/>reads, stay correct"])
+    PC -->|"pick A"| APN(["AP: keep serving,<br/>may return stale data"])
+    EC -->|"pick L"| LATN(["Fast local reply,<br/>skip coordination"])
+    EC -->|"pick C"| CONN(["Majority round-trip,<br/>slower but fresh"])
+
+    class START io
+    class P mathOp
+    class PC mathOp
+    class EC mathOp
+    class CPN train
+    class APN lossN
+    class LATN req
+    class CONN frozen
+```
+
+Caption: PACELC's full formula made visible — *if* a network Partition is happening, CAP's
+tradeoff applies (Consistency vs Availability); *Else*, in normal operation, the same shape of
+tradeoff persists as Latency vs Consistency, because linearizability's majority round-trip is
+slow whether or not anything has failed.
+
+**The Chapter's Climax: Five Problems, One Underlying Consensus**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TOB("Total order<br/>broadcast") --> CORE(("CONSENSUS"))
+    CAS("Linearizable<br/>compare-and-set") --> CORE
+    LE("Leader<br/>election") --> CORE
+    AC("Atomic<br/>commit") --> CORE
+    UC("Uniqueness<br/>constraints") --> CORE
+
+    class CORE mathOp
+    class TOB train
+    class CAS train
+    class LE frozen
+    class AC base
+    class UC req
+```
+
+Caption: the chapter's central insight — total order broadcast, a linearizable compare-and-set
+register, leader election, atomic commit, and uniqueness constraints all reduce to the same
+problem; solve consensus once (ZooKeeper/etcd) and every one of these comes for free.
 
 ---
 

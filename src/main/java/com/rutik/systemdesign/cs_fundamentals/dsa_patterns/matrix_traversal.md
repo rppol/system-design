@@ -178,6 +178,35 @@ Result: 1 2 3 4 8 12 11 10 9 5 6 7
 
 The two `if` guards (`if top <= bottom`, `if left <= right`) are the crux: in a non-square or odd-dimension matrix, after shrinking two walls the remaining strip is a single row or column, and re-walking it would double-emit elements. The guards skip the bottom/left passes precisely when their wall has already been consumed.
 
+Laid out as control flow, the loop shape makes it clear the two guards are independent checks, each sitting right after the wall it protects would be walked — never skipped together, never doubled:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Start: full walls<br/>top, bottom, left, right"]) --> LoopCheck{"top/bottom and<br/>left/right still valid?"}
+    LoopCheck -->|"no"| Exit(["Return spiral output"])
+    LoopCheck -->|"yes"| WalkTop("Walk top row<br/>left to right; top++")
+    WalkTop --> WalkRight("Walk right col<br/>top to bottom; right--")
+    WalkRight --> GuardBottom{"bottom row<br/>still unvisited?"}
+    GuardBottom -->|"yes"| WalkBottom("Walk bottom row<br/>right to left; bottom--")
+    GuardBottom -->|"no"| GuardLeft{"left col<br/>still unvisited?"}
+    WalkBottom --> GuardLeft
+    GuardLeft -->|"yes"| WalkLeft("Walk left col<br/>bottom to top; left++")
+    GuardLeft -->|"no"| LoopCheck
+    WalkLeft -.->|"repeat"| LoopCheck
+
+    class Start,Exit io
+    class LoopCheck,GuardBottom,GuardLeft mathOp
+    class WalkTop,WalkRight,WalkBottom,WalkLeft train
+```
+
 ---
 
 ## 5. Complexity
@@ -272,6 +301,36 @@ def set_zeroes_fixed(matrix: list[list[int]]) -> None:
 ---
 
 ## 9. Related Patterns & When to Switch
+
+The bullets below all answer one question — *what does this grid problem actually need?* — here is that question as a single decision cascade; follow the first branch that matches and land on the pattern to reach for.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Grid / 2D array problem"]) --> B{"About connectivity<br/>or reachability?"}
+    B -->|"yes"| B2{"Need fewest steps<br/>or min cost to move?"}
+    B -->|"no"| C{"Repeated submatrix-sum<br/>queries?"}
+    B2 -->|"yes"| P1(["Shortest Path"])
+    B2 -->|"no"| P2(["Graph Traversal"])
+    C -->|"yes"| P3(["Prefix Sum (2D)"])
+    C -->|"no"| D{"Grid IS the DP table<br/>(paths, min-cost)?"}
+    D -->|"yes"| P4(["Dynamic Programming"])
+    D -->|"no"| E{"Value lookup in a<br/>sorted matrix?"}
+    E -->|"yes"| P5(["Modified Binary Search"])
+    E -->|"no"| P6(["Matrix Traversal<br/>and Manipulation (this pattern)"])
+
+    class A io
+    class B,B2,C,D,E mathOp
+    class P1,P2,P3,P4,P5 frozen
+    class P6 train
+```
 
 - **[Graph Traversal](graph_traversal.md)** — switch the instant the problem is about connectivity: islands, flood fill, regions, reachability. Those need a visited-set and a frontier; matrix manipulation does not.
 - **[Shortest Path](shortest_path.md)** — switch for "fewest steps / minimum cost to move across the grid" (BFS, 0-1 BFS, Dijkstra). Movement-with-cost is not coordinate rewriting.

@@ -20,6 +20,32 @@ Backups are like insurance policies: boring and costly to maintain, catastrophic
 
 **3-2-1 backup rule**: 3 copies, 2 different media types, 1 offsite. For databases: primary (online), replica (different AZ), cold backup in object storage (S3, GCS) — different datacenter.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph rule["3-2-1: 3 copies, 2 media types, 1 offsite"]
+        Primary(["Copy 1: Primary<br/>online, disk"])
+        Replica(["Copy 2: Replica<br/>different AZ, disk"])
+        S3[("Copy 3: Object storage<br/>S3 / GCS, offsite")]
+    end
+
+    Primary -->|"same media"| Replica
+    Primary -.->|"different media,<br/>different datacenter"| S3
+
+    class Primary train
+    class Replica frozen
+    class S3 base
+```
+
+The rule made concrete for databases: the online primary and an AZ-local replica are copies 1 and 2, both on disk media in the same region, while the object-storage backup is copy 3 on a different medium in a different datacenter — the only one of the three that survives a full-region failure.
+
 **Backups must be tested**: An untested backup has unknown reliability. Restore drills catch encoding issues, permission problems, and software version mismatches before they occur at 3 AM.
 
 **WAL archiving enables PITR**: Base backup + all WAL since that backup = the ability to replay the database to any point in time. This is the foundation of PostgreSQL point-in-time recovery.
@@ -43,60 +69,127 @@ Percona XtraBackup| Hot physical backup MySQL  | No     | Full DB   | Minutes
 
 ## 5. Architecture Diagrams
 
+**PostgreSQL PITR Architecture**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Primary(["Primary DB"])
+
+    subgraph cont["Continuous Operation"]
+        Replica(["Streaming replica<br/>HA, not backup"])
+        WALG["WAL-G / pgBackRest"]
+        S3[("S3 / GCS bucket")]
+        WALSeg["WAL segments<br/>16MB, continuous"]
+        BaseBkp["Base backup<br/>weekly / daily"]
+    end
+
+    subgraph rec["Recovery (PITR)"]
+        Restore["1: restore base backup<br/>to new server"]
+        Cfg["2: set recovery_target_time"]
+        Replay["3: start PostgreSQL,<br/>replay WAL to target"]
+        Promoted(["4: promote<br/>to primary"])
+    end
+
+    Primary -->|"WAL stream"| Replica
+    Primary -->|"WAL archiving"| WALG
+    WALG --> S3
+    S3 --> WALSeg
+    S3 --> BaseBkp
+    BaseBkp -.-> Restore
+    Restore --> Cfg --> Replay --> Promoted
+
+    class Primary,Promoted train
+    class Replica frozen
+    class S3,WALSeg,BaseBkp base
+    class WALG,Cfg,Replay mathOp
+    class Restore req
 ```
-PostgreSQL PITR Architecture
-==============================
 
-Primary DB
-   │
-   ├── WAL stream → Streaming replica (HA, not backup)
-   │
-   └── WAL archiving → S3/GCS bucket ← WAL-G / pgBackRest
-         │
-         ├── WAL segment files (16MB each, continuous)
-         └── Base backup (full snapshot, weekly/daily)
+The primary streams WAL continuously to a replica for HA and separately archives WAL to object storage via WAL-G/pgBackRest; recovery restores the latest base backup, replays archived WAL to a target timestamp, and promotes. RPO is roughly the time since the last archived WAL segment (typically seconds); RTO is base-backup restore time plus WAL replay time (typically 30 minutes to 4 hours).
 
-Recovery process:
-  1. Restore base backup to new server
-  2. Configure recovery.conf / postgresql.conf:
-       restore_command = 'wal-g wal-fetch %f %p'
-       recovery_target_time = '2025-12-01 14:30:00 UTC'
-  3. Start PostgreSQL → replays WAL from archive until target time
-  4. Promote to primary
+**WAL-G Backup Flow**
 
-RPO: time since last archived WAL segment (typically seconds)
-RTO: base backup restore time + WAL replay time (typically 30 min – 4 hours)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    PG(["PostgreSQL"])
 
-WAL-G Backup Flow
-=================
+    subgraph cont2["Continuous"]
+        Seg["WAL segments<br/>16MB, every few min"]
+        Push["wal-g wal-push"]
+    end
 
-Continuous:
-  PostgreSQL → WAL segments (16MB, every few minutes under write load)
-           → WAL-G wal-push → S3 bucket/gs://bucket/wal/{seg}
+    subgraph daily["Daily"]
+        BPush["wal-g backup-push"]
+    end
 
-Daily:
-  WAL-G backup-push → S3 bucket/gs://bucket/basebackups/{timestamp}/
+    S3b[("S3 / GCS bucket")]
 
-Restore (PITR to 2 hours ago):
-  WAL-G backup-fetch LATEST → restore base backup locally
-  WAL-G wal-fetch {segment} → fetch WAL on demand during replay
-  PostgreSQL replays WAL until target time, then promotes
+    subgraph restore["Restore: PITR to 2h ago"]
+        Fetch["wal-g backup-fetch LATEST"]
+        Local["restore base backup<br/>locally"]
+        WFetch["wal-g wal-fetch segment<br/>on demand"]
+        Replay2["replay WAL to target,<br/>then promote"]
+    end
 
+    PG -->|"WAL segments"| Seg --> Push --> S3b
+    PG -.->|"daily base backup"| BPush --> S3b
+    S3b --> Fetch --> Local --> Replay2
+    S3b --> WFetch --> Replay2
 
-Backup Verification
-===================
-
-Weekly automated restore test:
-  1. Pull latest base backup from S3 to test instance
-  2. Replay WAL to most recent archived segment
-  3. Run checksum queries:
-     SELECT relname, relpages, reltuples FROM pg_class WHERE relname = 'orders'
-     Compare with known-good values from primary
-  4. Run application smoke tests against restored instance
-  5. Alert if restore fails or data mismatch detected
-  6. Decommission test instance
+    class PG train
+    class Seg,Push,BPush mathOp
+    class S3b base
+    class Fetch,WFetch,Local req
+    class Replay2 train
 ```
+
+WAL segments stream to S3/GCS continuously as they fill (every few minutes under write load) while a full base backup is pushed daily; restoring to two hours ago fetches the latest base backup plus the WAL segments needed to replay forward to the target time, then promotes.
+
+**Backup Verification**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["weekly trigger"]) --> Pull["1: pull latest<br/>base backup from S3"]
+    Pull --> Replay3["2: replay WAL to<br/>latest segment"]
+    Replay3 --> Checksum["3: checksum query<br/>vs primary"]
+    Checksum --> Smoke["4: application<br/>smoke tests"]
+    Smoke --> Check{"5: failure or<br/>mismatch?"}
+    Check -->|"yes"| Alert["alert PagerDuty"]
+    Check -->|"no"| Decom(["6: decommission<br/>test instance"])
+    Alert --> Decom
+
+    class Start io
+    class Pull,Replay3 req
+    class Checksum,Smoke,Check mathOp
+    class Alert lossN
+    class Decom io
+```
+
+The weekly restore drill pulls the latest base backup, replays WAL to the newest archived segment, checksums against the primary, and runs smoke tests before deciding whether to alert on failure; the test instance is torn down either way.
 
 ---
 
@@ -334,6 +427,34 @@ Multi-region active | 0           | 0            | 2× DB      | Very High
 
 **Never rely solely on snapshots**: cloud volume snapshots are consistent at a point in time but are stored in the same cloud region. Region failure destroys both DB and snapshot.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["choosing a<br/>backup method"]) --> Q1{"small DB, or need<br/>selective table restore?"}
+    Q1 -->|"yes"| PgDump["pg_dump<br/>logical backup"]
+    Q1 -->|"no"| Q2{"production, RPO<br/>under 1 hour?"}
+    Q2 -->|"yes"| WalG["WAL-G / pgBackRest<br/>WAL archiving + PITR"]
+    Q2 -->|"no"| Q3{"only need HA<br/>or read scaling?"}
+    Q3 -->|"yes"| Stream["streaming replication<br/>not a backup"]
+    Q3 -->|"no"| Snap["cloud snapshot only<br/>same-region risk"]
+
+    class Start io
+    class Q1,Q2,Q3 mathOp
+    class PgDump req
+    class WalG train
+    class Stream frozen
+    class Snap lossN
+```
+
+Backup-method selection as a decision chain: small databases or selective-restore needs point to logical pg_dump; production systems needing sub-hour RPO and disk-failure survival point to WAL-based PITR; and streaming replication or a lone snapshot are HA/DR tools, not backups, since a replicated DROP TABLE or a region failure takes them down too.
+
 ---
 
 ## 10. Common Pitfalls
@@ -426,35 +547,61 @@ Use logical replication for zero-downtime major version upgrades: (1) Set up a n
 
 **New backup architecture**:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Primary(["Primary DB<br/>200GB, 50K TPS"])
+
+    subgraph c1["1: Streaming replication (HA)"]
+        Patroni["Patroni failover"]
+        Replica(["Replica<br/>async, lag under 5s"])
+    end
+
+    subgraph c2["2: WAL-G continuous archiving"]
+        WALPush["wal-g wal-push<br/>every 1-5 min"]
+        S3wal[("S3 us-east-1<br/>WAL segments")]
+    end
+
+    subgraph c3["3: Daily base backup"]
+        Cron["02:00 UTC cron"]
+        BackupPush["wal-g backup-push<br/>about 17 min for 200GB"]
+    end
+
+    subgraph c4["4: Weekly restore test"]
+        EC2["new EC2 instance"]
+        Verify{"checksum + row count<br/>match primary?"}
+        Page["alert PagerDuty"]
+        Terminate(["terminate instance"])
+    end
+
+    Primary --> Patroni --> Replica
+    Primary --> WALPush --> S3wal
+    Primary --> Cron --> BackupPush
+    S3wal --> EC2
+    BackupPush --> EC2
+    EC2 --> Verify
+    Verify -->|"no"| Page --> Terminate
+    Verify -->|"yes"| Terminate
+
+    class Primary train
+    class Patroni,WALPush,Cron mathOp
+    class Replica frozen
+    class S3wal base
+    class BackupPush req
+    class EC2 req
+    class Verify mathOp
+    class Page lossN
+    class Terminate io
 ```
-Component 1: Streaming replication (HA, not backup)
-  Primary → Patroni failover → Replica (async, lag < 5s)
-  RTO for hardware failure: 15-30 seconds via Patroni
 
-Component 2: WAL-G continuous WAL archiving
-  archive_command = 'wal-g wal-push %p'
-  Destination: S3 (us-east-1, primary region)
-  WAL segment size: 16MB → archived every 1-5 minutes under load
-  RPO: 1-5 minutes (time since last archived segment)
-
-Component 3: Daily full base backup via WAL-G
-  Cron: 02:00 UTC daily → wal-g backup-push
-  Backup time: 200GB × 200MB/s throughput → ~17 minutes
-
-Component 4: Automated weekly restore test
-  New EC2 instance (same instance type as primary)
-  wal-g backup-fetch LATEST → restore 200GB
-  Replay WAL to yesterday's timestamp
-  Run verification: row counts, checksum on last 1000 orders
-  Compare against known-good values from primary
-  Alert to PagerDuty on failure
-  Terminate test instance
-
-Backup retention:
-  WAL segments: 14 days (2× recovery window)
-  Full backups: 7 (pgBackRest retention policy)
-  S3 lifecycle: transition WAL to S3-IA after 7 days (50% cost reduction)
-```
+Four independent components close the gap: Patroni promotes a replica in 15-30 seconds for hardware failure; WAL-G archives continuously for a 1-5 minute RPO; a daily 02:00 UTC base backup pushes the 200GB database at roughly 200MB/s, finishing in about 17 minutes; and a weekly restore drill on a fresh EC2 instance verifies checksums and row counts before alerting or tearing down. Retention keeps WAL for 14 days (twice the recovery window) and 7 full backups, transitioning WAL to S3 Infrequent Access after 7 days for a 50% storage-cost reduction.
 
 **DR scenario test results**:
 - Simulated: disk failure + 3 hours of silent WAL archive failure (max risk scenario)

@@ -123,6 +123,32 @@ of the interval before committing, so that two transactions' intervals never ove
 globally consistent ordering. Most systems lack such bounded clocks and must not trust timestamps
 for correctness.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["transaction ready<br/>to commit"]) --> B["read TrueTime interval<br/>earliest to latest bound"]
+    B --> C{"now past<br/>latest bound?"}
+    C -->|"not yet"| D(sleep until<br/>uncertainty passes)
+    D --> C
+    C -->|"yes"| E(commit with<br/>timestamp = latest)
+    E --> F(["next transaction<br/>starts strictly after"])
+    class A io
+    class B mathOp
+    class C mathOp
+    class D frozen
+    class E train
+    class F req
+```
+
+Caption: TrueTime turns clock uncertainty into a correctness mechanism — Spanner deliberately sleeps out the interval width before committing, so no later transaction's interval can overlap this one's, giving globally consistent ordering without a perfectly synchronized clock.
+
 ### Process pauses
 
 Even ignoring clocks, a process can **pause for an arbitrary, unbounded time** and not know it
@@ -133,15 +159,22 @@ a **lease** ("I'm leader until time T"), checks "do I still have the lease? yes,
 freezes it past T; meanwhile the cluster elected a new leader, but the paused node wakes up still
 *believing* it's leader and writes — corrupting data.
 
-```
-THE GC-PAUSE / LEASE BUG (why you can't trust "I checked, I still hold the lease")
+```mermaid
+sequenceDiagram
+    participant A as Old Leader
+    participant B as Cluster
 
-  t=0   Node A: "I hold the lease until t=10. I checked. I will write."
-  t=1   ███████████  Node A: stop-the-world GC pause (unbounded!)  ███████████
-   .    (cluster sees A silent past lease ⇒ elects Node B as new leader)
-  t=12  Node A WAKES, still thinks it's t≈1 and it's the leader ⇒ issues a write
-        ⇒ TWO leaders write ⇒ corruption.   FIX: fencing tokens (see §8.4)
+    Note over A: t=0 — holds lease until t=10,<br/>checks it, believes it can write
+    A->>A: stop-the-world GC pause begins
+    Note over A: t=1 — frozen, the pause is unbounded
+    B->>B: sees A silent past its lease deadline
+    B-->>B: elects a new leader, Node B
+    Note over A: t=12 — A wakes, still thinks t≈1,<br/>still believes it holds the lease
+    A->>B: issues a write with its stale belief
+    Note over A,B: two leaders write ⇒ corruption.<br/>Fix — fencing tokens, Section 8.4
 ```
+
+Caption: a GC pause freezes Node A's own clock while the cluster's clock keeps running; A wakes believing almost no time passed and that it still holds the lease, but a new leader was already elected — the collision that fencing tokens (Section 8.4) prevent.
 
 ## 8.4 Knowledge, Truth, and Lies
 
@@ -161,13 +194,23 @@ with a token lower than the highest it has already seen**. So when the paused ol
 writes with its stale (lower) token, the storage rejects it — the new leader's higher token wins.
 This turns "I believe I hold the lock" into an enforceable, checkable guarantee.
 
-```
-FENCING TOKENS: the storage enforces the truth, not the client's belief
+```mermaid
+sequenceDiagram
+    participant L as Lock Service
+    participant O as Old Leader
+    participant N as New Leader
+    participant S as Storage
 
-  lock service grants tokens, monotonically:  ... token 33 ... token 34 ...
-  old leader (paused) writes with token 33  ─▶ storage: "I've seen 34 ⇒ REJECT 33" ✗
-  new leader writes with token 34           ─▶ storage: "34 >= 34 ⇒ ACCEPT"        ✓
+    L->>O: grants token 33
+    Note over O: pauses right after receiving it
+    L->>N: grants token 34
+    O->>S: write with token 33
+    S-->>O: highest seen is 34 ⇒ REJECT 33 ✗
+    N->>S: write with token 34
+    S-->>N: 34 is highest so far ⇒ ACCEPT ✓
 ```
+
+Caption: the lock service hands out monotonically increasing tokens; storage — not the client — enforces the rule, rejecting any write whose token is lower than the highest it has already accepted, so the paused old leader's stale token 33 loses to the new leader's token 34.
 
 ### Byzantine faults
 
@@ -200,33 +243,67 @@ assumptions are violated) while guaranteeing **liveness only under certain condi
 while a majority is reachable). The model is a simplification — reality has edge cases the model
 ignores — but it's an indispensable tool for reasoning, as long as you remember it's an abstraction.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["algorithm running"]) --> B{"majority of nodes<br/>reachable?"}
+    B -->|"majority up"| C(safety holds)
+    B -->|"majority up"| D(liveness holds<br/>progress is made)
+    B -->|"partitioned"| E(safety still holds)
+    B -->|"partitioned"| F(liveness suspended<br/>no progress, no corruption)
+    class A io
+    class B mathOp
+    class C train
+    class D train
+    class E train
+    class F frozen
+```
+
+Caption: safety ("nothing bad happens") holds unconditionally, even mid-partition, while liveness ("something good eventually happens") is only guaranteed while a majority of nodes is reachable — under partition, progress simply pauses rather than the system doing anything unsafe.
+
 ---
 
 ## Visual Intuition
 
-```
-WHY A TIMEOUT CAN'T TELL "DEAD" FROM "SLOW"
+```mermaid
+sequenceDiagram
+    participant A as Node A
+    participant B as Node B
 
-  Node A sends request ───────────────▶ Node B
-                          (silence)
-  After timeout T, A must GUESS. The reality could be ANY of:
-    (1) request lost in network         (B never saw it)
-    (2) B crashed before handling it    (truly dead)
-    (3) B is alive but slow (GC/queue)  (will reply later!)
-    (4) B handled it, reply was lost    (it actually SUCCEEDED)
-    (5) B handled it, reply is delayed  (success, reply coming)
-  A single timeout collapses 5 very different worlds into one "assume failed." ✗
+    A->>B: sends request
+    Note over A,B: silence — timeout T elapses
+    alt 1 — request lost in network
+        Note over B: B never saw it
+    else 2 — B crashed before handling it
+        Note over B: truly dead
+    else 3 — B alive but slow, GC pause or busy queue
+        Note over B: will reply later
+    else 4 — B handled it, reply was lost
+        Note over A: it actually succeeded
+    else 5 — B handled it, reply is delayed
+        Note over A: success, reply is just coming
+    end
+    Note over A,B: one timeout collapses 5 different<br/>worlds into a single guess — assume failed
 ```
 
-```
-THREE TIMING MODELS vs REALITY
+Caption: after silence, Node A cannot tell which of five very different realities occurred — including two where B actually succeeded — so the timeout can only ever be an educated guess, never a fact.
 
-  synchronous       |■■■■■■■■■■■|                 bounded delay  — too optimistic
-  partially sync    |■■■■■■■■■■■|···spikes···|     usually bounded — REALISTIC
-  asynchronous      |·······························|  no bound at all — too pessimistic
-                    └ design for "partially synchronous": safe always,
-                      makes progress (liveness) when the network behaves
+```mermaid
+xychart-beta
+    title "How Bounded Is Delay Across Timing Models"
+    x-axis [Synchronous, "Partially Synchronous", Asynchronous]
+    y-axis "delay unpredictability, relative scale" 0 --> 10
+    bar [2, 5, 10]
 ```
+
+Caption: synchronous assumes a near-zero delay bound (unrealistic); asynchronous assumes no bound at all (unusable — no timeout is even possible); real networks sit in between, which is why algorithms are designed for the partially synchronous model.
 
 Caption: the chapter's spine — you can never *observe* truth directly (timeouts are guesses,
 clocks lie, processes pause), so correctness comes from majorities + fencing tokens + algorithms

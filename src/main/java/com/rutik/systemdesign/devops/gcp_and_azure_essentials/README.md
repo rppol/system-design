@@ -90,35 +90,104 @@ See [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/) for the AWS bas
 | Serverless containers | Fargate (needs ECS/EKS) | **Cloud Run** (fully managed, scales to zero) | Container Apps |
 | Billing/isolation unit | Account | Project | Resource Group within Subscription |
 
+**Why the VPC row matters most.** AWS/Azure VPCs are pinned to a region, so reaching a second region needs an explicit bridge; a GCP VPC is one global object with only its subnets pinned to regions, so cross-region traffic needs no bridge at all — the root cause behind Pitfall 1 below.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph REG["Regional model (AWS / Azure)"]
+        direction LR
+        us1([VPC/VNet<br/>us-region]) -.->|"explicit peering<br/>or Transit Gateway"| eu1([VPC/VNet<br/>eu-region])
+    end
+
+    subgraph GLB["Global model (GCP)"]
+        direction LR
+        us2([Subnet<br/>us-central1]) -->|"same VPC,<br/>Google backbone"| eu2([Subnet<br/>europe-west1])
+    end
+
+    class us1,eu1 frozen
+    class us2,eu2 train
+```
+
 ---
 
 ## 5. Architecture Diagrams
 
+**Same 3-tier app, three clouds (conceptually identical).** The stack is DNS to load balancer to managed Kubernetes to managed database, with object storage reachable over a private path — only the provider names change.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph AWS["AWS"]
+        direction LR
+        a1([Route 53]) --> a2(ALB) --> a3(EKS<br/>private subnets) --> a4([Aurora<br/>Multi-AZ])
+        a3 -.->|"Gateway Endpoint"| a5([S3])
+    end
+
+    subgraph GCP["GCP"]
+        direction LR
+        g1([Cloud DNS]) --> g2(Global HTTPS LB) --> g3(GKE) --> g4([Cloud SQL<br/>HA])
+        g3 -.->|"Private Google Access"| g5([GCS])
+    end
+
+    subgraph Azure["Azure"]
+        direction LR
+        z1([Azure DNS]) --> z2(App Gateway) --> z3(AKS) --> z4([Azure SQL<br/>zone-redundant])
+        z3 -.->|"Private Endpoint"| z5([Blob])
+    end
+
+    class a1,g1,z1 io
+    class a2,g2,z2 req
+    class a3,g3,z3 mathOp
+    class a4,g4,z4 base
+    class a5,g5,z5 frozen
 ```
-Same 3-tier app, three clouds (conceptually identical)
 
-  AWS:    Route53 -> ALB -> EKS (private subnets) -> Aurora Multi-AZ
-                              \-> S3 (via Gateway Endpoint)
+**Resource hierarchy: GCP vs Azure.** IAM (GCP) and RBAC (Azure) both inherit downward — a role granted on `prod` (or on the Management Group) cascades to every Project/Resource Group beneath it, which is exactly the over-permissioning trap in Pitfall 2 below.
 
-  GCP:    Cloud DNS -> Global HTTPS LB -> GKE -> Cloud SQL (HA)
-                              \-> GCS (via Private Google Access)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Azure:  Azure DNS -> App Gateway -> AKS -> Azure SQL (zone-redundant)
-                              \-> Blob (via Private Endpoint)
+    subgraph GCPH["GCP (IAM inherits down)"]
+        direction TB
+        org(["Organization<br/>example.com"]) --> prod(Folder: prod)
+        org --> nonprod(Folder: nonprod)
+        prod --> op(Project:<br/>orders-prod)
+        prod --> pp(Project:<br/>payments-prod)
+        nonprod --> os(Project:<br/>orders-staging)
+    end
 
-GCP resource hierarchy (IAM inherits down)
-  Organization (example.com)
-    +-- Folder: prod
-    |     +-- Project: orders-prod   <- IAM role here applies to all resources in it
-    |     +-- Project: payments-prod
-    +-- Folder: nonprod
-          +-- Project: orders-staging
+    subgraph AZH["Azure (RBAC any scope)"]
+        direction TB
+        mg(["Management Group<br/>root"]) --> sub1(Subscription:<br/>Production)
+        mg --> sub2(Subscription:<br/>NonProd)
+        sub1 --> rg(Resource Group:<br/>orders-rg)
+    end
 
-Azure resource hierarchy (RBAC assignable at any scope)
-  Management Group (root)
-    +-- Subscription: Production
-    |     +-- Resource Group: orders-rg   <- RBAC role here applies to all resources
-    +-- Subscription: NonProd
+    class org,mg base
+    class prod,nonprod,sub1,sub2 mathOp
+    class op,pp,os,rg train
 ```
 
 ---
@@ -236,6 +305,39 @@ az role assignment create \
 **Use GCP when:** you're data/analytics-heavy (BigQuery is best-in-class), want a global VPC and global load balancer, or want the most mature managed Kubernetes (GKE Autopilot). **Use Azure when:** you have heavy Microsoft/Active Directory investment, need tight Office 365/Entra ID integration, operate in regulated/government markets, or want strong hybrid via Azure Arc. **Use AWS when:** you want the broadest service catalog and deepest ecosystem (the default).
 
 **Reconsider multi-cloud when:** the operational complexity (duplicate IAM, networking, tooling, egress costs) outweighs the resilience/negotiation benefits — most organizations are better served being excellent on one cloud than mediocre on three. Avoid copy-pasting an identity or networking design across clouds; their semantics differ enough to cause subtle security gaps.
+
+**Turning the two paragraphs above into a decision procedure:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start([New workload]) --> q1{"Data/analytics-heavy,<br/>or need global VPC /<br/>mature K8s?"}
+    q1 -->|yes| gcp([Choose GCP])
+    q1 -->|no| q2{"Heavy Microsoft/AD,<br/>hybrid, or regulated<br/>market?"}
+    q2 -->|yes| azure([Choose Azure])
+    q2 -->|no| aws(["Choose AWS<br/>(default)"])
+
+    gcp --> q3{"Also need a<br/>second cloud?"}
+    azure --> q3
+    aws --> q3
+    q3 -->|no| single([Stay single-cloud])
+    q3 -->|yes| q4{"Resilience/negotiation<br/>benefit outweighs the<br/>dup. IAM + networking cost?"}
+    q4 -->|no| single
+    q4 -->|yes| multi([Multi-cloud:<br/>portable layers only])
+
+    class start io
+    class q1,q2,q3,q4 mathOp
+    class gcp,azure,aws train
+    class single base
+    class multi frozen
+```
 
 ---
 

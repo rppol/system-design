@@ -56,6 +56,26 @@ Kubernetes storage separates *requesting* storage from *providing* it:
 | ConfigMap/Secret volume | Pod lifetime | Config/cert injection (auto-updates) |
 | EFS/NFS (RWX) | Independent | Shared read-write across many Pods |
 
+The six types trade off two independent axes — how long the data survives, and how many Pods can share it at once:
+
+```mermaid
+quadrantChart
+    title Choosing a volume type by persistence and sharing scope
+    x-axis Low Persistence --> High Persistence
+    y-axis Single Pod or Node --> Shared Across Many
+    quadrant-1 Shared durable storage
+    quadrant-2 Ephemeral shared scratch
+    quadrant-3 Ephemeral local scratch
+    quadrant-4 Single-writer durable storage
+    "emptyDir (disk or RAM)": [0.08, 0.15]
+    "hostPath": [0.42, 0.08]
+    "PVC-backed (EBS/PD)": [0.85, 0.18]
+    "ConfigMap/Secret": [0.55, 0.78]
+    "EFS/NFS (RWX)": [0.85, 0.85]
+```
+
+`emptyDir` and `hostPath` sit low on persistence — the first dies with the Pod, the second with the node; PVC-backed volumes buy durability but stay single-writer (RWO); only EFS/NFS reaches the top-right quadrant of durable *and* shared.
+
 ### Access modes
 
 | Mode | Meaning | Backed by |
@@ -76,28 +96,55 @@ Kubernetes storage separates *requesting* storage from *providing* it:
 
 ## 5. Architecture Diagrams
 
+**Dynamic provisioning flow**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pod([Pod]) --> pvc["PVC data<br/>100Gi · RWO<br/>storageClassName: gp3"]
+    pvc --> sc["StorageClass gp3<br/>provisioner: ebs.csi.aws.com<br/>reclaimPolicy: Delete"]
+    sc -->|"triggers CSI<br/>provision"| csi["EBS CSI driver<br/>creates 100Gi gp3 volume<br/>in Pod's AZ"]
+    csi --> pv["PV<br/>bound to PVC"]
+    pv -->|"attach / mount"| node([Node where<br/>Pod is scheduled])
+
+    class pod io
+    class pvc req
+    class sc,pv base
+    class csi mathOp
+    class node train
 ```
-Dynamic provisioning flow
 
-  Pod -> PVC "data" (100Gi, RWO, storageClassName: gp3)
-              |
-              v
-        StorageClass gp3 (provisioner: ebs.csi.aws.com, reclaimPolicy: Delete)
-              |  triggers CSI provision
-              v
-        EBS CSI driver creates a 100Gi gp3 EBS volume in the Pod's AZ
-              |
-              v
-        PV (bound to the PVC)  ---attach/mount--> node where Pod is scheduled
+A Pod's PVC references a StorageClass, which triggers the CSI driver to provision the real volume in the Pod's AZ; the resulting PV then attaches and mounts to the node the Pod was scheduled on.
 
-StatefulSet storage follows the Pod
+**StatefulSet storage follows the Pod**
 
-  db-0 on node-A (AZ us-east-1a)   PVC data-db-0 -> EBS vol-1 (us-east-1a)
-        | node-A dies
-        v
-  db-0 reschedules to node-B (MUST also be in us-east-1a, because EBS is zonal)
-        EBS vol-1 detaches from A, attaches to B -> data intact
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["db-0 on node-A<br/>(us-east-1a)<br/>PVC bound to EBS vol-1"]) -->|"node-A dies"| resched["db-0 reschedules<br/>to node-B<br/>(must be us-east-1a)"]
+    resched --> reattach["EBS vol-1 detaches<br/>from A, attaches to B"]
+    reattach --> done(["Data intact"])
+
+    class start,done train
+    class resched mathOp
+    class reattach base
 ```
+
+Because EBS volumes are zone-locked, `db-0` can only reschedule to another node still inside `us-east-1a` — the PVC↔PV binding is what lets `vol-1` follow it there with no data loss.
 
 ---
 
@@ -158,12 +205,26 @@ volumes: [{name: data, persistentVolumeClaim: {claimName: data}}]
 
 ### Why a Pod can get stuck on a dead node (RWO)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    diesNode["node-A dies<br/>(not gracefully)"] --> stillAttached["EBS volume still shown<br/>attached to A<br/>(cloud API)"]
+    stillAttached --> stuckPod["Pod can't start on node-B<br/>(Multi-Attach error /<br/>attach timeout)"]
+    stuckPod --> resolution["Node confirmed dead,<br/>volume force-detached<br/>(node controller + CSI)"]
+
+    class diesNode,stuckPod lossN
+    class stillAttached frozen
+    class resolution mathOp
 ```
-node-A dies (not gracefully) -> EBS volume still "attached" to A in the cloud API
-   -> Pod can't start on node-B: "Multi-Attach error" / volume attach timeout
-   -> resolution: the node must be confirmed dead and the volume force-detached
-      (node controller + CSI; can take minutes). This is why RWO failover isn't instant.
-```
+
+Resolution can take minutes — the node must be confirmed dead before the volume force-detaches, which is why RWO failover isn't instant.
 
 ---
 
@@ -222,6 +283,36 @@ spec:
 **Pitfall 2 — `Immediate` binding in a multi-AZ cluster.** The PV is provisioned in AZ 1a before scheduling, but the scheduler later places the Pod on a node in 1b; the zonal EBS volume can't attach and the Pod is stuck Pending. FIX: `volumeBindingMode: WaitForFirstConsumer` so provisioning waits for the node choice and lands the volume in the right AZ.
 
 **Pitfall 3 — `reclaimPolicy: Delete` on production data.** Someone deletes a PVC (or a `helm uninstall` does), and the underlying EBS volume — with the only copy of the data — is destroyed. FIX: use `Retain` for stateful production volumes, protect PVCs with finalizers/labels, and keep CSI snapshots/backups.
+
+The three pitfalls above are really one triage flow — durability, then topology, then reclaim safety:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["New stateful<br/>workload"]) --> d1{"Can data be lost<br/>on restart?"}
+    d1 -->|"Yes"| scratch["emptyDir<br/>(scratch only)"]
+    d1 -->|"No"| d2{"Multi-AZ<br/>cluster?"}
+    d2 -->|"Yes"| wffc["WaitForFirstConsumer<br/>binding"]
+    d2 -->|"No"| immediate["Immediate binding<br/>is safe here"]
+    wffc --> d3{"Production<br/>data?"}
+    immediate --> d3
+    d3 -->|"Yes"| retain["reclaimPolicy: Retain<br/>+ CSI snapshots"]
+    d3 -->|"No"| del["reclaimPolicy: Delete<br/>is acceptable"]
+
+    class start io
+    class d1,d2,d3 mathOp
+    class scratch,immediate,del base
+    class wffc,retain train
+```
+
+The two green outcomes — `WaitForFirstConsumer` and `Retain` — are exactly the fixes from Pitfalls 2 and 3; skip either gate and you land back in one of the failures above.
 
 ---
 
@@ -298,12 +389,27 @@ You back up two things: the Kubernetes objects (manifests/etcd) and the PVC data
 
 A self-hosted Postgres StatefulSet (`pg-0..2`) runs across a 3-AZ cluster. A node in `us-east-1a` fails. `pg-0` (which lived there) goes Pending and never recovers; the app loses its primary.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    setup["Cluster: nodes in 1a/1b/1c<br/>pg-0 PVC bound to EBS vol<br/>in us-east-1a (zonal, RWO)"] --> nodeDies["Node in 1a dies"]
+    nodeDies --> reschedAttempt["Scheduler places pg-0<br/>on a node in 1b"]
+    reschedAttempt --> cantAttach["EBS vol (1a) can't<br/>attach to a 1b node"]
+    cantAttach --> stuckPending["pg-0 stuck Pending<br/>(volume node affinity<br/>conflict)"]
+
+    class setup base
+    class nodeDies,cantAttach,stuckPending lossN
+    class reschedAttempt mathOp
 ```
-Cluster: nodes in 1a, 1b, 1c.  pg-0 PVC -> EBS vol in us-east-1a (zonal, RWO).
-  node in 1a dies.
-  scheduler tries to place pg-0 on a node in 1b -> EBS vol (1a) can't attach to a 1b node
-     -> pg-0 stuck Pending: "node(s) had volume node affinity conflict"
-```
+
+Because the EBS volume is zone-locked, the scheduler's cross-AZ placement is exactly what strands `pg-0` — the fix below makes scheduling and storage topology-aware together.
 
 ```yaml
 # BROKEN: no AZ spread, Immediate binding, and reliance on volume re-attach for HA.

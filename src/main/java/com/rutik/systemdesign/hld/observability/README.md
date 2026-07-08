@@ -80,16 +80,26 @@ Every log line is a structured object (JSON), not free text — `{"timestamp": .
 
 ### 4.5 SLI / SLO / SLA / Error Budget
 
-```
-SLI (measurement)  -->  SLO (internal target)  -->  SLA (external promise, with penalty)
+Each term nests inside the next, strictest to loosest, and the gap between 100% and the SLO is the error budget:
 
-SLI: "% of /checkout requests completing in < 500ms, over a rolling 28-day window"
-SLO: 99.9%   (internal target — engineering works to this)
-SLA: 99.5%   (external contract — what you promise customers, with credits/penalties
-              if missed; always looser than the SLO, giving a safety margin)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Error budget = 100% - SLO = 0.1% over 28 days
-             = 0.1% of (28 * 24 * 60) minutes = ~40 minutes of "badness" allowed
+    SLI("SLI: measurement<br/>percent of /checkout under 500ms") --> SLO("SLO: internal target<br/>99.9% over 28 days")
+    SLO --> SLA("SLA: external promise<br/>99.5%, with penalty")
+    SLO -.-> BUDGET("Error budget<br/>100% minus SLO = 0.1%<br/>about 40 min per 28 days")
+
+    class SLI req
+    class SLO mathOp
+    class SLA frozen
+    class BUDGET lossN
 ```
 
 If the error budget is exhausted (more than 40 minutes of >500ms responses in the trailing 28 days), the team **stops shipping risky changes** and focuses on reliability until the budget recovers — a mechanism popularized by Google's SRE practice for balancing feature velocity against reliability.
@@ -100,92 +110,95 @@ If the error budget is exhausted (more than 40 minutes of >500ms responses in th
 
 ### 5.1 The Three Pillars and How They Connect
 
-```
-                         +-------------------+
-                         |   Alert fires:     |
-                         |  checkout error    |
-                         |  rate = 8%         |
-                         +---------+----------+
-                                    |
-                    METRIC (system-wide "what")
-                                    |
-                                    v
-              +---------------------------------------+
-              |  Find a sample of failing trace IDs    |
-              |  (exemplars: metrics link directly      |
-              |  to example traces)                     |
-              +---------------------+-------------------+
-                                    |
-                     TRACE (request-specific "where")
-                                    |
-                                    v
-        +----------------------------------------------------+
-        | API GW (5ms) -> Order (12ms) -> Inventory (4800ms!) |
-        |                                    ^^^^^^^^^^^^^^^^  |
-        |                              <-- the slow span      |
-        +----------------------------------+-----------------+
-                                            |
-                          LOG (operation-specific "why")
-                                            |
-                                            v
-              +-----------------------------------------------+
-              | trace_id=abc123 inventory-service ERROR        |
-              | "connection pool exhausted: 50/50 in use,      |
-              |  waited 4800ms"                                |
-              +-----------------------------------------------+
+One incident, three signals, three levels of zoom — the metric says something's wrong, the trace says where, the log says why:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Alert fires<br/>checkout error rate = 8%"]) -->|"METRIC: system-wide what"| B("Find failing trace IDs<br/>via exemplars")
+    B -->|"TRACE: request-specific where"| C("API GW 5ms to Order 12ms<br/>to Inventory 4800ms - slow span")
+    C -->|"LOG: operation-specific why"| D(["trace_id=abc123 ERROR<br/>connection pool exhausted<br/>50/50 in use, waited 4800ms"])
+
+    class A io
+    class B mathOp
+    class C lossN
+    class D base
 ```
 
 ### 5.2 Distributed Tracing Across a Microservices Request
 
-```
-  Client
-    |
-    | traceparent: 00-<trace_id>-<span_id_gw>-01
-    v
-  +------------+  span: gw (5ms)
-  | API Gateway|--------------------------------------------+
-  +------------+                                            |
-    |                                                        |
-    | traceparent: 00-<trace_id>-<span_id_order>-01         |
-    v                                                        |
-  +------------+  span: order-service (12ms)                |
-  | Order Svc  |---------------------+                       |
-  +------------+                     |                       |
-    |                                | traceparent: ...      |
-    | traceparent: ...               v                       |
-    v                          +------------+                |
-  +------------+               | Payment Svc|  span (40ms)   |
-  | Inventory  |  span (4800ms)+------------+                |
-  | Service    |  <-- BOTTLENECK                              |
-  +------------+                                              |
-                                                               v
-   All spans share the SAME trace_id. A tracing backend
-   (Jaeger/Tempo) assembles them into one waterfall view:
+Trace context propagates as a `traceparent` header on every hop, so every span down the call chain carries the same trace_id back to a shared tracing backend:
 
-   gw            [==] 5ms
-   order-service   [=] 12ms
-   inventory-svc     [================================] 4800ms  <-- here
-   payment-svc                                        [=] 40ms
+```mermaid
+sequenceDiagram
+    participant Client
+    participant GW as API Gateway
+    participant Order as Order Svc
+    participant Inv as Inventory Svc
+    participant Pay as Payment Svc
+
+    Client->>GW: traceparent 00-trace_id-span_gw-01
+    GW->>Order: traceparent 00-trace_id-span_order-01
+    Order->>Inv: traceparent ... (span 4800ms)
+    Order->>Pay: traceparent ... (span 40ms)
+    Inv-->>Order: response (BOTTLENECK)
+    Pay-->>Order: response
+    Order-->>GW: response
+    GW-->>Client: response
+    Note over Client,Pay: All spans share the same trace_id -<br/>a tracing backend (Jaeger/Tempo) assembles<br/>them into one waterfall view.
+```
+
+The waterfall that backend assembles makes the bottleneck impossible to miss — `inventory-svc` alone accounts for 4800 of the ~4857ms total:
+
+```mermaid
+xychart-beta
+    title "Span Duration by Service (ms), trace_id=abc123"
+    x-axis ["gw", "order-service", "inventory-svc", "payment-svc"]
+    y-axis "Duration (ms)" 0 --> 5000
+    bar [5, 12, 4800, 40]
 ```
 
 ### 5.3 Tail-Based Sampling Pipeline
 
+The collector buffers every span until a trace completes, so the keep/drop decision can use the outcome instead of a coin flip at the start:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Service A<br/>span"]) --> COL("OTel Collector<br/>buffers all spans<br/>per trace_id")
+    B(["Service B<br/>span"]) --> COL
+    C(["Service C<br/>span"]) --> COL
+    COL --> DEC{"Tail sampling<br/>decision"}
+    DEC -->|"any span errored"| KEEP1("KEEP 100%")
+    DEC -->|"duration over 1000ms"| KEEP2("KEEP 100%")
+    DEC -->|"otherwise"| RAND("KEEP 1%<br/>random")
+    KEEP1 --> BACK(["Tracing backend<br/>Jaeger / Tempo / Datadog"])
+    KEEP2 --> BACK
+    RAND --> BACK
+
+    class A,B,C req
+    class COL mathOp
+    class DEC mathOp
+    class KEEP1,KEEP2 train
+    class RAND lossN
+    class BACK base
 ```
-  Service A --span--\
-  Service B --span---+--> OTel Collector (buffers all spans for trace_id,
-  Service C --span--/      up to N seconds)
-                                |
-                                v
-                     Tail sampling decision:
-                       - any span has error=true?       -> KEEP (100%)
-                       - total trace duration > 1000ms? -> KEEP (100%)
-                       - otherwise                      -> KEEP 1% (random)
-                                |
-                                v
-                   Tracing backend (Jaeger / Tempo / Datadog)
-                   stores ~2-5% of total trace volume, but
-                   ~100% of errors and slow requests.
-```
+
+The result: trace storage holds only ~2-5% of total volume, but keeps ~100% of the errors and slow requests that actually matter during an incident.
 
 ---
 
@@ -252,6 +265,35 @@ long window (1h) to exceed the burn-rate threshold, to avoid paging on
 a single brief blip that self-resolves.
 ```
 
+The two-window rule is the part worth drawing: both the short and long window must independently confirm the breach before either alert fires, which is what keeps a single brief blip from paging anyone.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    RATE(["Observed error rate"]) --> CALC{"Burn rate =<br/>error rate / (1 - SLO)"}
+    CALC -->|"about 100x<br/>10% for 1h"| FAST{"5m AND 1h windows<br/>both breach?"}
+    CALC -->|"about 2x<br/>0.2% for 6h"| SLOW{"1h AND 6h windows<br/>both breach?"}
+    FAST -->|"yes"| PAGE(["PAGE immediately<br/>budget gone in about 24 min"])
+    FAST -->|"no"| QUIET1(["No alert<br/>blip self-resolves"])
+    SLOW -->|"yes"| TICKET(["Ticket, business hours<br/>budget gone in about 14 days"])
+    SLOW -->|"no"| QUIET2(["No alert"])
+
+    class RATE req
+    class CALC mathOp
+    class FAST mathOp
+    class SLOW mathOp
+    class PAGE lossN
+    class TICKET frozen
+    class QUIET1,QUIET2 train
+```
+
 ### 6.4 Trace Context Propagation — W3C `traceparent` Header
 
 ```
@@ -295,6 +337,32 @@ Metric: http_requests_total{service, endpoint, status, user_id}
   Rule of thumb: metric labels should have a cardinality of 1-100,
   bounded and known in advance. User IDs, request IDs, email addresses,
   and raw error messages NEVER belong in a metric label.
+```
+
+That rule of thumb is really a routing decision — where a new attribute belongs depends only on how many unique values it can take:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    NEW(["New attribute<br/>e.g. user_id"]) --> EST{"Estimated unique<br/>values?"}
+    EST -->|"bounded, 1 to 100<br/>e.g. status, region"| LABEL("Metric label<br/>safe: small, fixed series count")
+    EST -->|"unbounded, millions<br/>e.g. user_id, request_id"| ALT{"Needed per-request<br/>or for search?"}
+    ALT -->|"per-request context"| TRACE("Trace span attribute<br/>stored per-request, not aggregated")
+    ALT -->|"forensic search"| LOG("Structured log field<br/>queryable, not aggregated")
+
+    class NEW req
+    class EST mathOp
+    class ALT mathOp
+    class LABEL train
+    class TRACE base
+    class LOG base
 ```
 
 ---
@@ -474,35 +542,49 @@ An e-commerce platform's checkout flow spans 6 services (`api-gateway`, `cart-se
 
 ### Target Architecture
 
-```
-                         Client (web/mobile)
-                                |
-                                v
-                   +-------------------------+
-                   |  api-gateway             |  generates trace_id if absent
-                   |  RED metrics + traceparent|  injects traceparent downstream
-                   +------------+-------------+
-                                |
-        +------------+----------+----------+------------+
-        v            v                     v            v
-  +-----------+ +-----------+       +-----------+ +-----------+
-  | cart-svc  | | pricing-svc|       | inventory | | payment   |
-  | RED+USE   | | RED+USE    |       | RED+USE   | | RED+USE   |
-  +-----------+ +-----------+       +-----------+ +-----------+
-        |             |                    |            |
-        +------+------+--------+-----------+------------+
-               |               |
-               v               v
-        +-------------+  +-------------+
-        | order-svc   |  | OTel         |  All services export:
-        | RED+USE     |  | Collector    |   - metrics -> Prometheus
-        +-------------+  | (per region) |   - traces  -> Tempo (tail-sampled)
-                          +------+-------+   - logs    -> Loki (with trace_id)
-                                 |
-                                 v
-                    Grafana: unified dashboard
-                    (metric panel -> exemplar -> trace
-                     -> linked logs, all by trace_id)
+Checkout traffic fans out from the gateway to four services, which continue the business flow into `order-svc` (solid) while every service also exports telemetry (dotted) to a per-region collector feeding the three observability backends:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CLIENT(["Client<br/>web / mobile"]) --> GW("api-gateway<br/>RED + generates traceparent")
+
+    subgraph SVC ["Checkout services (RED + USE)"]
+        direction TB
+        CART("cart-svc")
+        PRICING("pricing-svc")
+        INV("inventory-svc")
+        PAY("payment-svc")
+    end
+
+    subgraph BACKENDS ["Telemetry backends"]
+        direction TB
+        PROM("Prometheus<br/>metrics")
+        TEMPO("Tempo<br/>traces, tail-sampled")
+        LOKI("Loki<br/>logs, with trace_id")
+    end
+
+    GW --> CART & PRICING & INV & PAY
+    CART & PRICING & INV & PAY --> ORDER("order-svc<br/>RED + USE")
+    CART & PRICING & INV & PAY -.-> COLLECTOR("OTel Collector<br/>per region")
+    ORDER -.-> COLLECTOR
+    COLLECTOR --> PROM & TEMPO & LOKI
+    PROM & TEMPO & LOKI --> GRAFANA(["Grafana<br/>unified dashboard<br/>metric to exemplar to trace to logs"])
+
+    class CLIENT io
+    class GW req
+    class CART,PRICING,INV,PAY req
+    class ORDER train
+    class COLLECTOR mathOp
+    class PROM,TEMPO,LOKI base
+    class GRAFANA io
 ```
 
 ### Key Design Decisions

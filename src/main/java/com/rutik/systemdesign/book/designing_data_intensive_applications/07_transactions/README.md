@@ -148,20 +148,28 @@ check "are there ≥2 on call? yes" and both remove themselves — leaving zero 
 invariant. Neither did a lost update (they wrote different rows); snapshot isolation permits this
 because each read a consistent snapshot showing two doctors.
 
-```
-WRITE SKEW: two transactions, disjoint writes, shared read ⇒ broken invariant
+```mermaid
+sequenceDiagram
+    participant DB as on_call_count
+    participant A as T_Alice
+    participant B as T_Bob
 
-  invariant: on_call_count >= 1
-  initial: Alice=on_call, Bob=on_call  (count = 2)
-
-  T_Alice                         T_Bob
-  ───────                         ─────
-  read count = 2 (ok, >=1)        read count = 2 (ok, >=1)
-  set Alice = off_call            set Bob = off_call
-  commit ✓                        commit ✓
-                                  ⇒ count = 0   ✗ INVARIANT VIOLATED
-  Neither saw the other's write (different rows). Snapshot isolation does NOT prevent this.
+    Note over DB: invariant: count ≥ 1 (initially 2 — Alice and Bob both on call)
+    par T_Alice
+        A->>DB: read count
+        DB-->>A: 2 (ok, ≥ 1)
+        A->>DB: set Alice = off_call
+        A->>DB: commit
+    and T_Bob
+        B->>DB: read count
+        DB-->>B: 2 (ok, ≥ 1)
+        B->>DB: set Bob = off_call
+        B->>DB: commit
+    end
+    Note over DB: count = 0 ✗ INVARIANT VIOLATED
 ```
+
+Caption: neither transaction saw the other's write — both read the same consistent snapshot showing 2 doctors on call — so snapshot isolation permits this write skew even though each transaction individually preserved the invariant.
 
 A **phantom** is the underlying cause: a write in one transaction changes the *result of a search
 query* in another (a row appears or disappears). Write skew often follows the pattern: SELECT to
@@ -170,6 +178,27 @@ because of a phantom. Locking existing rows (`FOR UPDATE`) doesn't help when the
 that don't exist *yet* (you can't lock a row that isn't there). Mitigations: **materializing
 conflicts** (artificially create lockable rows for, e.g., every time slot/seat so there's something
 to lock — ugly, last resort) or, properly, **serializable isolation**.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{"Two concurrent txns touch<br/>overlapping data - what<br/>caused the conflict?"} -->|"same row,<br/>read-modify-write"| LU(["Lost update<br/>2nd write clobbers 1st"])
+    Q1 -->|"different rows,<br/>shared read premise"| Q2{"Was the read over fixed<br/>existing rows, or a<br/>search query result set?"}
+    Q2 -->|"fixed rows<br/>(e.g. on-call flags)"| WS(["Write skew<br/>premise goes stale"])
+    Q2 -->|"search / count<br/>query result set"| PH(["Phantom<br/>write changes the<br/>search result"])
+
+    class Q1,Q2 mathOp
+    class LU,WS,PH lossN
+```
+
+Caption: lost update, write skew, and phantom are the three anomalies snapshot isolation permits, and interviewers love to blur them together — the tell is whether the write lands on the *same* row (lost update), a *different pre-existing* row read under a shared premise (write skew, e.g. the on-call doctors), or a row that didn't exist yet when the read's search query ran (phantom).
 
 ## 7.3 Serializability
 
@@ -216,29 +245,40 @@ needs transactions to be short (long transactions are more likely to hit a confl
 
 ## Visual Intuition
 
-```
-THE ISOLATION LADDER — each rung prevents one more anomaly (and costs more)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  READ COMMITTED ──▶ SNAPSHOT ISOLATION ──▶ SERIALIZABLE
-  prevents:            prevents also:          prevents also:
-   • dirty reads        • read skew             • write skew
-   • dirty writes         (non-repeatable read)  • phantoms
-  ALLOWS:              ALLOWS:                  ALLOWS: nothing — equals
-   • read skew          • write skew, lost        SOME serial order
-   • lost update          update, phantoms
-  cheap ◀──────────────────────────────────────────────▶ expensive
+    RC(["Read Committed<br/>blocks: dirty read/write<br/>allows: read skew, lost update"]) -->|"stronger<br/>pricier"| SI(["Snapshot Isolation<br/>blocks also: read skew<br/>allows: write skew,<br/>lost update, phantoms"]) -->|"stronger<br/>pricier"| SER(["Serializable<br/>blocks also: write skew, phantoms<br/>allows: nothing"])
+
+    class RC lossN
+    class SI mathOp
+    class SER train
 ```
 
-```
-MVCC: READERS NEVER BLOCK WRITERS (snapshot isolation's engine)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  object X versions (tagged by txn id that created them):
-     v1 (txn 10, committed)   v2 (txn 25, committed)   v3 (txn 31, IN PROGRESS)
-  ────────────────────────────────────────────────────────────────────────
-  txn 28 (started after 25, before 31 committed) reads X:
-     sees v2  (latest version committed BEFORE txn 28 began; ignores v3)
-  ⇒ a long analytic txn 28 reads a frozen, self-consistent snapshot while
-    writers keep creating new versions — no locks, no blocking
+    V1["v1<br/>txn 10 · committed"] --> V2["v2<br/>txn 25 · committed"] --> V3["v3<br/>txn 31 · in progress"]
+    T28(["txn 28 reads X<br/>started after 25,<br/>before 31 committed"]) -->|"sees (committed<br/>before it began)"| V2
+    T28 -.->|"ignores"| V3
+
+    class T28 req
+    class V1,V2 train
+    class V3 lossN
 ```
 
 Caption: pick the lowest rung that prevents the anomalies your app can't tolerate; MVCC is how
@@ -299,6 +339,22 @@ rung with zero anomalies.
 | Actual serial execution | Single thread | Simple, no locking overhead | Needs in-RAM data, short txns, ~1 core write tput |
 | Two-phase locking (2PL) | Pessimistic locking | Battle-tested | Low concurrency, deadlocks, slow tail |
 | Serializable snapshot isolation (SSI) | Optimistic | No read locks, scales reads | Aborts under high contention; short txns only |
+
+```mermaid
+quadrantChart
+    title Serializability techniques by concurrency and predictability
+    x-axis Low Concurrency --> High Concurrency
+    y-axis Low Predictability --> High Predictability
+    quadrant-1 Best of both
+    quadrant-2 Safe but serial
+    quadrant-3 Worst of both
+    quadrant-4 Fast but fragile
+    Actual serial execution: [0.15, 0.82]
+    Two-phase locking: [0.28, 0.22]
+    Serializable snapshot isolation: [0.78, 0.52]
+```
+
+Caption: no technique wins on both axes — actual serial execution and SSI each trade away one axis to win the other, while 2PL's mandatory reader/writer blocking leaves it worst on both, consistent with the deadlock-and-poor-concurrency weakness in the row above.
 
 ---
 

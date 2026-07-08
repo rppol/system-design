@@ -20,24 +20,34 @@ A production database migration is like changing an airplane engine mid-flight. 
 
 The canonical zero-downtime migration pattern:
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Phase 1 — Expand" as Expand
+    state "Phase 2 — Migrate Data" as Migrate
+    state "Phase 3 — Contract" as Contract
+    state "Phase 4 — Clean Up" as CleanUp
+
+    [*] --> Expand
+    Expand --> Migrate: additive change deployed<br/>old + new code both work
+    Migrate --> Contract: backfill done<br/>app reads/writes both columns
+    Contract --> CleanUp: old code refs removed<br/>no old code left deployed
+    CleanUp --> [*]: old columns/tables dropped
+
+    class Expand train
+    class Migrate mathOp
+    class Contract lossN
+    class CleanUp frozen
 ```
-Phase 1 — Expand (additive-only changes):
-  - Deploy schema change that is backward-compatible
-  - Old code + new schema: works
-  - New code + new schema: works
 
-Phase 2 — Migrate data (if needed):
-  - Backfill new columns with data
-  - Application reads both old and new columns
-
-Phase 3 — Contract:
-  - Remove old code that uses old schema elements
-  - Wait until no old code is deployed
-
-Phase 4 — Clean up:
-  - Drop old columns/tables/indexes
-  - Only after verifying no code references them
-```
+Each phase is a one-way gate: expand adds the new schema element so both code versions work simultaneously, migrate backfills and dual-writes, contract retires the old code paths (the riskiest step — see Pitfall 1), and only clean-up physically drops the old columns.
 
 ### Migration Tools
 
@@ -59,6 +69,36 @@ Phase 4 — Clean up:
 ## 4. Types / Architectures / Strategies
 
 ### Zero-Downtime DDL by Operation Type
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Op{"DDL operation<br/>type?"} -->|"add column"| AddCol["nullable add,<br/>batched backfill"]
+    Op -->|"drop column"| DropCol["remove code refs,<br/>drop later"]
+    Op -->|"add index"| AddIdx["CREATE INDEX<br/>CONCURRENTLY"]
+    Op -->|"rename column"| Rename["dual-write via<br/>trigger, drop old"]
+    Op -->|"change type"| AlterType["gh-ost / pt-osc<br/>shadow table"]
+
+    AddCol --> Safe(["zero downtime"])
+    DropCol --> Safe
+    AddIdx --> Safe
+    Rename --> Safe
+    AlterType --> Safe
+
+    class Op mathOp
+    class AddCol,DropCol,AddIdx,Rename train
+    class AlterType lossN
+    class Safe io
+```
+
+The safe technique depends entirely on the operation type: additive changes (add column, add index) are nearly free, while renames and type changes need dual-write or a shadow-table tool to avoid a blocking table rewrite.
 
 **ADD COLUMN — with DEFAULT**:
 ```sql
@@ -144,6 +184,29 @@ gh-ost \
 -- 5. When caught up: RENAME TABLE orders → _orders_del, _orders_gho → orders (atomic, ms)
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Orig(["orders table<br/>live writes"]) -->|"binlog stream"| Listener{"gh-ost binlog<br/>listener"}
+    Orig -->|"chunked copy,<br/>low priority"| Ghost(["_orders_gho<br/>shadow table"])
+    Listener -->|"replay inserts,<br/>updates, deletes"| Ghost
+    Ghost -->|"caught up,<br/>lag under 1s"| Rename{"atomic rename,<br/>ms metadata lock"}
+    Rename --> NewOrig(["orders<br/>new schema, live"])
+
+    class Orig,NewOrig base
+    class Listener,Rename mathOp
+    class Ghost train
+```
+
+The shadow table is built from a chunked copy plus a live binlog replay so it never falls far behind; the final `RENAME TABLE` swap is the only moment that touches the real table name, and it completes in milliseconds.
+
 ### Schema Registry for Event-Driven Systems
 
 When using Kafka/schema-based messaging, the message schema is separate from the database schema. Confluent Schema Registry enforces Avro/Protobuf/JSON schema compatibility.
@@ -166,45 +229,36 @@ FULL:      Both backward and forward compatible
 
 ## 5. Architecture Diagrams
 
-```
-EXPAND-CONTRACT MIGRATION TIMELINE:
-
-Time→   T1          T2          T3          T4
-Code:   v1.0        v1.1        v2.0        v2.0
-Schema: s1.0        s1.1        s1.1        s2.0
-
-s1.0: original schema (column "name")
-s1.1: expanded schema (columns "name" AND "full_name", both nullable)
-Code v1.1: writes BOTH "name" AND "full_name"
-s2.0: contracted schema (only "full_name", "name" dropped)
-Code v2.0: reads/writes only "full_name"
-
-During T2 rolling deploy: some pods run v1.0, some run v1.1
-- v1.0 writes "name" → v1.1 trigger copies to full_name ✓
-- v1.1 writes "name" + "full_name" ✓
-- Both work against schema s1.1
-
-During T3: all pods run v2.0, both columns exist
-- v2.0 only uses full_name, "name" exists but ignored ✓
-
-At T4: safe to drop "name" column
+```mermaid
+timeline
+    title Expand-Contract Migration Timeline
+    T1 : Code v1.0 : Schema s1.0, only the name column
+    T2 : Code v1.0 + v1.1 mixed (rolling deploy) : Schema s1.1, name AND full_name added (both nullable) : v1.0 writes name, trigger syncs full_name
+    T3 : Code v2.0 fully deployed : Schema s1.1, full_name used, name ignored
+    T4 : Code v2.0 : Schema s2.0, name column dropped
 ```
 
+At T2, some pods still run v1.0 while others already run v1.1 — both versions work because schema s1.1 carries both columns and the v1.1 trigger keeps `full_name` in sync with every `name` write. Only at T4, once every pod is on v2.0, is it safe to drop `name`.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Blue(["Blue env v1.0<br/>SELECT name"]) -->|"10% to 100%<br/>traffic cutover"| DB(["shared DB<br/>both columns live"])
+    Green(["Green env v2.0<br/>SELECT full_name"]) --> DB
+
+    class Blue frozen
+    class Green train
+    class DB base
 ```
-BLUE-GREEN DEPLOYMENT SCHEMA COMPATIBILITY:
 
-Blue env (v1.0) ──┐
-                  ├── DB (must satisfy both schemas simultaneously)
-Green env (v2.0) ─┘
-
-Blue (v1.0) uses: SELECT name FROM users
-Green (v2.0) uses: SELECT full_name FROM users
-
-During traffic cut (blue → green):
-- 10% traffic → green: DB has both "name" and "full_name"
-- 50% traffic → green: same
-- 100% traffic → green: can now drop "name"
-```
+During the cutover the database must satisfy both queries at once: at 10% and 50% traffic on green, `name` and `full_name` both stay populated; only once green carries 100% of traffic can `name` be dropped.
 
 ---
 

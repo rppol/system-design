@@ -21,6 +21,37 @@ the technique it requires, then proposes a phase-by-phase study order.
    from memory, without looking at your notes — this is the single highest-
    value spaced-repetition habit for pattern recall.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Start"]) --> Time{"Time until<br/>interview?"}
+    Time -->|"2-4 weeks"| B75Path("Work B75 rows only<br/>phase order")
+    Time -->|"8-12 weeks"| FullPath("Work B75 + NC150<br/>phase order")
+    B75Path --> ReadMd("Read pattern .md<br/>Recognition · Mental Model<br/>· Template")
+    FullPath --> ReadMd
+    ReadMd --> Drill("Drill problems<br/>easiest to hardest")
+    Drill --> FinishPhase("Finish phase")
+    FinishPhase -.->|"next phase"| ReadMd
+    FinishPhase -.->|"spaced repetition"| Recall("Re-attempt 1 old<br/>problem from memory")
+
+    class Start io
+    class Time mathOp
+    class B75Path,FullPath,Drill,FinishPhase train
+    class ReadMd base
+    class Recall frozen
+```
+
+*Steps 1-2 fork once on the time available before the interview; steps 3-4
+repeat every phase — read the pattern file before drilling its problems,
+then re-attempt one earlier problem from memory as spaced repetition.*
+
 ---
 
 ## 1. Blind 75 vs. NeetCode 150
@@ -68,46 +99,39 @@ Match phase).
 
 ## 3. Suggested Study Order (7 Phases)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P1("Phase 1 · ~1 week<br/>Arrays, Hashing, Two<br/>Pointers & Prefix Sum<br/>hashing_patterns,<br/>two_pointers, prefix_sum")
+    P2("Phase 2 · ~1 week<br/>Sliding Window &<br/>Monotonic Stack<br/>sliding_window,<br/>monotonic_stack")
+    P3("Phase 3 · ~1 week<br/>Binary Search, Linked<br/>Lists & Cyclic Sort<br/>modified_binary_search,<br/>fast_and_slow_pointers,<br/>in_place_linked_list_reversal,<br/>cyclic_sort")
+    P4("Phase 4 · ~1.5 weeks<br/>Trees, Heaps, K-Way<br/>Merge & Tries<br/>tree_bfs, tree_dfs,<br/>top_k_elements, two_heaps,<br/>k_way_merge, trie_patterns")
+    P5("Phase 5 · ~1.5 weeks<br/>Backtracking & Graphs<br/>backtracking, graph_traversal,<br/>topological_sort, union_find,<br/>shortest_path")
+    P6("Phase 6 · ~2 weeks<br/>DP, Greedy & Intervals<br/>dynamic_programming,<br/>greedy, merge_intervals")
+    P7("Phase 7 · ~3-4 days<br/>Bit Manipulation &<br/>Math/Simulation<br/>bit_manipulation,<br/>Appendix — Math & Simulation")
+
+    P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7
+
+    class P1 base
+    class P2,P3 train
+    class P4,P5 mathOp
+    class P6 lossN
+    class P7 frozen
 ```
-Phase 1: Arrays, Hashing, Two Pointers & Prefix Sum   (~1 week)
-  -> hashing_patterns, two_pointers, prefix_sum
-  Why first: every later pattern assumes fluency with hashmaps and
-  two-pointer array scans.
 
-Phase 2: Sliding Window & Monotonic Stack             (~1 week)
-  -> sliding_window, monotonic_stack
-  Why now: both extend the "single array pass" mental model from Phase 1
-  with a window/stack instead of two fixed pointers.
-
-Phase 3: Binary Search, Linked Lists & Cyclic Sort    (~1 week)
-  -> modified_binary_search, fast_and_slow_pointers,
-     in_place_linked_list_reversal, cyclic_sort
-  Why now: binary search (incl. "on the answer") and linked-list pointer
-  manipulation are foundational for later graph/DP follow-ups.
-
-Phase 4: Trees, Heaps, K-Way Merge & Tries            (~1.5 weeks)
-  -> tree_bfs, tree_dfs, top_k_elements, two_heaps, k_way_merge,
-     trie_patterns
-  Why now: trees are the gateway to graphs; heaps and k-way merge recur
-  throughout the "advanced graphs" and DP phases.
-
-Phase 5: Backtracking & Graphs                        (~1.5 weeks)
-  -> backtracking, graph_traversal, topological_sort, union_find,
-     shortest_path
-  Why now: graph algorithms build directly on tree BFS/DFS from Phase 4;
-  backtracking is the recursive foundation for bitmask DP in Phase 6.
-
-Phase 6: Dynamic Programming, Greedy & Intervals      (~2 weeks)
-  -> dynamic_programming, greedy, merge_intervals
-  Why last (and longest): DP is the largest single category in NC150 (23
-  problems across 1-D and 2-D) and benefits from having backtracking
-  (Phase 5) fresh, since many DP problems are "memoized backtracking."
-
-Phase 7: Bit Manipulation & Math/Simulation Wrap-up   (~3-4 days)
-  -> bit_manipulation, Appendix (Math & Simulation)
-  Why last: smallest category, lowest interdependency with other phases —
-  good "palate cleanser" before final mock interviews.
-```
+*Each phase assumes fluency with the previous one's mental model — trees are
+the gateway into graphs (Phase 4 to Phase 5) and backtracking primes bitmask
+DP (Phase 5 to Phase 6). Phase 6 is deliberately the longest since Dynamic
+Programming is NeetCode 150's largest single category (23 problems across
+1-D and 2-D), and Phase 7 is a low-interdependency wrap-up before final mock
+interviews.*
 
 ---
 
@@ -537,6 +561,38 @@ re-solved from memory after >=2 days; (3) can explain the recognition cue
 AND the approach out loud, unaided, in under 60 seconds (the actual bar
 from [interview_execution_playbook.md](interview_execution_playbook.md)
 §1's Match phase).
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Solved with hints" as SolvedHints
+    state "Re-solved from memory" as Resolved
+    state "Can explain unaided" as CanExplain
+
+    [*] --> Unattempted
+    Unattempted --> SolvedHints: attempt 1
+    SolvedHints --> Resolved: attempt 2,<br/>2+ days later
+    Resolved --> CanExplain: teach-back,<br/>under 60s
+    CanExplain --> [*]
+
+    class Unattempted req
+    class SolvedHints mathOp
+    class Resolved frozen
+    class CanExplain train
+```
+
+*A problem matures through the three checkpoints tracked by the checkboxes
+above — solved with hints, re-solved unaided 2+ days later, then taught
+back out loud in under 60 seconds, the actual interview-ready bar from the
+Match phase.*
 
 ---
 

@@ -115,63 +115,73 @@ Fix: parse every third-party response through a strict Pydantic model with `mode
 
 ## 5. Architecture Diagrams
 
+**Request lifecycle with security layers**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client([Client]) -->|"HTTPS<br/>TLS 1.2+"| LB(Load Balancer<br/>/ CDN)
+    LB -->|"strip headers<br/>enforce HTTPS"| SecHead(Security Headers<br/>Middleware)
+    SecHead --> ReqSize(Request Size Limit<br/>1 MB cap)
+    ReqSize --> RateLimit(Rate Limit<br/>IP + account bucket)
+    RateLimit --> CORS(CORS Middleware<br/>allow_origins list)
+    CORS --> JWT(OAuth2 / JWT<br/>verify sig, expiry, issuer)
+
+    subgraph RH["Route Handler"]
+        direction LR
+        Fetch(Fetch resource<br/>from DB) --> Own{"Ownership check<br/>BOLA fix"}
+        Own --> Role{"Role / scope check<br/>BFLA fix"}
+        Role --> Validate(Validate external<br/>API response)
+    end
+
+    JWT --> Fetch
+    Validate --> Resp(Response Schema<br/>exclude_unset)
+    Resp --> ClientOut([Client<br/>JSON / problem+json])
+
+    class Client,ClientOut io
+    class LB frozen
+    class SecHead,ReqSize,RateLimit,CORS req
+    class JWT mathOp
+    class Fetch base
+    class Own,Role lossN
+    class Validate train
+    class Resp train
 ```
-Request lifecycle with security layers
-======================================
+*Every request passes through five middleware layers before reaching the route handler; the ownership and role checks (red) run only inside the handler, after the object is fetched, because middleware has no access to `owner_id`.*
 
-Client
-  |
-  |  HTTPS (TLS 1.2+)
-  v
-[Load Balancer / CDN]
-  |
-  |  Strips internal headers, enforces HTTPS redirect
-  v
-[SecurityHeadersMiddleware]          -- X-Content-Type-Options, X-Frame-Options,
-  |                                     Strict-Transport-Security, CSP, X-XSS-Protection
-  v
-[RequestSizeLimitMiddleware]         -- 1 MB default body cap
-  |
-  v
-[RateLimitMiddleware]                -- IP + account token bucket (slowapi / Redis)
-  |
-  v
-[CORSMiddleware]                     -- explicit allow_origins list
-  |
-  v
-[OAuth2 / JWT dependency]            -- verify signature, expiry, issuer
-  |
-  v
-[Route handler]
-  |
-  |-- fetch resource from DB
-  |-- ownership check (BOLA fix)      <-- MUST happen here, not in middleware
-  |-- role/scope check (BFLA fix)
-  |-- validate external API response  <-- Pydantic, extra="forbid"
-  v
-[ResponseSchema]                     -- exclude_unset, no internal fields
-  |
-  v
-Client (JSON, problem+json on error)
+**SSRF prevention flow**
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-SSRF prevention flow
-====================
+    User([User supplies URL]) --> Parser{URL parser}
+    Parser -->|reject| PrivIP(Private IP range<br/>RFC 1918 + 169.254/16)
+    Parser -->|pass| Allow{Domain allowlist<br/>check}
+    Allow -->|reject| BadDomain(Domain not in<br/>allowlist)
+    Allow -->|pass| HttpxClient(httpx.AsyncClient<br/>timeout=5s, no redirects)
+    HttpxClient --> Model(Pydantic response<br/>model, extra=forbid)
 
-User supplies URL
-  |
-  v
-[URL parser]  --reject--> private IP ranges (RFC 1918 + 169.254.0.0/16)
-  |
-  v
-[Domain allowlist check]  --reject--> domains not in ALLOWED_WEBHOOK_DOMAINS
-  |
-  v
-[httpx.AsyncClient]  timeout=5s, follow_redirects=False
-  |
-  v
-[Pydantic response model]  extra="forbid"
+    class User io
+    class Parser,Allow mathOp
+    class PrivIP,BadDomain lossN
+    class HttpxClient req
+    class Model train
 ```
+*The URL is rejected at the first gate it fails — private IP ranges (including the `169.254.169.254` AWS IMDSv1 target) or a domain outside the allowlist — before `httpx` ever opens a connection.*
 
 ---
 
@@ -464,6 +474,38 @@ async def password_reset(request: Request, body: PasswordResetRequest):
     ...
 ```
 
+**Distributed rate limiting: why in-process counters fail**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Broken["Broken: per-process counters"]
+        direction LR
+        W1(Worker 1<br/>local count = 5)
+        W2(Worker 2<br/>local count = 5)
+        W3(Worker 3<br/>local count = 5)
+    end
+
+    subgraph Fixed["Fixed: shared Redis counter"]
+        direction LR
+        W4(Worker 1) --> Shared((Redis<br/>INCR / EXPIRE))
+        W5(Worker 2) --> Shared
+        W6(Worker 3) --> Shared
+    end
+
+    class W1,W2,W3 lossN
+    class W4,W5,W6 req
+    class Shared base
+```
+*Three workers each capping at `5/minute` in-process still let 15 requests per minute through in total; routing every worker's `INCR`/`EXPIRE` through one Redis instance enforces a single global `5/minute` limit.*
+
 ---
 
 ## 7. Real-World Examples
@@ -534,6 +576,33 @@ async def get_document(doc_id: int, current_user: User, session: AsyncSession):
 ```
 
 The broken pattern allows an attacker to iterate IDs: a `404` means "not mine", a `200` means "mine". They enumerate every resource in the database by observing which IDs return `200`.
+
+**BOLA-safe response decision**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req([Request for<br/>resource by ID]) --> Fetch(Fetch object<br/>from database)
+    Fetch --> Exists{Object exists?}
+    Exists -->|no| R404([404 Not Found])
+    Exists -->|yes| Owns{"owner_id ==<br/>current_user.id?"}
+    Owns -->|no| R403([403 Forbidden])
+    Owns -->|yes| R200([200 OK<br/>return resource])
+
+    class Req io
+    class Fetch base
+    class Exists,Owns mathOp
+    class R404,R403 lossN
+    class R200 train
+```
+*`404` fires only when the object does not exist at all; once it exists, the response is `403` or `200`, never `404` — so an attacker watching status codes cannot tell "not mine" from "does not exist."*
 
 ### Pitfall 2: CORS wildcard in production
 
@@ -703,34 +772,46 @@ A B2B SaaS invoicing service exposes an API consumed by 2,000 business tenants, 
 
 #### Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Internet([Internet]) -->|"TLS offload"| CF(CloudFlare)
+
+    subgraph App["FastAPI Application"]
+        direction LR
+        SecHead(Security Headers<br/>Middleware) --> ReqSize(Request Size Limit<br/>1 MB)
+        ReqSize --> RateLim(Rate Limit<br/>SlowAPI / Redis)
+        RateLim --> CORS(CORS Middleware<br/>explicit list)
+        CORS --> Route(["/v2/invoices/:id<br/>GET/PATCH/DELETE"])
+        Route --> JWT(JWT dependency)
+        JWT --> Handler(Route handler)
+        Handler --> Fetch(Fetch Invoice<br/>from PostgreSQL)
+        Fetch --> BOLA{"BOLA check<br/>owner_id == user.id?"}
+        BOLA --> BFLA{"BFLA check<br/>role in (owner, billing)?"}
+        BFLA --> Resp(Return InvoicePublic<br/>response_model)
+        Resp --> ExcHandler(Global exception<br/>handler)
+    end
+
+    ExcHandler -->|"RFC 7807<br/>problem+json"| ClientOut([Client])
+    Fetch -.-> PG(PostgreSQL<br/>invoices, users)
+    RateLim -.-> Redis(Redis<br/>rate limit counters)
+
+    class Internet,ClientOut io
+    class CF frozen
+    class SecHead,ReqSize,RateLim,CORS,Route req
+    class JWT,Handler mathOp
+    class Fetch,PG,Redis base
+    class BOLA,BFLA,ExcHandler lossN
+    class Resp train
 ```
-                           ┌──────────────────────────────────────────────┐
-                           │           FastAPI Application                │
-                           │                                              │
-Internet → [CloudFlare]    │  [SecurityHeadersMiddleware]                 │
-             TLS offload   │  [RequestSizeLimitMiddleware]  1 MB          │
-                           │  [RateLimitMiddleware]         SlowAPI/Redis │
-                           │  [CORSMiddleware]              explicit list  │
-                           │       │                                      │
-                           │  /v2/invoices/{id}  GET/PATCH/DELETE         │
-                           │       │                                      │
-                           │  [JWT dependency]                            │
-                           │       │                                      │
-                           │  Route handler                               │
-                           │  ├── fetch Invoice from PostgreSQL           │
-                           │  ├── BOLA: invoice.owner_id == user.id?      │
-                           │  ├── BFLA: user.role in ("owner","billing")?  │
-                           │  └── return InvoicePublic (response_model)   │
-                           │                                              │
-                           │  [Global exception handler]                  │
-                           │   → RFC 7807 problem+json, no stack traces   │
-                           └──────────────────────────────────────────────┘
-                                          │
-                             ┌────────────┴────────────┐
-                          PostgreSQL                  Redis
-                       (invoices, users)           (rate limit
-                                                    counters)
-```
+*The BOLA and BFLA checks and the global exception handler (red) are the three controls that keep a tenant-isolation failure from becoming a data breach or a leaked stack trace.*
 
 #### Implementation
 

@@ -68,26 +68,58 @@ Trunk-based + feature flags is the modern DevOps standard because long-lived bra
 
 ## 5. Architecture Diagrams
 
+**The commit DAG (trunk-based):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(A) --> B(B) --> C(C)
+    C -->|"feat/x, short-lived"| D(D)
+    D --> E(E)
+    C --> F((F<br/>merge))
+    E --> F
+    F -.->|tags| TAG([v1.4.0<br/>deploy SHA])
+
+    class A,B,C,F train
+    class D,E req
+    class TAG io
 ```
-The commit DAG (trunk-based)
 
-  main:    A---B---C-----------F (merge)
-                    \         /
-  feat/x:            D---E---/        short-lived, rebased on C, merged back
+- C is the base; D and E build on it.
+- F is the merge (or squash) commit to `main`.
+- Tag `v1.4.0` -> points at F. Deploy artifact built from F's SHA.
 
-  - C is the base; D,E built on it.
-  - F is the merge (or squash) to main.
-  - Tag v1.4.0 -> points at F.  Deploy artifact built from F's SHA.
+**GitOps flow (Git as deployment trigger):**
 
-GitOps flow (Git as deployment trigger)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  developer --PR--> main (manifests repo)
-                       |  webhook / poll
-                       v
-                  ArgoCD/Flux  --reconcile--> Kubernetes cluster
-                       ^                          |
-                       +------ drift detection ---+
+    DEV([developer]) -->|PR| MAIN(main<br/>manifests repo)
+    MAIN -.->|"webhook / poll"| ARGO("ArgoCD / Flux")
+    ARGO -->|reconcile| K8S(Kubernetes<br/>cluster)
+    K8S -.->|"drift detection"| ARGO
+
+    class DEV io
+    class MAIN base
+    class ARGO mathOp
+    class K8S train
 ```
+
+A merge to `main` is the only deploy trigger: ArgoCD/Flux continuously reconciles the cluster to match Git, and drift detection re-triggers reconciliation if the live state ever diverges.
 
 ---
 
@@ -121,6 +153,41 @@ git checkout feat/x && git rebase main      # rewrites feat/x commits
 # Squash merge: collapses the branch into one commit on main (clean, atomic).
 git merge --squash feat/x && git commit     # common for PR merges
 ```
+
+**Same starting point (`C` on `main`, feat/x commits `D`,`E`) — three different results:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph MERGE["Merge: non-linear"]
+        direction LR
+        C1(C) --> M((merge))
+        E1(E) --> M
+    end
+
+    subgraph REBASE["Rebase: linear, new SHAs"]
+        direction LR
+        C2(C) --> D2(D-new) --> E2(E-new)
+    end
+
+    subgraph SQUASH["Squash: one commit"]
+        direction LR
+        C3(C) --> S(S)
+    end
+
+    class C1,C2,C3 train
+    class E1 req
+    class M,D2,E2,S mathOp
+```
+
+Merge keeps both parents and adds a merge commit; rebase discards the old `D`,`E` SHAs and replays fresh ones in a straight line; squash throws away the intermediate commits and lands one atomic commit `S` — same code, three different audit trails.
 
 Rule: rebase/squash *your own* branch before merging; never rebase a branch others have based work on.
 
@@ -217,6 +284,39 @@ git push --force-with-lease origin my-own-branch   # aborts if remote moved unex
 # 2) Purge from history with git filter-repo (rewrites history -> coordinate the team).
 ```
 
+**Why purging alone isn't enough — the secret's compromise lifecycle:**
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Purged, not rotated" as PurgedOnly
+
+    [*] --> Committed
+    Committed --> Pushed: git push
+    Pushed --> Compromised: leaked into remote history
+    Compromised --> PurgedOnly: git filter-repo
+    PurgedOnly --> Compromised: still valid if not rotated
+    Compromised --> Rotated: rotate immediately
+    Rotated --> Safe: old secret now invalid
+    Safe --> [*]
+
+    class Committed base
+    class Pushed req
+    class Compromised lossN
+    class PurgedOnly frozen
+    class Rotated mathOp
+    class Safe train
+```
+
+Purging history alone loops right back to `Compromised` — the secret is still valid until it's rotated, which is why rotation, not scrubbing, is the mandatory first step.
+
 **Pitfall 3 — Long-lived feature branches.** A branch open for 6 weeks diverges so far that the merge is a multi-day conflict-resolution slog and integration bugs surface late. FIX: short-lived branches (<2 days), merge to trunk continuously, hide incomplete work behind feature flags.
 
 ---
@@ -290,14 +390,30 @@ They are easier to review, revert (`git revert <sha>` cleanly undoes one change)
 
 A team runs GitOps: the `infra` repo's `main` is reconciled to the cluster by ArgoCD. A PR tweaking a HorizontalPodAutoscaler `minReplicas` from 3 to 1 (a typo, meant `30`) merges and reconciles. Off-peak it's fine; at peak the service can't scale fast enough and sheds load.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PR([PR #482 merged<br/>to main]) --> ARGOR(ArgoCD reconciles<br/>minReplicas 3 to 1)
+    ARGOR --> SCALE(Pool scales down<br/>to 1 replica)
+    SCALE --> PEAK(Peak traffic<br/>hits)
+    PEAK --> OVER(1 pod<br/>overwhelmed)
+    OVER --> SPIKE((5xx<br/>spike))
+
+    class PR train
+    class ARGOR mathOp
+    class SCALE frozen
+    class PEAK req
+    class OVER,SPIKE lossN
 ```
-PR #482 merged -> main  (HPA minReplicas: 3 -> 1)
-      |
-      v
-ArgoCD reconciles -> HPA minReplicas=1 -> pool scales down to 1 at low traffic
-      |
-   peak traffic hits -> 1 pod overwhelmed -> 5xx spike
-```
+
+Off-peak the single replica looks fine; the moment traffic peaks, the undersized pool can't absorb it and the 5xx spike is the visible symptom of a config typo three steps upstream.
 
 ```bash
 # BROKEN approach: hot-patch the live cluster to stop the bleeding.

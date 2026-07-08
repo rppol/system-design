@@ -431,9 +431,82 @@ visited (or add it to the `visited` set) **at the moment you enqueue it**, not
 when you dequeue it — otherwise the same cell can be enqueued multiple times
 by different neighbors before it's ever processed.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph broken["BROKEN — mark visited AFTER recursing"]
+        direction LR
+        bEnter(["enter cell A"]) --> bGuard{"A already<br/>marked?"}
+        bGuard -->|"no"| bRecurse(["recurse into B"])
+        bRecurse --> bReenter(["B recurses<br/>back into A"])
+        bReenter --> bGuard
+        bGuard -.->|"never marked —<br/>loops forever"| bFail(["RecursionError<br/>(~1000 deep)"])
+    end
+
+    subgraph fixed["FIXED — mark visited BEFORE recursing"]
+        direction LR
+        fEnter(["enter cell A"]) --> fMark(["mark A visited<br/>immediately"])
+        fMark --> fGuard{"A already<br/>marked?"}
+        fGuard -->|"no (first visit)"| fRecurse(["recurse into B"])
+        fRecurse --> fReenter(["B recurses<br/>back into A"])
+        fReenter --> fGuard2{"A already<br/>marked?"}
+        fGuard2 -->|"yes"| fDone(["return immediately<br/>— terminates"])
+    end
+
+    class bEnter,bRecurse,bReenter,fEnter,fRecurse,fReenter req
+    class bGuard,fGuard,fGuard2 mathOp
+    class fMark,fDone train
+    class bFail lossN
+```
+
+The only difference between the two flows is *when* the mark happens: BROKEN
+checks the guard before ever marking A, so B's callback into A always finds
+it unmarked and the two calls loop forever; FIXED marks A on entry, so the
+same callback finds A already marked and returns immediately.
+
 ---
 
 ## 9. Related Patterns & When to Switch
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Unweighted graph<br/>or grid problem"]) --> d1{"Tree?<br/>(1 parent, no cycles)"}
+    d1 -->|"yes"| treeSib(["tree_bfs / tree_dfs"])
+    d1 -->|"no"| d2{"Edges weighted?"}
+    d2 -->|"yes"| spSib(["shortest_path<br/>(Dijkstra / Bellman-Ford)"])
+    d2 -->|"no"| d3{"Directed with<br/>dependencies?"}
+    d3 -->|"yes"| topoSib(["topological_sort"])
+    d3 -->|"no"| d4{"Connectivity arrives<br/>incrementally?"}
+    d4 -->|"yes"| ufSib(["union_find"])
+    d4 -->|"no"| d5{"Need ALL paths<br/>(undo choices)?"}
+    d5 -->|"yes"| btSib(["backtracking"])
+    d5 -->|"no"| home(["graph_traversal<br/>(BFS / DFS — this pattern)"])
+
+    class start io
+    class d1,d2,d3,d4,d5 mathOp
+    class treeSib,spSib,topoSib,ufSib,btSib frozen
+    class home train
+```
+
+Five yes/no checks route a problem to the right file before landing on plain
+graph traversal — the same checks as the anti-signals in §1 and the
+switch-points below, condensed into one path instead of two separate bullet
+lists.
 
 - **[`tree_bfs.md`](tree_bfs.md) / [`tree_dfs.md`](tree_dfs.md)** — if the
   structure is a tree (no cycles, single parent per node), you don't need a

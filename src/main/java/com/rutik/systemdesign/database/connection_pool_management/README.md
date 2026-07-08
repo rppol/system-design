@@ -43,65 +43,83 @@ Pooling modes        | Session pooling      | 1 server conn per client session
 
 ## 5. Architecture Diagrams
 
+**HikariCP Connection Pool — Internal Structure**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    t1(["Thread 1"]) --> bag["ConcurrentBag<br/>lock-free pool"]
+    t2(["Thread 2"]) --> bag
+    t3(["Thread 3"]) --> bag
+    t4(["Thread 4"]) -.->|"waits up to<br/>connectionTimeout 30s"| bag
+    bag -.->|"none freed<br/>in 30s"| ex(["SQLTimeoutException"])
+
+    bag --> e1["PoolEntry 1<br/>IN USE"]
+    bag --> e2["PoolEntry 2<br/>IN USE"]
+    bag --> e3["PoolEntry 3<br/>IDLE"]
+    bag --> e4["PoolEntry 4<br/>IDLE"]
+    bag --> e5["PoolEntry 5<br/>IDLE"]
+
+    e1 --> pg(["PostgreSQL<br/>5 backend processes"])
+    e2 --> pg
+    e3 --> pg
+    e4 --> pg
+    e5 --> pg
+
+    class t1,t2,t3,t4 req
+    class bag mathOp
+    class e1,e2 train
+    class e3,e4,e5 base
+    class pg frozen
+    class ex lossN
 ```
-HikariCP Connection Pool — Internal Structure
-=============================================
 
-Thread 1 → HikariPool.getConnection()
-Thread 2 → HikariPool.getConnection()
-Thread 3 → HikariPool.getConnection()
-                    │
-          ┌─────────▼──────────┐
-          │   ConcurrentBag    │   ← lock-free bag of PoolEntry objects
-          │                    │
-          │  PoolEntry 1 (IN USE by Thread 1)
-          │  PoolEntry 2 (IN USE by Thread 2)
-          │  PoolEntry 3 (IDLE)
-          │  PoolEntry 4 (IDLE)
-          │  PoolEntry 5 (IDLE)
-          └────────────────────┘
-                    │
-              ┌─────┴──────┐
-              │ PostgreSQL │ ← 5 backend processes (one per PoolEntry)
-              └────────────┘
+Three threads hold checked-out PoolEntries from the lock-free `ConcurrentBag`; a fourth thread waits up to `connectionTimeout` (30s) and throws `SQLTimeoutException` if none free up in time. HikariCP evicts entries in the background via `idleTimeout` (10 min) and `maxLifetime` (30 min), and sends a keepalive query every `keepaliveTime` (30s) to prevent TCP RST.
 
-Thread 4 arrives, all entries in use → waits up to connectionTimeout (30s)
-If none freed in 30s → SQLTimeoutException
+**PgBouncer Transaction Pooling — Multiplexing**
 
-HikariCP pool eviction: idleTimeout (10 min), maxLifetime (30 min),
-  keepaliveTime (30s) — sends keepalive query to prevent TCP RST
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    a1(["App Instance 1"]) --> pb["PgBouncer pool"]
+    a2(["App Instance 2"]) --> pb
+    a3(["App Instance 3"]) --> pb
+    aN(["...97 more<br/>app instances"]) --> pb
+    pb -->|"10 server<br/>connections"| pg(["PostgreSQL primary"])
 
-PgBouncer Transaction Pooling — Multiplexing
-=============================================
-
-Client connections (many)         Server connections (few)
-  App Instance 1  \
-  App Instance 2   ────► PgBouncer ────► PostgreSQL primary (10 server conns)
-  App Instance 3  /        pool
-  ...100 more...
-
-Transaction pooling:
-  Client 1 borrows server conn → executes transaction → returns conn
-  Client 2 gets that same conn immediately for the next transaction
-  100 client connections share 10 server connections
-  Multiplexing ratio: 10:1
-
-
-Connection Pool Sizing — Kubernetes Scale-Out Problem
-=====================================================
-
-Before PgBouncer:
-  50 pods × HikariCP pool size 10 = 500 PostgreSQL connections
-  PostgreSQL max_connections = 500 → at limit from application alone
-
-  Scale to 200 pods during peak → 2000 connections → PostgreSQL crash
-
-With PgBouncer (DaemonSet or sidecar):
-  50 pods × HikariCP pool size 10 = 500 PgBouncer connections (clients)
-  PgBouncer server pool size = 50 → 50 PostgreSQL connections
-  Scale to 200 pods → 2000 PgBouncer client connections, still 50 PG connections
+    class a1,a2,a3,aN req
+    class pb mathOp
+    class pg frozen
 ```
+
+Transaction pooling: Client 1 borrows a server connection, executes its transaction, and returns it; Client 2 immediately gets that same connection for its own transaction. 100 client connections share 10 server connections — a 10:1 multiplexing ratio.
+
+**Connection Pool Sizing — Kubernetes Scale-Out Problem**
+
+```mermaid
+xychart-beta
+    title "PostgreSQL Connections: Pod Scale-Out With vs Without PgBouncer"
+    x-axis ["50 pods", "200 pods (peak)"]
+    y-axis "PostgreSQL connections" 0 --> 2000
+    bar "Without PgBouncer" [500, 2000]
+    bar "With PgBouncer" [50, 50]
+```
+
+Without PgBouncer, 50 pods at HikariCP pool size 10 already sit at PostgreSQL's `max_connections=500` limit, and scaling to 200 pods during peak drives 2000 connections — a crash. With PgBouncer (DaemonSet or sidecar), the same 50-to-200 pod scale-out only grows PgBouncer's client-side connections; `server_pool_size=50` keeps actual PostgreSQL connections flat at 50.
 
 ---
 
@@ -227,27 +245,38 @@ query_timeout = 0          # 0 = no timeout (use PostgreSQL statement_timeout)
 ```
 
 **Transaction pooling vs session pooling**:
-```
-Session pooling:
-  Client connection → server connection for entire session duration
-  Client logs out → server connection returned to pool
-  Use case: when clients are long-lived sessions (not microservices)
-  Problem: if 100 clients connect but only 10 are active, 90 server conns wasted
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Transaction pooling:
-  Client connection → borrows server connection for each transaction → returns immediately
-  100 clients can share 10 server connections if transactions are short
-  Problem: cannot use session-level features:
-    - SET LOCAL (session variable) — resets on next client
-    - PREPARE statement — prepared statements bound to server connection
-    - Temporary tables — bound to server connection
-    - Advisory locks (session-level pg_advisory_lock)
+    subgraph SP["Session pooling"]
+        direction LR
+        c1(["Client connects"]) --> s1["Held for<br/>entire session"] --> r1(["Logout,<br/>conn returned"])
+    end
 
-Statement pooling:
-  Extreme mode: server connection returned after each statement
-  Most restrictive: no multi-statement transactions
-  Rarely used
+    subgraph TP["Transaction pooling"]
+        direction LR
+        c2(["Client borrows"]) --> s2["Held for<br/>1 transaction"] --> r2(["Returned<br/>immediately"])
+    end
+
+    subgraph StP["Statement pooling"]
+        direction LR
+        c3(["Client borrows"]) --> s3["Held for<br/>1 statement"] --> r3(["Returned after<br/>each statement"])
+    end
+
+    class c1,c2,c3,r1,r2,r3 io
+    class s1 train
+    class s2 mathOp
+    class s3 lossN
 ```
+
+Session pooling holds a server connection for the client's entire session; if 100 clients connect but only 10 are active, 90 server connections sit wasted. Transaction pooling borrows a server connection only for the duration of one transaction — 100 clients can share 10 server connections if transactions are short — but breaks anything bound to a single server connection: `SET LOCAL` session variables, `PREPARE` statements, temporary tables, and session-level advisory locks (`pg_advisory_lock`). Statement pooling is the most restrictive mode (connection returned after each statement, no multi-statement transactions) and is rarely used.
 
 ### ProxySQL for MySQL
 
@@ -287,35 +316,64 @@ mysql_hostgroup_attributes:
 
 ### Connection Storm on Kubernetes Scale-Out
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    hpa(["K8s HPA scales<br/>10 to 100 pods in 30s"]) --> conns["Each pod: minimum-idle=5<br/>adds 500 new connections"]
+    conns --> limit{"over PostgreSQL<br/>max_connections=200?"}
+    limit -->|"yes"| estfail["Connection<br/>establishment fails"]
+    estfail --> health["Pod health<br/>checks fail"]
+    health --> restart["Pods restart"]
+    restart -.->|"more connections<br/>attempted"| conns
+
+    class hpa req
+    class conns,limit mathOp
+    class estfail,health,restart lossN
 ```
-Problem:
-  Kubernetes HPA scales from 10 pods to 100 pods in 30 seconds (traffic spike)
-  Each pod starts with minimum-idle=5 connections → 500 new connections to DB
-  PostgreSQL: max_connections=200 → overwhelmed immediately
 
-  Effect: connection establishment itself fails → pod health checks fail
-  → pods restart → more connections → cascade failure
+The problem is a feedback loop: an HPA scale-out from 10 to 100 pods adds 500 new connections against a `max_connections=200` ceiling, so connection establishment itself starts failing — which fails pod health checks, which restarts pods, which attempts even more connections, cascading into a full outage.
 
-Solution 1: PgBouncer as DaemonSet
-  One PgBouncer per Kubernetes node
-  All pods on that node connect to local PgBouncer (localhost socket — fast)
-  PgBouncer maintains a fixed server pool to PostgreSQL
-  Pod scale-out adds PgBouncer clients, not PostgreSQL connections
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Solution 2: PgBouncer as sidecar
-  One PgBouncer container per pod
-  App connects to localhost:6432 (sidecar)
-  Sidecar connects to PostgreSQL with pool_size=2-5 per pod
-  100 pods × 5 pool size = 500 PgBouncer connections → 500 PG connections
-  (Not much better than without PgBouncer — sidecar not ideal for connection reduction)
-  Better use: DaemonSet (one per node, N pods share)
+    subgraph DS["Solution 1: PgBouncer DaemonSet"]
+        direction LR
+        p1(["Pod A"]) --> pb1["Node-local<br/>PgBouncer"]
+        p2(["Pod B"]) --> pb1
+        p3(["Pod C"]) --> pb1
+        pb1 --> pg1(["PostgreSQL<br/>fixed server pool"])
+    end
 
-Solution 3: Connection ramp-up limit
-  HikariCP: minimum-idle=1 (start with fewer connections)
-  initializationFailTimeout=60000 (longer startup tolerance)
-  Deploy pods with a startup delay (Kubernetes maxSurge=25%)
-  Distribute connection establishment over time
+    subgraph SC["Solution 2: PgBouncer Sidecar"]
+        direction LR
+        p4(["Pod A"]) --> pb2["Sidecar<br/>PgBouncer"]
+        p5(["Pod B"]) --> pb3["Sidecar<br/>PgBouncer"]
+        pb2 --> pg2(["PostgreSQL<br/>pool 2-5 per pod"])
+        pb3 --> pg2
+    end
+
+    class p1,p2,p3,p4,p5 req
+    class pb1,pb2,pb3 mathOp
+    class pg1,pg2 frozen
 ```
+
+DaemonSet placement (one PgBouncer per node, shared over a localhost socket by every pod on that node) keeps a fixed server pool regardless of pod count — scale-out only adds PgBouncer clients. Sidecar placement (one PgBouncer per pod, `pool_size=2-5`) barely helps: 100 pods × 5 still yields 500 PostgreSQL connections, since each pod's PgBouncer is not shared. DaemonSet is the better default; sidecar rarely reduces connection count.
+
+**Solution 3: Connection ramp-up limit** — set HikariCP `minimum-idle=1` (start with fewer connections) and `initializationFailTimeout=60000` (longer startup tolerance), then deploy pods with a startup delay (Kubernetes `maxSurge=25%`) to distribute connection establishment over time instead of all at once.
 
 ---
 
@@ -354,6 +412,35 @@ Kubernetes compat.   | Poor               | Medium             | Good (DaemonSet
 
 **Avoid PgBouncer transaction mode when**: Application uses PostgreSQL prepared statements bound to server connections, session-level advisory locks, or temporary tables. Use session pooling in those cases.
 
+**Do You Need PgBouncer?**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["New DB-backed<br/>service"]) --> pool["Always use an<br/>app-level pool<br/>(HikariCP)"]
+    pool --> trigger{"instances × pool size<br/>over max_connections,<br/>K8s storm, or<br/>short-lived conns?"}
+    trigger -->|"no"| direct(["App pool alone<br/>is enough"])
+    trigger -->|"yes"| addpgb["Add PgBouncer"]
+    addpgb --> feat{"uses prepared stmts,<br/>advisory locks, or<br/>temp tables?"}
+    feat -->|"yes"| session(["Session<br/>pooling mode"])
+    feat -->|"no"| txn(["Transaction<br/>pooling mode"])
+
+    class start io
+    class pool train
+    class trigger,feat mathOp
+    class direct,session,txn io
+    class addpgb base
+```
+
+Always start with an application-level pool; only add PgBouncer once one of the three triggers above is true, and only fall back to session pooling when the workload actually needs prepared statements, advisory locks, or temporary tables — transaction pooling is the default otherwise.
+
 ---
 
 ## 10. Common Pitfalls
@@ -363,6 +450,27 @@ Kubernetes compat.   | Poor               | Medium             | Good (DaemonSet
 **Connection leak with manual `getConnection()`**: Service code calls `dataSource.getConnection()` inside a utility method. An exception path exits without calling `close()`. Connections accumulate in "active" state, eventually exhausting the pool. Fix: always use try-with-resources; enable `leakDetectionThreshold` in HikariCP to catch leaks during testing.
 
 **PgBouncer transaction mode with prepared statements**: Application uses `PreparedStatement` (JDBC) in PgBouncer transaction mode. PgBouncer does not forward `PREPARE` statements to the server in transaction mode (each transaction can go to a different server connection). The prepared statement is not found → `PREPARE "X" does not exist` error. Fix: either use `prepareThreshold=0` in PostgreSQL JDBC driver (disables server-side prepared statements, uses client-side), or switch PgBouncer to session pooling for this use case.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant PgB as PgBouncer<br/>transaction mode
+    participant S1 as Server Conn A
+    participant S2 as Server Conn B
+
+    App->>PgB: BEGIN + PREPARE getUser
+    PgB->>S1: forward to Conn A
+    S1-->>PgB: statement prepared on Conn A
+    PgB-->>App: COMMIT, Conn A returned to pool
+
+    Note over PgB,S2: next transaction may land<br/>on a different server conn
+    App->>PgB: EXECUTE getUser
+    PgB->>S2: routed to Conn B instead
+    S2-->>PgB: ERROR - getUser not found
+    PgB-->>App: prepared statement does not exist
+```
+
+The `PREPARE` lands on Server Conn A, but PgBouncer returns that connection to the pool as soon as the transaction commits; the next `EXECUTE` can be routed to a completely different server connection (Conn B) where the statement was never prepared, producing the error above.
 
 **max_connections exhaustion during deployment restart**: Rolling deployment restarts 100 pods, each establishing connections. Old pods hold connections while new pods establish new ones. During the window, connection count doubles. Fix: use lifecycle hooks to drain connections before pod termination (`preStop: sleep 15s`), and set `minimum-idle=1` to reduce baseline connections.
 
@@ -443,19 +551,15 @@ Spring Boot auto-configures HikariCP when `spring-boot-starter-data-jpa` is on t
 **Scenario**: A Spring Boot e-commerce application with 50 Kubernetes pods, each with HikariCP pool size 20. Total: 1000 connections to PostgreSQL. PostgreSQL `max_connections = 500` — at twice the limit. Developers observe sporadic `ConnectionAcquisitionTimeoutException` errors during peak traffic. Database CPU is 90% even though QPS is only 5K/second (a 4-core database should handle 20K+ QPS).
 
 **Root cause analysis**:
+```mermaid
+pie showData
+    title pg_stat_activity — 1000 connections during peak
+    "Idle (not executing)" : 600
+    "Active (executing queries)" : 300
+    "Idle in transaction (stalled)" : 100
 ```
-pg_stat_activity during peak:
-  idle: 600 connections (not executing)
-  active: 300 connections (executing queries)
-  idle in transaction: 100 connections (stalled transactions)
 
-PostgreSQL backend count: 1000 processes × 8MB RAM = 8GB RAM consumed by connections alone
-Context switching: scheduler overhead from 1000 processes on 4 cores
-
-Stalled transactions: application code calling an external payment API with 30s timeout
-  while holding a DB connection inside a @Transactional method
-  → 100 connections stuck for 30s each = 100 connections blocked permanently during high load
-```
+PostgreSQL backend count: 1000 processes × 8MB RAM = 8GB RAM consumed by connections alone; context-switching overhead comes from the scheduler juggling 1000 processes on 4 cores. The 100 idle-in-transaction connections are stalled transactions: application code calls an external payment API with a 30s timeout while holding a DB connection inside a `@Transactional` method, so 100 connections are stuck for 30s each — blocked permanently during high load.
 
 **Fixes applied**:
 1. PgBouncer DaemonSet (4 nodes × 1 PgBouncer each):

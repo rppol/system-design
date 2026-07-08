@@ -148,45 +148,62 @@ A shared message bus (Redis pub/sub, Kafka, or a dedicated broker) is required f
 
 ### 5.1 WebSocket Connection Lifecycle
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant U as Uvicorn / Starlette
+    participant F as FastAPI Route
+
+    C->>U: HTTP GET /ws (Upgrade: ws)
+    U->>F: scope={type: websocket}
+    U-->>C: 101 Switching Protocols
+    Note over F: await ws.accept()
+    F-->>U: websocket.accept message
+    C->>U: ws frame (text: "hello")
+    U->>F: receive() msg
+    Note over F: await ws.receive_text()
+    Note over F: await ws.send_text()
+    F-->>U: ws frame (text: "world")
+    U-->>C: ws frame (text: "world")
+    C->>U: ws frame (close)
+    U->>F: WebSocketDisconnect
+    Note over F: cleanup / return
 ```
-Client                         Uvicorn / Starlette              FastAPI Route
-  |                                   |                              |
-  |-- HTTP GET /ws (Upgrade: ws) ---> |                              |
-  |                                   |-- scope={type:websocket} --> |
-  |<-- 101 Switching Protocols -------|                              |
-  |                                   |      await ws.accept()       |
-  |                                   | <--------------------------- |
-  |                                   |                              |
-  |-- ws frame (text: "hello") -----> |                              |
-  |                                   |-- receive() msg -----------> |
-  |                                   |      await ws.receive_text() |
-  |                                   |                              |
-  |                                   |      await ws.send_text()    |
-  |<-- ws frame (text: "world") ------|                              |
-  |                                   |                              |
-  |-- ws frame (close) ------------> |                              |
-  |                                   |-- WebSocketDisconnect -----> |
-  |                                   |      cleanup / return        |
-```
+
+The HTTP `Upgrade` handshake happens exactly once; after `101 Switching Protocols`, the
+same TCP connection carries WebSocket frames in both directions until the client closes
+it and Starlette raises `WebSocketDisconnect` inside the handler.
 
 ### 5.2 Multi-Pod Fan-Out with Redis Pub/Sub
 
-```
-              Client A             Client B             Client C
-              (Pod 1)              (Pod 1)              (Pod 2)
-                 |                    |                    |
-          +------+-------+     +------+-------+    +-------+------+
-          |    Pod 1      |     |    Pod 1      |    |    Pod 2     |
-          | ConnectionMgr |     | ConnectionMgr |    | ConnectionMgr|
-          | [ws_A, ws_B]  |     | (same obj)    |    | [ws_C]       |
-          +------+--------+     +---------------+    +------+-------+
-                 |                                           |
-                 +---+-------+---------------------------+---+
-                     |       |                           |
-               SUBSCRIBE   PUBLISH("room:1", msg)    SUBSCRIBE
-                     |                                   |
-                     +---------> Redis Pub/Sub <---------+
-                                 channel: room:1
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A([Client A]) --> P1
+    B([Client B]) --> P1
+    C([Client C]) --> P2
+
+    subgraph P1["Pod 1"]
+        M1["ConnectionManager<br/>ws_A, ws_B"]
+    end
+
+    subgraph P2["Pod 2"]
+        M2["ConnectionManager<br/>ws_C"]
+    end
+
+    M1 -->|"SUBSCRIBE / PUBLISH"| R(("Redis Pub/Sub<br/>channel: room:1"))
+    M2 -->|"SUBSCRIBE / PUBLISH"| R
+
+    class A,B,C io
+    class M1,M2 req
+    class R base
 ```
 
 When any pod calls `PUBLISH`, Redis delivers to all subscribers. Each pod then sends the
@@ -194,19 +211,25 @@ message to its locally held WebSocket connections.
 
 ### 5.3 SSE Flow
 
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant S as FastAPI
+
+    B->>S: GET /stream (EventSource)
+    S-->>B: HTTP 200
+    Note over S: event_generator starts
+    S-->>B: data: tick 1
+    Note over S: await asyncio.sleep(1)
+    S-->>B: data: tick 2
+    Note over B,S: stream continues...
+    B->>S: browser disconnects
+    Note over S: GeneratorExit raised, cleanup runs
 ```
-Browser                          FastAPI
-  |                                 |
-  |-- GET /stream (EventSource) --> |
-  |                                 |  async def event_generator():
-  |<-- HTTP 200 -------------------|       yield "data: tick 1\n\n"
-  |<-- data: tick 1\n\n ----------|       await asyncio.sleep(1)
-  |<-- data: tick 2\n\n ----------|       yield "data: tick 2\n\n"
-  |        ...                     |       ...
-  |                                 |
-  |  (browser disconnects)          |
-  |                                 |  GeneratorExit raised → cleanup
-```
+
+The server keeps the HTTP response open and pushes `data:` lines on its own schedule;
+when the browser drops the connection, Starlette raises `GeneratorExit` inside the
+generator so cleanup code runs.
 
 ---
 
@@ -420,6 +443,23 @@ The browser silently drops WebSocket connections through idle firewalls after ~3
 The WebSocket protocol has built-in ping/pong frames; Starlette/ASGI does not expose them
 directly, so application-level heartbeats are the pragmatic solution:
 
+```mermaid
+stateDiagram-v2
+    state "Awaiting Pong" as AwaitingPong
+
+    [*] --> Alive
+    Alive --> AwaitingPong: send ping<br/>(every 30s)
+    AwaitingPong --> Alive: pong received
+    AwaitingPong --> Stale: no pong<br/>within 60s
+    Alive --> Disconnected: WebSocketDisconnect<br/>or send fails
+    Stale --> Disconnected: force close
+    Disconnected --> [*]: cancel heartbeat,<br/>cleanup connection
+```
+
+The heartbeat task and the receive loop race independently: a missed pong for 60 seconds
+(twice the 30-second interval) marks the connection stale and forces the same cleanup
+path as an explicit `WebSocketDisconnect`.
+
 ```python
 @app.websocket("/ws/heartbeat/{client_id}")
 async def ws_with_heartbeat(websocket: WebSocket, client_id: str) -> None:
@@ -551,6 +591,33 @@ alternative to use in FastAPI.
 ---
 
 ## 9. When to Use / When NOT to Use
+
+The three primitives resolve to a single decision path: bidirectionality and low-RTT
+needs point to WebSocket, browser-only listening points to SSE, and an unknown-size or
+proxied-upstream body points to StreamingResponse.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start([Need to push data<br/>to the client?]) --> D1{"Client also sends often,<br/>or needs binary /<br/>sub-100ms RTT?"}
+    D1 -->|"yes"| WS([WebSocket])
+    D1 -->|"no"| D2{"Consumer is a browser<br/>that only listens?"}
+    D2 -->|"yes"| SSE([SSE])
+    D2 -->|"no"| D3{"Size unknown upfront,<br/>or proxying a<br/>streaming upstream?"}
+    D3 -->|"yes"| SR([StreamingResponse])
+    D3 -->|"no"| REST([Plain REST response])
+
+    class Start,WS,SSE,SR io
+    class D1,D2,D3 mathOp
+    class REST frozen
+```
 
 ### Use WebSockets when:
 
@@ -910,26 +977,25 @@ connections. Total target: 20,000 concurrent users.
 
 **Architecture:**
 
+```mermaid
+sequenceDiagram
+    participant U as User Browser
+    participant P as K8s Pod (x4)
+    participant R as Redis
+
+    U->>P: WS /notifications/ws?token=jwt
+    P-->>U: 101 Switching Protocols
+    Note over P: ConnectionManager stores<br/>{user_id: ws, ...}
+    Note over P: Application event<br/>(e.g., payment.received)
+    P->>R: PUBLISH notification:{user_id}
+    R-->>P: message delivered to all pods
+    Note over P: Pod holding the user's ws<br/>looks up the connection
+    P-->>U: send_text(notification)
 ```
-  User Browser                 K8s Pod (x4)                Redis
-      |                            |                          |
-      |-- WS /notifications/ws --> |                          |
-      |   ?token=<jwt>             |  ConnectionManager       |
-      |<-- 101 Switching Protocols-|  {user_id: ws, ...}      |
-      |                            |                          |
-      |                      Application event               |
-      |                      (e.g., payment.received)        |
-      |                            |                          |
-      |                            |-- PUBLISH notification:  |
-      |                            |   {user_id} msg -------> |
-      |                            |                          |
-      |                  All pods  |<-- message delivered ----|
-      |                  receive   |                          |
-      |                  the event |                          |
-      |                            |                          |
-      |  (pod holding user's ws)   |                          |
-      |<-- send_text(notification)-|                          |
-```
+
+A pod accepts the WebSocket after the JWT handshake, but the event that triggers a
+notification can originate on any pod; publishing to Redis lets whichever pod is
+actually holding that user's connection deliver it.
 
 **Implementation:**
 

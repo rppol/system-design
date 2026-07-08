@@ -44,46 +44,86 @@ Secrets management | No passwords in code; rotation       | Vault, AWS Secrets M
 Data masking       | Pseudonymize PII, mask SSN/CC        | Application layer, views
 ```
 
+Every request has to clear each layer in sequence — defense in depth means a leaked credential still has to get past authorization, and a bypassed authorization check is still encrypted, audited, and masked before it reaches sensitive data:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client request"]) --> net{"Network<br/>VPC isolation"}
+    net --> authn{"Authentication<br/>scram-sha-256 / cert"}
+    authn --> authz{"Authorization<br/>GRANT / RLS"}
+    authz --> enc["Encryption<br/>TLS + AES-256"]
+    enc --> audit["Audit logging<br/>pgAudit"]
+    audit --> secrets["Secrets mgmt<br/>Vault rotation"]
+    secrets --> mask(["Data masking<br/>PII pseudonymized"])
+    denied(["Denied,<br/>logged"])
+    authn -.->|"fail closed"| denied
+    authz -.->|"fail closed"| denied
+
+    class client io
+    class net,authn,authz mathOp
+    class enc,audit,secrets base
+    class mask train
+    class denied lossN
+```
+
+No single layer is trusted to be infallible: a request that fails authentication or authorization is rejected and logged before it ever reaches encryption, audit logging, or masking — the same nested-vault mental model as Section 2.
+
 ---
 
 ## 5. Architecture Diagrams
 
+**Network Security — PostgreSQL in AWS**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    internet(["Internet"]) --> alb["Application<br/>Load Balancer<br/>(public subnet)"]
+    alb --> appsrv["App servers<br/>(private 10.0.1.0/24)"]
+    appsrv --> sg{"VPC Security Group<br/>allow 5432 from<br/>app subnet only"}
+    sg --> primary[("PostgreSQL Primary<br/>private 10.0.2.0/24<br/>no public IP")]
+    primary --> replica[("PostgreSQL<br/>Replica")]
+    bastion(["Bastion Host /<br/>SSM Session Manager"]) -.->|"admin access only"| primary
+
+    class internet io
+    class alb,appsrv req
+    class sg mathOp
+    class primary,replica base
+    class bastion frozen
 ```
-Network Security — PostgreSQL in AWS
-=====================================
 
-Internet
-  │
-[Application Load Balancer]  ← Public subnet
-  │
-[Application servers]        ← Private subnet (10.0.1.0/24)
-  │
-[VPC Security Group]         ← Allow TCP 5432 only from app subnet
-  │
-[PostgreSQL Primary]         ← Private subnet (10.0.2.0/24)
-  │                            NO public IP; not reachable from internet
-[PostgreSQL Replica]         ←
-  │
-[Bastion Host / SSM Session Manager] ← For admin access only
-                                        (never open 5432 directly to developers)
+Neither the primary nor the replica has a public IP. The only paths in are the application-server security group on port 5432 and the bastion host for administrative access — developers never get a direct connection to 5432.
 
+**Row-Level Security (RLS) for Multi-Tenant SaaS**
 
-Row-Level Security (RLS) for Multi-Tenant SaaS
-===============================================
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant DB as PostgreSQL
 
-CREATE POLICY tenant_isolation ON orders
-    USING (tenant_id = current_setting('app.current_tenant')::UUID);
-
-Application request:
-  1. App authenticates → gets tenant_id
-  2. App sets: SET LOCAL app.current_tenant = '42'
-  3. App queries: SELECT * FROM orders
-  4. RLS policy filters: WHERE tenant_id = '42'
-  5. Tenant 42 only sees their own rows even if query has no WHERE clause
-
-Without RLS: a bug in application WHERE clause exposes all tenants' data
-With RLS: database enforces isolation regardless of application code
+    App->>DB: Authenticate
+    DB-->>App: tenant_id
+    App->>DB: SET LOCAL app.current_tenant = '42'
+    App->>DB: Query orders (no WHERE clause)
+    Note over DB: Policy tenant_isolation filters WHERE tenant_id = '42'
+    DB-->>App: Only tenant 42's rows
 ```
+
+The policy is `CREATE POLICY tenant_isolation ON orders USING (tenant_id = current_setting('app.current_tenant')::UUID)`. Without RLS, a bug in the application's WHERE clause exposes every tenant's data; with RLS, the database enforces isolation regardless of what the application code does.
 
 ---
 
@@ -319,6 +359,38 @@ String secret = secretsManagerClient.getSecretValue(
 ```
 
 ### GDPR/CCPA Right to Erasure
+
+Soft delete alone does not satisfy the right to erasure — the row and its PII still exist in the database and in backups. The database has to pick a path around the foreign-key constraints that reference the user:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    erq(["Erasure request"]) --> soft{"Soft delete<br/>only?"}
+    soft -->|"yes"| fail(["Row + backups still<br/>hold PII — fails"])
+    soft -->|"no"| hard["Attempt hard delete"]
+    hard --> fk{"Blocked by<br/>FK constraint?"}
+    fk -->|"Option 1"| pseudo["Pseudonymize PII,<br/>keep row for FK"]
+    fk -->|"Option 2"| sep["Move PII to isolated<br/>mapping table"]
+    pseudo --> ret["Backup retention<br/>window elapses"]
+    sep --> ret
+    ret --> done(["Erasure<br/>satisfied"])
+
+    class erq io
+    class soft,fk mathOp
+    class fail lossN
+    class hard req
+    class pseudo,sep,done train
+    class ret frozen
+```
+
+Options 1 and 2 both preserve referential integrity while destroying the PII itself; either way, erasure is only complete once the backup retention window (for example 35 days) elapses and the last PITR snapshot holding the old value expires.
 
 ```sql
 -- Hard delete vs soft delete for compliance

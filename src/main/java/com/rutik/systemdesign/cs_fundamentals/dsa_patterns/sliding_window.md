@@ -26,6 +26,36 @@ Maintain a contiguous range `[left, right]` over an array or string, expanding `
 
 The defining test: **as you shrink the window from the left, does the aggregate move predictably (monotonically) toward satisfying the constraint?** If yes → sliding window. If the aggregate can move in either direction unpredictably → prefix sum + hashmap.
 
+Chaining the signals and anti-signals above into one funnel:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["contiguous subarray<br/>or substring problem"]) --> q1{"relationship between<br/>2 specific elements?"}
+    q1 -->|"yes, sorted array"| twoPointers("Two Pointers")
+    q1 -->|"no, range aggregate"| q2{"values can<br/>be negative?"}
+    q2 -->|"yes"| prefixSum("Prefix Sum<br/>+ Hashmap")
+    q2 -->|"no"| q3{"need min/max<br/>inside window?"}
+    q3 -->|"yes"| monoDeque("Monotonic Deque<br/>window maximum")
+    q3 -->|"no"| q4{"constraint is<br/>exactly k?"}
+    q4 -->|"yes"| atMostTrick("atMost of k<br/>minus atMost of k-1")
+    q4 -->|"no"| slidingWindow(["Sliding Window<br/>this pattern"])
+
+    class start io
+    class q1,q2,q3,q4 mathOp
+    class twoPointers,prefixSum,monoDeque frozen
+    class atMostTrick,slidingWindow train
+```
+
+*Pattern-selection router: each "no" branch narrows the funnel — not a pair-relationship problem, values non-negative, no in-window min/max needed, not an "exactly k" constraint — until only direct sliding window remains; each "yes" branch exits to the sibling pattern named in the anti-signals above.*
+
 ---
 
 ## 2. Mental Model & Intuition
@@ -197,6 +227,42 @@ The amortized argument is the crux: even though there's a `for` loop with a nest
 - **Frequency-map window** — for anagram/permutation matching, compare two `Counter`s (or fixed-size arrays of 26) instead of a single sum ([Find All Anagrams in a String (LC 438)](https://leetcode.com/problems/find-all-anagrams-in-a-string/))
 - **Monotonic deque window** — when you need the *min/max within the window* at every step rather than a sum/count — see [monotonic_stack.md](monotonic_stack.md) §6 for "Sliding Window Maximum"
 - **Two-window / multiple windows** — some problems (e.g., "Minimum Operations to Reduce X to Zero" LC 1658) invert the problem into "find the *longest* subarray to *remove*" — same template, different framing
+
+The two shrink strategies place `record best` at a different point in the loop, which is the classic source of off-by-one bugs:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph MIN["Minimize — shrink while valid"]
+        direction LR
+        add1(["expand:<br/>add right"]) --> check1{"valid?"}
+        check1 -->|"yes"| rec1("record best")
+        rec1 --> shrink1("shrink:<br/>remove left")
+        shrink1 -.->|"repeat while valid"| check1
+    end
+
+    subgraph MAX["Maximize — shrink while invalid"]
+        direction LR
+        add2(["expand:<br/>add right"]) --> check2{"invalid?"}
+        check2 -->|"yes"| shrink2("shrink:<br/>remove left")
+        shrink2 -.->|"repeat until valid"| check2
+        check2 -->|"no"| rec2("record best")
+    end
+
+    class add1,add2 req
+    class check1,check2 mathOp
+    class rec1,rec2 train
+    class shrink1,shrink2 lossN
+```
+
+*Minimizing (e.g., "smallest subarray with sum ≥ target") records best on every shrink step while the window stays valid. Maximizing (e.g., "longest substring without repeating characters") records best only after an expand leaves the window valid — shrinking there is repair work to restore validity, not a place to record.*
 
 ---
 

@@ -65,36 +65,47 @@ The practical payoff is recognition, not derivation. You will not re-derive the 
 
 ### The Chomsky Hierarchy as Nested Power
 
-```
-Type-0  ############################################  Recursively Enumerable (Turing Machine)
-Type-1  ####################################          Context-Sensitive (Linear-Bounded Automaton)
-Type-2  ############################                  Context-Free (CFG / Pushdown Automaton)
-Type-3  ####################                          Regular (DFA / NFA / regex)
+```mermaid
+xychart-beta
+    title "Chomsky Hierarchy -- relative size of each language class"
+    x-axis ["Type-3 Regular", "Type-2 Context-Free", "Type-1 Context-Sensitive", "Type-0 Rec. Enumerable"]
+    y-axis "Relative size (illustrative)" 0 --> 50
+    bar [20, 28, 36, 44]
 ```
 
 Each bar's length is the *relative size* of that language class — every regular language is context-free, every context-free language is context-sensitive, every context-sensitive language is decidable, and every decidable language is recursively enumerable. The containments are all strict: the witness-language table above gives one string set that lives on each rung and no lower one.
 
 ### The P / NP / NP-hard Landscape
 
-```
-NP-hard  ############################################  (at least as hard as every NP problem)
-NP       ####################################          (a proposed answer verifies in poly time)
-P        ########################                      (solvable in poly time, period)
+```mermaid
+xychart-beta
+    title "P / NP / NP-hard -- relative breadth of each class"
+    x-axis ["P", "NP", "NP-hard"]
+    y-axis "Relative breadth (illustrative)" 0 --> 50
+    bar [24, 36, 44]
 ```
 
-```
-Cook-Levin (1971): SAT is NP-complete -- every NP problem reduces to it
-   |
-   +-- 3-SAT (split long clauses into 3-literal ones; still NP-complete)
-         |
-         +-- Vertex Cover        (variable-edge + clause-triangle gadgets, k = n + 2m)
-         |      |
-         |      +-- Independent Set  (cover size k  <=>  independent set size |V|-k)
-         |      +-- Clique             (independent set of the complement graph)
-         |
-         +-- Hamiltonian Path / Cycle  (per-variable gadgets chained through clauses)
-                |
-                +-- TSP decision   (weight 1 on real edges, 2 elsewhere; tour <= |V| ?)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CL("Cook-Levin 1971<br/>SAT is NP-complete") --> TS("3-SAT<br/>3-literal clauses")
+    TS --> VC("Vertex Cover<br/>k = n + 2m")
+    TS --> HP("Hamiltonian Path<br/>or Cycle")
+    VC --> IS("Independent Set<br/>size = |V| - k")
+    VC --> CQ("Clique<br/>complement graph")
+    HP --> TSP("TSP Decision<br/>tour length at most |V|")
+
+    class CL base
+    class TS mathOp
+    class VC,HP,TSP lossN
+    class IS,CQ frozen
 ```
 
 NP-hard is drawn as the outermost band because it is **not** a subset of NP in general — the Halting Problem is NP-hard (any 3-SAT instance reduces to it: build a program that brute-forces all assignments and halts iff one satisfies the formula) yet it is not even decidable, let alone verifiable in polynomial time. NP-complete is the thin band where NP-hard and NP overlap: SAT, 3-SAT, Vertex Cover, Hamiltonian Path, and TSP-decision all live there. The reduction tree below the bars shows the standard chain every textbook proof follows — everything traces back to Cook-Levin, because that is the one proof that had to start from nothing.
@@ -107,27 +118,57 @@ NP-hard is drawn as the outermost band because it is **not** a subset of NP in g
 
 **Example A — binary numbers divisible by 3.** Track the running remainder mod 3 as you read bits left to right (most-significant bit first): reading bit `b` from remainder `r` gives new remainder `(2r + b) mod 3`, because appending a bit doubles the value and adds the bit.
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> r0
+    r0 --> r0: 0
+    r0 --> r1: 1
+    r1 --> r2: 0
+    r1 --> r0: 1
+    r2 --> r1: 0
+    r2 --> r2: 1
+    note right of r0: accepting (remainder 0)
+
+    class r0 train
+    class r1,r2 mathOp
 ```
-  state (remainder)   on 0        on 1        accepting?
-  ---------------------------------------------------------
-  r0  (start)           r0          r1          yes (0 is divisible by 3)
-  r1                    r2          r0
-  r2                    r1          r2
-```
+*r0 is both the start state and the only accepting state, since a remainder of 0 means the number read so far is divisible by 3.*
 
 Three states are necessary and sufficient — one per residue class mod 3. This is the same trick behind streaming checksum and CRC computation: a DFA can do bounded modular arithmetic on an input of unbounded length using *constant* memory, because the only fact that matters about the past is the current remainder.
 
 **Example B — strings ending in "01".** Track only "what would let me accept if the string ended right now": no useful progress (`q0`), just saw a 0 (`q1`), or just saw 0-then-1 (`q2`, accepting).
 
-```
-  state            on 0        on 1        accepting?
-  ------------------------------------------------------
-  q0  (start)       q1          q0          no
-  q1  (saw ...0)    q1          q2          no
-  q2  (saw ...01)   q1          q0          yes
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  trace on "1101":  q0 -1-> q0 -1-> q0 -0-> q1 -1-> q2   => ACCEPT
+    [*] --> q0
+    q0 --> q1: 0
+    q0 --> q0: 1
+    q1 --> q1: 0
+    q1 --> q2: 1
+    q2 --> q1: 0
+    q2 --> q0: 1
+    note right of q2: accepting (just saw 0-then-1)
+
+    class q2 train
+    class q0,q1 mathOp
 ```
+*Trace on `1101`: q0 -(1)-> q0 -(1)-> q0 -(0)-> q1 -(1)-> q2 -- accept.*
 
 Both examples need exactly 3 states. That is not a coincidence of these two problems — it reflects how much "memory of the past" the language actually requires, which is precisely what subset construction measures in general (§6.2).
 
@@ -167,10 +208,27 @@ def subset_construction(nfa: NFA, start: State, accept: set[State], alphabet: st
 
 **Worked example — "is the 3rd-from-last symbol a 1?"** This NFA needs only 4 states: stay in `q0` freely, but on a `1` also *guess* that this is the target symbol and branch to `q1`; two more symbols must follow to confirm the guess (`q1 -> q2 -> q3`, accepting).
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> q0
+    q0 --> q0: 0 or 1
+    q0 --> q1: 1 (guess)
+    q1 --> q2: 0 or 1
+    q2 --> q3: 0 or 1
+    note right of q3: accepting (3rd-from-last was 1)
+
+    class q3 train
+    class q0,q1,q2 mathOp
 ```
-  NFA transitions (n=3): q0 -0,1-> q0 (self loop),  q0 -1-> q1 (extra guess branch)
-                          q1 -0,1-> q2               q2 -0,1-> q3 (accept)
-```
+*The two edges out of q0 on `1` are the nondeterministic branch: stay in q0, or guess this is the 3rd-from-last symbol and advance toward q3.*
 
 Running `subset_construction` on this NFA and checking every string up to length 7 against the direct definition (`len(s) >= 3 and s[-3] == "1"`) confirms it exactly:
 
@@ -229,22 +287,36 @@ This equivalence is *why* two regex engines can implement the same pattern langu
 
 A context-free grammar for balanced parentheses needs one rule: `S -> ( S ) S | ε`. Unlike a regular grammar (restricted to `A -> aB` or `A -> a`), a CFG's right-hand side can contain an unbounded, self-referential mix of terminals and nonterminals — that recursive self-reference is exactly the "memory" a regex lacks.
 
-```
-  Leftmost derivation of "(())":
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  S  =>  (S)S       apply S -> (S)S   (outer pair; trailing S allows more parens later)
-     =>  ((S)S)S    apply S -> (S)S   (expand the leftmost S one level deeper)
-     =>  (()S)S     apply S -> eps    (innermost S vanishes)
-     =>  (())S      apply S -> eps    (the S right after "()" vanishes)
-     =>  (())       apply S -> eps    (trailing S vanishes -- derivation complete)
+    S0("S") -->|"S to (S)S"| S1("(S)S")
+    S1 -->|"S to (S)S"| S2("((S)S)S")
+    S2 -->|"S to eps"| S3("(()S)S")
+    S3 -->|"S to eps"| S4("(())S")
+    S4 -->|"S to eps"| S5("(())")
+
+    class S0,S5 io
+    class S1,S2 mathOp
+    class S3,S4 train
 ```
+*Each arrow applies one grammar rule to the leftmost remaining S, until only terminal parentheses are left.*
 
 A **pushdown automaton** recognizes the same language operationally: push a marker on `(`, pop on `)`, reject immediately if a pop finds an empty stack, and accept if the stack is exactly empty when input ends (PDAs may accept by final state or by empty stack — the two definitions are provably equivalent). Tracing `"(()())"`:
 
-```
-  input symbol:     (      (      )      (      )      )
-  PDA action:      push   push   pop    push   pop    pop
-  stack depth:       1      2      1      2      1      0
+```mermaid
+xychart-beta
+    title "PDA stack depth while tracing (()())"
+    x-axis ["( push", "( push", ") pop", "( push", ") pop", ") pop"]
+    y-axis "Stack depth" 0 --> 2
+    line [1, 2, 1, 2, 1, 0]
 ```
 
 The stack never goes negative and ends at depth 0 exactly when input is exhausted — accept. This single counter is all the "memory" a DFA is missing; a DFA cannot track it because the counter is unbounded, while a DFA's state set must be fixed and finite. (One subtlety worth flagging: CFGs can be **ambiguous** — more than one derivation tree for the same string, e.g. a naive `E -> E + E | E * E | id` grammar for arithmetic — which real parsers resolve with precedence/associativity rules layered on top of the grammar.)
@@ -305,6 +377,35 @@ A **reduction** A ≤p B means: given a polynomial-time algorithm for B, you can
 
 **The one-sentence check**: before writing a reduction, ask "if I could solve X quickly, could I use that to solve 3-SAT (or Halting) quickly?" If yes, the direction is correct.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph correct["Correct -- proves hardness"]
+        direction LR
+        hard1("Known-hard<br/>3-SAT or Halting") -->|"reduces into"| newprob1("New problem X")
+        newprob1 --> result1("X inherits<br/>the hardness")
+    end
+
+    subgraph wrong["Wrong -- proves nothing"]
+        direction LR
+        newprob2("New problem X") -->|"reduces into"| easy2("Known-easy<br/>problem Y")
+        easy2 --> result2("Only shows X is<br/>at most as hard as Y")
+    end
+
+    class hard1,result2 lossN
+    class newprob1,newprob2 mathOp
+    class result1 train
+    class easy2 base
+```
+*The arrow direction is everything: reducing a known-hard problem into the new one transports hardness onto it, while reducing the new problem into something easy only bounds it from above.*
+
 ### 6.9 P vs NP and NP-Completeness
 
 **Cook-Levin theorem (1971)**: Boolean satisfiability (SAT) is NP-complete — it was the *first* problem ever proven NP-complete, and every other NP-completeness proof reduces from SAT (or 3-SAT) rather than starting over. The proof encodes an arbitrary NP verifier's entire computation — its tape contents, head position, and state at every one of a polynomial number of time steps — as one giant Boolean formula that is satisfiable exactly when some certificate makes the verifier accept. Because the encoding works for *any* poly-time verifier, SAT can simulate every problem in NP.
@@ -359,6 +460,34 @@ A **reduction** A ≤p B means: given a polynomial-time algorithm for B, you can
 ---
 
 ## 9. When to Use / When NOT to Use
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["New problem<br/>to classify"]) --> nest{"Structure nests<br/>arbitrarily deep?"}
+    nest -->|"yes"| cfg("CFG / parser<br/>recursive descent, ANTLR, yacc")
+    nest -->|"no"| fixed{"Fixed, bounded shape,<br/>no nesting?"}
+    fixed -->|"yes"| dfa("DFA / regex<br/>prefer RE2 for linear time")
+    fixed -->|"no"| conflict{"Many-to-many mutual-<br/>exclusion constraints?"}
+    conflict -->|"yes"| nphard("NP-hard shape<br/>pivot: bounded search, approx, solver")
+    conflict -->|"no"| arbitrary{"Decide something for ALL<br/>arbitrary programs?"}
+    arbitrary -->|"yes"| undecidable("Halting-shaped<br/>build a bounded or heuristic version")
+    arbitrary -->|"no"| standard("Likely a standard<br/>polynomial algorithm")
+
+    class start io
+    class nest,fixed,conflict,arbitrary mathOp
+    class cfg,dfa train
+    class nphard,undecidable lossN
+    class standard base
+```
+*The four questions map onto the four subsections below -- follow whichever "yes" branch fires first and it names the machine model or fallback strategy to reach for.*
 
 **Reach for a DFA / regular expression when:**
 - The pattern has a fixed, bounded shape with no nesting — phone numbers, log-line prefixes, a compiler's lexical tokens (identifiers, numeric literals).
@@ -537,13 +666,22 @@ Recognizing NP-completeness should make you stop searching for a polynomial exac
 
 **Setup**: a university needs to schedule final exams for 40 courses into a fixed number of time slots such that no two courses sharing at least one student are scheduled in the same slot. Model courses as vertices and draw an edge between any two courses that share a student; assigning a time slot is exactly assigning a **color**, and the question "can this be done with k slots?" is exactly the graph k-coloring decision problem.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    roster(["Course roster<br/>+ enrollment data"]) -->|"conflict graph<br/>edge = shared student"| sched("Scheduler<br/>can_k_color(G,k)?<br/>assign slots")
+
+    class roster io
+    class sched mathOp
 ```
-+------------------+   conflict graph    +--------------------+
-|  Course roster   | -------------------> |  Scheduler          |
-|  + enrollment    |   (edge = shared     |  - can_k_color(G,k)? |
-|  data            |    student)          |  - assign slots      |
-+------------------+                      +--------------------+
-```
+*The shared-student edges built from the roster feed directly into the k-coloring decision the scheduler must answer.*
 
 **The k=2 case is a trap — it's actually easy.** Checking whether 2 slots suffice is exactly checking whether the conflict graph is **bipartite**, solvable in O(V+E) with a single BFS/DFS 2-coloring pass (color each vertex the opposite of its parent; a same-colored edge means "no"). See [Graphs, Tries, and Advanced Structures](../graphs_tries_and_advanced_structures/README.md) for the traversal mechanics this reuses.
 

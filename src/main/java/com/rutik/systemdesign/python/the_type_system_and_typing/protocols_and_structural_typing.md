@@ -272,6 +272,35 @@ handles any animal also handles dogs specifically (Liskov safe for parameter typ
 **Invariant** (default `TypeVar`): must match exactly. Suitable for mutable containers where
 both read and write occur, e.g., `list[int]` is NOT a subtype of `list[float]`.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start{"Where does T appear<br/>in the Protocol?"}
+    Start -->|"output only<br/>(producer)"| Co["T_co<br/>covariant=True"]
+    Start -->|"input only<br/>(consumer)"| Ctr["T_contra<br/>contravariant=True"]
+    Start -->|"read AND write<br/>(mutable)"| Inv["T<br/>invariant (default)"]
+
+    Co --> CoEx(["safe: Dog return<br/>where Animal expected"])
+    Ctr --> CtrEx(["safe: Animal handler<br/>also handles Dog"])
+    Inv --> InvEx(["must match exactly<br/>(mutable containers)"])
+
+    class Start mathOp
+    class Co,CoEx train
+    class Ctr,CtrEx req
+    class Inv,InvEx frozen
+```
+
+*Pick the TypeVar's variance from where `T` appears in the Protocol's methods — producer-only
+(return) positions are safely covariant, consumer-only (parameter) positions are safely
+contravariant, and positions that both read and write must stay invariant (see Pitfall 5).*
+
 ### 4.7 `@classmethod` and `@staticmethod` in Protocols
 
 ```python
@@ -332,50 +361,87 @@ class HasName(Protocol):
 
 ### Nominal vs Structural Type Hierarchy
 
-```
-NOMINAL (ABC)                          STRUCTURAL (Protocol)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-     Animal (ABC)                           Drawable (Protocol)
-       /    \                                    |
-    Dog     Cat                     +------------+------------+
-  (inherits) (inherits)             |            |            |
-                                  Circle       Rect        Widget
-                                (no import of Drawable — just has draw())
+    subgraph NOM["NOMINAL (ABC)"]
+        Animal("Animal<br/>(ABC)") -->|"inherits"| Dog(["Dog"])
+        Animal -->|"inherits"| Cat(["Cat"])
+    end
+
+    subgraph STR["STRUCTURAL (Protocol)"]
+        Drawable("Drawable<br/>(Protocol)") -.->|"just draw(),<br/>no import"| Circle(["Circle"])
+        Drawable -.->|"just draw(),<br/>no import"| Rect(["Rect"])
+        Drawable -.->|"just draw(),<br/>no import"| Widget(["Widget"])
+    end
+
+    class Animal,Drawable base
+    class Dog,Cat frozen
+    class Circle,Rect,Widget train
 ```
+
+*ABC forces every subclass into an explicit, locked inheritance link; Protocol lets unrelated classes satisfy the interface just by having the right method — no import, no registration.*
 
 ### Protocol Satisfaction Check Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Src([Source code]) --> Chk["mypy / pyright<br/>resolves Protocol members"]
+    Chk --> Q{"call site:<br/>has_all_members(Protocol)?"}
+    Q -->|"YES"| OK(("OK"))
+    Q -->|"NO"| Err[["error:<br/>incompatible type"]]
+    Chk --> Run["Runtime<br/>(Python interpreter)"]
+    Run --> Q2{"@runtime_checkable?"}
+    Q2 -->|"yes"| Hasattr["hasattr() loop<br/>(shallow check)"]
+    Q2 -->|"no"| NoAware["no Protocol<br/>awareness at all"]
+
+    class Src io
+    class Chk,Q,Q2 mathOp
+    class OK train
+    class Err lossN
+    class Run base
+    class Hasattr train
+    class NoAware frozen
 ```
-  Source code
-      |
-      v
-  mypy / pyright
-      |
-      +-- resolves Protocol members (methods + attrs + signatures)
-      |
-      +-- for each call site: arg_type.has_all_members(Protocol)?
-      |         YES -> OK
-      |         NO  -> error: "Argument 1 ... incompatible type"
-      |
-      v
-  Runtime (Python interpreter)
-      |
-      +-- @runtime_checkable? -> hasattr() loop (shallow)
-      +-- No @runtime_checkable? -> no Protocol awareness at all
-```
+
+*mypy/pyright and the Python runtime are two independent checks: mypy verifies full signatures at every call site, while the runtime only gains any Protocol awareness at all when the class is `@runtime_checkable` — and even then it runs only a shallow `hasattr()` loop (§4.2).*
 
 ### Protocol Composition
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Readable["Readable<br/>Protocol"] --> RW(("ReadWritable<br/>Protocol"))
+    Writable["Writable<br/>Protocol"] --> RW
+    RW --> Any(["any class with<br/>read() AND write()"])
+
+    class Readable,Writable,RW base
+    class Any train
 ```
-  Readable           Writable
-  Protocol           Protocol
-     |                  |
-     +------ ReadWritable ------+
-                 Protocol
-                    |
-            (any class with
-             read() AND write())
-```
+
+*Readable and Writable compose into ReadWritable; per §4.4, the new class must still list `Protocol` in its MRO, or mypy treats the composition as a concrete class and the structural-typing benefit is lost.*
 
 ---
 
@@ -737,6 +803,32 @@ Use `Protocol` when:
 3. You want to express contracts on **built-in or third-party types** retroactively.
 4. You are using **dependency injection** — service takes an interface, implementations are swappable.
 5. The interface is **purely behavioral** (no shared state or implementation).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start{"Need shared mixin<br/>implementation?"} -->|"yes"| ABC(["Use ABC"])
+    Start -->|"no"| Q2{"Need runtime<br/>TypeError enforcement?"}
+    Q2 -->|"yes"| ABC
+    Q2 -->|"no"| Q3{"Must downstream avoid<br/>inheriting your class?"}
+    Q3 -->|"yes"| Proto(["Use Protocol"])
+    Q3 -->|"no (default)"| Proto
+
+    class Start,Q2,Q3 mathOp
+    class ABC frozen
+    class Proto train
+```
+
+*Walking the two lists above as ordered gates: shared implementation or `TypeError`-on-instantiation
+needs push you to ABC; everything else defaults to Protocol, which is why Best Practice #1
+(§13) says to default to Protocol at library boundaries.*
 
 ---
 
@@ -1116,15 +1208,42 @@ registry.
 
 ### Design
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph FW["Framework (defines Protocols)"]
+        SC["SourceConnector<br/>(Protocol)"]
+        SK["SinkConnector<br/>(Protocol)"]
+        PR(["PipelineRunner"])
+    end
+
+    subgraph PLG["External Plugins (no framework import)"]
+        Kafka["KafkaSource"]
+        S3["S3Source"]
+        BQ["BigQuerySink"]
+        CH["ClickHouseSink"]
+        Future(("any future<br/>connector"))
+    end
+
+    SC -.->|"satisfied by"| Kafka
+    SC -.->|"satisfied by"| S3
+    SK -.->|"satisfied by"| BQ
+    SK -.->|"satisfied by"| CH
+    PR -->|"injects via constructor"| Kafka
+    PR -->|"injects via constructor"| BQ
+
+    class SC,SK,PR base
+    class Kafka,S3,BQ,CH,Future train
 ```
-     Framework (defines Protocols)          External Plugins (no framework import)
-     ─────────────────────────────          ──────────────────────────────────────
-     SourceConnector (Protocol)  ─── satisfied by ──>  KafkaSource
-     SinkConnector (Protocol)    ─── satisfied by ──>  BigQuerySink
-     PipelineRunner                                    S3Source
-           |                                           ClickHouseSink
-           +──── injects via constructor ────>         (any future connector)
-```
+
+*The framework owns `SourceConnector`/`SinkConnector` as Protocols; third-party plugins like `KafkaSource` and `BigQuerySink` satisfy them without ever importing the framework, and `PipelineRunner` injects whichever concrete connector it receives.*
 
 ### Implementation
 

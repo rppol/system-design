@@ -37,66 +37,105 @@ Imagine a bank that mails a withdrawal receipt only after the money is debited. 
 - **Separate DLQ per source**: avoids DLQ processing from one topic affecting another
 - **DLQ consumer**: monitoring, alerting, root cause analysis, manual replay after fix
 
+```mermaid
+stateDiagram-v2
+    state "Attempting Delivery" as Attempting
+    state "Exponential Backoff" as Backoff
+    state "Dead Letter Queue" as DLQ
+
+    [*] --> Attempting
+    Attempting --> Delivered: ack success
+    Attempting --> Backoff: exception
+    Backoff --> Attempting: retry after 1s / 2s / 4s / 8s
+    Backoff --> DLQ: max retries exceeded
+    Delivered --> [*]
+    DLQ --> [*]
+```
+
+Each failure escalates the wait — 1s, 2s, 4s, 8s — before the next attempt; once retries are exhausted the message moves to the DLQ instead of blocking healthy messages queued behind it.
+
 ---
 
 ## 5. Architecture Diagrams
 
+**Outbox Pattern (Polling Relay)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    orderSvc("Order Service<br/>@Transactional") -->|"INSERT order +<br/>INSERT outbox event<br/>same DB txn"| db[("orders +<br/>outbox_events")]
+    db -->|"SELECT unpublished<br/>LIMIT 100"| relay("Outbox Relay<br/>polls every 500ms")
+    relay -->|"publish"| topic(["Kafka topic<br/>order-events"])
+    relay -.->|"UPDATE published_at"| db
+    topic --> consumers(["Downstream<br/>Consumers"])
+
+    class orderSvc req
+    class db base
+    class relay mathOp
+    class topic req
+    class consumers io
 ```
-Outbox Pattern (Polling Relay)
-================================
 
-[Order Service]
-    |
-    | @Transactional
-    +--- INSERT INTO orders (id, status, ...) VALUES (...)
-    +--- INSERT INTO outbox_events (aggregate_id, event_type, payload) VALUES (...)
-    |    (same DB transaction — atomic)
-    |
-    v
-[Outbox Relay] (scheduled every 500ms)
-    |--- SELECT * FROM outbox_events WHERE published_at IS NULL LIMIT 100
-    |--- FOR EACH event: publish to Kafka topic
-    |--- UPDATE outbox_events SET published_at = NOW() WHERE id = event.id
-    |
-    v
-[Kafka Topic: order-events]
-    |
-    v
-[Downstream Consumers]
+The order write and its outbox insert commit in one local transaction, so a Kafka outage never loses or fabricates an event — the relay polling every 500ms is the only component that talks to Kafka, and the dotted edge marks its `published_at` update as the confirmation step.
 
+**Outbox Pattern (CDC with Debezium)**
 
-Outbox Pattern (CDC with Debezium)
-====================================
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-[PostgreSQL WAL]
-    |--- Logical replication slot
-    v
-[Debezium Connector]
-    |--- Reads INSERT/UPDATE/DELETE from outbox_events table
-    |--- Transforms: route to Kafka topic based on aggregate_type column
-    v
-[Kafka Topic: orders] (near-real-time, < 100ms)
-    |
-    v
-[Downstream Consumers]
+    wal[("PostgreSQL WAL<br/>logical replication slot")] --> connector("Debezium Connector<br/>reads outbox_events")
+    connector -->|"route by<br/>aggregate_type"| topic(["Kafka topic<br/>orders (under 100ms)"])
+    topic --> consumers(["Downstream<br/>Consumers"])
 
-
-Transactional Inbox (Deduplication)
-=====================================
-
-[Kafka Consumer]
-    |
-    | @Transactional
-    +--- INSERT INTO inbox_idempotency (message_id, processed_at)
-    |    ON CONFLICT DO NOTHING
-    |    -- if duplicate: returns 0 rows affected, skip
-    |
-    +--- IF rows_affected == 1:
-    |      process the message (business logic)
-    |      update application state
-    |
-    COMMIT (idempotency record + business state in same transaction)
+    class wal frozen
+    class connector mathOp
+    class topic req
+    class consumers io
 ```
+
+Debezium tails the WAL directly instead of polling the outbox table, cutting publish latency from the relay's 500ms-1s down to under 100ms with no added database load.
+
+**Transactional Inbox (Deduplication)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    consumer("Kafka Consumer<br/>@Transactional") --> insert("INSERT inbox_idempotency<br/>ON CONFLICT DO NOTHING")
+    insert --> decision{"rows_affected<br/>== 1?"}
+    decision -->|"0 rows: duplicate"| skip("Skip<br/>already processed")
+    decision -->|"1 row: new"| process("Process message<br/>+ update state")
+    skip --> commit((COMMIT))
+    process --> commit
+
+    class consumer req
+    class insert,decision mathOp
+    class skip lossN
+    class process train
+    class commit train
+```
+
+The INSERT's `ON CONFLICT DO NOTHING` is the dedup check: a redelivered message affects zero rows and returns without touching business state, while a new message processes and commits atomically with its idempotency record in the same transaction.
 
 ---
 
@@ -362,6 +401,28 @@ curl -X PUT http://schema-registry:8081/config/order-events-value \
   -H "Content-Type: application/json" \
   -d '{"compatibility": "BACKWARD"}'
 ```
+
+```mermaid
+sequenceDiagram
+    participant P1 as Producer (v1 schema)
+    participant SR as Schema Registry
+    participant C as Consumer (upgraded to v2)
+    participant P2 as Producer (upgraded to v2)
+
+    Note over SR: 1. Register v2 as BACKWARD compatible
+    C->>SR: check v2 against v1
+    SR-->>C: compatible - deploy consumer
+
+    Note over C: 2. Deploy consumer first
+    P1->>C: OrderCreatedEvent v1 (no currency)
+    C-->>C: reads fine, currency defaults to null
+
+    Note over P2: 3. Deploy producer second
+    P2->>C: OrderCreatedEvent v2 (currency=USD)
+    C-->>C: reads fine, currency populated
+```
+
+BACKWARD compatibility means the upgraded v2 consumer can read both the old v1 payload — currency defaults to null — and the new v2 payload once producers catch up, which is why consumers must deploy before producers, never the reverse.
 
 ---
 

@@ -62,14 +62,17 @@ Python version: 3.11/3.12. FastAPI version: 0.110+. Pydantic version: v2. SQLAlc
 
 Wraps each test in a database transaction that is rolled back, not committed:
 
-```
-test starts
-  BEGIN outer transaction
-    BEGIN SAVEPOINT sp1
-      test body (db calls hit real SQLAlchemy, real SQL, no commit)
-    ROLLBACK TO SAVEPOINT sp1
-  ROLLBACK outer transaction
-test ends — database state unchanged
+```mermaid
+sequenceDiagram
+    participant T as Test
+    participant DB as Database
+
+    T->>DB: BEGIN outer transaction
+    T->>DB: BEGIN SAVEPOINT sp1
+    Note over T,DB: test body runs here<br/>real SQLAlchemy, real SQL, no commit
+    T->>DB: ROLLBACK TO SAVEPOINT sp1
+    T->>DB: ROLLBACK outer transaction
+    Note over T,DB: test ends — database state unchanged
 ```
 
 This is faster than truncating tables and avoids needing a test-specific migration at teardown.
@@ -112,54 +115,71 @@ For routes that call external HTTP services via `httpx`, use `respx` to intercep
 
 ### Fixture Dependency Graph (per test)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CT(["conftest.py"]) --> ENG("engine<br/>session-scoped<br/>AsyncEngine")
+    CT --> TU("test_user<br/>function-scoped<br/>row via db_session")
+    ENG --> CONN("connection<br/>function-scoped<br/>BEGIN outer txn")
+    CONN --> SESS("db_session<br/>function-scoped<br/>AsyncSession")
+    SESS --> CLIENT("client<br/>function-scoped<br/>TestClient with override")
+    SESS --> AUTH(["auth_headers<br/>function-scoped<br/>Bearer token"])
+    CLIENT --> OVR("override get_db<br/>to db_session")
+
+    class CT io
+    class ENG base
+    class CONN mathOp
+    class SESS train
+    class CLIENT req
+    class AUTH io
+    class OVR mathOp
+    class TU train
 ```
-conftest.py
-    |
-    +-- engine (session-scoped) ─────── SQLAlchemy AsyncEngine (test DB or in-memory)
-    |        |
-    |        +-- connection (function-scoped) ── BEGIN outer transaction
-    |                  |
-    |                  +-- db_session (function-scoped) ── AsyncSession bound to connection
-    |                             |
-    |                             +-- client (function-scoped) ── TestClient with override
-    |                             |        |
-    |                             |        +-- app.dependency_overrides[get_db] = db_session
-    |                             |
-    |                             +-- auth_headers (function-scoped) ── {"Authorization": "Bearer ..."}
-    |
-    +-- test_user (function-scoped) ── User row inserted via db_session
-```
+
+The `engine` is built once per test session; every fixture beneath it — `connection`, `db_session`, `client`, `auth_headers`, `test_user` — is rebuilt and rolled back per test, which is what keeps tests independent of each other.
 
 ### Request Flow in a Route Test
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TB(["test body"]) --> POST(["TestClient.post<br/>POST /items/"])
+    POST --> ASGI("ASGI app<br/>FastAPI")
+    ASGI --> MW("Middleware stack<br/>CORS, auth, etc.")
+    MW --> RM("Route matching<br/>POST /items/")
+    RM --> DEP("Dependency resolution<br/>get_db, get_current_user<br/>both overridden")
+    DEP --> HANDLER("Route handler<br/>items.create<br/>inner commit only")
+    HANDLER --> ENC("Response encoding<br/>Pydantic v2")
+    ENC --> RESP(["Response 201<br/>Created"])
+    RESP --> ASSERT(["assert status_code == 201"])
+
+    class TB io
+    class POST req
+    class ASGI base
+    class MW mathOp
+    class RM mathOp
+    class DEP mathOp
+    class HANDLER train
+    class ENC mathOp
+    class RESP io
+    class ASSERT train
 ```
-test body
-   |
-   v
-TestClient.post("/items/", json={...})
-   |
-   v
-ASGI app (FastAPI)
-   |
-   +-- Middleware stack (CORS, auth middleware, etc.)
-   |
-   +-- Route matching  →  POST /items/
-   |
-   +-- Dependency resolution
-   |       get_db()        → overridden → yields test db_session
-   |       get_current_user() → overridden → returns fake_user
-   |
-   +-- Route handler (items.create)
-   |       db.add(item); await db.commit()  ← commit runs but outer txn not committed
-   |
-   +-- Response encoding (Pydantic v2 serialization)
-   |
-   v
-Response(status_code=201, body={"id": 1, ...})
-   |
-   v
-assert response.status_code == 201
-```
+
+Middleware, routing, and dependency resolution all run for real; only the two overridden dependencies (`get_db`, `get_current_user`) are swapped, and the handler's `db.commit()` only closes the inner SAVEPOINT — the outer transaction (and the real database) is never touched.
 
 ---
 
@@ -422,6 +442,24 @@ def test_item_response_schema(client):
 | Full process (real server + real DB) | None | Slow (100 ms+/test) | High | E2E smoke tests |
 | `respx` mock transport | HTTP boundary | Very fast | Low | Routes that call external APIs |
 
+Plotting the same five strategies on speed against isolation shows why `TestClient` + `dependency_overrides` is the default: it sits in the corner every other strategy trades away.
+
+```mermaid
+quadrantChart
+    title Testing Strategy: Speed vs Isolation
+    x-axis Slow --> Fast
+    y-axis Low Isolation --> Full Isolation
+    quadrant-1 Prefer for most tests
+    quadrant-2 Isolated but slower
+    quadrant-3 Reserve for a few E2E tests
+    quadrant-4 Fast but narrow isolation
+    TestClient with overrides: [0.95, 0.95]
+    AsyncClient with rollback: [0.75, 0.75]
+    Separate test DB: [0.45, 0.85]
+    Full process E2E: [0.1, 0.1]
+    respx mock transport: [0.9, 0.45]
+```
+
 | Client | Sync/Async test | Lifespan | BackgroundTasks | WebSocket |
 |---|---|---|---|---|
 | `TestClient` | Sync | Context manager only | Runs synchronously | Yes |
@@ -480,6 +518,29 @@ def test_create_item(client):
 def client(app):
     with TestClient(app) as c:  # __enter__ runs lifespan startup, __exit__ runs shutdown
         yield c
+```
+
+The two fixtures put the client on entirely different paths: one never enters the lifespan states at all, the other walks through startup and shutdown exactly like production.
+
+```mermaid
+stateDiagram-v2
+    state "Bare Client<br/>lifespan never runs" as Bare
+    state "Route Handler Called" as BareRoute
+    state "AttributeError<br/>no app.state.db" as Crash
+    state "Lifespan Started<br/>__enter__ sets app.state.db" as Entered
+    state "Test Body Runs<br/>full app state available" as Active
+    state "Lifespan Stopped<br/>__exit__ cleanup runs" as Stopped
+
+    [*] --> Bare: TestClient app<br/>no with-block
+    [*] --> Entered: with TestClient app as c
+
+    Bare --> BareRoute: client.post items
+    BareRoute --> Crash: reads app.state.db
+
+    Entered --> Active
+    Active --> Stopped: test completes
+    Stopped --> [*]
+    Crash --> [*]
 ```
 
 The lifespan context manager was introduced as the recommended pattern in Starlette 0.20+ / FastAPI 0.93+. Before that, startup/shutdown events were separate signals; `TestClient` did not guarantee they fired unless used as a context manager.

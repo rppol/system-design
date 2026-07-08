@@ -44,24 +44,77 @@ less when words share prefixes.
 - "Generate all subsets/permutations" with no dictionary involved ->
   [`backtracking.md`](backtracking.md)
 
+The signals and anti-signals above collapse into one routing decision:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["words / prefixes /<br/>dictionary mentioned"]) --> q1{"need prefix or<br/>startsWith queries?"}
+    q1 -->|"no: exact match only"| hashA("hashing_patterns.md")
+    q1 -->|"no: anagram grouping"| hashB("hashing_patterns.md")
+    q1 -->|"yes"| q2{"single pattern P<br/>inside one text T?"}
+    q2 -->|"yes"| kmp("KMP / Z-algorithm")
+    q2 -->|"no"| q3{"subsets/permutations,<br/>no dictionary?"}
+    q3 -->|"yes"| back("backtracking.md")
+    q3 -->|"no"| q4{"XOR / bitwise<br/>maximization?"}
+    q4 -->|"yes"| bintrie("binary trie +<br/>bit_manipulation.md")
+    q4 -->|"no"| trie("plain trie<br/>this pattern")
+    trie -.->|"also a letter grid?"| triebt("trie + backtracking.md<br/>Word Search II")
+
+    class start io
+    class q1,q2,q3,q4 mathOp
+    class hashA,hashB,kmp,back frozen
+    class trie,bintrie,triebt train
+```
+
+The four purple off-ramps (`hashA`/`hashB`/`kmp`/`back`) peel off the special
+cases first; whatever survives all four checks is a genuine trie problem
+(green), and a letter grid on top of that is Word Search II's
+trie-plus-backtracking combo.
+
 ---
 
 ## 2. Mental Model & Intuition
 
 A trie for the words `{"cat", "car", "card", "dog"}`:
 
-```
-                 root
-                /    \
-               c      d
-               |      |
-               a      o
-              / \     |
-             t   r    g (end)
-          (end)  |
-                  d (end)
-                 (end)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    root(["root"]) --> c("c")
+    root --> d1("d")
+    c --> a("a")
+    a --> t("t<br/>end: cat")
+    a --> r("r<br/>end: car")
+    r --> d2("d<br/>end: card")
+    d1 --> o("o")
+    o --> g("g<br/>end: dog")
+
+    class root io
+    class c,d1,a,o req
+    class t,r,d2,g train
+```
+
+Teal nodes are prefixes still in progress; green nodes are complete words.
+`r` is both a complete word (`car`, green) and an internal node with its own
+child `d` (`card`) — a trie node can be end-of-word and a branch point at
+the same time.
+
+```
 Path root -> c -> a -> t  spells "cat", and the 't' node is marked (end).
 Path root -> c -> a -> r  spells "car", and the 'r' node is ALSO marked (end)
    -- "car" is itself a complete word, but the trie continues beyond it.
@@ -201,15 +254,31 @@ def find_words(board: list[list[str]], words: list[str]) -> list[str]:
 (extends through 'a' -> 't', marks 't' as end, `word="oat"`), then "eat"
 (separate branch from root, marks final 't' as end, `word="eat"`).
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root(["root"]) --> o("o")
+    root --> e("e")
+    o --> a1("a<br/>end: oa")
+    e --> a2("a")
+    a1 --> t1("t<br/>end: oat")
+    a2 --> t2("t<br/>end: eat")
+
+    class root io
+    class o,e,a2 req
+    class a1,t1,t2 train
 ```
-        root
-       /    \
-      o      e
-      |      |
-      a(end="oa")  a
-      |      |
-      t(end="oat") t(end="eat")
-```
+
+Green nodes mark the three dictionary words the DFS below is hunting for;
+`oa` sits on the same path as `oat`, so finding one costs nothing extra
+toward finding the other.
 
 **DFS from (0,0) = 'o'**:
 
@@ -278,6 +347,36 @@ find the maximum XOR with a given number `x`, walk the trie greedily choosing
 the **opposite** bit of `x` at each level when available (opposite bits
 maximize XOR at that position). See
 [`bit_manipulation.md`](bit_manipulation.md) for the bit-level mechanics.
+
+A 3-bit example with `nums = [4, 3, 1]` (`100`, `011`, `001`) querying `x = 4`:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    x(["query x = 100, i.e. 4"]) --> r(("root"))
+    r -->|"bit2: pick 0<br/>opposite of x"| n0("0")
+    r -.->|"bit2: 1, skipped"| skip1("1-subtree, num 4")
+    n0 -->|"bit1: pick 1<br/>opposite of x"| n01("1")
+    n0 -.->|"bit1: 0, skipped"| skip2("0-subtree, num 1")
+    n01 -->|"bit0: only 1<br/>available"| leaf("011 = 3<br/>4 xor 3 = 7")
+
+    class x io
+    class r,n0,n01 mathOp
+    class skip1,skip2 frozen
+    class leaf train
+```
+
+Orange nodes are the greedy decision points: at each level the walk skips
+the purple sibling subtree and takes the opposite bit of `x`, landing on the
+green answer leaf. Bit0 has only one child, so the choice is forced there —
+it still happens to be optimal. Maximum XOR = `7` (`4 xor 3`).
 
 **Replace Words** ([LC 648](https://leetcode.com/problems/replace-words/)):
 insert all dictionary "roots" into a trie. For each word in the sentence,

@@ -29,6 +29,34 @@ The defining test: **are the array's values exactly the indices (or index+1) of 
 
 ## 2. Mental Model & Intuition
 
+Every visit to index `i` collapses into one decision — swap and retry, or advance:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    visit(["visit index i"]) --> cmp{"nums[i] ==<br/>nums[home]?"}
+    cmp -->|"no, misplaced"| swap("swap nums[i] into<br/>its home slot")
+    swap -.->|"stay at i, retry"| cmp
+    cmp -->|"yes, i is home"| placed("home reached,<br/>placed for good")
+    cmp -->|"yes, i not home"| dup("duplicate value<br/>caught here")
+    placed --> next(["i += 1, advance"])
+    dup --> next
+
+    class visit,next io
+    class cmp,swap mathOp
+    class placed train
+    class dup lossN
+```
+
+*A swap only ever fires when it seats a value in its true home for good — a match (home reached, or a duplicate caught) always advances `i`, while a mismatch retries the same `i` (dotted edge). Because every swap permanently places one more element, the total number of swaps across the whole run is bounded by `n` — the traces below make this concrete with actual numbers.*
+
 ```
 Placing each number at its "home" index (value v -> index v-1)
 
@@ -262,6 +290,34 @@ def cyclic_sort_fixed(nums: list[int]) -> None:
 - **[Hashing Patterns](hashing_patterns.md)** — the O(n)-space fallback for *any* cyclic-sort problem; always mention this as the "obvious" solution before optimizing to O(1) space with cyclic sort. If the problem doesn't explicitly require O(1) space, hashing is simpler to write correctly.
 - **[Fast & Slow Pointers](fast_and_slow_pointers.md)** — for "Find the Duplicate Number" specifically, when the array **must not be mutated**, Floyd's cycle detection (treating `nums[i]` as a pointer to index `nums[i]`) achieves O(n) time, O(1) space, *without* modifying the array — strictly better than cyclic sort when mutation is disallowed.
 - **Counting sort** — cyclic sort is conceptually a special case of counting sort / pigeonhole sort where the "count array" is the input array itself (because values are a permutation of indices); if values are NOT a near-permutation of `[0,n)` (e.g., many duplicates of a few values), a separate counting array is more natural.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["array of size n"]) --> bound{"values bounded<br/>by range 1..n?"}
+    bound -->|"no, arbitrary range"| kth{"need kth smallest<br/>or largest?"}
+    kth -->|"yes"| topk(["Top K Elements"])
+    kth -->|"no"| hash1(["Hashing Patterns<br/>O(n) space"])
+    bound -->|"yes, candidate"| mutate{"array may be<br/>mutated in place?"}
+    mutate -->|"no"| duponly{"need only the<br/>single duplicate?"}
+    duponly -->|"yes"| fastslow(["Fast and Slow Pointers<br/>no mutation needed"])
+    duponly -->|"no"| hash2(["Hashing Patterns<br/>O(n) space"])
+    mutate -->|"yes"| cyclic(["Cyclic Sort<br/>O(n) time, O(1) space"])
+
+    class start io
+    class bound,kth,mutate,duponly mathOp
+    class topk,hash1,hash2,fastslow frozen
+    class cyclic train
+```
+
+*Three questions route you away from cyclic sort: an unbounded value range sends you to hashing (or Top K Elements for a kth-smallest/largest ask); a no-mutation constraint sends you to hashing, or, for the single-duplicate case specifically, Fast & Slow Pointers. Cyclic sort remains the answer only when values are `[1,n]`-bounded and the array can be rearranged in place.*
 
 ---
 

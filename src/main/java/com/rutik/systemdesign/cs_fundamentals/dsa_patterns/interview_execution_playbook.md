@@ -34,6 +34,35 @@ Each phase below expands on [README §1](README.md#1-the-universal-problem-solvi
 with: the **goal**, **what strong execution sounds like**, and the **failure
 modes** that cost candidates the most signal.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    U(["Understand<br/>3-5 min"]) --> M("Match<br/>2-3 min")
+    M --> P("Plan<br/>3-5 min")
+    P --> I("Implement<br/>15-20 min")
+    I --> R("Review<br/>3-5 min")
+    R --> E(["Evaluate<br/>2-3 min"])
+    I -.->|"runs long"| Squeeze{"Eats into<br/>Review and Evaluate"}
+    Squeeze -.-> R
+
+    class U,E io
+    class M,P,R train
+    class I mathOp
+    class Squeeze lossN
+```
+
+The six UMPIRE phases run left to right in a single 45-minute loop; Implement
+is by far the widest budget (15-20 min) and, per §7's time-management data,
+the phase most likely to run long and squeeze Review and Evaluate — which is
+exactly why Understand and Match must never be skipped to "save time."
+
 ### U — Understand (3-5 min)
 
 **Goal:** leave this phase with a precise, agreed-upon problem statement and
@@ -288,70 +317,73 @@ signals you have time-management awareness.
 compressed table. Here is the same decision tree with example phrases for
 each branch — the goal is to never sit in silence for more than ~30 seconds.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Stuck(["No progress<br/>for 30+ seconds"]) --> Q{"Which UMPIRE<br/>phase is stuck?"}
+
+    subgraph Recognition["Stuck at Recognition (2+ min, no pattern)"]
+        direction TB
+        R1("Restate data shape:<br/>array / string / tree / graph?")
+        R2("Run README §5 tree out loud:<br/>sorted? contiguous subarray?")
+        R3{"Still stuck after 1 more min?<br/>Start brute force,<br/>find bottleneck later"}
+        R1 --> R2 --> R3
+    end
+
+    subgraph Optimization["Stuck at Optimization (brute force works)"]
+        direction TB
+        O1("Name what the<br/>brute force recomputes")
+        O2{"What's the<br/>problem shape?"}
+        O3("Subarray / substring:<br/>sliding window or<br/>prefix sum + hashmap")
+        O4("Tree / graph:<br/>pass state down or<br/>return state up")
+        O5("Min / max / top-k:<br/>heap, or binary<br/>search on the answer")
+        O6{"Still stuck?<br/>Proceed with<br/>brute force"}
+        O1 --> O2
+        O2 -->|"subarray"| O3
+        O2 -->|"tree/graph"| O4
+        O2 -->|"top-k"| O5
+        O3 --> O6
+        O4 --> O6
+        O5 --> O6
+    end
+
+    subgraph Implementation["Stuck at Implementation (code isn't working)"]
+        direction TB
+        I1("Write the invariant<br/>as a comment first")
+        I2("Trace the example on paper<br/>to find where it diverges")
+        I3{"Suspect line found?<br/>State the reasoning,<br/>then fix it"}
+        I1 --> I2 --> I3
+    end
+
+    subgraph Blank["Completely Blank (no idea where to start)"]
+        direction TB
+        B1("Start the most naive<br/>approach at any complexity")
+        B2{"Still blank?<br/>Ask the interviewer for<br/>a constraint hint"}
+        B1 --> B2
+    end
+
+    Q -->|"no pattern"| R1
+    Q -->|"brute force<br/>only"| O1
+    Q -->|"approach known,<br/>bug in code"| I1
+    Q -->|"no idea<br/>at all"| B1
+
+    class Stuck io
+    class Q,O2 mathOp
+    class R1,R2,O1,O3,O4,O5,I1,I2,B1 train
+    class R3,O6,I3 lossN
+    class B2 frozen
 ```
-STUCK AT RECOGNITION (>2 min, no pattern identified)
-  |
-  +-- Say: "Let me re-read the problem and focus on the data shape.
-  |         [Restate: array/string/tree/graph?] [Restate: what's being
-  |         asked — count, min/max, all-of, exists?]"
-  |
-  +-- Run the README §5 decision tree OUT LOUD:
-  |     "Is the input sorted? No. Is it about contiguous subarrays? ...
-  |      Yes — that suggests sliding window or prefix sum."
-  |
-  +-- If still stuck after another minute:
-        Say: "I don't immediately see an optimization, so let me start
-        with a brute force and look for the bottleneck as I write it —
-        sometimes the optimization becomes clear once I see what's
-        being recomputed."
 
-STUCK AT OPTIMIZATION (brute force works, can't improve)
-  |
-  +-- Say: "Let me look at what my brute force recomputes.
-  |         [Identify the specific repeated computation]."
-  |
-  +-- Ask pattern-specific questions out loud:
-  |     "Is this a subarray/substring problem?"
-  |        -> "Can a sliding window avoid recomputation?"
-  |        -> "Can a prefix sum + hashmap turn this into O(1) lookups?"
-  |     "Is this about a tree/graph?"
-  |        -> "Can I pass state DOWN (parameters) or return state UP
-  |            (return values) instead of recomputing per node?"
-  |     "Is this a min/max/top-k question?"
-  |        -> "Can a heap maintain the answer incrementally?"
-  |        -> "Can binary search on the ANSWER plus a feasibility
-  |            check work?"
-  |
-  +-- If still stuck:
-        Say: "I'll proceed with the brute force, get it correct, and
-        revisit the optimization if time allows — I want to make sure
-        I have a working solution first."
-
-STUCK AT IMPLEMENTATION (know the approach, code isn't working)
-  |
-  +-- Say: "Let me write the invariant as a comment first, then make sure
-  |         my loop maintains it." [Write: # invariant: ...]
-  |
-  +-- Isolate: "Let me trace through with the example to find where this
-  |             diverges from what I expect." [Trace 2-3 iterations on
-  |             paper/scratchpad]
-  |
-  +-- If a specific line is suspect:
-        Say: "I think the issue is here — [line] — because [specific
-        reasoning about what the line does vs. what it should do]."
-
-COMPLETELY BLANK (no idea where to start)
-  |
-  +-- Say: "Let me start with the most naive approach I can think of:
-  |         [even O(2^n) or O(n!) is fine] — at least this gives us a
-  |         correct baseline and might reveal structure."
-  |
-  +-- If even brute force isn't obvious:
-        Say: "Could you give me a hint about which part of the
-        constraints I should focus on?" — asking for a hint after a
-        genuine attempt is FAR better than extended silence, and most
-        interviewers expect to give 1-2 hints in a 45-minute loop.
-```
+The decision tree never has a "keep thinking silently" branch — every leaf is
+a spoken line, which is the entire point (§4's own goal statement: never sit
+in silence for more than ~30 seconds).
 
 ---
 
@@ -493,6 +525,29 @@ itself a communication technique.
 
 ## 6. Common Anti-Patterns & How to Recover
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A1("Jump to code<br/>without clarifying") -->|"fix"| F1("Clarify upfront<br/>in 20-30 seconds")
+    A2("Go silent<br/>when stuck") -->|"fix"| F2("Narrate<br/>while thinking")
+    A3("Unjustified<br/>complexity claim") -->|"fix"| F3("Claim, then<br/>justification")
+
+    class A1,A2,A3 lossN
+    class F1,F2,F3 train
+```
+
+A quick-scan map of the three anti-patterns below and their fixes, for the
+post-mock review this playbook's "How to use this file" list recommends:
+check whether you fell into any of the red boxes, and whether you recovered
+with the matching green fix.
+
 ### Anti-pattern 1: Jumping to code without clarifying
 
 ```
@@ -563,14 +618,17 @@ is what's actually being graded.
 
 ### Standard 45-Minute Loop (one Medium problem)
 
+```mermaid
+xychart-beta
+    title "45-Minute Loop - Budget Ceiling by Phase (minutes)"
+    x-axis ["Understand", "Match", "Plan", "Implement", "Review", "Evaluate", "Buffer"]
+    y-axis "Minutes (upper bound)" 0 --> 20
+    bar [5, 3, 5, 20, 5, 3, 7]
 ```
-0:00 -------- 0:05 -------- 0:08 -------- 0:13 -------- 0:33 -------- 0:38 -- 0:45
-|  Understand |    Match    |    Plan     |        Implement         | Review | Evaluate |
-|   3-5 min   |   2-3 min   |   3-5 min   |        15-20 min          | 3-5 min| 2-3 min  |
-                                                                                  |
-                                                                          5-7 min buffer
-                                                                       for follow-ups / Q&A
-```
+
+Bars use the upper bound of each phase's stated range (3-5, 2-3, 3-5, 15-20,
+3-5, 2-3 min) plus the 5-7 min follow-up buffer — Implement dwarfs every other
+phase, which is exactly why it is the one most likely to run over.
 
 If Implement runs long (common), it eats into Review/Evaluate first — never
 skip Understand or Match, since a wrong pattern wastes the ENTIRE remaining
@@ -578,14 +636,17 @@ budget.
 
 ### 60-Minute Loop (Medium + follow-up, or Medium + Easy)
 
+```mermaid
+xychart-beta
+    title "60-Minute Loop - Time Budget by Segment (minutes)"
+    x-axis ["Problem 1 (UMPIRE)", "Follow-up / 2nd problem", "Wrap-up"]
+    y-axis "Minutes" 0 --> 40
+    bar [35, 15, 10]
 ```
-0:00 ---------------- 0:35 ---------------- 0:50 -------------- 0:60
-|   Problem 1 (full UMPIRE, as above)  |  Follow-up / harder  |  Wrap-up  |
-|              ~35 min                  |  variant of P1, OR   |  Q&A for |
-|                                        |  a second (often     |  candidate|
-|                                        |  Easy) problem        |          |
-|                                        |     ~15 min           | ~5-10 min|
-```
+
+Problem 1 alone consumes well over half the loop (~35 of ~60 min); the
+follow-up is either a harder variant of the same problem or a second, often
+Easy, problem in the remaining ~15 min.
 
 For the follow-up phase, you've already done Understand/Match for the
 underlying problem — re-use that context explicitly: "this is the same

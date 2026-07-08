@@ -141,66 +141,80 @@ class Settings(BaseSettings):
 
 ### Settings resolution order (pydantic-settings v2)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["1. Environment variables<br/>APP_DATABASE_URL=..."]) -->|"checked first"| B(["2. .env files<br/>last file in list wins"])
+    B -->|"if unset"| C(["3. secrets_dir files<br/>/run/secrets/field_name"])
+    C -->|"if unset"| D(["4. Field defaults<br/>debug: bool = False"])
+
+    class A io
+    class B base
+    class C frozen
+    class D train
 ```
- Highest priority
-        |
-        v
- ┌─────────────────────────────────────────────────────────────────┐
- │  1. Environment variables          (APP_DATABASE_URL=...)       │
- ├─────────────────────────────────────────────────────────────────┤
- │  2. .env file(s)                   (last file in list wins)     │
- ├─────────────────────────────────────────────────────────────────┤
- │  3. secrets_dir files              (/run/secrets/<field_name>)  │
- ├─────────────────────────────────────────────────────────────────┤
- │  4. Field defaults                 (debug: bool = False)        │
- └─────────────────────────────────────────────────────────────────┘
-        |
-        v
- Lowest priority
-```
+
+Each source is checked in strict priority order top-to-bottom; the first one that supplies a value wins outright, with no merging of list or dict values across layers (see Q4).
 
 ### Singleton injection flow in FastAPI
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Process start"]) --> B("get_settings called once<br/>@lru_cache stores instance<br/>~2 ms cold start")
+    B -->|"Settings object"| C(["FastAPI DI graph<br/>Depends on get_settings"])
+    C --> D(["Route handler receives settings<br/>same Settings object every request"])
+
+    class A io
+    class B mathOp
+    class C req
+    class D train
 ```
- Process start
-      │
-      ▼
- ┌──────────────────────────────┐
- │  get_settings() called once  │
- │  @lru_cache stores instance  │  ~2 ms cold start overhead
- └──────────────┬───────────────┘
-                │ Settings object
-                ▼
- ┌──────────────────────────────┐
- │  FastAPI DI graph            │
- │  Depends(get_settings)       │──────────────────────────────┐
- └──────────────────────────────┘                              │
-                                                               ▼
-                                              ┌────────────────────────────┐
-                                              │  Route handler receives    │
-                                              │  settings: Settings        │
-                                              │  (same object every req.)  │
-                                              └────────────────────────────┘
-```
+
+The `~2 ms` construction cost from the priority-resolution walk above is paid once per worker process; every later `Depends(get_settings)` call in the DI graph returns the identical cached object (see Q2).
 
 ### Layered environment override diagram
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ROOT(["Base .env<br/>committed<br/>database_url, log_level"])
+    TEST(".env.test overlay<br/>committed<br/>database_url, redis_url")
+    DEV(".env.development<br/>gitignored<br/>jwt_secret")
+    PROD(["Environment variables<br/>production, platform-injected<br/>APP_DATABASE_URL, APP_JWT_SECRET"])
+
+    ROOT --> TEST
+    ROOT --> DEV
+    ROOT -.->|"replaced entirely in prod"| PROD
+
+    class ROOT base
+    class TEST train
+    class DEV io
+    class PROD frozen
 ```
-.env (base, committed)
-│  database_url = "postgresql://localhost/dev"
-│  log_level = "DEBUG"
-│
-├── .env.test (test overlay, committed)
-│   │  database_url = "postgresql://localhost/test"
-│   │  redis_url = "redis://localhost:6379/1"
-│
-├── .env.development (local, gitignored)
-│   │  jwt_secret = "local-only-insecure"
-│
-└── Environment variables (production, injected by platform)
-    │  APP_DATABASE_URL = "postgresql://rds-prod.internal/app"
-    │  APP_JWT_SECRET   = "<vault-injected>"
-```
+
+Test and development overlay the base `.env`; production instead replaces it entirely with platform-injected environment variables, the highest-priority source in the resolution order above.
 
 ---
 
@@ -270,6 +284,18 @@ async def health(settings: SettingsDep) -> dict[str, str | bool]:
         "log_level": settings.log_level,
     }
 ```
+
+The `@lru_cache` decorator above turns `get_settings()` into a small state machine — the first call pays the construction-and-validation cost, and every call after that is a free cache hit until something explicitly clears it:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Uninitialized
+    Uninitialized --> Cached: first get_settings call<br/>constructs + validates, ~2 ms
+    Cached --> Cached: later calls<br/>cache hit, 0 ms
+    Cached --> Uninitialized: cache_clear called<br/>lifespan shutdown or test teardown
+```
+
+Every request served by the same worker process shares the one `Cached` instance; only a `cache_clear()` call — in the `lifespan` shutdown hook or a test fixture's teardown — resets the cycle so the next call re-validates from scratch.
 
 ### 6.2 SecretStr in practice
 
@@ -451,6 +477,38 @@ def client(mock_settings: Settings) -> TestClient:
 - The codebase has more than one service or more than a handful of config values
 - Tests need to swap config values — monkeypatching `os.environ` in every test is fragile and order-sensitive
 - Any secret values are involved — no masking, no audit trail
+
+Collapsing the guidance above into a single decision path:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["New service<br/>needs configuration"]) --> Q1{"Building a<br/>FastAPI service?"}
+    Q1 -->|"yes"| R1(["pydantic-settings<br/>+ @lru_cache"])
+    Q1 -->|"no"| Q2{"Need TOML/YAML layered<br/>files or Vault / AWS SM<br/>loaders?"}
+    Q2 -->|"yes"| R2(["dynaconf"])
+    Q2 -->|"no"| Q3{"One-off script,<br/>no third-party deps allowed?"}
+    Q3 -->|"yes"| R3(["raw os.environ"])
+    Q3 -->|"no"| R4(["avoid scattered<br/>inline os.getenv calls<br/>multi-service or secrets involved"])
+
+    class START io
+    class Q1 mathOp
+    class Q2 mathOp
+    class Q3 mathOp
+    class R1 train
+    class R2 base
+    class R3 frozen
+    class R4 lossN
+```
+
+Reach for `pydantic-settings` by default, drop to `dynaconf` only when the config format itself needs to be TOML/YAML with layered merging, and treat scattered `os.getenv()` calls as the anti-pattern to grow out of once a codebase outgrows a single script.
 
 ---
 
@@ -679,36 +737,48 @@ A FastAPI service needs to run across three environments — local development, 
 
 ### ASCII Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PLAT(["Deployment platform<br/>ECS / K8s<br/>injects APP_DATABASE_URL, APP_JWT_SECRET, APP_REDIS_URL"])
+    START("Process start<br/>Settings constructor validates all fields<br/>fail-fast, before HTTP traffic")
+    CACHE(("@lru_cache<br/>single Settings instance"))
+
+    subgraph INIT["Startup initialisers"]
+        direction LR
+        DB(["DB pool init<br/>settings.database_url"])
+        REDIS(["Redis pool init<br/>settings.redis_url"])
+        JWT(["JWT middleware<br/>settings.jwt_secret"])
+    end
+
+    HANDLERS(["FastAPI request handlers<br/>Depends on get_settings<br/>same Settings object injected"])
+
+    PLAT -->|"env vars"| START
+    START --> CACHE
+    CACHE --> DB
+    CACHE --> REDIS
+    CACHE --> JWT
+    DB --> HANDLERS
+    REDIS --> HANDLERS
+    JWT --> HANDLERS
+
+    class PLAT frozen
+    class START mathOp
+    class CACHE base
+    class DB train
+    class REDIS train
+    class JWT train
+    class HANDLERS req
 ```
-  ┌─────────────────────────────────────────────────────────────────┐
-  │ Deployment platform (ECS / K8s)                                 │
-  │   Environment variables injected at container start:            │
-  │   APP_DATABASE_URL, APP_JWT_SECRET, APP_REDIS_URL               │
-  └───────────────────────────┬─────────────────────────────────────┘
-                              │ env vars
-                              ▼
-  ┌─────────────────────────────────────────────────────────────────┐
-  │ Process start                                                   │
-  │   get_settings() ──► Settings() constructor                     │
-  │     reads: env vars > .env.{ENV} > .env > defaults             │
-  │     validates all fields (fail-fast; no HTTP traffic yet)       │
-  │   @lru_cache stores single Settings instance                    │
-  └───────────────────────────┬─────────────────────────────────────┘
-                              │ Settings object
-                              ▼
-  ┌──────────────────┐   ┌────────────────────┐   ┌──────────────────┐
-  │  DB pool init    │   │  Redis pool init   │   │  JWT middleware  │
-  │  (settings       │   │  (settings.        │   │  (settings.      │
-  │  .database_url)  │   │   redis_url)       │   │   jwt_secret)    │
-  └──────────────────┘   └────────────────────┘   └──────────────────┘
-                              │
-                              ▼
-              ┌───────────────────────────────┐
-              │  FastAPI request handlers     │
-              │  Depends(get_settings)        │
-              │  Same Settings object injected│
-              └───────────────────────────────┘
-```
+
+Deployment-injected environment variables flow through the one validated `Settings` instance into every subsystem that depends on it, so a secret rotation only requires a new env var value and a clean restart — no code change.
 
 ### Implementation
 

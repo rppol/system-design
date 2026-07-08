@@ -180,139 +180,205 @@ Common algorithms: RSA-PSS (RSA with probabilistic padding), ECDSA (elliptic cur
 
 ### Hash Function Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Input message<br/>any size"]) --> B["SHA-256<br/>64 rounds of mixing"]
+    B --> C(["Fixed digest<br/>32 bytes = 256 bits"])
+
+    class A io
+    class B mathOp
+    class C train
 ```
-Input message (any size)
-        |
-        v
-+------------------+
-|   Hash Function   |   SHA-256: 64 rounds of mixing
-|   (SHA-256)       |
-+------------------+
-        |
-        v
-Fixed-size output: 32 bytes (256 bits)
-e9d71f5e...  <-- completely different from SHA-256("Hell")
-                    even though input differs by 1 bit (avalanche)
-```
+
+SHA-256 compresses any-length input into a fixed 32-byte digest through 64 mixing rounds; flipping a single input bit changes roughly half the output bits (the avalanche effect), so similar inputs never produce similar hashes.
 
 ### Symmetric Encryption (AES-256-GCM)
 
-```
-Plaintext ──────────────────────────────────────────┐
-                                                     v
-32-byte key ──> [ AES-256-GCM ] <── 12-byte nonce (unique per message)
-                      |
-                      v
-          Ciphertext (same length as plaintext)
-          +
-          16-byte authentication tag
-          +
-          nonce (sent alongside ciphertext)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Decryption:
-Ciphertext + tag + nonce + key ──> [ AES-256-GCM Decrypt ]
-        |
-        v (tag verified before any plaintext released)
-Plaintext OR "Authentication Failed" exception
+    subgraph ENC["Encryption"]
+        direction LR
+        P(["Plaintext"]) --> AG["AES-256-GCM<br/>Encrypt"]
+        K1(["32-byte key"]) --> AG
+        N1(["12-byte nonce<br/>unique per message"]) --> AG
+        AG --> CT(["Ciphertext + tag<br/>+ nonce"])
+    end
+
+    subgraph DEC["Decryption"]
+        direction LR
+        CT2(["Ciphertext + tag<br/>+ nonce + key"]) --> AGD["AES-256-GCM<br/>Decrypt"]
+        AGD -->|"tag valid"| PT(["Plaintext"])
+        AGD -.->|"tag invalid"| ERR(["Authentication Failed<br/>exception"])
+    end
+
+    class P,K1,N1,CT2 io
+    class AG,AGD mathOp
+    class CT,PT train
+    class ERR lossN
 ```
+
+AES-256-GCM binds encryption to a 16-byte authentication tag; decryption verifies that tag before releasing any plaintext, so tampered ciphertext fails closed with an exception instead of returning corrupted data.
 
 ### Asymmetric Key Exchange + Hybrid Encryption
 
+```mermaid
+sequenceDiagram
+    participant A as Alice
+    participant B as Bob
+
+    Note over A: RSA key pair<br/>pub_A, priv_A
+    Note over B: RSA key pair<br/>pub_B, priv_B
+
+    B->>A: Bob's public key pub_B<br/>(key directory or cert)
+    Note over A: Generate random<br/>AES-256 key K
+    Note over A: encrypted_K = RSA_encrypt(pub_B, K)
+
+    A->>B: encrypted_K + AES-GCM(K, data)
+
+    Note over B: K = RSA_decrypt(priv_B, encrypted_K)
+    Note over B: data = AES-GCM_decrypt(K, ciphertext)
 ```
-Alice                              Bob
-  |                                  |
-  |  Alice's RSA key pair:           |  Bob's RSA key pair:
-  |  pub_A, priv_A                   |  pub_B, priv_B
-  |                                  |
-  |--- Bob's public key (pub_B) --->|  (key directory or cert)
-  |                                  |
-  |  Generate random AES-256 key K  |
-  |  encrypted_K = RSA_encrypt(pub_B, K)
-  |                                  |
-  |--- encrypted_K + AES-GCM(K, data) --->|
-  |                                  |
-  |                    K = RSA_decrypt(priv_B, encrypted_K)
-  |                    data = AES-GCM_decrypt(K, ciphertext)
-```
+
+Bob shares his RSA public key; Alice generates a one-time AES-256 key, wraps it with Bob's public key, and sends it alongside the AES-GCM-encrypted payload — hybrid encryption gets RSA's key-distribution benefit without paying RSA's ~10 ms-per-operation cost for bulk data.
 
 ### HMAC Construction
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    K(["Key K<br/>padded to block size"])
+
+    K --> IP["XOR ipad<br/>0x36 repeated"]
+    IP --> CC1["Concat with<br/>message"]
+    CC1 --> H1["Hash function"]
+    H1 --> IH(["Inner hash"])
+
+    K --> OP["XOR opad<br/>0x5C repeated"]
+    IH --> CC2["Concat with<br/>inner hash"]
+    OP --> CC2
+    CC2 --> H2["Hash function"]
+    H2 --> OUT(["HMAC output"])
+
+    class K io
+    class IP,OP,CC1,CC2,H1,H2 mathOp
+    class IH,OUT train
 ```
-Key K (padded to block size)
-    |
-    |--- XOR ipad (0x36...) -------> [  K XOR ipad  ]
-    |                                        |
-    |                                  concat with message
-    |                                        |
-    |                                   Hash function
-    |                                        |
-    |                                   inner hash
-    |
-    |--- XOR opad (0x5C...) -------> [  K XOR opad  ]
-                                             |
-                                       concat with inner hash
-                                             |
-                                        Hash function
-                                             |
-                                         HMAC output
-```
+
+HMAC nests two hash passes — an inner hash over (K XOR ipad) concatenated with the message, then an outer hash over (K XOR opad) concatenated with that inner hash — which is what defeats the length-extension attacks that break a naive H(key || message) construction.
 
 ### Diffie-Hellman Key Exchange
 
-```
-Public knowledge: prime p, generator g
+```mermaid
+sequenceDiagram
+    participant A as Alice
+    participant B as Bob
 
-Alice                                Bob
-secret a (random)                    secret b (random)
-A = g^a mod p  ──── send A ────>    A received
-                <─── send B ────    B = g^b mod p
+    Note over A,B: Public knowledge: prime p, generator g
 
-shared = B^a mod p                  shared = A^b mod p
-       = g^(ab) mod p               = g^(ab) mod p
-       
-Both arrive at the SAME shared secret.
-Eavesdropper sees g^a mod p and g^b mod p but cannot
-compute g^(ab) mod p without discrete logarithm.
+    Note over A: secret a (random)
+    Note over B: secret b (random)
+
+    A->>B: A = g^a mod p
+    B->>A: B = g^b mod p
+
+    Note over A: shared = B^a mod p<br/>= g^(ab) mod p
+    Note over B: shared = A^b mod p<br/>= g^(ab) mod p
+
+    Note over A,B: Both derive the SAME secret.<br/>An eavesdropper sees g^a and g^b<br/>but cannot compute g^(ab) mod p<br/>without the discrete logarithm.
 ```
+
+Alice and Bob each combine their own secret with the other's public value to land on the same shared key g^(ab) mod p; an eavesdropper who intercepts g^a and g^b cannot derive it without solving the discrete logarithm problem.
 
 ### Password Storage Evolution
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph G1["BROKEN: Plain text"]
+        direction LR
+        A1(["Store password123<br/>as-is"]) --> B1{"DB leaked?"}
+        B1 -->|"yes"| C1(["Instant compromise<br/>of every account"])
+    end
+
+    subgraph G2["BROKEN: Plain SHA-256"]
+        direction LR
+        A2(["SHA256 of password123<br/>no salt"]) --> B2{"DB leaked?"}
+        B2 -->|"yes"| C2(["Rainbow table<br/>cracks in seconds"])
+    end
+
+    subgraph G3["BROKEN: SHA-256 plus salt"]
+        direction LR
+        A3(["SHA256 of salt + password<br/>still a fast hash"]) --> B3{"DB leaked?"}
+        B3 -->|"yes"| C3(["GPU: 10B SHA-256/sec<br/>still brute-forceable"])
+    end
+
+    subgraph G4["CORRECT: PBKDF2 or bcrypt"]
+        direction LR
+        A4(["PBKDF2 600k iterations<br/>or bcrypt cost 12"]) --> B4{"DB leaked?"}
+        B4 -->|"yes"| C4(["GPU: ~1000 bcrypt/sec<br/>economically infeasible"])
+    end
+
+    class A1,A2,A3,A4 io
+    class B1,B2,B3,B4 mathOp
+    class C1,C2,C3 lossN
+    class C4 train
 ```
-BROKEN: Plain text        "password123"  ──────> DB stores "password123"
-                          attacker reads DB ──> instant compromise
 
-BROKEN: Plain SHA-256     SHA256("password123") ──> DB stores hash
-                          attacker uses rainbow table ──> cracks in seconds
-
-BROKEN: SHA-256 + salt    SHA256(salt + "password123") ──> slightly better
-  but still fast hash:    GPU does 10 billion SHA256/sec ──> brute-forceable
-
-CORRECT: PBKDF2-HMAC-SHA256 (600k iterations) + random salt
-  or bcrypt (cost 12) + embedded salt
-  GPU does ~1000 bcrypt/sec at cost 12 ──> economically infeasible to crack
-```
+Four generations of the same design decision: each stage keeps the hashing step fast enough to be convenient until the database leaks, at which point only intentional slowness (PBKDF2 or bcrypt) keeps a GPU-armed attacker from cracking every account.
 
 ### TLS 1.3 Handshake (where crypto primitives converge)
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    C->>S: ClientHello: supported ciphers, key share
+    S-->>C: ServerHello: chosen cipher, key share
+    Note over C,S: ECDH X25519 - both sides<br/>compute the shared secret
+
+    S-->>C: Certificate, CertVerify, Finished
+    Note over S: Signed with the server's<br/>private key
+
+    C->>S: Finished
+    Note over C: HMAC of the<br/>handshake transcript
+
+    Note over C,S: Encrypted application data<br/>via AES-256-GCM
+
+    Note over C,S: Primitives: ECDH (key exchange),<br/>ECDSA/RSA (certificates), HMAC-SHA256<br/>(session keys via HKDF), AES-256-GCM (bulk data)
 ```
-Client                                          Server
-  |                                               |
-  |── ClientHello (supported ciphers, key share) ──>|
-  |                                               |
-  |<── ServerHello (chosen cipher, key share) ────|
-  |    (ECDH X25519: both compute shared secret)  |
-  |                                               |
-  |<── {Certificate, CertVerify, Finished} ────── |
-  |    (digital signature with server private key) |
-  |                                               |
-  |── {Finished} ─────────────────────────────>  |
-  |    (HMAC of handshake transcript)             |
-  |                                               |
-  |<══ Encrypted application data (AES-256-GCM) ═>|
-  
-Primitives used: ECDH (key exchange), ECDSA/RSA (certificates),
-HMAC-SHA256 (session keys derivation via HKDF), AES-256-GCM (bulk data)
-```
+
+TLS 1.3 completes a full handshake in one round trip: ECDH X25519 derives the shared secret, the server's certificate is verified with a digital signature, and each Finished message is authenticated with an HMAC of the transcript before bulk data moves under AES-256-GCM.
 
 ---
 
@@ -495,6 +561,35 @@ print(f"  Identical: {stored['hash'] == stored2['hash']}")  # False
 
 ### 6.4 Deriving Multiple Keys from a Single Secret (HKDF)
 
+Section 6.3 hardened a low-entropy human password with PBKDF2. A high-entropy secret (an ECDH shared secret) needs the opposite treatment — no iteration cost, just a clean split into independent keys:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Key material"]) --> B{"Already high-entropy?<br/>e.g. ECDH shared secret"}
+    B -->|"No: human password"| C["PBKDF2 / bcrypt / Argon2"]
+    C --> D["Add computational cost<br/>600k+ iterations"]
+    D --> E(["Brute-force-resistant hash"])
+    B -->|"Yes: 32+ random bytes"| F["HKDF"]
+    F --> G["Extract + Expand<br/>RFC 5869"]
+    G --> H(["Independent session keys"])
+
+    class A io
+    class B mathOp
+    class C,D frozen
+    class F,G mathOp
+    class E,H train
+```
+
+Low-entropy input needs PBKDF2/bcrypt/Argon2 to add brute-force cost; already-random input only needs HKDF to split it into independent keys — reaching for HKDF on a password, or PBKDF2 on an already-random secret, is a common design mistake.
+
 ```python
 import hashlib
 import hmac
@@ -627,6 +722,16 @@ Linux package managers (apt, yum) verify GPG signatures on every package before 
 | bcrypt (cost 12) | ~1,000/sec (GPU) | Yes (embedded) | No (third-party) | Good | Recommended; well-studied |
 | scrypt | Configurable | Yes | No (third-party) | Good (memory-hard) | Good for high security |
 | Argon2id | Configurable | Yes | No (third-party) | Best (memory + CPU) | Current best practice (OWASP 2024) |
+
+```mermaid
+xychart-beta
+    title "GPU guesses per second, by algorithm (log10 scale)"
+    x-axis ["MD5 / SHA-1", "SHA-256", "bcrypt (cost 12)"]
+    y-axis "log10(guesses per second)" 0 --> 10
+    bar [10, 9, 3]
+```
+
+The table above states the numbers; the chart is what makes the gap real: MD5/SHA-1 run ~10 billion guesses/sec and SHA-256 ~1 billion/sec on a single GPU, but bcrypt at cost 12 collapses to ~1,000/sec — a seven-order-of-magnitude drop (bars plotted as log10 of guesses/sec) that is the entire reason password hashing must be intentionally slow.
 
 ### Hash Functions: Speed vs Security
 

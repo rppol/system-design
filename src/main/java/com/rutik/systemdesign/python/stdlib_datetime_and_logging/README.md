@@ -98,17 +98,30 @@ semantics mean you must configure them explicitly at startup rather than assume 
 
 ### logging architecture layers
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    app(["application code"]) --> logger("Logger<br/>named, hierarchical")
+    logger --> handler("Handler<br/>Stream / File / Rotating / Socket")
+    handler --> formatter("Formatter<br/>text, JSON, custom")
+    formatter --> sink(["sink<br/>stderr, file, syslog, TCP, agent"])
+
+    class app io
+    class sink base
+    class logger,formatter mathOp
+    class handler req
 ```
-application code
-     |
- Logger (named, hierarchical)
-     |
- Handler (StreamHandler, FileHandler, RotatingFileHandler, SocketHandler)
-     |
- Formatter (text, JSON, custom)
-     |
- sink (stderr, file, syslog, TCP socket, third-party agent)
-```
+
+A log record passes through four transform/routing stages before it lands in a sink: the
+Logger gates by level, the Handler routes to a destination, and the Formatter renders the
+final text.
 
 ### argparse strategies
 
@@ -134,19 +147,26 @@ application code
 
 ### Logging hierarchy
 
-```
-root logger (level WARNING by default)
-|
-+-- "app" logger (level INFO — set at startup)
-|   |
-|   +-- "app.api" logger (inherits INFO, propagates to "app")
-|   |   |
-|   |   +-- "app.api.users" logger (inherits INFO)
-|   |
-|   +-- "app.db" logger (inherits INFO)
-|
-+-- "uvicorn" logger (managed by uvicorn; avoid overriding)
-+-- "sqlalchemy" logger (noisy; set to WARNING in production)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root("root logger<br/>WARNING by default") --> app("app logger<br/>INFO, set at startup")
+    root --> uvicorn("uvicorn logger<br/>managed externally")
+    root --> sqlalchemy("sqlalchemy logger<br/>noisy, WARNING in prod")
+    app --> appapi("app.api logger<br/>inherits INFO")
+    app --> appdb("app.db logger<br/>inherits INFO")
+    appapi --> appapiusers("app.api.users logger<br/>inherits INFO")
+
+    class root base
+    class app,appapi,appapiusers,appdb train
+    class uvicorn,sqlalchemy frozen
 ```
 
 Each logger checks its own level, then walks up the chain. A record is emitted by every
@@ -155,29 +175,49 @@ either set `propagate = False` on a logger or attach handlers only to the root.
 
 ### datetime awareness chain
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    naive(["datetime.now<br/>naive, no tzinfo"]) -.->|"DANGEROUS"| danger("unsafe in production")
+    awareutc(["datetime.now tz=utc<br/>aware UTC, safe baseline"]) --> local("astimezone ZoneInfo NY<br/>aware local, display only")
+    local --> iso(["isoformat<br/>2024-03-10T14:30:00-04:00"])
+    iso --> parsed("fromisoformat<br/>round-trip parse, 3.7+")
+
+    class naive,awareutc,iso io
+    class danger lossN
+    class local,parsed mathOp
 ```
-datetime.now()          --> naive (no tzinfo) -- DANGEROUS in production
-   |
-datetime.now(tz=timezone.utc)  --> aware UTC  -- safe baseline
-   |
-.astimezone(ZoneInfo("America/New_York"))  --> aware local -- for display only
-   |
-.isoformat()            --> "2024-03-10T14:30:00-04:00"
-   |
-datetime.fromisoformat(...)  --> round-trip parse (Python 3.7+; handles offset suffix 3.11+)
-```
+
+The naive branch (top) is a dead end to avoid; the safe pipeline (bottom) stays
+timezone-aware from creation through serialization and back via a round trip.
 
 ### subprocess fork model
 
-```
-Python process (parent)
-    |
-    | os.fork() + execve  (subprocess.run, no shell)
-    |
-external binary (child)
-    stdout --> pipe --> result.stdout (bytes or str)
-    stderr --> pipe --> result.stderr
-    returncode --> result.returncode
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    parent(["Python process<br/>parent"]) -->|"os.fork + execve<br/>subprocess.run, no shell"| child("external binary<br/>child process")
+    child -->|"stdout pipe"| rstdout(["result.stdout<br/>bytes or str"])
+    child -->|"stderr pipe"| rstderr(["result.stderr"])
+    child -->|"exit status"| rrc(["result.returncode"])
+
+    class parent req
+    class child frozen
+    class rstdout,rstderr,rrc io
 ```
 
 With `shell=True`, an intermediate `/bin/sh -c "..."` process is inserted, which
@@ -228,6 +268,41 @@ deadline: datetime = utc_now + timedelta(days=30)
 remaining: timedelta = deadline - utc_now
 print(remaining.total_seconds())  # 2592000.0
 ```
+
+The `fold` attribute above disambiguates the one wall-clock hour that daylight saving
+repeats each autumn; Python defaults to `fold=0` (the first, pre-transition occurrence).
+Spring forward is the opposite failure mode — a gap, not an overlap:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph springfwd["Spring forward - March"]
+        s1(["01:59:59 EST"]) --> s2{"02:00-02:59<br/>does not exist"}
+        s2 --> s3(["03:00:00 EDT"])
+    end
+
+    subgraph fallback["Fall back - November"]
+        f1(["01:30 occurs twice"]) --> f2{"fold value"}
+        f2 -->|"fold=0"| f3(["01:30 EDT<br/>UTC-4"])
+        f2 -->|"fold=1"| f4(["01:30 EST<br/>UTC-5"])
+    end
+
+    class s1,s3,f1 io
+    class s2,f2 mathOp
+    class f3 train
+    class f4 frozen
+```
+
+Spring forward skips a wall-clock hour entirely (constructing it raises or silently
+normalizes, depending on the library); fall back repeats one, and only the `fold` flag
+tells `01:30` apart from its own reoccurrence an hour later.
 
 ### 6.2 logging — hierarchy, handlers, formatters
 
@@ -709,6 +784,31 @@ proc.wait()                  # blocks waiting for process to exit
 output = proc.stdout.read()  # process blocked waiting for reader — deadlock
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    parent("parent: proc.wait<br/>blocks for exit") -.->|"waiting"| deadlock((" DEADLOCK "))
+    child("child: writes large<br/>stdout") --> pipe("OS pipe buffer<br/>~64KB on Linux")
+    pipe -.->|"buffer full<br/>write blocks"| deadlock
+    deadlock -.-> fix("fix: capture_output=True<br/>or proc.communicate")
+
+    class parent,child req
+    class pipe base
+    class deadlock lossN
+    class fix train
+```
+
+Both sides block on each other: the parent waits for exit before it ever reads, while
+the child blocks mid-write once the ~64 KB pipe buffer fills — a circular wait that
+`capture_output=True` or `proc.communicate()` avoids by draining stdout concurrently.
+
 Use `subprocess.run(capture_output=True)` which handles pipe draining internally, or
 use `proc.communicate()` which reads stdout/stderr concurrently.
 
@@ -843,24 +943,36 @@ uploads, consent events) in an `audit_events` table. Three production incidents 
 
 #### Solution architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    http(["HTTP Request"]) --> mw("request_id_middleware<br/>sets ContextVar")
+    mw --> handler("route handler<br/>LoggerAdapter reads ContextVar")
+    handler --> fmt("JsonFormatter<br/>timestamp + request_id + message")
+    fmt --> stream(["StreamHandler<br/>stderr"])
+    fmt --> file(["RotatingFileHandler<br/>/var/log/app/"])
+    stream --> filebeat("Filebeat")
+    file --> filebeat
+    filebeat --> es("Elasticsearch")
+    es --> kibana(["Kibana"])
+
+    class http,kibana io
+    class mw,fmt mathOp
+    class handler req
+    class stream,file base
+    class filebeat,es frozen
 ```
-HTTP Request
-     |
-     v
-[request_id_middleware]  -- generates/extracts X-Request-Id, sets ContextVar
-     |
-     v
-[route handler]          -- calls logger (LoggerAdapter reads ContextVar)
-     |
-     v
-[JsonFormatter]          -- emits {"timestamp": "...", "request_id": "...", ...}
-     |
-     v
-[StreamHandler -> stderr / RotatingFileHandler -> /var/log/app/]
-     |
-     v
-[Filebeat -> Elasticsearch -> Kibana]
-```
+
+Middleware stamps a request_id, the route handler logs through it, JsonFormatter
+serializes the record, and both sinks feed the same ELK stack used for the 90-second
+Kibana triage described in the Outcome below.
 
 #### BROKEN: naive datetime in audit model
 

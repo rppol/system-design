@@ -84,14 +84,25 @@ and `read_text()` / `write_bytes()` bake this in conveniently.
 
 ### 4.2 Serialization Format Spectrum
 
+```mermaid
+quadrantChart
+    title Serialization format spectrum — readability vs. speed
+    x-axis Human-readable --> Compact / Fast
+    y-axis Slow --> Fastest
+    quadrant-1 Fast and compact
+    quadrant-2 Fast and readable
+    quadrant-3 Slow and readable
+    quadrant-4 Slow and compact
+    JSON: [0.08, 0.10]
+    CSV: [0.18, 0.24]
+    TOML/YAML: [0.32, 0.10]
+    msgpack: [0.54, 0.56]
+    Pickle UNSAFE: [0.66, 0.74]
+    Protobuf: [0.82, 0.58]
+    struct: [0.95, 0.94]
 ```
-Human-readable  ←——————————————————————→  Compact/Fast
 
-  JSON    CSV   TOML/YAML   msgpack   Pickle   Protobuf   struct
-  ████    ████    ████        ████      ████     ████       ████
-  Safe    Safe    Safe       Safe     UNSAFE    Safe       Safe
-  Slow    Slow    Slow        Fast     Fast      Fast      Fastest
-```
+Formats slide from human-readable and slow (JSON, CSV, TOML/YAML) toward compact and fast (msgpack, Protobuf, struct); Pickle lands in the fast cluster but is marked UNSAFE because unpickling executes arbitrary code (see §6.5 and §10 Pitfall 2).
 
 ### 4.3 Buffering Strategies
 
@@ -119,47 +130,56 @@ open(p).read()            Path(p).read_text(encoding="utf-8")
 
 ### FastAPI File Upload Pipeline
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["HTTP Client"]) -->|"multipart/<br/>form-data"| fastapi("FastAPI /<br/>Starlette")
+    fastapi -->|"UploadFile<br/>async chunks"| step1
+
+    subgraph handler["Endpoint handler"]
+        step1["1. NamedTemporaryFile<br/>delete=False"] --> step2["2. chunk loop<br/>read, tmp.write"]
+        step2 --> step3["3. csv.DictReader<br/>parse rows"]
+        step3 --> step4["4. json.dumps<br/>DecimalEncoder"]
+    end
+
+    step4 --> response(["JSON response<br/>to client"])
+
+    class client,response io
+    class fastapi req
+    class step1,step2,step3,step4 mathOp
 ```
-HTTP Client
-    │
-    │  multipart/form-data
-    ▼
-FastAPI / Starlette
-    │
-    │  UploadFile (async generator over chunks)
-    ▼
-┌─────────────────────────────────────────────┐
-│  Endpoint handler                           │
-│                                             │
-│  1. tempfile.NamedTemporaryFile(delete=False│
-│     suffix=".csv")                          │
-│                                             │
-│  2. chunk loop: await file.read(64_000)     │
-│     → tmp.write(chunk)                      │
-│                                             │
-│  3. csv.DictReader(tmp_path.open(...))      │
-│     → parse rows                            │
-│                                             │
-│  4. json.dumps(result, cls=DecimalEncoder)  │
-│     → JSONResponse                          │
-└─────────────────────────────────────────────┘
-    │
-    ▼
-JSON response to client
-```
+
+The endpoint handler streams the multipart upload through four sequential steps — spool to a temp file, chunk-read, parse as CSV, then re-serialize with a `Decimal`-aware encoder — before the JSON response goes back to the client.
 
 ### in-memory I/O for Tests
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    prod(["Production:<br/>open(real_path, 'rb')"]) --> iface(("same API"))
+    test(["Test:<br/>io.BytesIO(fake content)"]) --> iface
+    iface --> ops["f.read()<br/>f.seek(0)<br/>f.write(...)"]
+
+    class prod,test io
+    class iface mathOp
+    class ops req
 ```
-Production path          Test path
-────────────────         ─────────────────────────
-open(real_path, "rb")    io.BytesIO(b"fake content")
-         │                         │
-         └──────── same API ───────┘
-                 f.read()
-                 f.seek(0)
-                 f.write(...)
-```
+
+Real files and `io.BytesIO` implement the identical `read()`/`seek()`/`write()` interface, so tests substitute an in-memory buffer for `open()` without changing the code under test.
 
 ### Binary Protocol Framing with `struct`
 
@@ -589,6 +609,39 @@ def parse_binary_log(path: Path) -> list[LogEntry]:
 
 ## 9. When to Use / When NOT to Use
 
+The choice among formats reduces to a short sequence of questions — wire-protocol shape, trust boundary, throughput, and cross-language needs:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Choose a<br/>serialization format"]) --> q0{"Fixed-width binary<br/>wire protocol?"}
+    q0 -->|"yes"| structN["struct"]
+    q0 -->|"no"| q1{"Crosses a<br/>trust boundary?"}
+
+    q1 -->|"yes: user, API,<br/>external source"| q2{"Need max<br/>throughput?"}
+    q1 -->|"no: same trusted<br/>codebase + version"| pickleN["pickle<br/>+ HMAC signature"]
+
+    q2 -->|"yes"| q3{"Cross-language or<br/>schema evolution?"}
+    q2 -->|"no"| jsonN["json (stdlib)"]
+
+    q3 -->|"yes"| protoN["protobuf or<br/>msgpack"]
+    q3 -->|"no: same-process<br/>hot path"| orjsonN["orjson"]
+
+    class start io
+    class q0,q1,q2,q3 mathOp
+    class pickleN lossN
+    class structN,jsonN,orjsonN,protoN train
+```
+
+Pickle only survives the trust-boundary check when the producer and consumer are the same codebase at the same version; everywhere else, prefer `json`/`orjson` for safety or `protobuf`/`msgpack` when a schema or cross-language contract is needed.
+
 ### Use `json` when:
 - Exchanging data with any non-Python system (REST API, frontend, third-party service)
 - Writing config files that humans will edit
@@ -1010,6 +1063,40 @@ async def upload_transactions(file: UploadFile) -> JSONResponse:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)  # always clean up, even on error
 ```
+
+The fixed endpoint's control flow — three guard checks run before any totals are returned, and the temp file is always unlinked afterward regardless of outcome:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["POST<br/>/upload/transactions"]) --> extCheck{".csv<br/>extension?"}
+    extCheck -->|"no"| err400["400<br/>only .csv accepted"]
+    extCheck -->|"yes"| stream["stream_to_tempfile()<br/>64 KB chunks, 600 MB guard"]
+
+    stream -->|"over limit"| err413["413<br/>upload too large"]
+    stream -->|"under limit"| parse["compute_totals()<br/>validate columns + amounts"]
+
+    parse -->|"invalid"| err422["422<br/>missing columns or<br/>bad amount"]
+    parse -->|"valid"| success["200 JSON<br/>totals by currency"]
+
+    err413 -.->|"finally"| cleanup(("unlink<br/>temp file"))
+    err422 -.->|"finally"| cleanup
+    success -.->|"finally"| cleanup
+
+    class client,success io
+    class extCheck,stream,parse mathOp
+    class err400,err413,err422 lossN
+    class cleanup train
+```
+
+The 413 size guard and 422 validation both fire before any totals are computed; whichever branch is taken, the `finally` block unlinks the temp file, so the upload never leaves a scratch file behind.
 
 ---
 

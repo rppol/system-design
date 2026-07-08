@@ -257,6 +257,39 @@ sort all candidate edges by weight ascending. Iterate edges; for each, call
 (already connected), *skip* it (adding it would create a cycle). Stop early
 once `count == 1`.
 
+As a loop with one branch point:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S(["Sort edges<br/>by weight asc"]) --> N("Take next<br/>edge u, v, w")
+    N --> U{"different<br/>components?"}
+    U -->|"yes — True"| A("Accept edge<br/>total += w")
+    U -->|"no — False"| SK("Skip edge<br/>would cycle")
+    A --> C{"count == 1?"}
+    C -->|"no"| N
+    C -->|"yes — MST<br/>complete"| D(["Return total"])
+    SK -.-> N
+
+    class S,D io
+    class N,U,C mathOp
+    class A train
+    class SK lossN
+```
+
+*`union`'s boolean return value IS the cycle check: a different-components
+result (`True`) means edge `(u, v, w)` is safe to accept into the MST — the
+Cut Property — while an already-connected result (`False`) means this edge
+would close a cycle and gets skipped; the loop can stop the instant
+`count == 1` without examining any remaining edges.*
+
 **Redundant Connection II** ([LC 685](https://leetcode.com/problems/redundant-connection-ii/)):
 the *directed* variant. A node can have at most one parent in a valid rooted
 tree, so first check for a node with **two** incoming edges (in-degree 2) —
@@ -387,6 +420,47 @@ to be safe.
   Union-Find, but answers "minimum total edge weight to connect everything,"
   which is a different question from "shortest path between two specific
   nodes" (Dijkstra/Bellman-Ford answer the latter).
+
+**The full decision at a glance** — collapsing §1's anti-signals and the
+switch-points above into the one chain that discriminates between all five
+patterns:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P(["Connectivity /<br/>grouping problem"]) --> d1{"Already a tree<br/>(no cycles possible)?"}
+    d1 -->|"yes"| tb(["Tree BFS / DFS"])
+    d1 -->|"no"| d2{"Merging sorted<br/>ranges, not edges?"}
+
+    d2 -->|"yes"| mi(["Merge Intervals"])
+    d2 -->|"no"| d3{"Directed graph,<br/>order/cycles matter?"}
+
+    d3 -->|"yes"| ts(["Topological Sort<br/>(no direction in DSU)"])
+    d3 -->|"no"| d4{"Need shortest<br/>distance, not just<br/>connected?"}
+
+    d4 -->|"yes"| sp(["Shortest Path<br/>(Dijkstra / Bellman-Ford)"])
+    d4 -->|"no"| d5{"Single static query,<br/>traverse once?"}
+
+    d5 -->|"yes"| gt(["Graph Traversal<br/>(BFS / DFS)"])
+    d5 -->|"no — incremental edges<br/>or many repeated queries"| uf(["Union-Find<br/>this pattern"])
+
+    class P io
+    class d1,d2,d3,d4,d5 mathOp
+    class tb,mi,ts,sp,gt frozen
+    class uf train
+```
+
+*Tree shape peels off first, then sorted-range problems, then direction,
+then distance-vs-connectivity, then static-vs-incremental — five yes/no
+questions that land on Union-Find only once edges arrive incrementally or
+the same "are X and Y connected?" query repeats many times.*
 
 ---
 

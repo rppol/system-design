@@ -69,6 +69,33 @@ binlog coordinate) and catch up.
   ideally the most up-to-date follower); reconfigure clients and old leader to follow the new
   one. Failover is riddled with pitfalls (below).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Leader stops<br/>responding"]) --> detect{"Timeout<br/>exceeded?"}
+    detect -->|"too short"| spurious(unnecessary failover<br/>can cascade under load)
+    detect -->|"too long"| downtime(extended<br/>downtime)
+    detect -->|"well-tuned"| elect(elect new leader<br/>most up-to-date follower)
+    elect --> reconfig(reconfigure clients<br/>and old leader)
+    reconfig --> done(["Cluster<br/>recovered"])
+
+    class start,done io
+    class detect mathOp
+    class spurious,downtime lossN
+    class elect,reconfig train
+```
+
+Caption: the failover timeout is a guess at "dead vs. slow" — too short triggers spurious
+failovers that can cascade under load, too long extends downtime, and even a well-tuned
+timeout still needs election plus reconfiguration before the cluster is healthy again.
+
 ### Implementation of replication logs
 
 - **Statement-based:** ship the SQL statements. Breaks on nondeterminism (`NOW()`, `RAND()`,
@@ -141,6 +168,43 @@ every other; robust but writes can arrive out of causal order), **circular**, an
 ring/star topologies have a single point of failure; all-to-all is more fault tolerant but can
 deliver writes out of order (needing version vectors to order them correctly).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph AA["All-to-All"]
+        direction TB
+        a1(L1) <--> a2(L2)
+        a1 <--> a3(L3)
+        a2 <--> a3
+    end
+
+    subgraph CIRC["Circular"]
+        direction TB
+        c1(L1) --> c2(L2) --> c3(L3) --> c1
+    end
+
+    subgraph STAR["Star"]
+        direction TB
+        s1(L1) <--> hub(Hub)
+        s2(L2) <--> hub
+        s3(L3) <--> hub
+    end
+
+    class a1,a2,a3,c1,c2,c3,s1,s2,s3 mathOp
+    class hub lossN
+```
+
+Caption: all-to-all is the most fault-tolerant topology but can deliver causally related writes
+out of order (needing version vectors); circular and star route through fewer links, but the
+star's hub — and any single ring node — is a single point of failure that stalls propagation.
+
 ## 5.4 Leaderless Replication
 
 No leader; the **client (or a coordinator) sends each write to several replicas** directly.
@@ -162,14 +226,30 @@ to see at least one replica with the latest write — a **quorum**. Typical: n=3
 w and r trades durability/consistency against availability and latency (e.g. w=n, r=1 for
 read-heavy; smaller w for write availability).
 
-```
-QUORUM OVERLAP:  n=3, w=2, r=2  ⇒  w + r = 4 > 3  ⇒  read set ∩ write set ≠ ∅
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  replicas:   [A]  [B]  [C]
-  write goes to A,B (w=2) ──────┐
-  read  asks  B,C (r=2) ──┐     │
-                          └─► B is in BOTH sets ⇒ the read sees the latest value on B
+    write(["Write<br/>w=2"]) --> a(Replica A)
+    write --> b(Replica B)
+    read(["Read<br/>r=2"]) --> b
+    read --> c(Replica C)
+    b --> overlap(("B in both sets<br/>read sees latest write"))
+
+    class write,read req
+    class a,c frozen
+    class b train
+    class overlap mathOp
 ```
+
+Caption: with n=3, w=2, r=2 the write set (A, B) and read set (B, C) overlap on replica B, so
+w+r exceeding n guarantees the read always touches at least one replica holding the latest write.
 
 **Limits of quorums:** even with w+r>n, edge cases return stale data — concurrent writes (which
 to keep?); a write that succeeds on some and fails on others isn't rolled back; if a node with a
@@ -209,26 +289,84 @@ must converge. Techniques:
 
 ## Visual Intuition
 
-```
-THREE REPLICATION ARCHITECTURES
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  SINGLE-LEADER            MULTI-LEADER                LEADERLESS (quorum)
-  writes ─▶ [Leader]       writes ─▶[L-DC1]◀─writes    writes ─▶ [R1][R2][R3]
-              │ async/sync       ▲   │                    client writes to w of n
-        ┌─────┼─────┐           sync│ │sync               reads  from r of n
-     [F1]   [F2]  [F3]          [L-DC2]◀─writes           w+r>n ⇒ overlap guarantee
-   reads from any              conflicts possible!       conflicts resolved by
-   one writer ⇒ no conflict    (resolve: avoid/LWW/merge) version vectors / LWW
+    subgraph SL["Single-Leader"]
+        direction TB
+        slw(["writes"]) --> sll(Leader)
+        sll -->|"sync/async"| slf1(F1)
+        sll -->|"sync/async"| slf2(F2)
+        sll -->|"sync/async"| slf3(F3)
+        slf1 --> slr(["reads: any replica<br/>no write conflict"])
+        slf2 --> slr
+        slf3 --> slr
+    end
+
+    subgraph ML["Multi-Leader"]
+        direction TB
+        mlw1(["writes"]) --> mll1(L-DC1)
+        mlw2(["writes"]) --> mll2(L-DC2)
+        mll1 -.->|"sync"| mll2
+        mll2 -.->|"sync"| mll1
+        mll1 -.-> mln(conflicts possible<br/>avoid / LWW / merge)
+        mll2 -.-> mln
+    end
+
+    subgraph LL["Leaderless (quorum)"]
+        direction TB
+        llw(["writes: w of n"]) --> llr1(R1)
+        llw --> llr2(R2)
+        llw --> llr3(R3)
+        llr1 --> lln(["reads: r of n<br/>overlap guaranteed"])
+        llr2 --> lln
+        llr3 --> lln
+    end
+
+    class slw,mlw1,mlw2,llw io
+    class sll train
+    class slf1,slf2,slf3 frozen
+    class mll1,mll2 mathOp
+    class llr1,llr2,llr3 base
+    class slr,lln train
+    class mln lossN
 ```
 
-```
-REPLICATION LAG BREAKS THREE GUARANTEES (asynchronous followers)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  read-your-writes:  user writes to Leader, reads stale Follower ⇒ "my post vanished!"
-  monotonic reads:   read fresh F1 (t=10), then lagging F2 (t=5) ⇒ "time went backward"
-  consistent prefix: see the ANSWER on fast partition before the QUESTION on slow one
-                     ⇒ "Mr Poons: how far into the future? Mrs Cake: ten seconds" read
-                        in REVERSE order looks nonsensical
+    subgraph RYW["Read-Your-Writes (asynchronous followers)"]
+        direction LR
+        ryw1(["writes to Leader"]) --> ryw2(reads stale Follower) --> ryw3(post appears<br/>to vanish)
+    end
+
+    subgraph MONO["Monotonic Reads"]
+        direction LR
+        m1(["reads fresh F1<br/>at t=10"]) --> m2(reads lagging F2<br/>at t=5) --> m3(time appears<br/>to go backward)
+    end
+
+    subgraph PREFIX["Consistent Prefix"]
+        direction LR
+        p1(["sees answer<br/>fast partition"]) --> p2(sees question<br/>slow partition) --> p3(reversed order<br/>looks nonsensical)
+    end
+
+    class ryw1,m1,p1 io
+    class ryw2,m2,p2 frozen
+    class ryw3,m3,p3 lossN
 ```
 
 Caption: pick the architecture by where writes originate, then patch async lag with the

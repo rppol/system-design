@@ -87,37 +87,81 @@ The central tension is **alert fatigue**: an alert that fires without requiring 
 
 ## 5. Architecture Diagrams
 
+**Alerting pipeline: rule to Alertmanager to human**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    prom(["Prometheus HA pair A+B<br/>rule fires, for: 10m"]) --> am["Alertmanager cluster"]
+    am --> proc["Group by alertname/cluster/service<br/>Dedupe HA replicas A vs B<br/>Inhibit: ClusterDown suppresses PodDown<br/>Silence: muted 02:00-03:00"]
+    proc --> route{"Routing tree<br/>match severity / team"}
+
+    route -->|"severity=page"| pd(["PagerDuty<br/>on-call phone, escalate if no ack"])
+    route -->|"severity=ticket"| slack(["Slack #team-alerts<br/>Jira"])
+    route -->|"team=payments"| payTeam(["Payments<br/>on-call only"])
+
+    class prom req
+    class am,proc,route mathOp
+    class pd,payTeam lossN
+    class slack train
 ```
-Alerting pipeline: rule -> Alertmanager -> human
 
-  Prometheus (HA pair A + B)
-     rule fires (for: 10m)  -->  Alertmanager cluster
-                                    |
-            +---- group_by(alertname, cluster, service) --> 1 notification, not 50
-            +---- dedupe A vs B (HA) ----------------------> 1 page, not 2
-            +---- inhibit: ClusterDown suppresses 200 PodDown
-            +---- silence: muted during 02:00-03:00 maintenance
-                                    |
-                       routing tree (match on severity/team)
-            +-- severity=page  --> PagerDuty --> on-call phone (escalate if no ack)
-            +-- severity=ticket--> Slack #team-alerts / Jira
-            +-- team=payments  --> payments on-call only
+Alertmanager collapses a firing storm into one deduplicated, routed notification: grouping turns 200 `PodDown` alerts into 1 notification, HA dedup turns the A/B replica pair's identical firings into 1 page, and inhibition/silencing suppress the rest before the routing tree sends `severity=page` to PagerDuty, `severity=ticket` to Slack/Jira, and team-scoped alerts to the right on-call.
 
+**Dashboard hierarchy: drill down from overview to root cause**
 
-Dashboard hierarchy (drill-down)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  [Overview]  all services: RED + SLO compliance + error budget remaining
-       |  click a red service
-  [Service]   that service's Rate/Errors/Duration, saturation, deploy markers
-       |  click a latency spike (exemplar)
-  [Trace]     the slow request's span waterfall  --trace_id--> logs
+    overview(["Overview<br/>RED + SLO + error budget remaining"]) -->|"click a red service"| service(["Service<br/>Rate / Errors / Duration + deploy markers"])
+    service -->|"click a latency exemplar"| trace(["Trace<br/>span waterfall for the slow request"])
+    trace -->|"trace_id"| logs(["Logs<br/>the exact log lines"])
 
-
-Symptom vs cause (what pages vs what dashboards)
-
-  PAGE:  SLO burn 14.4x | error ratio > 5% | p99 > 1s | queue draining never
-  DASH:  CPU 85% | disk 70% | GC pauses | per-pod memory   (causes -> investigate)
+    class overview io
+    class service req
+    class trace lossN
+    class logs base
 ```
+
+Each click narrows scope by one level — overview to service to trace to logs — turning a vague "something's slow" into the exact failing span and its logs in three hops (see Q10).
+
+**Symptom vs cause: what earns a page versus a dashboard panel**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    signal(["Telemetry condition fires"]) --> decide{"Does a user<br/>feel it right now?"}
+    decide -->|"yes: symptom"| page["PAGE<br/>SLO burn 14.4x · error ratio over 5%<br/>p99 over 1s · queue never draining"]
+    decide -->|"no: cause"| dash["DASHBOARD<br/>CPU 85% · disk 70%<br/>GC pauses · per-pod memory"]
+
+    class signal req
+    class decide mathOp
+    class page lossN
+    class dash train
+```
+
+The same decision rule from Core Principle 1 drawn as a fork: anything a user would feel right now pages; everything else — the causes an engineer investigates afterward — stays on a dashboard.
 
 ---
 
@@ -198,6 +242,30 @@ groups:
 ```
 
 The short window (5m/30m) makes the alert clear quickly once the burn stops; the long window (1h/6h) confirms the burn is real before paging. Burn-rate math lives in [sre_principles_and_slos](../sre_principles_and_slos/).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+
+    state "Confirming Fast Burn" as ConfirmFast
+    state "Confirming Slow Burn" as ConfirmSlow
+    state "Paged to PagerDuty" as Paged
+    state "Ticketed to Slack or Jira" as Ticketed
+
+    Idle --> ConfirmFast: 1h AND 5m ratio over 14.4x budget
+    Idle --> ConfirmSlow: 6h AND 30m ratio over 6x budget
+
+    ConfirmFast --> Paged: sustained for 2m
+    ConfirmSlow --> Ticketed: sustained for 15m
+
+    ConfirmFast --> Idle: 5m window clears early
+    ConfirmSlow --> Idle: 30m window clears early
+
+    Paged --> Idle: burn rate drops
+    Ticketed --> Idle: burn rate drops
+```
+
+The AND of both windows is what makes this safe: a real 14.4x burn holds true on the 5m window long enough for the 1h window to confirm it too, so it pages in `for: 2m`; a brief blip clears the 5m window before the 1h window ever confirms, so `ConfirmFast` falls back to `Idle` and nobody gets paged.
 
 ### A symptom alert vs the cause it replaces
 

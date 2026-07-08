@@ -85,6 +85,34 @@ header.
 | `aiohttp` | Yes | No | No (1.x) | Yes | High-concurrency async workloads, slightly lower per-request overhead |
 | `requests` | No | Yes | No | Yes | Legacy sync scripts, CLI tools, not for async FastAPI routes |
 
+The three rows above collapse into one decision: pick by call site first, then by measured
+throughput — never by preference alone.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"inside an<br/>async def route?"} -->|"no"| reqs(["requests<br/>sync scripts only"])
+    start -->|"yes"| concurrency{"over 200 concurrent<br/>outbound calls, profiled?"}
+    concurrency -->|"no (typical)"| httpxNode(["httpx<br/>default choice"])
+    concurrency -->|"yes"| aiohttpNode(["aiohttp<br/>~10-15% less overhead"])
+
+    class start,concurrency mathOp
+    class reqs frozen
+    class httpxNode train
+    class aiohttpNode base
+```
+
+`httpx` wins by default because of sync+async parity, HTTP/2, and native FastAPI/Starlette
+integration; only move to `aiohttp` once profiling — not intuition — shows it is the bottleneck
+(Section 8.1: ~18,000 rps vs ~15,500 rps at 500 concurrent fetches).
+
 ### 4.2 Timeout Strategies
 
 **Conservative (external third parties):** `connect=3.0, read=30.0, write=10.0, pool=5.0`
@@ -102,13 +130,44 @@ or set to the maximum expected streaming duration (e.g., 120s).
 - **Decorrelated jitter (AWS style):** `sleep = min(cap, random.uniform(base, sleep * 3))`.
   Better distribution across retries than full jitter.
 
+```mermaid
+xychart-beta
+    title "Retry delay by attempt (base=1s, cap=2^attempt)"
+    x-axis ["attempt 0", "attempt 1", "attempt 2", "attempt 3", "attempt 4"]
+    y-axis "delay (seconds)" 0 --> 16
+    bar "plain exponential (synchronized spike)" [1, 2, 4, 8, 16]
+    bar "full jitter (average wait)" [0.5, 1, 2, 4, 8]
+```
+
+Plain exponential backoff synchronises every failed client onto the same spike — at attempt 3
+(cap 8s) all 1,000 retrying clients hit the downstream at once. Full jitter (`uniform(0, cap)`)
+keeps the same ceiling but halves the average wait and spreads the 1,000 retries across the
+full window instead, exactly the distinction Q7 asks about.
+
 ### 4.4 Circuit Breaker States
 
+```mermaid
+stateDiagram-v2
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN  fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+
+    state "CLOSED (normal)" as CLOSED
+    state "OPEN (rejecting calls)" as OPEN
+    state "HALF-OPEN (probe)" as HALF_OPEN
+
+    [*] --> CLOSED
+    CLOSED --> OPEN: N consecutive<br/>failures
+    OPEN --> HALF_OPEN: recovery timeout<br/>expires
+    HALF_OPEN --> CLOSED: probe succeeds
+    HALF_OPEN --> OPEN: probe fails
+
+    class CLOSED train
+    class OPEN lossN
+    class HALF_OPEN mathOp
 ```
-CLOSED (normal) --[N consecutive failures]--> OPEN (rejecting calls)
-    ^                                             |
-    |--[call succeeds in half-open]               |--[timeout expires]--> HALF-OPEN (probe)
-```
+
+The half-open probe either closes the circuit on success or reopens it immediately with a reset recovery timer on failure — see the `CircuitBreaker` class in Section 6.4 for the exact implementation.
 
 ### 4.5 Authentication Patterns
 
@@ -126,74 +185,92 @@ CLOSED (normal) --[N consecutive failures]--> OPEN (rejecting calls)
 
 ### 5.1 Lifespan-Managed Client Pool
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph proc["FastAPI process"]
+        startup(["lifespan startup"]) --> client["AsyncClient pool<br/>max=100 · keepalive=20<br/>shared via app.state"]
+        routeA["Route A"] --> get["client.get(url)"]
+        routeB["Route B"] --> get
+        routeC["Route C"] --> get
+        client --> get
+        client -.->|"shutdown"| shutdown(["aclose()"])
+    end
+
+    class startup,shutdown io
+    class client base
+    class routeA,routeB,routeC req
+    class get mathOp
 ```
-FastAPI process
-+----------------------------------------------------+
-|                                                    |
-|  lifespan()                                        |
-|  +--------------+                                  |
-|  | AsyncClient  |  <-- created at startup          |
-|  |  pool:       |                                  |
-|  |   max=100    |  <-- shared via app.state        |
-|  |   keepalive=20|                                 |
-|  +--------------+                                  |
-|        |                                           |
-|   Route A ----+                                    |
-|   Route B ----|----> client.get(url)               |
-|   Route C ----+                                    |
-|                                                    |
-|  aclose() on shutdown                              |
-+----------------------------------------------------+
-```
+
+One `AsyncClient` is created at startup, shared via `app.state` across every route, and closed once at shutdown — the single-pool pattern from Section 6.2 that avoids the per-request socket exhaustion in Section 6.1.
 
 ### 5.2 Retry + Circuit Breaker Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    request(["Incoming<br/>request"]) --> cb{"circuit<br/>open?"}
+    cb -->|"yes"| reject(["reject 503<br/>immediately"])
+    cb -->|"closed /<br/>half-open"| call["httpx.AsyncClient<br/>.get(url, timeout)"]
+
+    call --> status{"response<br/>status?"}
+    status -->|"200-299"| success(["return<br/>response"])
+    status -->|"5xx / ConnectError"| retryCheck{"attempt<br/>less than max?"}
+    status -->|"4xx not 429"| clientErr(["raise<br/>immediately"])
+    status -->|"429"| rateLimited["read Retry-After,<br/>sleep"]
+
+    retryCheck -->|"yes"| backoff["sleep(backoff<br/>+ jitter)"]
+    retryCheck -->|"no"| exhausted(["record failure,<br/>raise"])
+
+    backoff -.->|"retry"| call
+    rateLimited -.->|"retry"| call
+
+    class request io
+    class cb,status,retryCheck,call,backoff,rateLimited mathOp
+    class reject,clientErr,exhausted lossN
+    class success train
 ```
-Incoming request
-       |
-       v
-  [Circuit Breaker]
-       |
-  OPEN? --> reject immediately (503) --> return
-       |
-  CLOSED/HALF-OPEN
-       |
-  [Retry Loop: attempt 1..3]
-       |
-       v
-  httpx.AsyncClient.get(url, timeout=...)
-       |
-  200-299 --> return response
-       |
-  5xx / ConnectError
-       +-- attempt < max? --> sleep(backoff + jitter) --> retry
-       +-- attempts exhausted --> record failure, raise
-       |
-  4xx (not 429) --> raise immediately (no retry)
-       |
-  429  --> read Retry-After header --> sleep --> retry
-```
+
+The circuit breaker gates every call before a single retry is attempted; a 5xx or connection error loops back through backoff+jitter up to the attempt cap, a 429 always retries after honouring `Retry-After`, and any other 4xx raises immediately with no retry.
 
 ### 5.3 Webhook Processing Pipeline
 
+```mermaid
+sequenceDiagram
+    participant Ext as External Service
+    participant API as FastAPI Endpoint
+    participant Queue as asyncio.Queue / Kafka
+    participant Worker as Background Worker
+
+    Ext->>API: POST /webhooks/stripe
+    API->>API: read raw body bytes
+    API->>API: verify HMAC-SHA256<br/>== X-Stripe-Signature
+    alt signature invalid
+        API-->>Ext: 400
+    else signature valid
+        API->>Queue: publish event
+        API-->>Ext: 200 (immediately)
+        Queue->>Worker: consume event
+        Worker->>Worker: process event<br/>(db write, downstream call)
+    end
 ```
-External service
-       |
-       | POST /webhooks/stripe
-       v
-  FastAPI endpoint
-       |
-  1. Read raw body bytes
-  2. Verify HMAC-SHA256(body, secret) == X-Stripe-Signature
-  3. If invalid --> 400
-       |
-  4. Publish event to asyncio.Queue / Kafka topic
-  5. Return 200 immediately
-       |
-  Background worker
-  6. Consume queue
-  7. Process event (db write, downstream call, etc.)
-```
+
+Signature verification happens synchronously and the 200 is returned immediately after the event is queued — the background worker's processing time never adds to the webhook's response latency, which is what lets Stripe/GitHub-style senders retire the request quickly.
 
 ---
 
@@ -892,24 +969,35 @@ to 10s. News sentiment is slow (p99 = 2s). Economic data rarely changes and can 
 
 **Architecture:**
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    user(["User request"]) --> route["FastAPI route<br/>/analytics/symbol"]
+
+    route --> market["fetch_market_data<br/>timeout 1.0s · breaker A"]
+    route --> news["fetch_news_sentiment<br/>timeout 2.5s · breaker B"]
+    route --> econ["fetch_economic_indicators<br/>Redis cache TTL 3600s"]
+
+    market --> gather((" gather "))
+    news --> gather
+    econ --> gather
+
+    gather --> agg(["aggregate:<br/>partial results on failure"])
+
+    class user,agg io
+    class route,gather mathOp
+    class market,news frozen
+    class econ base
 ```
-User request
-     |
-     v
-FastAPI route (/analytics/{symbol})
-     |
-     +---> fetch_market_data(symbol)   -- timeout 1.0s, circuit breaker A
-     |
-     +---> fetch_news_sentiment(symbol)-- timeout 2.5s, circuit breaker B
-     |
-     +---> fetch_economic_indicators() -- Redis cache (TTL 3600s)
-                                       -- timeout 1.0s on cache miss
-     |
-asyncio.gather(*tasks, return_exceptions=True)
-     |
-     v
-Aggregate: return partial results if any provider fails
-```
+
+Three providers are fetched concurrently inside a 3-second response budget via `asyncio.gather(..., return_exceptions=True)`; market data and news sentiment each sit behind their own circuit breaker, while the rarely-changing economic indicators are served from a 3600s Redis cache.
 
 **Implementation:**
 

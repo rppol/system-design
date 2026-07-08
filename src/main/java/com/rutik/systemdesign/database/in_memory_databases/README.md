@@ -22,6 +22,24 @@ A disk-backed database is a library with books stored in a warehouse — every r
 
 **Durability spectrum**: Configurable tradeoff between durability and performance. RDB snapshots, AOF logs, synchronous replication, NVMe persistence, and hybrid approaches each provide different RPO/RTO characteristics.
 
+```mermaid
+quadrantChart
+    title Persistence Strategy — Performance vs Durability
+    x-axis Low Performance --> High Performance
+    y-axis Low Durability --> High Durability
+    quadrant-1 Durable and fast
+    quadrant-2 Durable but slow
+    quadrant-3 Slow and risky
+    quadrant-4 Fast but risky
+    "No persistence": [0.92, 0.03]
+    "RDB snapshot": [0.82, 0.32]
+    "AOF everysec": [0.58, 0.68]
+    "AOF always": [0.28, 0.93]
+    "Sync replication": [0.45, 0.88]
+```
+
+Each point trades write-path latency for how much committed data can survive a crash: RDB risks losing the minutes since the last snapshot, AOF `everysec` risks one second, and AOF `always` or synchronous (K-safety) replication trade throughput for near-zero loss — see the RDB/AOF and K-safety discussion later in this module for the numbers behind each position.
+
 **Concurrency without lock overhead**: Many IMDBs (Redis, VoltDB single-threaded core) serialize access to eliminate lock contention. Redis's single-threaded command processing avoids mutex overhead entirely for most operations.
 
 ---
@@ -42,52 +60,62 @@ Persistent Memory     | pmem-based stores          | NVMe DIMM, byte-addressable
 
 ## 5. Architecture Diagrams
 
+**Redis Single-Instance Architecture** — network I/O is decoupled from command execution: the single command thread avoids all lock contention on data structures, while persistence and replication both branch off that same write path.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Clients([Clients]) --> NetIO("Network I/O Thread<br/>epoll, non-blocking")
+    NetIO --> CmdQueue("Command Queue")
+    CmdQueue --> CmdThread("Single Command Thread<br/>no lock contention")
+    CmdThread --> Store("In-Memory Data Store<br/>hash tables · skip lists · listpacks")
+    Store -.->|"async"| RDB("RDB Snapshot<br/>fork + copy-on-write")
+    Store -.->|"async"| AOF("AOF Log<br/>fsync policy")
+    CmdThread -.->|"replication"| Replica1([Replica 1])
+    CmdThread -.->|"replication"| Replica2([Replica 2])
+
+    class Clients io
+    class NetIO,CmdQueue req
+    class CmdThread mathOp
+    class Store base
+    class RDB,AOF,Replica1,Replica2 frozen
 ```
-Redis Single-Instance Architecture
-===================================
 
-Clients
-  │
-  ├── Network I/O Thread (epoll, non-blocking)
-  │       │
-  │       └── Command Queue
-  │               │
-  │       [Single Command Thread]  ← no lock contention
-  │               │
-  │       ┌───────┴───────────────┐
-  │       │  In-Memory Data Store │
-  │       │  (hash tables, skip   │
-  │       │   lists, listpacks)   │
-  │       └───────────────────────┘
-  │               │
-  │       Persistence (async)
-  │       ├── RDB snapshot (fork + CoW)
-  │       └── AOF log (fsync policy)
-  │
-  └── Replication → Replica 1, Replica 2
+**Redis 6+ I/O threading**: network I/O became multi-threaded (reading and writing sockets), but command execution stays on the single thread shown above — no contention on data structures is introduced.
 
+**VoltDB Architecture** — every transaction runs as a stored procedure routed to its owning partition; each partition is single-threaded, so committed state is protected by synchronous K-safety replication before the (async) command log is written.
 
-Redis 6+ I/O Threading:
-  Network I/O is multi-threaded (read/write from sockets)
-  Command execution remains single-threaded (no contention on data structures)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    Client([Client]) --> Proc("VoltDB Stored Procedure<br/>all logic in stored procs")
+    Proc --> Router{"Partition Router"}
+    Router --> P0("Partition 0<br/>single thread · RAM table")
+    Router --> P1("Partition 1<br/>single thread · RAM table")
+    Router --> PN("Partition N<br/>single thread · RAM table")
+    P0 --> KSafety("K-Safety Replication<br/>synchronous replica")
+    P1 --> KSafety
+    PN --> KSafety
+    KSafety -.->|"async"| CmdLog("Command Logging<br/>WAL to disk")
 
-VoltDB Architecture
-====================
-
-Client
-  │
-[VoltDB Stored Procedure] ←── all logic in stored procs
-  │
-[Partition Router]
-  │
-  ├── Partition 0 (single thread)   ─ RAM tables
-  ├── Partition 1 (single thread)   ─ RAM tables
-  └── Partition N (single thread)   ─ RAM tables
-                │
-        [K-Safety Replication]  ← synchronous replica
-                │
-        [Command Logging]       ← WAL to disk, async
+    class Client io
+    class Proc,Router mathOp
+    class P0,P1,PN base
+    class KSafety,CmdLog frozen
 ```
 
 ---
@@ -133,6 +161,36 @@ volatile-lfu        | Evict LFU key from keys with TTL set only
 allkeys-random      | Evict random key from all keys
 volatile-random     | Evict random key from keys with TTL only
 volatile-ttl        | Evict key with shortest remaining TTL
+```
+
+The policy name encodes a two-stage decision: which keys are eligible (`allkeys-*` vs `volatile-*`), then which one to pick within that pool.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Full{"maxmemory<br/>reached"} -->|"noeviction"| Err("reject write<br/>OOM error")
+    Full -->|"allkeys-*"| AllPool("candidate pool:<br/>all keys")
+    Full -->|"volatile-*"| VolPool("candidate pool:<br/>keys with TTL only")
+
+    AllPool --> LRU1("LRU<br/>evict least-recently-used")
+    AllPool --> LFU1("LFU<br/>evict least-frequently-used")
+    AllPool --> RND1("random<br/>evict random key")
+
+    VolPool --> LRU2("LRU<br/>evict least-recently-used")
+    VolPool --> LFU2("LFU<br/>evict least-frequently-used")
+    VolPool --> RND2("random<br/>evict random key")
+    VolPool --> TTL2("TTL<br/>evict soonest-expiring")
+
+    class Full mathOp
+    class Err,LRU1,LFU1,RND1,LRU2,LFU2,RND2,TTL2 lossN
+    class AllPool,VolPool base
 ```
 
 **LRU vs LFU**: LRU evicts the key not accessed for the longest time. LFU tracks access frequency; a key accessed once yesterday is evicted before a key accessed 100 times last week. Use LFU when access patterns are skewed (most data accessed rarely, hot data accessed frequently) — this is common for caches.

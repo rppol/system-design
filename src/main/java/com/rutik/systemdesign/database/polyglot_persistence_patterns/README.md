@@ -44,70 +44,98 @@ Polyglot SaaS              | Different DB per tenant type        | Enterprise vs
 
 ## 5. Architecture Diagrams
 
+**CQRS with PostgreSQL + Elasticsearch**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Write["Write Side - Commands"]
+        C1([Client]) --> API1(API) --> PG[("PostgreSQL<br/>source of truth")]
+        PG --> OB(Outbox table<br/>same transaction)
+        OB -.-> DBZ{Debezium CDC}
+        DBZ -.-> KT1(["Kafka topic:<br/>product-events"])
+        KT1 -.-> IDX(Elasticsearch Indexer)
+        IDX --> ESIX[("Elasticsearch<br/>index")]
+    end
+
+    subgraph Read["Read Side - Queries"]
+        C2([Client]) --> SAPI(Search API) --> ESREAD[("Elasticsearch<br/>read model")]
+        C2 --> DAPI(Detail API) --> PGREAD[("PostgreSQL<br/>source of truth, by id")]
+    end
+
+    class C1,C2 io
+    class API1,SAPI,DAPI req
+    class PG,ESIX,ESREAD,PGREAD base
+    class OB train
+    class DBZ,IDX mathOp
+    class KT1 req
 ```
-CQRS with PostgreSQL + Elasticsearch
-======================================
 
-Write Side (Commands):
-  Client → API → PostgreSQL (source of truth)
-             └── outbox table (in same transaction)
-                     │
-               [Debezium CDC]
-                     │
-               [Kafka topic: product-events]
-                     │
-              [Elasticsearch Indexer]
-                     │
-              [Elasticsearch index]
+*Write path: the client's write lands in PostgreSQL plus an outbox row in the same transaction; Debezium tails the WAL and republishes the change onto Kafka, which an indexer applies to Elasticsearch. Read path: search queries hit the Elasticsearch projection while detail lookups go straight to PostgreSQL. Consistency window (Debezium lag): 100ms-2s depending on transaction size.*
 
-Read Side (Queries):
-  Client → Search API → Elasticsearch (read model)
-         → Detail API → PostgreSQL (source of truth, by ID)
+**Event Sourcing + Multiple Read Models**
 
-Consistency window: Debezium lag = 100ms-2s depending on transaction size
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    CL([Client]) --> EV[("Events table<br/>PostgreSQL")]
+    EV -.-> OC{OrderCreated<br/>projector}
+    OC --> ORD[("Orders read model<br/>PostgreSQL")]
+    OC --> INV[("Inventory read model<br/>Cassandra")]
+    OC --> ANA[("Analytics read model<br/>ClickHouse")]
 
-Event Sourcing + Multiple Read Models
-=======================================
+    Q1(Order detail) --> ORD
+    Q2(Inventory check) --> INV
+    Q3(Sales report) --> ANA
 
-All writes:
-  Client → append to events table (PostgreSQL):
-    { event_id, aggregate_id, event_type, payload, timestamp }
-
-Projectors (CDC → consumers):
-  OrderCreated event:
-    → Orders read model (PostgreSQL view table for fast lookup)
-    → Inventory read model (Cassandra for high-read throughput)
-    → Analytics read model (ClickHouse for aggregations)
-
-Query:
-  Order detail → Orders read model (PostgreSQL — fast by order_id)
-  Inventory check → Inventory read model (Cassandra — fast by SKU)
-  Sales report → Analytics read model (ClickHouse — fast aggregation)
-
-Advantage: source of truth never changes after write; projections can be rebuilt
-  by replaying the full event log from the beginning
-
-
-CDC Pipeline with Debezium
-============================
-
-PostgreSQL (primary)
-  │ WAL stream (logical replication slot)
-  ▼
-Debezium Connector (Kafka Connect)
-  │ reads WAL, emits change events
-  ▼
-Kafka Topics (one per table or aggregate):
-  products.changes
-  users.changes
-  orders.changes
-  │
-  ├── Elasticsearch Sink Connector → Elasticsearch index
-  ├── ClickHouse Sink Connector → ClickHouse analytics table
-  ├── Redis Publisher → Redis cache invalidation
-  └── Data Warehouse Connector → BigQuery / Snowflake
+    class CL io
+    class Q1,Q2,Q3 req
+    class EV,ORD,INV,ANA base
+    class OC mathOp
 ```
+
+*Every write appends an immutable event to the PostgreSQL events table; a CDC projector fans the `OrderCreated` event out to three purpose-built read models. Because the event log is the source of truth, any projection can be rebuilt from scratch by replaying it from the beginning.*
+
+**CDC Pipeline with Debezium**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PG2[("PostgreSQL<br/>primary")] -.->|"WAL stream,<br/>replication slot"| DBZ2(Debezium Connector<br/>Kafka Connect)
+    DBZ2 -->|"emits change<br/>events"| KT2(["Kafka Topics<br/>products / users / orders"])
+    KT2 --> ES2[("Elasticsearch<br/>index")]
+    KT2 --> CH2[("ClickHouse<br/>analytics table")]
+    KT2 --> RD2[("Redis cache<br/>invalidation")]
+    KT2 -.-> DW2[("Data Warehouse<br/>BigQuery / Snowflake")]
+
+    class PG2,ES2,CH2,RD2 base
+    class DBZ2 mathOp
+    class KT2 req
+    class DW2 frozen
+```
+
+*Debezium tails PostgreSQL's WAL through a logical replication slot and emits change events onto per-table Kafka topics; independent sink connectors fan those events out to Elasticsearch, ClickHouse, Redis, and a downstream data warehouse.*
 
 ---
 
@@ -202,35 +230,67 @@ SELECT pg_create_logical_replication_slot('debezium_slot', 'pgoutput');
 
 ### Dual-Write Problems and the Outbox Solution
 
+**Dual-write without outbox (the failure mode)**
+
+```mermaid
+sequenceDiagram
+    participant App as Client
+    participant PG as PostgreSQL
+    participant ES as Elasticsearch
+
+    App->>PG: 1. Write product
+    PG-->>App: SUCCESS
+    App--xES: 2. Write product
+    Note over ES: NETWORK TIMEOUT
+    Note over PG,ES: PostgreSQL has the new product;<br/>Elasticsearch still has the stale one
 ```
-Dual-write without outbox:
-  1. Write to PostgreSQL → SUCCESS
-  2. Write to Elasticsearch → NETWORK TIMEOUT
-  Result: PostgreSQL has new product; Elasticsearch has stale product
-  Application serves search results inconsistent with reality
-  Fix: manual re-sync script; error-prone; manual process
 
-Dual-write with outbox pattern:
-  1. BEGIN transaction
-  2. Write to PostgreSQL (products table) → SUCCESS
-  3. Write to outbox table (same transaction) → SUCCESS
-  4. COMMIT → both writes committed atomically
-  5. Debezium reads outbox entry from WAL
-  6. Debezium publishes to Kafka → Elasticsearch consumer processes
-  Result: even if Kafka/Elasticsearch are down, the outbox entry persists
-  and will be processed when they recover
+*Result: the application serves search results inconsistent with reality. Fix today is a manual re-sync script - error-prone and manual.*
 
-Failure modes and mitigations:
-  Debezium down: outbox entries accumulate; replication slot holds WAL
-    → Monitor slot lag; alert at > 5 minutes
-    → cap with max_slot_wal_keep_size = 10GB to prevent disk fill
+**Dual-write with the outbox pattern (the fix)**
 
-  Elasticsearch consumer fails: messages remain in Kafka (configurable retention)
-    → Retry from Kafka position; idempotent consumer (upsert by document ID)
+```mermaid
+sequenceDiagram
+    participant App as Client
+    participant PG as PostgreSQL
+    participant DBZ as Debezium
+    participant KFK as Kafka
+    participant ES as Elasticsearch
 
-  Kafka down: Debezium blocks (cannot commit offset); messages buffer in Debezium
-    → Debezium has internal buffer; Kafka reconnect triggers replay
+    App->>PG: 1. BEGIN transaction
+    App->>PG: 2. Write products row
+    App->>PG: 3. Write outbox row (same tx)
+    PG-->>App: 4. COMMIT - both writes atomic
+    PG-->>DBZ: 5. Read outbox entry from WAL
+    DBZ->>KFK: 6. Publish change event
+    KFK->>ES: Consumer processes event
+    Note over PG,ES: Even if Kafka or Elasticsearch are down,<br/>the outbox entry persists and is<br/>processed once they recover
 ```
+
+*The outbox row commits atomically with the business write, so delivery is guaranteed even through downstream outages.*
+
+**Failure modes and mitigations**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(Debezium down) --> B(Outbox entries<br/>accumulate) --> C([Monitor slot lag,<br/>alert over 5 min])
+    D(Elasticsearch<br/>consumer fails) --> E(Messages remain<br/>in Kafka) --> F([Retry, idempotent<br/>upsert by doc id])
+    G(Kafka down) --> H(Debezium blocks,<br/>buffers internally) --> I([Reconnect<br/>triggers replay])
+
+    class A,D,G lossN
+    class B,E,H mathOp
+    class C,F,I train
+```
+
+*Each failure mode is bounded by a concrete guardrail: WAL disk growth is capped with `max_slot_wal_keep_size`, Kafka retention absorbs consumer downtime, and Debezium's own buffer survives a Kafka outage.*
 
 ### Keeping PostgreSQL and Elasticsearch in Sync
 
@@ -322,23 +382,28 @@ public class ProductInventoryDataLoader {
 
 ### Data Mesh / Data Lake Integration
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PG[("PostgreSQL<br/>OLTP")] --> DBZ(Debezium) --> KT(["Kafka"])
+    KT --> S3[("S3<br/>Parquet")] --> GLUE(Glue Crawler) --> ATH(Athena SQL)
+    KT --> BQ[("BigQuery")] --> LOOK([Looker dashboards])
+    KT --> SF[("Snowflake")] --> DBT(dbt transformations)
+
+    class PG,S3,BQ,SF base
+    class DBZ,GLUE,DBT mathOp
+    class KT,ATH req
+    class LOOK io
 ```
-CDC → Data Lake pipeline:
 
-PostgreSQL (OLTP) → Debezium → Kafka → S3 (Parquet)
-                                          → Glue Crawler → Athena SQL
-                                          → BigQuery → Looker dashboards
-                                          → Snowflake → dbt transformations
-
-Benefits:
-  OLTP database never hit by analytics queries
-  Data lake retains all historical changes (not just current state)
-  Multiple consumers: BI, ML training, compliance audit
-
-Ordering guarantee: Kafka partition key = primary key → per-record ordering
-Exactly-once: Kafka Streams or Flink can deduplicate for exactly-once semantics
-Schema evolution: Confluent Schema Registry (Avro/Protobuf) manages schema changes
-```
+*Kafka fans CDC events out to three independent analytics paths - a Parquet data lake queried via Athena, BigQuery feeding Looker dashboards, and Snowflake feeding dbt transformations - so the OLTP database is never touched by analytics queries and the lake retains every historical change, not just current state. Ordering guarantee: Kafka partition key = primary key, giving per-record ordering. Exactly-once: Kafka Streams or Flink can deduplicate. Schema evolution: Confluent Schema Registry (Avro/Protobuf) manages schema changes.*
 
 ---
 
@@ -376,6 +441,28 @@ Full polyglot        | Optimized per pattern | Very high         | Varies per pa
 **Do NOT use when**: (1) PostgreSQL with proper indexing and extensions handles all access patterns. (2) Team lacks expertise to operate additional databases. (3) Consistency requirements are strict and the eventual consistency window of CDC is unacceptable. (4) The system is early-stage — premature polyglot persistence creates maintenance burden before scale warrants it.
 
 **Rule**: add a second database when a specific requirement cannot be met by the primary database with proper optimization, and when the operational cost of the second database is justified by the benefit.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{"Can the primary DB<br/>meet this requirement?"} -->|No| Q2{"Is the ops cost<br/>justified by the benefit?"}
+    Q1 -->|Yes| STAY(Stay on single DB)
+    Q2 -->|Yes| ADD(Add a purpose-built store)
+    Q2 -->|No| STAY
+
+    class Q1,Q2 mathOp
+    class STAY train
+    class ADD base
+```
+
+*The rule above as a decision: only add a database when a requirement genuinely cannot be met by the primary store, and only when the operational cost of running it is worth the benefit.*
 
 ---
 
@@ -473,21 +560,27 @@ Consistency testing between PostgreSQL and Elasticsearch: (1) Continuous reconci
 
 **Polyglot architecture**:
 
-```
-Sources of truth:
-  PostgreSQL → products table (canonical: all fields, ACID for writes)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Derived stores:
-  Elasticsearch → search index (text, facets, relevance)
-  ClickHouse → analytics (daily aggregations, funnel metrics)
-  Redis → product cache (hot product pages, 30-min TTL)
+    PG[("PostgreSQL<br/>products table<br/>source of truth")] --> DBZ(Debezium<br/>pgoutput) --> KT(["Kafka<br/>products.events"])
+    KT --> ESSINK(Elasticsearch<br/>Sink Connector) --> ES[("Elasticsearch<br/>search index")]
+    KT --> CHSINK(ClickHouse Kafka<br/>Engine table) --> CH[("ClickHouse<br/>analytics")]
+    KT --> RSINK(Redis Invalidation<br/>Consumer) -.->|"invalidate<br/>on update"| RD[("Redis<br/>product cache")]
 
-Synchronization:
-  PostgreSQL → Debezium (pgoutput) → Kafka (products.events)
-           → Elasticsearch Sink Connector (upsert by product_id)
-           → ClickHouse Kafka Engine table (append + ReplacingMergeTree)
-           → Redis Invalidation Consumer (DEL product:{id} on update)
+    class PG,ES,CH,RD base
+    class DBZ,ESSINK,CHSINK,RSINK mathOp
+    class KT req
 ```
+
+*PostgreSQL is the single source of truth; Debezium streams every change through Kafka to three independent sink consumers that keep Elasticsearch (search), ClickHouse (analytics), and Redis (cache) each eventually consistent with it.*
 
 ```java
 // API routing:
@@ -508,6 +601,16 @@ GET /api/analytics/top-categories?date=2025-12-01
 - Search results: eventually consistent (1–5s lag from CDC). Acceptable: users tolerate slight search lag.
 - Product detail: Redis TTL=30min; cache miss → PostgreSQL (strongly consistent). Fresh price always available on detail page.
 - Analytics: T+15min delay (ClickHouse receives CDC events; materialized views refresh every 15 minutes). Acceptable: analytics dashboard is not real-time.
+
+```mermaid
+xychart-beta
+    title "Staleness Window by Derived Store"
+    x-axis ["Elasticsearch", "Redis Cache", "ClickHouse"]
+    y-axis "Seconds behind PostgreSQL" 0 --> 1800
+    bar [5, 1800, 900]
+```
+
+*Even within one architecture the tolerable staleness spans almost three orders of magnitude: Elasticsearch search results lag PostgreSQL by single-digit seconds, ClickHouse dashboards by up to 15 minutes (900s), and the Redis cache's worst case - if invalidation is ever missed - is bounded by its 30-minute TTL (1800s). Each window is sized to what its consumers can actually tolerate.*
 
 **Results**:
 - Search latency: 8–12s → 80ms (Elasticsearch)

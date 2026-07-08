@@ -87,72 +87,112 @@ Cross-references:
 
 ### Registry-Based Factory
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    c1["@register('circle')"] --> reg["_registry dict<br/>(name to class)"]
+    c2["@register('rect')"] --> reg
+    reg --> circleCls["CircleShape"]
+    reg --> rectCls["RectShape"]
+    kind(["factory(kind)"]) --> lookup["look up kind<br/>in _registry"]
+    reg -.-> lookup
+    lookup --> inst(["Shape instance"])
+
+    class c1,c2 mathOp
+    class reg base
+    class circleCls,rectCls train
+    class kind req
+    class lookup mathOp
+    class inst io
 ```
-                  @register("circle")
-                  @register("rect")
-                        |
-                        v
-              _registry: dict[str, type[Shape]]
-              {
-                "circle": CircleShape,
-                "rect":   RectShape,
-              }
-                        |
-          factory(kind) v
-              _registry[kind]()  ---> Shape instance
-```
+
+Decorators register concrete shape classes into `_registry` at import time; `factory(kind)` is a pure dict lookup at call time, so adding a new shape never touches the factory function.
 
 ### Observer Event Bus with Weak References
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph EB["EventBus"]
+        sub["subscribe(event, cb)"] --> listeners["_listeners dict<br/>(event to WeakSet of callbacks)"]
+        emit["emit(event, *args)"] --> listeners
+        listeners --> iterate["iterate set,<br/>call each cb"]
+    end
+    listeners -.->|"weak ref: GC can<br/>collect cb"| listenerObjs(["Listener objects<br/>(live while subscriber holds ref)"])
+
+    class sub,emit,iterate mathOp
+    class listeners base
+    class listenerObjs io
 ```
-  EventBus
-  ┌─────────────────────────────────────────┐
-  │  _listeners: dict[str, WeakSet[Callable]]│
-  │                                         │
-  │  subscribe(event, cb) ──> WeakSet.add   │
-  │  emit(event, *args)   ──> iterate set,  │
-  │                           call each cb  │
-  └─────────────────────────────────────────┘
-       |
-       | weak reference (GC can collect cb)
-       v
-  Listener objects (live as long as subscriber holds reference)
-```
+
+The weak-reference edge is why listeners never leak: `_listeners` holds a `WeakSet`, so a subscriber can be garbage-collected the moment nothing else references it — the dotted edge marks that soft, GC-visible dependency.
 
 ### Repository with FastAPI DI
 
-```
-  Protocol: Repository[T]
-  ┌──────────────────────┐
-  │ get(id) -> T | None  │
-  │ save(entity: T)      │
-  │ delete(id: int)      │
-  └──────────┬───────────┘
-             |
-    ┌────────┴────────┐
-    v                 v
-SQLAlchemyUserRepo  InMemoryUserRepo
-(production)        (test / unit)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-FastAPI route:
-  async def create_user(
-      repo: UserRepo = Depends(get_user_repo)
-  ): ...
+    proto["Generic Repository Protocol<br/>get / save / delete"] --> sqlRepo["SQLAlchemyUserRepo<br/>(production)"]
+    proto --> memRepo["InMemoryUserRepo<br/>(test / unit)"]
+    sqlRepo -.->|"Depends(get_user_repo)"| route(["FastAPI route:<br/>create_user(repo)"])
+    memRepo -.->|"Depends(get_user_repo)"| route
+
+    class proto frozen
+    class sqlRepo base
+    class memRepo train
+    class route io
 ```
+
+Both implementations satisfy the same `Repository[T]` Protocol, so `Depends(get_user_repo)` can swap between them per environment without touching route code — the dotted edges mark that runtime-resolved DI link.
 
 ### Template Method vs Composition
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TM["Template Method (ABC)"]
+        base1["DataProcessor (ABC)<br/>load + save fixed"] --> abs1["transform()<br/>abstract hook"]
+        abs1 --> child1["CsvProcessor<br/>overrides transform()"]
+    end
+
+    subgraph CO["Composition (callable)"]
+        base2["DataProcessor<br/>load + save fixed"] --> fn2["transform_fn(data)<br/>injected via __init__"]
+    end
+
+    class base1,base2 frozen
+    class abs1 mathOp
+    class child1,fn2 train
 ```
-  Template Method (ABC)          Composition (callable)
-  ─────────────────────          ──────────────────────
-  DataProcessor (ABC)            DataProcessor
-    load()                         __init__(transform_fn)
-    transform() @abstract          load()
-    save()                         transform_fn(data)
-       |                           save()
-  CsvProcessor
-    transform() -> override
-```
+
+The fixed skeleton (purple) is identical in shape either way; the only difference is where the variable step lives — an abstract method a subclass must override, or a callable injected through `__init__`.
 
 ---
 
@@ -459,6 +499,32 @@ class CommandHistory:
         cmd.execute()
         self._done.append(cmd)
 ```
+
+The two-deque dance in `CommandHistory` is easy to misread from code alone — the diagram below makes the execute/undo/redo mechanics, and the redo-clearing side effect, explicit:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    newCmd(["new command"]) --> exec["execute(cmd)"]
+    exec --> doneStack["Done stack<br/>(deque)"]
+    exec -.->|"side effect:<br/>clears redo history"| undoneStack["Undone stack<br/>(deque)"]
+    doneStack -->|"undo():<br/>pop + cmd.undo()"| undoneStack
+    undoneStack -->|"redo():<br/>pop + cmd.execute()"| doneStack
+
+    class newCmd req
+    class exec mathOp
+    class doneStack train
+    class undoneStack lossN
+```
+
+`execute()` both pushes onto the done stack and clears the undone stack as a side effect (the dotted edge) — that is why redo is unavailable again the moment a fresh command runs; `undo()`/`redo()` simply move the top command between the two stacks.
 
 FastAPI's `BackgroundTasks.add_task(fn, *args)` is a command queue: tasks are enqueued as callables and fired after the response is sent.
 
@@ -1102,6 +1168,37 @@ async def create_payment(
     result = service.process(req)
     return dataclasses.asdict(result)
 ```
+
+The 300-line god object collapses into a thin orchestrator plus four independently extensible collaborators — one per pattern:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Before["Before: God Object"]
+        god["PaymentService<br/>300 lines: validate + dispatch<br/>+ persist + notify"]
+    end
+
+    subgraph After["After: Composable Patterns"]
+        svc["PaymentService<br/>thin orchestrator"] --> strat["Strategy:<br/>provider registry"]
+        svc --> repo["Repository:<br/>persistence"]
+        svc --> bus["Observer:<br/>event bus"]
+        svc --> fac["Factory:<br/>validator registry"]
+    end
+
+    class god lossN
+    class svc mathOp
+    class strat,repo,fac base
+    class bus train
+```
+
+Each collaborator below is exactly what the bullets describe: Strategy, Repository, and Factory are registries the thin `PaymentService` orchestrator calls into, and Observer fires only after persistence succeeds — extending any one of the four never touches the orchestrator itself.
 
 **What changed**:
 

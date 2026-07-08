@@ -49,6 +49,22 @@ This module covers writing and testing Rego, the Gatekeeper and Kyverno enforcem
 | Admission webhook | Gatekeeper, Kyverno | At API-server request | No (cluster-enforced) |
 | Audit / background | Gatekeeper audit, kube-bench | Periodic scan of live state | N/A (reporting) |
 
+```mermaid
+quadrantChart
+    title Enforcement point tradeoff space
+    x-axis Bypassable --> Non-bypassable
+    y-axis Slow feedback --> Fast feedback
+    quadrant-1 Ideal, rarely achievable
+    quadrant-2 Developer guardrail
+    quadrant-3 Weakest control
+    quadrant-4 Non-bypassable backstop
+    "Conftest (CI)": [0.15, 0.88]
+    "Gatekeeper / Kyverno (Admission)": [0.85, 0.42]
+    "Audit / kube-bench (Background)": [0.72, 0.12]
+```
+
+Conftest sits top-left — seconds-fast PR feedback that is bypassable by editing the pipeline; the admission webhook sits bottom-right — non-bypassable but adding roughly 5-50ms per request and firing only after merge; the periodic audit is slowest of all yet still closes the drift gap, which is why mature platforms combine more than one gate instead of relying on a single point in this space.
+
 **Gatekeeper model:** A `ConstraintTemplate` defines reusable Rego with parameters; a `Constraint` instantiates it with concrete values and a scope. This two-layer design lets one template (e.g., "allowed registries") be reused across many constraints.
 
 **Kyverno model:** Policies are plain YAML with three capabilities:
@@ -65,38 +81,73 @@ This module covers writing and testing Rego, the Gatekeeper and Kyverno enforcem
 | Encryption at rest required | — | CC6.7 | 3.4 | §164.312(a)(2)(iv) |
 | Audit logging enabled | 3.2.1 | CC7.2 | 10.2 | §164.312(b) |
 
+```mermaid
+stateDiagram-v2
+    state "New Rule" as New
+    state "Audit / Dryrun" as Dryrun
+    state "Enforced (Deny)" as Enforced
+
+    [*] --> New
+    New --> Dryrun: opa test passes
+    Dryrun --> Dryrun: violation found, fix or waive
+    Dryrun --> Enforced: violations near zero
+    Enforced --> Dryrun: backlog reappears
+    Enforced --> [*]
+```
+
+Every policy is authored and unit-tested, then rolled out in Audit/Dryrun where it loops until the violation backlog clears — the Section 14 case study's 2-week dryrun surfaced 23 privileged pods and 11 public-registry images to fix or waive — before flipping to Enforced, after which a violating request is rejected at the API server in about 12ms.
+
 ---
 
 ## 5. Architecture Diagrams
 
-```
-POLICY AS CODE — TWO ENFORCEMENT GATES
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Developer                          CI Pipeline                       Kubernetes API Server
-  ─────────                          ───────────                       ─────────────────────
-  edit manifest / *.tf ──► [Conftest: Rego vs files] ──► merge ──► kubectl apply
-                                │  fast feedback                          │
-                                └─ deny: "privileged not allowed"         ▼
-                                                          ┌──────────────────────────────┐
-                                                          │ ValidatingAdmissionWebhook     │
-                                                          │  Gatekeeper / Kyverno          │
-                                                          │  evaluate Rego/YAML policy     │
-                                                          │     ADMIT  ──► etcd            │
-                                                          │     DENY   ──► 403 to user     │
-                                                          └──────────────────────────────┘
-                                                                        │
-                                          Gatekeeper audit (every 60s) ─┘
-                                          scans existing objects, writes violations to status
+    dev(["Developer<br/>edits manifest / *.tf"]) --> conftest{"Conftest<br/>Rego vs files"}
+    conftest -->|"deny"| ciReject(["'privileged container<br/>not allowed'"])
+    conftest -->|"pass"| merged(["merge"]) --> kubectl["kubectl apply"] --> webhook{"ValidatingAdmissionWebhook<br/>Gatekeeper / Kyverno"}
+    webhook -->|"ADMIT"| etcd[("etcd")]
+    webhook -->|"DENY"| reject403(["403 to user"])
+    etcd -.->|"every 60s"| audit["Gatekeeper audit<br/>scans existing objects"]
+    audit -.-> violations(["violations written<br/>to Constraint status"])
+
+    class dev io
+    class conftest,webhook mathOp
+    class ciReject,reject403 lossN
+    class merged,kubectl req
+    class etcd base
+    class audit,violations frozen
 ```
 
-```
-GATEKEEPER CONSTRAINT MODEL
+Two enforcement gates run the same intent: Conftest gives fast, bypassable feedback in CI before merge, while the Gatekeeper/Kyverno admission webhook evaluates every `kubectl apply` at the API server and cannot be skipped; Gatekeeper's background audit separately re-scans etcd every 60 seconds and records drift in the Constraint's status.
 
-  ConstraintTemplate (Rego + param schema)
-        │  reused by
-        ├──► Constraint A: allowedRepos = ["myrepo/"]   scope: namespace=prod
-        └──► Constraint B: allowedRepos = ["test/"]     scope: namespace=dev
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    template(["ConstraintTemplate<br/>Rego + param schema"]) -->|"reused by"| constraintA["Constraint A<br/>allowedRepos: myrepo/<br/>scope: ns=prod"]
+    template -->|"reused by"| constraintB["Constraint B<br/>allowedRepos: test/<br/>scope: ns=dev"]
+
+    class template base
+    class constraintA train
+    class constraintB req
 ```
+
+One `ConstraintTemplate` — the reusable Rego plus its parameter schema — is instantiated by multiple `Constraint` objects that each supply their own `allowedRepos` list and namespace scope; here prod and dev enforce different registry allow-lists from the same underlying rule.
 
 ---
 

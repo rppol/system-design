@@ -91,6 +91,34 @@ and (2) a **side effect on a global/nonlocal answer** (here, diameter — the
 actual thing the problem asks for, which isn't always the same as what's
 returned upward). Conflating these two is the most common DFS bug (see §8).
 
+This shape repeats across nearly every tree DFS problem in this file:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    L(["left subtree<br/>result"]) --> N{"combine<br/>at node"}
+    R(["right subtree<br/>result"]) --> N
+    N -->|"return value"| P(["used by<br/>parent"])
+    N -.->|"side effect"| G(("global<br/>answer"))
+
+    class L,R io
+    class N mathOp
+    class P train
+    class G base
+```
+
+*The solid arrow is what the parent consumes for its own combination (height,
+in the diameter walkthrough above); the dotted arrow is a side effect on a
+global accumulator — often the actual answer the problem asks for. Treating
+the two as one value is the bug §8 dissects in detail.*
+
 ---
 
 ## 3. The Template
@@ -290,6 +318,37 @@ node-by-node). Naive complexity is `O(n * m)` (`n` = nodes in main tree, `m` =
 nodes in target) — acceptable for typical constraints; an `O(n + m)`
 alternative serializes both trees (with sentinels, to avoid false positives
 from ambiguous shapes) and does a substring search.
+
+The variations above nearly all reuse the same combine-at-node skeleton from
+§3, changing only what gets computed or returned:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CORE(["Core template<br/>combine children at node"])
+    CORE -->|"subtract on the<br/>way down"| V1(["Path Sum I / II"])
+    CORE -.->|"+ prefix-sum<br/>hashmap"| V2(["Path Sum III"])
+    CORE -->|"pass low/high<br/>bounds down"| V3(["Validate BST"])
+    CORE -->|"clip negatives,<br/>track global best"| V4(["Max Path Sum"])
+    CORE -->|"emit null<br/>sentinels"| V5(["Serialize /<br/>deserialize"])
+    CORE -->|"split by root's<br/>inorder index"| V6(["Construct from<br/>Preorder+Inorder"])
+    CORE -.->|"DFS calls a<br/>second DFS"| V7(["Subtree of<br/>Another Tree"])
+
+    class CORE base
+    class V1,V3,V4,V5,V6 train
+    class V2,V7 frozen
+```
+
+*Every branch keeps the postorder combine-at-node skeleton; only Path Sum III
+and Subtree of Another Tree (dotted) reach outside it — the first bolts on a
+prefix-sum hashmap, the second launches a nested second DFS.*
 
 ---
 

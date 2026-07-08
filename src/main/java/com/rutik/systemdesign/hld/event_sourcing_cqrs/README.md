@@ -105,77 +105,159 @@ Rebuilding aggregate state from event zero is O(N) in the number of events. For 
 
 ### Full CQRS + Event Sourcing Architecture
 
-```
-                              Client
-                                |
-                  +-------------+-------------+
-                  |                           |
-             [Command]                    [Query]
-                  |                           |
-         +--------v--------+         +--------v--------+
-         |  Command        |         |  Query          |
-         |  Handler        |         |  Handler        |
-         |  (validates,    |         |  (reads from    |
-         |   loads agg.)   |         |   read model)   |
-         +--------+--------+         +--------+--------+
-                  |                           |
-         +--------v--------+         +--------+--------+
-         |  Aggregate      |         |  Read Model     |
-         |  (emits events, |         |  (Postgres /    |
-         |   version N)    |         |   Redis /       |
-         +--------+--------+         |   ES index)     |
-                  |                  +--------^--------+
-         +--------v--------+                  |
-         |  Event Store    +---(stream)---->  Projector
-         |  (append-only   |                  |
-         |   event log,    |         +--------+--------+
-         |   global seq.)  |         |  Subscribes to  |
-         +-----------------+         |  event stream,  |
-                                     |  updates model  |
-                                     +-----------------+
+Commands flow through the aggregate into the append-only event store; queries never touch the write side at all — the projector is the only bridge, asynchronously replaying the event stream into the read model.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client([Client])
+
+    subgraph WriteSide["Command Side"]
+        direction LR
+        Cmd(Command)
+        CmdH(Command Handler<br/>validates, loads aggregate)
+        Agg(Aggregate<br/>emits events, version N)
+    end
+
+    subgraph ReadSide["Query Side"]
+        direction LR
+        Qry(Query)
+        QryH(Query Handler<br/>reads read model)
+        RM(Read Model<br/>Postgres / Redis / ES)
+    end
+
+    Store(Event Store<br/>append-only, global seq.)
+    Proj(Projector<br/>subscribes to stream)
+
+    Client --> Cmd
+    Client --> Qry
+    Cmd --> CmdH --> Agg --> Store
+    Qry --> QryH --> RM
+    Store -.->|"stream"| Proj -.->|"updates"| RM
+
+    class Client io
+    class Cmd,Qry req
+    class CmdH,QryH,Proj mathOp
+    class Agg train
+    class Store,RM base
 ```
 
 ### Snapshot Lifecycle
 
-```
-Event Stream for aggregate "order-123":
-[v1: OrderPlaced] [v2: PaymentConfirmed] ... [v49: ItemPicked] [v50: SNAPSHOT] [v51: Packed] [v52: Shipped]
+Replaying from zero costs 52 event applications (red, the expensive path); loading the snapshot at v50 and replaying only v51 and v52 (green, the fast path) reaches the same current state in 2.
 
-Rebuild without snapshot:
-  Load events v1..v52 → apply all 52 → current state
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Rebuild with snapshot:
-  Load snapshot at v50 → apply events v51, v52 → current state (2 events instead of 52)
+    Events(Event stream order-123<br/>v1 OrderPlaced ... v52 Shipped)
+    Snap(Snapshot at v50)
+    NoSnap(Apply all 52 events<br/>v1 through v52)
+    WithSnap(Apply 2 events only<br/>v51, v52)
+    State((Current State))
+
+    Events --> NoSnap --> State
+    Events -.->|"snapshot at v50"| Snap --> WithSnap --> State
+
+    class Events req
+    class Snap frozen
+    class NoSnap lossN
+    class WithSnap train
+    class State base
 ```
 
 ### Saga: Choreography vs Orchestration
 
+**Choreography** (no central coordinator) — each service reacts only to the event immediately before it; no single component sees the whole flow, so failure handling depends on the right service happening to listen:
+
+```mermaid
+sequenceDiagram
+    participant O as OrderService
+    participant P as PaymentService
+    participant I as InventoryService
+    participant S as ShipmentService
+
+    O->>P: OrderPlaced
+    P->>I: PaymentConfirmed
+    I->>S: InventoryReserved
+    S->>O: Shipped (updates status)
+
+    opt Inventory reservation fails
+        I->>P: InventoryFailed
+        P->>P: emits PaymentRefunded
+    end
 ```
-Choreography (no central coordinator):
-  OrderService ──[OrderPlaced]──> PaymentService
-  PaymentService ──[PaymentConfirmed]──> InventoryService
-  InventoryService ──[InventoryReserved]──> ShipmentService
-  ShipmentService ──[Shipped]──> OrderService (updates status)
 
-  Failure: InventoryService emits [InventoryFailed]
-  PaymentService listens → emits [PaymentRefunded]
+**Orchestration** (central coordinator) — a dedicated OrderSaga owns the state machine, issuing commands and waiting for replies; easier to trace and monitor, at the cost of the orchestrator becoming a coordination bottleneck if overloaded:
 
-Orchestration (central coordinator):
-                 +------------------+
-                 |  OrderSaga       |
-                 |  (state machine) |
-                 +--+--+--+--+-----+
-        [Command]   |  |  |  |   [Command]
-        PayOrder    |  |  |  |   ReserveInventory
-            +-------+  |  |  +-------+
-            |          |  |          |
-     PaymentSvc     [Reply]    InventorySvc
-            |       Success         |
-            +-------+  |  +---------+
-                       |
-                [Command] ShipOrder
-                       |
-                  ShipmentSvc
+```mermaid
+sequenceDiagram
+    participant Saga as OrderSaga
+    participant Pay as PaymentSvc
+    participant Inv as InventorySvc
+    participant Ship as ShipmentSvc
+
+    Note over Saga: owns the state machine
+    Saga->>Pay: Command: PayOrder
+    Pay-->>Saga: Reply: Success
+    Saga->>Inv: Command: ReserveInventory
+    Inv-->>Saga: Reply: Success
+    Saga->>Ship: Command: ShipOrder
+```
+
+### Choosing Among the Architecture Variants
+
+A decision path through §4.1–§4.4: audit/temporal-query needs and cross-service coordination push toward richer, more operationally expensive patterns. The common production default is Full ES + CQRS (green); Saga (red) layers on only when a process spans multiple services.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{Need audit trail<br/>or temporal replay?}
+    Q2{Read:write asymmetry<br/>about 100:1?}
+    Q3{Need multiple<br/>independent read models?}
+    Q4{Process spans services,<br/>need a saga?}
+
+    CRUD(Traditional CRUD)
+    CQRSOnly(CQRS alone)
+    ESOnly(Event Sourcing alone)
+    ESCQRS(Full ES + CQRS)
+    ESCQRSSaga(Full ES + CQRS + Saga)
+
+    Q1 -->|No| Q2
+    Q2 -->|No| CRUD
+    Q2 -->|Yes| CQRSOnly
+    Q1 -->|Yes| Q3
+    Q3 -->|No| ESOnly
+    Q3 -->|Yes| Q4
+    Q4 -->|No| ESCQRS
+    Q4 -->|Yes| ESCQRSSaga
+
+    class Q1,Q2,Q3,Q4 mathOp
+    class CRUD base
+    class CQRSOnly req
+    class ESOnly frozen
+    class ESCQRS train
+    class ESCQRSSaga lossN
 ```
 
 ---
@@ -273,11 +355,24 @@ VALUES (
 
 Two concurrent commands on the same aggregate race to append at version N+1. The event store enforces uniqueness on (aggregateId, eventVersion):
 
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant B as Thread B
+    participant Store as Event Store
+
+    A->>Store: read Order @ v4
+    B->>Store: read Order @ v4
+    A->>Store: append event @ v5
+    Store-->>A: SUCCEEDS
+    B->>Store: append event @ v5
+    Store-->>B: FAILS (version conflict)
+    B->>Store: reload Order @ v5
+    B->>Store: append event @ v6
+    Store-->>B: SUCCEEDS
 ```
-Thread A: reads Order at version 4 → produces event at version 5 → SUCCEEDS
-Thread B: reads Order at version 4 → produces event at version 5 → FAILS (version conflict)
-Thread B retry: reloads Order (now at version 5) → re-validates command → produces event at version 6 → SUCCEEDS
-```
+
+Thread B's write at v5 collides with Thread A's already-committed v5 and is rejected; only after reloading at v5 does its retry succeed at v6.
 
 Write latency to a well-tuned EventStoreDB or PostgreSQL event store: p50 ~1ms, p99 ~5ms for single-region, local disk. Cross-AZ replication adds 1–3ms.
 
@@ -528,33 +623,59 @@ Query patterns: aggregation by day/SKU/customer tier, refund rate, GMV
 Latency: eventual, 30-second lag acceptable
 ```
 
+One event stream, three independently-latencied projections: the customer status view needs p99 under 5ms, the warehouse queue tolerates under 50ms, and the finance rollup accepts a 30-second lag.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Events(Event Stream)
+
+    CustStatus(Customer Order Status<br/>Redis / PostgreSQL<br/>p99 under 5ms)
+    Fulfillment(Warehouse Fulfillment<br/>PostgreSQL<br/>p99 under 50ms)
+    Revenue(Finance Revenue<br/>Elasticsearch<br/>30s lag OK)
+
+    Events -->|"OrderPlaced, OrderShipped,<br/>OrderDelivered, OrderCancelled"| CustStatus
+    Events -->|"InventoryReserved,<br/>PaymentConfirmed"| Fulfillment
+    Events -->|"OrderPlaced, PaymentConfirmed,<br/>PaymentRefunded"| Revenue
+
+    class Events req
+    class CustStatus train
+    class Fulfillment mathOp
+    class Revenue base
+```
+
 ### Saga Steps with Compensation
 
-```
-OrderPlacementSaga (orchestration-based):
+`OrderPlacementSaga` (orchestration-based). Each step has its own timeout; a failure triggers the compensations for every already-completed step before the saga terminates in `OrderCancelled` — success only when the shipment step reports `OrderShipped`:
 
-Step 1: OrderPlaced event received
-  → Command: InitiatePayment(orderId, amount)
-  → Timeout: 30s
-  → On PaymentConfirmed: proceed to Step 2
-  → On PaymentFailed: emit OrderCancelled(reason=payment_failed) — END
+```mermaid
+stateDiagram-v2
+    state "Initiate Payment<br/>timeout 30s" as S1
+    state "Reserve Inventory<br/>timeout 60s" as S2
+    state "Schedule Shipment<br/>timeout 1hr SLA" as S3
+    state "Refund Payment<br/>compensation" as Comp1
+    state "Release Inventory<br/>+ Refund Payment<br/>compensation" as Comp2
+    state "Order Cancelled" as Cancelled
+    state "Saga Complete" as Success
 
-Step 2: PaymentConfirmed received
-  → Command: ReserveInventory(orderId, items[])
-  → Timeout: 60s
-  → On InventoryReserved: proceed to Step 3
-  → On InventoryFailed:
-      Compensation: Command RefundPayment(transactionRef)
-      → On PaymentRefunded: emit OrderCancelled(reason=out_of_stock) — END
-
-Step 3: InventoryReserved received
-  → Command: ScheduleShipment(orderId, warehouseId, reservationId)
-  → Timeout: 3600s (1 hour — warehouse SLA)
-  → On OrderShipped: saga complete — SUCCESS
-  → On ShipmentFailed:
-      Compensation 1: Command ReleaseInventory(reservationId)
-      Compensation 2: Command RefundPayment(transactionRef)
-      → emit OrderCancelled(reason=shipment_failed) — END
+    [*] --> S1: OrderPlaced
+    S1 --> S2: PaymentConfirmed
+    S1 --> Cancelled: PaymentFailed
+    S2 --> S3: InventoryReserved
+    S2 --> Comp1: InventoryFailed
+    Comp1 --> Cancelled: PaymentRefunded
+    S3 --> Success: OrderShipped
+    S3 --> Comp2: ShipmentFailed
+    Comp2 --> Cancelled: compensated
+    Success --> [*]
+    Cancelled --> [*]
 ```
 
 ### Technology Choices

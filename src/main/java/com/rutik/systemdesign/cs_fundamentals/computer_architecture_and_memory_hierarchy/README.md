@@ -79,6 +79,16 @@ Modern out-of-order processors have 15–25+ pipeline stages, multiple execution
 | Tournament predictor | Combine local and global history predictors | ~95%+ |
 | TAGE predictor (modern Intel/AMD) | Tagged geometric history length tables | ~97–99% in benchmarks |
 
+```mermaid
+xychart-beta
+    title "Branch Predictor Accuracy by Generation"
+    x-axis ["Static", "1-bit", "2-bit", "Tournament", "TAGE"]
+    y-axis "Prediction accuracy %" 0 --> 100
+    bar [55, 85, 93, 96, 98]
+```
+
+Each predictor generation roughly halves the residual misprediction rate, and every misprediction costs ~15 cycles of flushed pipeline work — explaining why modern TAGE predictors are worth the transistor budget despite the added tagged-table complexity.
+
 Branch Target Buffer (BTB): a cache of recent branch addresses → predicted target address. Allows the CPU to speculatively fetch from the predicted target before the branch instruction is even decoded.
 
 ### Cache Write Policies
@@ -121,34 +131,32 @@ Branch Target Buffer (BTB): a cache of recent branch addresses → predicted tar
 
 ### Memory Hierarchy with Latency and Size
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph CPU["CPU Core"]
+        REG(["Register File<br/>under 1 ns · ~1 KB"]) --> L1["L1 Cache<br/>1-4 ns · 32-64 KB"]
+        L1 --> L2["L2 Cache<br/>~10 ns · 256 KB-1 MB"]
+    end
+    L2 --> L3["L3 Cache shared<br/>~40 ns · 4-32 MB"]
+    L3 --> DRAM["Main Memory DRAM<br/>~100 ns · 8 GB-4 TB"]
+    DRAM --> SSD["NVMe SSD<br/>~100 µs · 500 GB-16 TB"]
+    SSD --> HDD["HDD / Network Storage<br/>~10 ms · 1 TB-PB scale"]
+
+    class REG io
+    class L1,L2,L3 base
+    class DRAM frozen
+    class SSD,HDD lossN
 ```
-+---------------------------+
-|     CPU Core              |
-|  +---------------------+  |
-|  |   Register File     |  |  < 1 ns   ~1 KB (integer + FP regs)
-|  +---------------------+  |
-|  |     L1 Cache        |  |  1-4 ns   32-64 KB per core (split I$/D$)
-|  +---------------------+  |
-|  |     L2 Cache        |  |  ~10 ns   256 KB - 1 MB per core
-|  +---------------------+  |
-+---------------------------+
-         |
-+---------------------------+
-|     L3 Cache (shared)     |  ~40 ns   4-32 MB (all cores share)
-+---------------------------+
-         |
-+---------------------------+
-|     Main Memory (DRAM)    |  ~100 ns  8 GB - 4 TB
-+---------------------------+
-         |
-+---------------------------+
-|     NVMe SSD              |  ~100 µs  500 GB - 16 TB
-+---------------------------+
-         |
-+---------------------------+
-|     HDD / Network Storage |  ~10 ms   1 TB - PB scale
-+---------------------------+
-```
+
+Each hop down trades latency for capacity: registers answer in under a cycle, but a full miss cascading to DRAM costs ~300 cycles on a 3 GHz core, and a miss all the way to disk is roughly five orders of magnitude slower than an L1 hit.
 
 ### CPU Pipeline (4-stage simplified)
 
@@ -194,25 +202,45 @@ Solution — pad to 64 bytes per counter:
 
 ### Two-Socket NUMA Topology
 
-```
-+---------------------+       QPI/UPI (~200-300 ns)      +---------------------+
-|   Socket 0          |<=================================>|   Socket 1          |
-|                     |                                   |                     |
-|  Core 0  Core 1     |                                   |  Core 4  Core 5     |
-|    |       |        |                                   |    |       |        |
-|  L1      L1         |                                   |  L1      L1         |
-|    \     /          |                                   |    \     /          |
-|     L2              |                                   |     L2              |
-|      |              |                                   |      |              |
-|   L3 Cache          |                                   |   L3 Cache          |
-|      |              |                                   |      |              |
-|  Memory Controller  |                                   |  Memory Controller  |
-|      |              |                                   |      |              |
-|   DRAM (~100 ns)    |                                   |   DRAM (~100 ns)    |
-+---------------------+                                   +---------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Socket 0 core accessing Socket 1 DRAM: ~200-300 ns (2-3x penalty)
+    subgraph S0["Socket 0"]
+        c0(["Core 0"]) --> l1a["L1"]
+        c1(["Core 1"]) --> l1b["L1"]
+        l1a --> l2a["L2"]
+        l1b --> l2a
+        l2a --> l3a["L3 Cache"]
+        l3a --> mc0["Memory<br/>Controller"]
+        mc0 --> dram0(["DRAM<br/>~100 ns"])
+    end
+
+    subgraph S1["Socket 1"]
+        c4(["Core 4"]) --> l1c["L1"]
+        c5(["Core 5"]) --> l1d["L1"]
+        l1c --> l2b["L2"]
+        l1d --> l2b
+        l2b --> l3b["L3 Cache"]
+        l3b --> mc1["Memory<br/>Controller"]
+        mc1 --> dram1(["DRAM<br/>~100 ns"])
+    end
+
+    mc0 -.->|"QPI/UPI<br/>200-300 ns"| mc1
+
+    class c0,c1,c4,c5 io
+    class l1a,l1b,l2a,l3a,l1c,l1d,l2b,l3b base
+    class mc0,mc1 mathOp
+    class dram0,dram1 frozen
 ```
+
+A core on Socket 0 reaching into Socket 1's DRAM crosses the QPI/UPI interconnect and pays ~200-300 ns versus ~100 ns for local memory — a 2-3x penalty that motivates NUMA-aware thread and memory pinning.
 
 ---
 
@@ -390,6 +418,40 @@ if __name__ == "__main__":
 Note: Python's GIL prevents true parallel execution of threads, so the false sharing penalty is not visible at the Python level. The real penalty appears in compiled languages (C, C++, Java, Rust) where two cores genuinely write to adjacent bytes simultaneously. In Java, `@jdk.internal.vm.annotation.Contended` (public as `sun.misc.Contended` before JDK 9) adds 128 bytes of padding around a field or class, ensuring it occupies its own cache line. See `../../java/concurrency/` for the JVM-specific treatment.
 
 ### MESI Protocol Walkthrough (conceptual)
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Invalid
+
+    Invalid --> Exclusive: local read, no other copy
+    Invalid --> Shared: local read, other core has copy
+    Invalid --> Modified: local write
+
+    Exclusive --> Modified: local write, silent
+    Exclusive --> Shared: remote read snoop
+    Exclusive --> Invalid: remote write snoop
+
+    Shared --> Modified: local write, invalidate others
+    Shared --> Invalid: remote write snoop
+
+    Modified --> Shared: remote read, writeback
+    Modified --> Invalid: remote write snoop
+
+    class Modified train
+    class Exclusive base
+    class Shared req
+    class Invalid lossN
+```
+
+Every cache line moves between these four states on local or remote reads/writes; a core wanting to write a Shared line must broadcast an invalidation, forcing every peer copy to Invalid before the write can proceed. The Python walkthrough below implements the remote-triggered edges (`on_remote_read`, `on_remote_write`) and traces a full two-core scenario across the local-read/write edges.
 
 ```python
 from __future__ import annotations

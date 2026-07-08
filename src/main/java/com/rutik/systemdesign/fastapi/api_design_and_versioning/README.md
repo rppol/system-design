@@ -171,6 +171,22 @@ Standard practice:
 3. Run both versions in parallel until traffic to old version drops below 1%
 4. Return `410 Gone` from old version after sunset date
 
+```mermaid
+stateDiagram-v2
+    [*] --> Active
+    state "Deprecated<br/>header set, RFC 8594" as Deprecated
+    state "Parallel Run<br/>old and new versions live" as ParallelRun
+    state "Gone<br/>410 Gone returned" as Gone
+
+    Active --> Deprecated: announce deprecation
+    Deprecated --> ParallelRun: Sunset date set<br/>6-12mo external, 30-90d internal
+    ParallelRun --> Gone: old-version traffic under 1%<br/>and sunset date reached
+    Gone --> [*]
+```
+
+*The lifecycle only moves forward — a version cannot jump from Active straight to Gone
+without first passing through the parallel-run window that gives clients time to migrate.*
+
 ### 4.3 Pagination strategies
 
 | Strategy | Good for | Bad for |
@@ -198,64 +214,83 @@ Sliding window log is the most accurate but memory-intensive.
 
 ### Request lifecycle with versioning, rate limiting, and pagination
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Client"])
+    Gateway("API Gateway / FastAPI app<br/>routes /v1 and /v2")
+    RateLimit{"Step 1: rate limit check<br/>slowapi + Redis sliding window"}
+    Idem{"Step 2: idempotency check<br/>SET idempotency:abc123 NX EX 86400"}
+    Handler("Step 3: v2_router POST<br/>validate body, create row")
+    Cursor[("Step 4: cursor pagination GET<br/>keyset filter less than cursor<br/>LIMIT 21")]
+
+    Client -->|"POST /v2/posts<br/>Idempotency-Key: abc123"| Gateway
+    Gateway --> RateLimit
+    RateLimit -->|"Remaining: 47 of 100"| Idem
+    Idem -.->|"key exists:<br/>return cached response"| Client
+    Idem -->|"key set"| Handler
+    Handler --> Cursor
+
+    class Client io
+    class Gateway,RateLimit,Idem mathOp
+    class Handler train
+    class Cursor base
 ```
-Client
-  |
-  | POST /v2/posts  Idempotency-Key: abc123
-  |
-  v
-+------------------+
-|   API Gateway /  |  -- routes /v1/* to v1_router
-|   FastAPI app    |  -- routes /v2/* to v2_router
-+--------+---------+
-         |
-         | (1) Rate limit check
-         v
-+------------------+
-|  slowapi / Redis |  X-RateLimit-Limit: 100
-|  sliding window  |  X-RateLimit-Remaining: 47
-+--------+---------+
-         |
-         | (2) Idempotency key check
-         v
-+------------------+
-|  Redis           |  SET idempotency:abc123 NX EX 86400
-|  SET NX EX 86400 |  -- if key exists, return cached response
-+--------+---------+
-         |
-         | (3) Handler
-         v
-+------------------+
-|  v2_router POST  |  validate body (Pydantic)
-|  /posts handler  |  create in DB
-+--------+---------+
-         |
-         | (4) Cursor pagination on GET
-         v
-+------------------+
-|  DB query with   |  WHERE (created_at, id) < cursor
-|  keyset filter   |  LIMIT 21 (limit+1 to detect next page)
-+------------------+
-```
+
+*Every request passes through rate limiting and an idempotency check before reaching the
+handler; a duplicate `Idempotency-Key` short-circuits straight back to the client (dotted
+edge) without touching the database, while a fresh key falls through to the handler and, on
+`GET`, the keyset-filtered cursor query.*
 
 ### URL path versioning router wiring
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    App(["FastAPI app"])
+    V1("/v1<br/>mounts v1_router")
+    V2("/v2<br/>mounts v2_router")
+    V1A(["GET /v1/users"])
+    V1B(["POST /v1/users"])
+    V1C(["GET /v1/posts"])
+    V2A(["GET /v2/users<br/>new field: display_name"])
+    V2B(["POST /v2/users"])
+    V2C(["GET /v2/posts<br/>cursor pagination"])
+    V2D(["GET /v2/posts/{id}/reactions<br/>new sub-resource"])
+
+    App --> V1
+    App --> V2
+    V1 --> V1A
+    V1 --> V1B
+    V1 --> V1C
+    V2 --> V2A
+    V2 --> V2B
+    V2 --> V2C
+    V2 --> V2D
+
+    class App io
+    class V1 frozen
+    class V2 train
+    class V1A,V1B,V1C,V2A,V2B,V2C,V2D req
 ```
-FastAPI app
-    |
-    +-- /v1  <-- include_router(v1_router, prefix="/v1")
-    |     |
-    |     +-- GET  /v1/users
-    |     +-- POST /v1/users
-    |     +-- GET  /v1/posts
-    |
-    +-- /v2  <-- include_router(v2_router, prefix="/v2")
-          |
-          +-- GET  /v2/users       (new field: display_name)
-          +-- POST /v2/users
-          +-- GET  /v2/posts       (cursor pagination instead of offset)
-          +-- GET  /v2/posts/{id}/reactions  (new sub-resource)
-```
+
+*`include_router` mounts each version as an independent branch under the same app; v1 (purple,
+frozen) keeps serving old clients while v2 (green, active) carries the new field, cursor
+pagination, and the new reactions sub-resource.*
 
 ---
 
@@ -593,6 +628,25 @@ is expensive.
 | Token bucket | Configurable burst | Low | Medium | Requires refill logic |
 | Leaky bucket | No burst | Low | Simple | Adds latency (queuing) |
 
+```mermaid
+quadrantChart
+    title Rate limiting algorithm tradeoffs
+    x-axis Low memory --> High memory
+    y-axis Bursty --> Smooth
+    quadrant-1 Smooth, memory-heavy
+    quadrant-2 Smooth, cheap but adds latency
+    quadrant-3 Simple, bursty
+    quadrant-4 Rare in practice
+    Fixed window: [0.12, 0.15]
+    Token bucket: [0.22, 0.5]
+    Leaky bucket: [0.18, 0.88]
+    Sliding window: [0.85, 0.82]
+```
+
+*Token bucket wins for most APIs because it sits at the same low memory cost as fixed window
+but far higher on burst-smoothing — bursts are capped by bucket size instead of doubling at a
+window boundary.*
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -858,25 +912,39 @@ The team decides to ship cursor pagination in `/v2/posts` while keeping `/v1/pos
 
 #### Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Mobile(["Mobile App<br/>iOS and Android"])
+    Gateway("FastAPI, 8 pods<br/>slowapi + Redis")
+    V1Router("v1_router<br/>offset")
+    V2Router("v2_router<br/>cursor")
+    DB[("PostgreSQL: posts table<br/>index on created_at desc, id desc")]
+
+    Mobile -->|"v1 clients: offset pagination"| Gateway
+    Mobile -->|"v2 clients: cursor pagination"| Gateway
+    Gateway --> V1Router
+    Gateway --> V2Router
+    V1Router --> DB
+    V2Router --> DB
+
+    class Mobile io
+    class Gateway mathOp
+    class V1Router frozen
+    class V2Router train
+    class DB base
 ```
-Mobile App (iOS/Android)
-    |
-    |  v1 clients: GET /v1/posts?offset=20&limit=20
-    |  v2 clients: GET /v2/posts?cursor=<token>&limit=20
-    v
-+--------------------+
-|   FastAPI (8 pods) |
-|   slowapi + Redis  |
-+--------+-----------+
-         |
-    +----+-------+
-    |            |
-  v1_router   v2_router
-  (offset)    (cursor)
-         |
-    PostgreSQL (posts table)
-    INDEX ON (created_at DESC, id DESC)
-```
+
+*FastAPI fans the same pod fleet out to two routers that share one Postgres index; v1 (purple,
+frozen) and v2 (green, active) differ only in query shape — `OFFSET n` versus the keyset
+cursor.*
 
 #### v1 router (kept for backward compatibility)
 

@@ -70,21 +70,28 @@ track the farthest index reachable from the *current* level, and the moment
 your scan passes the end of the current level, you've implicitly finished
 that BFS layer and start the next one.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["nums = [2, 3, 1, 1, 4]"]) --> L0("Level 0: 0 jumps<br/>reach = 0+2 = 2<br/>current_end=0, farthest=2")
+    L0 -->|"scan i=1..2<br/>rest of level 0"| L1("Level 1: 1 jump<br/>farthest = max(4,3) = 4<br/>current_end becomes 4")
+    L1 -->|"index 4 already<br/>reachable"| L2(["Level 2: STOP<br/>answer = 2 jumps"])
+
+    class Start io
+    class L0,L1 mathOp
+    class L2 train
 ```
-nums = [2, 3, 1, 1, 4]
-index:    0   1   2   3   4
 
-Level 0 (0 jumps): {0}                reach = 0+2 = 2
-                    current_end = 0,  farthest = 2
-
-Level 1 (1 jump):  scan i = 1..2 (the rest of level 0's reach)
-   i=1: 1+3 = 4
-   i=2: 2+1 = 3
-   farthest = max(4, 3) = 4
-   current_end = farthest = 4   <-- covers index 4 (the last index!)
-
-Level 2 (2 jumps): last index already covered -> STOP, answer = 2
-```
+Each level's scan must fully exhaust before the next begins — two level
+transitions (Level 0 to 1, Level 1 to 2) land exactly on the traced answer
+of 2 jumps.
 
 ### Exchange argument for interval scheduling
 
@@ -94,19 +101,30 @@ without making the solution worse. For "maximum non-overlapping intervals,"
 the greedy choice is **the interval that ends earliest** — it leaves the most
 room for everything that comes after.
 
-```
-Sorted by END time:
-  [1,2]    [2,3]      [4,5]      [6,7]
-  -----    -----      -----      -----
-  KEEP     KEEP       KEEP       KEEP    (each starts >= previous end)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  [1,100] overlaps every interval above -> REMOVE (1 removal)
+    A1("[1,2]") --> A2("[2,3]") --> A3("[4,5]") --> A4("[6,7]") --> Out1(["sort by END:<br/>1 removal"])
+    Bad("[1,100]<br/>overlaps all four") -.->|"REMOVE"| Out1
 
-If you instead picked the interval that STARTS earliest first ([1,100]),
-you'd be forced to remove [2,3], [4,5], AND [6,7] -> 3 removals. Picking the
-interval that frees up the timeline soonest is what makes "end time" the
-correct sort key.
+    S1("[1,100]<br/>picked first") -->|"locks in a long<br/>interval early"| Out2(["sort by START:<br/>3 removals"])
+
+    class A1,A2,A3,A4 train
+    class Bad,S1 lossN
+    class Out1 train
+    class Out2 lossN
 ```
+
+Sorting by start time locks in `[1,100]` first, forcing 3 removals instead
+of 1 — end time is the correct sort key because it frees up the timeline
+soonest.
 
 ---
 
@@ -321,6 +339,35 @@ when an interviewer asks "why does this work?"):
    produces another solution `O'` that is *no worse* than `O`.
 4. By induction, `G` is at least as good as any `O`, hence optimal.
 
+The four steps collapse into one small decision-and-induction loop:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["G = greedy solution<br/>O = optimal solution"]) --> Q{"Same first<br/>choice?"}
+    Q -->|"yes"| Recurse("Recurse on the<br/>remaining sub-problem")
+    Q -->|"no"| Swap("Swap O's first choice<br/>for G's to build O'")
+    Swap --> Check{"Is O' no worse<br/>than O?"}
+    Check -->|"yes"| Done(["By induction:<br/>G is optimal"])
+    Recurse -.->|"induction"| Done
+
+    class Start io
+    class Q,Check mathOp
+    class Recurse,Swap req
+    class Done train
+```
+
+Both branches — recursing on a matching first choice, or swapping and
+checking a differing one — converge on the same conclusion, which is exactly
+why induction closes the proof either way.
+
 ---
 
 ## 7. Problem Bank
@@ -441,6 +488,37 @@ smallest end time.
   switch here when the greedy choice is "the current max/min of a changing
   set" rather than a fixed sort order computed once up front (e.g., Task
   Scheduler's heap-simulation variant, "minimum meeting rooms").
+
+The four redirects above chain into one decision path (Modified Binary
+Search, below, pairs *with* greedy rather than replacing it, so it sits
+outside this chain):
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S(["Candidate local-best<br/>choice identified"]) --> D1{"Can you prove it with<br/>an exchange argument?"}
+    D1 -->|"no, or need a<br/>COUNT of ways"| DP("Dynamic Programming")
+    D1 -->|"yes"| D2{"Must generate ALL<br/>valid results?"}
+    D2 -->|"yes"| BT("Backtracking")
+    D2 -->|"no"| D3{"Combining overlaps into<br/>unions, not selecting?"}
+    D3 -->|"yes"| MI("Merge Intervals")
+    D3 -->|"no"| D4{"Best choice = current<br/>max/min of a changing set?"}
+    D4 -->|"yes"| TK("Two Heaps /<br/>Top K Elements")
+    D4 -->|"no"| GR(["Greedy<br/>(this pattern)"])
+
+    class S io
+    class D1,D2,D3,D4 mathOp
+    class DP,BT,MI,TK frozen
+    class GR train
+```
+
 - **[Modified Binary Search](modified_binary_search.md)** — "binary search on
   the answer" problems (e.g., Koko Eating Bananas, Capacity to Ship Packages)
   pair a binary search over the answer space with a *greedy feasibility

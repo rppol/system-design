@@ -95,6 +95,36 @@ CPython 3 stores `str` internally using the minimum width needed for all charact
 
 `len()` always returns the number of code points, never the number of bytes.
 
+CPython makes this a one-time decision when the string is built, by scanning for the single
+widest code point in it:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s(["new str<br/>scan for widest code point"]) --> q1{"max code point<br/>over U+00FF?"}
+    q1 -->|"no"| k1["Latin-1 · KIND=1<br/>1 byte/char"]
+    q1 -->|"yes"| q2{"max code point<br/>over U+FFFF?"}
+    q2 -->|"no"| k2["UCS-2 · KIND=2<br/>2 bytes/char"]
+    q2 -->|"yes"| k3["UCS-4 · KIND=4<br/>4 bytes/char"]
+    k1 --> e1(["'a'×100 = 149 bytes"])
+    k2 --> e2(["'中'×100 = 250 bytes"])
+    k3 --> e3(["emoji×100 = 448 bytes"])
+
+    class s,e1,e2,e3 io
+    class q1,q2 mathOp
+    class k1,k2,k3 base
+```
+
+The three byte counts are the actual `sys.getsizeof()` results for a 100-character string of
+each kind (Section 6.1) — one stray emoji widens every character in the string to 4 bytes.
+
 ### 4.2 `bytes`, `bytearray`, `memoryview`
 
 | Type | Mutable | Buffer protocol | Typical use |
@@ -138,23 +168,47 @@ CPython 3 stores `str` internally using the minimum width needed for all charact
 
 ## 5. Architecture Diagrams
 
-```
-Text / Binary Boundary
-======================
-External world                    Python application
-(file, socket, HTTP body)         (str objects)
-  bytes                               str
-[0x48 0x65 0x6C 0x6C 0x6F]  <-->   "Hello"
-                               decode("utf-8") / encode("utf-8")
+The text/binary boundary is the single most important picture in this module: every byte
+entering or leaving the process crosses it through an explicit `decode()`/`encode()` call,
+never implicitly.
 
-PEP 393 str memory layout:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ext(["External world<br/>file · socket · HTTP body"]) --> raw(["bytes<br/>0x48 0x65 0x6C 0x6C 0x6F"])
+    raw -->|"decode('utf-8')"| app(["Python str<br/>'Hello'"])
+    app -->|"encode('utf-8')"| raw
+
+    class ext frozen
+    class raw req
+    class app io
+```
+
+CPython's compact `str` layout packs a header, the storage `kind` (1/2/4 bytes), the code-point
+length, and the character data contiguously. The byte alignment below is itself the information,
+so it stays a memory map rather than becoming a flowchart:
+
+```
+PEP 393 str memory layout
 +-----------+----------+----------+----...----+
 | PyObject  | kind     | length   |  data     |
 | header    | (1/2/4)  |  (5)     | H e l l o |
 +-----------+----------+----------+----...----+
   Latin-1: 1 byte/char; UCS-2: 2 bytes/char; UCS-4: 4 bytes/char
+```
 
-memoryview zero-copy:
+A `memoryview` slice is a pointer-and-length pair into the same heap buffer rather than a new
+allocation — again a byte-offset picture that a graph would only obscure:
+
+```
+memoryview zero-copy
 +-------------------------------------------+
 | bytes object  b"....PAYLOAD.............." |  (heap)
 +------------------+---+--------------------+
@@ -162,12 +216,34 @@ memoryview zero-copy:
   mv[offset:end]  <- new view, no data copy
                    v   v
                [PAYLOAD]  <- same memory
+```
 
-re NFA (catastrophic backtracking):
-Pattern: (a+)+b   Input: "aaaaa" (no 'b')
-  branch 1: (aaaaa)+b -> fail
-  branch 2: (aaaa)(a)+b -> fail
-  ...  2^n combinations  -> O(2^n) states explored
+The `(a+)+b` pattern against a trailing-`b`-less input is the textbook catastrophic-backtracking
+shape: the engine tries every way to partition the run of `a` characters before giving up, so the
+branch count doubles with each extra character:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Pattern (a+)+b<br/>Input 'aaaaa' (no b)"]) --> b1("branch 1: (aaaaa)+b<br/>fail")
+    start --> b2("branch 2: (aaaa)(a)+b<br/>fail")
+    start --> b3("branch 3: (aaa)(aa)+b<br/>fail")
+    start --> more(["... 2^n partitions"])
+    b1 --> boom("O(2^n) states explored<br/>every partition fails")
+    b2 --> boom
+    b3 --> boom
+    more --> boom
+
+    class start req
+    class b1,b2,b3,more mathOp
+    class boom lossN
 ```
 
 ---
@@ -885,6 +961,36 @@ def validate_rule(req: RuleRequest) -> dict:
     # Step 4: apply with process isolation and timeout
     result = safe_regex_apply(req.pattern, req.test_input)
     return result
+```
+
+The four gates run in this exact order inside `validate_rule()`; the two cheapest checks
+(length, heuristic blocklist) reject the bulk of bad requests before the pipeline ever pays the
+process-spawn cost of the timed match:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reqIn(["POST /rules/validate<br/>pattern + test_input"]) --> g1{"length under<br/>200 / 2000 chars?"}
+    g1 -->|"no"| r1(["400<br/>too long"])
+    g1 -->|"yes"| g2{"heuristic ReDoS<br/>blocklist match?"}
+    g2 -->|"yes"| r2(["400<br/>unsafe pattern"])
+    g2 -->|"no"| g3{"re.compile()<br/>valid syntax?"}
+    g3 -->|"no"| r3(["400<br/>invalid regex"])
+    g3 -->|"yes"| g4{"child process<br/>under 500ms?"}
+    g4 -->|"timeout, killed"| r4(["400<br/>pattern timed out"])
+    g4 -->|"yes"| ok(["200<br/>matched + span"])
+
+    class reqIn req
+    class g1,g2,g3,g4 mathOp
+    class r1,r2,r3,r4 lossN
+    class ok train
 ```
 
 #### Operational Notes

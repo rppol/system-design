@@ -65,66 +65,107 @@ See `../asyncio_and_event_loop/README.md` for the asyncio alternative to threadi
 
 **Threading — shared memory, serialized bytecode**:
 
-```
-Main Thread          Worker Thread 1       Worker Thread 2
-     |                      |                      |
-     |---submit task-------->|                      |
-     |                  [GIL acquired]              |
-     |                  execute bytecode            |
-     |                  [GIL released - I/O wait]   |
-     |                      |              [GIL acquired]
-     |                      |              execute bytecode
-     |                  [I/O completes]            |
-     |                  [GIL acquired]    [GIL released]
-     |                  execute bytecode            |
-     |<--result returned-----|                      |
-     |
-     Shared heap: both threads read/write same objects
+```mermaid
+sequenceDiagram
+    participant M as Main Thread
+    participant W1 as Worker Thread 1
+    participant W2 as Worker Thread 2
+
+    M->>W1: submit task
+    Note over W1: GIL acquired<br/>execute bytecode
+    Note over W1: GIL released<br/>(I/O wait)
+    Note over W2: GIL acquired<br/>execute bytecode
+    Note over W1: I/O completes<br/>GIL acquired
+    Note over W2: GIL released
+    Note over W1: execute bytecode
+    W1-->>M: result returned
+    Note over W1,W2: Shared heap - both threads read/write the same objects
 ```
 
 **Multiprocessing — separate heaps, data crosses via pickle**:
 
-```
-Main Process                Worker Process 1      Worker Process 2
-     |                           |                      |
-     |--pickle(args)------------>|                      |
-     |--pickle(args)---------------------------------->  |
-     |                      [own GIL]               [own GIL]
-     |                      execute(args)           execute(args)
-     |                           |                      |
-     |<-pickle(result)-----------|                      |
-     |<-pickle(result)----------------------------------/
-     |
-     Separate heaps: no sharing, each process has full Python interpreter
+```mermaid
+sequenceDiagram
+    participant M as Main Process
+    participant W1 as Worker Process 1
+    participant W2 as Worker Process 2
+
+    M->>W1: pickle(args)
+    M->>W2: pickle(args)
+    Note over W1: own GIL<br/>execute(args)
+    Note over W2: own GIL<br/>execute(args)
+    W1-->>M: pickle(result)
+    W2-->>M: pickle(result)
+    Note over M,W2: Separate heaps - no sharing; each process runs a full Python interpreter
 ```
 
 **`concurrent.futures` state machine**:
 
-```
-Future states: PENDING -> RUNNING -> FINISHED
-                                  -> CANCELLED (if cancel() called before RUNNING)
-                                  -> CANCELLED_AND_NOTIFIED
-
-executor.submit(fn, x) -> Future(PENDING)
-    |
-    [thread/process picks up task]
-    |
-Future(RUNNING)
-    |
-    [fn(x) completes or raises]
-    |
-Future(FINISHED)  -- future.result() returns value or re-raises exception
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: submit(fn, x)
+    Pending --> Running: worker picks up task
+    Pending --> Cancelled: cancel() before RUNNING
+    Running --> Finished: fn(x) completes or raises
+    Cancelled --> CancelledNotified: waiters notified
+    Finished --> [*]: result() returns or re-raises
+    CancelledNotified --> [*]
 ```
 
 **`queue.Queue` internal structure**:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P(Producer threads) -->|"put(item)"| Q(Queue<br/>deque + Condition)
+    Q -->|"get(block=True)"| C(Consumer threads)
+    Q -.->|"Condition.notify() wakes waiters"| C
+
+    class P req
+    class Q base
+    class C train
 ```
-producer threads          Queue (thread-safe deque + Condition)         consumer threads
-    put(item) ---------> [item1, item2, item3, ...] <---------- get(block=True)
-                               |
-                         Condition.notify()
-                         wakes waiting consumers
+
+**Choosing a concurrency model**:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["New workload"]) --> B{"I/O-bound or<br/>CPU-bound?"}
+    B -->|"I/O-bound"| C{"Needs shared<br/>in-process state?"}
+    C -->|"Yes"| D(["ThreadPoolExecutor"])
+    C -->|"No - async code"| E(["asyncio"])
+    B -->|"CPU-bound"| F{"Data per task<br/>over 1MB?"}
+    F -->|"Yes"| G(["multiprocessing +<br/>SharedMemory"])
+    F -->|"No"| H(["ProcessPoolExecutor"])
+    B -->|"External binary"| I(["subprocess"])
+
+    class A io
+    class B mathOp
+    class C mathOp
+    class F mathOp
+    class D train
+    class E train
+    class H train
+    class G base
+    class I frozen
 ```
+
+*Synthesizes the decision criteria from Sections 3, 4, and 9 into one path: I/O-bound work stays on threads (or `asyncio` for async codebases); CPU-bound work moves to processes, and once a task's data exceeds ~1 MB the ~0.5s/100MB pickle cost (Section 6.8) tips the choice toward `SharedMemory`.*
 
 ---
 
@@ -473,6 +514,18 @@ print(f"Pickle 100MB array: {elapsed:.3f}s")   # ~0.5s — significant overhead
 # Shared memory: effectively 0s for the worker — only one copy in kernel memory
 # Rule: if passing > 1 MB to a subprocess, prefer SharedMemory or mmap
 ```
+
+**Pickle vs shared memory — the 100 MB transfer cost**:
+
+```mermaid
+xychart-beta
+    title "Passing a 100MB array to one worker"
+    x-axis ["pickle.dumps + loads", "SharedMemory attach"]
+    y-axis "Time (seconds)" 0 --> 0.5
+    bar [0.5, 0.02]
+```
+
+*Pickling round-trips the full 100 MB through serialization (about 0.5s); attaching to an existing `SharedMemory` buffer costs only one kernel-level copy, effectively 0s. This gap is why the rule above switches to `SharedMemory` once a task's data passes 1 MB.*
 
 ---
 
@@ -993,15 +1046,15 @@ def shared_memory_resize(paths: list[str]) -> float:
 
 **Benchmark Summary**:
 
+```mermaid
+xychart-beta
+    title "Resize 10 images: wall-clock time by approach"
+    x-axis ["Sequential", "ThreadPool ×4", "ProcessPool ×4", "SharedMemory ×4", "SharedMemory large arrays"]
+    y-axis "Time (seconds)" 0 --> 9
+    bar [8.20, 2.10, 2.00, 2.00, 2.00]
 ```
-Approach                     | Time   | Notes
------------------------------|--------|-------------------------------------------
-Sequential (1 worker)        | 8.20s  | Baseline; trivial to implement
-ThreadPoolExecutor (4)       | 2.10s  | 3.9× speedup; GIL released by Pillow C ext
-ProcessPoolExecutor (4)      | 2.00s  | 4.1× speedup; no GIL; spawn overhead paid
-SharedMemory (4 procs)       | 2.00s  | Same compute; saves pickle on result return
-SharedMemory (large arrays)  | 2.00s  | Critical for > 10 MB result arrays
-```
+
+*Threading and multiprocessing both land near 2.0s — a ~4× speedup over the 8.2s sequential baseline — because Pillow's JPEG codec releases the GIL; SharedMemory matches that compute time while also removing the pickle cost on the return path (Approach 4 above).*
 
 **Production Decision**:
 

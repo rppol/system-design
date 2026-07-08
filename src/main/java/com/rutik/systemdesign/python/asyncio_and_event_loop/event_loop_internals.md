@@ -35,12 +35,28 @@ full source.
 
 **Mental model.** Each iteration of `_run_once()` has exactly four phases, in order:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P1(["Phase 1<br/>drain _ready"]) --> P2(["Phase 2<br/>compute poll timeout"])
+    P2 --> P3(["Phase 3<br/>selector.select(timeout)"])
+    P3 --> P4(["Phase 4<br/>fire I/O callbacks"])
+    P4 -.->|"next tick"| P1
+
+    class P1 train
+    class P2 mathOp
+    class P3 frozen
+    class P4 req
 ```
-Phase 1: drain _ready (all zero-deadline callbacks)
-Phase 2: compute poll timeout from _scheduled heap
-Phase 3: selector.select(timeout)  ← only blocking syscall
-Phase 4: fire I/O callbacks returned by select
-```
+
+*The four-phase `_run_once()` cycle repeats forever; Phase 3's `selector.select()` is the only OS-blocking call, and a flooded `_ready` queue in Phase 1 is what starves it.*
 
 **Why it matters.** CPU-bound work that never yields blocks Phase 1 indefinitely — the selector is
 never reached and I/O starves. Knowing this lets you fix it: insert `await asyncio.sleep(0)` every
@@ -106,18 +122,38 @@ file descriptors; `SelectSelector` is limited to 1,024 FDs on most Unix systems.
 
 ### 4.4 `asyncio.run()` Lifecycle
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["asyncio.run(coro)"]) --> Create(["create SelectorEventLoop"])
+    Create --> SetCur(["set as current<br/>(thread-local)"])
+    SetCur --> RUC(["loop.run_until_complete(coro)"])
+
+    subgraph RunPhase[Inside run_until_complete]
+        Wrap(["wrap coro via<br/>ensure_future()"]) --> Forever(["loop.run_forever()"])
+        Forever --> Tick(["_run_once()<br/>in while True"])
+    end
+
+    RUC --> Wrap
+    Tick --> ShutGen(["shutdown_asyncgens()"])
+    ShutGen --> ShutExec(["shutdown_default_executor()"])
+    ShutExec --> Close(["loop.close()"])
+
+    class Start io
+    class Create,SetCur,RUC,Wrap,Forever mathOp
+    class Tick train
+    class ShutGen,ShutExec frozen
+    class Close io
 ```
-asyncio.run(coro)
-  └─ creates new SelectorEventLoop
-  └─ sets it as current (thread-local)
-  └─ loop.run_until_complete(coro)
-       └─ wraps coro in Task via ensure_future()
-       └─ loop.run_forever() (exits when Task done)
-            └─ _run_once() in a while True
-  └─ loop.run_until_complete(loop.shutdown_asyncgens())
-  └─ loop.run_until_complete(loop.shutdown_default_executor())
-  └─ loop.close()
-```
+
+*`asyncio.run()` owns the whole loop lifecycle — create, drive the coroutine, then always tear down async generators and the default executor before closing, even on exception.*
 
 ---
 
@@ -125,81 +161,74 @@ asyncio.run(coro)
 
 ### The `_run_once()` tick
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S1(["1. Move expired timers<br/>_scheduled to _ready"]) --> S2(["2. Compute poll timeout<br/>0, next deadline, or 3600s"])
+    S2 --> S3(["3. selector.select(timeout)<br/>only blocking syscall"])
+    S3 --> S4(["4. _process_events()<br/>append ready FDs to _ready"])
+    S4 --> S5(["5. Drain _ready<br/>ntodo snapshot, run handles"])
+    S5 -.->|"next _run_once() tick"| S1
+
+    class S1 mathOp
+    class S2 mathOp
+    class S3 frozen
+    class S4 req
+    class S5 train
 ```
-┌─────────────────────────── _run_once() ──────────────────────────────┐
-│                                                                        │
-│  1. Move expired TimerHandles from _scheduled heap → _ready deque    │
-│     (any handle whose .when <= loop.time())                           │
-│                                                                        │
-│  2. Compute poll timeout:                                             │
-│     • 0  if _ready is non-empty (don't block, work pending)          │
-│     • heap[0].when - loop.time()  if _scheduled non-empty            │
-│     • MAXIMUM_SELECT_TIMEOUT (3600 s) if both queues empty            │
-│                                                                        │
-│  3. event_list = self._selector.select(timeout)                      │
-│     ← OS blocks here until: FD ready | timeout expires               │
-│                                                                        │
-│  4. self._process_events(event_list)                                  │
-│     For each (key, events) returned:                                  │
-│       • key.data = (reader_handle, writer_handle)                     │
-│       • if EVENT_READ  → _ready.append(reader_handle)                │
-│       • if EVENT_WRITE → _ready.append(writer_handle)                │
-│                                                                        │
-│  5. ntodo = len(_ready)  # snapshot — new items added during step 5  │
-│     for _ in range(ntodo):                                            │
-│       handle = _ready.popleft()                                       │
-│       handle._run()   # calls handle._callback(*handle._args)        │
-│                                                                        │
-└────────────────────────────────────────────────────────────────────────┘
-```
+
+*Five sub-steps per tick, run in a cycle: Phase 3's `selector.select()` is the sole blocking syscall, and the `ntodo` snapshot in Phase 5 defers any callback spawned mid-drain to the next tick.*
 
 ### Task / Future / Coroutine interaction
 
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Task
+    participant Loop as EventLoop
+    participant Coro as Coroutine
+    participant Future
+
+    Caller->>Task: create_task(coro)
+    Task->>Loop: call_soon(self.__step)
+    Note over Loop: Handle queued in _ready
+    Loop->>Task: _run_once drains _ready
+    Task->>Coro: coro.send(None)
+    Coro-->>Task: yields Future (pending)
+    Task->>Future: add_done_callback(__wakeup)
+    Note over Future: I/O completes elsewhere
+    Future->>Loop: call_soon(cb) per callback
+    Loop->>Task: __wakeup(future)
+    Task->>Task: __step(future.result())
 ```
-  asyncio.create_task(coro)
-         │
-         ▼
-  Task.__init__
-    self._loop.call_soon(self.__step)   ← adds Handle to _ready
-         │
-  ... later, _run_once drains _ready ...
-         │
-         ▼
-  Task.__step()
-    result = coro.send(None)            ← drive coroutine one step
-         │
-    ┌────┴──────────────────────┐
-    │ result is Future (pending)│        ← coroutine yielded a Future
-    └────┬──────────────────────┘
-         │
-    future.add_done_callback(self.__wakeup)
-         │
-  ... I/O completes elsewhere ...
-         │
-         ▼
-  Future.set_result(value)
-    for cb in self._callbacks:
-        self._loop.call_soon(cb, self)   ← re-adds Task.__wakeup to _ready
-         │
-         ▼
-  Task.__wakeup(future)
-    self.__step(future.result())         ← resumes coroutine with result
-```
+
+*The Task drives the coroutine one step at a time; when it yields a pending Future, the Task registers `__wakeup` as a done-callback and parks until `Future.set_result()` re-enqueues it via `call_soon`.*
 
 ### `call_soon_threadsafe` wakeup pipe
 
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant B as Thread B EventLoop
+
+    Note over B: selector.select(timeout=60s)<br/>blocked in epoll_wait
+    A->>A: acquire _write_lock
+    A->>A: _ready.append(Handle(cb))
+    A->>B: _write_to_self() — 1 byte
+    A->>A: release _write_lock
+    Note over B: epoll returns — _csock readable
+    B->>B: _read_from_self() drains byte
+    B->>B: next _run_once tick — cb fires
 ```
- Thread A                          Thread B (event loop thread)
-─────────────────                 ─────────────────────────────
-call_soon_threadsafe(cb)           selector.select(timeout=60s)
-  acquire _write_lock                  ... blocked in epoll_wait ...
-  _ready.append(Handle(cb))
-  _write_to_self()                 ← writes 1 byte to self._ssock
-  release _write_lock              
-                                   epoll returns: _csock readable
-                                   _read_from_self() drains byte
-                                   next _run_once tick: cb fires
-```
+
+*`call_soon_threadsafe` is the only thread-safe entry point into the loop: it appends under a lock, then writes one byte to a self-pipe so the blocked `epoll_wait` returns immediately instead of waiting out the full timeout.*
 
 ---
 
@@ -326,6 +355,42 @@ class Task(Future):
 `Future`. If it yields `None` (from `asyncio.sleep(0)` which yields an already-resolved
 Future-like), the Task reschedules itself via `call_soon`, giving other tasks a chance to run.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Fire(["Handle fires:<br/>Task.__step()"]) --> Send(["coro.send(None)"])
+    Send --> Outcome{"what did the<br/>coroutine do?"}
+    Outcome -->|"returned"| Stop(["StopIteration"])
+    Stop --> SetRes(["set_result(value)"])
+    Outcome -->|"raised Cancelled"| Cancel(["super().cancel()"])
+    Outcome -->|"raised Keyboard-<br/>Interrupt/SystemExit"| Fatal(["set_exception<br/>+ re-raise"])
+    Outcome -->|"raised other<br/>exception"| SetExc(["set_exception(exc)"])
+    Outcome -->|"yielded a value"| Blocking{"_asyncio_future_<br/>blocking set?"}
+    Blocking -->|"yes — a Future"| Park(["add_done_callback<br/>Task parks"])
+    Blocking -->|"no — bare yield"| Resched(["call_soon(__step)<br/>back to _ready"])
+
+    class Fire io
+    class Send mathOp
+    class Outcome mathOp
+    class Stop train
+    class SetRes train
+    class Cancel lossN
+    class Fatal lossN
+    class SetExc lossN
+    class Blocking mathOp
+    class Park frozen
+    class Resched req
+```
+
+*The `_asyncio_future_blocking` flag (Q10) is the fork in the road: it is what lets `Task.__step` tell a real suspend-on-Future apart from a bare `yield` (the `asyncio.sleep(0)` cooperative-yield path covered next).*
+
 ### 6.4 `asyncio.sleep(0)` — The Cooperative Yield
 
 ```python
@@ -365,19 +430,35 @@ loop.add_writer(fd, callback, *args)
 Higher-level transport methods like `loop.sock_recv(sock, nbytes)` internally call `add_reader`.
 The flow:
 
-```
-await loop.sock_recv(sock, 1024)
-  │
-  └─ creates Future f
-     calls loop.add_reader(sock.fileno(), _sock_recv, f, sock, 1024)
-     returns await f   ← suspends Task
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-... _run_once: selector detects sock readable ...
-  _sock_recv(f, sock, 1024):
-    data = sock.recv(1024)
-    loop.remove_reader(sock.fileno())
-    f.set_result(data)         ← wakes Task via done-callback chain
+    Call(["await loop.sock_recv(sock, 1024)"]) --> MkFuture(["create Future f"])
+    MkFuture --> AddR(["add_reader(fd, _sock_recv, ...)"])
+    AddR --> Suspend(["await f — Task suspends"])
+    Suspend -.->|"selector detects<br/>socket readable"| Cb(["_sock_recv(f, sock, 1024)"])
+    Cb --> Recv(["data = sock.recv(1024)"])
+    Recv --> RemoveR(["remove_reader(fd)"])
+    RemoveR --> SetRes(["f.set_result(data)<br/>wakes Task"])
+
+    class Call io
+    class MkFuture mathOp
+    class AddR mathOp
+    class Suspend frozen
+    class Cb req
+    class Recv req
+    class RemoveR mathOp
+    class SetRes train
 ```
+
+*`loop.sock_recv` wraps `add_reader` in a Future: the Task suspends until the selector reports the socket readable, then the reader callback reads the data and resolves the Future, waking the Task.*
 
 ### 6.6 uvloop: Why It Is 2-4x Faster
 
@@ -397,6 +478,16 @@ Benchmark (wrk, 10,000 connections, echo server, CPython 3.12):
 - `asyncio.SelectorEventLoop`: ~60,000 RPS
 - `uvloop.EventLoop`: ~150,000 RPS
 - `nginx` (C, baseline): ~180,000 RPS
+
+```mermaid
+xychart-beta
+    title "Echo server throughput at 10,000 connections (CPython 3.12)"
+    x-axis ["SelectorEventLoop", "uvloop", "nginx (C baseline)"]
+    y-axis "Requests per second" 0 --> 200000
+    bar [60000, 150000, 180000]
+```
+
+*uvloop roughly 2.5x's `SelectorEventLoop` throughput by moving polling, timers, and callback dispatch into libuv's C runtime — closing most of the gap to the nginx baseline while staying a drop-in `asyncio` replacement.*
 
 ### 6.7 `anyio` Abstraction
 
@@ -818,25 +909,40 @@ OS thread.
 
 ### Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["asyncio.run(main())"]) --> Coord(["Coordinator Task"])
+    Coord -->|"every 30s"| TG(["TaskGroup<br/>max 200 concurrent"])
+    TG --> Worker(["Worker Task × 5,000"])
+    Worker --> Timeout(["asyncio.timeout(2.0)"])
+    Timeout --> HTTP(["aiohttp.ClientSession.get"])
+    HTTP --> Reader(["add_reader(socket_fd)"])
+    Reader --> Select(["selector.select()"])
+    Select -->|"OS waits for<br/>TCP reply"| Record(["record result"])
+    Record --> Queue(["asyncio.Queue"])
+    Queue --> Collector(["Result Collector Task"])
+    Collector --> Redis(["redis.xadd<br/>health:results"])
+
+    class Start io
+    class Coord,TG mathOp
+    class Worker req
+    class Timeout mathOp
+    class HTTP,Select frozen
+    class Reader mathOp
+    class Record train
+    class Queue,Redis base
+    class Collector mathOp
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  asyncio.run(main())                                                │
-│                                                                     │
-│  Coordinator Task                                                   │
-│    └─ every 30 s: asyncio.TaskGroup (max 200 concurrent)           │
-│         └─ [Worker Task × 5,000]                                   │
-│              └─ asyncio.timeout(2.0)                               │
-│              └─ aiohttp.ClientSession.get(url)                     │
-│                   └─ add_reader(socket_fd, ...)                    │
-│                   └─ selector.select() ← OS waits for TCP reply    │
-│              └─ record result                                       │
-│                                                                     │
-│  Result Collector Task                                              │
-│    └─ asyncio.Queue.get()                                          │
-│    └─ redis.asyncio.xadd("health:results", ...)                   │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+
+*5,000 URL checks fan out through a 200-way `TaskGroup`; each worker's `selector.select()` wait is the only blocking point, and results funnel through a single `asyncio.Queue` into the Redis stream writer.*
 
 ### Implementation
 
@@ -1004,7 +1110,6 @@ async def check_url_fixed(url: str) -> CheckResult:
 
 4. Replace `asyncio.Semaphore(200)` with `asyncio.BoundedSemaphore(200)`. Is there a difference
    in this use case? When would `BoundedSemaphore` prevent a bug?
-```
 
 ---
 

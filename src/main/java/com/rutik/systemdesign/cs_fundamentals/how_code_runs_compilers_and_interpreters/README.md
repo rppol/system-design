@@ -50,6 +50,26 @@ Producing machine code is not the same as running it. The **linker** combines mu
 | Bytecode VM + JIT | Bytecode ahead of time; hot bytecode re-compiled to native machine code *during* the run, using data observed while running | Cold code: interpreted. Hot code: natively executed, speculatively optimized, with a bailout path back to the interpreter | JVM HotSpot (C1/C2 tiers), V8 (Ignition + Sparkplug + TurboFan), PyPy | Interpreter speed at first call; ~100 ms to a few seconds to reach peak | Can match or exceed statically compiled code on polymorphic hot code, because it optimizes using real runtime type and branch data unavailable at build time |
 | AOT compilation of a managed/bytecode language | The whole program, assumed closed-world, is compiled to native code before it ships, using build-time static analysis instead of runtime profiling | The CPU executes machine code directly, same as row 1, but produced from bytecode instead of a systems language | GraalVM Native Image, .NET Native AOT | ~10-50 ms | Usually below a fully warmed-up JIT's ceiling (no runtime profile-guided speculation), but reached instantly and far above interpreter speed |
 
+The two columns on the right of that table are exactly the two axes named in Section 2's "why it matters" — plotting all five strategies against each other on those axes at once makes the tradeoff a single glance instead of a five-row read:
+
+```mermaid
+quadrantChart
+    title Startup Latency vs Steady-State Throughput
+    x-axis Low Latency --> High Latency
+    y-axis Low Throughput --> High Throughput
+    quadrant-1 Slow start, fast steady state
+    quadrant-2 Fast start, fast steady state
+    quadrant-3 Fast start, slow steady state
+    quadrant-4 Slow start, slow steady state
+    "Tree-walking interpreter": [0.05, 0.05]
+    "Bytecode interpreter": [0.35, 0.20]
+    "AOT native": [0.15, 0.65]
+    "AOT native image": [0.30, 0.60]
+    "Bytecode VM + JIT": [0.90, 0.95]
+```
+
+Only the JIT reaches the top-right corner, and only by first paying the top-right corner's cost -- it takes the longest to warm up (~100 ms to a few seconds) in exchange for the highest reachable steady-state throughput. AOT native and AOT native image cluster in the fast-start / high-throughput quadrant instead, while both interpreter tiers sit in the fast-start / low-throughput corner, and no strategy willingly occupies the slow-start / low-throughput quadrant at all.
+
 ### 4.2 Static vs. Dynamic Linking
 
 | Aspect | Static linking | Dynamic linking |
@@ -68,36 +88,36 @@ Producing machine code is not the same as running it. The **linker** combines mu
 
 ### The Full Pipeline: Source Text to Running Process
 
-```
-SOURCE TEXT   (e.g. "x = 2 + 3 * 4")
-    |
-    v
-FRONT END  -- source-language specific; rejects malformed programs
-    1. Lexer               characters -> tokens
-    2. Parser              tokens     -> AST
-    3. Semantic analysis   AST        -> AST + symbol table (scopes, types checked)
-    |
-    v
-MIDDLE END  -- target-independent; same shape for every source language
-    4. Lower to IR         AST -> three-address code / SSA
-    5. Optimize             constant folding, dead-code elimination, inlining, ...
-    |
-    v
-BACK END  -- target-machine specific; one per CPU architecture
-    6. Instruction selection   IR          -> machine instructions
-    7. Register allocation      temporaries -> physical registers (or stack spill)
-    8. Code generation          -> object code (a .o file)
-    |
-    v
-LINKER    merges every .o file and library, resolves each symbol to an address,
-          then relocates (patches) every reference now that layout is final
-    |
-    v
-LOADER (operating system)   maps segments into a fresh process's virtual memory,
-          builds the initial stack, jumps to the entry point
-    |
-    v
-RUNNING PROCESS
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src(["Source text<br/>x = 2 + 3 * 4"])
+
+    subgraph FE["Front End -- source-language specific"]
+        lex["1 Lexer<br/>chars to tokens"] --> parse["2 Parser<br/>tokens to AST"] --> sem["3 Semantic analysis<br/>scopes, types checked"]
+    end
+
+    subgraph ME["Middle End -- target-independent"]
+        ir["4 Lower to IR<br/>AST to SSA / 3-address code"] --> opt["5 Optimize<br/>fold, DCE, inline"]
+    end
+
+    subgraph BE["Back End -- target-machine specific"]
+        isel["6 Instruction selection<br/>IR to machine instrs"] --> ra["7 Register allocation<br/>temps to registers"] --> cg["8 Code generation<br/>emits object code (.o)"]
+    end
+
+    src --> FE --> ME --> BE --> linker["Linker<br/>merge .o + libs,<br/>resolve + relocate"] --> loader["Loader (OS)<br/>map segments, build stack,<br/>jump to entry point"] --> proc(["Running process"])
+
+    class src,proc io
+    class lex,parse,sem,ir,opt,isel,ra,cg mathOp
+    class linker frozen
+    class loader base
 ```
 
 This is the same pipeline whether the implementation is called a "compiler" or an "interpreter" — the difference is only how far along it a given piece of code travels before it is first executed, and whether the box that finally executes it is the CPU or another program's dispatch loop.
@@ -388,21 +408,24 @@ def infer_type(node: Node, scope: Scope) -> str:
 
 A scope chain is a tree at compile time even though only one root-to-leaf path is walked per lookup:
 
-```
-Scope chain for:
-    x = 10
-    def outer():
-        y = 20
-        def inner():
-            z = x + y        <- must resolve BOTH x and y by walking outward
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-module scope       { x }
-  |
-  +-- outer() scope { y }
-        |
-        +-- inner() scope { z }
-              resolve(x): not here -> outer: not here -> module: found (x = 10)
-              resolve(y): not here -> outer: found (y = 20)
+    M("module scope<br/>x = 10") --> O("outer() scope<br/>y = 20")
+    O --> I("inner() scope<br/>z = x + y")
+    I -.->|"resolve(x): miss here,<br/>miss in outer,<br/>found in module"| M
+    I -.->|"resolve(y): miss here,<br/>found in outer"| O
+
+    class I req
+    class O mathOp
+    class M base
 ```
 
 A compiled language answers "which scope is `x` in" once, during semantic analysis, and bakes the answer into a fixed memory offset or register — the question is never re-asked at run time. A dynamic language like Python re-asks a cheaper version of the same question every time (`LOAD_FAST`/`LOAD_GLOBAL` bytecode, see 6.6), which is part of why dynamic languages pay a per-access cost that statically resolved languages do not.
@@ -571,6 +594,36 @@ The JVM's HotSpot runtime is the textbook tiered-JIT example. A method starts in
 A hot *loop* inside a method that has only been called once cannot wait for an invocation counter to cross any threshold — the method has not even returned yet. **On-stack replacement (OSR)** solves this: the interpreter tracks loop back-edge counts directly, and once a loop is hot enough, the runtime swaps the *currently executing* interpreted frame for an equivalent compiled frame in the middle of execution, without waiting for the enclosing method to be called again.
 
 Speculation can be wrong. If a call site the JIT devirtualized under the assumption "this is always a `Dog`" is later reached with a `Cat`, the compiled code's assumption breaks. The runtime must **deoptimize** (V8 calls this a "bailout"): discard the compiled frame, reconstruct an equivalent interpreter frame from it, and resume in the interpreter — possibly recompiling a more conservative, polymorphism-aware version later. HotSpot exposes this via `-XX:+PrintCompilation`/`-XX:+TraceDeoptimization`; V8 exposes the same idea via `--trace-deopt`. V8 itself runs a three-tier pipeline for the same reasons: **Ignition** (a bytecode interpreter), **Sparkplug** (a non-optimizing baseline JIT added in Chrome 91 specifically to close the gap between "cheap bytecode" and "slow-to-produce, fully optimized code"), and **TurboFan** (the optimizing tier that does the same profile-guided speculation as C2).
+
+The three paragraphs above are really one state machine — a method moves between execution tiers as its invocation and loop back-edge counts cross thresholds, with deoptimization as the safety valve back to the interpreter whenever a speculative bet turns out wrong:
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Interpreted (Tier 0)" as T0
+    state "C1 Compiled (fast tier)" as T1
+    state "C2 Compiled (optimizing tier)" as T2
+
+    [*] --> T0
+    T0 --> T1: invocation threshold<br/>~1,500 calls, or OSR<br/>for a hot loop mid-method
+    T1 --> T2: invocation threshold<br/>~10,000 calls (classic default)
+    T1 --> T0: deoptimize -- speculative<br/>assumption proven false
+    T2 --> T0: deoptimize -- speculative<br/>assumption proven false
+    T2 --> [*]: method returns
+
+    class T0 frozen
+    class T1 mathOp
+    class T2 train
+```
+
+A method starts interpreted, is promoted to the fast C1 tier once its invocation count -- or a hot loop's back-edge count via OSR -- crosses the classic ~1,500-call default, and is promoted again to the aggressively-optimizing C2 tier past the classic ~10,000-call default; a failed speculative assumption at either compiled tier deoptimizes straight back to the interpreter rather than crashing.
 
 This warmup requirement is also the most common way engineers accidentally lie to themselves in a benchmark:
 
@@ -937,19 +990,15 @@ A recursive-descent parser's call stack directly mirrors the grammar's own recur
 
 **Cold-invocation timeline, until the first response is served:**
 
+```mermaid
+xychart-beta
+    title "Cold-Start P99 by Execution Strategy (payments-validation service)"
+    x-axis ["JVM default", "JVM tuned", "GraalVM Native Image", "Go rewrite"]
+    y-axis "Cold-start latency (ms)" 0 --> 1000
+    bar [950, 400, 75, 58]
 ```
-JVM default (java -jar app.jar):
-  [class load + cold interpretation ~900ms] [request handling ~50ms] = ~950ms
 
-JVM tuned for startup (-XX:TieredStopAtLevel=1 -Xshare:on):
-  [faster class load, C1-only, no C2 wait ~350ms] [request ~50ms] = ~400ms
-
-GraalVM Native Image build of the same app:
-  [native process start ~25ms] [request handling ~50ms] = ~75ms
-
-Go rewrite of the validation logic:
-  [native process start ~8ms] [request handling ~50ms] = ~58ms
-```
+In every strategy the request-handling cost is a near-constant ~50 ms; the entire multi-hundred-millisecond gap comes from what precedes it -- ~900 ms of cold class loading and interpretation for the JVM default, ~350 ms once C2 is disabled and class data sharing is enabled, and under 30 ms of native process start for the two AOT-compiled builds.
 
 **Diagnosis**: the root cause is not "the JVM is slow" in a throughput sense — it is that scale-to-zero means the process almost never stays warm long enough to amortize class loading, let alone JIT warmup, before a request must already be answered. This is a strategy mismatch with the deployment shape described in section 9, not a defect in the JVM itself.
 

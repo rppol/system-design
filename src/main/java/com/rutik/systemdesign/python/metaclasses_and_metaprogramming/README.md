@@ -109,62 +109,81 @@ The `@dataclass` decorator reads `__annotations__` and synthesizes `__init__`, `
 
 ### 5.1 The metaclass inheritance chain
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T["type<br/>metaclass of everything"] -->|"instance of"| T2["type (itself)<br/>fixed point: type(type) is type"]
+    T2 -->|"subclass"| CM["ABCMeta, ModelMeta, ...<br/>custom metaclasses"]
+    CM -->|"instance of"| Foo["class Foo(Base)<br/>Foo.__class__ is ModelMeta"]
+    Foo -->|"instance of"| foo(["foo = Foo()<br/>foo.__class__ is Foo"])
+
+    class T,T2 frozen
+    class CM base
+    class Foo train
+    class foo io
 ```
-       type  <─────────────── metaclass of everything
-        |
-        |  (instance of)
-        v
-    type (itself)     ← type(type) is type — the fixed point
-        |
-        |  (subclass)
-        v
-    ABCMeta, ModelMeta, ...   ← custom metaclasses
-        |
-        |  (instance of)
-        v
-     class Foo(Base)          ← ordinary class; Foo.__class__ is ModelMeta
-        |
-        |  (instance of)
-        v
-     foo = Foo()              ← ordinary object; foo.__class__ is Foo
-```
+
+Every class is an instance of some metaclass, and every metaclass is ultimately a subclass of `type` — the chain bottoms out at `type` itself, the one fixed point where `type(type) is type`.
 
 ### 5.2 Class body execution — four-step protocol
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src(["class Foo(Base,<br/>metaclass=Meta): x = 1"]) --> S1["Step 1: determine metaclass<br/>bases + metaclass= kwarg to Meta"]
+    S1 --> S2["Step 2: Meta.__prepare__<br/>returns namespace (default: empty dict)"]
+    S2 --> S3["Step 3: exec(class_body, namespace)<br/>populates x=1, __module__, __qualname__"]
+    S3 --> S4["Step 4: Meta.__new__ allocates,<br/>then Meta.__init__ configures"]
+    S4 --> out(["Foo class object"])
+
+    class src io
+    class S1,S2,S3,S4 mathOp
+    class out train
 ```
-  class Foo(Base, metaclass=Meta):
-      x = 1
 
-       Step 1: determine metaclass
-               ─── look at bases.__class__, explicit metaclass= kwarg
-               ─── result: Meta
-
-       Step 2: Meta.__prepare__("Foo", (Base,), **kwargs)
-               ─── returns namespace dict (default: {})
-
-       Step 3: exec(class_body, namespace)
-               ─── populates namespace: {"x": 1, "__module__": ..., ...}
-
-       Step 4: Meta.__new__(Meta, "Foo", (Base,), namespace)
-               ─── allocates the class object
-               Meta.__init__(Foo, "Foo", (Base,), namespace)
-               ─── post-init hook
-               ─── returns Foo
-```
+Each step can be intercepted independently — overriding `__prepare__`, `__new__`, or `__init__` lets a metaclass hook in at exactly the stage it needs.
 
 ### 5.3 Attribute lookup chain (MRO + descriptor protocol)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["obj.name lookup"]) --> D1{"Data descriptor<br/>in type(obj).__mro__?"}
+    D1 -->|"found"| G1["call descriptor.__get__<br/>(obj, type(obj))"]
+    D1 -->|"not found"| D2{"name in<br/>obj.__dict__?"}
+    D2 -->|"found"| G2["return value<br/>directly"]
+    D2 -->|"not found"| D3{"Non-data descriptor<br/>in type(obj).__mro__?"}
+    D3 -->|"found"| G3["call descriptor.__get__<br/>(obj, type(obj))"]
+    D3 -->|"not found"| Err["raise AttributeError<br/>(triggers __getattr__)"]
+
+    class Start io
+    class D1,D2,D3 mathOp
+    class G1,G2,G3 train
+    class Err lossN
 ```
-  obj.name   →
-    1. type(obj).__mro__ scan for a DATA descriptor (has __set__)
-       found? → call descriptor.__get__(obj, type(obj))
-    2. obj.__dict__.get("name")
-       found? → return it directly
-    3. type(obj).__mro__ scan for a NON-DATA descriptor (only __get__)
-       found? → call descriptor.__get__(obj, type(obj))
-    4. raise AttributeError
-       (triggers __getattr__ if defined)
-```
+
+Data descriptors are checked first and win even over `instance.__dict__`; only when no data descriptor exists does the instance dictionary get a chance, with non-data descriptors as the final fallback before `__getattr__`.
 
 ### 5.4 Descriptor classification
 
@@ -719,6 +738,41 @@ class B(metaclass=MetaB): pass
 class C(A, B): pass   # no conflict — A has no metaclass now
 ```
 
+**Visualizing the conflict**: the diagram below shows why `C(A, B)` fails when `MetaA` and `MetaB` share no relationship, and how a merged `MetaAB(MetaA, MetaB)` satisfies the "subclass of every base's metaclass" rule.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph broken["Broken: unrelated metaclasses"]
+        MA["MetaA"] --> A(["A"])
+        MB["MetaB"] --> B(["B"])
+        A --> C{"C(A, B)"}
+        B --> C
+        C -.-> X["TypeError:<br/>metaclass conflict"]
+    end
+
+    subgraph fixed["Fix: merged metaclass"]
+        MA2["MetaA"] --> MAB["MetaAB<br/>(MetaA, MetaB)"]
+        MB2["MetaB"] --> MAB
+        MAB --> C2(["C(A, B,<br/>metaclass=MetaAB)"])
+    end
+
+    broken ~~~ fixed
+
+    class MA,MB,MA2,MB2 frozen
+    class A,B io
+    class C mathOp
+    class X lossN
+    class MAB,C2 train
+```
+
 ### Pitfall 3 — mutable default in `@dataclass`
 
 ```python
@@ -888,6 +942,36 @@ Yes. In `__new__`, the `bases` tuple can be replaced before calling `super().__n
 - The model metaclass collects all fields at class-creation time
 - Fields validate on assignment
 - The system is extensible without touching the metaclass
+
+---
+
+**High-level flow** (the shape the fix in Steps 2–3 converges on): the metaclass runs once per class definition to build the field registry, while each descriptor's `__set__` runs on every assignment to validate and store per-instance state.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    body(["class body:<br/>Field descriptors"]) --> scan["ModelMeta.__new__<br/>scans namespace"]
+    scan --> merge["merge with<br/>inherited fields"]
+    merge --> registry[("cls._fields<br/>registry")]
+    registry --> init["Model.__init__<br/>setattr per field"]
+    init --> desc{"Field.__set__<br/>validate(value)"}
+    desc -->|"valid"| store[("stored in<br/>obj.__dict__")]
+    desc -->|"invalid"| err["raise TypeError<br/>or ValueError"]
+
+    class body io
+    class scan,merge,desc mathOp
+    class registry base
+    class init req
+    class store train
+    class err lossN
+```
 
 ---
 

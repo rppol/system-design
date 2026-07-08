@@ -69,6 +69,39 @@ arrives, compare it to the root:
   top-k — pop it, push the new element. The heap's new root becomes the new
   "weakest link" of the top-k.
 
+The same rule mirrors for the k SMALLEST elements — heap type and eviction
+direction flip together, which is the easiest thing in this pattern to get
+backwards (see the BROKEN -> FIX in §8):
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    G{"Want k LARGEST<br/>or k SMALLEST?"}
+    G -->|"k LARGEST"| MIN("MIN-heap<br/>of size k")
+    MIN --> EV1("Evict the root<br/>(smallest kept)")
+    EV1 --> R1(["Root = k-th<br/>largest overall"])
+
+    G -->|"k SMALLEST"| MAX("MAX-heap<br/>of size k")
+    MAX --> EV2("Evict the root<br/>(largest kept)")
+    EV2 --> R2(["Root = k-th<br/>smallest overall"])
+
+    class G mathOp
+    class MIN,MAX base
+    class EV1,EV2 lossN
+    class R1,R2 train
+```
+
+The heap you keep is always the **weak** side — a MIN-heap surfaces the
+smallest of the current top-k at its root, ready to be evicted, which is why
+chasing the k LARGEST values means maintaining a MIN-heap, not a max-heap.
+
 ```
 Maintaining the 3 LARGEST elements of [5, 1, 2, 3, 4] with a min-heap of size 3:
 
@@ -333,6 +366,43 @@ in a way that won't crash, only silently return the wrong set.
 ---
 
 ## 9. Related Patterns & When to Switch
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{"Need median, or balance<br/>into two live halves?"}
+    Q2{"Merging multiple already-<br/>sorted lists/rows?"}
+    Q3{"k close to n, or huge<br/>value range?"}
+    Q4{"One-shot k-th value,<br/>static array, no stream?"}
+    R1(["Two Heaps"])
+    R2(["K-Way Merge"])
+    R3(["Modified Binary Search"])
+    R4(["Quickselect"])
+    R5(["Top-K Elements<br/>(this pattern)"])
+
+    Q1 -->|"yes"| R1
+    Q1 -->|"no"| Q2
+    Q2 -->|"yes"| R2
+    Q2 -->|"no"| Q3
+    Q3 -->|"yes"| R3
+    Q3 -->|"no"| Q4
+    Q4 -->|"yes"| R4
+    Q4 -->|"no"| R5
+
+    class Q1,Q2,Q3,Q4 mathOp
+    class R1,R2,R3,R4 frozen
+    class R5 train
+```
+
+This collapses the anti-signals from §1 into one switch-or-stay flow: default
+to a heap of size k unless one of the four narrower shapes above fits better.
 
 - **[Two Heaps](two_heaps.md)** — when you need the median or to balance a
   dataset into two halves *as it streams in*, not just "the top k." Two heaps

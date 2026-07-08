@@ -18,22 +18,37 @@ Cassandra is like a distributed sorted map: each row has a partition key (determ
 
 ### Cassandra Architecture (Ring / Consistent Hashing)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph ring["Token ring · 6 nodes · RF=3 · vnodes=256/node"]
+        direction LR
+        n1(["Node1<br/>0-17"]) --> n2(["Node2<br/>17-34"]) --> n3(["Node3<br/>34-51"]) --> n4(["Node4<br/>51-68"]) --> n5(["Node5<br/>68-85"]) --> n6(["Node6<br/>85-99"])
+    end
+
+    subgraph gossip["Gossip protocol · every 1s"]
+        direction LR
+        exch("Nodes exchange<br/>health info") --> know("Every node knows<br/>all state<br/>no coordinator") --> fail{"Heartbeat<br/>timeout?"}
+    end
+
+    pk(["Partition key"]) --> hash{"murmur3 hash"} --> tok("Token") --> pos("Ring position") --> rep("3 nodes<br/>RF=3")
+
+    class pk io
+    class hash mathOp
+    class tok,pos mathOp
+    class rep frozen
+    class n1,n2,n3,n4,n5,n6 base
+    class exch,know req
+    class fail lossN
 ```
-Token Ring (6 nodes, RF=3):
-
-Node 1: tokens 0-17
-Node 2: tokens 17-34
-Node 3: tokens 34-51         ← Virtual nodes (vnodes) default 256 per node
-Node 4: tokens 51-68            distribute tokens across ring evenly
-Node 5: tokens 68-85
-Node 6: tokens 85-99
-
-Partition key → murmur3 hash → token → ring position → 3 nodes (RF=3)
-
-Gossip Protocol: nodes exchange health information every second
-                 → All nodes know all other nodes' state without central coordinator
-                 → Node failure detected via heartbeat timeout
-```
+Vnodes (default 256 per node) scatter each physical node's ownership across many small token ranges so a partition key's murmur3 hash always lands on some node's range, which owns the key plus its RF-1 replicas; gossip lets every node learn the whole cluster's health every second with no coordinator to elect or fail over.
 
 ### Data Model
 
@@ -79,49 +94,104 @@ Formula: W + R > RF → strong consistency
   ONE + ONE = 1+1=2 ≤ 3 → eventual ✗
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    rf("RF = 3") --> check{"W + R over RF?"}
+    wcl(["Write CL<br/>e.g. QUORUM = 2"]) --> check
+    rcl(["Read CL<br/>e.g. QUORUM = 2"]) --> check
+    check -->|"QUORUM+QUORUM = 4<br/>over 3"| strong("Strong consistency<br/>latest write always seen")
+    check -->|"ONE+ONE = 2<br/>not over 3"| eventual("Eventual consistency<br/>may read stale")
+
+    class rf base
+    class wcl,rcl io
+    class check mathOp
+    class strong train
+    class eventual lossN
+```
+The formula collapses to a simple pass/fail check: with RF=3, QUORUM+QUORUM clears the bar and guarantees strong consistency, while ONE+ONE does not, leaving reads eventually consistent.
+
 ---
 
 ## 4. Types / Architectures / Strategies
 
 ### Write Path
 
-```
-Client → Coordinator node
-           |
-    ┌──────┴──────┐
-    ↓             ↓          ↓
-Replica 1    Replica 2   Replica 3
-    |
-    ├── 1. Write to commit log (WAL, sequential, durable)
-    ├── 2. Write to memtable (in-memory sorted structure)
-    └── 3. ACK to coordinator when (CL) replicas respond
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Memtable flush (when full, ~64MB default):
-  → Immutable SSTable written to disk
-  → SSTable: sorted, immutable file of key-value pairs
+    client(["Client"]) --> coord("Coordinator node")
+    coord --> r1("Replica 1")
+    coord --> r2("Replica 2")
+    coord --> r3("Replica 3")
+    r1 --> steps("1 Commit log WAL<br/>2 Memtable write<br/>3 ACK at CL")
+    r2 --> steps
+    r3 --> steps
+    steps --> flush{"Memtable full?<br/>~64MB default"}
+    flush -->|"yes"| sstable(["SSTable<br/>immutable · on disk"])
 
-Result:
-- Writes are sequential (commit log) → very fast
-- Write amplification from compaction (background)
-- No updates: new row version written (timestamp determines latest)
+    class client io
+    class coord mathOp
+    class r1,r2,r3 frozen
+    class steps train
+    class flush mathOp
+    class sstable base
 ```
+Writes fan out to all RF replicas in parallel; each appends to its commit log (durable) and memtable (sorted, in-memory) before ACKing, and a background flush turns a full memtable into an immutable SSTable — sequential and fast, at the cost of later write amplification from compaction. Every update writes a new row version; the highest timestamp wins.
 
 ### Read Path
 
-```
-Client → Coordinator → sends read to replica(s) based on CL
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-On Replica:
-1. Bloom filter: is this partition key in THIS SSTable? (99.9% accurate, skip if NO)
-2. Partition key cache: direct SSTable offset lookup (if cached)
-3. Row cache: entire partition cached? Return immediately (if enabled)
-4. SSTable index: binary search for partition key
-5. SSTable data: read rows, filter by clustering key
-6. Merge across multiple SSTables: take latest version per column (by timestamp)
-7. Return to coordinator → coordinator merges if multiple replicas → return to client
+    client(["Client"]) --> coord("Coordinator")
+    coord -->|"read, CL replicas"| replica("Replica")
+    replica --> bloom{"Bloom filter:<br/>key in SSTable?"}
+    bloom -->|"no · 99.9% accurate"| skip("Skip SSTable<br/>zero I/O")
+    bloom -->|"maybe"| rowcache{"Row cache:<br/>partition cached?"}
+    rowcache -->|"yes"| immediate(["Return immediately"])
+    rowcache -->|"no"| pkcache{"Partition key<br/>cache hit?"}
+    pkcache -->|"yes"| offset("Direct SSTable offset")
+    pkcache -->|"no"| index("SSTable index:<br/>binary search")
+    offset --> read("Read rows ·<br/>filter by clustering key")
+    index --> read
+    read --> merge("Merge SSTables:<br/>latest wins by timestamp")
+    skip --> merge
+    merge --> back("Coordinator merges<br/>replicas · checks CL")
+    immediate --> back
+    back --> repair{"Replicas<br/>disagree?"}
+    repair -->|"yes"| rr("Read repair:<br/>patch stale replica")
+    repair -->|"no"| out(["Return to client"])
+    rr -.-> out
 
-Read repair: if replicas return different data → coordinator sends repair to stale replica
+    class client,out,immediate io
+    class coord,back,bloom,rowcache,pkcache,repair mathOp
+    class replica frozen
+    class skip,offset,index,read,merge base
+    class rr lossN
 ```
+A read checks each SSTable's Bloom filter first (99.9% accurate, a clean skip on NO costs zero I/O), falls through row-cache and partition-key-cache fast paths before walking the SSTable index, then merges versions across SSTables by timestamp; the coordinator only triggers read repair when replicas disagree.
 
 ### Compaction Strategies
 
@@ -169,20 +239,37 @@ IF balance = 500;
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    key(["device_id =<br/>UUID-42"]) --> hash{"murmur3 hash<br/>→ token 47"}
+    hash --> n1("Node1<br/>0-17")
+    n1 --> n2("Node2<br/>17-34")
+    n2 --> n3("Node3<br/>34-51<br/>PRIMARY")
+    n3 --> n4("Node4<br/>51-68<br/>REPLICA")
+    n4 --> n5("Node5<br/>68-85<br/>REPLICA")
+    n5 --> n6("Node6<br/>85-99")
+    n3 -.->|"CL=QUORUM<br/>2 of 3 ACK"| ack(["Write/read<br/>acknowledged"])
+    n4 -.-> ack
+    n5 -.-> ack
+
+    class key io
+    class hash mathOp
+    class n1,n2,n6 base
+    class n3 train
+    class n4,n5 frozen
+    class ack io
 ```
-CASSANDRA DATA DISTRIBUTION (RF=3, 6 nodes):
+Hashing `device_id=UUID-42` with murmur3 lands on token 47, owned by Node3 (primary) with Node4 and Node5 as its RF-1 replicas; CL=QUORUM needs acks from 2 of these 3 nodes for either a write or a read.
 
-Data: device_id=UUID-42
-murmur3(UUID-42) → token 47 → Node 3 owns token 47
-RF=3 → replicate to next 2 nodes: Node 4, Node 5
-
-   Node1    Node2    Node3    Node4    Node5    Node6
-  [0-17]  [17-34]  [34-51]  [51-68]  [68-85]  [85-99]
-                  [PRIMARY] [REPLICA] [REPLICA]
-
-Write with CL=QUORUM: wait for 2/3 of {Node3, Node4, Node5} to ACK
-Read with CL=QUORUM: request from 2/3 of {Node3, Node4, Node5}, take latest
-
+```
 PARTITION STRUCTURE:
 
 Partition Key: device_id=UUID-42
@@ -199,6 +286,7 @@ Partition Key: device_id=UUID-42
 │ Rows sorted by ts DESC (CLUSTERING ORDER BY ts DESC)  │
 └────────────────────────────────────────────────────────┘
 ```
+Within the partition, rows are stored sorted by clustering key (`ts DESC`), so the most recent reading is always the first row a query scans.
 
 ---
 
@@ -206,28 +294,38 @@ Partition Key: device_id=UUID-42
 
 ### Tombstone Accumulation Problem
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Live
+    Live --> Tombstone: DELETE writes a marker<br/>not a physical delete
+    Tombstone --> Tombstone: every read scans<br/>past the tombstone
+    Tombstone --> Removed: gc_grace_seconds elapses<br/>(default 10 days) + compaction
+    Removed --> [*]
+
+    note right of Tombstone
+        Problem: 50M deletes leave 50M tombstones.
+        Reads scan X rows to return Y results, X far greater than Y.
+    end note
+
+    note right of Removed
+        Fixes: TTL instead of DELETE (TWCS expires the whole SSTable);
+        tombstone_gc.mode=repair (4.1+); tombstone_threshold=0.1;
+        ALLOW FILTERING is never the fix.
+    end note
+
+    class Live train
+    class Tombstone lossN
+    class Removed base
 ```
-Delete in Cassandra: writes a tombstone marker (not a physical delete)
-  DELETE FROM sensor_readings WHERE device_id=? AND ts=?
-  → Writes: {partition_key, clustering_key, tombstone_timestamp}
-
-Tombstones are resolved during compaction (SSTables that contain tombstone are merged)
-But tombstones must be retained until gc_grace_seconds (default 10 days) has passed
-  → Ensures deleted data propagates to all replicas before removal
-
-Problem scenario:
-  - 50M sensor readings deleted (device retired)
-  - Table has 50M tombstones
-  - Each read scans through tombstones before finding live data
-  - Read: "Scanned X rows before returning Y results" → X >> Y = tombstone problem
-
-Fixes:
-  1. Set TTL on inserts instead of deleting (TWCS compaction expires entire SSTables)
-     INSERT INTO sensor_readings (...) VALUES (...) USING TTL 86400
-  2. Tune tombstone_gc.mode=repair (Cassandra 4.1+): gc tombstones after repair
-  3. Reduce tombstone_threshold=0.1 (compact when 10% of SSTable is tombstones)
-  4. ALLOW FILTERING is never the fix — it disables partition pruning
-```
+The tombstone marker must outlive `gc_grace_seconds` (10 days by default) so it reaches every replica before compaction can drop it — for as long as it lives, every read pays the cost of scanning past it.
 
 ### Anti-Patterns
 
@@ -446,5 +544,15 @@ CREATE TABLE sensor_current (
     PRIMARY KEY (device_id, sensor_type)
 ) WITH default_time_to_live = 300;  -- 5-minute TTL
 ```
+
+```mermaid
+xychart-beta
+    title "Partition size over time: unbucketed grows unbounded, hour-bucketed stays flat"
+    x-axis ["Day 1", "Month 1", "Month 6", "Year 1"]
+    y-axis "Rows in the partition" 0 --> 2200000
+    line [5760, 172800, 1036800, 2102400]
+    line [240, 240, 240, 240]
+```
+Without bucketing, a single device's partition grows unbounded — the same 5,760 reads/day compounds past 2M rows within a year; bucketing by `(device_id, hour_bucket)` caps every partition at 240 rows no matter how long the device stays online.
 
 **Result**: Partition size: 240 rows, ~30KB max. TWCS compaction efficiently expires 1-hour windows when their TTL passes — no tombstone accumulation. Write throughput: 500K/s with 10-node cluster, RF=3, LOCAL_QUORUM. Read latency: < 5ms for 6-hour range queries. 24-hour data volumes: 10M devices × 1440 readings × 4 types = 57.6B rows/day, distributed evenly across all nodes.

@@ -69,6 +69,33 @@ The operational surface area:
 | Cooperative (incremental) | Revoke only moving partitions | Much smaller pause; default for new clients |
 | Static membership | `group.instance.id` pins assignment | Survives transient restarts without rebalancing at all |
 
+Why cooperative pauses less than eager — same trigger, different blast radius:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    M(["group membership<br/>changes"]) --> D{"rebalance<br/>protocol?"}
+    D -->|eager| E1("revoke ALL<br/>partitions")
+    E1 --> E2("every consumer<br/>pauses")
+    E2 --> E3("stop-the-world<br/>until reassigned")
+    D -->|cooperative| C1("revoke only<br/>moving partitions")
+    C1 --> C2("other consumers<br/>keep consuming")
+    C2 --> C3("reassign just<br/>the moved subset")
+
+    class M req
+    class D mathOp
+    class E1,E2,E3 lossN
+    class C1,C2,C3 train
+```
+Both protocols react to the same trigger (a consumer joins, leaves, crashes, or a deploy restarts pods); eager revokes every partition from every consumer, while cooperative revokes only the partitions actually moving — the mechanical reason a large deploy pauses the whole group under eager but barely dents it under cooperative.
+
 **Storage tiers:**
 
 | Tier | Location | Use |
@@ -82,38 +109,66 @@ The operational surface area:
 
 Strimzi-managed Kafka spread across 3 AZs with rack awareness:
 
-```
-                         Strimzi Cluster Operator (watches CRDs)
-                                       │ reconciles Kafka / KafkaTopic / KafkaRebalance
-            ┌──────────────────────────┼──────────────────────────┐
-            v                          v                          v
-        AZ us-east-1a            AZ us-east-1b            AZ us-east-1c
-      ┌───────────────┐        ┌───────────────┐        ┌───────────────┐
-      │ broker-0      │        │ broker-1      │        │ broker-2      │
-      │ rack=1a       │        │ rack=1b       │        │ rack=1c       │
-      │ EBS gp3 2TB   │        │ EBS gp3 2TB   │        │ EBS gp3 2TB   │
-      └───────────────┘        └───────────────┘        └───────────────┘
-         KRaft controllers quorum (3, one per AZ) — Raft metadata log
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   Topic "orders", partition 0, RF=3:
-     leader  -> broker-0 (rack 1a)     replicas placed one-per-rack so
-     replica -> broker-1 (rack 1b)     losing a whole AZ keeps the
-     replica -> broker-2 (rack 1c)     partition online (still 2 ISR)
+    OP(["Strimzi Cluster<br/>Operator"]) -->|"reconciles CRDs"| B0
+    OP -->|"reconciles CRDs"| B1
+    OP -->|"reconciles CRDs"| B2
 
-   Cold segments (> 6h old) ──tiered storage──> S3  (hot disk stays small)
+    subgraph AZ1["AZ us-east-1a"]
+        B0("broker-0<br/>rack=1a<br/>EBS gp3 2TB")
+    end
+    subgraph AZ2["AZ us-east-1b"]
+        B1("broker-1<br/>rack=1b<br/>EBS gp3 2TB")
+    end
+    subgraph AZ3["AZ us-east-1c"]
+        B2("broker-2<br/>rack=1c<br/>EBS gp3 2TB")
+    end
+
+    B0 -->|"replicates<br/>orders-0"| B1
+    B0 -->|"replicates<br/>orders-0"| B2
+
+    KR[("KRaft controller<br/>quorum, 1 per AZ")]
+    B0 -.->|metadata| KR
+    B1 -.->|metadata| KR
+    B2 -.->|metadata| KR
+
+    B0 -.->|"cold segments<br/>over 6h old"| S3([S3 tiered storage])
+
+    class OP mathOp
+    class B0 train
+    class B1,B2 frozen
+    class KR base
+    class S3 frozen
 ```
+Topic `orders` partition 0 (RF=3): broker-0 leads and replicates one-per-rack to broker-1 and broker-2, so losing a whole AZ still leaves 2 ISR and the partition stays online.
 
 Consumer-group lag, the core health view:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C(["billing committed offset<br/>985,000"]) -->|"LAG = 15,000<br/>messages behind head"| H(["produce offset (head)<br/>1,000,000"])
+
+    class C req
+    class H io
 ```
-  produce offset (head) ─────────────────────────────────────────> 1,000,000
-                                                          ▲
-   consumer-group "billing" committed offset ── 985,000   │  LAG = 15,000
-                                                          │  (messages behind head)
-   LAG rising  => consume rate < produce rate => alert before it hits retention edge
-   LAG flat near 0 => healthy
-   LAG = (log-end-offset) - (committed-offset), summed across all partitions
-```
+LAG = `log-end-offset − committed-offset`, summed across all partitions; flat near zero is healthy, while a widening gap (consume rate < produce rate) must be caught before it reaches the retention edge.
 
 ---
 
@@ -195,6 +250,40 @@ Correct: stored bytes = average_ingest_rate × retention_window × replication_f
   across 3 brokers = ~121 TB/broker  -> too much for 2TB disks
 => either cut retention, add brokers, or use TIERED STORAGE to push cold to S3.
 ```
+
+The wrong-path/right-path branch, visualized:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ING(["ingest rate"]) --> Q{"peak or avg?"}
+    Q -->|"peak (WRONG)"| CUM("peak × retention<br/>= cumulative writes")
+    CUM --> WRONGR("not stored bytes<br/>e.g. 363 TB overcount")
+    Q -->|"avg (CORRECT)"| STORE("avg ingest × retention<br/>× RF 3")
+    STORE --> PERBROKER("divide by 3 brokers<br/>= ~121 TB/broker")
+    PERBROKER --> FIT{"fits a 2TB disk?"}
+    FIT -->|no| TIER("offload cold segments<br/>to S3 (tiered storage)")
+    FIT -->|yes| LOCAL("stays hot on<br/>local EBS/NVMe")
+
+    class ING io
+    class Q mathOp
+    class CUM lossN
+    class WRONGR lossN
+    class STORE mathOp
+    class PERBROKER mathOp
+    class FIT mathOp
+    class TIER frozen
+    class LOCAL train
+```
+Peak ingest (600 MB/s) over-counts cumulative writes as if they were stored bytes; the correct path — avg ingest (200 MB/s) × retention × RF 3, divided across 3 brokers — is the ~121 TB/broker that actually has to fit on disk, well past a 2TB broker.
+
 This is exactly why tiered storage exists: keep ~6–24h hot on EBS, offload the rest to S3.
 
 ### 6.3 Monitoring consumer lag
@@ -426,12 +515,38 @@ A Schema Registry (Confluent, Apicurio, AWS Glue Schema Registry) stores the Avr
 - Incident 1: the `orders` group had 12 consumers but the topic had only **8 partitions** — 4 consumers sat idle, capping parallelism below the produce rate, so lag grew unbounded under 3× load.
 - Incident 2: the on-call engineer restarted **two** brokers at once to save time; with `min.insync.replicas=2` and RF=3, dropping two brokers left only 1 ISR → all writes to those partitions blocked for 6 minutes.
 
-```
-BEFORE (broken):                          AFTER (fixed):
-orders: 8 partitions, 12 consumers        orders: 36 partitions, autoscaled consumers
- -> 4 consumers idle, lag -> 4h            -> full parallelism, lag < 30s at 3x load
-manual 2-broker restart -> writes block   Strimzi rolling upgrade, 1 broker at a time
-no lag alerting                           lag alert at 500k + tiered storage for headroom
+The fixes map directly onto the two root causes:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph BEFORE["BEFORE (broken)"]
+        direction TB
+        B1("orders: 8 partitions<br/>12 consumers") --> B2("4 consumers idle")
+        B2 --> B3("lag grows to 4h")
+        B4("manual 2-broker restart") --> B5("writes blocked")
+        B6("no lag alerting")
+    end
+
+    subgraph AFTER["AFTER (fixed)"]
+        direction TB
+        A1("orders: 36 partitions<br/>autoscaled consumers") --> A2("full parallelism")
+        A2 --> A3("lag under 30s<br/>at 3x load")
+        A4("Strimzi rolling upgrade<br/>1 broker at a time") --> A5("writes never blocked")
+        A6("lag alert at 500k<br/>+ tiered storage")
+    end
+
+    BEFORE -.->|fix| AFTER
+
+    class B1,B2,B3,B4,B5,B6 lossN
+    class A1,A2,A3,A4,A5,A6 train
 ```
 
 **Fix 1 — repartition for parallelism (carefully):**

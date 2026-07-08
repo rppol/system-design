@@ -42,6 +42,25 @@ Kleppmann derives big-data principles from a simple task: find the most popular 
 server log. A chain of standard tools — `cat log | awk '{print $7}' | sort | uniq -c | sort -rn |
 head` — solves it. Two lessons emerge:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    log(["log file"]) --> cat("cat") --> awk("awk<br/>extract $7") --> sort1("sort") --> uniq("uniq -c<br/>count duplicates") --> sort2("sort -rn<br/>sort by count") --> head("head") --> top(["top pages"])
+
+    class log,top io
+    class cat,awk,sort1,uniq,sort2,head mathOp
+```
+Caption: `cat log | awk '{print $7}' | sort | uniq -c | sort -rn | head` composes six single-purpose
+tools purely through pipes — every stage reads lines of text on stdin and writes lines of text on
+stdout, so no tool knows or cares what feeds it or what it feeds.
+
 **The uniform interface.** Unix tools all speak the same data format: a **file = a sequence of
 lines / bytes**. Because every tool reads lines from stdin and writes lines to stdout, *any* tool
 can feed *any* other. This uniform interface is what makes arbitrary composition possible.
@@ -80,17 +99,33 @@ framework **partitions** mapper output by key and **sorts** each partition, then
 for a given key to the same reducer (across the network) — so each reducer sees its keys' values
 together and in sorted order. This sort is the heart of MapReduce.
 
-```
-MAPREDUCE DATAFLOW (the framework owns the shuffle/sort)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  input splits (on HDFS)      MAP                SHUFFLE              REDUCE       output
-  ┌──────────┐            ┌─────────┐       partition by key      ┌─────────┐
-  │ block 1  │──▶ mapper ─│ (k,v)…  │──┐    + SORT each part.     │reducer A│──▶ part-A
-  │ block 2  │──▶ mapper ─│ (k,v)…  │──┼──▶ all values for key ──▶│reducer B│──▶ part-B
-  │ block 3  │──▶ mapper ─│ (k,v)…  │──┘    K go to ONE reducer   │reducer C│──▶ part-C
-  └──────────┘                            (sorted, grouped)        └─────────┘
-  "bring computation TO the data": run each mapper on the node holding its block.
+    b1(["block 1"]) --> m1("mapper") --> shuf{"shuffle<br/>partition + sort by key"}
+    b2(["block 2"]) --> m2("mapper") --> shuf
+    b3(["block 3"]) --> m3("mapper") --> shuf
+    shuf -->|"key K routes to<br/>one reducer"| rA("reducer A") --> pA(["part-A"])
+    shuf --> rB("reducer B") --> pB(["part-B"])
+    shuf --> rC("reducer C") --> pC(["part-C"])
+
+    class b1,b2,b3 base
+    class m1,m2,m3 mathOp
+    class shuf lossN
+    class rA,rB,rC train
+    class pA,pB,pC io
 ```
+Caption: the shuffle is the framework's own step — partition every mapper's output by key, sort
+each partition, and route all of a key's values to one reducer; the scheduler also runs each mapper
+on the node already holding its input block ("bring computation to the data") so only the smaller
+mapper output crosses the network.
 
 **Bringing computation to the data:** the scheduler tries to run each mapper on a machine that
 already stores a replica of that input block, so the (large) input doesn't cross the network — only
@@ -120,6 +155,34 @@ When you can avoid the shuffle, joins get much faster — done entirely in the m
   (e.g. both into 100 partitions by user ID mod 100), a mapper only needs to join partition *i* of
   one against partition *i* of the other.
 - **Map-side merge join:** if the inputs are also sorted within each partition, merge them directly.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["need to join<br/>two datasets"]) --> q1{"does one side<br/>fit in memory?"}
+    q1 -->|"yes"| bhj(["broadcast hash join<br/>(map-side)"])
+    q1 -->|"no"| q2{"already co-partitioned<br/>by join key?"}
+    q2 -->|"no"| smj(["sort-merge join<br/>(reduce-side, full shuffle)"])
+    q2 -->|"yes"| q3{"also sorted<br/>within partition?"}
+    q3 -->|"yes"| mmj(["map-side merge join"])
+    q3 -->|"no"| phj(["partitioned hash join<br/>(map-side)"])
+
+    class start io
+    class q1,q2,q3 mathOp
+    class bhj,mmj,phj train
+    class smj lossN
+```
+Caption: the join strategy reduces to three questions — does a side fit in memory (broadcast hash),
+are both sides already co-partitioned by key (partitioned hash), and are they also sorted within
+partition (map-side merge) — falling back to the general but full-shuffle sort-merge (reduce-side)
+join only when none of those hold.
 
 ### The output of batch workflows and comparison to MPP databases
 
@@ -173,27 +236,66 @@ advantage (Ch 2) back to batch processing.
 
 ## Visual Intuition
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph MR["MapReduce (3 jobs) — materializes every step"]
+        direction LR
+        j1("job 1") --> h1("HDFS<br/>3x replicated")
+        h1 --> j2("job 2") --> h2("HDFS<br/>3x replicated")
+        h2 --> j3("job 3") --> h3("HDFS<br/>3x replicated")
+    end
+
+    subgraph DF["Dataflow engine (Spark, Flink) — one DAG, in-memory"]
+        direction LR
+        o1("op1") --> o2("op2") --> o3("op3") --> o4("op4") --> out(["output"])
+    end
+
+    class j1,j2,j3 mathOp
+    class h1,h2,h3 lossN
+    class o1,o2,o3,o4 train
+    class out io
 ```
-MAPREDUCE vs DATAFLOW ENGINE — the cost of forced materialization
+Caption: MapReduce writes every job's full output to HDFS (replicated 3x) before the next job can
+start, so a 3-job workflow pays three disk-and-network round-trips; a dataflow engine keeps
+intermediate state in memory as one DAG and, on failure, recomputes a lost partition from recorded
+lineage instead of re-reading disk (this requires deterministic operators).
 
-  MAPREDUCE (3 jobs):    each ── writes FULL output to HDFS (replicated 3x) ──▶ next reads it
-    job1 ─▶[HDFS]─▶ job2 ─▶[HDFS]─▶ job3 ─▶[HDFS]      ⇒ 3 round-trips through disk+network
-            ▲ materialize     ▲ materialize
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  DATAFLOW (Spark/Flink, one DAG):
-    op1 ─▶ op2 ─▶ op3 ─▶ op4 ─▶ output    intermediate state kept in MEMORY/local disk
-                                          ⇒ no forced HDFS write between steps ⇒ much faster
-  fault tolerance: dataflow RECOMPUTES a lost partition from LINEAGE (needs determinism)
-```
+    subgraph RS["Reduce-side sort-merge join<br/>any size, full shuffle cost"]
+        direction LR
+        dsA(["Dataset A"]) --> shufR{"shuffle<br/>partition + sort by key"}
+        dsB(["Dataset B"]) --> shufR
+        shufR --> redR("reducer") --> joinR(["joined output"])
+    end
 
-```
-REDUCE-SIDE (sort-merge) JOIN vs MAP-SIDE (broadcast hash) JOIN
+    subgraph MS["Map-side broadcast join<br/>no shuffle, small side only"]
+        direction LR
+        small(["small table"]) --> hashM("hash map<br/>in every mapper")
+        big(["big input"]) --> mapM("mapper") --> hashM
+        hashM --> joinM(["joined output"])
+    end
 
-  reduce-side: shuffle BOTH inputs by join key ─▶ reducer sees all records for a key
-               ✓ any size   ✗ pays full shuffle/sort cost
-
-  map-side broadcast: small table loaded into a hash map in EVERY mapper
-               big input ─▶ mapper ─▶ probe hash map ─▶ joined   ✓ no shuffle  ✗ small side only
+    class dsA,dsB,joinR,small,big,joinM io
+    class shufR lossN
+    class redR,mapM mathOp
+    class hashM base
 ```
 
 Caption: the chapter's two engineering levers — eliminate forced materialization (dataflow engines)

@@ -69,43 +69,80 @@ Platform success is measured with **DORA metrics** (deployment frequency, lead t
 
 IDP layered architecture with developer self-service flow:
 
-```
-   Developer
-      |  "create payments-service"  /  "I need a Postgres DB"
-      v
-+-------------------------------------------------------------+
-|              Developer Portal  (Backstage)                  |
-|  +-----------+  +-------------+  +----------+  +----------+  |
-|  |  Catalog  |  | Scaffolder  |  | TechDocs |  | Plugins  |  |
-|  | (graph)   |  | (templates) |  | (docs)   |  | (k8s/CI) |  |
-|  +-----------+  +------+------+  +----------+  +----------+  |
-+--------------------------|----------------------------------+
-                           | generates repo + manifests
-                           v
-+-------------------------------------------------------------+
-|        Golden Path Automation (GitOps + Control Plane)      |
-|   Git repo --> Argo CD / Flux --> Kubernetes                |
-|   Claim    --> Crossplane Composition --> Cloud resources   |
-+--------------------------|----------------------------------+
-                           v
-+-------------------------------------------------------------+
-|     Infrastructure:  EKS  |  RDS  |  S3  |  IAM  |  VPC      |
-+-------------------------------------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Dev(["Developer"])
+    Dev -->|"create payments-service<br/>/ need a Postgres DB"| Portal
+
+    subgraph Portal["Developer Portal (Backstage)"]
+        direction LR
+        Catalog["Catalog<br/>(graph)"]
+        Scaffolder["Scaffolder<br/>(templates)"]
+        TechDocs["TechDocs<br/>(docs)"]
+        Plugins["Plugins<br/>(k8s / CI)"]
+    end
+
+    Portal -->|"generates repo<br/>+ manifests"| GoldenPath
+
+    subgraph GoldenPath["Golden Path Automation<br/>(GitOps + Control Plane)"]
+        direction LR
+        GitRepo(["Git repo"]) --> ArgoCD["Argo CD / Flux"] --> K8s["Kubernetes"]
+        Claim(["Claim"]) --> Crossplane["Crossplane<br/>Composition"] --> CloudRes["Cloud resources"]
+    end
+
+    GoldenPath --> Infra
+
+    subgraph Infra["Infrastructure"]
+        direction LR
+        EKS["EKS"]
+        RDS["RDS"]
+        S3["S3"]
+        IAM["IAM"]
+        VPC["VPC"]
+    end
+
+    class Dev io
+    class Catalog base
+    class TechDocs io
+    class Scaffolder mathOp
+    class Plugins frozen
+    class GitRepo train
+    class Claim req
+    class ArgoCD,Crossplane mathOp
+    class K8s,CloudRes,EKS,RDS,S3,IAM,VPC base
 ```
 
 Team Topologies interaction:
 
-```
-  +------------------+   X-as-a-Service   +------------------+
-  | Stream-aligned   |<------------------>|  Platform team   |
-  | team (product)   |  (self-service)    |  (the IDP)       |
-  +------------------+                    +------------------+
-           ^                                      ^
-           | facilitating                         | facilitating
-           v                                      v
-        +------------------------------------------------+
-        |              Enabling team (coaching)          |
-        +------------------------------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SA(["Stream-aligned team<br/>(product)"])
+    PT(["Platform team<br/>(the IDP)"])
+    EN(["Enabling team<br/>(coaching)"])
+
+    SA <-->|"X-as-a-Service<br/>(self-service)"| PT
+    SA <-.->|"facilitating"| EN
+    PT <-.->|"facilitating"| EN
+
+    class SA req
+    class PT base
+    class EN train
 ```
 
 ---
@@ -189,6 +226,33 @@ spec:
 
 Crossplane's controller continuously reconciles this Claim into an RDS instance, subnet group, and a Kubernetes `Secret` with the connection string — and *re-reconciles* if anyone drifts the resource manually, unlike a one-shot `terraform apply`.
 
+The mechanic that makes this "self-healing" instead of one-shot is a continuous control loop, not a single pass:
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Claimed: developer submits<br/>PostgreSQLInstance Claim
+    Claimed --> Reconciling: controller wakes
+    Reconciling --> Converged: RDS + subnet group<br/>+ Secret created
+    Converged --> Drifted: resource edited<br/>outside Crossplane
+    Drifted --> Reconciling: auto re-reconcile<br/>(self-healing)
+    Converged --> Converged: periodic re-check,<br/>no drift found
+
+    class Claimed req
+    class Reconciling mathOp
+    class Converged train
+    class Drifted lossN
+```
+
+Terraform has no `Drifted --> Reconciling` edge of its own: drift sits uncorrected until the next pipeline run manually re-applies it, whereas Crossplane's controller loop keeps closing that loop on its own.
+
 A typical golden path end-to-end: developer fills the scaffolder form → repo created with CI/CD + Helm + observability wired → Argo CD syncs it to the cluster ([`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/README.md)) → service appears in the catalog with docs, ownership, and dashboards. Elapsed time: minutes, versus days of manual setup.
 
 ---
@@ -232,6 +296,35 @@ A typical golden path end-to-end: developer fills the scaffolder form → repo c
 **Use Backstage when** you want a customizable, open, catalog-centric portal and have the engineering capacity to run and extend it. **Use a commercial IDP (Humanitec, Port, Cortex)** when you want faster time-to-value and have a small platform team. **Use Crossplane** when your org is Kubernetes-native and you want self-healing, claim-based provisioning rather than pipeline-driven Terraform.
 
 **Do NOT** build a heavyweight portal for a 2-team startup — a Terraform module library and a README *is* your thinnest viable platform; building Backstage there is gold-plating. **Do NOT** build a platform no one asked for: if you cannot name the developer pain it removes, you are building a project, not a product. **Do NOT** make the golden path a golden cage — if teams cannot escape it for legitimate edge cases, they will route around the whole platform and adoption collapses.
+
+The build/buy/tool decision above is a gate followed by a choice, not a flat checklist:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start{"5+ teams or dozens<br/>of services in pain?"}
+    Start -- "no" --> TVP(["Thinnest viable platform<br/>(wiki + TF module lib)"])
+    Start -- "yes" --> Named{"Can you name the<br/>developer pain removed?"}
+    Named -- "no" --> NoBuild(["Do NOT build:<br/>project, not product"])
+    Named -- "yes" --> Tool{"Which tool fits?"}
+    Tool -- "open, customizable,<br/>eng capacity to run it" --> Backstage(["Backstage"])
+    Tool -- "fast time-to-value,<br/>small platform team" --> Commercial(["Commercial IDP<br/>(Humanitec / Port / Cortex)"])
+    Tool -- "K8s-native,<br/>self-healing claims" --> Crossplane(["Crossplane"])
+
+    class Start,Named,Tool mathOp
+    class TVP train
+    class NoBuild lossN
+    class Backstage,Commercial,Crossplane base
+```
+
+The gate is adoption pain, not preference: skip straight to the thinnest viable platform until the 5+ teams / dozens-of-services signal fires, and never pick a tool before you can name the pain it removes.
 
 ---
 

@@ -26,6 +26,34 @@ Two indices walk through a sequence — toward each other, in the same direction
 
 The dividing line: **two pointers** moves indices based on a *comparison* between elements at those indices (or against a target); **sliding window** moves indices based on whether an *aggregate over the range* satisfies a constraint.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Cue([Pair / triplet / subarray<br/>relationship cue]) --> D1{Must preserve<br/>original indices?}
+    D1 -->|"yes, can't sort"| Hash([Switch:<br/>Hashing])
+    D1 -->|"no, sortable"| D2{Aggregate over a<br/>contiguous range?}
+    D2 -->|"yes"| Slide([Switch:<br/>Sliding Window])
+    D2 -->|"no, compare elements"| D3{One array<br/>or two?}
+    D3 -->|"two sequences"| S3([Shape 3:<br/>two-sequence advance])
+    D3 -->|"one array,<br/>in-place filter"| S2([Shape 2:<br/>same-direction fast/slow])
+    D3 -->|"one array,<br/>converge"| S1([Shape 1:<br/>opposite ends])
+    D3 -->|"linked list,<br/>cycle or midpoint"| Fast([Switch:<br/>Fast and Slow])
+
+    class Cue req
+    class D1,D2,D3 mathOp
+    class S1,S2,S3 train
+    class Hash,Slide,Fast frozen
+```
+
+**Pattern-selection decision tree:** the recognition signals above and the "when to switch" rules in Section 9 collapse into one routing path — a sortable input compared element-by-element stays in two pointers and lands on one of the three shapes from Section 2 (opposite ends, same-direction, or two-sequence); anything else hands off to hashing, sliding window, or fast & slow pointers.
+
 ---
 
 ## 2. Mental Model & Intuition
@@ -186,6 +214,16 @@ This matches the expected output. The dedup checks at the "first", "second", and
 | **Total** | **O(n^2)** | **O(1)** extra (excluding output and sort space) |
 
 For plain pair-sum two pointers (no outer loop), it's **O(n log n)** if a sort is required, or **O(n)** if the array is already sorted, with **O(1)** space. Compare to the brute-force O(n^2) (pair) or O(n^3) (triplet) — two pointers trades the *combinatorial* search for a *sorted, monotonic* search.
+
+```mermaid
+xychart-beta
+    title "Two Pointers Saves a Factor of n at Every Level (n = 10)"
+    x-axis ["2Sum · O(n)", "3Sum · O(n^2)", "4Sum · O(n^3)"]
+    y-axis "Approx. operations" 0 --> 1000
+    bar [10, 100, 1000]
+```
+
+**Growth at a glance:** fixing one more element before the two-pointer scan multiplies the work by another factor of n — the O(n), O(n^2), O(n^3) figures from the table above and the kSum question in Section 11, plotted here at a fixed n=10 so the curve is visible at a glance.
 
 ---
 

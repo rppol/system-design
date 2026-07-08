@@ -49,40 +49,63 @@ PlanetScale     | Vitess + MySQL        | External    | MySQL          | Eventua
 
 ## 5. Architecture Diagrams
 
+**CockroachDB Architecture**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client<br/>JDBC / psql"]) --> gateway("SQL Gateway<br/>Distributed SQL Planner")
+    gateway --> txn("Transaction Layer<br/>heartbeats long txns")
+    txn --> dist("Distribution Layer<br/>range cache + retries")
+
+    subgraph raft["Raft Groups · one per 64MB range"]
+        rangeA_l("Range A Leader<br/>Node1") -.->|"replicate"| rangeA_f("Range A Follower<br/>Node2")
+        rangeB_l("Range B Leader<br/>Node3") -.->|"replicate"| rangeB_f("Range B Follower<br/>Node1")
+    end
+
+    dist --> rangeA_l
+    dist --> rangeB_l
+    rangeA_f --> rocksdb(["RocksDB<br/>on each node"])
+    rangeB_f --> rocksdb
+
+    class client io
+    class gateway,dist mathOp
+    class txn req
+    class rangeA_l,rangeB_l train
+    class rangeA_f,rangeB_f frozen
+    class rocksdb base
 ```
-CockroachDB Architecture
-========================
 
-Client (JDBC/psql)
-       |
-   [SQL Gateway / Distributed SQL Planner]
-       |
-   [Transaction Layer]  ←── Heartbeating for long-running txns
-       |
-   [Distribution Layer] ←── Range descriptor cache, retry logic
-       |
-   ┌───────────────────────────────────────┐
-   │  Raft Groups (one per range = 64MB)   │
-   │                                       │
-   │  Range A [Raft]   Range B [Raft]      │
-   │  Leader  Follower  Leader  Follower   │
-   │  Node1   Node2     Node3   Node1      │
-   └───────────────────────────────────────┘
-       |
-   [RocksDB on each node]
+Each 64MB range is its own Raft group with an independent leader, so one node can lead Range A while following Range B (Node1 above does both) — writes for a row always route to that row's range leader, never to one fixed "primary" node.
 
+**Google Spanner TrueTime — Commit Protocol**
 
-Google Spanner TrueTime
-=======================
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant L as Spanner Leader
+    participant P as Paxos Group
 
-Commit request arrives at leader
-          |
-   [1] Acquire Paxos write lock
-   [2] Generate timestamp T = TT.now().latest  (TrueTime upper bound)
-   [3] Wait until TT.now().earliest > T         (commit-wait: ~7ms GPS, ~14ms atomic clock)
-   [4] Commit log entry with timestamp T
-   [5] Return success to client
+    C->>L: commit request
+    L->>P: acquire write lock
+    P-->>L: lock acquired
+    L->>L: choose T = TT.now().latest
+    Note over L: commit-wait until<br/>TT.now().earliest passes T<br/>(epsilon approx 1-7ms)
+    L->>P: commit log entry at T
+    P-->>L: quorum ack
+    L-->>C: success
+```
 
+Spanner never contacts another datacenter to validate this timestamp — it commit-waits out the clock uncertainty (epsilon, about 1–7ms of GPS and atomic-clock drift) instead of a cross-region round trip, which is how it reaches external consistency without two-phase commit.
+
+```
 TrueTime interval: [earliest, latest]
   GPS satellites  → ~1ms uncertainty
   Atomic clocks   → ~7ms drift between syncs
@@ -91,27 +114,51 @@ TrueTime interval: [earliest, latest]
 External consistency guarantee:
   If T1 commits at real time r1 and T2 starts at real time r2 > r1,
   then timestamp(T2) > timestamp(T1) always.
-
-
-TiDB Architecture
-=================
-
-  MySQL clients
-       |
-   [TiDB] ──────────────── stateless SQL layer (MySQL wire protocol)
-       |
-   [Placement Driver (PD)] ── metadata, leader election, scheduling, TSO (Timestamp Oracle)
-       |
-   ┌──────────┐  ┌──────────┐  ┌──────────┐
-   │  TiKV    │  │  TiKV    │  │  TiKV    │
-   │ RocksDB  │  │ RocksDB  │  │ RocksDB  │
-   │ + Raft   │  │ + Raft   │  │ + Raft   │
-   └──────────┘  └──────────┘  └──────────┘
-                        |
-   ┌──────────┐  ┌──────────┐  (optional HTAP)
-   │ TiFlash  │  │ TiFlash  │  ← columnar replica for analytics
-   └──────────┘  └──────────┘
 ```
+
+**TiDB Architecture**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    clients(["MySQL clients"]) --> tidb("TiDB<br/>stateless SQL layer<br/>MySQL wire protocol")
+    tidb --> pd("Placement Driver<br/>metadata · scheduling · TSO")
+    pd --> tikv1("TiKV<br/>RocksDB + Raft")
+    pd --> tikv2("TiKV<br/>RocksDB + Raft")
+    pd --> tikv3("TiKV<br/>RocksDB + Raft")
+    tikv1 -.->|"Raft learner"| tiflash1("TiFlash<br/>columnar replica")
+    tikv2 -.->|"Raft learner"| tiflash2("TiFlash<br/>columnar replica")
+
+    class clients io
+    class tidb,pd mathOp
+    class tikv1,tikv2,tikv3 base
+    class tiflash1,tiflash2 frozen
+```
+
+TiDB separates stateless compute (the TiDB SQL layer) from storage (TiKV), with PD acting as cluster scheduler and timestamp oracle; TiFlash trails TiKV's Raft log asynchronously as a learner replica, giving the optimizer a columnar copy for OLAP without a separate ETL pipeline.
+
+**Quorum Loss and the CP Guarantee**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Quorum
+    state "Quorum Available" as Quorum
+    state "Quorum Lost" as NoQuorum
+
+    Quorum --> Quorum: reads / writes<br/>served normally
+    Quorum --> NoQuorum: partition drops<br/>2 of 3 replicas
+    NoQuorum --> NoQuorum: writes blocked<br/>CP over AP
+    NoQuorum --> Quorum: partition heals<br/>replica rejoins
+```
+
+A CockroachDB range or Spanner Paxos group needs a live majority to accept writes; losing 2 of 3 replicas to a partition drops it into a no-quorum state where writes block until the partition heals, rather than risk the divergence an AP system would accept — the concrete meaning of the "CP" entries in the CAP Position column above.
 
 ---
 
@@ -133,23 +180,48 @@ Data is split into 64MB ranges. Each range is a Raft group with its own leader (
 
 ### Distributed Transaction Latency
 
+```mermaid
+xychart-beta
+    title "Write / Read Latency Across Deployment Topologies"
+    x-axis ["Postgres local", "Spanner read 1-region", "CRDB write 1-region", "TiDB write 1-region", "Spanner write 1-region", "CRDB write multi-region", "Spanner write multi-region"]
+    y-axis "Latency (ms)" 0 --> 200
+    bar [0.5, 2, 3.5, 3.5, 5, 100, 150]
 ```
-Scenario                             | Latency
--------------------------------------|------------------
-Spanner single-region read           | ~2ms
-Spanner single-region write          | ~5ms (commit-wait ε)
-Spanner multi-region write           | ~100–200ms (cross-continental Paxos)
-CockroachDB single-region write      | ~2–5ms (single Raft RTT)
-CockroachDB multi-region write       | ~50–150ms (cross-region Raft)
-TiDB single-region write             | ~2–5ms (TiKV Raft + PD TSO)
-PostgreSQL (local) write             | ~0.1–1ms (no distributed coordination)
-```
+
+Local commits pay almost no coordination tax (PostgreSQL ~0.1–1ms); a single-region distributed commit adds one Raft/Paxos round trip (~2–5ms for CockroachDB, TiDB, and Spanner); crossing regions adds two orders of magnitude (CockroachDB ~50–150ms, Spanner ~100–200ms) because the quorum itself now spans a continent.
 
 **Implication**: For a 10K TPS single-region OLTP application, CockroachDB is competitive with PostgreSQL. For a globally distributed application requiring linearizability across continents, Spanner at ~100ms per cross-region write is still the only production-proven option at Google scale.
 
 ### Hotspot Problem with Sequential Primary Keys
 
 In a distributed database, data ranges are assigned to different nodes. If you use `SERIAL`/`AUTO_INCREMENT` as a primary key, all writes go to the node owning the highest key range — a single hotspot node handles 100% of inserts regardless of cluster size.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph seq["BIGSERIAL primary key"]
+        w1(["inserts"]) --> hot("Node holding<br/>max-key range")
+    end
+
+    subgraph spread["UUID / hash-sharded key"]
+        w2(["inserts"]) --> b1("Node 1<br/>bucket")
+        w2 --> b2("Node 2<br/>bucket")
+        w2 --> b3("Node N<br/>bucket")
+    end
+
+    class w1,w2 io
+    class hot lossN
+    class b1,b2,b3 train
+```
+
+A `BIGSERIAL` key always routes the next insert to the range holding the current max key — one hot node regardless of cluster size — while a UUID, ULID, or CockroachDB's `USING HASH WITH (bucket_count = 8)` spreads inserts evenly across N buckets on N different nodes.
 
 ```sql
 -- PROBLEMATIC: All inserts hit the same node (max key range leader)
@@ -345,20 +417,48 @@ PlanetScale uses Vitess, which is a sharding middleware for MySQL. Each shard is
 **Scenario**: A global fintech startup processes cross-currency payments for users in North America, Europe, and Asia. The current PostgreSQL single-master setup (us-east-1) shows 150ms average write latency for EU users, 250ms for APAC users, and begins to saturate at 30K TPS during peak hours. The engineering team must evaluate whether to move to CockroachDB with REGIONAL BY ROW.
 
 **Architecture Before**:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    regions(["All regions<br/>NA · EU · AP"]) -->|"sync writes"| primary("us-east-1<br/>PostgreSQL primary")
+    primary -.->|"async reads"| replicas("us-east-1<br/>read replicas")
+
+    class regions io
+    class primary lossN
+    class replicas frozen
 ```
-All regions → us-east-1 PostgreSQL primary (sync writes)
-           → us-east-1 read replicas (async reads)
-```
+
+Every region's writes cross the network to this one primary, adding the 150ms (EU) to 250ms (APAC) round-trip latency described above and capping throughput at the primary's ~30K TPS ceiling.
 
 **Architecture After (CockroachDB REGIONAL BY ROW)**:
-```
-NA users → us-east-1 CRDB node  (Raft leader for NA rows)
-EU users → eu-west-1 CRDB node  (Raft leader for EU rows)
-AP users → ap-east-1 CRDB node  (Raft leader for AP rows)
 
-Each region: 3 nodes (Raft group, tolerates 1 node failure)
-Total: 9 nodes
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    na(["NA users"]) --> crdbNA("us-east-1 CRDB<br/>Raft leader · NA rows")
+    eu(["EU users"]) --> crdbEU("eu-west-1 CRDB<br/>Raft leader · EU rows")
+    ap(["AP users"]) --> crdbAP("ap-east-1 CRDB<br/>Raft leader · AP rows")
+
+    class na,eu,ap io
+    class crdbNA,crdbEU,crdbAP train
 ```
+
+Each region runs its own 3-node Raft group (9 nodes total, tolerating one node failure per region) with the region's rows led locally, turning the 150–250ms cross-region round trip into a single regional Raft commit.
 
 **Schema Design**:
 ```sql

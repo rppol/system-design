@@ -26,6 +26,34 @@ Precompute cumulative sums (`prefix[i] = sum(nums[0..i-1])`) so that the sum of 
 
 The defining test: **can the answer be expressed as a difference of two cumulative values, `prefix[j] - prefix[i]`, where you're searching over pairs `(i, j)`?** If yes — and especially if values can be negative — prefix sum (+ hashmap to find matching `prefix[i]` values in O(1)) is the pattern.
 
+Chaining the anti-signals and the defining test above into one funnel:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["range/subarray<br/>sum problem"]) --> q1{"can express as<br/>prefix[j] - prefix[i]?"}
+    q1 -->|"no"| otherDP("Kadane's / DP")
+    q1 -->|"yes"| q2{"array mutated<br/>between queries?"}
+    q2 -->|"yes"| fenwick("Fenwick Tree /<br/>Segment Tree")
+    q2 -->|"no"| q3{"values can<br/>be negative?"}
+    q3 -->|"no"| slidingWindow("Sliding Window<br/>longest/shortest length")
+    q3 -->|"yes"| prefixSum(["Prefix Sum<br/>+ Hashmap — this pattern"])
+
+    class start io
+    class q1,q2,q3 mathOp
+    class otherDP,fenwick,slidingWindow frozen
+    class prefixSum train
+```
+
+*Pattern-selection funnel: each "no" branch peels off to the sibling pattern named in the anti-signals above — only "expressible as a prefix difference, on a static array, with negatives allowed" survives to the hashmap variant that headlines this file.*
+
 ---
 
 ## 2. Mental Model & Intuition
@@ -140,6 +168,16 @@ def subarray_divisible_by_k(nums: list[int], k: int) -> int:
 **Brute force**: for every pair `(i, j)`, compute `sum(nums[i..j])` — O(n^2) (or O(n^3) if you re-sum from scratch each time, O(n^2) if you extend the running sum). For n up to 2*10^4, O(n^2) = 4*10^8 — borderline, often TLE in Python.
 
 **Why not sliding window?** `nums` can contain negatives. Consider `nums = [3, 4, -7, 1, 3, 3, 1, -4], k = 7`. As `right` advances, the window sum can go up, then down (due to `-7`), then up again — there's no monotonic relationship between window size and sum, so "shrink when sum > k" is not a valid operation (shrinking might make the sum *smaller* than k when it was already too small due to a later negative).
+
+```mermaid
+xychart-beta
+    title "Running prefix sum on nums = [3, 4, -7, 1, 3, 3, 1, -4]"
+    x-axis ["prefix[0]", "prefix[1]", "prefix[2]", "prefix[3]", "prefix[4]", "prefix[5]", "prefix[6]", "prefix[7]", "prefix[8]"]
+    y-axis "prefix value" 0 --> 9
+    line [0, 3, 7, 0, 1, 4, 7, 8, 4]
+```
+
+*The running prefix climbs to 7, plunges to 0 the instant `-7` is added, climbs back to 8, then drops to 4 — up, down, up, with no monotonic relationship to window size. That non-monotonicity is precisely why "shrink while sum > k" cannot be a valid sliding-window rule here.*
 
 **Key insight**: reframe "subarray `[i+1..j]` sums to `k`" as "`prefix[j+1] - prefix[i] == k`", i.e., "`prefix[i] == prefix[j+1] - k`". As we scan and compute `prefix[j+1]` incrementally, we just need to know **how many times** the value `prefix[j+1] - k` has appeared as a prefix sum *before* — a hashmap gives O(1) lookups.
 
