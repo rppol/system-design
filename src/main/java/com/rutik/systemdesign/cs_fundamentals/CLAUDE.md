@@ -98,7 +98,7 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 
 - **Python-first** for algorithm/DS implementations: type-hinted, runnable-shaped, `from __future__ import annotations`, dataclasses where appropriate; Java noted only for JVM-specific points
 - **Concrete numbers**: cache line 64 B, L1 ~1–4 ns, L2 ~10 ns, L3 ~40 ns, RAM ~100 ns, SSD ~100 µs, HDD ~10 ms; hash table default load factor 0.75, resize threshold; page size 4 KB; context switch ~1–10 µs; virtual memory max 128 TiB (x86-64 user space)
-- **ASCII diagrams only** — no Mermaid, no image files
+- **Diagrams appeal-first** (see root `CLAUDE.md`): Mermaid preferred for topological diagrams (flow/sequence/state); ASCII kept only for grids, bit/byte layouts, and geometry Mermaid can't draw; no image files
 - **No emojis** anywhere
 - **At least 1 BROKEN→FIX block** in §10 (Common Pitfalls) and §14 (Case Study)
 - **`---` horizontal rules** between every top-level section
@@ -140,7 +140,7 @@ Files:
 **Quality bar per pattern file:**
 - ~350–600 lines (focused playbook, not a full single-problem walkthrough)
 - Python-first, type-hinted, runnable-shaped code
-- ASCII diagrams only — no Mermaid, no images
+- Diagrams appeal-first: Mermaid preferred for topological diagrams; ASCII kept only for grids/geometry; no image files
 - At least 1 BROKEN→FIX block in §8
 - 10+ Q&As in §11
 - Real LeetCode hyperlinks in §7 (see link-format exception below)

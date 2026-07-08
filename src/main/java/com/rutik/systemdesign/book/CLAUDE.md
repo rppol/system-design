@@ -37,7 +37,7 @@ completeness guarantee: a missing topic is structurally visible.
 ## N.3 <book section title>   mechanism, concrete numbers, broken->fix, inline ASCII.
    ...
 
-## Visual Intuition       — grouped ASCII diagrams for the chapter's hardest mechanics
+## Visual Intuition       — grouped diagrams (Mermaid preferred; ASCII for grids/geometry) for the chapter's hardest mechanics
 ## Key Concepts Glossary  — EVERY term the chapter defines, one line each (completeness net)
 ## Tradeoffs & Decision Tables — comparison tables
 ## Common Pitfalls / War Stories — production failure patterns tied to the chapter
@@ -49,7 +49,7 @@ completeness guarantee: a missing topic is structurally visible.
 ```
 
 **Quality bars** (inherited from root `CLAUDE.md`):
-- ASCII diagrams only — no Mermaid, no images
+- Diagrams appeal-first (see root `CLAUDE.md`): Mermaid preferred for topological diagrams (flow/sequence/state); ASCII kept only for grids, byte-layout maps, and geometry Mermaid can't draw; no image files
 - Concrete numbers everywhere (latencies, sizes, amplification factors)
 - Show broken design/code, then the fix
 - No emojis (use `✓`/`✗`, not emoji check marks)
