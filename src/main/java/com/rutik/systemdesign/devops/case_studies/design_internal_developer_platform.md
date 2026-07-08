@@ -136,61 +136,72 @@ Low RPS — the portal is a *low-traffic, high-leverage* system. You do not scal
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    eng(["Engineer (2000)<br/>browser / CLI"])
+
+    subgraph portal["Backstage Portal"]
+        direction LR
+        fe["React frontend"]
+        catB["Catalog backend"]
+        scafB["Scaffolder backend"]
+        docB["TechDocs backend"]
+        searchB["Search / Permission"]
+        fe --> catB
+        fe --> scafB
+        fe --> docB
+        fe --> searchB
+    end
+
+    catDB[("Catalog DB<br/>Postgres")]
+    git("Git provider<br/>GitHub / GitLab")
+    s3[("S3<br/>docs")]
+    opa{{"OPA / perms<br/>policy engine"}}
+
+    eng --> fe
+    catB -- "refresh loop (pull)" --> catDB
+    git -- "org-scan discovery" --> catB
+    scafB -- "render + publish" --> git
+    docB -- "build docs" --> s3
+    searchB -- "RBAC query" --> opa
+
+    ci["CI<br/>(build)"]
+    reg[("Container registry<br/>or Helm repo")]
+    gitops["GitOps<br/>Argo CD / Flux"]
+    xplane{{"Crossplane<br/>control plane"}}
+    mrs["Managed Resources<br/>RDSInstance · SubnetGroup<br/>SecurityGroup · Secret"]
+    cloud("Cloud + Kubernetes<br/>RDS · S3 · SQS · ElastiCache<br/>IAM · VPC · App clusters")
+    obs[("Prometheus + Grafana<br/>+ Tempo")]
+
+    git -- "push" --> ci
+    ci --> reg
+    ci -- "commits Claim" --> gitops
+    gitops -- "kubectl apply Claim" --> xplane
+    xplane -- "reconcile loop (1 min)" --> mrs
+    mrs -- "provider-aws / provider-gcp" --> cloud
+
+    cloud -.->|"metrics / traces (OTel)"| obs
+    portal -.->|"portal RED"| obs
+    catB -.->|"catalog refresh"| obs
+    xplane -.->|"reconcile lag"| obs
+
+    class eng io
+    class fe,catB,scafB,docB,searchB req
+    class catDB,s3,reg,obs base
+    class git,cloud frozen
+    class opa,ci,gitops,xplane mathOp
+    class mrs train
 ```
-                         INTERNAL DEVELOPER PLATFORM (IDP)
-+--------------------------------------------------------------------------------------+
-|                                                                                      |
-|  Engineer (2000)                                                                     |
-|     |   browser / CLI (`backstage` plugin, `humctl`-style)                           |
-|     v                                                                                |
-|  +------------------------------ BACKSTAGE PORTAL --------------------------------+   |
-|  |  React frontend (catalog UI, scaffolder wizard, TechDocs, search, plugin tabs) |   |
-|  |        |                  |                    |               |                |   |
-|  |   +---------+      +--------------+      +-----------+   +-------------+         |   |
-|  |   | Catalog |      |  Scaffolder  |      | TechDocs  |   |  Search /   |         |   |
-|  |   | backend |      |   backend    |      |  backend  |   | Permission  |         |   |
-|  |   +----+----+      +------+-------+      +-----+-----+   +------+------+         |   |
-|  +--------|------------------|-------------------|----------------|----------------+   |
-|           |                  |                   |                |                    |
-|   refresh loop (pull)        | render template   | build docs     | RBAC (Rego)        |
-|           |                  v                   v                v                    |
-|     +-----+------+    +---------------------+  +------+   +----------------+           |
-|     | Catalog DB |    |  Git provider       |  | S3   |   |  OPA / perms   |           |
-|     | (Postgres) |    |  (GitHub/GitLab):    |  |docs  |   |  policy engine |           |
-|     +-----^------+    |  - new repo          |  +------+   +----------------+           |
-|           |           |  - CI workflow       |                                        |
-|           | (pull)    |  - catalog-info.yaml |                                        |
-|           |           |  - infra Claim YAML  |                                        |
-|           |           +----------+----------+                                          |
-|           |                      |  push                                               |
-|   discovers catalog-info.yaml    v                                                     |
-|     across all repos        +---------+        +--------------------------------+      |
-|     (GitHub org scan /       |   CI    |--------> Container registry / Helm repo |      |
-|      catalog locations)      | (build) |        +--------------------------------+      |
-|                             +----+----+                                                |
-|                                  | commits Claim to GitOps repo                        |
-|                                  v                                                      |
-|     +----------------- GITOPS (Argo CD / Flux) -----------------+                       |
-|     |  watches infra-claims repo, applies Claims to cluster      |                      |
-|     +------------------------------+----------------------------+                       |
-|                                    | kubectl apply Claim                                |
-|                                    v                                                    |
-|  +================= CROSSPLANE CONTROL PLANE (mgmt K8s cluster) =================+      |
-|  |   Claim (XPostgresInstance) -> Composite (XRD) -> Compositions -> Managed       |     |
-|  |   Resources (provider-aws RDSInstance, SubnetGroup, SecurityGroup, Secret)      |     |
-|  |             reconcile loop (1 min) -> converge to desired                       |     |
-|  +================================+============================================+        |
-|                                   | provider-aws / provider-gcp                          |
-|                                   v                                                     |
-|        +--------------------- CLOUD + KUBERNETES -----------------------+               |
-|        |  RDS, S3, SQS, ElastiCache, IAM, VPC  |  App K8s clusters       |              |
-|        +-------------------------------------------------------------------+            |
-|                                                                                      |
-+--------------------------------------------------------------------------------------+
-        ^                                  ^
-        | metrics/traces (OTel)            | metrics
-   Prometheus + Grafana + Tempo  <---------+  (portal RED, catalog refresh, reconcile lag)
-```
+
+Three planes stack top-to-bottom: the portal fields the engineer's request, Git is the source of truth for both code and infra Claims, and Crossplane's 1-minute reconcile loop continuously converges Managed Resources against the cloud. Observability threads back through every layer (portal RED, catalog refresh, reconcile lag), and the whole path from engineer intent to CI green targets under 25 minutes.
 
 ### Component Inventory
 
@@ -229,25 +240,33 @@ A `Claim` (e.g., `XPostgresInstance`) lands in the GitOps repo → Argo applies 
 
 The catalog is a graph database expressed as YAML files living *next to the code they describe*. The unit is `catalog-info.yaml`.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    repo(["catalog-info.yaml<br/>repo: payments/checkout"])
+    parse["Catalog backend<br/>parse + validate"]
+    rel["Build relations<br/>ownedBy → Group:team-payments<br/>dependsOn → Component:ledger<br/>providesApi → API:checkout-api<br/>consumesApi → API:fraud-score"]
+    pg[("Postgres<br/>upsert")]
+    out(["Searchable +<br/>UI-rendered"])
+
+    repo -- "org-scan discovery" --> parse
+    parse --> rel
+    rel --> pg
+    pg --> out
+
+    class repo,out io
+    class parse,rel mathOp
+    class pg base
 ```
-   repo: payments/checkout
-   +------------------------+        org-scan discovery
-   | catalog-info.yaml      |  --------------------------> Catalog backend
-   +------------------------+                                   |
-                                                          parse + validate
-                                                                |
-                                            +-------------------+--------------------+
-                                            |   build relations (graph edges)         |
-                                            |   ownedBy -> Group:team-payments         |
-                                            |   dependsOn -> Component:ledger          |
-                                            |   providesApi -> API:checkout-api        |
-                                            |   consumesApi -> API:fraud-score         |
-                                            +-------------------+--------------------+
-                                                                |
-                                                        upsert into Postgres
-                                                                |
-                                                      searchable + UI-rendered
-```
+
+The relation-building step is what turns a flat YAML file into typed graph edges at ingest time — the reason a blast-radius query (who depends on `ledger-api`?) answers in milliseconds instead of a manual search.
 
 A correct, ownership-complete entity:
 
@@ -435,16 +454,46 @@ Now a service cannot exist without a valid name and a real owning team. The fix 
 
 Self-service infra is the difference between an IDP and a glorified wiki. The contract is: developer writes a tiny *Claim*; the platform team's *Composition* expands it into the real, policy-compliant cloud topology.
 
-```
-  developer's Claim (namespaced, tiny)        platform's Composition (cluster, rich)
-  +----------------------------+              +-----------------------------------+
-  | XPostgresInstanceClaim     |    XRD       |  RDSInstance (provider-aws)        |
-  |  size: small               | -----------> |  DBSubnetGroup                     |
-  |  storageGB: 20             |   binds      |  SecurityGroup (ingress from app)  |
-  +----------------------------+              |  IAMRole (RDS auth)                |
-                                              |  Secret (conn string -> app ns)    |
-                                              +-----------------------------------+
-                                                  reconcile loop (1 min) -> AWS
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    claim(["Developer's Claim<br/>size: small · storageGB: 20"])
+    xrd{{"XRD<br/>binds"}}
+
+    subgraph comp["Platform's Composition"]
+        direction LR
+        rds["RDSInstance<br/>provider-aws"]
+        subnet["DBSubnetGroup"]
+        sg["SecurityGroup<br/>ingress from app"]
+        iam["IAMRole<br/>RDS auth"]
+        secret[("Secret<br/>conn string → app ns")]
+    end
+
+    aws("AWS")
+
+    claim --> xrd
+    xrd --> rds
+    xrd --> subnet
+    xrd --> sg
+    xrd --> iam
+    xrd --> secret
+    rds -.->|"reconcile loop (1 min)"| aws
+    subnet -.-> aws
+    sg -.-> aws
+    iam -.-> aws
+    secret -.-> aws
+
+    class claim req
+    class xrd mathOp
+    class rds,subnet,sg,iam,secret train
+    class aws frozen
 ```
 
 The XRD (CompositeResourceDefinition) — the API the platform offers:
@@ -566,23 +615,43 @@ func RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest) (*fnv1.RunFu
 
 The reconcile loop guarantees *convergence*: if someone manually flips `publiclyAccessible: true` in the AWS console, Crossplane detects drift on its next 1-minute pass and reverts it. This is the property a Terraform-behind-a-portal design lacks (Terraform reconciles only when you run `apply`).
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Converged
+    Converged --> Drifted: manual console edit<br/>(publiclyAccessible: true)
+    Drifted --> Drifted: engineer re-enables<br/>mid-fight (war story #3)
+    Drifted --> Converged: reconcile loop (60s)<br/>reverts to desired spec
+
+    class Converged train
+    class Drifted lossN
+```
+
+The mechanic behind war story #3 in §9: Crossplane's 60-second reconcile loop makes drift self-correcting by design, so an engineer fighting it by hand (re-enabling `publiclyAccessible` for ~20 minutes) is racing a controller that always wins the next pass — the fix is the break-glass `crossplane.io/paused` annotation, not a standoff with the loop.
+
 ---
 
 ### 4.4 RBAC & Ownership Enforcement
 
 Ownership is not metadata — it is the authorization boundary. The Backstage permission framework asks a policy engine (OPA/Rego) for every sensitive action.
 
-```
-   user action: "delete service checkout"
-        |
-        v
-  Backstage permission framework  --policy query-->  OPA (Rego)
-        |                                               |
-        | allow / deny                                  | input: user groups,
-        v                                               |        entity owner,
-  execute or 403                                        |        action
-                                                        v
-                                                   decision
+```mermaid
+sequenceDiagram
+    participant U as Engineer
+    participant B as Backstage<br/>permission framework
+    participant O as OPA policy engine
+
+    U->>B: delete service checkout
+    B->>O: policy query<br/>(user groups, entity owner, action)
+    O-->>B: allow / deny decision
+    B-->>U: execute or 403
 ```
 
 ```rego
@@ -729,17 +798,32 @@ Coupling RBAC to the catalog's `spec.owner` field is why §4.2's ownership gate 
 
 Every golden-path template change runs through an eval gate before merge, measured against DORA outcomes for services *created from it*:
 
-```
-Template PR  ->  smoke-scaffold in a sandbox org  ->  assert:
-   - repo created, CI green within 25 min  (lead-time proxy)
-   - catalog-info.yaml schema-valid + owner resolves
-   - infra claim reaches Ready in sandbox (provisioning works)
-   - security scan + SBOM present by default
-            |
-   capture rolling DORA on services born from this template:
-     deploy freq, lead time, change-fail rate, MTTR
-            |
-   gate: if change-failure-rate of services from template > 15% -> block promotion
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pr(["Template PR"])
+    smoke["Smoke-scaffold<br/>in sandbox org"]
+    assertN["Assert:<br/>CI green ≤25 min · owner resolves<br/>infra claim Ready · SBOM present"]
+    dora["Capture rolling DORA<br/>deploy freq · lead time<br/>change-fail rate · MTTR"]
+    gate{"Change-failure rate<br/>of template's services<br/>over 15%?"}
+    block["Block promotion"]
+    promote(["Promote template"])
+
+    pr --> smoke --> assertN --> dora --> gate
+    gate -- "yes" --> block
+    gate -- "no" --> promote
+
+    class pr io
+    class smoke,assertN,dora,gate mathOp
+    class block lossN
+    class promote train
 ```
 
 DORA targets (elite band): deploy on-demand, lead time < 1 day, change-failure < 15%, MTTR < 1 hr. The error-budget math that turns these into ship/hold decisions is in [`cross_cutting/slo_error_budget_math.md`](cross_cutting/slo_error_budget_math.md).
@@ -851,6 +935,16 @@ sustained = 10 workers x (1 reconcile / ~200ms) = ~50 reconciles/sec  -> headroo
 ```
 
 The real ceiling is **cloud-provider API rate limits**, not Crossplane CPU. AWS RDS `DescribeDBInstances` etc. throttle around the low hundreds/min per account; at 1800 MRs reconciling every 60s you generate ~1800 describe calls/min — *exceeding default throttles*. Mitigation: raise the reconcile interval to 5 min for stable resources (`--poll-interval=5m`), shard across multiple AWS accounts/providers, and back off on throttle. This makes account-sharding a capacity lever, not just an isolation one. Control-plane cluster hardening (resource limits, etcd, node sizing) is in [`cross_cutting/kubernetes_production_hardening.md`](cross_cutting/kubernetes_production_hardening.md).
+
+```mermaid
+xychart-beta
+    title "Crossplane's real ceiling: cloud throttle, not reconcile capacity"
+    x-axis ["Worker capacity", "Steady-state need", "AWS throttle ceiling"]
+    y-axis "Calls per minute" 0 --> 3000
+    bar [3000, 1800, 200]
+```
+
+Worker capacity (3000/min) comfortably clears the steady-state need (1800/min) — but AWS's own low-hundreds/min throttle (shown here at a representative 200/min) sits far below both, which is why 5-minute polling and account-sharding, not more Crossplane replicas, are the actual capacity levers.
 
 ### Worked example with real instances and cost (AWS, monthly)
 

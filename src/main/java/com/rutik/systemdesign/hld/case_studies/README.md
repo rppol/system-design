@@ -128,107 +128,129 @@ Each case study's `## Cross-References` footer points to deep-dive modules in `b
 
 ## Dependency Map
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph RH["Read-Heavy and Caching"]
+        URL(["URL<br/>Shortener"])
+        NF(["Netflix"])
+        SAC(["Search<br/>Autocomplete"])
+        LB(["Leaderboard"])
+    end
+
+    subgraph WF["Write-Heavy and Fan-Out"]
+        TW("Twitter")
+        WA("WhatsApp")
+        NS("Notification<br/>System")
+    end
+
+    subgraph RG["Real-Time and Geo"]
+        UB("Uber")
+        GM("Google<br/>Maps")
+        PROX("Proximity<br/>Service")
+    end
+
+    subgraph DT["Distributed Transactions"]
+        PAY("Payment<br/>System")
+        DW("Digital<br/>Wallet")
+        HR("Hotel<br/>Reservation")
+    end
+
+    subgraph RC["Real-Time Collaboration"]
+        GDOC("Google<br/>Docs")
+        GD("Google<br/>Drive")
+    end
+
+    subgraph CI["Core Infrastructure"]
+        KV("Key-Value<br/>Store")
+        DID("Distributed<br/>Unique ID")
+        MQ("Message<br/>Queue")
+        OBJ("Object Storage<br/>S3")
+    end
+
+    subgraph AN["Analytics and Aggregation"]
+        ADCLK("Ad Click<br/>Aggregation")
+        MM("Metrics<br/>Monitoring")
+    end
+
+    SE("Stock<br/>Exchange")
+    WC("Web<br/>Crawler")
+    SNOW("Snowflake<br/>Java Impl")
+
+    %% consistent hashing thread
+    URL -->|"consistent<br/>hashing"| TW
+    URL -->|"consistent<br/>hashing"| WC
+    URL -->|"consistent<br/>hashing"| GDOC
+
+    %% fan-out thread
+    TW -->|"fan-out<br/>model"| NF
+    TW -->|"fan-out<br/>model"| NS
+    TW -->|"Redis<br/>timeline"| WA
+
+    %% real-time / geo thread
+    UB -->|"WebSocket<br/>pattern"| WA
+    UB -->|"WebSocket<br/>pattern"| GDOC
+    UB -->|"geo-<br/>indexing"| GM
+    UB -->|"geo-<br/>indexing"| TW
+    GM -->|"geo-index<br/>theory"| PROX
+
+    %% transactional threads
+    PAY -->|"idempotency<br/>+ outbox"| NS
+    PAY -->|"event-<br/>sourcing"| GDOC
+    PAY -->|"idempotency<br/>key"| DW
+    PAY -->|"saga<br/>pattern"| HR
+
+    %% crawler thread
+    WC -->|"crawl<br/>corpus"| SAC
+
+    %% core infra fan-out
+    KV -->|"hash-ring<br/>primitive"| URL
+    KV -->|"hash-ring<br/>primitive"| WC
+    KV -->|"ring<br/>placement"| OBJ
+    KV -->|"ring<br/>placement"| LB
+    DID -->|"Snowflake<br/>origin"| TW
+    DID -->|"ID<br/>generation"| URL
+    DID -->|"impl deep<br/>dive"| SNOW
+    MQ -->|"partitioned<br/>log"| NS
+    MQ -->|"partitioned<br/>log"| GDOC
+    MQ -->|"exactly-once<br/>outbox"| PAY
+    MQ -->|"ingestion<br/>layer"| ADCLK
+    MQ -->|"ordered<br/>log"| SE
+
+    %% storage thread
+    OBJ -->|"blob +<br/>multipart"| GD
+
+    %% contrasts and echoes (dotted)
+    WC -.->|"rate-limit<br/>echo"| NS
+    KV -.->|"quorum vs<br/>ledger"| PAY
+    DID -.->|"hotspot<br/>problem"| OBJ
+    PROX -.->|"match vs<br/>search"| UB
+    UB -.->|"location<br/>echo"| ADCLK
+    ADCLK -.->|"windowed vs<br/>live"| LB
+    DW -.->|"P2P vs<br/>merchant"| PAY
+    DID -.->|"monotonic<br/>ID echo"| SE
+    ADCLK -.->|"TTL<br/>counters"| HR
+    PROX -.->|"split-TTL<br/>echo"| HR
+    ADCLK -.->|"sibling<br/>pipeline"| MM
+    LB -.->|"tiering<br/>parallel"| MM
+    GD -.->|"file vs<br/>op-level"| GDOC
+
+    class URL,NF,SAC,LB req
+    class KV,DID,MQ,OBJ base
+    class PAY,DW,HR train
+    class UB,GM,PROX,WC,ADCLK,MM,GDOC,GD mathOp
+    class TW,WA,NS,SNOW frozen
+    class SE lossN
 ```
-design_url_shortener   (standalone — best first study)
-    |- teaches consistent hashing used in design_twitter (distributed cache)
-    |- consistent hashing also reused in design_web_crawler (frontier sharding by domain)
-    |                                  and design_google_docs (document-to-shard routing)
 
-design_twitter
-    |- fan-out concept reused in design_netflix (content recommendation feed)
-    |- fan-out concept reused in design_notification_system (multi-channel delivery fan-out)
-    |- Redis timeline patterns reused in design_whatsapp (message delivery receipts)
-
-design_uber
-    |- real-time WebSocket patterns shared with design_whatsapp and design_google_docs
-    |- geo-indexing (geohash/quadtree) extended by design_google_maps (S2/H3, routing)
-    |- geo-indexing complements design_twitter (location-tagged posts)
-
-design_payment_system
-    |- idempotency-key + outbox pattern reused in design_notification_system (exactly-once delivery)
-    |- operation-log / event-sourcing approach shared with design_google_docs (op log as source of truth)
-
-design_web_crawler
-    |- feeds the corpus design_search_autocomplete builds suggestions from
-    |- politeness / per-host rate limiting echoes design_notification_system's per-provider limits
-
-design_key_value_store
-    |- consistent-hash ring (with virtual nodes) is the same placement primitive
-    |  design_url_shortener and design_web_crawler use for distribution
-    |- quorum / vector-clock consistency model contrasts with
-       design_payment_system's strict ledger consistency
-
-design_distributed_unique_id
-    |- companion to design_twitter (Snowflake's origin use case) and
-       design_url_shortener (ID generation for short keys)
-    |- implementation deep dive lives in java/case_studies/design_snowflake_id_generator_java.md
-
-design_distributed_message_queue
-    |- the partitioned-log model underlies design_notification_system's
-       per-channel topics and design_google_docs's operation log
-    |- exactly-once / outbox pattern shared with design_payment_system
-    |- ingestion layer reused by design_ad_click_aggregation (Kafka-style
-       partitioned log for click events)
-
-design_object_storage_s3
-    |- metadata-index sharding/replication/quorum mechanics reuse
-       design_key_value_store's consistent-hash-ring placement
-    |- hashed-prefix key design solves the same sequential-key hotspot
-       design_distributed_unique_id documents for Snowflake IDs
-
-design_proximity_service
-    |- geo-index theory (geohash precision, neighbor-cell expansion)
-       extends design_google_maps's S2/H3 indexing
-    |- contrasts with design_uber: proximity *matching* (write-heavy,
-       tight freshness) vs. proximity *search* (read-heavy, rich filters)
-
-design_ad_click_aggregation
-    |- ingestion layer is a direct application of
-       design_distributed_message_queue's partitioned-log model
-    |- geo/device dimension breakdowns echo design_uber's
-       location-based aggregation patterns
-    |- tumbling-window/TTL key-naming contrasted with design_leaderboard
-
-design_leaderboard
-    |- consistent-hash sharding by playerId reuses
-       design_key_value_store's ring-placement primitive
-    |- contrasts with design_ad_click_aggregation: time-windowed
-       aggregation vs. always-current sorted-set ranking
-
-design_digital_wallet
-    |- double-entry ledger + optimistic-locking concurrency control
-       contrasts with design_payment_system's saga/outbox pattern
-       for merchant charges (P2P transfer vs. merchant settlement)
-    |- idempotency-key pattern reused from design_payment_system,
-       applied to client-retried P2P transfers
-
-design_stock_exchange
-    |- single-writer-per-symbol sequencer + durable log is a
-       specialized application of design_distributed_message_queue's
-       ordered partitioned-log model
-    |- deterministic replay via sequence numbers echoes
-       design_distributed_unique_id's need for strictly monotonic IDs
-
-design_hotel_reservation
-    |- hold-with-TTL + atomic-decrement inventory pattern parallels
-       design_ad_click_aggregation's TTL-keyed window counters
-    |- booking saga (search -> hold -> pay -> confirm) reuses
-       design_payment_system's saga orchestration for the payment leg
-    |- search-cache staleness tradeoff echoes design_proximity_service's
-       split-TTL freshness model
-
-design_metrics_monitoring
-    |- ingestion + rollup pipeline is a sibling of
-       design_ad_click_aggregation's tumbling-window aggregation
-    |- 3-tier downsampling/retention parallels design_leaderboard's
-       hot-vs-cold data tiering (real-time sorted set vs. archived ranks)
-
-design_google_drive
-    |- content-addressed chunking + dedup builds directly on
-       design_object_storage_s3's blob-storage and multipart-upload model
-    |- file-level "conflicted copy" resolution contrasts with
-       design_google_docs's operation-level CRDT/OT convergence
-```
+Solid arrows point from the case study that originates a pattern to the one that reuses it; dotted arrows mark a contrast, or an independently-arrived-at echo of the same idea, rather than direct reuse. Key-Value Store and Distributed Message Queue (gold, Core Infrastructure) are the busiest hubs, together feeding their hash-ring, ring-placement, and partitioned-log primitives out to nine other case studies; Stock Exchange (red) sits at the end of two of those chains — it consumes the ordered log and the monotonic-ID need but feeds no pattern back out.
 
 ---
 

@@ -86,41 +86,37 @@ appears as a secondary component.
 
 Conceptual dependencies — study problems lower in the tree first:
 
-```
-Foundation (study first)
-  |
-  +-- Vending Machine         [State FSM, 4 states, clean]
-  |       |
-  |       v
-  +-- ATM                     [State + Template Method + idempotency]
-  |       |
-  |       v
-  +-- Parking Lot             [Factory + Strategy + concurrent access]
-  |       |
-  |       v
-  |   +---+-------------------+
-  |   |                       |
-  |   v                       v
-  +-- Elevator System         Online Booking System
-  |   [Complex FSM +          [Concurrency + Strategy +
-  |    scheduling algo]        double-booking prevention]
-  |                                |
-  |                                v
-  |                            Ride Sharing
-  |                            [State (ride lifecycle) + Strategy (fare) +
-  |                             Observer (status) + Factory (vehicle)]
-  v
-Chess Game     Library Management     Splitwise
-[Command       [Observer + Builder +  [Strategy (split types) +
- undo/redo +    borrow lifecycle]      Factory + debt-graph
- Composite                             simplification via
- board]                                 max-heap matching]
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Standalone — Algorithms & Data Structures (study independently, any order)
-  |
-  +-- LRU Cache       [Doubly-linked list + HashMap, O(1) get/put; Decorator adds thread safety]
-  +-- Rate Limiter    [4 algorithms as Strategy — token bucket, fixed/sliding window]
-  +-- Tic-Tac-Toe     [Incremental win-check counters; Strategy for AI move selection]
+    F(["Foundation<br/>study first"]) --> VM["Vending Machine<br/>4-state FSM, clean"]
+    VM --> ATM["ATM<br/>State + Template Method<br/>+ idempotency"]
+    ATM --> PL["Parking Lot<br/>Factory + Strategy<br/>+ concurrent access"]
+    PL --> ES["Elevator System<br/>Complex FSM<br/>+ scheduling algo"]
+    PL --> OBS["Online Booking System<br/>Concurrency + Strategy<br/>+ double-booking prevention"]
+    OBS --> RS["Ride Sharing<br/>State + Strategy<br/>+ Observer + Factory"]
+    ES --> CG["Chess Game<br/>Command undo/redo<br/>+ Composite board"]
+    ES --> LM["Library Management<br/>Observer + Builder<br/>+ borrow lifecycle"]
+    ES --> SW["Splitwise<br/>Strategy splits + Factory<br/>+ debt-graph simplification"]
+
+    subgraph SA["Standalone — Algorithms and Data Structures (any order)"]
+        LRU["LRU Cache<br/>DLL + HashMap, O(1)"]
+        RL["Rate Limiter<br/>4 Strategy algorithms"]
+        TTT["Tic-Tac-Toe<br/>Win-check + Strategy AI"]
+    end
+
+    class F base
+    class VM,ATM,PL,ES train
+    class OBS,RS req
+    class CG,LM,SW frozen
+    class LRU,RL,TTT mathOp
 ```
 
 **Why this order**: Vending Machine's clean 4-state FSM is the template you'll reuse in every
@@ -158,14 +154,30 @@ lean more on data-structure correctness than on OOP class design, so study them 
 
 ### 30-Minute Interview Time Box
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["0–5 min<br/>Clarify requirements"]) --> B["5–10 min<br/>Identify entities"]
+    B --> C["10–20 min<br/>Draw class diagram<br/>name the patterns"]
+    C --> D["20–25 min<br/>Walk one scenario<br/>end-to-end"]
+    D --> E(["25–30 min<br/>Discuss extensibility"])
+
+    class A,E io
+    class B mathOp
+    class C train
+    class D req
 ```
-0–5 min   Clarify requirements: scale, concurrency, extensibility asks
-5–10 min  Identify entities (nouns → classes) and relationships
-10–20 min Draw class diagram: key classes, interfaces, relationships
-          Identify and NAME the patterns you're using
-20–25 min Walk through one key scenario end-to-end (e.g., purchase flow)
-25–30 min Discuss extensibility: "If I needed to add X, I would..."
-```
+
+Each stage feeds the next inside a strict 30-minute budget — requirements (0–5 min) and entity
+identification (5–10 min) exist only to feed the 10-minute class-diagram stage, the interviewer's
+primary signal.
 
 The most common failure mode: spending 15+ minutes on requirements and running out of time
 for the class diagram. Timebox requirements to 5 minutes maximum.

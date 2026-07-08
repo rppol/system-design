@@ -68,43 +68,46 @@
 
 ## 3. High-Level Architecture
 
-```
-                         +------------------+
-                         |   DNS / CDN      |
-                         +--------+---------+
-                                  |
-                         +--------v---------+
-                         |  Load Balancer   |
-                         +---+----------+---+
-                             |          |
-               +-------------v---+  +---v-------------+
-               |  Write API      |  |  Read API       |
-               | (URL Shortening)|  | (Redirects)     |
-               +--------+--------+  +--------+--------+
-                        |                    |
-           +------------v--+          +------v-------+
-           |  URL Service  |          |  Cache Layer |
-           | (ID Gen +     |          |  (Redis)     |
-           |  Storage)     |          +------+-------+
-           +------+--------+                 |
-                  |                  (miss)  |
-         +--------v--------+         +-------v------+
-         | ID Generator     |         | Database     |
-         | (Counter +       |         | (Cassandra)  |
-         | Zookeeper)       |         +--------------+
-         +--------+--------+
-                  |
-         +--------v--------+
-         | Database Write  |
-         | (Cassandra)     |
-         +-----------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-         +--------------------------------------+
-         | Analytics Pipeline                   |
-         | Click Event → Kafka → Flink →        |
-         | Cassandra (time-series) → Dashboard  |
-         +--------------------------------------+
+    DNS("DNS / CDN") --> LB{"Load Balancer"}
+
+    subgraph WritePath["Write Path"]
+        WriteAPI("Write API<br/>URL Shortening") --> URLSvc("URL Service<br/>ID Gen + Storage")
+        URLSvc --> IDGen("ID Generator<br/>Counter + Zookeeper")
+        IDGen --> WriteDB[("Cassandra<br/>Database Write")]
+    end
+
+    subgraph ReadPath["Read Path"]
+        ReadAPI("Read API<br/>Redirects") --> Cache[("Cache Layer<br/>Redis")]
+        Cache -.->|"miss"| ReadDB[("Cassandra<br/>Database")]
+    end
+
+    LB --> WriteAPI
+    LB --> ReadAPI
+
+    subgraph Analytics["Analytics Pipeline"]
+        Click(["Click Event"]) --> Kafka("Kafka") --> Flink("Flink") --> Stats[("Cassandra<br/>time-series")] --> Dash(["Dashboard"])
+    end
+
+    class DNS frozen
+    class LB mathOp
+    class WriteAPI,ReadAPI,Kafka req
+    class URLSvc train
+    class IDGen,Flink mathOp
+    class WriteDB,Cache,ReadDB,Stats base
+    class Click,Dash io
 ```
+
+*Write and read traffic are split into separate API tiers behind the load balancer, so the read-heavy redirect path (right) never contends with the write-heavy shortening path (left) for capacity; the Analytics Pipeline runs fully out-of-band from both.*
 
 ---
 
@@ -148,17 +151,35 @@ short_code = "aaQ8Sa"  (padded to 6-7 chars)
 - Solution: Use distributed ID generators
 
 ### Option C: Pre-Generated Random IDs (ID Pool)
-```
-Background job:
-  1. Generate random 7-char Base62 strings
-  2. Verify they are not already used
-  3. Store in a "key pool" table: id_pool(key VARCHAR(7), used BOOLEAN)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-URL Shortening:
-  1. Pop an unused key from the pool
-  2. Mark it as used
-  3. Associate with the long URL
+    subgraph BG["Background Job"]
+        Gen("Generate random<br/>7-char Base62 strings") --> Verify{"Already used?"}
+        Verify -.->|"yes, discard"| Gen
+        Verify -->|"no"| Pool[("id_pool table<br/>key, used")]
+    end
+
+    subgraph PerRequest["URL Shortening (per request)"]
+        Pop("Pop unused key<br/>from pool") --> Mark("Mark key used") --> Assoc("Associate with<br/>long URL")
+    end
+
+    Pool --> Pop
+
+    class Gen,Verify mathOp
+    class Pool base
+    class Pop,Mark,Assoc train
 ```
+
+*The background job (top) keeps a pool of pre-verified codes ready; the request path (bottom) only ever pops a ready key, so collision-checking never happens on the hot path.*
+
 **Pros**: Truly random (not guessable), no collision risk at point of use, fast lookup
 
 **Cons**: Key pool must be maintained; potential for pool exhaustion under extreme load
@@ -167,27 +188,61 @@ URL Shortening:
 
 Use a distributed counter (Zookeeper or dedicated counter service) with Base62 encoding:
 
-```
-Setup:
-  - Multiple counter servers, each assigned a range by Zookeeper
-  - Counter Server A: range 1 - 1,000,000
-  - Counter Server B: range 1,000,001 - 2,000,000
-  - Counter Server C: range 2,000,001 - 3,000,000
+```mermaid
+sequenceDiagram
+    participant API as API Server
+    participant CS as Counter Server
+    participant ZK as Zookeeper
+    participant DB as Cassandra
 
-URL Creation:
-  1. API Server asks Counter Server for next ID
-  2. Counter Server atomically increments and returns ID (e.g., 1000042)
-  3. API Server encodes ID in Base62: 1000042 → "4c92"
-  4. Pad to 7 chars: "000c92" or add prefix: "4c9200a"
-  5. Write (short_code, long_url, metadata) to Cassandra
+    Note over ZK,CS: Setup - Zookeeper pre-assigns disjoint ID ranges<br/>A: 1-1,000,000 · B: 1,000,001-2,000,000 · C: 2,000,001-3,000,000
 
-Zookeeper manages range assignments:
-  - When Counter Server exhausts its range, it requests a new range from Zookeeper
-  - Zookeeper maintains a global counter of which ranges have been assigned
-  - If a Counter Server dies, its remaining range is abandoned (tiny waste, acceptable)
+    API->>CS: request next ID
+    CS->>CS: atomically increment local counter
+    CS-->>API: return ID (e.g., 1000042)
+    Note over API: Base62-encode 1000042 to 4c92<br/>pad to 7 chars: 4c9200a (or zero-pad: 000c92)
+    API->>DB: write short_code, long_url, metadata
+
+    opt Counter Server exhausts its range
+        CS->>ZK: request a new range
+        ZK-->>CS: assign next available range
+    end
+
+    Note over CS: If a Counter Server dies mid-range,<br/>its remaining unused IDs are simply abandoned
 ```
 
 **Why this is best**: No collisions, distributed (no single bottleneck), not easily guessable (IDs are non-sequential when interleaved across multiple counter servers), fast.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start{"Generate a 7-char<br/>short code"} -->|"Option A"| HashOpt("Hash the URL<br/>truncate to 7 chars")
+    HashOpt -->|"collisions past<br/>~2.5M URLs"| HashRej(["Rejected"])
+
+    Start -->|"Option B"| CounterOpt("Single auto-increment<br/>counter + Base62")
+    CounterOpt -->|"guessable +<br/>single-writer bottleneck"| CounterRej(["Rejected"])
+
+    Start -->|"Option C"| PoolOpt("Pre-generated<br/>random ID pool")
+    PoolOpt -->|"works, but pool<br/>upkeep + exhaustion risk"| PoolPartial(["Viable,<br/>higher ops cost"])
+
+    Start -->|"Recommended"| DistOpt("Distributed counter<br/>+ Base62, Zookeeper ranges")
+    DistOpt --> Chosen(["Chosen<br/>no collisions, no bottleneck,<br/>not easily guessable"])
+
+    class Start mathOp
+    class HashOpt,CounterOpt,PoolOpt,DistOpt req
+    class HashRej,CounterRej lossN
+    class PoolPartial frozen
+    class Chosen train
+```
+
+*Each rejected branch traces back to the Pros/Cons above: hashing collides past ~2.5M URLs (birthday paradox on the 62^7 ~ 3.5T-code space, §2), a plain counter is sequential and single-writer, and a pre-generated pool works but adds ongoing maintenance — leaving the distributed counter as the only option with no collisions and no write bottleneck.*
 
 ---
 
@@ -213,21 +268,40 @@ HTTP Response: HTTP/1.1 302 Found
 For link owners who prefer performance over analytics, offer an option to use 301 (common in enterprise plans).
 
 ### Redirect Flow
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant LB as Load Balancer
+    participant API as Read API Server
+    participant R as Redis Cache
+    participant DB as Cassandra
+
+    C->>LB: GET /abc1234
+    LB->>API: forward request
+    API->>R: lookup "abc1234"
+
+    alt Cache HIT
+        R-->>API: cached long_url
+        API-->>C: 302 redirect to long_url
+        API--)DB: record click event (async)
+    else Cache MISS, found in DB
+        R-->>API: (miss)
+        API->>DB: query "abc1234"
+        DB-->>API: long_url
+        API->>R: populate cache
+        API-->>C: 302 redirect to long_url
+        API--)DB: record click event (async)
+    else Cache MISS, not found or expired
+        R-->>API: (miss)
+        API->>DB: query "abc1234"
+        DB-->>API: not found or expired
+        API-->>C: 404 Not Found
+    end
+
+    Note over C: On a 302, the browser follows<br/>the redirect to the original URL
 ```
-Client GET /abc1234
-    |
-    v
-Load Balancer → Read API Server
-    |
-    | 1. Look up "abc1234" in Redis cache
-    | 2. Cache HIT: return 302 with cached long_url + record click event async
-    | 3. Cache MISS:
-    |       - Query Cassandra for "abc1234"
-    |       - If found: populate cache, return 302 redirect, record click async
-    |       - If not found or expired: return 404
-    v
-Client follows redirect → Original URL
-```
+
+*The redirect hot path: a cache hit returns in about 1ms with the click logged asynchronously; a miss falls through to Cassandra and repopulates the cache before returning, so only the next request for that code benefits — only a missing or expired mapping ever reaches 404.*
 
 ---
 
@@ -376,31 +450,32 @@ Multiple Redis cache nodes. When we add or remove a node, how do we redistribute
 - Time-series chart (clicks over time)
 
 ### Pipeline
-```
-Client Redirect Request
-    |
-    v
-Read API Server — returns redirect immediately (< 10ms)
-    |
-    | async (non-blocking)
-    v
-Kafka (click_events topic)
-    |
-    v
-Flink Stream Processor (real-time aggregation)
-    |
-    | 1. Count clicks per URL per minute
-    | 2. Group by country, device, browser
-    | 3. Update aggregated counters
-    v
-Cassandra (url_stats_hourly table) — aggregated time-series
-    +
-Cassandra (click_events table) — raw events (90-day TTL)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Dashboard Service:
-    - Reads from url_stats_hourly for charts
-    - Total click count maintained in Redis counter (INCR url:count:abc1234)
+    Client(["Client Redirect<br/>Request"]) --> API("Read API Server<br/>returns 302 in under 10ms")
+    API -.->|"async, non-blocking"| Kafka("Kafka<br/>click_events topic")
+    Kafka --> Flink("Flink Stream Processor<br/>count per URL per minute<br/>group by country / device / browser")
+    Flink --> Hourly[("Cassandra<br/>url_stats_hourly")]
+    Flink --> Raw[("Cassandra<br/>click_events, 90-day TTL")]
+    Hourly --> Dash("Dashboard Service")
+    Counter[("Redis counter<br/>INCR url:count:abc1234")] --> Dash
+
+    class Client io
+    class API,Kafka req
+    class Flink mathOp
+    class Hourly,Raw,Counter base
+    class Dash io
 ```
+
+*The redirect response is synchronous and fast; everything from the click event onward — Kafka, Flink, and both Cassandra tables — runs asynchronously, so a Flink backlog (War Story 6, §9) delays dashboards but never delays a redirect.*
 
 ### Why Kafka?
 - Decouples click recording from redirect response (redirect is synchronous; analytics is async)
@@ -491,6 +566,22 @@ LIMIT 10000;
 - **Choice**: Soft delete first (is_active = false), hard delete after 30 days
 - **Reason**: User accidentally creates URL with wrong expiry, can restore within grace period
 - **Hard delete**: reclaims storage and frees short_url for reuse (important for custom aliases)
+
+```mermaid
+stateDiagram-v2
+    state "Active (is_active = true)" as Active
+    state "Soft-deleted (is_active = false)" as Soft
+    state "Hard-deleted (row removed)" as Hard
+
+    [*] --> Active: URL created
+    Active --> Active: read before expires_at<br/>cache or DB hit
+    Active --> Soft: expires_at passed<br/>checked lazily on next read
+    Soft --> Soft: read returns 410 Gone
+    Soft --> Hard: nightly sweep,<br/>30+ days since expiry
+    Hard --> [*]: short_url freed for reuse
+```
+
+*The 30-day gap between soft-delete and hard-delete is the grace period for recovering from an accidental wrong-expiry setting; only the hard-delete transition frees the short_url string for reuse, which matters most for custom aliases (§4).*
 
 ---
 

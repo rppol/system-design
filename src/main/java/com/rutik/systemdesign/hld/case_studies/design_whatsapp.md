@@ -52,46 +52,37 @@ Connections: 500M DAU online simultaneously ≈ 200M concurrent WebSocket connec
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    iOS([iOS App]) --> LB{Load Balancer}
+    Droid([Android]) --> LB
+    LB --> CS1(Chat Server 1)
+    LB --> CS2(Chat Server 2)
+    LB --> CS3(Chat Server N)
+    CS1 --> Redis(Redis<br/>presence + routing)
+    CS2 --> Kafka(Kafka<br/>message queue)
+    CS3 --> Media(Media Service<br/>S3 + CDN)
+    CS1 --> UserDB(User / Group DB<br/>Cassandra)
+    Kafka --> MsgStore(Message Store<br/>Cassandra)
+    Kafka --> Push(Push Notification<br/>Service)
+
+    class iOS,Droid io
+    class LB mathOp
+    class CS1,CS2,CS3 req
+    class Redis,UserDB,MsgStore base
+    class Kafka,Media train
+    class Push frozen
 ```
-┌─────────────┐     ┌─────────────┐
-│  iOS App    │     │  Android    │
-└──────┬──────┘     └──────┬──────┘
-       │                   │
-       └──────────┬─────────┘
-                  │ HTTPS/WebSocket
-                  ▼
-         ┌────────────────┐
-         │  Load Balancer  │
-         └───────┬────────┘
-                 │
-    ┌────────────┼────────────┐
-    │            │            │
-    ▼            ▼            ▼
-┌─────────┐ ┌─────────┐ ┌─────────┐
-│  Chat   │ │  Chat   │ │  Chat   │
-│ Server 1│ │ Server 2│ │ Server N│
-└────┬────┘ └────┬────┘ └────┬────┘
-     │            │            │
-     └────────────┼────────────┘
-                  │
-     ┌────────────┼────────────┬──────────────────┐
-     │            │            │                  │
-     ▼            ▼            ▼                  ▼
-┌─────────┐ ┌─────────┐ ┌──────────┐      ┌──────────┐
-│  Redis  │ │ Kafka   │ │  Media   │      │  User/   │
-│(presence│ │(message │ │ Service  │      │ Group DB │
-│+routing)│ │ queue)  │ │ (S3+CDN) │      │(Cassandra│
-└─────────┘ └────┬────┘ └──────────┘      └──────────┘
-                 │
-          ┌──────┴──────┐
-          │             │
-          ▼             ▼
-   ┌─────────────┐  ┌──────────┐
-   │  Message    │  │  Push    │
-   │  Store      │  │Notification│
-   │ (Cassandra) │  │ Service  │
-   └─────────────┘  └──────────┘
-```
+
+*Clients connect over WebSocket through a load balancer to a stateless chat-server fleet, which fans out to Redis for presence and routing, Kafka as the durability buffer, media storage, and the Cassandra-backed message and user stores.*
 
 ---
 
@@ -107,16 +98,25 @@ WhatsApp maintains a persistent WebSocket connection for each online user.
 - Real-time: sub-100ms delivery
 
 **Connection mapping** (critical for routing):
-```
-When User B connects → ChatServer N handles the connection
-Redis stores: userId_B → serverN
+```mermaid
+sequenceDiagram
+    participant B as User B
+    participant SN as ChatServer N
+    participant R as Redis
+    participant A as User A
+    participant SA as ChatServer A
 
-When User A sends to User B:
-  1. ChatServer (handling A's connection) looks up: where is B?
-  2. Redis returns: serverN
-  3. ChatServer forwards to serverN
-  4. serverN delivers to B's WebSocket
+    B->>SN: connects (WebSocket)
+    SN->>R: store userId_B -> serverN
+    Note over A,SA: Later, Alice sends to Bob
+    A->>SA: send message to B
+    SA->>R: lookup - where is B?
+    R-->>SA: serverN
+    SA->>SN: forward message
+    SN->>B: deliver over WebSocket
 ```
+
+*Redis is the connection-routing table: every WebSocket lands on exactly one chat server, and a sender's server looks up that mapping before forwarding a message to the recipient's server.*
 
 ```
 Redis key: conn:{userId}
@@ -131,50 +131,70 @@ If TTL expires → user is considered offline → route to push notification.
 ### Message Flow
 
 **Happy path (both online)**:
+```mermaid
+sequenceDiagram
+    participant Alice
+    participant SA as Chat Server A
+    participant R as Redis
+    participant K as Kafka
+    participant SB as Chat Server B
+    participant Bob
+
+    Alice->>SA: "Hey Bob!" (WebSocket)
+    SA->>R: lookup Bob's server
+    R-->>SA: Server B
+    SA->>K: persist message (async)
+    SA->>SB: forward message
+    SB->>Bob: deliver (WebSocket)
+    Bob-->>SB: ACK, delivery tick shown
+    SB-->>SA: relay ACK
+    SA-->>Alice: update to double tick
 ```
-Alice sends "Hey Bob!"
-      │
-      ▼ (WebSocket)
-Chat Server A
-      │
-      ├─► Redis: lookup Bob's server → Server B
-      │
-      ├─► Kafka: persist message (async, for reliability)
-      │
-      └─► Chat Server B (direct connection or message broker)
-                │
-                ▼ (WebSocket)
-              Bob sees "Hey Bob!" + delivery tick ✓
-              Bob's app sends ACK
-                │
-                ▼
-Chat Server B → Chat Server A → Alice's app updates to ✓✓
-```
+
+*Persisting to Kafka happens asynchronously alongside forwarding to Bob, so delivery isn't blocked on durability - the tick only advances to double-check once Bob's ACK travels back through both chat servers.*
 
 **Message delivery states**:
-```
-Sent     (✓)   — Message reached WhatsApp servers
-Delivered(✓✓)  — Message reached recipient's device
-Read     (✓✓blue) — Recipient opened the conversation
+```mermaid
+stateDiagram-v2
+    state "Sent - one grey tick" as Sent
+    state "Delivered - two grey ticks" as Delivered
+    state "Read - two blue ticks" as Read
+
+    [*] --> Sent: reaches<br/>WhatsApp servers
+    Sent --> Delivered: reaches<br/>recipient's device
+    Delivered --> Read: recipient opens<br/>the conversation
+    Read --> [*]
 ```
 
+*Delivery status is a strict linear state machine: server ACK, then device delivery, then the recipient opening the chat - each tick stage requires the previous one first.*
+
 **Offline recipient**:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Alice([Alice sends]) --> Check{Bob online?}
+    Check -->|"no - Redis miss"| Store(Queue in<br/>Cassandra)
+    Check -->|"no - Redis miss"| Push(Push via<br/>APNs / FCM)
+    Store --> Wake(Bob's device<br/>wakes, reconnects)
+    Push --> Wake
+    Wake --> Deliver([Server delivers<br/>queued messages])
+
+    class Alice io
+    class Check mathOp
+    class Store base
+    class Push frozen
+    class Wake train
+    class Deliver io
 ```
-Alice sends to offline Bob
-      │
-      ▼
-Chat Server checks Redis: Bob not connected
-      │
-      ├─► Store message in Cassandra (message queue for Bob)
-      │
-      └─► Push Notification Service → APNs (iOS) or FCM (Android)
-              │
-              ▼
-           Bob's device wakes up, connects WebSocket
-              │
-              ▼
-           Server delivers queued messages
-```
+
+*When Redis shows no connection for Bob, the message is durably queued in Cassandra while a push notification wakes his device - both paths converge once he reconnects and the server drains the queue.*
 
 ---
 
@@ -220,18 +240,30 @@ Table: user_message_receipt
 **Fanout approaches**:
 
 *Option A: Fanout on write (WhatsApp's approach)*
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Alice([Alice sends to Group G]) --> Fetch(Group Service<br/>fetches member list)
+    Fetch --> Fanout{Fan out}
+    Fanout --> Copies(1024 message copies<br/>in Kafka)
+    Copies --> Deliver([Each member's Chat Server<br/>delivers or queues offline])
+
+    class Alice io
+    class Fetch base
+    class Fanout mathOp
+    class Copies lossN
+    class Deliver io
 ```
-Alice sends to Group G (1024 members)
-      │
-      ▼
-Group Service fetches member list
-      │
-      ▼
-Creates 1024 individual message copies in Kafka
-      │
-      ▼
-Each member's Chat Server delivers to their WebSocket (or offline queue)
-```
+
+*Fanout-on-write creates one Kafka copy per group member at send time - simple to reason about, but the 1024x write amplification is exactly what later gets optimized away for members who stay offline.*
+
 Pros: Simple; member-specific delivery tracking
 Cons: 1024× write amplification per group message
 
@@ -280,6 +312,17 @@ When Alice sends a message to a 1000-member group:
 - Cost: O(N) per join, O(1) per subsequent message.
 - Member removed: every remaining member rotates their sender key and re-distributes. O(N²) cost on removal — expensive for large groups, which is why removals are batched in admin operations.
 
+```mermaid
+xychart-beta
+    title "Sender Key Cost: Join vs. Member Removal"
+    x-axis "Group size (members)" [10, 100, 500, 1024]
+    y-axis "Key operations" 0 --> 1100000
+    bar [10, 100, 500, 1024]
+    bar [100, 10000, 250000, 1048576]
+```
+
+*Joining costs O(N) key deliveries (the barely-visible lower bar), but removing one member forces every remaining member to rotate and redistribute keys - O(N²), the towering upper bar - which is why WhatsApp batches removals instead of processing them one at a time.*
+
 #### Admin Operations
 
 Add/remove member, change name/avatar, modify settings: special protocol stanzas that trigger an update of Cassandra group state, a notification fan-out to all members ("Alice added Bob to the group"), and a sender key rotation if removing a member. All admin operations are idempotent (replayed safely).
@@ -312,12 +355,26 @@ WhatsApp implemented the Signal Protocol (formerly TextSecure / Axolotl) globall
 
 #### X3DH Handshake (First Message to a New Contact)
 
+```mermaid
+sequenceDiagram
+    participant B as Bob
+    participant S as Server
+    participant A as Alice
+
+    Note over B,S: Setup, any time before first contact
+    B->>S: publish identity key + signed prekey + one-time prekeys
+
+    Note over A,S: Alice sends the first message, Bob offline
+    A->>S: fetch Bob's identity key + signed prekey + one-time prekey
+    S-->>A: return keys
+    A->>A: compute SK from 4 DH outputs
+    A->>S: send identity key + ephemeral key + first ciphertext
+    S->>B: deliver when Bob reconnects
+    B->>B: look up prekey, compute same SK, decrypt
+    Note over A,B: Double Ratchet takes over from here
 ```
-Alice and Bob each publish to server:
-  - Identity key (long-term)
-  - Signed prekey (medium-term)
-  - One-time prekeys (single use)
-```
+
+*Alice derives the shared secret entirely from Bob's uploaded keys without Bob ever being online - the one-time prekey is what lets this handshake complete asynchronously.*
 
 1. Alice fetches Bob's identity key + signed pre-key + one one-time pre-key from the server.
 2. Alice computes a shared secret SK = KDF(DH(IK_A, SPK_B) || DH(EK_A, IK_B) || DH(EK_A, SPK_B) || DH(EK_A, OPK_B)).
@@ -335,6 +392,34 @@ Key chain: RootKey → ChainKey → MessageKey (a new key for every message). Tw
 
 Even if an attacker gets one message's key: past messages stay safe (forward secrecy) and future messages use different keys (break-in recovery). Lost messages can still be decrypted out-of-order using "skipped message keys" (stored up to a configurable horizon).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    RK(Root Key) --> DHR{DH ratchet}
+    DHR --> CK1(Chain Key 1)
+    CK1 --> CR1{chain ratchet}
+    CR1 --> MK1([Message Key 1])
+    CR1 --> CK2(Chain Key 2)
+    CK2 --> CR2{chain ratchet}
+    CR2 --> MK2([Message Key 2])
+    CK1 -.->|"discarded after use"| Gone(Old key discarded<br/>forward secrecy)
+
+    class RK frozen
+    class DHR,CR1,CR2 mathOp
+    class CK1,CK2 base
+    class MK1,MK2 io
+    class Gone lossN
+```
+
+*The DH ratchet steps forward only on a message-direction change; the chain ratchet derives a fresh Message Key on every message, and each Chain Key is discarded the instant it's used - the mechanism behind forward secrecy.*
+
 #### Server's Limited View
 
 WhatsApp's server stores only ciphertext plus minimal metadata (sender, recipient(s), timestamp, message ID, size) and cannot decrypt content — it has no key access. Metadata still reveals communication graphs (who talks to whom, when), which remains a critical privacy limitation even with full E2E encryption.
@@ -349,12 +434,16 @@ A directory service publishes verifiable logs of identity keys, so users can ver
 
 ### Online Presence and Last Seen
 
+```mermaid
+stateDiagram-v2
+    [*] --> Online: connects,<br/>Redis key TTL=30s
+    Online --> Online: heartbeat every 10s<br/>renews TTL
+    Online --> Offline: TTL expires or<br/>disconnect event
+    Offline --> Online: reconnects
+    Offline --> [*]: last seen written<br/>to User DB
 ```
-User connects   → Set online status in Redis, TTL=30s
-Heartbeat       → Client sends heartbeat every 10s → renews Redis TTL
-User disconnects→ Redis TTL expires OR disconnect event removes key
-Last seen       → Written to User DB when user goes offline
-```
+
+*Presence is soft state - the Redis TTL, not a persisted record, is the source of truth for "online", so a single missed heartbeat cycle is enough to flip a user to offline.*
 
 **Redis structure**:
 ```
@@ -369,28 +458,33 @@ TTL: 30 seconds
 
 ### Media Sharing
 
-```
-User selects photo
-      │
-      ▼
-Client compresses (JPEG quality reduction) and encrypts media
-      │
-      ▼
-Upload to S3 via pre-signed URL (bypasses chat servers for large files)
-      │
-      ▼
-Client sends message with media URL + encryption key
-      │
-      ▼ (encrypted message travels via normal chat flow)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Recipient receives message with URL + decryption key
-      │
-      ▼
-Downloads from CloudFront CDN (closest edge node)
-      │
-      ▼
-Decrypts locally
+    Sel([User selects photo]) --> Comp(Compress + encrypt<br/>on device)
+    Comp --> S3(Upload to S3<br/>via pre-signed URL)
+    S3 --> Msg(Send message with<br/>URL + key)
+    Msg -.->|"normal chat flow"| Recv(Recipient gets<br/>URL + key)
+    Recv --> CDN(Download from<br/>CloudFront CDN)
+    CDN --> Dec([Decrypt locally])
+
+    class Sel io
+    class Comp mathOp
+    class S3 base
+    class Msg req
+    class Recv req
+    class CDN frozen
+    class Dec io
 ```
+
+*Media bytes never touch the chat servers - only the URL and decryption key ride the normal encrypted message path, while the file itself flows through S3 and the CloudFront edge.*
 
 Media on S3 is encrypted with a randomly generated key. The key travels with the message (encrypted). Even Amazon can't read the media.
 

@@ -113,77 +113,66 @@ Every later design decision is, at its core, a statement about what this tiny su
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client Order Entry<br/>brokers, market makers,<br/>algo trading firms"]) -->|"FIX / binary protocol<br/>OUCH, ITCH-like"| gw("Order Gateway /<br/>Session Layer")
+    gw --> risk{"Pre-Trade Risk<br/>Check (§4.6)"}
+
+    subgraph SHARDS["Sequencer Shards — durable, total order per symbol (§4.3)"]
+        seq1("Shard 1<br/>symbols A-F")
+        seq2("Shard 2<br/>symbols G-M")
+        seqN("Shard N<br/>symbols T-Z")
+    end
+
+    risk -->|"symbol-routed"| seq1
+    risk --> seq2
+    risk --> seqN
+
+    subgraph ENGINES["Matching Engine Instances — 1 thread per symbol (§4.1, §4.2)"]
+        me1("Instance 1<br/>+ hot standby")
+        me2("Instance 2<br/>+ hot standby")
+        meN("Instance N<br/>+ hot standby")
+    end
+
+    seq1 --> me1
+    seq2 --> me2
+    seqN --> meN
+
+    me1 --> bus("Trade Execution /<br/>Drop-Copy Bus")
+    me2 --> bus
+    meN --> bus
+
+    bus --> md("Market Data<br/>Dissemination (§4.4)")
+
+    subgraph CONSUMERS["Market Data Consumers"]
+        algo(["Co-located Algo Firms<br/>multicast"])
+        vendors(["Data Vendors<br/>consolidated"])
+        ticker(["Public Ticker /<br/>Retail Feeds (delayed)"])
+    end
+
+    md --> algo
+    md --> vendors
+    md --> ticker
+
+    class client io
+    class gw req
+    class risk mathOp
+    class seq1,seq2,seqN base
+    class me1,me2,meN train
+    class bus train
+    class md mathOp
+    class algo,vendors,ticker io
 ```
-                                    +-------------------------+
-                                    |   Client Order Entry      |
-                                    |  (Brokers, Market Makers, |
-                                    |   Algo Trading Firms)     |
-                                    +------------+--------------+
-                                                 |  FIX / binary protocol (OUCH, ITCH-like)
-                                                 v
-                            +------------------------------------------+
-                            |          Order Gateway / Session Layer      |
-                            |  - protocol translation, session mgmt       |
-                            |  - assigns client-order-ID -> exchange-ID   |
-                            +--------------------+-----------------------+
-                                                 |
-                                                 v
-                            +------------------------------------------+
-                            |        Pre-Trade Risk Check Service         |
-                            |  - buying power, position limits (§4.6)     |
-                            |  - in-memory, sub-microsecond checks         |
-                            +--------------------+-----------------------+
-                                                 |  symbol-routed
-                  +----------------------------+-----------------------------+
-                  |                            |                              |
-                  v                            v                              v
-        +-------------------+       +-------------------+         +-------------------+
-        | Sequencer Shard 1   |       | Sequencer Shard 2   |  ...   | Sequencer Shard N   |
-        | (symbols A-F)       |       | (symbols G-M)       |        | (symbols T-Z)       |
-        | durable log, total  |       | durable log, total  |        | durable log, total  |
-        | order per symbol    |       | order per symbol    |        | order per symbol    |
-        | (§4.3)              |       | (§4.3)              |        | (§4.3)              |
-        +---------+-----------+       +---------+-----------+        +---------+-----------+
-                  |                              |                              |
-                  v                              v                              v
-        +-------------------+       +-------------------+         +-------------------+
-        | Matching Engine     |       | Matching Engine     |       | Matching Engine     |
-        | Instance 1          |       | Instance 2          |       | Instance N          |
-        | - one thread/symbol |       | - one thread/symbol |       | - one thread/symbol |
-        | - in-memory order   |       | - in-memory order   |       | - in-memory order   |
-        |   books (§4.1)      |       |   books (§4.1)      |       |   books (§4.1)      |
-        | - hot standby       |       | - hot standby       |       | - hot standby       |
-        |   replica (§4.2)    |       |   replica (§4.2)    |       |   replica (§4.2)    |
-        +---------+-----------+       +---------+-----------+        +---------+-----------+
-                  |                              |                              |
-                  +--------------+---------------+-----------------------------+
-                                 |
-                                 v
-                  +--------------------------------------------+
-                  |       Trade Execution / Drop-Copy Bus          |
-                  |  - acks to order gateway (fills, cancels)      |
-                  |  - trade reporting facility feed                |
-                  |  - clearinghouse handoff (out of scope)         |
-                  +--------------------+-------------------------+
-                                       |
-                                       v
-                  +--------------------------------------------+
-                  |        Market Data Dissemination (§4.4)        |
-                  |  - per-symbol snapshot + delta feed             |
-                  |  - sequence-numbered, multicast fan-out         |
-                  |  - 10-20M msgs/sec consolidated (§2)            |
-                  +--------------------------------------------+
-                                       |
-                            +----------+-----------+
-                            |          |            |
-                            v          v            v
-                  +------------+ +-----------+ +------------+
-                  | Co-located  | | Data       | | Public      |
-                  | Algo Firms  | | Vendors    | | Ticker /     |
-                  | (multicast) | | (consol-   | | Retail Feeds |
-                  |             | |  idated)   | | (delayed)    |
-                  +------------+ +-----------+ +------------+
-```
+
+Each stage fans out across symbol shards (~10,000 symbols cluster-wide, §2) while every individual symbol stays on exactly one path end to end; the numbered Request Flow below walks each hop in the same left-to-right order.
 
 ### Request Flow
 
@@ -395,21 +384,29 @@ public final class OrderBook {
 
 The order book above has **zero internal synchronization** — no locks, no atomics, no `volatile` fields. This is not an oversight; it is the central design decision of the whole system, and it is only safe because of an invariant enforced one layer up: **for any given symbol, exactly one thread, in exactly one process, processes that symbol's orders, one at a time, in sequence-number order, ever.**
 
-```
-            Symbol AAPL                         Symbol MSFT
-   +---------------------------+        +---------------------------+
-   | Matching Engine Instance 1 |        | Matching Engine Instance 2 |
-   |                             |        |                             |
-   |  Thread "AAPL-matcher"      |        |  Thread "MSFT-matcher"      |
-   |  - owns AAPL's order book   |        |  - owns MSFT's order book   |
-   |  - processes seq# 1,2,3,... |        |  - processes seq# 1,2,3,... |
-   |    one at a time, no locks  |        |    one at a time, no locks  |
-   +---------------------------+        +---------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   Both threads run CONCURRENTLY (different symbols, no shared state) -
-   this is where the system's parallelism comes from: thousands of
-   symbols, each single-threaded, spread across many instances/cores.
+    subgraph I1["Matching Engine Instance 1"]
+        t1("Thread<br/>AAPL-matcher") --> b1("AAPL Order Book<br/>seq# 1,2,3...<br/>no locks")
+    end
+
+    subgraph I2["Matching Engine Instance 2"]
+        t2("Thread<br/>MSFT-matcher") --> b2("MSFT Order Book<br/>seq# 1,2,3...<br/>no locks")
+    end
+
+    class t1,t2 train
+    class b1,b2 base
 ```
+
+Both threads run concurrently with zero shared state — this is where the system's parallelism comes from: thousands of symbols (~10,000, §2), each single-threaded, spread across many instances and cores.
 
 **Why not multi-thread a single symbol's order book?** Two incoming orders for AAPL arriving within the same microsecond could, in a naively-parallelized design, be processed by two different threads. Even with perfect locking around the `TreeMap` (eliminating data races), **the relative order in which the two threads acquire the lock determines which order is treated as "first"** — and that order determines price-time priority, which determines who gets filled. Lock-acquisition order is not deterministic and not reproducible: replaying the exact same two input messages could produce a different fill outcome on a different run, or even on the same run with different OS thread-scheduling jitter. This violates the **strict ordering/determinism NFR (§1)** outright — a regulator asking "prove that Order A was correctly filled ahead of Order B because A arrived first" cannot be answered if "first" was decided by a lock race. Single-writer-per-symbol sidesteps the entire class of problem: there is no race to resolve, because there is only one thread touching that symbol's book.
 
@@ -448,31 +445,35 @@ Sequencer log for partition "AAPL" (durable, replicated, append-only):
 
 Every mutation to a symbol's order book (a new resting order, a cancel, a modify, a trade execution) is published as an **incremental delta message** on that symbol's market-data feed, carrying the **same sequence number** assigned by the sequencer (§4.3) — this is the thread that ties the matching engine's internal state directly to what subscribers see.
 
-```
-                    Matching Engine (AAPL, seq# 104 just processed)
-                                  |
-                                  v
-            +---------------------------------------------+
-            |  Market Data Publisher                          |
-            |  emits delta: {seq=104, type=TRADE,             |
-            |                price=101.04, qty=100,           |
-            |                bidDepthChange=-100@101.04}      |
-            +---------------------+-------------------------+
-                                  |  multicast / fan-out tree
-              +-------------------+-------------------+
-              |                   |                   |
-              v                   v                   v
-     Subscriber A (seq 104    Subscriber B (seq 102 -  Subscriber C (just
-     received, in order)      GAP DETECTED, missing    connected - requests
-                               103! request snapshot    full snapshot at
-                               + replay from gap, §9)   current seq, then
-                                                          applies deltas >= seq)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   Periodic full snapshot (e.g., every 1 second OR every 100,000 seq#):
-     {seq=104, bids=[...all price levels...], asks=[...all price levels...]}
-   - lets a newly-connected subscriber (Subscriber C) bootstrap without
-     replaying the entire day's delta history from seq#0.
+    me("Matching Engine<br/>AAPL, seq 104 processed") --> pub("Market Data Publisher<br/>emits delta seq=104")
+    pub -->|"multicast<br/>fan-out tree"| subA(["Subscriber A<br/>seq 104, in order"])
+    pub --> subB(["Subscriber B<br/>gap: missing seq 103"])
+    pub --> subC(["Subscriber C<br/>just connected"])
+
+    subB -->|"request gap-fill<br/>or snapshot (§9)"| snap("Periodic Full Snapshot<br/>every 1s or 100k seq#")
+    subC -->|"request snapshot<br/>at current seq"| snap
+    snap -.->|"resync, then<br/>apply deltas"| subB
+    snap -.-> subC
+
+    class me train
+    class pub mathOp
+    class subA train
+    class subB lossN
+    class subC io
+    class snap base
 ```
+
+Subscriber A stays current, Subscriber B has detected a gap (missing seq#103) and must resync from the periodic snapshot rather than silently continuing, and Subscriber C is a fresh connection bootstrapping the same way — the mechanism that keeps the 10-20 million msgs/sec consolidated feed (§2) correct despite dropped UDP packets.
 
 **Sequence numbers for gap detection**: each subscriber tracks the last sequence number it successfully processed for a symbol. If a delta arrives with `seq = lastSeq + 1`, it's applied directly (O(1) — apply one price-level/order change to the subscriber's local book copy). If `seq > lastSeq + 1`, the subscriber has **missed one or more messages** (a dropped UDP multicast packet is the common cause for the highest-throughput feeds) — it must **stop trusting its local book**, request either a targeted replay of the missing sequence range or a fresh full snapshot, and only resume applying deltas once it has reconstructed a consistent state at a known sequence number. **Never silently continuing past a gap** is the critical correctness property — an out-of-date local order book that *looks* internally consistent (no error, just stale) is far more dangerous than an explicit "I am behind, catching up" state, because a trading algorithm acting on a stale book makes decisions based on prices and depth that no longer exist. War Story 2 (§9) is exactly this failure mode.
 
@@ -498,6 +499,39 @@ Every order must pass **pre-trade risk checks** before it is sequenced (§3's fl
 
 **Why these checks must be in-memory and fast**: the entire latency budget for "accept this order" is in the tens-of-microseconds range (§10). A risk check that requires a database round-trip (even a fast one, ~1ms) would be **10-100x the entire rest of the budget** — completely dominating end-to-end latency and defeating the purpose of a microsecond-class matching engine downstream. Production risk-check services therefore maintain an **in-memory, continuously-updated view** of each firm's current buying power and positions — updated synchronously as fills occur (a fill immediately decrements available buying power and updates the position) — so that a risk check is a handful of in-memory comparisons (`orderNotional <= availableBuyingPower`, `currentPosition + orderQty <= positionLimit`, `abs(orderPrice - lastTradePrice) / lastTradePrice <= maxDeviationPct`), each on the order of tens of nanoseconds.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    order(["Incoming Order"]) --> bp{"Buying power<br/>sufficient?"}
+    order --> pos{"Position limit<br/>respected?"}
+    order --> band{"Price within<br/>fat-finger band?"}
+
+    bp -->|"yes"| gate(("AND"))
+    pos -->|"yes"| gate
+    band -->|"yes"| gate
+
+    bp -->|"no"| reject(["REJECTED<br/>never sequenced"])
+    pos -->|"no"| reject
+    band -->|"no"| reject
+
+    gate -->|"all yes"| accept(["ACCEPTED<br/>to sequencer, §4.3"])
+
+    class order io
+    class bp,pos,band mathOp
+    class gate mathOp
+    class accept train
+    class reject lossN
+```
+
+All three checks run in parallel, in-memory, at roughly 50-200 ns each (§10); a single failure rejects the order before it ever reaches the sequencer, while three passes hand it forward for durable sequencing.
+
 **Placement relative to the sequencer**: risk checks happen **before** sequencing (§3), not after — a rejected order should never consume a sequence number or be visible to the matching engine at all, because sequence numbers are part of the permanent, auditable record (§4.3) and a rejected order was never "accepted" in the first place. This placement also means risk-check rejections don't compete with matching-engine throughput — they're filtered out of the pipeline entirely before the single-writer-per-symbol bottleneck (§4.2) is even reached.
 
 **Order cancels and modifies follow the same fast-path/slow-path split**: a cancel request also passes through the risk-check layer (trivially — canceling can only *reduce* a firm's exposure, so cancels are effectively always approved) and the sequencer, gets its own sequence number, and is processed by the matching engine in-order like any other message (§4.3's log shows `[CANCEL #98]` at seq#101 as an ordinary log entry). A **modify** (cancel-replace) is conceptually two operations — cancel the existing order, then submit a new order — but critically, a modify that **reduces** quantity without changing price is commonly implemented as an in-place mutation that **preserves the order's original time priority** (it doesn't go to the back of the FIFO queue), while a modify that **increases** quantity or **changes price** is treated as a full cancel-replace that **loses time priority** (the "new" order goes to the back of its price level's queue, or to a new price level entirely). This distinction — "does this modification preserve queue position?" — is itself a price-time-priority rule, and getting it wrong (e.g., letting a price-improving modify keep its old time priority) is a subtle but real fairness bug.
@@ -506,21 +540,37 @@ Every order must pass **pre-trade risk checks** before it is sequenced (§3's fl
 
 The matching engine doesn't run in one mode all day — it transitions through distinct **market states**, and each state changes what `OrderBook.process()` (§4.1) is permitted to do with incoming sequenced messages:
 
-```
-   PRE-MARKET          OPENING AUCTION       CONTINUOUS TRADING        CLOSING AUCTION       POST-MARKET
-  (orders queue,    -> (single batch match -> (§4.1's process(), one -> (orders queue,    -> (limited trading,
-   no matching)         at the open price,       order at a time)        single batch          often limit-
-                         §11)                                              match at close)       orders only)
+```mermaid
+stateDiagram-v2
+    state "Pre-Market" as PreMarket
+    state "Opening Auction" as OpeningAuction
+    state "Continuous Trading" as Continuous
+    state "Closing Auction" as ClosingAuction
+    state "Post-Market" as PostMarket
+    state "Trading Halt" as Halt
+    state "Re-opening Auction" as Reopen
 
-                    TRADING HALT (any state) <-- circuit breaker (price-band
-                         |                        violation), regulatory
-                         v                        halt, or operational issue
-                    orders continue to be SEQUENCED (§4.3, audit trail
-                    intact) but matching is PAUSED for the halted symbol;
-                    a halt can resolve into a re-opening auction (like the
-                    opening auction, but mid-day) rather than resuming
-                    continuous trading directly.
+    [*] --> PreMarket
+    PreMarket --> OpeningAuction: market open
+    OpeningAuction --> Continuous: uncross price set
+    Continuous --> ClosingAuction: session end
+    ClosingAuction --> PostMarket: close price set
+    PostMarket --> [*]
+
+    PreMarket --> Halt: circuit breaker or halt
+    OpeningAuction --> Halt: circuit breaker or halt
+    Continuous --> Halt: circuit breaker or halt
+    ClosingAuction --> Halt: circuit breaker or halt
+    Halt --> Reopen: halt lifts
+    Reopen --> Continuous: uncross price set
+
+    note right of Halt
+        orders keep SEQUENCING (§4.3)
+        matching is PAUSED for the symbol
+    end note
 ```
+
+A trading halt is reachable from any session state and never interrupts the audit trail — the sequencer keeps numbering orders straight through the halt (§4.3), and lifting the halt routes through a re-opening auction rather than resuming continuous trading directly.
 
 **Why halts are a matching-engine concern, not just an "outage"**: a trading halt is a **deliberate, orderly pause** — distinct from an unplanned outage (§8's failover runbook) in one critical way: during a halt, the sequencer (§4.3) **keeps accepting and sequencing** new orders, cancels, and modifies (preserving the audit trail and each order's true arrival sequence), but the matching engine **does not process them against the book** until the halt is lifted. This means a halt is invisible to the durability/audit story — every message still gets a sequence number — but very visible to the matching story — the book's state is frozen at the halt's start. When the halt lifts (often via a re-opening auction — a single batch match, structurally identical to the closing-auction mechanism discussed in §11, but run mid-day using the order book as it stood *before* the halt plus everything queued *during* the halt), all the orders that arrived during the halt are processed in their original sequence order, exactly as if they'd arrived during continuous trading — the halt doesn't reorder anything, it only delays processing.
 
@@ -656,6 +706,25 @@ This context is what makes IEX's speed bump (§6's table) make sense as a design
 4. If the root cause is sustained network capacity exhaustion (not a transient blip), this is the trigger for War Story 2's fix (§9) — verify the gap-detection-and-resync logic is actually engaging for affected subscribers, rather than subscribers silently operating on stale book state.
 
 ### Runbook: Matching-Engine Instance Failover
+
+```mermaid
+sequenceDiagram
+    participant P as Primary (failing)
+    participant C as Consensus Layer
+    participant S as Standby Instance
+    participant L as Sequencer Log
+    participant Cl as Client
+
+    Note over P,C: lease renewal missed (TTL expires, §4.2)
+    C->>S: lease granted for symbol(s)
+    S->>L: replay from last acked seq#
+    L-->>S: caught up, no gap
+    Note over S: begins accepting new orders as owner
+    S-->>Cl: fills resume<br/>(brief latency bump, §1)
+    Note over P,S: P rejoins later as standby only —<br/>never reclaims primary
+```
+
+No orders are lost in this handoff because the durable sequencer log (§4.3), not the crashed primary's in-memory state, is authoritative — the standby only has to prove it has replayed up to the last acknowledged sequence number before it starts accepting new orders.
 
 1. Detection: the consensus layer (§4.2, cross-ref [`../consensus_algorithms/README.md`](../consensus_algorithms/README.md)) observes a failed lease renewal for one or more symbols owned by the failed instance.
 2. A standby instance — which has been continuously consuming the same sequencer log (§4.3) and applying it to its own in-memory book replica, staying within a few sequence numbers of the primary — acquires the now-expired lease(s) for the affected symbol(s).

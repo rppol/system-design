@@ -64,48 +64,60 @@
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Clients["Client Apps"]
+        direction LR
+        riderApp(["Rider App<br/>iOS / Android"])
+        driverApp(["Driver App<br/>iOS / Android"])
+    end
+
+    gateway("API Gateway<br/>Auth · Routing · Rate Limit")
+
+    subgraph Core["Core Services"]
+        direction LR
+        locationService("Location Service<br/>WebSocket receiver")
+        matchingService("Matching Service<br/>Nearest driver search")
+    end
+
+    redisGeo("Redis Geo Index<br/>GEOADD / GEORADIUS")
+    tripService("Trip Service<br/>Trip state machine")
+
+    subgraph Downstream["Downstream Services"]
+        direction LR
+        surgeService("Surge Pricing Service<br/>Supply vs demand")
+        notificationService("Notification Service<br/>Push to apps")
+        paymentService("Payment Service<br/>Post-trip billing")
+    end
+
+    riderApp --> gateway
+    driverApp --> gateway
+    gateway --> locationService
+    gateway --> matchingService
+    locationService --> redisGeo
+    locationService -.->|"via Kafka"| surgeService
+    matchingService --> tripService
+    tripService --> notificationService
+    tripService -.->|"via Kafka"| paymentService
+
+    class riderApp,driverApp io
+    class gateway req
+    class locationService,matchingService,surgeService mathOp
+    class redisGeo base
+    class tripService train
+    class notificationService req
+    class paymentService lossN
 ```
-  +------------------+               +------------------+
-  |   Rider App      |               |   Driver App     |
-  | (iOS/Android)    |               | (iOS/Android)    |
-  +--------+---------+               +---------+--------+
-           |                                   |
-           |  HTTPS REST/WebSocket             |  HTTPS REST/WebSocket
-           v                                   v
-  +------------------+               +------------------+
-  |   API Gateway    |               |   API Gateway    |
-  | (Auth, Routing,  |               | (Auth, Routing,  |
-  |  Rate Limiting)  |               |  Rate Limiting)  |
-  +--------+---------+               +---------+--------+
-           |                                   |
-           +-------------------+---------------+
-                               |
-           +-------------------v-------------------+
-           |                                       |
-  +--------v---------+                 +-----------v---------+
-  | Location Service |                 | Matching Service    |
-  | (WebSocket       |                 | (Find nearest       |
-  |  receiver)       |                 |  available drivers) |
-  +--------+---------+                 +-----------+---------+
-           |                                       |
-           v                                       v
-  +--------+----------+                +-----------+---------+
-  | Redis (Geo Index) |                | Trip Service        |
-  | Driver locations  |                | (State machine,     |
-  | (GEOADD/GEORADIUS)|                |  trip lifecycle)    |
-  +-------------------+                +-----------+---------+
-                                                   |
-           +------------------+        +-----------v---------+
-           | Surge Pricing    |        | Notification Service|
-           | Service          |        | (Push to rider/     |
-           | (Supply/demand   |        |  driver apps)       |
-           | per geohash cell)|        +---------------------+
-           +------------------+
-                                       +---------------------+
-                                       | Payment Service     |
-                                       | (Post-trip billing) |
-                                       +---------------------+
-```
+
+Rider and Driver apps enter through the same API Gateway tier, which fans out to the two hot-path services (Location, Matching); Location Service owns the Redis geo index and feeds Surge Pricing asynchronously via Kafka, while Matching Service hands off to Trip Service, which in turn drives Notification and Payment (also async, via Kafka).
 
 ---
 
@@ -120,28 +132,39 @@
 - Each connection server handles ~50K connections → need ~20 connection servers
 
 ### Location Update Pipeline
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    driverApp(["Driver App"])
+    locationService("Location Service<br/>validate + geohash")
+    redisGeo("Redis Geospatial Index<br/>GEOADD + HSET")
+    kafka("Kafka<br/>location_update topic")
+    tripService("Trip Service<br/>relay to rider")
+    analyticsService("Analytics Service<br/>GPS trace + ETA model")
+    surgeService("Surge Pricing Service<br/>density recalculation")
+
+    driverApp -->|"WebSocket frame:<br/>lat, lng, heading, speed"| locationService
+    locationService --> redisGeo
+    redisGeo --> kafka
+    kafka --> tripService
+    kafka --> analyticsService
+    kafka --> surgeService
+
+    class driverApp io
+    class locationService,analyticsService,surgeService mathOp
+    class redisGeo base
+    class kafka req
+    class tripService train
 ```
-Driver App
-    |
-    | WebSocket frame: {driver_id, lat, lng, timestamp, heading, speed}
-    v
-Location Service (Connection Server)
-    |
-    | 1. Validate driver is active
-    | 2. Convert lat/lng to geohash
-    v
-Redis Geospatial Index
-    | GEOADD drivers_online {lng} {lat} {driver_id}
-    |
-    | Also update:
-    | HSET driver:{driver_id} lat {lat} lng {lng} ts {ts} status "available"
-    v
-Kafka (location_update topic)
-    |
-    +--> Trip Service (if driver has active trip: relay location to rider)
-    +--> Analytics Service (GPS trace storage, ETA model updates)
-    +--> Surge Pricing Service (density recalculation per geohash)
-```
+
+Every location ping lands in Redis first, then fans out from a single Kafka topic to the three independent consumers that each need it for a different reason — relay, analytics, and surge — instead of the driver app writing to each directly.
 
 ### Geohash for Spatial Indexing
 
@@ -186,23 +209,38 @@ ZREM drivers_available "driver_abc"
 ### Driver-Rider Matching
 
 ### Matching Algorithm
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    rideRequest(["Ride Request<br/>rider, pickup, destination"])
+    queryDrivers("Query GEORADIUS<br/>within 2km, expand<br/>if under 3 found")
+    scoreCandidates("Score candidates<br/>ETA + rating + vehicle tier")
+    rankSelect("Rank & select top<br/>set PENDING_ACCEPTANCE")
+    notifyDriver("Push request<br/>to driver")
+    acceptDecision{"Driver accepts<br/>within 10s?"}
+    createTrip("Create trip record<br/>notify rider")
+    nextCandidate("Try next candidate")
+
+    rideRequest --> queryDrivers --> scoreCandidates --> rankSelect --> notifyDriver --> acceptDecision
+    acceptDecision -->|"accepted"| createTrip
+    acceptDecision -->|"rejected / timeout"| nextCandidate
+    nextCandidate -.->|"retry"| queryDrivers
+
+    class rideRequest io
+    class queryDrivers,scoreCandidates,rankSelect,acceptDecision mathOp
+    class notifyDriver req
+    class createTrip train
+    class nextCandidate lossN
 ```
-Ride Request Event: {rider_id, pickup_lat, pickup_lng, destination}
-    |
-    v
-Matching Service:
-  1. Query Redis GEORADIUS for available drivers within 2km (expand if < 3 results)
-  2. For each candidate driver:
-     - Calculate ETA from driver's current location to rider pickup (Google Maps API or internal)
-     - Check driver rating (exclude drivers below threshold)
-     - Check driver vehicle type matches requested service tier
-  3. Rank candidates by: ETA (primary), rating (secondary)
-  4. Select top candidate → set driver status to "PENDING_ACCEPTANCE" in Redis
-  5. Send ride request push notification to driver
-  6. Wait up to 10 seconds for driver acceptance
-  7. If accepted: create trip record, notify rider
-  8. If rejected or timeout: try next candidate
-```
+
+A rejection or a 10-second timeout doesn't fail the request — it loops back to the ranked candidate list and tries the next driver, so the rider only sees a failure if the whole candidate pool is exhausted.
 
 ### Preventing Double-Booking
 - Driver status stored in Redis with compare-and-swap (CAS):
@@ -244,6 +282,18 @@ For each geohash cell (precision 6, ~1 km²) every 5 minutes:
     ratio > 5    → 3.0x (cap at 3x in most markets)
 ```
 
+The same ratio-to-multiplier mapping, plotted as a step function, makes the flat-then-climbing shape easier to read than the table alone:
+
+```mermaid
+xychart-beta
+    title "Surge multiplier vs. demand/supply ratio"
+    x-axis ["under 0.5", "0.5-1", "1-2", "2-3", "3-5", "over 5"]
+    y-axis "Surge multiplier" 0 --> 3.5
+    bar [1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
+```
+
+The multiplier stays flat at 1.0x while supply keeps pace with demand, then steps up in five increments and hard-caps at 3.0x in most markets — a deliberate ceiling so surge never becomes unbounded during extreme demand spikes.
+
 ### Implementation
 - Surge Pricing Service subscribes to location updates and ride request events from Kafka
 - Maintains a counter per geohash cell in Redis
@@ -260,38 +310,22 @@ For each geohash cell (precision 6, ~1 km²) every 5 minutes:
 ### Trip State Machine
 
 ### States
-```
-REQUESTED
-    |
-    | Driver accepts
-    v
-DRIVER_ASSIGNED
-    |
-    | Driver starts navigating to pickup
-    v
-DRIVER_ARRIVING
-    |
-    | Driver arrives at pickup location
-    v
-DRIVER_ARRIVED (waiting for rider)
-    |
-    | Rider gets in, driver starts trip
-    v
-TRIP_STARTED
-    |
-    | Driver reaches destination
-    v
-TRIP_ENDED
-    |
-    | Payment processed
-    v
-PAID
-    |
-    | Ratings exchanged (optional)
-    v
-COMPLETED
+```mermaid
+stateDiagram-v2
+    [*] --> REQUESTED
+    REQUESTED --> DRIVER_ASSIGNED: driver accepts
+    DRIVER_ASSIGNED --> DRIVER_ARRIVING: driver navigates to pickup
+    DRIVER_ARRIVING --> DRIVER_ARRIVED: driver reaches pickup,<br/>waits for rider
+    DRIVER_ARRIVED --> TRIP_STARTED: rider gets in
+    TRIP_STARTED --> TRIP_ENDED: driver reaches destination
+    TRIP_ENDED --> PAID: payment processed
+    PAID --> COMPLETED: ratings exchanged, optional
+    COMPLETED --> [*]
 
-CANCELLED (from REQUESTED, DRIVER_ASSIGNED, or DRIVER_ARRIVING)
+    REQUESTED --> CANCELLED
+    DRIVER_ASSIGNED --> CANCELLED
+    DRIVER_ARRIVING --> CANCELLED
+    CANCELLED --> [*]
 ```
 
 ### State Transitions (Trip Service)
@@ -414,30 +448,50 @@ CREATE TABLE vehicles (
 ### Payment Processing
 
 ### Flow
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    tripEnded(["Trip Ends<br/>TRIP_ENDED"])
+    calcFare("Calculate final fare<br/>base + distance + time<br/>× surge + tolls")
+    applyPromo("Apply promotions<br/>/ discount codes")
+    chargeCard("Charge payment method<br/>via gateway")
+    decision{"Charge<br/>succeeded?"}
+    successNode("Transition to PAID<br/>send receipt")
+    retryNode("Retry up to 3×")
+    manualFlag("Flag for manual<br/>resolution")
+
+    tripEnded -.->|"Kafka event"| calcFare
+    calcFare --> applyPromo
+    applyPromo --> chargeCard
+    chargeCard --> decision
+    decision -->|"success"| successNode
+    decision -->|"failure"| retryNode
+    retryNode -.->|"still failing"| manualFlag
+
+    subgraph escrow["Escrow Model"]
+        preAuth("Pre-authorize<br/>estimated fare + buffer<br/>at trip start")
+        capture("Capture actual fare<br/>at trip end")
+        preAuth --> capture
+    end
+
+    chargeCard -.->|"captures against"| capture
+
+    class tripEnded io
+    class calcFare,applyPromo,decision mathOp
+    class chargeCard req
+    class successNode,capture train
+    class retryNode,manualFlag lossN
+    class preAuth frozen
 ```
-Trip ends (TRIP_ENDED state)
-    |
-    v
-Payment Service (triggered by Kafka event)
-    |
-    | 1. Calculate final fare:
-    |    base_fare + (per_km_rate * distance) + (per_min_rate * duration)
-    |    * surge_multiplier
-    |    + tolls (if any, from maps API)
-    v
-    | 2. Apply any promotions/discount codes
-    v
-    | 3. Charge rider's saved payment method (credit card / UPI / wallet)
-    |    via payment gateway (Stripe, Braintree, local PSP)
-    v
-    | 4. On success: transition trip to PAID, send receipt email/SMS
-    | 5. On failure: retry 3x, then flag for manual resolution
-    v
-Escrow Model:
-    - Rider's card pre-authorized at trip start (estimated fare + buffer)
-    - Final charge captured at trip end with actual fare
-    - Pre-authorization holds the amount but does not charge until capture
-```
+
+The escrow subgraph runs on a separate timeline from the main flow: pre-authorization happens back at trip start, and the charge step at trip end simply captures against that existing hold rather than opening a new authorization.
 
 ### Why Escrow/Pre-authorization?
 - Rider may have insufficient funds → catch this upfront, not after the trip
@@ -459,22 +513,35 @@ Escrow Model:
 | Surge pricing active | Nearby riders | Push notification |
 
 ### Implementation
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    kafkaTopic(["Kafka<br/>trip_state_changed"])
+    notifService("Notification Service<br/>type + tokens + prefs")
+    apns("APNs<br/>iOS push")
+    fcm("FCM<br/>Android push")
+    sms("SMS Gateway<br/>Twilio, critical alerts")
+    email("Email<br/>SES / SendGrid")
+
+    kafkaTopic --> notifService
+    notifService -->|"iOS"| apns
+    notifService -->|"Android"| fcm
+    notifService -.->|"fallback"| sms
+    notifService --> email
+
+    class kafkaTopic req
+    class notifService mathOp
+    class apns,fcm,sms,email frozen
 ```
-Kafka (trip_state_changed topic)
-    |
-    v
-Notification Service
-    |
-    | 1. Determine notification type from event
-    | 2. Look up user's device tokens (from Device Registry)
-    | 3. Check notification preferences
-    | 4. Route to appropriate channel:
-    |
-    +---> APNs (Apple Push Notification Service) — iOS
-    +---> FCM (Firebase Cloud Messaging) — Android
-    +---> SMS gateway (Twilio) — fallback for critical alerts
-    +---> Email (SES/SendGrid) — receipts, weekly summaries
-```
+
+One event fans out to four independent channels; SMS is reached only as a fallback path for critical alerts rather than every notification, which is why its edge is dashed.
 
 ---
 
@@ -527,6 +594,25 @@ Resolution 11: ~25 m² hexagons  → precise driver positioning
 - **Choice**: Use Cassandra Lightweight Transactions (LWT) for trip state transitions (at the cost of latency)
 - **Reason**: A trip double-assigned to two drivers is a terrible user experience; correctness is critical here
 - **Trade-off**: LWT adds ~10ms latency to state transitions (uses Paxos internally)
+
+Zooming out, the same strong-vs-eventual question recurs across every subsystem in this design — plotting how often each one changes against the cost of getting it wrong shows why trip state and payments land in the strong-consistency corner while the location index and surge pricing don't:
+
+```mermaid
+quadrantChart
+    title "Consistency choice by subsystem"
+    x-axis "Low update frequency" --> "High update frequency"
+    y-axis "Low cost of being wrong" --> "High cost of being wrong"
+    quadrant-1 "expensive to guarantee"
+    quadrant-2 "strong consistency"
+    quadrant-3 "low priority"
+    quadrant-4 "eventual consistency"
+    "Location Index": [0.9, 0.15]
+    "Surge Pricing": [0.75, 0.3]
+    "Trip State": [0.25, 0.85]
+    "Payments": [0.1, 0.95]
+```
+
+Trip state and payments sit in the upper-left: they change only a handful of times per trip, but a wrong answer is a correctness failure, which is why they pay the ~10ms LWT/Paxos latency tax. The location index and surge multiplier sit in the lower-right: they change every few seconds, so a stale read for a moment is a suboptimal match, not a broken one.
 
 ### Pre-authorization vs. Post-payment
 - **Choice**: Pre-authorize at trip start, capture at trip end

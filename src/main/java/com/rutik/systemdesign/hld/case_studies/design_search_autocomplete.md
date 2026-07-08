@@ -87,52 +87,50 @@ This is the number that drives everything else in this design: **500K QPS at <10
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Client<br/>debounces ~100-150ms"])
+
+    subgraph READ["Read Path (hot, under 100ms p99)"]
+        LB{"Load Balancer"}
+        Redis["Redis hot-prefix<br/>cache"]
+        TS["Typeahead Service<br/>Replica 1..N<br/>full trie, ~1.25GB"]
+    end
+
+    subgraph WRITE["Write / Update Path (offline)"]
+        Kafka(["Kafka Topic<br/>query-log events"])
+        Agg["Aggregator Pipeline<br/>Spark/Flink, ~10 min"]
+        Trend["Trending Detector<br/>~1-min window"]
+    end
+
+    Client -->|"GET /autocomplete<br/>?q=prefix"| LB
+    LB --> Redis
+    LB --> TS
+    Redis -.->|"cache miss/bypass<br/>for rare prefixes"| TS
+    TS -.->|"logs query events"| Kafka
+    Kafka --> Agg
+    Kafka --> Trend
+    Agg -.->|"hot-swap snapshot<br/>every ~10 min"| TS
+    Trend -.->|"overlay trending<br/>overrides"| TS
+
+    class Client io
+    class LB mathOp
+    class Redis base
+    class TS train
+    class Kafka base
+    class Agg mathOp
+    class Trend mathOp
 ```
-                                +----------------------+
-                                |       Client        |
-                                |  (debounces ~100-150ms |
-                                |   between keystrokes) |
-                                +----------+-----------+
-                                           |
-                                           | GET /autocomplete?q=<prefix>
-                                           v
-                          +--------------------------------+
-                          |        Load Balancer           |
-                          +----------------+----------------+
-                                           |
-                       +-------------------+-------------------+
-                       |                                       |
-                       v                                       v
-            +---------------------+                +---------------------+
-            |  Redis hot-prefix   |  cache miss /  |  Typeahead Service  |
-            |  cache (absorbs     |  bypass for    |  Replica 1..N       |
-            |  spikes on the few  |---------------> |  (in-memory TRIE,  |
-            |  hottest prefixes,  |  rare prefixes  |   FULL replica of  |
-            |  e.g. "a", "th")    |                 |   ~1.25GB index)   |
-            +---------------------+                +----------+----------+
-                       ^                                       ^
-                       |                                       | hot-swap new
-                       | overlay results                       | trie snapshot
-                       |                                       | every ~10 min
-            +---------------------+                +----------+----------+
-            |  Trending Detector  |                |  Aggregator Pipeline |
-            |  (~1-min sliding    |<---------------|  (Spark/Flink batch  |
-            |  window over the    |   query log    |   job every ~10 min: |
-            |  query-log stream;  |   stream       |   recompute top-K    |
-            |  flags sudden spikes|                |   per prefix, build  |
-            |  and OVERLAYS them  |                |   new trie snapshot) |
-            |  onto trie results) |                +----------+----------+
-            +----------+----------+                           ^
-                       ^                                       |
-                       |                                       |
-                       +------------------+--------------------+
-                                           |
-                                  +--------+---------+
-                                  |   Kafka Topic    |
-                                  |  (query log /    |
-                                  |  search events)  |
-                                  +------------------+
-```
+
+The read path (left) never waits on the write path (right): every replica already holds a complete trie, so the only synchronous hop is client to load balancer to Typeahead Service, while the Aggregator Pipeline and Trending Detector update that trie's contents out of band.
 
 ### Read Path (the hot path — must be <100ms p99)
 1. Client debounces keystrokes (waits ~100-150ms after the last keystroke before firing a request) — see §4.5 and §11 for why this matters on both sides.
@@ -363,22 +361,36 @@ The fully-replicated approach sidesteps this problem **entirely**: there is no s
 
 The trie is **never mutated in place** while serving traffic. Instead:
 
-```
- 1. Query events flow continuously into a Kafka topic ("query-log").
- 2. Every ~10 minutes, a Spark/Flink batch job:
-      a. Reads the last window of query-log events (plus carries forward
-         decayed historical counts, so popularity doesn't reset every 10 min).
-      b. Aggregates frequency counts per unique query string.
-      c. Builds a brand-new AutocompleteTrie from scratch, on a SEPARATE
-         host/process — NOT on any of the live-serving replicas.
-      d. Serializes the new trie to a compact binary snapshot (~1.25GB).
- 3. The new snapshot is distributed to every Typeahead Service replica
-    (e.g., via a blob store + pull, or a push-based fan-out).
- 4. Each replica loads the new snapshot into memory ALONGSIDE the old one
-    (briefly, during the swap window), then ATOMICALLY swaps a pointer/
-    reference so that new requests are served from the new trie, and the
-    old trie's memory is released once in-flight requests on it complete.
- 5. The old trie is garbage collected; the cycle repeats in ~10 minutes.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    K(["Kafka topic<br/>query-log"]) --> R["Read 10-min window<br/>+ decayed history"]
+
+    subgraph BATCH["Spark/Flink batch job (~10 min)"]
+        R --> AGG["Aggregate frequency<br/>per query string"]
+        AGG --> BUILD["Build new trie<br/>on separate host"]
+        BUILD --> SER["Serialize snapshot<br/>~1.25GB"]
+    end
+
+    SER --> DIST["Distribute to<br/>every replica"]
+    DIST --> LOAD["Load new snapshot<br/>alongside old"]
+    LOAD --> SWAP["Atomic pointer<br/>swap"]
+    SWAP --> GC["Old trie<br/>garbage collected"]
+    GC -.->|"repeats every ~10 min"| K
+
+    class K base
+    class R,AGG,BUILD,SER mathOp
+    class DIST req
+    class LOAD frozen
+    class SWAP train
+    class GC lossN
 ```
 
 This **build-then-swap** pattern is the answer to two of the four war stories in §9:
@@ -396,20 +408,31 @@ The 10-minute rebuild cadence is far too slow for breaking news — if a major e
 
 The **Trending Detector** is a *separate*, *faster* pipeline that runs alongside the aggregation pipeline:
 
-```
- 1. Consumes the same Kafka query-log stream as the aggregator.
- 2. Maintains a ~1-MINUTE sliding window of per-query counts.
- 3. For each query, compares its count in the current 1-minute window
-    against its expected/baseline count (e.g., its rolling average over
-    the last few hours at this time of day).
- 4. If a query's current-window count exceeds its baseline by a large
-    multiplier (e.g., 20x or more) AND crosses a minimum absolute
-    threshold (to avoid flagging low-volume noise), it is flagged as
-    "trending" and pushed to a small, fast-access "trending overrides"
-    store (e.g., a Redis hash or an in-memory map replicated via pub/sub).
- 5. The Typeahead Service, on every request, checks this trending-overrides
-    store for entries matching the current prefix and OVERLAYS them onto
-    (typically prepends them to) the trie's precomputed top-K results.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    K(["Kafka<br/>query-log stream"]) --> W["Maintain ~1-min<br/>sliding window"]
+    W --> CMP["Compare count vs<br/>historical baseline"]
+    CMP --> D{"Spike over 20x baseline<br/>and above min floor?"}
+    D -->|"no"| MISS["Not flagged<br/>(noise)"]
+    D -->|"yes"| FLAG["Flag as trending"]
+    FLAG --> STORE(["Trending-overrides<br/>store"])
+    STORE --> OVERLAY["Typeahead Service<br/>overlays onto top-K"]
+
+    class K base
+    class W,CMP mathOp
+    class D mathOp
+    class MISS lossN
+    class FLAG train
+    class STORE base
+    class OVERLAY req
 ```
 
 This overlay mechanism is what makes "breaking news appears in autocomplete within ~1 minute" possible **despite** the 10-minute full-rebuild cadence: the trending layer doesn't wait for or require a rebuild at all. It's a thin, fast, additive layer on top of the (slightly stale, by design) trie.
@@ -526,38 +549,96 @@ public class ShardedAutocompleteClient {
 }
 ```
 
+```mermaid
+sequenceDiagram
+    participant TS as Typeahead Service
+    participant S1 as Shard 1
+    participant S2 as Shard 2
+    participant SN as Shard N
+
+    TS->>S1: getTopK(prefix)
+    TS->>S2: getTopK(prefix)
+    TS->>SN: getTopK(prefix)
+    Note over TS,SN: 30ms per-shard timeout
+    S1-->>TS: local top-K (or empty on timeout)
+    S2-->>TS: local top-K (or empty on timeout)
+    SN-->>TS: local top-K (or empty on timeout)
+    Note over TS: merge via bounded min-heap<br/>O(N x topK log topK)
+    TS->>TS: return global top-K
+```
+
+Every request broadcasts to all N shards in parallel; a shard that misses its 30ms budget contributes nothing rather than blocking the merge, and the surviving results are combined with the same bounded min-heap eviction pattern as `TrieNode.offerCandidate` (§4.1).
+
 **What this costs, relative to §4.2's design**: (1) every request now fans out to N shards instead of hitting one replica — tail latency becomes `max()` over N parallel RPCs rather than a single in-process trie walk, which is why each per-shard call gets an aggressive 30ms timeout (well inside the <100ms p99 budget) and a missing/slow shard simply contributes nothing rather than blocking the merge; (2) the merge step itself is `O(N * topK log topK)` — for N=16-32 shards and topK=10, that's a few hundred heap operations per request, still cheap relative to the network round-trips; (3) operationally, this reintroduces a real shard count to manage (rebalancing, hot-shard monitoring) that §4.2 deliberately avoided. **The decision rule**: stay on §4.2's fully-replicated design as long as the trie fits comfortably in replica memory (low tens of GB is a reasonable practical ceiling); cross over to this scatter-gather design only when corpus growth genuinely forces it, since it trades a strictly simpler, lower-latency architecture for one that scales further.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SIZE(["Tracked corpus size"]) --> Q{"Trie fits in low<br/>tens of GB per replica?"}
+    Q -->|"yes (~1.25GB today, §2)"| REPL["Fully-replicated trie (§4.2)<br/>any replica answers any prefix"]
+    Q -->|"no (~125GB+ at 500M queries)"| SHARD["Shard by hash(query) (§4.6)<br/>scatter-gather + merge"]
+    REPL --> NOHOT["No shard key,<br/>no hot-shard risk"]
+    SHARD --> COST["Fan-out latency +<br/>shard-rebalancing surface"]
+
+    class SIZE io
+    class Q mathOp
+    class REPL train
+    class NOHOT train
+    class SHARD mathOp
+    class COST lossN
+```
+
+This is the single threshold that decides between the two architectures in this file: as long as the corpus stays under a low-tens-of-GB replica footprint, full replication wins outright; once it doesn't, scatter-gather is the fix, but it is bought with fan-out latency and a real shard-rebalancing surface that §4.2 was specifically designed to avoid.
 
 ### 4.7 Multi-Region Replication
 
 A single-region deployment of ~35 replicas (§10) doesn't serve a global user base well — a user in Singapore querying a Typeahead Service replica in `us-east` pays 150-200ms of pure network round-trip, which alone blows the entire <100ms p99 budget (§1) before the trie lookup even happens. The fix is the familiar one: deploy replica pools in multiple regions and route each user to the nearest one.
 
-```
-                     +-------------------------------+
-                     |   Global Aggregator (us-east)  |
-                     |   builds canonical trie         |
-                     |   snapshot every ~10 min (4.3)  |
-                     +---------------+-----------------+
-                                      |
-                snapshot pushed to each region's blob
-                store (~1.25GB, async; same-region is
-                near-instant, cross-region adds latency)
-                                      |
-        +--------------+--------------+--------------+
-        |              |              |              |
-        v              v              v              v
-  +-----------+  +-----------+  +-----------+  +-----------+
-  | us-east    |  | us-west   |  | eu-west   |  | ap-south  |
-  | replicas   |  | replicas  |  | replicas  |  | replicas  |
-  | (~12)      |  | (~9)      |  | (~9)      |  | (~5)      |
-  | local      |  | local     |  | local     |  | local     |
-  | Trending   |  | Trending  |  | Trending  |  | Trending  |
-  | Detector   |  | Detector  |  | Detector  |  | Detector  |
-  +-----------+  +-----------+  +-----------+  +-----------+
-        ^              ^              ^              ^
-        |              |              |              |
-   geo-routed     geo-routed     geo-routed     geo-routed
-   user traffic   user traffic   user traffic   user traffic
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    GA(["Global Aggregator (us-east)<br/>builds snapshot every ~10 min"])
+
+    subgraph USE["us-east (~12 replicas)"]
+        RUSE["Replicas +<br/>local Trending Detector"]
+    end
+    subgraph USW["us-west (~9 replicas)"]
+        RUSW["Replicas +<br/>local Trending Detector"]
+    end
+    subgraph EUW["eu-west (~9 replicas)"]
+        REUW["Replicas +<br/>local Trending Detector"]
+    end
+    subgraph APS["ap-south (~5 replicas)"]
+        RAPS["Replicas +<br/>local Trending Detector"]
+    end
+
+    GA -->|"snapshot push<br/>~1.25GB async"| RUSE
+    GA -->|"snapshot push<br/>~1.25GB async"| RUSW
+    GA -->|"snapshot push<br/>~1.25GB async"| REUW
+    GA -->|"snapshot push<br/>~1.25GB async"| RAPS
+
+    TUSE(["geo-routed<br/>user traffic"]) --> RUSE
+    TUSW(["geo-routed<br/>user traffic"]) --> RUSW
+    TEUW(["geo-routed<br/>user traffic"]) --> REUW
+    TAPS(["geo-routed<br/>user traffic"]) --> RAPS
+
+    class GA frozen
+    class RUSE,RUSW,REUW,RAPS train
+    class TUSE,TUSW,TEUW,TAPS io
 ```
 
 **One global aggregator, but per-region trending detectors**: the 10-minute rebuild pipeline (§4.3) runs **once, globally** — query trends for the "head" of the distribution (the top 5M queries) are overwhelmingly global or at least cross-regional (a spike in "world cup" queries matters everywhere), so running N independent rebuild pipelines per region would mostly duplicate work and risk the regions' tries drifting apart in subtle ways. The **Trending Detector (§4.4)**, by contrast, runs **independently per region** — a regional event (a local election, a regional sports final, a local weather emergency) produces a query spike that's highly relevant to *that region's* users and largely irrelevant elsewhere; a global trending detector would either dilute the regional signal (the spike is a rounding error in global volume) or, worse, surface a hyper-local term to users worldwide who have no context for it.

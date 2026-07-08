@@ -61,45 +61,67 @@ Now the collection can have multiple iterator types (e.g., `AlphabeticIterator`,
 
 ## 5. UML Structure
 
-```
-  +-----------------+            +------------------+
-  |  <<interface>>  |            |  <<interface>>   |
-  |    Iterable     |            |    Iterator<T>   |
-  +-----------------+            +------------------+
-  | +iterator():    |            | + hasNext():bool |
-  |   Iterator<T>   |            | + next(): T      |
-  +-----------------+            | + remove(): void |
-          ^                      +------------------+
-          |                               ^
-  +------------------+                   |
-  | ConcreteAggregate|        +--------------------+
-  +------------------+        | ConcreteIterator   |
-  | - elements       |        +--------------------+
-  | +iterator()      |------->| - aggregate        |
-  +------------------+        | - position: int    |
-                               | + hasNext()        |
-                               | + next()           |
-                               +--------------------+
+```mermaid
+classDiagram
+    class Iterable {
+        <<interface>>
+        +iterator() Iterator~T~
+    }
+    class Iterator~T~ {
+        <<interface>>
+        +hasNext() bool
+        +next() T
+        +remove() void
+    }
+    class ConcreteAggregate {
+        -elements
+        +iterator() Iterator~T~
+    }
+    class ConcreteIterator {
+        -aggregate
+        -int position
+        +hasNext() bool
+        +next() T
+    }
+    class Client
 
-  Client
-    |
-    |---uses---> Iterator interface only
-    |                  |
-    |              hasNext() / next()
-    |                  |
-    |           ConcreteIterator navigates
-    |                  |
-    |           ConcreteAggregate (hidden from client)
+    Iterable <|.. ConcreteAggregate
+    Iterator~T~ <|.. ConcreteIterator
+    ConcreteAggregate ..> ConcreteIterator : creates
+    ConcreteIterator --> ConcreteAggregate : aggregate
+    Client ..> Iterator~T~ : uses only
 ```
+
+*`Client` depends only on the `Iterator` interface — it never sees `ConcreteAggregate` or `ConcreteIterator` directly. `ConcreteIterator` realizes `Iterator`, holds the `aggregate` reference, and walks it via `position`, so the aggregate's `elements` stay hidden from the client.*
 
 **Java's built-in structure:**
+```mermaid
+classDiagram
+    direction LR
+    class Iterable~T~ {
+        <<interface>>
+    }
+    class Collection~T~ {
+        <<interface>>
+    }
+    class ArrayList~T~ {
+        +iterator() Iterator~T~
+    }
+    class Iterator~T~ {
+        <<interface>>
+    }
+    class ArrayListItr["ArrayList.Itr"]
+    ArrayListItr : +hasNext() bool
+    ArrayListItr : +next() T
+    ArrayListItr : +remove() void
+
+    Iterable~T~ <|-- Collection~T~
+    Collection~T~ <|.. ArrayList~T~
+    Iterator~T~ <|.. ArrayListItr
+    ArrayList~T~ ..> ArrayListItr : creates
 ```
-Iterable<T>  <----  Collection<T>  <----  ArrayList<T>
-    |                                          |
-    +-- iterator() --> Iterator<T>  <-- ArrayList$Itr
-                           |
-                      hasNext(), next(), remove()
-```
+
+*`ArrayList` never implements `Iterator` itself — `iterator()` hands back a fresh `ArrayList.Itr`, the private inner class that actually implements `hasNext()`/`next()`/`remove()`, so two independent loops over the same list never share cursor state.*
 
 ---
 
@@ -112,6 +134,34 @@ Iterable<T>  <----  Collection<T>  <----  ArrayList<T>
 5. **Client calls** `iterator.next()` to get the current element and advance the position.
 6. The iterator uses its position + the collection to retrieve elements without exposing internal structure.
 7. **Multiple iterators** can exist simultaneously on the same collection, each maintaining independent state.
+
+**Runtime collaboration:**
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Agg as ConcreteAggregate
+    participant Iter as ConcreteIterator
+
+    Client->>Agg: iterator()
+    Agg->>Iter: new ConcreteIterator(this)
+    activate Iter
+    Agg-->>Client: iterator
+    loop until exhausted
+        Client->>Iter: hasNext()
+        Iter-->>Client: true
+        Client->>Iter: next()
+        Iter->>Agg: read element at position
+        Agg-->>Iter: element
+        Iter-->>Client: element
+    end
+    Client->>Iter: hasNext()
+    Iter-->>Client: false
+    deactivate Iter
+    Note over Agg,Iter: A second iterator() call returns a new ConcreteIterator<br/>with its own position — independent, simultaneous traversal.
+```
+
+*`Client` only ever calls `hasNext()`/`next()` on `ConcreteIterator` — it never touches `ConcreteAggregate` directly. Each `next()` reads through the stored `aggregate` reference at the iterator's own `position`, so two iterators over the same collection never interfere.*
 
 **For external vs internal iterators:**
 - **External iterator** (most common): Client controls the loop (`while(it.hasNext()) it.next()`).
@@ -240,30 +290,31 @@ own a non-overlapping `[minId, maxId)` range, achieving ~500k records/sec throug
 - `Spliterator.trySplit()` overhead: ~0.1 ms per split (range arithmetic only)
 - `ConcurrentModificationException` from modifying a list during for-each: thrown in < 1 us
 
-```
-Paginated DB Spliterator — Iterator in Production
-==================================================
+**Paginated DB Spliterator — Iterator in Production**
 
-  PostgreSQL (50M orders table)
-       |
-       | JDBC: SELECT * FROM orders WHERE id > ? ORDER BY id LIMIT 1000
-       |
-  +----+------------------+
-  | OrderPageSpliterator  |   implements Spliterator<Order>
-  |  - currentPage: List  |   (holds one page of 1000 rows)
-  |  - pageIndex: int     |
-  |  - lastId: long       |   tracks cursor position across pages
-  |  - minId / maxId      |   for trySplit() parallel partitioning
-  +----+------------------+
-       |
-       | StreamSupport.stream(spliterator, parallel=true)
-       |
-  +----+--------+
-  | Java Stream |   filter / map / collect — standard Stream API
-  +-------------+
-       |
-  [ S3 CSV export / Kafka producer / aggregate count ]
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PG(["PostgreSQL<br/>50M orders table"]) -->|"JDBC keyset query<br/>(id after cursor, LIMIT 1000)"| SPL["OrderPageSpliterator<br/>currentPage, pageIndex,<br/>lastId, minId / maxId"]
+    SPL -->|"StreamSupport.stream<br/>(parallel = true)"| STR["Java Stream<br/>filter / map / collect"]
+    STR --> S3(["S3 CSV export"])
+    STR --> KAFKA(["Kafka producer"])
+    STR --> AGG(["aggregate count"])
+
+    class PG io
+    class SPL mathOp
+    class STR train
+    class S3,KAFKA,AGG req
 ```
+
+*`OrderPageSpliterator` lazily pages the 50M-row table into a parallel `Stream`, holding only ~500 KB (one page) in heap at a time instead of the ~25 GB a full load would need; `trySplit()` then hands each of 8 threads a disjoint key range.*
 
 ```java
 // Java 17 LTS — Custom Spliterator for lazy paginated PostgreSQL cursor
@@ -503,6 +554,33 @@ public void processAllOrders() {
   pull-based Iterator does not model backpressure; use `Publisher<T>` (Project Reactor) instead.
 - Iteration involves async I/O — blocking `next()` calls inside a virtual thread pool are
   acceptable (Java 21+), but reactive pipelines give finer backpressure control.
+
+**Which iteration approach for a given data source:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["Choose an<br/>iteration approach"]) --> Q1{"data larger than<br/>available heap?"}
+    Q1 -->|Yes| SPLIT["custom Spliterator<br/>+ Stream ops"]
+    Q1 -->|No| Q2{"source is push-based<br/>(WebSocket, Kafka, HTTP/2)?"}
+    Q2 -->|Yes| REACTIVE["reactive Publisher<br/>(Reactor / RxJava)"]
+    Q2 -->|No| STD["standard Iterator<br/>/ Iterable"]
+
+    class START io
+    class Q1,Q2 mathOp
+    class SPLIT train
+    class REACTIVE req
+    class STD base
+```
+
+*Reach for a custom `Spliterator` once data outgrows the heap; hand off to a reactive `Publisher` once the source itself is push-based (Kafka, WebSocket, HTTP/2) — a pull-based `Iterator`/`Spliterator` has no way to model backpressure.*
 
 ---
 

@@ -107,18 +107,40 @@ Problems with concurrency requirements need explicit treatment. The interviewer 
 
 **The atomic check-then-act pattern:**
 
-```
-BROKEN: check availability, then reserve (two separate operations)
-  Thread A: check -> available
-  Thread B: check -> available
-  Thread A: reserve -> success
-  Thread B: reserve -> success (DOUBLE BOOKING)
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant B as Thread B
+    participant S as Spot
 
-FIXED: single atomic operation
-  Thread A: compareAndSet(AVAILABLE, RESERVED) -> success
-  Thread B: compareAndSet(AVAILABLE, RESERVED) -> fails (already RESERVED)
-  Thread B: returns "no availability" to the user
+    Note over A,B: BROKEN — check and reserve are two separate operations
+    A->>S: check availability
+    S-->>A: AVAILABLE
+    B->>S: check availability
+    S-->>B: AVAILABLE
+    A->>S: reserve()
+    S-->>A: success
+    B->>S: reserve()
+    S-->>B: success (DOUBLE BOOKING)
 ```
+
+Both threads read `AVAILABLE` before either one writes, so both reservations "succeed" — the classic check-then-act race.
+
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant B as Thread B
+    participant S as Spot
+
+    Note over A,B: FIXED — a single atomic compareAndSet operation
+    A->>S: compareAndSet(AVAILABLE, RESERVED)
+    S-->>A: success
+    B->>S: compareAndSet(AVAILABLE, RESERVED)
+    S-->>B: fails (already RESERVED)
+    B->>B: returns "no availability" to the user
+```
+
+Collapsing check-and-reserve into one `compareAndSet` call makes Thread B observe the already-updated state and fail cleanly instead of double-booking.
 
 ---
 
@@ -143,69 +165,115 @@ FIXED: single atomic operation
 State machines appear in 5 of the 7 problems. Recognizing the states and transitions early is the key to choosing the right pattern.
 
 **Parking Spot:**
+```mermaid
+stateDiagram-v2
+    [*] --> AVAILABLE
+
+    AVAILABLE --> OCCUPIED : car parks
+    OCCUPIED --> AVAILABLE : car leaves
+    AVAILABLE --> RESERVED : online reservation
+    RESERVED --> OCCUPIED : reserved car arrives
+    RESERVED --> AVAILABLE : reservation expires
 ```
-AVAILABLE -> OCCUPIED (car parks)
-OCCUPIED  -> AVAILABLE (car leaves)
-AVAILABLE -> RESERVED (online reservation)
-RESERVED  -> OCCUPIED (reserved car arrives)
-RESERVED  -> AVAILABLE (reservation expires)
-```
+
+Every transition is reversible — there is no dead-end state — which is why the interview's real question is atomicity (Section 5's compareAndSet pattern), not the shape of this machine.
 
 **Elevator:**
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+
+    IDLE --> MOVING_UP : floor requested above current floor
+    IDLE --> MOVING_DOWN : floor requested below current floor
+    MOVING_UP --> DOOR_OPEN : reached target floor
+    MOVING_DOWN --> DOOR_OPEN : reached target floor
+    DOOR_OPEN --> IDLE : door closes, no pending requests
+    DOOR_OPEN --> MOVING_UP : door closes, pending request above
+    DOOR_OPEN --> MOVING_DOWN : door closes, pending request below
 ```
-IDLE       -> MOVING_UP    (floor requested above current floor)
-IDLE       -> MOVING_DOWN  (floor requested below current floor)
-MOVING_UP  -> DOOR_OPEN    (reached target floor)
-MOVING_DOWN-> DOOR_OPEN    (reached target floor)
-DOOR_OPEN  -> IDLE         (door closes, no pending requests)
-DOOR_OPEN  -> MOVING_UP    (door closes, pending request above)
-DOOR_OPEN  -> MOVING_DOWN  (door closes, pending request below)
-```
+
+`DOOR_OPEN` is the decision point: it fans back out to `IDLE` or either direction depending on what's still queued — exactly the seam SCAN/LOOK scheduling plugs into (see the Q&A below).
 
 **Vending Machine:**
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+
+    IDLE --> HAS_MONEY : money inserted
+    HAS_MONEY --> DISPENSING : item selected, sufficient funds
+    HAS_MONEY --> IDLE : cancel, money returned
+    DISPENSING --> IDLE : item dispensed, change returned
+
+    IDLE --> OUT_OF_STOCK : inventory reaches 0
+    HAS_MONEY --> OUT_OF_STOCK : inventory reaches 0
+    DISPENSING --> OUT_OF_STOCK : inventory reaches 0
+    OUT_OF_STOCK --> IDLE : inventory restocked
 ```
-IDLE         -> HAS_MONEY    (money inserted)
-HAS_MONEY    -> DISPENSING   (item selected, sufficient funds)
-HAS_MONEY    -> IDLE         (cancel; money returned)
-DISPENSING   -> IDLE         (item dispensed; change returned)
-ANY_STATE    -> OUT_OF_STOCK (inventory reaches 0)
-OUT_OF_STOCK -> IDLE         (inventory restocked)
-```
+
+The original `ANY_STATE -> OUT_OF_STOCK` shorthand is drawn here as three explicit fan-in edges — inventory can hit 0 while the machine is in any of the other three states.
 
 **ATM:**
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+
+    IDLE --> CARD_INSERTED : card inserted
+    CARD_INSERTED --> PIN_VERIFIED : correct PIN entered
+    CARD_INSERTED --> IDLE : wrong PIN 3 times, card ejected
+    PIN_VERIFIED --> TRANSACTION : amount entered
+    TRANSACTION --> IDLE : transaction complete or cancelled
 ```
-IDLE          -> CARD_INSERTED   (card inserted)
-CARD_INSERTED -> PIN_VERIFIED    (correct PIN entered)
-CARD_INSERTED -> IDLE            (wrong PIN 3 times; card ejected)
-PIN_VERIFIED  -> TRANSACTION     (amount entered)
-TRANSACTION   -> IDLE            (transaction complete or cancelled)
-```
+
+`TRANSACTION` always drains back to `IDLE`, which is exactly the state the Q&A below flags as the recovery hazard if power fails before that transition completes.
 
 **Booking System (Seat):**
+```mermaid
+stateDiagram-v2
+    [*] --> AVAILABLE
+
+    AVAILABLE --> RESERVED : user selects seat, 10-min hold
+    RESERVED --> BOOKED : user completes payment
+    RESERVED --> AVAILABLE : payment timeout, reservation expires
+    BOOKED --> CANCELLED : user cancels, refund issued
+    CANCELLED --> AVAILABLE : seat re-listed
 ```
-AVAILABLE -> RESERVED  (user selects seat; 10-min hold)
-RESERVED  -> BOOKED    (user completes payment)
-RESERVED  -> AVAILABLE (payment timeout; reservation expires)
-BOOKED    -> CANCELLED (user cancels; refund issued)
-CANCELLED -> AVAILABLE (seat re-listed)
-```
+
+`RESERVED` is the only state with two exits (payment vs. timeout) — the same compareAndSet-style atomicity from Section 5 decides which one wins when two users race for it.
 
 **Ride (Ride Sharing):**
-```
-REQUESTED      -> ACCEPTED       (driver matched and accepts)
-REQUESTED      -> CANCELLED      (rider cancels before a match is found)
-ACCEPTED       -> DRIVER_ARRIVED (driver reaches the pickup location)
-ACCEPTED       -> CANCELLED      (rider or driver cancels before pickup)
-DRIVER_ARRIVED -> IN_PROGRESS    (rider boards; trip starts)
-IN_PROGRESS    -> COMPLETED      (trip ends; fare calculated via FareStrategy)
+```mermaid
+stateDiagram-v2
+    [*] --> REQUESTED
+
+    REQUESTED --> ACCEPTED : driver matched and accepts
+    REQUESTED --> CANCELLED : rider cancels before a match is found
+    ACCEPTED --> DRIVER_ARRIVED : driver reaches the pickup location
+    ACCEPTED --> CANCELLED : rider or driver cancels before pickup
+    DRIVER_ARRIVED --> IN_PROGRESS : rider boards, trip starts
+    IN_PROGRESS --> COMPLETED : trip ends, fare calculated via FareStrategy
+
+    COMPLETED --> [*]
+    CANCELLED --> [*]
 ```
 
+`COMPLETED` and `CANCELLED` are the only absorbing states — every legal path either finishes a trip or cancels one, and `Ride.requestTransition()` rejects any edge not drawn here.
+
 **Tic-Tac-Toe (Game):**
+```mermaid
+stateDiagram-v2
+    [*] --> IN_PROGRESS
+
+    IN_PROGRESS --> IN_PROGRESS : valid move, no win yet
+    IN_PROGRESS --> X_WINS : X completes a row, column, or diagonal
+    IN_PROGRESS --> O_WINS : O completes a row, column, or diagonal
+    IN_PROGRESS --> DRAW : board full, no winner
+
+    X_WINS --> [*]
+    O_WINS --> [*]
+    DRAW --> [*]
 ```
-IN_PROGRESS -> X_WINS (X completes a row, column, or diagonal)
-IN_PROGRESS -> O_WINS (O completes a row, column, or diagonal)
-IN_PROGRESS -> DRAW   (board full, no winner)
-```
+
+`IN_PROGRESS` is the only re-entrant state — every game is a run of self-loops that ends the instant one of the three terminal states is reached.
 
 ---
 
@@ -227,119 +295,247 @@ IN_PROGRESS -> DRAW   (board full, no winner)
 
 ### Parking Lot
 
-```
-ParkingLot
-  |-- Floor[]
-        |-- ParkingSpot[]
-              |-- SpotType (enum: COMPACT, LARGE, MOTORCYCLE, DISABLED)
-              |-- SpotStatus (enum: AVAILABLE, OCCUPIED, RESERVED)
-              |-- PricingStrategy (interface)
-                    |-- HourlyPricingStrategy
-                    |-- FlatRatePricingStrategy
+```mermaid
+classDiagram
+    direction LR
 
-ParkingTicket
-  |-- spot: ParkingSpot
-  |-- entryTime: LocalDateTime
-  |-- exitTime: LocalDateTime
-  |-- totalCost: BigDecimal
+    class ParkingLot {
+        -floors: Floor[]
+    }
+    class Floor {
+        -spots: ParkingSpot[]
+    }
+    class ParkingSpot {
+        -type: SpotType
+        -status: SpotStatus
+        -pricingStrategy: PricingStrategy
+    }
+    class SpotType {
+        <<enumeration>>
+        COMPACT
+        LARGE
+        MOTORCYCLE
+        DISABLED
+    }
+    class SpotStatus {
+        <<enumeration>>
+        AVAILABLE
+        OCCUPIED
+        RESERVED
+    }
+    class PricingStrategy {
+        <<interface>>
+    }
+    class HourlyPricingStrategy
+    class FlatRatePricingStrategy
+    class ParkingTicket {
+        -spot: ParkingSpot
+        -entryTime: LocalDateTime
+        -exitTime: LocalDateTime
+        -totalCost: BigDecimal
+    }
+    class ParkingLotController {
+        +findAvailableSpot(vehicleType) ParkingSpot
+        +park(vehicle) ParkingTicket
+        +exit(ticket) BigDecimal
+    }
 
-ParkingLotController
-  |-- findAvailableSpot(vehicleType): ParkingSpot
-  |-- park(vehicle): ParkingTicket
-  |-- exit(ticket): BigDecimal (amount charged)
+    ParkingLot "1" o-- "*" Floor : aggregates
+    Floor "1" *-- "*" ParkingSpot : contains
+    ParkingSpot --> SpotType
+    ParkingSpot --> SpotStatus
+    ParkingSpot --> PricingStrategy
+    PricingStrategy <|.. HourlyPricingStrategy
+    PricingStrategy <|.. FlatRatePricingStrategy
+    ParkingLotController ..> ParkingSpot : finds
+    ParkingLotController ..> ParkingTicket : creates
+    ParkingTicket --> ParkingSpot
 ```
+
+`ParkingLotController` is the only class with behavior; everything below it — `Floor`, `ParkingSpot`, and the two `PricingStrategy` implementations — is pure structure, which is what makes adding a new `SpotType` or pricing tier an additive change instead of a rewrite (see the "add a feature" Q&A below).
 
 ### Vending Machine (State Pattern)
 
-```
-VendingMachine
-  |-- currentState: VendingMachineState (interface)
-  |-- inventory: Map<Item, Integer>
-  |-- balance: BigDecimal
+```mermaid
+classDiagram
+    class VendingMachine {
+        -currentState: VendingMachineState
+        -inventory: Map~Item, Integer~
+        -balance: BigDecimal
+    }
+    class VendingMachineState {
+        <<interface>>
+        +insertMoney(amount)
+        +selectItem(item)
+        +cancel()
+        +dispense()
+    }
+    class IdleState
+    class HasMoneyState
+    class DispensingState
+    class OutOfStockState
 
-VendingMachineState (interface)
-  |-- insertMoney(amount)
-  |-- selectItem(item)
-  |-- cancel()
-  |-- dispense()
-
-  Implementations:
-  |-- IdleState
-  |-- HasMoneyState
-  |-- DispensingState
-  |-- OutOfStockState
+    VendingMachine --> VendingMachineState : currentState
+    VendingMachineState <|.. IdleState
+    VendingMachineState <|.. HasMoneyState
+    VendingMachineState <|.. DispensingState
+    VendingMachineState <|.. OutOfStockState
 ```
+
+`VendingMachine` never branches on state itself — it just forwards to whichever `VendingMachineState` it currently holds, so the `stateDiagram-v2` in Section 7 above IS the behavior, not a separate description of it.
 
 ### Online Booking System (Concurrency + Observer)
 
+```mermaid
+classDiagram
+    class BookingSystem {
+        -seatInventory: Map~SeatId, Seat~
+        -bookingObservers: List~BookingObserver~
+    }
+    class Seat {
+        -seatId: String
+        -status: SeatStatus
+        -version: int
+    }
+    note for Seat "version is the optimistic-lock field"
+    class SeatStatus {
+        <<enumeration>>
+        AVAILABLE
+        RESERVED
+        BOOKED
+        CANCELLED
+    }
+    class BookingRecord {
+        <<Builder>>
+        -bookingId
+        -userId
+        -seatId
+        -totalPrice: BigDecimal
+        -bookingTime: LocalDateTime
+    }
+    class BookingObserver {
+        <<interface>>
+        +onBookingConfirmed(BookingRecord)
+    }
+    class EmailNotifier
+    class SMSNotifier
+    class InvoiceGenerator
+
+    BookingSystem "1" --> "*" Seat : tracks
+    BookingSystem "1" --> "*" BookingObserver : notifies
+    Seat --> SeatStatus
+    BookingObserver <|.. EmailNotifier
+    BookingObserver <|.. SMSNotifier
+    BookingObserver <|.. InvoiceGenerator
+    BookingSystem ..> BookingRecord : creates
 ```
-BookingSystem
-  |-- seatInventory: Map<SeatId, Seat>
-  |-- bookingObservers: List<BookingObserver>
 
-Seat
-  |-- seatId: String
-  |-- status: SeatStatus (enum: AVAILABLE, RESERVED, BOOKED, CANCELLED)
-  |-- version: int  <- optimistic lock field
-
-BookingRecord (Builder pattern)
-  |-- bookingId, userId, seatId
-  |-- totalPrice: BigDecimal
-  |-- bookingTime: LocalDateTime
-
-BookingObserver (interface)
-  |-- onBookingConfirmed(BookingRecord)
-  Implementations: EmailNotifier, SMSNotifier, InvoiceGenerator
-```
+`Seat.version` is the field that turns "two users book the same seat" from a race into a rejected second write — the same idea as the `compareAndSet` pattern in Section 5, applied at the database row level.
 
 ### Ride Sharing (State + Strategy + Observer + Factory)
 
+```mermaid
+classDiagram
+    direction LR
+
+    class RideSharingSystem {
+        -drivers: List~Driver~
+        -riders: List~Rider~
+        +requestRide(rider, pickup, dropoff, vehicleType) Ride
+    }
+    class VehicleFactory {
+        +create(VehicleType) Vehicle
+    }
+    class Vehicle
+    class EconomyVehicle
+    class PremiumVehicle
+    class XLVehicle
+    class Ride {
+        -state: RideState
+        -fareStrategy: FareStrategy
+        -observers: List~RideObserver~
+        +requestTransition(RideState)
+    }
+    note for Ride "requestTransition throws on illegal transition"
+    class RideState {
+        <<enumeration>>
+        REQUESTED
+        ACCEPTED
+        DRIVER_ARRIVED
+        IN_PROGRESS
+        COMPLETED
+        CANCELLED
+    }
+    class FareStrategy {
+        <<interface>>
+        +calculateFare(distanceKm, durationMin, vehicleType)
+    }
+    class StandardFareStrategy
+    class SurgePricingFareStrategy
+    class PremiumFareStrategy
+    class RideObserver {
+        <<interface>>
+        +onRideStatusChanged(Ride)
+    }
+    class RiderNotifier
+    class DriverNotifier
+    class DispatchDashboard
+
+    RideSharingSystem ..> Ride : creates
+    RideSharingSystem --> VehicleFactory : uses
+    VehicleFactory ..> Vehicle : creates
+    Vehicle <|-- EconomyVehicle
+    Vehicle <|-- PremiumVehicle
+    Vehicle <|-- XLVehicle
+    Ride --> RideState
+    Ride --> FareStrategy
+    Ride "1" --> "*" RideObserver : notifies
+    FareStrategy <|.. StandardFareStrategy
+    FareStrategy <|.. SurgePricingFareStrategy
+    FareStrategy <|.. PremiumFareStrategy
+    RideObserver <|.. RiderNotifier
+    RideObserver <|.. DriverNotifier
+    RideObserver <|.. DispatchDashboard
 ```
-RideSharingSystem
-  |-- drivers: List<Driver>
-  |-- riders: List<Rider>
-  |-- requestRide(rider, pickup, dropoff, vehicleType): Ride
 
-VehicleFactory
-  |-- create(VehicleType): Vehicle
-  Implementations: EconomyVehicle, PremiumVehicle, XLVehicle
-
-Ride
-  |-- state: RideState (REQUESTED/ACCEPTED/DRIVER_ARRIVED/IN_PROGRESS/COMPLETED/CANCELLED)
-  |-- fareStrategy: FareStrategy
-  |-- observers: List<RideObserver>
-  |-- requestTransition(RideState): throws on illegal transition
-
-FareStrategy (interface)
-  |-- calculateFare(distanceKm, durationMin, vehicleType)
-  Implementations: StandardFareStrategy, SurgePricingFareStrategy, PremiumFareStrategy
-
-RideObserver (interface)
-  |-- onRideStatusChanged(Ride)
-  Implementations: RiderNotifier, DriverNotifier, DispatchDashboard
-```
+Four patterns share one diagram: Factory (`VehicleFactory`) builds the `Vehicle`, State (`RideState`) gates what `Ride` can legally do next, Strategy (`FareStrategy`) prices the trip, and Observer (`RideObserver`) fans status out to riders, drivers, and dispatch without `Ride` knowing who's listening.
 
 ### LRU Cache (Doubly-Linked List + HashMap)
 
+```mermaid
+classDiagram
+    class LRUCacheImpl~K,V~ {
+        -capacity: int
+        -index: HashMap~K, Node~
+        -head: Node~K,V~
+        -tail: Node~K,V~
+        +get(key) V
+        +put(key, value)
+    }
+    class Node~K,V~ {
+        -key: K
+        -value: V
+        -prev: Node~K,V~
+        -next: Node~K,V~
+    }
+    class ThreadSafeLRUCache~K,V~ {
+        <<Decorator>>
+        -delegate: LRUCacheImpl~K,V~
+        -lock: ReentrantLock
+        +get(key) V
+        +put(key, value)
+    }
+    class CacheEventListener~K,V~ {
+        <<interface>>
+        +onEviction(key, value)
+    }
+
+    LRUCacheImpl~K,V~ "1" *-- "*" Node~K,V~ : index, head, tail
+    LRUCacheImpl~K,V~ ..> CacheEventListener~K,V~ : notifies on eviction
+    ThreadSafeLRUCache~K,V~ --> LRUCacheImpl~K,V~ : delegate
 ```
-LRUCacheImpl<K,V>
-  |-- capacity: int
-  |-- index: HashMap<K, Node<K,V>>     <- O(1) key lookup
-  |-- head/tail: Node<K,V>             <- sentinel nodes, MRU at head
-  |-- get(key)  -> moveToFront, return value
-  |-- put(k, v) -> if full, evictLRU (tail.prev); insert at front
 
-Node<K,V>
-  |-- key, value, prev, next
-
-ThreadSafeLRUCache<K,V>   <<Decorator>>
-  |-- delegate: LRUCacheImpl<K,V>
-  |-- lock: ReentrantLock
-  |-- get/put wrap delegate calls in lock.lock()/unlock()
-
-CacheEventListener<K,V> (interface)
-  |-- onEviction(K key, V value)
-```
+`index` gives O(1) key lookup while the `head`/`tail` sentinels keep MRU at the front and LRU at `tail.prev`, so `get()` moves a node to the front and a full `put()` evicts `tail.prev` before inserting at the front — `ThreadSafeLRUCache` wraps both operations behind a single `ReentrantLock` without touching either.
 
 ---
 
@@ -449,11 +645,39 @@ A HashMap alone gives O(1) key lookup but no ordering — you can't efficiently 
 
 Token Bucket is the most common production choice because it allows controlled bursts (a client that's been idle can "save up" tokens) while still enforcing a steady-state average rate, and it's O(1) memory per client (just `tokens` and `lastRefillTimestamp`). Fixed Window Counter is simplest but allows up to 2x the limit at window boundaries (a burst at 11:59:59 and another at 12:00:00 both succeed). Sliding Window Log is the most accurate but costs O(N) memory per client where N = requests per window — at 1000 req/min that's 1000 timestamps per client, which doesn't scale to millions of clients. Sliding Window Counter (the Cloudflare/Kong approach — weighted average of current and previous fixed windows) is the pragmatic middle ground: O(1) memory, smooths boundary bursts, slightly approximate. For the interview: name all four, then justify Token Bucket or Sliding Window Counter as the default, falling back to Sliding Window Log only if exact accuracy is a hard requirement.
 
+```mermaid
+quadrantChart
+    title "Rate Limiter Algorithms: Memory Cost vs Accuracy"
+    x-axis Low Memory Cost --> High Memory Cost
+    y-axis Low Accuracy --> High Accuracy
+    quadrant-1 Exact but costly
+    quadrant-2 Efficient sweet spot
+    quadrant-3 Cheap and imprecise
+    quadrant-4 Worst of both
+    "Fixed Window Counter": [0.15, 0.15]
+    "Token Bucket": [0.2, 0.68]
+    "Sliding Window Counter": [0.3, 0.55]
+    "Sliding Window Log": [0.88, 0.95]
+```
+
+Plotting the four algorithms this way makes the empty bottom-right quadrant the point: nobody ships an algorithm that is both expensive and imprecise, so the real decision is between the O(1) cluster (Token Bucket, Sliding Window Counter) and paying O(N) memory for Sliding Window Log's exactness.
+
 ---
 
 **Q: Tic-Tac-Toe: how do you make win-checking work for an NxN board without it becoming the bottleneck?**
 
 The naive approach rescans the entire board after every move — O(N^2) per move, so O(N^2) work just to check 4 lines through the last-placed cell. The fix is incremental counters: maintain `rowCounts[N]`, `colCounts[N]`, and two diagonal counters, each storing a running sum where X contributes +1 and O contributes -1 (or separate counters per symbol). Placing a move updates at most 4 counters in O(1), and a win is detected the instant `|counter| == N`. At N=1000, that's the difference between 1,000,000 cell reads per move and 4 integer increments. This incremental-counter technique generalizes to any "check all lines through a point" problem — it's the same idea as maintaining row/column sums for a live spreadsheet.
+
+```mermaid
+xychart-beta
+    title "Win-check cost per move: naive rescan explodes, incremental counters stay flat"
+    x-axis "Board size N" [10, 100, 1000]
+    y-axis "Cell reads per move" 0 --> 1000000
+    line [100, 10000, 1000000]
+    line [4, 4, 4]
+```
+
+The naive line is literally `N^2`; the incremental-counter line is a flat 4 regardless of `N` — the gap at `N=1000` is the exact 1,000,000-vs-4 comparison from the text above.
 
 ---
 

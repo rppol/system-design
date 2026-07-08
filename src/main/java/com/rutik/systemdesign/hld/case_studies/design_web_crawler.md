@@ -76,82 +76,55 @@ m = -n * ln(p) / (ln 2)^2
 
 ## 3. High-Level Architecture
 
-```
-                            +-----------------+
-                            |   Seed URLs     |
-                            | (manual / sitemaps)
-                            +--------+--------+
-                                      |
-                                      v
-        +-----------------------------------------------------------+
-        |                     URL FRONTIER (sharded)                  |
-        |  consistent-hash(host) -> frontier shard 0..N-1             |
-        |                                                              |
-        |   Shard k:                                                  |
-        |     Front Queues (priority by importance/freshness score)  |
-        |              |                                               |
-        |              v  (selector: weighted round-robin by priority)|
-        |     Back Queues (1 logical queue per host)                  |
-        |       host_a: [url1, url2, ...]   nextAllowedFetch[host_a]  |
-        |       host_b: [url3, ...]         nextAllowedFetch[host_b]  |
-        |       ...                                                    |
-        +---------------------------+---------------------------------+
-                                      |
-                                      v  (politeness-gated dequeue)
-        +-----------------------------------------------------------+
-        |              FETCHER WORKER POOL (per shard)                |
-        |  worker pulls next due (host, url) pair                     |
-        |    -> check robots.txt cache (fetch/parse if expired)       |
-        |    -> resolve host via shared DNS Resolver/Cache            |
-        |    -> HTTP GET with timeout + size cap                      |
-        |    -> update nextAllowedFetch[host] = now + crawlDelay[host]|
-        +---------------------------+---------------------------------+
-                                      |
-                                      v
-        +-----------------------------------------------------------+
-        |                       DEDUP STAGE                           |
-        |  1. URL-seen check        : Bloom filter (per-shard or      |
-        |                              global, ~1.2GB / billion URLs) |
-        |  2. Content-seen check    : SimHash signature + Hamming     |
-        |                              distance vs. recent signatures |
-        +---------------------------+---------------------------------+
-                                      |  (new URL + new/changed content)
-                                      v
-        +-----------------------------------------------------------+
-        |                  PARSER / EXTRACTOR                         |
-        |   - extract visible text                                    |
-        |   - extract metadata (title, meta tags, lang, last-mod)     |
-        |   - extract + normalize outbound links                      |
-        +-----+----------------------------------------+-------------+
-              |                                          |
-              v                                          v
-   +--------------------+               +----------------------------+
-   |  Raw HTML Storage   |               |  Parsed Content Store       |
-   |  (S3-compatible     |               |  (Cassandra/HBase: text,     |
-   |   blob storage,     |               |   metadata, link graph) ->   |
-   |   content-addressed)|               |   feeds downstream Search    |
-   +--------------------+               |   Index (out of scope)       |
-                                          +-------------+----------------+
-                                                         |
-                                                         v
-                                          +----------------------------+
-                                          |  LINK EXTRACTOR / NORMALIZER |
-                                          |  - resolve relative URLs     |
-                                          |  - strip tracking params      |
-                                          |  - dedup against Bloom filter |
-                                          |  - score by est. importance   |
-                                          +-------------+----------------+
-                                                         |
-                                                         |  new URLs fed back
-                                                         v
-                                          (back to URL FRONTIER, sharded
-                                           by consistent-hash(host))
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-        +-----------------------------------------------------------+
-        |          SHARED DNS RESOLVER / CACHE SERVICE                |
-        |  host -> IP, TTL-based refresh, async pre-resolution        |
-        |  (consulted by all fetcher workers across all shards)       |
-        +-----------------------------------------------------------+
+    seed(["Seed URLs<br/>manual / sitemaps"])
+
+    subgraph frontier["URL Frontier (sharded by host)"]
+        frontQ("Front Queues<br/>priority tiers")
+        backQ("Back Queues<br/>1 per host")
+        frontQ -->|"weighted<br/>round-robin"| backQ
+    end
+
+    fetcher("Fetcher Worker Pool<br/>politeness-gated")
+    dns("Shared DNS<br/>Resolver / Cache")
+
+    subgraph dedupstage["Dedup Stage"]
+        dedupUrl{"URL seen before?<br/>Bloom filter"}
+        dedupContent{"Content seen before?<br/>SimHash"}
+        dedupUrl --> dedupContent
+    end
+
+    parser("Parser / Extractor")
+    rawStore("Raw HTML Storage<br/>content-addressed blob")
+    parsedStore("Parsed Content Store<br/>Cassandra / HBase")
+    searchIndex(["Downstream<br/>Search Index"])
+    linkExtractor("Link Extractor /<br/>Normalizer")
+
+    seed --> frontQ
+    backQ -->|"politeness<br/>dequeue"| fetcher
+    fetcher -.->|"resolve host"| dns
+    fetcher --> dedupUrl
+    dedupContent -->|"new / changed"| parser
+    parser --> rawStore
+    parser --> parsedStore
+    parsedStore --> searchIndex
+    parsedStore --> linkExtractor
+    linkExtractor -.->|"new URLs<br/>fed back"| frontQ
+
+    class seed io
+    class searchIndex frozen
+    class frontQ,backQ req
+    class fetcher,dedupUrl,dedupContent,linkExtractor,parser mathOp
+    class dns,rawStore,parsedStore base
 ```
 
 **Read of the diagram**: URLs flow Seed -> Frontier -> Fetcher -> Dedup -> Parser -> Storage, with the Link Extractor closing the loop by feeding newly discovered URLs back into the Frontier. The Frontier is the system's central nervous system — it is sharded by `consistent-hash(host)` (cross-ref [`../consistent_hashing/README.md`](../consistent_hashing/README.md)) so that *all* URLs for a given host always land on the *same* shard, which is what makes per-host politeness enforceable even across hundreds of fetcher machines (§4.1, §4.6). The DNS Resolver/Cache is drawn as a separate shared service because, without it, every fetcher independently performing synchronous DNS lookups becomes a severe latency drain (§9, War Story 2).
@@ -817,6 +790,25 @@ Following the **RED method** (Rate, Errors, Duration — cross-ref [`../observab
 3. Investigate: check whether the host's `robots.txt` `Crawl-delay` changed recently, or whether the crawler's effective rate to this host briefly exceeded the configured limit (this is the failure mode that frontier sharding by host, §4.6, is specifically designed to prevent — if this runbook fires often, audit the sharding assignment for that domain).
 4. Long-term: maintain a per-host "trust" or "sensitivity" score; hosts that have triggered bans before get a more conservative default `crawlDelayMs` even after the ban lifts.
 
+Both runbooks are instances of one underlying host-health lifecycle — sustained errors or a ban signal push a host out of `Healthy` into a backoff/cooldown state, and a periodic probe is the only path back, mirroring the circuit-breaker closed/open/half-open pattern referenced in the 5xx runbook above:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+
+    Healthy --> Backoff: 5xx rate over 50%<br/>sustained 10 min
+    Healthy --> Cooldown: 403/429 spike<br/>likely IP ban
+
+    Backoff --> Backoff: still failing,<br/>double crawlDelayMs
+    Backoff --> Deprioritized: still failing after<br/>several backoff rounds
+    Deprioritized --> Probing: probe periodically<br/>every few hours
+
+    Cooldown --> Probing: cooldown elapsed<br/>e.g. 24h
+
+    Probing --> Healthy: probe succeeds
+    Probing --> Backoff: probe still fails
+```
+
 ---
 
 ## 9. Common Pitfalls & War Stories
@@ -856,6 +848,16 @@ Following the **RED method** (Rate, Errors, Duration — cross-ref [`../observab
 **Scenario**: The visited-URL Bloom filter was sized at launch for 1 billion URLs at a 1% false-positive rate (~1.2 GB, per §2's worked example). The crawl ran continuously for over a year, and the *cumulative* number of distinct URLs ever inserted into the filter (crawled, queued, and rejected-as-duplicate URLs all get inserted to prevent re-discovery) grew to roughly **4 billion** — 4x the design capacity — with no resize.
 
 **Impact**: The false-positive-rate formula `p ~= (1 - e^(-kn/m))^k` is sharply non-linear in `n/m`. At 4x the design cardinality (`n/m` quadrupled relative to the design point), the *actual* false-positive rate climbed from the targeted ~1% to **roughly 30%**. In practice, this meant that for every ~3 genuinely new URLs the Link Extractor discovered, the Bloom filter incorrectly reported "already seen" for **roughly 1 of them**, silently dropping it from the frontier forever. Because a Bloom filter false positive produces *no error, no log entry, and no metric by default* (it just looks like "this URL was already crawled"), this degradation went undetected for weeks — discovered only when crawl-coverage audits noticed entire categories of new content (e.g., a news site's articles published in the last few months) were missing from the index despite the site being actively crawled.
+
+```mermaid
+xychart-beta
+    title "Bloom Filter False-Positive Rate vs. Cardinality Growth"
+    x-axis ["1x design (1B URLs)", "4x actual (4B URLs)"]
+    y-axis "False-positive rate (%)" 0 --> 35
+    bar [1, 30]
+```
+
+**The non-linearity made this dangerous**: cardinality only grew 4x, but the false-positive rate grew roughly 30x (1% to 30%) — a small, unmonitored overrun of design capacity produced a wildly disproportionate spike in silently dropped URLs.
 
 **Fixed**: Two changes:
 1. **Monitoring**: added a metric tracking *observed insertions* into each Bloom filter against its *designed capacity*, with an alert when observed insertions exceed ~75% of design capacity (giving lead time before the false-positive rate becomes problematic) — this is the kind of metric that should sit alongside the frontier-queue-depth and dedup-hit-rate metrics in §8.

@@ -68,47 +68,61 @@
 
 ## 3. High-Level Architecture
 
-```
-                        +------------------+
-                        |    DNS / CDN     |
-                        +--------+---------+
-                                 |
-                        +--------v---------+
-                        |  Load Balancer   |
-                        +---+----------+---+
-                            |          |
-              +-------------v--+    +--v--------------+
-              |   API Servers  |    |   API Servers   |
-              | (Write Path)   |    | (Read Path)     |
-              +---+--------+---+    +--+----------+---+
-                  |        |           |          |
-     +------------v--+  +--v---------+ |   +------v-------+
-     | Tweet Service |  | Fanout     | |   | Timeline     |
-     |               |  | Service    | |   | Service      |
-     +-------+-------+  +-----+------+ |   +------+-------+
-             |                |        |          |
-     +-------v-------+  +-----v------+ |   +------v-------+
-     | Tweet Store   |  | Timeline   | |   | Timeline     |
-     | (Cassandra)   |  | Cache      | |   | Cache        |
-     +---------------+  | (Redis)    | |   | (Redis)      |
-                        +-----+------+ |   +------+-------+
-                              |        |          |
-                        +-----v--------v----------v------+
-                        |         Message Queue          |
-                        |           (Kafka)              |
-                        +----+----------+----------+-----+
-                             |          |          |
-                    +--------v--+  +----v----+  +--v---------+
-                    | Search    |  | Notif.  |  | Analytics  |
-                    | Service   |  | Service |  | Service    |
-                    | (ES)      |  |         |  |            |
-                    +-----------+  +---------+  +------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-     +-------------------+        +---------------------------+
-     |   Object Store    |        |    User Graph Service     |
-     |   (S3 + CDN)      |        |  (Redis Set / Graph DB)   |
-     +-------------------+        +---------------------------+
+    dns(["DNS / CDN"]) --> lb(Load Balancer)
+    lb --> apiWrite("API Servers<br/>Write Path")
+    lb --> apiRead("API Servers<br/>Read Path")
+
+    subgraph CORE["Core Services"]
+        tweetSvc(Tweet Service)
+        fanoutSvc(Fanout Service)
+        timelineSvc(Timeline Service)
+    end
+
+    subgraph STORE["Storage & Cache"]
+        tweetStore(Tweet Store<br/>Cassandra)
+        timelineCache(Timeline Cache<br/>Redis)
+        userGraph(User Graph Service)
+        objStore(Object Store<br/>S3 + CDN)
+    end
+
+    mq(Message Queue<br/>Kafka)
+
+    subgraph CONSUMERS["Async Consumers"]
+        search(Search Service<br/>Elasticsearch)
+        notif(Notification Service)
+        analytics(Analytics Service)
+    end
+
+    apiWrite --> tweetSvc
+    apiRead --> timelineSvc
+    tweetSvc --> tweetStore
+    tweetSvc --> mq
+    mq --> fanoutSvc
+    fanoutSvc --> userGraph
+    fanoutSvc --> timelineCache
+    timelineSvc --> timelineCache
+    mq --> search
+    mq --> notif
+    mq --> analytics
+
+    class dns io
+    class lb,fanoutSvc mathOp
+    class apiWrite,apiRead,mq req
+    class tweetSvc,timelineSvc train
+    class tweetStore,timelineCache,userGraph,objStore base
+    class search,notif,analytics mathOp
 ```
+*Write path (blue-to-teal) lands tweets in Cassandra and hands off to the Fanout Service via Kafka; read path resolves through the Timeline Service straight to the Redis cache. Search/Notification/Analytics are all async Kafka consumers off the same event stream — none sit in the request-response critical path.*
 
 ---
 
@@ -160,16 +174,57 @@ This is the most important design decision for Twitter. The challenge: when a us
 - 99% of accounts are non-celebrity, so fanout is bounded
 - Celebrities' tweets are cached individually (hot data anyway)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client requests<br/>home timeline"]) --> redisFetch(Fetch cached timeline<br/>Redis)
+    client --> identify(Identify celebrity<br/>followees)
+    identify --> celebFetch(Fetch celebrity tweets<br/>Tweet Store)
+    redisFetch --> merge((Merge<br/>+ Rank))
+    celebFetch --> merge
+    merge --> response(["Ranked feed<br/>returned to client"])
+
+    class client,response io
+    class redisFetch,celebFetch base
+    class identify,merge mathOp
+```
+*This is the read-time half of the hybrid model: the precomputed Redis timeline and a handful of live celebrity fetches (~5 per user, per "Why this works" above) run in parallel and converge at a single merge-and-rank step before the response goes back to the client.*
+
 ### Fanout Service Implementation
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    tweetSvc(Tweet Service<br/>write + publish) --> cassandra(Cassandra)
+    tweetSvc --> kafka(Kafka<br/>tweet_event)
+    kafka --> fanout(Fanout Service<br/>consumes event)
+    fanout --> userGraphSvc(User Graph Service<br/>lookup followers)
+    userGraphSvc --> decision{Follower<br/>count?}
+    decision -->|"under 10K"| push(Push tweet_id to<br/>each follower's Redis)
+    decision -->|"10K or more"| skip(Skip push<br/>pull at read time)
+
+    class tweetSvc train
+    class cassandra base
+    class kafka req
+    class fanout,decision mathOp
+    class userGraphSvc base
+    class push train
+    class skip frozen
 ```
-Fanout Service (async, via Kafka):
-  1. Tweet Service writes tweet to Cassandra
-  2. Tweet Service publishes tweet_event to Kafka
-  3. Fanout Service consumes event
-  4. Looks up followers of tweet author in User Graph Service
-  5. If follower count < 10K: push tweet_id to each follower's Redis timeline
-  6. If follower count >= 10K: skip push (pull at read time)
-```
+*The fan-out worker runs asynchronously off Kafka: it writes the tweet durably, then branches on follower count — the green push path for normal accounts, the purple skip-and-pull-later path for celebrities (the same threshold discussed in Option C above).*
 
 ---
 
@@ -315,6 +370,30 @@ Count-Min Sketch:
 - `trending:{region}` -> sorted set of (hashtag, score)
 - Refresh every 5 minutes via a cron job or stream processor output
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    firehose(["Tweet Firehose"]) --> kafkaPart(Kafka<br/>partitioned by hashtag)
+    kafkaPart --> streamCount(Stream Processing<br/>sliding window count)
+    streamCount --> aggregator(Central Aggregator<br/>flush counts)
+    aggregator --> topK(Top-K Selection<br/>heap / Count-Min Sketch)
+    topK --> redisTrending(Redis<br/>trending:region, TTL)
+    redisTrending --> api(["Trending API<br/>per region"])
+
+    class firehose,api io
+    class kafkaPart req
+    class streamCount,aggregator,topK mathOp
+    class redisTrending base
+```
+*The four steps above form one pipeline: hashtag partitioning gives counting parallelism, the sliding window bounds memory to 12 buckets, and only the winning top-K survive into the Redis-served, per-region result set.*
+
 ---
 
 ### Search
@@ -357,26 +436,34 @@ Count-Min Sketch:
 - Like, Retweet, Reply, Mention, New Follower, Direct Message
 
 ### Pipeline
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    userAction(["User Action"]) --> actionSvc(Action Service<br/>writes to DB)
+    actionSvc --> kafka(Kafka<br/>notification_events)
+    kafka --> notifSvc(Notification Service<br/>consumer)
+    notifSvc --> prefCheck(Preference Check<br/>DND, frequency)
+    prefCheck --> aggregation(Aggregation<br/>batch similar events)
+    aggregation --> router{Delivery Channel<br/>Router}
+    router --> push(Push Notification<br/>APNs / FCM)
+    router --> email(Email<br/>SendGrid / SES)
+    router --> inapp(In-app<br/>Notification Store)
+
+    class userAction io
+    class actionSvc train
+    class kafka req
+    class notifSvc,prefCheck,aggregation,router mathOp
+    class push,email io
+    class inapp base
 ```
-User Action
-    |
-    v
-Action Service (writes to DB)
-    |
-    v
-Kafka (notification_events topic)
-    |
-    v
-Notification Service (consumer)
-    |-- User preferences check (do not disturb, frequency settings)
-    |-- Aggregation (batch: "X and 5 others liked your tweet")
-    |
-    v
-Delivery Channel Router
-    |-- Push Notification (APNs / FCM)
-    |-- Email (SendGrid / SES)
-    |-- In-app notification store
-```
+*Every like/retweet/reply/mention/follow event flows through the same Kafka topic; the router fans out to whichever channels the user's preferences allow, batching similar events ("X and 5 others liked your tweet") before delivery.*
 
 ### Notification Store
 ```sql
@@ -397,29 +484,32 @@ CREATE TABLE notifications (
 ### Media Upload
 
 ### Upload Flow
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client"]) --> uploadSvc(Media Upload Service<br/>pre-signed URL)
+    uploadSvc --> s3Raw(S3<br/>raw upload)
+    s3Raw --> kafka(Kafka<br/>media_uploaded)
+    kafka --> mediaProc(Media Processing<br/>Service, async)
+    mediaProc --> imgProc(Image: resize,<br/>compress, thumbnails)
+    mediaProc --> vidProc(Video: transcode,<br/>extract thumbnail)
+    imgProc --> s3Processed(S3<br/>processed versions)
+    vidProc --> s3Processed
+    s3Processed --> cdn(["CDN<br/>CloudFront / Fastly"])
+
+    class client,cdn io
+    class uploadSvc,mediaProc,imgProc,vidProc mathOp
+    class s3Raw,s3Processed base
+    class kafka req
 ```
-Client
-  |
-  v
-Media Upload Service (pre-signed URL generation)
-  |
-  v
-S3 (raw upload directly from client using pre-signed URL)
-  |
-  v
-Kafka (media_uploaded event)
-  |
-  v
-Media Processing Service (async)
-  |-- Image: resize, compress, generate thumbnails
-  |-- Video: transcode to multiple bitrates, extract thumbnail
-  |
-  v
-S3 (processed versions stored)
-  |
-  v
-CDN (CloudFront / Fastly) — serves all media globally
-```
+*The client uploads directly to S3 via a pre-signed URL (bypassing the app servers for the heavy bytes); processing is fully async off a Kafka event, and the CDN is the only thing that ever talks to end users for media reads.*
 
 ### CDN Strategy
 - Cache media at edge nodes close to users
