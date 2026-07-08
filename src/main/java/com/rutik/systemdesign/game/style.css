@@ -956,6 +956,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body code {
   background: var(--md-code-bg); border: 1px solid var(--md-code-brd); border-radius: 4px;
   padding: 1px 5px; font-size: 12.5px; font-family: var(--mono); color: var(--md-code-fg);
+  overflow-wrap: anywhere;   /* long inline tokens break instead of forcing page h-scroll on phones */
 }
 .md-body pre {
   background: #0a0d13; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 10px;
@@ -964,6 +965,16 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body pre code {
   background: none; border: none; padding: 0; font-size: 12.5px; line-height: 1.5;
   white-space: pre; color: #e6e6e6;
+}
+/* Phones: wrap long code lines rather than trapping them behind a horizontal
+   scroll — reading source one line-fragment at a time on a narrow screen is
+   painful. ASCII diagrams (.diagram) are EXEMPT: their monospace column
+   alignment carries the meaning, so they keep white-space: pre and h-scroll. */
+@media (max-width: 640px) {
+  .md-body pre code:not(.diagram) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
 }
 .md-body hr { border: none; border-top: 1px solid var(--od-line); margin: 16px 0; }
 .md-body blockquote { border-left: 3px solid var(--md-quote); margin: 10px 0; padding: 4px 14px; color: var(--od-muted); }
@@ -981,6 +992,9 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body pre:hover .codecopy { opacity: 1; }
 .codecopy:hover { color: #e6e9f0; border-color: rgba(255, 255, 255, 0.28); }
 .codecopy.ok { color: #98c379; border-color: rgba(152, 195, 121, 0.5); opacity: 1; }
+/* Touch devices never fire :hover, so the copy button would be permanently
+   invisible — keep it faintly visible so it stays tappable on phones/tablets. */
+@media (hover: none) { .md-body pre .codecopy { opacity: 0.6; } }
 
 /* clickable ASCII diagrams */
 .md-body pre:has(code.diagram) { cursor: zoom-in; }
