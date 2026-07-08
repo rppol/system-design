@@ -348,6 +348,31 @@ above adds belt-and-suspenders to also nullify the SVG rect fill.
   This applies to edge labels too — `|"[Retrieve]"|` works because it is
   inside a quoted string, but `{[Retrieve] token\ngenerated?}` fails. Confirmed
   in Mermaid v11.16.0 (the CDN version the reader loads).
+- **Semicolon inside a `sequenceDiagram` Note/message breaks it** — `;` is a
+  statement separator in sequenceDiagram, so `Note over A,B: charge undone; reserve
+  kept` either errors or silently spawns stray floating nodes. Use a comma or em dash
+  (`—`) instead. This is the single most common non-flowchart error — five separate
+  files hit it during the lld/case-study rollout. Confirmed in v11.16.0.
+- **Reserved keywords as node/participant ids** — an id that collides with a Mermaid
+  keyword breaks parsing: `rect` (the sequenceDiagram background-block keyword),
+  `graph`/`end` (flowchart keywords), `class`/`state`. Symptom: `Expecting 'ACTOR', got
+  'rect'` or stray behaviour. Fix: rename the id (`rect`→`Sq`, `graph`→`userGraphSvc`)
+  and use `as` for the display label. A literal `$` in a classDiagram id (e.g.
+  `ArrayList$Itr`) also breaks — use a display alias `class ArrayListItr["ArrayList.Itr"]`.
+- **Colon in a `quadrantChart` quadrant label breaks the parser** — `quadrant-4 Sweet
+  spot: fast and cheap` errors on the `:` (the `title` line *does* allow a colon, the
+  `quadrant-N` labels do not). Drop the colon or replace with an em dash.
+- **classDiagram generics use tildes, not angle brackets** — write `class Node~K,V~`
+  (renders as `Node<K,V>`) and `+get(key K) V`; a raw `<`/`>` misparses as HTML. And
+  do NOT put the flowchart `classDef` palette on a `classDiagram`/`sequenceDiagram`/
+  `stateDiagram-v2` — those are not flowcharts; leave them unclassed (reader dark theme
+  styles them). Only flowcharts and decision-tree flowcharts take the One-Dark classDef.
+- **Structural linting cannot catch these — render to verify.** A classDef/bracket
+  linter validates flowchart *convention* but is blind to sequenceDiagram/classDiagram/
+  quadrantChart *syntax*. Before committing non-flowchart diagrams at scale, render each
+  block with `mermaid-cli` (`mmdc -i block.mmd -o out.svg`) pinned to v11.16.0 (the
+  reader's CDN version). The rollout's render pass caught 6 real parse errors that both
+  the linter and the authoring agents' self-checks missed.
 - **Click-to-zoom is wired globally** — `renderMermaid()` adds a click listener to
   every rendered `.mermaid` div. Clicking opens a full-screen dark overlay with the
   cloned SVG; `−`/`+` buttons and mouse-wheel adjust zoom (25% and 10% steps
