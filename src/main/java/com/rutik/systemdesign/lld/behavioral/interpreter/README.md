@@ -57,52 +57,73 @@ The Interpreter pattern maps each grammar rule directly to a class. The sentence
 
 ## 5. UML Structure
 
+```mermaid
+classDiagram
+    class Expression {
+        <<interface>>
+        +interpret(ctx: Context) Object
+    }
+    class TerminalExpression {
+        -value: Object
+        +interpret(ctx: Context) Object
+    }
+    class AndExpression {
+        -left: Expression
+        -right: Expression
+        +interpret(ctx: Context) Object
+    }
+    class OrExpression {
+        -left: Expression
+        -right: Expression
+        +interpret(ctx: Context) Object
+    }
+    class Context {
+        -variables: Map~String, Object~
+        +lookup(name) Object
+        +assign(name, value) void
+    }
+    class Client {
+        +run() void
+    }
+
+    Expression <|.. TerminalExpression
+    Expression <|.. AndExpression
+    Expression <|.. OrExpression
+    AndExpression o-- Expression : left / right
+    OrExpression o-- Expression : left / right
+    Client ..> Expression : builds & evaluates AST
+    Client ..> Context : creates
+
+    note for TerminalExpression "interpret() returns its own literal/variable value"
+    note for AndExpression "interpret() = left.interpret() AND right.interpret() (short-circuits)"
+    note for OrExpression "interpret() = left.interpret() OR right.interpret()"
+    note for Client "Builds the AST, creates Context, calls root.interpret(context)"
 ```
-    <<interface>>
-     Expression
-+──────────────────────────────+
-| + interpret(ctx: Context)    |
-+──────────────────────────────+
-           /\
-           | implements
-    _______|___________
-    |       |          |
-Terminal  NonTerminal  NonTerminal
-Expression  AndExpr    OrExpr
-+────────+ +─────────+ +─────────+
-| value  | | left    | | left    |
-|        | | right   | | right   |
-+────────+ +─────────+ +─────────+
-  interpret()  interpret()  interpret()
-  returns       calls left    calls left
-  own value     .interpret()  .interpret()
-              AND right     OR right
-              .interpret()  .interpret()
 
-
-Context
-+─────────────────────────────────+
-| - variables: Map<String,Object> |
-| + lookup(name): Object          |
-| + assign(name, value): void     |
-+─────────────────────────────────+
-
-Client
-  |
-  |--> Builds AST (parse tree of Expression objects)
-  |--> Creates Context with variable values
-  |--> Calls root.interpret(context)
-```
+Expression is realized by one terminal leaf (`TerminalExpression`) and two composite non-terminals (`AndExpression`, `OrExpression`) whose `interpret()` recurses into `left`/`right`; `Client` builds the AST, wires a `Context`, and evaluates by calling `interpret()` on the root — the three responsibilities named in Section 4's Solution.
 
 **Example AST for `a AND (b OR c)`:**
+```mermaid
+flowchart TD
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+
+    AND["AndExpression"]
+    OR["OrExpression"]
+    A(["VariableExpr 'a'"])
+    B(["VariableExpr 'b'"])
+    C(["VariableExpr 'c'"])
+
+    AND --> A
+    AND --> OR
+    OR --> B
+    OR --> C
+
+    class AND,OR mathOp
+    class A,B,C io
 ```
-        AndExpression
-        /            \
-  VariableExpr    OrExpression
-      "a"         /          \
-           VariableExpr  VariableExpr
-               "b"           "c"
-```
+
+Orange nodes are the non-terminal boolean operators; blue nodes are the terminal variable lookups they combine — the same two node categories walked in Section 6's steps 3–4.
 
 ---
 
@@ -123,6 +144,38 @@ Client
 7. **Call `interpret(context)` on the root expression.** Evaluation propagates recursively down the tree, with results bubbling back up.
 
 8. **The root expression returns the final result** of evaluating the entire sentence.
+
+**Runtime collaboration for `a AND (b OR c)`** with `a=true, b=false, c=true` — steps 5–8 traced as calls over time:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Parser
+    participant Context
+    participant AE as AndExpression
+    participant OE as OrExpression
+    participant VA as VariableExpr("a")
+    participant VB as VariableExpr("b")
+    participant VC as VariableExpr("c")
+
+    Client->>Parser: parse("a AND (b OR c)")
+    Parser-->>Client: root = AndExpression(a, OrExpression(b, c))
+    Client->>Context: assign a=true, b=false, c=true
+    Client->>AE: interpret(ctx)
+    AE->>VA: interpret(ctx)
+    VA-->>AE: true
+    Note over AE: left is true, so no short-circuit -- must still evaluate right
+    AE->>OE: interpret(ctx)
+    OE->>VB: interpret(ctx)
+    VB-->>OE: false
+    OE->>VC: interpret(ctx)
+    VC-->>OE: true
+    OE-->>AE: false OR true = true
+    AE-->>Client: true AND true = true
+    Note over AE,OE: If a were false, AndExpression short-circuits and OrExpression.interpret() never runs
+```
+
+The recursion bottoms out at the two `VariableExpr` leaves before bubbling results back up through `OrExpression` and `AndExpression`; the short-circuit note is exactly the `if (!lv) return FALSE;` line in the production `AndExpression.interpret()` code in Section 14, and it's the concrete case behind Pitfall #4's warning that evaluation order matters.
 
 ---
 
@@ -230,26 +283,41 @@ Observed numbers in a high-throughput API gateway at 200k authorization checks/s
 - Result-cache for time-invariant expressions (no method calls): another ~5x reduction on hot paths.
 - A single missing cache layer once caused a 4x CPU regression in production; fix was 8 lines (ConcurrentHashMap of parsed expressions).
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+
+    EXPR(["hasRole('ADMIN') and<br/>#userId == authentication.principal.id"])
+    PARSER["Parser<br/>(once, cached)"]
+
+    subgraph AST["AST: Composite of Expression nodes"]
+        OPAND["OpAnd"]
+        METHREF["MethodReference<br/>hasRole(ADMIN)"]
+        OPEQ["OpEqual"]
+        VARREF["VarRef(userId)"]
+        PROPREF["PropertyRef<br/>(auth.principal.id)"]
+        OPAND --> METHREF
+        OPAND --> OPEQ
+        OPEQ --> VARREF
+        OPEQ --> PROPREF
+    end
+
+    RESULT(["interpret(EvaluationContext)<br/>returns boolean"])
+
+    EXPR --> PARSER --> OPAND
+    OPAND --> RESULT
+
+    class EXPR io
+    class PARSER mathOp
+    class OPAND,OPEQ mathOp
+    class METHREF,VARREF,PROPREF req
+    class RESULT train
 ```
-   "hasRole('ADMIN') and #userId == authentication.principal.id"
-                            |
-                            v
-                       +--------+
-                       | Parser |  -- once, cached --
-                       +---+----+
-                           |
-                           v
-                       AST (Composite of Expression nodes)
-                           OpAnd
-                          /     \
-                MethodReference   OpEqual
-                  hasRole(ADMIN)   /     \
-                            VarRef(userId)  PropertyRef(auth.principal.id)
-                           |
-                           v
-                       interpret(EvaluationContext)
-                           -> boolean
-```
+
+The cached `Parser` step is the one-time cost; every one of the 200k/sec checks re-walks the already-built `OpAnd`/`OpEqual` composite tree via `interpret()`, which is why the single missing cache layer above caused a 4x CPU regression.
 
 ### Production-grade interpreter with caching and sandbox
 
@@ -413,6 +481,35 @@ Object result = parser.parseExpression(filter).getValue(sandbox, model);
 ### Interpreter vs Template Method
 - Template Method defines how an algorithm's steps are orchestrated. Interpreter defines how a sentence's sub-expressions are composed and evaluated.
 - Template Method is linear/sequential; Interpreter is recursive/tree-structured.
+
+**Quick decision guide** — which of the four patterns above actually fits the problem in front of you:
+
+```mermaid
+flowchart TD
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+
+    ROOT{"What's the shape<br/>of your problem?"}
+    Q2{"Need more than one operation<br/>over that same tree?"}
+
+    STRATEGY(["Strategy"])
+    TEMPLATE(["Template Method"])
+    BOTH(["Interpreter + Visitor"])
+    INTERPRETER(["Interpreter alone"])
+
+    ROOT -->|"one algorithm,<br/>swapped at runtime"| STRATEGY
+    ROOT -->|"fixed skeleton,<br/>overridable steps"| TEMPLATE
+    ROOT -->|"recursive, composed<br/>expression tree"| Q2
+    Q2 -->|"yes: print, optimize,<br/>type-check, evaluate"| BOTH
+    Q2 -->|"no: just evaluate"| INTERPRETER
+
+    class ROOT io
+    class Q2 mathOp
+    class STRATEGY,TEMPLATE,BOTH,INTERPRETER train
+```
+
+Composite doesn't appear as a leaf here because it isn't a competing choice — it's the structural skeleton every recursive-tree branch above (both `Interpreter alone` and `Interpreter + Visitor`) is already built on.
 
 ---
 

@@ -84,34 +84,39 @@ Each wrapper adds one layer of behavior. The chain is transparent — everything
 
 ## 5. UML Structure
 
-```
-         +----------------------+
-         |   <<interface>>      |
-         |     Component        |
-         +----------------------+
-         | +operation()         |
-         +----------------------+
-                  ^
-        __________|______________
-       |                         |
-+--------------+       +-------------------+
-| ConcreteComp |       |  Decorator        |  (abstract)
-| (FileStream) |       +-------------------+
-+--------------+       | -wrapped: Component|
-| +operation() |       | +operation()       |  delegates to wrapped.operation()
-+--------------+       +-------------------+
-                                ^
-               _________________|_________________
-              |                 |                  |
-  +-------------------+ +-------------------+ +-------------------+
-  | ConcreteDecorator | | ConcreteDecorator | | ConcreteDecorator |
-  |   (Buffered)      | |   (Gzip)          | |   (Checksum)      |
-  +-------------------+ +-------------------+ +-------------------+
-  | +operation()      | | +operation()      | | +operation()      |
-  +-------------------+ +-------------------+ +-------------------+
+```mermaid
+classDiagram
+    class Component {
+        <<interface>>
+        +operation()
+    }
+    class FileStream {
+        +operation()
+    }
+    class Decorator {
+        <<abstract>>
+        -wrapped : Component
+        +operation()
+    }
+    class BufferedDecorator {
+        +operation()
+    }
+    class GzipDecorator {
+        +operation()
+    }
+    class ChecksumDecorator {
+        +operation()
+    }
 
-Client call flow: Checksum.op() -> Gzip.op() -> Buffered.op() -> File.op()
+    Component <|.. FileStream
+    Component <|.. Decorator
+    Decorator o-- Component : wraps
+    Decorator <|-- BufferedDecorator
+    Decorator <|-- GzipDecorator
+    Decorator <|-- ChecksumDecorator
 ```
+
+*`Component` defines the shared interface; `FileStream` is the ConcreteComponent supplying the base behavior. The abstract `Decorator` implements `Component` and aggregates (`wraps`) another `Component`, delegating every call to it — `BufferedDecorator`, `GzipDecorator`, and `ChecksumDecorator` are ConcreteDecorators, each adding exactly one behavior before or after calling `wrapped.operation()`. A fully-wrapped stream's call flow is `Checksum.operation() -> Gzip.operation() -> Buffered.operation() -> FileStream.operation()` — see the sequence diagram in Section 6 for the pre/post-behavior mechanics.*
 
 **The decorator's `operation()` can:**
 - Add behavior **before** delegating: `preprocess(); wrapped.operation();`
@@ -132,6 +137,29 @@ Client call flow: Checksum.op() -> Gzip.op() -> Buffered.op() -> File.op()
 5. **Innermost concrete component** executes the base operation.
 6. **Results bubble back up** through the chain; each decorator adds post-behavior to the result as it returns.
 7. **Client receives** the result after all decorators have processed it.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Checksum as ChecksumDecorator
+    participant Gzip as GzipDecorator
+    participant Buffered as BufferedDecorator
+    participant File as FileStream
+
+    Client->>Checksum: operation()
+    Checksum->>Checksum: pre-behavior
+    Checksum->>Gzip: wrapped.operation()
+    Gzip->>Gzip: pre-behavior
+    Gzip->>Buffered: wrapped.operation()
+    Buffered->>Buffered: pre-behavior
+    Buffered->>File: wrapped.operation()
+    File-->>Buffered: base result
+    Buffered-->>Gzip: result (post-behavior applied)
+    Gzip-->>Checksum: result (post-behavior applied)
+    Checksum-->>Client: result (post-behavior applied)
+```
+
+*The same `Checksum -> Gzip -> Buffered -> File` chain from Section 5, seen at runtime: each decorator's pre-behavior fires on the way in, `wrapped.operation()` delegates one layer deeper, and the result bubbles back out through every decorator's post-behavior before reaching the Client — exactly the mechanic steps 3-6 above describe in prose.*
 
 The key insight: every object in the chain sees the same interface. Decorators are stackable because they wrap and expose the same interface. The chain length is variable and chosen at runtime.
 
@@ -231,34 +259,31 @@ The key insight: every object in the chain sees the same interface. Decorators a
 
 A backend service makes ~100k HTTP calls/day to a flaky third-party payments API. The team needs retries with exponential backoff, a circuit breaker to fail fast during outages, Prometheus metrics on every call, and a mutating header injector for the auth token. Each concern must be independently testable, removable, and orderable — and a junior engineer should be able to disable retries in dev without touching production code. Decorator stack: `MetricsClient -> CircuitBreakerClient -> RetryClient -> AuthClient -> BaseHttpClient`. After deployment, the retry decorator dropped the user-visible error rate from 2.0% to 0.10% (transient 502s now recovered); the circuit breaker bounded outage blast radius from 30s of timeouts to 5s of fast-fail.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req(["call(req)"]) --> Metrics("MetricsClient<br/>records latency, status")
+    Metrics --> CB("CircuitBreakerClient<br/>short-circuits when open")
+    CB --> Retry("RetryClient<br/>3 tries, exp backoff")
+    Retry --> Auth("AuthClient<br/>adds Authorization header")
+    Auth --> BaseHttp(["BaseHttpClient<br/>real network I/O (java.net.http)"])
+
+    class Req req
+    class Metrics base
+    class CB mathOp
+    class Retry lossN
+    class Auth frozen
+    class BaseHttp io
 ```
-              call(req)
-                |
-                v
-       +----------------+
-       | MetricsClient  |  records latency, status code
-       +-------+--------+
-               | call(req)
-               v
-       +-------------------+
-       | CircuitBreakerCli |  short-circuits when open
-       +-------+-----------+
-               | call(req)
-               v
-       +----------------+
-       | RetryClient    |  3 tries, exp backoff
-       +-------+--------+
-               | call(req)
-               v
-       +----------------+
-       | AuthClient     |  adds Authorization header
-       +-------+--------+
-               | call(req)
-               v
-       +----------------+
-       | BaseHttpClient |  real network I/O (java.net.http)
-       +----------------+
-```
+
+*The call threads through every decorator in a fixed order before reaching the real network I/O — the retry decorator dropped the user-visible error rate from 2.0% to 0.10%, and the circuit breaker bounded outage blast radius from 30s of timeouts to 5s of fast-fail (numbers from the scenario above).*
 
 ```java
 public interface HttpClient {

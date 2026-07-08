@@ -58,59 +58,68 @@ New operations are added by creating new Visitor implementations — no modifica
 
 ## 5. UML Structure
 
+```mermaid
+classDiagram
+    class Visitor {
+        <<interface>>
+        +visitConcreteElementA(a)
+        +visitConcreteElementB(b)
+    }
+    class ConcreteVisitor1 {
+        +visitConcreteElementA(a)
+        +visitConcreteElementB(b)
+    }
+    class ConcreteVisitor2 {
+        +visitConcreteElementA(a)
+        +visitConcreteElementB(b)
+    }
+    class Element {
+        <<interface>>
+        +accept(v Visitor) void
+    }
+    class ConcreteElementA {
+        +accept(v Visitor) void
+        +operationA()
+    }
+    class ConcreteElementB {
+        +accept(v Visitor) void
+        +operationB()
+    }
+    class ObjectStructure {
+        -elements List~Element~
+        +accept(v Visitor) void
+    }
+    class Client
+
+    Visitor <|.. ConcreteVisitor1 : implements
+    Visitor <|.. ConcreteVisitor2 : implements
+    Element <|.. ConcreteElementA : implements
+    Element <|.. ConcreteElementB : implements
+    ObjectStructure "1" o-- "*" Element : holds
+    Client ..> ConcreteVisitor1 : uses
+    Client ..> ConcreteVisitor2 : uses
+    Client ..> ObjectStructure : uses
 ```
-    <<interface>>
-       Visitor
-+────────────────────────────+
-| + visitConcreteElementA(a) |
-| + visitConcreteElementB(b) |
-+────────────────────────────+
-          /\
-          |  implements
-   _______|_______
-   |              |
-ConcreteVisitor1  ConcreteVisitor2
-+ visitConcreteElementA(a)  { ... }
-+ visitConcreteElementB(b)  { ... }
 
-
-    <<interface>>
-       Element
-+───────────────────────────+
-| + accept(v: Visitor): void |
-+───────────────────────────+
-          /\
-          |  implements
-   _______|_______
-   |              |
-ConcreteElementA  ConcreteElementB
-+ accept(v) { v.visitConcreteElementA(this); }
-+ accept(v) { v.visitConcreteElementB(this); }
-+ operationA()               + operationB()
-
-
-ObjectStructure
-+─────────────────────────────────────+
-| - elements: List<Element>           |
-| + accept(v: Visitor): void          |  <-- iterates elements, calls accept(v)
-+─────────────────────────────────────+
-
-Client ──uses──> ConcreteVisitor
-Client ──uses──> ObjectStructure
-```
+Two independent hierarchies meet only through `accept()`/`visit()`: adding a third `ConcreteVisitor` touches nothing in the Element hierarchy, but adding a third concrete element forces every existing `ConcreteVisitor` to grow a new method — the double-dispatch tradeoff made visible.
 
 **Double Dispatch Flow:**
+```mermaid
+sequenceDiagram
+    participant Client
+    participant ObjectStructure as objectStructure
+    participant ElementA as elementA
+    participant Visitor as visitor
+
+    Client->>ObjectStructure: accept(visitor)
+    ObjectStructure->>ElementA: accept(visitor)
+    Note right of ElementA: 1st dispatch — selects by element's runtime type
+    ElementA->>Visitor: visitA(this)
+    Note right of Visitor: 2nd dispatch — selects by visitor's type
+    Note over Visitor: visitor's logic for element A executes
 ```
-Client
-  |
-  |--> objectStructure.accept(visitor)
-         |
-         |--> elementA.accept(visitor)       [1st dispatch: element type]
-                |
-                |--> visitor.visitA(this)    [2nd dispatch: visitor type]
-                        |
-                        |--> (visitor's logic for element A executes)
-```
+
+Two single dispatches compose into one double dispatch: `elementA.accept(visitor)` resolves by the element's runtime type, then `visitor.visitA(this)` resolves by the visitor's type — together picking the exact operation for that element without any `instanceof` check.
 
 ---
 
@@ -236,27 +245,34 @@ Observed numbers in a B2B SaaS at 500 queries/sec sustained, 4k QPS burst:
 - Cache hit on prepared statement skips parse entirely (~0.05 ms total visitor cost).
 - Zero tenant-data-leakage incidents in 18 months post-adoption vs 4 in the prior year using string concatenation.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sqlIn(["user SQL string"])
+    parser(Parser)
+    ast("Query AST<br/>SelectNode + FromNode<br/>+ WhereNode + JoinNode")
+    visitorNode("TenantFilterVisitor<br/>rewrites every SelectNode")
+    rewritten("Rewritten AST")
+    sqlOut("SQL string")
+    jdbc(["JDBC"])
+
+    sqlIn --> parser --> ast --> visitorNode --> rewritten --> sqlOut --> jdbc
+
+    class sqlIn,sqlOut io
+    class jdbc frozen
+    class ast base
+    class parser,visitorNode mathOp
+    class rewritten train
 ```
-   user SQL string
-        |
-        v
-   +--------+      +------------------+
-   | Parser | ---> | Query AST        |
-   +--------+      |  SelectNode      |
-                   |   +-- FromNode   |
-                   |   +-- WhereNode  |
-                   |   +-- JoinNode   |
-                   +--------+---------+
-                            |
-                            v
-                   +------------------+
-                   | TenantFilter     |   <-- Visitor
-                   |  Visitor         |       rewrites every SelectNode
-                   +--------+---------+
-                            |
-                            v
-                   Rewritten AST -> SQL string -> JDBC
-```
+
+Each stage maps to the latency budget above: parsing (~0.3 ms) builds the AST, `TenantFilterVisitor` rewrites every `SelectNode` (< 0.5 ms p99), and re-serialisation (~0.4 ms) hands a tenant-safe query to JDBC.
 
 ### Production-grade visitor + element
 
@@ -400,6 +416,38 @@ public final class JoinNode extends SqlNode {
 **Move TO Visitor when**: you have a stable element hierarchy and a growing set of operations over it (AST analysis, serialisation, validation, rewriting); you want each operation isolated in one class for testing; the compiler should enforce "every operation handles every element". We moved to Visitor when our `if (node instanceof ...)` chains reached 12 sites and a tenant-leak post-mortem traced to one site missing `UnionNode`.
 
 **Move AWAY FROM Visitor when**: the element hierarchy churns frequently (each new element forces edits in N visitors); you only have one operation (just put a method on the elements); you need polymorphism over operations as well as elements (Visitor is awkward — consider pattern matching with sealed types in Java 21+, which gives compiler-enforced exhaustiveness without the boilerplate).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["New operation needed<br/>over the hierarchy"])
+    q1{"How many unrelated<br/>operations, now + planned?"}
+    q2{"Does the element hierarchy<br/>gain new types often?"}
+    plain("Add a method directly<br/>on the elements")
+    modern("Sealed interfaces + switch<br/>pattern matching, Java 21+")
+    visitorPick(["Use Visitor:<br/>one ConcreteVisitor per operation"])
+
+    start --> q1
+    q1 -->|"one or two"| plain
+    q1 -->|"many, growing"| q2
+    q2 -->|"yes, churns often"| modern
+    q2 -->|"no, stable"| visitorPick
+
+    class start io
+    class q1,q2 mathOp
+    class plain base
+    class modern frozen
+    class visitorPick train
+```
+
+The two axes that decide Visitor's fit — operation count and element-hierarchy churn — from the migration rules above: stable types with many operations favor Visitor, while frequent churn favors Java 21+ sealed types and pattern matching instead.
 
 ---
 

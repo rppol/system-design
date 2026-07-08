@@ -82,6 +82,27 @@ public class UserService {
 - Unit testing `UserService.registerUser()` requires a running MySQL instance and SMTP server
 - `UserService` has multiple reasons to change: business rules, DB technology, email technology
 
+```mermaid
+classDiagram
+    direction LR
+    class UserService {
+        -MySQLUserRepository userRepository
+        -SmtpEmailService emailService
+        +registerUser(email, name)
+    }
+    class MySQLUserRepository {
+        +findById(id) User
+        +save(user)
+    }
+    class SmtpEmailService {
+        +sendEmail(to, subject, body)
+    }
+    UserService --> MySQLUserRepository : constructs directly
+    UserService --> SmtpEmailService : constructs directly
+```
+
+The violation made visible: `UserService` (high-level policy) holds direct references to the concrete `MySQLUserRepository` and `SmtpEmailService` (low-level detail) — swapping either implementation means editing `UserService` itself.
+
 ### Solution: Refactored Code (DIP Compliant)
 
 ```java
@@ -187,6 +208,50 @@ public class Application {
 }
 ```
 
+```mermaid
+classDiagram
+    class UserService {
+        -UserRepository userRepository
+        -EmailService emailService
+        +registerUser(email, name)
+    }
+    class UserRepository {
+        <<interface>>
+        +findById(id) User
+        +save(user)
+        +existsByEmail(email) boolean
+    }
+    class EmailService {
+        <<interface>>
+        +sendEmail(to, subject, body)
+    }
+    class MySQLUserRepository {
+        +findById(id) User
+        +save(user)
+        +existsByEmail(email) boolean
+    }
+    class PostgreSQLUserRepository {
+        +findById(id) User
+        +save(user)
+        +existsByEmail(email) boolean
+    }
+    class SmtpEmailService {
+        +sendEmail(to, subject, body)
+    }
+    class SendGridEmailService {
+        +sendEmail(to, subject, body)
+    }
+
+    UserService --> UserRepository : depends on abstraction
+    UserService --> EmailService : depends on abstraction
+    UserRepository <|.. MySQLUserRepository
+    UserRepository <|.. PostgreSQLUserRepository
+    EmailService <|.. SmtpEmailService
+    EmailService <|.. SendGridEmailService
+```
+
+The DIP-compliant structure: `UserService` depends only on the `UserRepository` and `EmailService` abstractions; `MySQLUserRepository`/`PostgreSQLUserRepository` and `SmtpEmailService`/`SendGridEmailService` each realize (implement) those interfaces and can be swapped without touching `UserService`.
+
 Now `UserService` has one reason to change: business rules. DB and email technology can change freely.
 
 ---
@@ -268,23 +333,29 @@ public class PushNotificationService implements NotificationService { /* Firebas
 
 ## A Realistic Layered Architecture
 
-```
-+-----------------------------------+
-|        Presentation Layer         |  (Controllers)
-+-----------------------------------+
-             depends on
-+-----------------------------------+
-|         Application Layer         |  (Use Cases / Services)
-|    depends on interfaces only     |
-+-----------------------------------+
-             depends on
-+-----------------------------------+
-|        Domain Interfaces          |  (Repository, Gateway interfaces)
-+-----------------------------------+
-             implemented by
-+-----------------------------------+
-|       Infrastructure Layer        |  (JPA, REST clients, SMTP)
-+-----------------------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P("Presentation Layer<br/>(Controllers)")
+    A("Application Layer<br/>(Use Cases / Services)<br/>depends on interfaces only")
+    D("Domain Interfaces<br/>(Repository, Gateway interfaces)")
+    I("Infrastructure Layer<br/>(JPA, REST clients, SMTP)")
+
+    P -- "depends on" --> A
+    A -- "depends on" --> D
+    I -- "implements" --> D
+
+    class P io
+    class A req
+    class D base
+    class I frozen
 ```
 
 Arrows point inward. Infrastructure implements domain interfaces — the domain never imports infrastructure.

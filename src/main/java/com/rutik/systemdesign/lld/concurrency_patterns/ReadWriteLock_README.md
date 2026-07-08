@@ -27,16 +27,31 @@ Allow multiple concurrent readers OR one exclusive writer, but never both simult
 
 ## Lock Semantics
 
+```mermaid
+sequenceDiagram
+    participant A as Reader A
+    participant B as Reader B
+    participant L as RWLock
+    participant W as Writer W
+
+    Note over L: unlocked
+    A->>L: acquire read lock
+    Note over L: 1 reader
+    B->>L: acquire read lock
+    Note over L: 2 readers (concurrent reads allowed)
+    W->>L: try acquire write lock
+    Note over L: 2 readers, writer BLOCKED (waiting)
+    A->>L: release read lock
+    Note over L: 1 reader, writer still waiting
+    B->>L: release read lock
+    Note over L: 0 readers, writer acquires
+    L-->>W: write lock granted
+    Note over L: 1 writer (exclusive — no readers allowed)
+    W->>L: release write lock
+    Note over L: unlocked, readers can proceed
 ```
-State: unlocked
-  Reader A acquires → State: 1 reader ✓
-  Reader B acquires → State: 2 readers ✓ (concurrent reads allowed!)
-  Writer W tries    → State: 2 readers, writer BLOCKED (waiting)
-  Reader A releases → State: 1 reader, writer still waiting
-  Reader B releases → State: 0 readers, writer acquires
-  Writer W acquired → State: 1 writer (exclusive — no readers allowed)
-  Writer W releases → State: unlocked, readers can proceed
-```
+
+Two readers hold the lock concurrently while the writer blocks; once both readers release, the writer gets exclusive access, and releasing the write lock returns the lock to unlocked for the next reader or writer.
 
 ---
 
@@ -140,6 +155,33 @@ if (!lock.validate(stamp)) {
 - You can handle the extra complexity
 - Writes are rare (< 1%)
 
+The three bullet lists above collapse into one decision path:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["pick a locking<br/>strategy"]) --> Q1{"mostly writes, or<br/>critical section under 100ns?"}
+    Q1 -->|"yes"| Sync(["synchronized"])
+    Q1 -->|"no"| Q2{"read:write over 5:1<br/>and reads non-trivial?"}
+    Q2 -->|"no"| Sync
+    Q2 -->|"yes"| Q3{"extreme performance needed,<br/>writes under 1%?"}
+    Q3 -->|"no"| RWL(["ReadWriteLock"])
+    Q3 -->|"yes"| Stamped(["StampedLock<br/>optimistic read"])
+
+    class Start io
+    class Q1,Q2,Q3 mathOp
+    class Sync,RWL,Stamped train
+```
+
+Short or write-heavy critical sections stay with `synchronized`; read-heavy contention (over 5:1) moves to `ReadWriteLock`; rare-write, performance-critical code graduates to `StampedLock`'s optimistic reads.
+
 ---
 
 ## Common Pitfalls
@@ -164,6 +206,27 @@ try {
 3. **Lock upgrade deadlock**: Thread A holds read lock, tries to upgrade to write lock. Thread B also holds read lock, also tries to upgrade. Neither can proceed — deadlock.
 
 4. **Holding locks across I/O**: Never hold a lock while doing I/O (database call, HTTP request) — too long, too much contention.
+
+The circular wait behind pitfall 3 (lock upgrade deadlock) looks like this:
+
+```mermaid
+sequenceDiagram
+    participant TA as Thread A
+    participant TB as Thread B
+    participant L as RWLock
+
+    TA->>L: acquire read lock
+    Note over L: 1 reader (A)
+    TB->>L: acquire read lock
+    Note over L: 2 readers (A, B)
+    TA->>L: try upgrade to write lock
+    Note over TA: BLOCKED — waiting for B's read lock
+    TB->>L: try upgrade to write lock
+    Note over TB: BLOCKED — waiting for A's read lock
+    Note over TA,TB: circular wait — neither releases, deadlock
+```
+
+Each thread holds a read lock the other needs before it can upgrade — a circular wait that neither `ReentrantReadWriteLock` nor manual locking can resolve, which is why lock upgrade is unsupported.
 
 ---
 

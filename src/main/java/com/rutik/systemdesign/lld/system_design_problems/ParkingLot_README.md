@@ -38,58 +38,99 @@ Design a parking lot system that can:
 
 ## ASCII Class Diagram
 
+```mermaid
+classDiagram
+    direction LR
+
+    class ParkingLot {
+        <<main>>
+    }
+
+    class ParkingLotSystem {
+        <<Singleton>>
+        -floors List
+        -activeTickets Map
+        -pricingStrategy
+        +parkVehicle()
+        +exitVehicle()
+    }
+
+    class PricingStrategy {
+        <<interface>>
+        +calculateFee(duration, spotType)
+    }
+
+    class HourlyPricing
+    class DailyPricing
+    class WeekendPricing
+
+    class ParkingFloor {
+        -floorId
+        -spotsByType
+        -observers
+    }
+
+    class ParkingSpot {
+        <<abstract>>
+    }
+    class SmallSpot
+    class MediumSpot
+    class LargeSpot
+
+    class Vehicle {
+        <<abstract>>
+    }
+    class Motorcycle
+    class Car
+    class Truck
+
+    class ParkingSpotObserver {
+        <<interface>>
+        +onAvailability()
+    }
+
+    class DisplayBoard {
+        -boardId
+        +onAvailability()
+    }
+
+    class ParkingTicket {
+        -ticketId
+        -vehicle
+        -spot
+        -entryTime
+        -status
+        +markPaid()
+        +getDuration()
+    }
+
+    class VehicleFactory {
+        <<Factory>>
+        +create(type, p)
+    }
+
+    ParkingLot ..> ParkingLotSystem : getInstance()
+    ParkingLotSystem --> PricingStrategy : uses
+    ParkingLotSystem "1" o-- "*" ParkingFloor : aggregates
+    ParkingLotSystem "1" --> "*" ParkingTicket : activeTickets
+    PricingStrategy <|.. HourlyPricing
+    PricingStrategy <|.. DailyPricing
+    PricingStrategy <|.. WeekendPricing
+    ParkingFloor "1" *-- "*" ParkingSpot : spotsByType
+    ParkingFloor "1" o-- "*" ParkingSpotObserver : observers
+    ParkingSpot <|-- SmallSpot
+    ParkingSpot <|-- MediumSpot
+    ParkingSpot <|-- LargeSpot
+    Vehicle <|-- Motorcycle
+    Vehicle <|-- Car
+    Vehicle <|-- Truck
+    ParkingSpotObserver <|.. DisplayBoard
+    ParkingTicket --> Vehicle : vehicle
+    ParkingTicket --> ParkingSpot : spot
+    VehicleFactory ..> Vehicle : creates
 ```
-+------------------+          +---------------------+
-|   ParkingLot     |  Singleton|  ParkingLotSystem   |
-|   (public main)  +---------->| -floors: List       |
-+------------------+          | -activeTickets: Map  |
-                               | -pricingStrategy     |
-                               | +parkVehicle()       |
-                               | +exitVehicle()       |
-                               +----------+----------+
-                                          |
-                           uses           |  aggregates
-                    +----------+    +-----+--------+
-                    | Pricing  |    | ParkingFloor |
-                    | Strategy |    | -floorId     |
-                    +-----+----+    | -spotsByType |
-                          |         | -observers   |
-              +-----------+---------+------+-------+
-              |           |                |
-     +--------+--+  +-----+-----+  +------+----------+
-     |HourlyPricing| |DailyPricing| |WeekendPricing  |
-     +-----------+  +-----------+  +----------------+
 
-+---------------+          +------------------+
-|  ParkingSpot  |          |    Vehicle       |
-| (abstract)    |          | (abstract)       |
-+---+---+---+--+          +--+---+---+-------+
-    |   |   |                 |   |   |
-  Small Med Large         Moto Car Truck
-  Spot  Spot Spot          (concrete subclasses)
-
-+-------------------+       +------------------+
-| ParkingSpotObserver|<------| DisplayBoard     |
-| (interface)        |       | -boardId         |
-| +onAvailability()  |       | +onAvailability()|
-+-------------------+       +------------------+
-
-+------------------+
-|  ParkingTicket   |
-| -ticketId        |
-| -vehicle         |
-| -spot            |
-| -entryTime       |
-| -status          |
-| +markPaid()      |
-| +getDuration()   |
-+------------------+
-
-+-----------------+
-|  VehicleFactory |   <<Factory>>
-| +create(type,p) |
-+-----------------+
-```
+*`ParkingLotSystem` is the Singleton coordinator: it aggregates `ParkingFloor`s, delegates fee math to a swappable `PricingStrategy` (Strategy pattern), and each floor fans availability changes out to its `ParkingSpotObserver`s such as `DisplayBoard` (Observer pattern); `VehicleFactory` centralises which `Vehicle` subclass gets constructed (Factory pattern).*
 
 ---
 
@@ -141,35 +182,49 @@ Design a parking lot system that can:
 
 ## State / Flow
 
-```
-Vehicle arrives
-      |
-      v
- parkVehicle(vehicle)
-      |
-      +--[floor loop]--> findAvailableSpot(type)
-      |                        |
-      |                   [spot found]
-      |                        |
-      |               floor.parkVehicle(spot, vehicle)
-      |                        |
-      |               notifyObservers()  <--- DisplayBoard updated
-      |                        |
-      +<---- ParkingTicket created & returned
+**Park flow:**
 
-Vehicle departs
-      |
-      v
- exitVehicle(ticket)
-      |
-      +---> pricingStrategy.calculateFee(duration, spotType)
-      |
-      +---> ticket.markPaid(fee)
-      |
-      +---> floor.vacateSpot(spot)
-                  |
-            notifyObservers()  <--- DisplayBoard updated
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Lot as ParkingLotSystem
+    participant Floor as ParkingFloor
+    participant Board as DisplayBoard
+
+    Client->>Lot: parkVehicle(vehicle)
+    loop each floor until a spot fits
+        Lot->>Floor: findAvailableSpot(type)
+    end
+    Floor-->>Lot: spot found
+    Lot->>Floor: parkVehicle(spot, vehicle)
+    Floor->>Board: notifyObservers()
+    Note over Board: DisplayBoard updated
+    Lot-->>Client: ParkingTicket created & returned
 ```
+
+*`parkVehicle` loops floors until `findAvailableSpot` succeeds, delegates the actual placement to `ParkingFloor`, and lets the floor fan the change out to its `DisplayBoard` observers (Observer pattern) before returning the new `ParkingTicket`.*
+
+**Exit flow:**
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Lot as ParkingLotSystem
+    participant Pricing as PricingStrategy
+    participant Ticket as ParkingTicket
+    participant Floor as ParkingFloor
+    participant Board as DisplayBoard
+
+    Client->>Lot: exitVehicle(ticket)
+    Lot->>Pricing: calculateFee(duration, spotType)
+    Pricing-->>Lot: fee
+    Lot->>Ticket: markPaid(fee)
+    Lot->>Floor: vacateSpot(spot)
+    Floor->>Board: notifyObservers()
+    Note over Board: DisplayBoard updated
+```
+
+*`exitVehicle` delegates fee math to the currently-configured `PricingStrategy` (Strategy pattern — swappable without touching this method), settles the `ParkingTicket`, then vacates the spot and re-notifies observers.*
 
 ---
 

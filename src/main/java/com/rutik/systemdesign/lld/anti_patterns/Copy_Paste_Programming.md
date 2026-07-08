@@ -181,6 +181,25 @@ public class SupportTicketService {
 - Any future change to validation rules (e.g., supporting new TLDs, allowing plus-addressing in emails) must be applied to 3 files with no guarantee all 3 will be updated
 - There is no single source of truth for what a valid email or phone number means in this system
 
+The class diagram below makes the duplication concrete: three classes in three different packages, no shared type between them, each holding its own inline copy of the same email and phone validation rules that have since drifted apart.
+
+```mermaid
+classDiagram
+    direction LR
+    class UserRegistrationService {
+        -UserRepository userRepository
+        +registerUser(name, email, phone, password) void
+    }
+    class CheckoutService {
+        -OrderRepository orderRepository
+        +initiateCheckout(email, phone, address, cart) Order
+    }
+    class SupportTicketService {
+        -TicketRepository ticketRepository
+        +createTicket(email, phone, subject, description) Ticket
+    }
+```
+
 ---
 
 ## Why It's Harmful
@@ -308,6 +327,38 @@ public class UserRegistrationService {
         userRepository.save(User.from(request));
     }
 }
+```
+
+The class diagram below shows the fix as a shape: one `ContactValidator` that every request-specific validator depends on, so a single regex fix now reaches all three request paths at once.
+
+```mermaid
+classDiagram
+    direction LR
+    class ContactValidator {
+        <<utility>>
+        -Pattern EMAIL_PATTERN
+        -Pattern PHONE_PATTERN
+        +validateEmail(email, fieldName) void
+        +validatePhone(phone, fieldName) void
+    }
+    class UserRegistrationValidator {
+        +validate(request) void
+    }
+    class CheckoutValidator {
+        +validate(request) void
+    }
+    class SupportTicketValidator {
+        +validate(request) void
+    }
+    class UserRegistrationService {
+        -UserRepository userRepository
+        -UserRegistrationValidator validator
+        +registerUser(request) void
+    }
+    UserRegistrationValidator ..> ContactValidator : uses
+    CheckoutValidator ..> ContactValidator : uses
+    SupportTicketValidator ..> ContactValidator : uses
+    UserRegistrationService --> UserRegistrationValidator : delegates to
 ```
 
 **Alternative: Template Method Pattern for shared workflow structure**

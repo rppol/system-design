@@ -26,48 +26,98 @@ Design a Chess game system that:
 
 ## Class Diagram
 
+```mermaid
+classDiagram
+    class Board {
+        <<Singleton>>
+        +Optional~Piece~[][] grid
+        +getPiece(Position) Optional~Piece~
+        +movePiece(Move) void
+    }
+
+    class Piece {
+        <<abstract>>
+        +Color color
+        +Position position
+        +getValidMoves(Board) List~Move~
+    }
+
+    class King
+    class Queen
+    class Rook
+    class Bishop
+    class Knight
+    class Pawn
+
+    class MoveCommand {
+        <<interface>>
+        +execute() void
+        +undo() void
+    }
+
+    class ChessMoveCommand {
+        -Move move
+        -Board board
+        -Optional~Piece~ capturedPiece
+    }
+
+    class Move {
+        +Position from
+        +Position to
+        +Piece piece
+        +Optional~Piece~ capturedPiece
+        +boolean isPromotion
+    }
+
+    class MoveHistory {
+        <<stack>>
+        +push(MoveCommand) void
+        +undo() void
+        +peek() MoveCommand
+    }
+
+    class ChessGame {
+        +Board board
+        +MoveHistory moveHistory
+        +List~GameObserver~ observers
+        +makeMove(from, to) boolean
+        +undoLastMove() void
+        +isCheckmate(Color) boolean
+        +isInCheck(Color) boolean
+    }
+
+    class GameObserver {
+        <<interface>>
+        +onCheck(Color)
+        +onCheckmate(Color)
+        +onDraw(String reason)
+        +onMoveMade(Move)
+    }
+
+    class GameLogger
+    class GameClock
+
+    Board *-- Piece : contains
+    Piece <|-- King
+    Piece <|-- Queen
+    Piece <|-- Rook
+    Piece <|-- Bishop
+    Piece <|-- Knight
+    Piece <|-- Pawn
+    MoveCommand <|.. ChessMoveCommand : implements
+    ChessMoveCommand --> Move : wraps
+    ChessMoveCommand --> Board : mutates
+    ChessMoveCommand --> Piece : capturedPiece
+    Move --> Piece : piece, capturedPiece
+    MoveHistory --> MoveCommand : stores
+    ChessGame *-- MoveHistory : owns
+    ChessGame --> Board : uses
+    ChessGame --> GameObserver : notifies
+    GameObserver <|.. GameLogger : implements
+    GameObserver <|.. GameClock : implements
 ```
-    Board (Singleton)
-      + grid: Optional<Piece>[][]
-      + getPiece(Position): Optional<Piece>
-      + movePiece(Move): void
-      ────────────────────────────────
-      contains
-         │
-         ▼
-    <<abstract>>                        <<interface>>
-    Piece                               MoveCommand
-      + color: Color                      + execute(): void
-      + position: Position                + undo(): void
-      + getValidMoves(Board): List<Move>
-         △                             ChessMoveCommand
-         │                               - move: Move
-    ┌────┴──────────────────────┐        - board: Board
-  King Queen Rook Bishop Knight Pawn     - capturedPiece: Optional<Piece>
 
-    Move                                 MoveHistory (stack)
-      + from: Position                     + push(MoveCommand): void
-      + to: Position                       + undo(): void
-      + piece: Piece                       + peek(): MoveCommand
-      + capturedPiece: Optional<Piece>
-      + isPromotion: boolean
-
-    ChessGame
-      + board: Board (Singleton)
-      + moveHistory: MoveHistory
-      + observers: List<GameObserver>
-      + makeMove(from, to): boolean
-      + undoLastMove(): void
-      + isCheckmate(Color): boolean
-      + isInCheck(Color): boolean
-
-    <<interface>>                        GameLogger
-    GameObserver                           implements GameObserver
-      + onCheck(Color)                   GameClock
-      + onCheckmate(Color)                 implements GameObserver
-      + onDraw(String reason)
-      + onMoveMade(Move)
-```
+Board is the Singleton container for every `Piece` on the grid; `MoveCommand`/`ChessMoveCommand` form the Command pattern's execute/undo contract, `MoveHistory` is the undo stack, and `GameObserver` decouples `ChessGame` from `GameLogger`/`GameClock`.
 
 ---
 
@@ -100,30 +150,53 @@ The `undo()` in `ChessMoveCommand`:
 3. Revert pawn promotion (if applicable)
 4. Update the board state
 
+```mermaid
+sequenceDiagram
+    participant G as ChessGame
+    participant C as ChessMoveCommand
+    participant H as MoveHistory
+    participant B as Board
+
+    G->>C: new ChessMoveCommand(board, from, to)
+    G->>C: execute()
+    C->>B: movePiece(move)
+    B-->>C: board updated
+    G->>H: push(command)
+
+    Note over G,H: later, undo requested
+
+    G->>H: pop()
+    H-->>G: last command
+    G->>C: undo()
+    C->>B: restore captured piece, revert position
+    B-->>C: board reverted
+```
+
+`ChessGame` drives execution through `ChessMoveCommand`, which mutates `Board` directly and is pushed onto `MoveHistory`; undo pops the same command and reverses it — the four steps listed above, made explicit as a call sequence.
+
 ---
 
 ## State Diagram: Piece Movement
 
+```mermaid
+stateDiagram-v2
+    [*] --> WHITE_TURN
+
+    WHITE_TURN --> WHITE_TURN: invalid move, error
+    WHITE_TURN --> WHITE_TURN: leaves own king in check, illegal
+    WHITE_TURN --> BLACK_TURN: valid move, updates board and notifies observers
+
+    BLACK_TURN --> CHECK_STATE: makeMove(from, to)
+
+    state CHECK_STATE <<choice>>
+    CHECK_STATE --> GAME_OVER: CHECK and checkmate, loser is checked color
+    CHECK_STATE --> GAME_OVER: STALEMATE, draw
+    CHECK_STATE --> WHITE_TURN: NORMAL, continue
+
+    GAME_OVER --> [*]
 ```
-        WHITE_TURN
-           │
-           │ makeMove(from, to)
-           │  ├── valid move? → update board, notify observers, → BLACK_TURN
-           │  ├── in check after move? → illegal, reject
-           │  └── invalid? → error, stay WHITE_TURN
-           ▼
-        BLACK_TURN
-           │
-           │ makeMove(from, to)
-           ▼
-        ┌──────────────┐
-        │ check state? │
-        ├──────────────┤
-        │ CHECK        │ ─── checkmate? → GAME_OVER(loser=checked color)
-        │ STALEMATE    │ ─────────────── GAME_OVER(DRAW)
-        │ NORMAL       │ ─────────────── continue
-        └──────────────┘
-```
+
+Turns alternate between `WHITE_TURN` and `BLACK_TURN`; after each move the game evaluates CHECK / STALEMATE / NORMAL to decide whether to end in `GAME_OVER` or continue to the next turn.
 
 ---
 

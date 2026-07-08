@@ -20,20 +20,74 @@ Both patterns delegate behavior to a separate object and look nearly identical i
 
 ## Side-by-Side UML
 
-```
-STRATEGY                              STATE
-─────────────────────────────         ─────────────────────────────
-Context                               Context
-├── strategy: Strategy                ├── state: State
-├── setStrategy(Strategy)             ├── setState(State)       ← may be called by State itself
-└── executeStrategy()                 └── request()
+Both patterns produce almost the same shape — a `Context` holding a reference to an interface, with concrete implementations behind it. The diagrams below are structural near-twins; each is captioned with the one difference that actually matters.
 
-<<interface>> Strategy                <<interface>> State
-└── execute()                         └── handle(Context)
-                                                    ↑
-ConcreteStrategyA                     ConcreteStateA    ConcreteStateB
-ConcreteStrategyB                     may call context.setState(new ConcreteStateB())
+### Strategy
+
+```mermaid
+classDiagram
+    direction LR
+
+    class Context {
+        -strategy Strategy
+        +setStrategy(s) void
+        +executeStrategy() void
+    }
+
+    class Strategy {
+        <<interface>>
+        +execute() void
+    }
+
+    class ConcreteStrategyA {
+        +execute() void
+    }
+
+    class ConcreteStrategyB {
+        +execute() void
+    }
+
+    Context --> Strategy : delegates to
+    Strategy <|.. ConcreteStrategyA : implements
+    Strategy <|.. ConcreteStrategyB : implements
 ```
+
+*`Context` only ever holds the `Strategy` interface; `setStrategy()` is an external call the client makes, and `ConcreteStrategyA`/`ConcreteStrategyB` never reference each other.*
+
+### State
+
+```mermaid
+classDiagram
+    direction LR
+
+    class Context {
+        -state State
+        +setState(s) void
+        +request() void
+    }
+
+    class State {
+        <<interface>>
+        +handle(context) void
+    }
+
+    class ConcreteStateA {
+        +handle(context) void
+    }
+
+    class ConcreteStateB {
+        +handle(context) void
+    }
+
+    Context --> State : delegates to
+    State <|.. ConcreteStateA : implements
+    State <|.. ConcreteStateB : implements
+    ConcreteStateA ..> ConcreteStateB : may transition to
+
+    note for Context "setState() may be called by the active State itself"
+```
+
+*The one structural tell versus Strategy: the dashed `ConcreteStateA ..> ConcreteStateB` arrow. A state implementation can construct a sibling state and hand it back to `Context.setState()` — strategies never do this to each other.*
 
 ---
 
@@ -190,6 +244,45 @@ player.pressPlay();   // Resuming...
 player.pressStop();   // Stopping...
 ```
 
+Here's that trace playing out at runtime — the client only ever fires `pressPlay()`/`pressPause()`/`pressStop()`; each state object decides for itself which state comes next:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as player : MediaPlayer
+    participant ST as StoppedState
+    participant PL as PlayingState
+    participant PA as PausedState
+
+    Note over P: state = StoppedState (initial)
+
+    C->>P: pressPlay()
+    P->>ST: pressPlay(player)
+    Note right of ST: "Starting playback..."
+    ST->>P: setState(new PlayingState())
+    Note over P: state = PlayingState
+
+    C->>P: pressPause()
+    P->>PL: pressPause(player)
+    Note right of PL: "Pausing..."
+    PL->>P: setState(new PausedState())
+    Note over P: state = PausedState
+
+    C->>P: pressPlay()
+    P->>PA: pressPlay(player)
+    Note right of PA: "Resuming..."
+    PA->>P: setState(new PlayingState())
+    Note over P: state = PlayingState
+
+    C->>P: pressStop()
+    P->>PL: pressStop(player)
+    Note right of PL: "Stopping..."
+    PL->>P: setState(new StoppedState())
+    Note over P: state = StoppedState
+```
+
+*The state object swaps itself out mid-call (`ST->>P: setState(new PlayingState())`) — this self-directed transition is exactly what Strategy's client-driven `setStrategy()` never does.*
+
 ---
 
 ### Strategy in its natural habitat: Sorting
@@ -229,6 +322,29 @@ sorter.sort(new int[]{3,1,2});
 sorter.setStrategy(new BubbleSort());
 sorter.sort(new int[]{3,1});
 ```
+
+This is the mirror image of the State trace above — the client, never the strategy, drives every switch:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as sorter : Sorter
+    participant Q as QuickSort
+    participant B as BubbleSort
+
+    C->>S: new Sorter(QuickSort)
+    C->>S: sort(data)
+    S->>Q: sort(data)
+    Note right of Q: "QuickSort"
+
+    Note over C,S: client decides to switch strategy
+    C->>S: setStrategy(BubbleSort)
+    C->>S: sort(data)
+    S->>B: sort(data)
+    Note right of B: "BubbleSort"
+```
+
+*`QuickSort` and `BubbleSort` never call back into `Sorter` — the client calls `setStrategy()` explicitly whenever it wants a different algorithm, matching the "who decides to switch?" test from the Key Insight above.*
 
 ---
 

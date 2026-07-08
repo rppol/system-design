@@ -59,31 +59,34 @@ This is a classic example of the **Hollywood Principle**: "Don't call us, we'll 
 
 ## 5. UML Structure
 
-```
-AbstractClass
-+──────────────────────────────────────────+
-|  + templateMethod() : void  [final]      |  <-- orchestrates the algorithm
-|  + step1() : void  [concrete]            |  <-- invariant, implemented here
-|  + step2() : void  [abstract]            |  <-- variant, subclass must implement
-|  + step3() : void  [concrete]            |  <-- invariant, implemented here
-|  + hook() : void   [concrete/empty]      |  <-- optional hook, subclass may override
-+──────────────────────────────────────────+
-              /\
-              |  extends
-    __________|__________
-    |                   |
-ConcreteClassA      ConcreteClassB
-+──────────────+   +──────────────+
-| + step2()    |   | + step2()    |
-| + hook()     |   |              |
-+--------------+   +--------------+
+```mermaid
+classDiagram
+    class AbstractClass {
+        <<abstract>>
+        +templateMethod() void
+        +step1() void
+        +step2() void
+        +step3() void
+        +hook() void
+    }
 
-Client
-  |
-  | uses
-  v
-AbstractClass (reference)  --> calls templateMethod()
+    class ConcreteClassA {
+        +step2() void
+        +hook() void
+    }
+
+    class ConcreteClassB {
+        +step2() void
+    }
+
+    class Client
+
+    AbstractClass <|-- ConcreteClassA
+    AbstractClass <|-- ConcreteClassB
+    Client ..> AbstractClass : calls templateMethod()
 ```
+
+`step2()` is the mandatory primitive operation every subclass must implement; `hook()` is optional — `ConcreteClassA` overrides it, `ConcreteClassB` accepts the no-op default. `Client` depends only on the `AbstractClass` reference, never on the concrete subclasses directly.
 
 **Key relationships:**
 - `AbstractClass` is the parent; `ConcreteClass` subclasses extend it.
@@ -107,6 +110,28 @@ AbstractClass (reference)  --> calls templateMethod()
 6. The overall flow is fixed; only specific steps vary.
 
 **Dynamic dispatch** is the key mechanism: when `templateMethod()` calls `this.step2()`, Java's virtual method dispatch ensures the subclass's version runs — even though the call originates in the base class.
+
+Reading it as a sequence makes the fixed call order and the two dynamic-dispatch points explicit — `step2()` always resolves to the subclass, `hook()` only if the subclass chose to override it:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as AbstractClass
+    participant S as ConcreteClass
+
+    C->>A: templateMethod()
+    A->>A: step1()
+    Note right of A: invariant - implemented in AbstractClass
+    A->>S: step2()
+    Note right of S: variant - dynamic dispatch to the subclass
+    S-->>A: done
+    A->>S: hook()
+    Note right of S: optional - subclass overrides only if needed
+    S-->>A: done
+    A->>A: step3()
+    Note right of A: invariant - implemented in AbstractClass
+    A-->>C: return
+```
 
 ---
 
@@ -223,28 +248,33 @@ a single buggy mapper would exhaust the 20-connection pool in seconds, causing a
 - RowMapper call frequency: once per row; 1,000-row result set = 1,000 mapRow() calls per query
 - AbstractBatchConfiguration batch job: 50,000 items/chunk, 200 chunks/job = 10M records/job
 
-```
-JdbcTemplate — Template Method in Production
-=============================================
+The template method (`JdbcTemplate.query()`) owns every invariant step — connection acquisition, statement prep, execution, resource release, and exception translation — while the caller's `RowMapper.mapRow()` hook supplies only the row-to-object mapping:
 
-  Caller (Service layer)
-       |
-       | jdbcTemplate.query(sql, rowMapper, args...)
-       |
-  +----+-------------------------------+
-  |         JdbcTemplate.query()       |  <-- TEMPLATE METHOD (final-like sequence)
-  |                                    |
-  |  1. dataSource.getConnection()     |  invariant: acquire from HikariCP pool
-  |  2. prepareStatement(sql, args)    |  invariant: bind parameters safely
-  |  3. executeQuery()                 |  invariant: run against DB
-  |  4. while(rs.next())              |
-  |       rowMapper.mapRow(rs, rowNum) |  <-- HOOK: caller-provided variable step
-  |  5. rs.close() / stmt.close()     |  invariant: release resources (finally block)
-  |  6. conn returned to pool          |  invariant: always, even on exception
-  |  7. translate SQLException         |  invariant: wrap in DataAccessException hierarchy
-  +------------------------------------+
-       |
-  [ List<T> result returned to caller ]
+```mermaid
+sequenceDiagram
+    participant Caller as Caller (Service layer)
+    participant JT as JdbcTemplate.query()
+    participant DB as HikariCP / JDBC
+    participant RM as RowMapper (hook)
+
+    Caller->>JT: query(sql, rowMapper, args...)
+    JT->>DB: 1. getConnection()
+    Note right of DB: invariant - acquire from HikariCP pool
+    JT->>DB: 2. prepareStatement(sql, args)
+    Note right of DB: invariant - bind parameters safely
+    JT->>DB: 3. executeQuery()
+    loop while rs.next()
+        JT->>RM: 4. mapRow(rs, rowNum)
+        Note right of RM: HOOK - caller-provided variable step
+        RM-->>JT: mapped row
+    end
+    JT->>DB: 5. rs.close() / stmt.close()
+    Note right of DB: invariant - release resources (finally)
+    JT->>DB: 6. return connection to pool
+    Note right of DB: invariant - always, even on exception
+    JT->>JT: 7. translate SQLException
+    Note right of JT: invariant - wrap in DataAccessException
+    JT-->>Caller: result list
 ```
 
 ```java
@@ -519,6 +549,33 @@ public abstract class DataPipeline {
 - The algorithm needs to be selected at runtime or injected externally — inheritance is compile-time.
 - The hierarchy grows beyond 2 levels (AbstractA -> AbstractB -> Concrete) — prefer composition.
 - You cannot control the base class (third-party library) — inject a Strategy callback instead.
+
+The "move to" vs "move away" criteria above are exactly a decision tree — the same reasoning, laid out as gates:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start([Multiple classes share<br/>one algorithm's steps]) --> Q1{"Must the algorithm swap<br/>at runtime?"}
+    Q1 -- yes --> Strategy[Use Strategy<br/>swap the algorithm via composition]
+    Q1 -- no --> Q2{"Do you own the base class<br/>and every subclass?"}
+    Q2 -- no --> ThirdParty[Inject a Strategy callback<br/>can't touch a 3rd-party base]
+    Q2 -- yes --> Q3{"Would the hierarchy exceed<br/>2 levels deep?"}
+    Q3 -- yes --> Strategy
+    Q3 -- no --> TM[Use Template Method<br/>fixed skeleton, variant steps]
+
+    class Start io
+    class Q1,Q2,Q3 mathOp
+    class Strategy req
+    class ThirdParty frozen
+    class TM train
+```
 
 ---
 

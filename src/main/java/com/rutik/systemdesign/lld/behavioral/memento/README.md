@@ -61,26 +61,27 @@ This separation preserves encapsulation: the Caretaker holds Mementos but cannot
 
 ## 5. UML Structure
 
-```
-+------------------+          creates         +--------------------+
-|   Originator     |------------------------>|     Memento        |
-|------------------|                          |--------------------|
-| - state: State   |                          | - state: State     |
-|------------------|                          |--------------------|
-| + createMemento()|  <-- returns Memento     | + getState(): State|  (package-private or nested)
-| + restore(m)     |  <-- accepts Memento     +--------------------+
-+------------------+
-         ^
-         |  uses
-         |
-+------------------+
-|   Caretaker      |
-|------------------|
-| - history: Stack |  <-- holds Mementos (but cannot read them)
-|------------------|
-| + save()         |
-| + undo()         |
-+------------------+
+```mermaid
+classDiagram
+    direction LR
+    class Originator {
+        -state State
+        +createMemento() Memento
+        +restore(m Memento)
+    }
+    class Memento {
+        -state State
+        +getState() State
+    }
+    class Caretaker {
+        -history Stack~Memento~
+        +save()
+        +undo()
+    }
+    Originator --> Memento : creates
+    Caretaker --> Originator : uses
+    Caretaker o-- Memento : holds
+    note for Memento "getState() is package-private or nested — visible only to Originator"
 ```
 
 **Key structural insight:** The Memento's state accessor (`getState()`) should only be visible to the Originator. In Java this is typically achieved by making Memento an inner class of Originator, or by using package-private access.
@@ -95,6 +96,29 @@ This separation preserves encapsulation: the Caretaker holds Mementos but cannot
 4. **User triggers undo** — the Caretaker pops the top Memento off the stack and calls `originator.restore(memento)`.
 5. **Originator restores state** — the Originator reads the state from the Memento and replaces its own state with it.
 6. **Encapsulation preserved** — at no point does the Caretaker access the raw fields of the Originator.
+
+The sequence below traces one save-then-undo cycle end-to-end: notice the Caretaker (steps 1, 3, 4) only ever pushes/pops an opaque `memento` reference, while `getState()` (step 5) is called exclusively by the Originator.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant C as Caretaker
+    participant O as Originator
+    participant M as Memento
+
+    User->>C: save()
+    C->>O: createMemento()
+    O->>M: new Memento(state)
+    O-->>C: memento
+    C->>C: history.push(memento)
+
+    User->>C: undo()
+    C->>C: memento = history.pop()
+    C->>O: restore(memento)
+    O->>M: getState()
+    M-->>O: state
+    Note over C,O: Caretaker never reads memento's<br/>fields — only Originator can
+```
 
 ---
 
@@ -198,17 +222,25 @@ Observed numbers in an order-processing service at 10k attempted orders/day:
 - Without savepoints, a fraud-flag step at the tail forced full rollback + restart, doubling order latency from 220 ms to 510 ms.
 - Savepoint-per-step pattern reduced retry storms by 73% during a payment-gateway flap incident.
 
+```mermaid
+sequenceDiagram
+    participant OF as Order Flow (Caretaker)
+    participant TX as Transaction (undo log)
+
+    OF->>TX: setSavepoint("validated")
+    TX-->>OF: SP1
+    OF->>TX: setSavepoint("reserved")
+    TX-->>OF: SP2
+    OF->>TX: setSavepoint("charged")
+    TX-->>OF: SP3
+    Note over TX: undo log = [SP1][SP2][SP3]
+
+    Note over OF,TX: fraud check fails!
+    OF->>TX: rollbackToSavepoint(SP2)
+    Note over TX: undo log = [SP1][SP2]<br/>charge undone, reserve kept
 ```
-+--------+     setSavepoint("validated")     +-------------------+
-| Order  | -----------------------------> SP1| Transaction       |
-| Flow   |     setSavepoint("reserved")  SP2 |   undo log:       |
-| (Care- |     setSavepoint("charged")   SP3 |   [SP1][SP2][SP3] |
-| taker) |                                   +-------------------+
-|        |     fraud check fails!
-|        | -- rollbackToSavepoint(SP2) -->  [SP1][SP2]
-|        |                                   (charge undone; reserve kept)
-+--------+
-```
+
+*Each `setSavepoint()` call is a Memento checkpoint on the Transaction's undo log; `rollbackToSavepoint(SP2)` restores to the "reserved" point, discarding only the failed "charged" step while keeping "reserve inventory" intact.*
 
 ### Production-grade Memento (inner-class, encapsulated state)
 

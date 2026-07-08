@@ -87,6 +87,37 @@ public class OrderService {
 }
 ```
 
+The runtime collaboration makes the "pull" model concrete: `OrderService`'s constructor takes zero arguments, so all four collaborators surface only as `ServiceLocator.get()` calls buried inside `placeOrder()` — invisible until you read the method body.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant SL as ServiceLocator
+    participant OS as OrderService
+    participant Repo as OrderRepository
+    participant Pay as PaymentGateway
+    participant Mail as EmailService
+    participant Log as AuditLogger
+
+    App->>SL: register(4 services)
+    App->>OS: new OrderService()
+    Note over OS: Empty constructor, zero visible dependencies
+    App->>OS: placeOrder(request)
+    OS->>SL: get(PaymentGateway.class)
+    SL-->>OS: payment
+    OS->>SL: get(OrderRepository.class)
+    SL-->>OS: repo
+    OS->>SL: get(EmailService.class)
+    SL-->>OS: email
+    OS->>SL: get(AuditLogger.class)
+    SL-->>OS: logger
+    OS->>Pay: charge(paymentMethod, total)
+    OS->>Repo: save(order)
+    OS->>Mail: sendConfirmation(order)
+    OS->>Log: log(orderId)
+    Note over OS,SL: All four dependencies surface mid-method, not in the signature
+```
+
 **Testing problem:**
 
 ```java
@@ -214,6 +245,32 @@ class OrderServiceTest {
         verify(mockRepo).save(any(Order.class));
     }
 }
+```
+
+Mirror this against the diagram above: the composition root constructs every collaborator and pushes all four into `OrderService`'s constructor in a single call — `placeOrder()` makes no lookups at all, it only uses what it already holds.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant OS as OrderService
+    participant Repo as OrderRepository
+    participant Pay as PaymentGateway
+    participant Mail as EmailService
+    participant Log as AuditLogger
+
+    Note over App: Composition root, wiring happens in one place
+    App->>Repo: new JpaOrderRepository()
+    App->>Pay: new StripePaymentGateway()
+    App->>Mail: new SmtpEmailService()
+    App->>Log: new DatabaseAuditLogger()
+    App->>OS: new OrderService(repo, payment, email, logger)
+    Note over App,OS: All four dependencies are visible in one constructor call
+    App->>OS: placeOrder(request)
+    OS->>Pay: charge(paymentMethod, total)
+    OS->>Repo: save(order)
+    OS->>Mail: sendConfirmation(order)
+    OS->>Log: log(orderId)
+    Note over OS: No lookups mid-method, every collaborator was pushed in at construction
 ```
 
 **Using Spring for wiring (the standard approach):**

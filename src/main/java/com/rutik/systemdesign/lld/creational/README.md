@@ -44,24 +44,33 @@ Creational patterns abstract the instantiation process, decoupling client code f
 
 ## 4. Decision Flowchart (ASCII)
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Need to create<br/>an object"]) --> D1
+    D1{"Only ONE instance should<br/>ever exist across the JVM?"} -->|YES| Singleton["Singleton<br/>(enum preferred, or Holder<br/>idiom; avoid DCL)"]
+    D1 -->|NO| D2{"Copying an EXISTING object<br/>cheaper than creating new?"}
+    D2 -->|YES| Prototype["Prototype<br/>(copy constructor over<br/>Cloneable)"]
+    D2 -->|NO| D3{"Object needs MANY<br/>parameters, some optional?"}
+    D3 -->|YES| Builder["Builder<br/>(kills telescoping ctors,<br/>enables immutability)"]
+    D3 -->|NO| D4{"Create ONE OF SEVERAL related<br/>types, subclass decides which?"}
+    D4 -->|YES| FactoryMethod["Factory Method<br/>(creation interface,<br/>subclass overrides)"]
+    D4 -->|NO| D5{"Create FAMILIES of related,<br/>compatible objects?"}
+    D5 -->|YES| AbstractFactory["Abstract Factory<br/>(factory of factories,<br/>ensures compatibility)"]
+
+    class Start io
+    class D1,D2,D3,D4,D5 mathOp
+    class Singleton,Prototype,Builder,FactoryMethod,AbstractFactory train
 ```
-Need to CREATE an object?
-  |
-  +-- Only ONE instance should ever exist across the JVM?
-  |     YES -> Singleton (enum preferred; or Holder idiom; avoid DCL unless Java 5+)
-  |
-  +-- Copying an EXISTING object is cheaper than creating from scratch?
-  |     YES -> Prototype (copy constructor preferred over Cloneable)
-  |
-  +-- Object requires MANY parameters, some optional?
-  |     YES -> Builder (eliminates telescoping constructors; enables immutability)
-  |
-  +-- Need to create ONE OF SEVERAL related types, subclass decides which?
-  |     YES -> Factory Method (define creation interface; subclass overrides)
-  |
-  +-- Need to create FAMILIES of related, compatible objects?
-        YES -> Abstract Factory (factory of factories; ensures compatibility)
-```
+
+Each decision point resolves one axis of variation — instance count, then copy cost, then parameter count, then single-type vs. family-of-types — and the first `YES` wins; falling through all five means a plain constructor already suffices.
 
 ---
 
@@ -92,18 +101,20 @@ Need to CREATE an object?
 
 ## 7. Complexity and Flexibility Trade-offs
 
-```
-                     FLEXIBILITY (runtime variation)
-                     LOW                         HIGH
-                      |                            |
-COMPLEXITY  LOW       | Static factory method       | Factory Method
-(boilerplate)         |                            |
-                      |                            |
-            HIGH      | Builder                    | Abstract Factory
-                      |                            |
-                      |            Prototype        |
-                      | (complexity depends on      |
-                      |  object graph depth)        |
+```mermaid
+quadrantChart
+    title Complexity vs Flexibility Trade-offs
+    x-axis Low Flexibility --> High Flexibility
+    y-axis Low Complexity --> High Complexity
+    quadrant-1 High complexity, high flexibility
+    quadrant-2 High complexity, low flexibility
+    quadrant-3 Low complexity, low flexibility
+    quadrant-4 Low complexity, high flexibility
+    Static factory method: [0.15, 0.15]
+    Factory Method: [0.85, 0.2]
+    Builder: [0.2, 0.8]
+    Abstract Factory: [0.85, 0.85]
+    Prototype: [0.5, 0.5]
 ```
 
 - **Singleton** sits outside this grid — its dimension is *instance count*, not creation complexity or runtime variation.

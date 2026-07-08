@@ -20,24 +20,71 @@ All three patterns involve wrapping or composing other objects, but they serve f
 
 ## Side-by-Side UML
 
+```mermaid
+classDiagram
+    direction LR
+
+    namespace AdapterPattern {
+        class AdapterClient
+        class Target {
+            <<interface>>
+            +request()
+        }
+        class Adapter {
+            -adaptee : Adaptee
+            +request()
+        }
+        class Adaptee {
+            +specificRequest()
+        }
+    }
+
+    namespace BridgePattern {
+        class Abstraction {
+            <<abstract>>
+            #impl : Implementor
+            +operation()
+        }
+        class RefinedAbstraction {
+            +operation()
+        }
+        class Implementor {
+            <<interface>>
+            +operationImpl()
+        }
+        class ConcreteImplementorA
+        class ConcreteImplementorB
+    }
+
+    namespace FacadePattern {
+        class FacadeClient
+        class Facade {
+            -sub1 : Sub1
+            -sub2 : Sub2
+            -sub3 : Sub3
+            +subsystemOperation()
+        }
+        class Sub1
+        class Sub2
+        class Sub3
+    }
+
+    AdapterClient --> Target : uses
+    Target <|.. Adapter
+    Adapter --> Adaptee : translates to
+
+    Abstraction o-- Implementor : bridge
+    Abstraction <|-- RefinedAbstraction
+    Implementor <|.. ConcreteImplementorA
+    Implementor <|.. ConcreteImplementorB
+
+    FacadeClient --> Facade : uses
+    Facade o-- Sub1
+    Facade o-- Sub2
+    Facade o-- Sub3
 ```
-ADAPTER                           BRIDGE                            FACADE
-──────────────────────────        ──────────────────────────        ──────────────────────────
-Client                            Abstraction                       Client
-  └── uses Target interface         ├── impl: Implementor             └── uses Facade
-                                    └── operation()
-<<interface>> Target              <<interface>> Implementor          Facade
-└── request()                     └── operationImpl()                ├── subsystem1: Sub1
-                                                                     ├── subsystem2: Sub2
-Adapter                           RefinedAbstraction                 └── subsystemOperation()
-├── adaptee: Adaptee              └── operation()
-└── request()                         calls impl.operationImpl()     Sub1, Sub2, Sub3...
-    translates to                                                    (complex subsystem)
-    adaptee.specificRequest()     ConcreteImplementorA
-                                  ConcreteImplementorB
-Adaptee
-└── specificRequest()
-```
+
+Three different shapes for the same "wrap something" idea. Adapter converts one incompatible interface after the fact (`Adapter` translates `Target.request()` into `Adaptee.specificRequest()`). Bridge plans for independent variation upfront — `Abstraction` and `Implementor` are two hierarchies joined by a swappable, shared reference (the "bridge"). Facade exposes one simplified entry point (`subsystemOperation()`) over several subsystem classes that remain independently usable (aggregation, not ownership — see the "Subsystem still accessible?" row below).
 
 ---
 
@@ -156,6 +203,25 @@ class Application {
 Application app1 = new Application(new LegacyLoggerAdapter(new LegacyFileLogger()));
 Application app2 = new Application(new CloudLoggerAdapter(new ThirdPartyCloudLogger()));
 ```
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant LA as LegacyLoggerAdapter
+    participant LF as LegacyFileLogger
+    participant CA as CloudLoggerAdapter
+    participant CL as ThirdPartyCloudLogger
+
+    Note over App,LF: app1 = new Application(new LegacyLoggerAdapter(new LegacyFileLogger()))
+    App->>LA: log("ERROR", "Something failed")
+    LA->>LF: writeToFile("[ERROR] Something failed")
+
+    Note over App,CL: app2 = new Application(new CloudLoggerAdapter(new ThirdPartyCloudLogger()))
+    App->>CA: log("ERROR", "Something failed")
+    CA->>CL: send("error", "Something failed", timestamp)
+```
+
+`Application` calls the exact same `Logger.log(level, message)` method in both wire-ups — only the adapter changes. `LegacyLoggerAdapter` translates that call into `writeToFile(...)`; `CloudLoggerAdapter` translates the identical call into `send(...)`. `Application` never sees `LegacyFileLogger` or `ThirdPartyCloudLogger` directly.
 
 ---
 
@@ -305,6 +371,27 @@ theater.endMovie();
 // Subsystem objects still available for advanced users who need direct access
 ```
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Facade as HomeTheaterFacade
+    participant Lights
+    participant Projector
+    participant Amp as Amplifier
+    participant DVD as DVDPlayer
+
+    Client->>Facade: watchMovie("Inception")
+    Facade->>Lights: dim(10)
+    Facade->>Projector: on()
+    Facade->>Projector: wideScreenMode()
+    Facade->>Amp: on()
+    Facade->>Amp: setVolume(20)
+    Facade->>DVD: on()
+    Facade->>DVD: play("Inception")
+```
+
+One `watchMovie("Inception")` call fans out to seven calls across four subsystem objects, in an order `Client` never has to know. `Client` still could call `Amplifier`, `Projector`, `DVDPlayer`, or `Lights` directly — the Facade doesn't lock out direct access — it just means most callers never need to.
+
 ---
 
 ## Interview Answer Templates
@@ -325,13 +412,22 @@ theater.endMovie();
 
 ## Summary
 
-```
-Problem: "These interfaces don't match and I can't change either one"
-  └── ADAPTER
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Problem: "I have two dimensions that vary independently and don't want N*M subclasses"
-  └── BRIDGE
+    P1{"These interfaces don't match<br/>and I can't change either one"} --> R1([ADAPTER])
+    P2{"Two dimensions vary independently —<br/>don't want N×M subclasses"} --> R2([BRIDGE])
+    P3{"This subsystem is too complex —<br/>need a simpler entry point"} --> R3([FACADE])
 
-Problem: "This subsystem is too complex — I need a simpler entry point"
-  └── FACADE
+    class P1,P2,P3 mathOp
+    class R1,R2,R3 train
 ```
+
+Each problem statement maps to exactly one pattern. If a real design seems to need more than one of these three for the very same problem, revisit the Key Differences table above — genuine three-way overlap is rare.

@@ -99,6 +99,27 @@ public void register(String email) {
 
 Now there is one place to update when the email rule changes.
 
+Completing the fix across all three original services (the code above shows two of the three): every caller now depends on one authoritative `ValidationUtils.isValidEmail()`, so the email rule has exactly one home to update.
+
+```mermaid
+classDiagram
+    class ValidationUtils {
+        +isValidEmail(email) boolean
+    }
+    class UserService {
+        +registerUser(email) boolean
+    }
+    class RegistrationService {
+        +register(email)
+    }
+    class NotificationService {
+        -checkEmail(email) boolean
+    }
+    UserService ..> ValidationUtils : uses
+    RegistrationService ..> ValidationUtils : uses
+    NotificationService ..> ValidationUtils : uses
+```
+
 ---
 
 ## WET vs DRY
@@ -150,6 +171,31 @@ A pragmatic heuristic for when to apply DRY:
 3. **Third time:** now you have enough signal to understand the real abstraction — extract it.
 
 This prevents over-engineering while still preventing rampant duplication.
+
+The escalation is deliberate: waiting until the third occurrence is what supplies enough signal to avoid the "wrong abstraction" trap described above.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["1st occurrence"]) --> B("Just write it")
+    B --> C(["2nd occurrence"])
+    C --> D("Note duplication,<br/>leave it - risk too high")
+    D --> E(["3rd occurrence"])
+    E --> F("Enough signal to see<br/>the real abstraction")
+    F --> G(["Extract it"])
+
+    class A,C,E io
+    class B,G train
+    class D frozen
+    class F mathOp
+```
 
 ---
 

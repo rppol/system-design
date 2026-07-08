@@ -43,52 +43,100 @@ Design an elevator system for an N-floor building with M elevators that can:
 
 ## ASCII Class Diagram
 
-```
-+------------------+          +--------------------+
-| ElevatorSystem   |          | ElevatorScheduler  |  <<interface>>
-| -totalFloors     |          | +selectElevator()  |
-| -controllers[]   |          +--------+-----------+
-| -elevators[]     |                   |
-| -scheduler       +---uses----------->|
-| +requestElevator()|         +--------+----------+
-| +runAll()         |         |                   |
-+--------+----------+    FCFSScheduler     SCANScheduler
-         |
-         | manages
-         v
-+--------------------+         +-------------------+
-| ElevatorController |         |   ElevatorCar     |  <<Context>>
-| +addRequest()      +-------->| -id               |
-| +processAllReqs()  |         | -currentFloor     |
-+--------------------+         | -direction        |
-                                | -state            |
-                                | -destinations     |
-                                | -observers[]      |
-                                | +requestFloor()   |
-                                | +openDoor()       |
-                                | +closeDoor()      |
-                                | +emergencyStop()  |
-                                | +step()           |
-                                +--------+----------+
-                                         |
-                      +-----------------+-----------------+
-                      |                 |                 |
-               MovingState       StoppedState    MaintenanceState
-               (handles ops)     (handles ops)   (rejects ops)
+```mermaid
+classDiagram
+    direction LR
+    class ElevatorSystem {
+        -totalFloors
+        -controllers
+        -elevators
+        -scheduler
+        +requestElevator()
+        +runAll()
+    }
+    class ElevatorScheduler {
+        <<interface>>
+        +selectElevator()
+    }
+    class FCFSScheduler {
+        +selectElevator()
+    }
+    class SCANScheduler {
+        +selectElevator()
+    }
+    class ElevatorController {
+        +addRequest()
+        +processAllReqs()
+    }
+    class ElevatorCar {
+        <<Context>>
+        -id
+        -currentFloor
+        -direction
+        -state
+        -destinations
+        -observers
+        +requestFloor()
+        +openDoor()
+        +closeDoor()
+        +emergencyStop()
+        +step()
+    }
+    class ElevatorStateHandler {
+        <<interface>>
+        +requestFloor()
+        +openDoor()
+        +closeDoor()
+        +emergencyStop()
+    }
+    class MovingState {
+        +requestFloor()
+        +openDoor()
+        +closeDoor()
+        +emergencyStop()
+    }
+    class StoppedState {
+        +requestFloor()
+        +openDoor()
+        +closeDoor()
+        +emergencyStop()
+    }
+    class MaintenanceState {
+        +requestFloor()
+        +openDoor()
+        +closeDoor()
+        +emergencyStop()
+    }
+    class ElevatorObserver {
+        <<interface>>
+        +onArrival(id, floor)
+    }
+    class WaitingPassenger {
+        -name
+        -waitingFloor
+        +onArrival()
+    }
+    class Request {
+        -floor
+        -direction
+    }
 
-+---------------------+         +--------------------+
-| ElevatorObserver    |<--------| WaitingPassenger   |
-| (interface)         |         | -name              |
-| +onArrival(id,floor)|         | -waitingFloor      |
-+---------------------+         | +onArrival()       |
-                                 +--------------------+
-
-+------------+
-|  Request   |
-| -floor     |
-| -direction |
-+------------+
+    ElevatorSystem --> ElevatorScheduler : uses
+    ElevatorScheduler <|.. FCFSScheduler
+    ElevatorScheduler <|.. SCANScheduler
+    ElevatorSystem "1" --> "*" ElevatorController : manages
+    ElevatorController --> ElevatorCar : drives
+    ElevatorController ..> Request : enqueues
+    ElevatorScheduler ..> Request : selects for
+    ElevatorCar --> ElevatorStateHandler : delegates to
+    ElevatorStateHandler <|.. MovingState : handles ops
+    ElevatorStateHandler <|.. StoppedState : handles ops
+    ElevatorStateHandler <|.. MaintenanceState : rejects ops
+    ElevatorCar "1" --> "*" ElevatorObserver : notifies
+    ElevatorObserver <|.. WaitingPassenger
 ```
+
+*`ElevatorSystem` uses a swappable `ElevatorScheduler` to pick a car, then hands the request down through `ElevatorController` to the chosen `ElevatorCar`; the car delegates every state-dependent call to its current `ElevatorStateHandler` (State pattern) and fans arrivals out to every registered `ElevatorObserver` (Observer pattern).*
 
 ---
 
@@ -116,6 +164,32 @@ Design an elevator system for an N-floor building with M elevators that can:
 | FCFSScheduler| Assign to elevator with fewest pending stops                    | Low traffic, simplicity |
 | SCANScheduler| Prefer same-direction elevator that hasn't passed the floor yet | High traffic, efficiency|
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["New hall call"]) --> Q{"Building traffic profile?"}
+    Q -->|"low traffic,<br/>simplicity matters"| FCFS["FCFSScheduler<br/>fewest pending stops"]
+    Q -->|"high traffic,<br/>efficiency matters"| SCAN["SCANScheduler<br/>same-direction,<br/>not yet passed"]
+    FCFS --> R1(["Fair and simple<br/>more total travel"])
+    SCAN --> R2(["Less travel and wait<br/>avoids thrashing"])
+
+    class START io
+    class Q mathOp
+    class FCFS base
+    class SCAN train
+    class R1 req
+    class R2 train
+```
+
+*Same decision the "Best for" column states above, walked as a path: low-traffic buildings take the simpler FCFS branch, high-traffic buildings route to SCAN for the travel-distance win quantified in the SCAN vs FCFS scenario below.*
+
 ---
 
 ### 3. Observer Pattern — `ElevatorObserver` / `WaitingPassenger`
@@ -125,30 +199,58 @@ Design an elevator system for an N-floor building with M elevators that can:
 
 ---
 
+## Runtime Collaboration: Hall Call to Notification
+
+The three patterns above are static structure; here is one hall call traced dynamically end-to-end, matching the `Sample Output` trace further down this file.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Sys as ElevatorSystem
+    participant Sched as ElevatorScheduler
+    participant Ctrl as ElevatorController
+    participant Car as ElevatorCar<br/>(Elevator 1)
+    participant Alice as WaitingPassenger<br/>(Alice)
+
+    Client->>Sys: requestElevator(floor=3, dir=UP)
+    Sys->>Sched: selectElevator(cars, request)
+    Sched-->>Sys: Elevator 1
+    Sys->>Ctrl: addRequest(floor=3)
+    Ctrl->>Car: requestFloor(3)
+    Note over Car: STOPPED to MOVING (queue + move)
+    Ctrl->>Car: step()
+    Note over Car: arrives at floor 3, MOVING to STOPPED
+    Car->>Car: openDoor()
+    Car->>Alice: onArrival(1, 3)
+    Alice-->>Car: boarding!
+    Car->>Car: closeDoor()
+    Client->>Car: emergencyStop()
+    Note over Car: MOVING to MAINTENANCE, all requests now rejected
+```
+
+*Strategy (`ElevatorScheduler`) picks the car, State (`ElevatorCar`'s current handler) governs whether `requestFloor`/`openDoor`/`emergencyStop` are honoured at each step, and Observer (`onArrival`) fans the arrival out to `WaitingPassenger` Alice — the same three patterns from the class diagram, now shown collaborating at runtime.*
+
+---
+
 ## State Transition Diagram
 
-```
-               requestFloor()
-  +----------+  (queue + move)  +----------+
-  |          +----------------->|          |
-  | STOPPED  |                  | MOVING   |
-  |          |<-----------------+          |
-  +----+-----+  arrive at floor +----+-----+
-       |         (step() done)       |
-       |                             |
-       | emergencyStop()             | emergencyStop()
-       |                             |
-       v                             v
-  +----+-----------------------------+-----+
-  |                                        |
-  |            MAINTENANCE                 |
-  |    (all operations rejected)           |
-  |    (manual reset required)             |
-  +----------------------------------------+
+```mermaid
+stateDiagram-v2
+    [*] --> STOPPED
+    STOPPED --> MOVING : requestFloor()
+    MOVING --> STOPPED : step() arrives
+    STOPPED --> MAINTENANCE : emergencyStop()
+    MOVING --> MAINTENANCE : emergencyStop()
 
-  Note: MAINTENANCE → STOPPED requires manual operator intervention
-        (not modelled here; extend with a reset() method)
+    note right of MAINTENANCE
+        All operations rejected here.
+        MAINTENANCE to STOPPED requires
+        manual operator intervention
+        (not modelled; extend with reset()).
+    end note
 ```
+
+*STOPPED and MOVING cycle into each other on every `requestFloor()` queue-and-move and every arrival, but `emergencyStop()` from either one is a one-way trip into MAINTENANCE, where `ElevatorStateHandler` rejects every operation; recovery back to STOPPED is deliberately left unmodelled — extend with a `reset()` method gated by operator authentication.*
 
 ---
 

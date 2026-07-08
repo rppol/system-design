@@ -120,6 +120,32 @@ public class OrderService {
 
 Now `OrderService` only knows about `Order`. The internal structure of `Customer` and `Address` can change freely without affecting `OrderService`.
 
+```mermaid
+sequenceDiagram
+    participant OS as OrderService
+    participant Ord as Order
+    participant Cust as Customer
+    participant Addr as Address
+
+    Note over OS,Addr: Violation — order.getCustomer().getAddress().getCity()
+    OS->>Ord: getCustomer()
+    Ord-->>OS: customer
+    OS->>Cust: getAddress()
+    Cust-->>OS: address
+    OS->>Addr: getCity()
+    Addr-->>OS: city
+
+    Note over OS,Addr: Compliant — order.getCustomerCity() (Tell, Don't Ask)
+    OS->>Ord: getCustomerCity()
+    Ord->>Cust: getCity()
+    Cust->>Addr: getCity()
+    Addr-->>Cust: city
+    Cust-->>Ord: city
+    Ord-->>OS: city
+```
+
+Same four classes, same ultimate call to `Address.getCity()` — but in the violation `OrderService` is the direct caller of all three hops (two of them strangers), while in the compliant version `OrderService` calls only its immediate friend `Order`, which delegates one hop at a time down the chain it already owns.
+
 ---
 
 ## Consequences of Violations
@@ -188,6 +214,32 @@ List<String> names = users.stream()
 This is a data pipeline, not navigation through an object graph to extract hidden state.
 
 **The distinction:** the Law of Demeter targets chains that **access state through multiple layers of object ownership**. Builders and streams are operating on a single logical thing (the builder, the stream) throughout the chain.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant A
+    participant B
+    participant C
+    participant Builder as UserBuilder
+
+    Note over Client,C: Train wreck — a.getB().getC().doSomething() touches 2 different strangers
+    Client->>A: getB()
+    A-->>Client: b
+    Client->>B: getC()
+    B-->>Client: c
+    Client->>C: doSomething()
+
+    Note over Client,Builder: Fluent builder — every call returns the SAME object
+    Client->>Builder: setName("Alice")
+    Builder-->>Client: this
+    Client->>Builder: setEmail("alice@example.com")
+    Builder-->>Client: this
+    Client->>Builder: build()
+    Builder-->>Client: user
+```
+
+The train-wreck chain lands on three different objects (`A`, `B`, `C`); the builder chain calls the same `UserBuilder` instance every time because each setter returns `this` — no stranger's internals are ever touched, which is why fluent builders (and `stream.filter().map().collect()`) are exempt from the Law of Demeter.
 
 ---
 

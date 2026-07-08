@@ -81,6 +81,21 @@ public class Employee {
 - DBA changes the schema — you change `saveToDatabase()`, and might accidentally conflict with an in-flight Finance change
 - Unit testing `calculatePay()` requires the class to be instantiable with all DB concerns too
 
+```mermaid
+classDiagram
+    class Employee {
+        -name String
+        -hourlyRate double
+        -hoursWorked int
+        +calculatePay() double
+        +saveHoursToReport()
+        +saveToDatabase()
+    }
+    note for Employee "Three actors, one class: Finance owns calculatePay(), HR owns saveHoursToReport(), DBA owns saveToDatabase()"
+```
+
+**Class diagram — the violation.** One `Employee` class carries all three method groups, so a change requested by Finance, HR, or DBA touches the same class as the other two — exactly the "more than one reason to change" SRP forbids.
+
 ### Solution: Refactored Code
 
 ```java
@@ -132,6 +147,33 @@ public class Employee {
 ```
 
 Now each change is isolated. Finance changing pay rules only touches `PayCalculator`. Schema changes only touch `EmployeeRepository`. You can unit test `PayCalculator` in total isolation.
+
+```mermaid
+classDiagram
+    direction LR
+    class Employee {
+        -name String
+        -hourlyRate double
+        -hoursWorked int
+        +getName() String
+        +getHourlyRate() double
+        +getHoursWorked() int
+    }
+    class PayCalculator {
+        +calculatePay(employee) double
+    }
+    class HoursReporter {
+        +generateReport(employee) String
+    }
+    class EmployeeRepository {
+        +save(employee)
+    }
+    PayCalculator ..> Employee : reads
+    HoursReporter ..> Employee : reads
+    EmployeeRepository ..> Employee : persists
+```
+
+**Class diagram — the SRP-compliant fix.** `Employee` is now a pure data holder with no reason to change except its own shape; `PayCalculator` (Finance), `HoursReporter` (HR), and `EmployeeRepository` (DBA) each depend on `Employee` transiently but own exactly one actor's logic — each class now has exactly one reason to change.
 
 ---
 

@@ -266,6 +266,50 @@ public class OrderValidator {
 - `OrderValidator` was extracted for testability and single responsibility
 - Class is now 30 lines instead of 150+; every line has a known purpose
 
+**Visualized — the class shape before and after:**
+
+```mermaid
+classDiagram
+    direction LR
+    class OrderProcessorBefore["OrderProcessor (before, 150+ lines)"]
+    OrderProcessorBefore : -LEGACY_REGISTRY Map~String, Object~$
+    OrderProcessorBefore : -OLD_PAYMENT_ENDPOINT String$
+    OrderProcessorBefore : -orderRepository OrderRepository
+    OrderProcessorBefore : -paymentService PaymentService
+    OrderProcessorBefore : +processOrder(order) void
+    OrderProcessorBefore : -validateOrder(order) void
+    OrderProcessorBefore : +processOrderLegacy(order) void
+    OrderProcessorBefore : -validateOrderLegacy(order) boolean
+    OrderProcessorBefore : -enrichOrderLegacy(order) void
+    OrderProcessorBefore : -chargeViaLegacyGateway(order) void
+    OrderProcessorBefore : -auditLegacy(order) void
+    OrderProcessorBefore : -buildOrderHash(order) String
+    OrderProcessorBefore : -retryOnFailure(action, maxRetries) void
+
+    class OrderProcessorAfter["OrderProcessor (after, 30 lines)"]
+    OrderProcessorAfter : -orderRepository OrderRepository
+    OrderProcessorAfter : -paymentService PaymentService
+    OrderProcessorAfter : -orderValidator OrderValidator
+    OrderProcessorAfter : +processOrder(order) void
+
+    class OrderValidator
+    OrderValidator : +validate(order) void
+
+    class OrderRepository
+    OrderRepository : +save(order) void
+
+    class PaymentService
+    PaymentService : +charge(order) void
+
+    OrderProcessorBefore --> OrderRepository : persists via
+    OrderProcessorBefore --> PaymentService : charges via
+    OrderProcessorAfter --> OrderValidator : delegates validation to
+    OrderProcessorAfter --> OrderRepository : persists via
+    OrderProcessorAfter --> PaymentService : charges via
+```
+
+*Thirteen members are crammed into the "before" `OrderProcessor` — nine of them dead, duplicated, or unexplainable. The "after" version keeps only four members and delegates validation to a new `OrderValidator` collaborator; `OrderRepository` and `PaymentService` are the same two dependencies in both versions, untouched by the cleanup. Redrawing the diff as class shapes makes the actual deletion — not just the line count — visible at a glance.*
+
 ---
 
 ## Prevention Strategies
@@ -297,6 +341,40 @@ When cleaning up old code:
 
 **5. Feature Flags for Safe Removal**
 Before deleting a code path, gate it behind a feature flag set to `false`. Monitor for a release cycle. If nothing breaks, delete the flag and the code together.
+
+**Visualized — the safe-deletion decision flow (strategies 4 and 5 combined):**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A([Dead code candidate found]) --> B(Find all callers<br/>via IDE search)
+    B --> C(Search prod logs<br/>90-day window)
+    C --> D(Check git blame for<br/>last touch and why)
+    D --> E{"Callers or recent<br/>activity found?"}
+    E -- Yes --> F([Keep, document<br/>why it stays])
+    E -- No --> G(Gate behind a<br/>feature flag, default off)
+    G --> H(Monitor one full<br/>release cycle)
+    H --> I{"Anything break<br/>during monitoring?"}
+    I -- Yes --> J([Re-enable, keep code,<br/>investigate further])
+    I -- No --> K([Delete code and<br/>flag together])
+
+    class A io
+    class B,C,D,E,I mathOp
+    class F frozen
+    class G base
+    class H req
+    class J lossN
+    class K train
+```
+
+*This merges strategies 4 and 5 into one decision flow: a method only reaches the feature-flag gate after surviving the callers, log, and git-blame audit, and only gets deleted after surviving a full release cycle behind that flag. Anything that breaks along the way is kept and re-investigated instead of deleted — the diagram makes both escape hatches explicit instead of leaving them implicit in two separate numbered lists.*
 
 **6. Enforce Clean Commit History**
 Commented-out code should fail code review. Version control is the history — use `git log` to find deleted code, not inline comments.

@@ -39,61 +39,86 @@ Design a system where users can:
 
 ## ASCII Class Diagram
 
-```
-+-------------------+        +----------------------+
-|  ExpenseManager   |------->|       Group          |
-| (coordinator)     | manages| -id, name            |
-| +createGroup()    |        | -members: List<User> |
-| +addExpense()     |        | -expenses: List      |
-| +getBalances()    |        | -ledger: BalanceSheet|
-| +simplifyDebts()  |        | +addExpense()        |
-| +recordSettlement |        | +addMember()         |
-+-------------------+        +----+----------+------+
-                                   |          |
-                          contains |          | owns
-                                   v          v
-                          +----------------+  +--------------------+
-                          |    Expense     |  |   BalanceSheet      |
-                          | -id, desc      |  |   (Ledger)          |
-                          | -payer: User   |  | Map<userId,         |
-                          | -totalAmount   |  |   Map<otherId,      |
-                          | -splits: List  |  |     BigDecimal>>    |
-                          | -timestamp     |  | +updateBalance()    |
-                          +-------+--------+  | +getBalances(user)  |
-                                  |            +---------------------+
-                          uses    v
-                          +----------------+         +------------------+
-                          | SplitStrategy  |<>------>|      Split       |
-                          | <<interface>>  |  creates| -user: User      |
-                          | +computeSplits |         | -amount: BigDecimal|
-                          +-------+--------+         +------------------+
-                                  ^
-            +---------------------+----------------------+
-            |                      |                      |
-  +-------------------+  +-------------------+  +-----------------------+
-  | EqualSplit        |  | ExactSplit        |  | PercentageSplit        |
-  | Strategy          |  | Strategy          |  | Strategy               |
-  | divide evenly,    |  | validate provided |  | validate % sum to 100, |
-  | remainder to first|  | amounts sum to    |  | compute amounts, fix   |
-  | N participants    |  | total exactly     |  | rounding remainder     |
-  +-------------------+  +-------------------+  +-----------------------+
+```mermaid
+classDiagram
+    class ExpenseManager {
+        +createGroup()
+        +addExpense()
+        +getBalances()
+        +simplifyDebts()
+        +recordSettlement()
+    }
+    class Group {
+        -id
+        -name
+        -members List~User~
+        -expenses List~Expense~
+        -ledger BalanceSheet
+        +addExpense()
+        +addMember()
+    }
+    class Expense {
+        -id
+        -desc
+        -payer User
+        -totalAmount BigDecimal
+        -splits List~Split~
+        -timestamp
+    }
+    class BalanceSheet {
+        -balances Map~String, BigDecimal~
+        +updateBalance()
+        +getBalances(user) Map
+    }
+    class SplitStrategy {
+        <<interface>>
+        +computeSplits(totalAmount, participants, extraData) List~Split~
+    }
+    class Split {
+        -user User
+        -amount BigDecimal
+    }
+    class EqualSplitStrategy {
+        +computeSplits(totalAmount, participants, extraData) List~Split~
+    }
+    class ExactSplitStrategy {
+        +computeSplits(totalAmount, participants, extraData) List~Split~
+    }
+    class PercentageSplitStrategy {
+        +computeSplits(totalAmount, participants, extraData) List~Split~
+    }
+    class User {
+        -id
+        -name
+    }
+    class DebtSimplifier {
+        <<utility>>
+        +simplify(netBalances) List~Transaction~
+    }
+    class Transaction {
+        -fromUser User
+        -toUser User
+        -amount BigDecimal
+    }
 
-+------------------+        +-------------------------+
-|      User        |        |    DebtSimplifier        |
-| -id, name         |        | (stateless utility)      |
-+------------------+        | +simplify(netBalances)   |
-                             |   -> List<Transaction>   |
-                             |  uses 2 max-heaps:        |
-                             |   creditors / debtors     |
-                             +------------+-------------+
-                                          |
-                                          v
-                             +--------------------------+
-                             |  Transaction (Settlement) |
-                             | -fromUser, -toUser        |
-                             | -amount: BigDecimal       |
-                             +--------------------------+
+    ExpenseManager --> Group : manages
+    ExpenseManager ..> DebtSimplifier : uses
+    Group *-- "*" Expense : contains
+    Group *-- "1" BalanceSheet : owns
+    Group o-- User : members
+    Expense ..> SplitStrategy : uses
+    Expense --> User : payer
+    SplitStrategy ..> Split : creates
+    SplitStrategy <|.. EqualSplitStrategy
+    SplitStrategy <|.. ExactSplitStrategy
+    SplitStrategy <|.. PercentageSplitStrategy
+    Split --> User : user
+    DebtSimplifier ..> Transaction : creates
+    Transaction --> User : fromUser
+    Transaction --> User : toUser
 ```
+
+`ExpenseManager` is the coordinator: it manages `Group`, whose `BalanceSheet` acts as the ledger. The three `SplitStrategy` implementations (Strategy pattern) plug in interchangeably to produce `Split`s, while the stateless-utility `DebtSimplifier` turns net balances into settling `Transaction`s (each one a settlement between two users).
 
 ---
 
@@ -140,75 +165,69 @@ A natural extension would be a `BalanceChangeObserver` notified whenever an expe
 
 ### `addExpense()` flow
 
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant EM as ExpenseManager
+    participant SF as SplitStrategyFactory
+    participant ST as SplitStrategy
+    participant G as Group
+    participant L as BalanceSheet
+
+    Caller->>EM: addExpense(group, payer, totalAmount,<br/>participants, splitType, extraData)
+    EM->>SF: create(splitType)
+    SF-->>EM: strategy
+    EM->>ST: computeSplits(totalAmount, participants, extraData)
+    ST-->>EM: splits
+
+    alt sum(splits.amount) != totalAmount
+        EM-->>Caller: throw IllegalArgumentException
+    else sum matches totalAmount
+        EM->>EM: new Expense(payer, totalAmount, splits, timestamp)
+        EM->>G: addExpense(expense)
+        loop for each split where split.user != payer
+            EM->>L: updateBalance(payer, split.user, +split.amount)
+        end
+        Note over L: Observer hook would fire here<br/>(see Follow-Up Extensions)
+        EM-->>Caller: return expense
+    end
 ```
-addExpense(group, payer, totalAmount, participants, splitType, extraData)
-      |
-      v
- SplitStrategyFactory.create(splitType)
-      |
-      v
- strategy.computeSplits(totalAmount, participants, extraData)
-      |
-      +--[validation]--> sum(splits.amount) == totalAmount ?
-      |                        |
-      |                    [no] --> throw IllegalArgumentException
-      |                        |
-      |                      [yes]
-      v
- new Expense(payer, totalAmount, splits, timestamp)
-      |
-      v
- group.addExpense(expense)
-      |
-      +--[for each split in splits]--------------------+
-      |   if split.user != payer:                       |
-      |     ledger.updateBalance(payer, split.user,     |
-      |                           +split.amount)        |
-      |     // payer is owed split.amount by split.user |
-      +---------------------------------------------------+
-      |
-      v
- (Observer hook would fire here — see Follow-Up Extensions)
-      |
-      v
- return expense
-```
+
+Traces the runtime collaboration behind `addExpense()`: the `SplitStrategyFactory` hands back a strategy, the strategy computes the `Split`s, and — once the sum-to-total invariant holds — the ledger is updated once per non-payer participant before the new `Expense` is returned.
 
 ### `simplifyDebts(group)` flow
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["simplifyDebts(group)"]) --> Net["Build netBalance per user<br/>(sum ledger balances for each member)"]
+    Net --> Heaps["Split into creditorHeap (net positive)<br/>and debtorHeap (net negative)"]
+    Heaps --> Cond{"Both heaps non-empty?"}
+    Cond -- no --> Done(["Return transactions<br/>(at most N-1 for N users)"])
+    Cond -- yes --> Pop["Pop largest creditor C<br/>and largest debtor D"]
+    Pop --> Settle["settle = min(creditAmt, debtAmt)<br/>add Transaction(D to C, settle)"]
+    Settle --> Remainder["remainder_C = creditAmt - settle<br/>remainder_D = debtAmt - settle"]
+    Remainder --> CheckC{"remainder_C above 0?"}
+    CheckC -- yes --> PushC["Push C back onto creditorHeap"] --> Cond
+    CheckC -- no --> CheckD{"remainder_D above 0?"}
+    CheckD -- yes --> PushD["Push D back onto debtorHeap"] --> Cond
+    CheckD -- no --> Cond
+
+    class Start io
+    class Net,Heaps base
+    class Cond,Remainder,CheckC,CheckD mathOp
+    class Pop,PushC,PushD req
+    class Settle,Done train
 ```
-simplifyDebts(group)
-      |
-      v
- build netBalance: Map<User, BigDecimal>
-   for each user U in group.members:
-     netBalance[U] = sum over all V of ledger.getBalance(U, V)
-     // positive = U is owed money overall (net creditor)
-     // negative = U owes money overall (net debtor)
-      |
-      v
- creditorHeap = max-heap of (user, amount) where amount > 0, ordered by amount desc
- debtorHeap   = max-heap of (user, amount) where amount < 0, ordered by |amount| desc
-      |
-      v
- transactions = []
- while both heaps non-empty:
-      |
-      +--> pop largest creditor C (owed creditAmt)
-      +--> pop largest debtor   D (owes debtAmt = |amount|)
-      |
-      +--> settle = min(creditAmt, debtAmt)
-      +--> transactions.add( Transaction(from=D, to=C, amount=settle) )
-      |
-      +--> remainder_C = creditAmt - settle
-      +--> remainder_D = debtAmt   - settle
-      |
-      +--[remainder_C > 0]--> push C back onto creditorHeap
-      +--[remainder_D > 0]--> push D back onto debtorHeap
-      |
-      v
- return transactions   // at most (N - 1) transactions for N users
-```
+
+Traces the greedy debt-simplification loop: each iteration matches the largest creditor against the largest debtor, settles the smaller of the two amounts, and requeues whichever side still has a remainder — producing at most N-1 transactions for N users.
 
 ---
 

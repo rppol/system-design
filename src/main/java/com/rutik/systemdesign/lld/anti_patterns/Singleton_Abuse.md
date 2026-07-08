@@ -105,6 +105,30 @@ public class UserRepository {
 }
 ```
 
+The class diagram makes the hidden coupling concrete: both arrows are dependencies (`..>`), not held associations — `UserRepository` stores no field for either collaborator, so each is fetched fresh via a static `getInstance()` call buried inside `findById()`, invisible from the class's own signature.
+
+```mermaid
+classDiagram
+    direction LR
+    class DatabaseConnection {
+        <<Singleton>>
+        -Connection connection
+        +getInstance() DatabaseConnection
+        +getConnection() Connection
+    }
+    class AppConfig {
+        <<Singleton>>
+        -Properties props
+        +getInstance() AppConfig
+        +get(key) String
+    }
+    class UserRepository {
+        +findById(id) User
+    }
+    UserRepository ..> DatabaseConnection : getInstance() lookup
+    UserRepository ..> AppConfig : getInstance() lookup
+```
+
 **Testing problem:**
 
 ```java
@@ -228,6 +252,34 @@ class UserRepositoryTest {
         assertNotNull(user);
     }
 }
+```
+
+Both dependency arrows from the diagram above become explicit `-->` associations here: `UserRepository` now stores `DatabaseConnection` and `AppConfig` as constructor-injected fields, and `Application` is the single composition root that constructs every collaborator exactly once.
+
+```mermaid
+classDiagram
+    direction LR
+    class DatabaseConnection {
+        -Connection connection
+        +getConnection() Connection
+    }
+    class AppConfig {
+        -Properties props
+        +get(key) String
+    }
+    class UserRepository {
+        -DatabaseConnection dbConnection
+        -AppConfig config
+        +findById(id) User
+    }
+    class Application {
+        +main(args) void
+    }
+    UserRepository --> DatabaseConnection : held field
+    UserRepository --> AppConfig : held field
+    Application ..> DatabaseConnection : constructs
+    Application ..> AppConfig : constructs
+    Application ..> UserRepository : constructs
 ```
 
 **When Singleton IS appropriate:**

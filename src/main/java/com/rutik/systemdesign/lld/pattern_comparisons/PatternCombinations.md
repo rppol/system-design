@@ -24,6 +24,38 @@ Each pattern solves one specific problem. Real systems have multiple problems:
 - **Structure** + **behavior extension** → Composite + Decorator
 - **Action** + **undo** → Command + Memento
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Which two problems<br/>am I solving at once?"])
+    Q1("Creation +<br/>lifecycle management")
+    Q2("Behavior variation +<br/>event notification")
+    Q3("Structure +<br/>behavior extension")
+    Q4("Action + undo")
+    R1("Factory + Singleton")
+    R2("Strategy + Observer")
+    R3("Composite + Decorator")
+    R4("Command + Memento")
+
+    Start --> Q1 --> R1
+    Start --> Q2 --> R2
+    Start --> Q3 --> R3
+    Start --> Q4 --> R4
+
+    class Start io
+    class Q1,Q2,Q3,Q4 req
+    class R1,R2,R3,R4 train
+```
+
+*Each branch pairs two simultaneous concerns with the combination that resolves both at once — these four pairings recur constantly in production code, and each gets its own worked example below.*
+
 ---
 
 ## Classic Combinations
@@ -92,15 +124,39 @@ stockMarket.addListener(new AlertTrigger(new SMSAlertStrategy()));
 
 **Use case**: UI component trees (Java Swing, HTML DOM), middleware pipelines
 
+```mermaid
+classDiagram
+    direction LR
+    class Component {
+        <<interface>>
+        +render()
+    }
+    class Leaf {
+        +render()
+    }
+    class Composite {
+        -children List~Component~
+        +render()
+    }
+    class DecoratorA {
+        -wrapped Component
+        +render()
+    }
+    class DecoratorB {
+        -wrapped Component
+        +render()
+    }
+
+    Component <|.. Leaf
+    Component <|.. Composite
+    Component <|.. DecoratorA
+    Component <|.. DecoratorB
+    Composite "1" o-- "*" Component : children
+    DecoratorA --> Component : wraps
+    DecoratorB --> Component : wraps
 ```
-<<interface>> Component
-      △
-   ┌──┴──────────────────┐
-Leaf        Composite (holds children)
-            │ children: List<Component>
-DecoratorA (wraps any Component)
-DecoratorB (wraps any Component)
-```
+
+*Leaf and Composite both realize `Component`, so a caller never needs to know which one it holds; Composite aggregates any number of `Component` children while `DecoratorA`/`DecoratorB` each wrap a single `Component` instance — the shared interface is what lets trees and wrappers nest inside each other freely.*
 
 ```java
 // A tree of components, each individually decorated
@@ -112,6 +168,32 @@ Component root = new BorderDecorator(
 );
 root.render();
 ```
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant BD as BorderDecorator
+    participant P as Panel (Composite)
+    participant SD as ScrollDecorator
+    participant TA as TextArea (Leaf)
+    participant TD as TooltipDecorator
+    participant Btn as Button (Leaf)
+
+    Client->>BD: render()
+    BD->>P: render()
+    P->>SD: render()
+    SD->>TA: render()
+    TA-->>SD: rendered
+    SD-->>P: rendered
+    P->>TD: render()
+    TD->>Btn: render()
+    Btn-->>TD: rendered
+    TD-->>P: rendered
+    P-->>BD: rendered
+    BD-->>Client: rendered
+```
+
+*A single `root.render()` call cascades through the decorator (`BorderDecorator` forwards to its wrapped `Panel`), then fans out across the composite's children — two of which are themselves decorated (`ScrollDecorator`, `TooltipDecorator`) — before the results bubble back up the same chain.*
 
 **Why they work together**: Both use the same Component interface. You can decorate leaves, composites, or even other decorators.
 

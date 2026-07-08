@@ -191,47 +191,71 @@ public class StrategyDemo {
 
 ### Template Method (Inheritance)
 
+```mermaid
+classDiagram
+    class DataProcessor {
+        <<abstract>>
+        +process() void
+        #readData() void
+        #processData() void
+        #saveData() void
+    }
+
+    class CsvDataProcessor {
+        #readData() void
+        #processData() void
+        #saveData() void
+    }
+
+    class JsonDataProcessor {
+        #readData() void
+        #processData() void
+    }
+
+    DataProcessor <|-- CsvDataProcessor
+    DataProcessor <|-- JsonDataProcessor
 ```
-+-------------------------------+
-|   <<abstract>>                |
-|   DataProcessor               |
-|-------------------------------|
-|+ process()  [final]           |  <-- skeleton: calls readData, processData, saveData
-|# readData() [abstract]        |
-|# processData() [abstract]     |
-|# saveData() [hook, optional]  |
-+-------------------------------+
-          ^               ^
-          |               |
-+-----------------+  +------------------+
-| CsvDataProcessor|  | JsonDataProcessor|
-|# readData()     |  |# readData()      |
-|# processData()  |  |# processData()   |
-|# saveData()     |  | (uses default)   |
-+-----------------+  +------------------+
-```
+
+*`process()` is `final` — the skeleton that always calls `readData → processData → saveData`. `readData()`/`processData()` are abstract primitive operations every subclass must supply; `saveData()` is a hook with a default body, so `JsonDataProcessor` inherits it unchanged instead of overriding it.*
 
 ### Strategy (Composition)
 
+```mermaid
+classDiagram
+    direction LR
+
+    class DataProcessor {
+        <<Context>>
+        -strategy ProcessingStrategy
+        +setStrategy(s) void
+        +process() void
+    }
+
+    class ProcessingStrategy {
+        <<interface>>
+        +readData() void
+        +processData() void
+        +saveData() void
+    }
+
+    class CsvProcessingStrategy {
+        +readData() void
+        +processData() void
+        +saveData() void
+    }
+
+    class JsonProcessingStrategy {
+        +readData() void
+        +processData() void
+        +saveData() void
+    }
+
+    DataProcessor --> ProcessingStrategy : delegates to
+    ProcessingStrategy <|.. CsvProcessingStrategy
+    ProcessingStrategy <|.. JsonProcessingStrategy
 ```
-+--------------------+       +------------------------+
-|   DataProcessor    |------>| <<interface>>          |
-|   (Context)        |       |  ProcessingStrategy    |
-|--------------------|       |------------------------|
-|- strategy          |       |+ readData()            |
-|+ setStrategy()     |       |+ processData()         |
-|+ process()         |       |+ saveData()            |
-+--------------------+       +------------------------+
-                                        ^
-                           +------------+------------+
-                           |                         |
-              +---------------------+   +---------------------+
-              | CsvProcessingStrategy|  | JsonProcessingStrategy|
-              |+ readData()          |  |+ readData()           |
-              |+ processData()       |  |+ processData()        |
-              |+ saveData()          |  |+ saveData()           |
-              +---------------------+   +---------------------+
-```
+
+*`DataProcessor` (the Context) holds a `ProcessingStrategy` reference and delegates every step to it — unlike Template Method, there is no shared base implementation, so `setStrategy()` lets the client swap in `JsonProcessingStrategy` at runtime without subclassing.*
 
 ---
 
@@ -317,5 +341,31 @@ public abstract class DataProcessor {
     private void audit()    { System.out.println("Writing audit log entry"); }
 }
 ```
+
+Reading the hybrid as a runtime sequence makes the alternation between fixed and delegated steps explicit — `validate()` and `audit()` never move, while the three middle steps bind to whichever strategy was injected:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant DP as processor : DataProcessor
+    participant S as strategy : ProcessingStrategy
+
+    C->>DP: process()
+    activate DP
+    DP->>DP: validate()
+    Note right of DP: fixed step - base class owns it
+    DP->>S: readData()
+    S-->>DP: done
+    DP->>S: processData()
+    S-->>DP: done
+    DP->>S: saveData()
+    S-->>DP: done
+    DP->>DP: audit()
+    Note right of DP: fixed step - base class owns it
+    deactivate DP
+    DP-->>C: return
+```
+
+*`validate()` and `audit()` are invariant — implemented once in the base class — while `readData()`/`processData()`/`saveData()` are delegated to whichever `ProcessingStrategy` was injected at construction; swap in a different strategy and this diagram is unchanged except for what `S` binds to.*
 
 This hybrid keeps the pipeline structure locked (Template Method) while making each step independently replaceable (Strategy) — the best of both worlds.

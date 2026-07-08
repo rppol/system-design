@@ -107,6 +107,48 @@ public class WorkManager {
 - If the `eat()` signature changes, `RobotWorker` is affected even though it never eats
 - Testing `RobotWorker.work()` requires satisfying the entire `Worker` interface (12+ methods in a real-world analog)
 
+```mermaid
+classDiagram
+    direction LR
+    class Worker {
+        <<interface>>
+        +work()
+        +eat()
+        +sleep()
+        +attendMeeting()
+        +writeCode()
+        +doPhysicalLabor()
+        +manageTeam()
+    }
+    class HumanWorker {
+        +work()
+        +eat()
+        +sleep()
+        +attendMeeting()
+        +writeCode()
+        +doPhysicalLabor()
+        +manageTeam()
+    }
+    class RobotWorker {
+        +work()
+        +eat()
+        +sleep()
+        +attendMeeting()
+        +writeCode()
+        +doPhysicalLabor()
+        +manageTeam()
+    }
+    class WorkManager {
+        +scheduleBreak(worker)
+    }
+    Worker <|.. HumanWorker
+    Worker <|.. RobotWorker
+    WorkManager ..> Worker : schedules break
+    note for RobotWorker "eat(), sleep(), manageTeam() are forced stubs that throw at runtime"
+```
+
+**Class diagram — the violation.** `Worker` bundles seven unrelated methods behind one fat interface, so `RobotWorker` is forced to realize all seven even though it cannot meaningfully eat, sleep, or manage a team — the three flagged methods only exist to throw `UnsupportedOperationException`.
+
 ### Solution: Refactored Code (ISP Compliant)
 
 ```java
@@ -164,6 +206,57 @@ public class WorkManager {
     }
 }
 ```
+
+```mermaid
+classDiagram
+    class Workable {
+        <<interface>>
+        +work()
+    }
+    class Feedable {
+        <<interface>>
+        +eat()
+        +sleep()
+    }
+    class OfficeCapable {
+        <<interface>>
+        +attendMeeting()
+        +writeCode()
+    }
+    class PhysicalCapable {
+        <<interface>>
+        +doPhysicalLabor()
+    }
+    class Manageable {
+        <<interface>>
+        +manageTeam()
+    }
+    class HumanDeveloper {
+        +work()
+        +eat()
+        +sleep()
+        +attendMeeting()
+        +writeCode()
+    }
+    class RobotWorker {
+        +work()
+        +attendMeeting()
+        +writeCode()
+        +doPhysicalLabor()
+    }
+    class WorkManager {
+        +scheduleBreak(worker)
+    }
+    Workable <|.. HumanDeveloper
+    Feedable <|.. HumanDeveloper
+    OfficeCapable <|.. HumanDeveloper
+    Workable <|.. RobotWorker
+    OfficeCapable <|.. RobotWorker
+    PhysicalCapable <|.. RobotWorker
+    WorkManager ..> Feedable : schedules break
+```
+
+**Class diagram — the ISP-compliant fix.** Five narrow interfaces replace the one fat `Worker` interface; `HumanDeveloper` and `RobotWorker` each realize only the roles they actually fulfill (no `Manageable`, and `RobotWorker` skips `Feedable` entirely), and `WorkManager` now depends on `Feedable` directly instead of the whole `Worker` contract.
 
 ---
 

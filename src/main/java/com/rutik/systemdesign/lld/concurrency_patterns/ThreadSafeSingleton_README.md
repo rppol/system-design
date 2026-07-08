@@ -65,15 +65,21 @@ class NaiveSingleton {
 
 **The race condition:**
 
-```
-Thread A                          Thread B
---------                          --------
-if (instance == null) -> TRUE
-                                  if (instance == null) -> TRUE (A hasn't written yet)
-instance = new Singleton()
-                                  instance = new Singleton()  <- SECOND INSTANCE!
-return instance (instance #1)
-                                  return instance (instance #2)
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant S as instance (static field)
+    participant B as Thread B
+    A->>S: read instance
+    Note right of A: sees null, check passes
+    B->>S: read instance
+    Note right of B: sees null too (A hasn't written yet)
+    A->>S: write new Singleton()
+    Note over S: now holds instance #1
+    B->>S: write new Singleton()
+    Note over S: overwritten with instance #2
+    S-->>A: return instance #1
+    S-->>B: return instance #2
 ```
 
 Both threads get different instances. All state managed by the "singleton" is now split across two objects. This leads to subtle, hard-to-reproduce bugs in production.
@@ -95,6 +101,35 @@ Both threads get different instances. All state managed by the "singleton" is no
 
 **Recommendation for most cases: Bill Pugh Holder Idiom (production Java code)**
 **Recommendation when serialization/reflection matters: Enum Singleton**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Need a thread-safe singleton"]) --> Q1{"Need lazy<br/>initialization?"}
+    Q1 -->|no| Eager["Eager Initialization"]
+    Q1 -->|yes| Q2{"Serialization or<br/>reflection attacks a concern?"}
+    Q2 -->|yes| Q3{"Must extend a class or<br/>implement several interfaces?"}
+    Q3 -->|yes| Holder2["Holder Idiom +<br/>readResolve + ctor guard"]
+    Q3 -->|no| EnumS["Enum Singleton"]
+    Q2 -->|no| Q4{"getInstance() called<br/>millions of times/sec?"}
+    Q4 -->|yes| Holder["Bill Pugh Holder Idiom<br/>(default recommendation)"]
+    Q4 -->|no| Sync["Synchronized Method<br/>(rarely called only)"]
+
+    class Start io
+    class Q1,Q2,Q3,Q4 mathOp
+    class Eager,Sync base
+    class Holder,Holder2 train
+    class EnumS frozen
+```
+
+A decision guide synthesizing the table above: most production code lands on the Bill Pugh Holder Idiom, serialization/reflection concerns push you toward Enum Singleton (or Holder with extra guards when you cannot use an enum), and Eager/Synchronized cover the narrow edge cases.
 
 ---
 
@@ -214,14 +249,19 @@ The JVM and CPU are allowed to reorder steps 2 and 3 (as long as the result is e
 
 ### The Race Condition
 
-```
-Thread A (creating instance)       Thread B (reading instance)
----------------------------------  ---------------------------------
-memory = allocate(...)
-instance = memory    <-- write
-                                   if (instance == null) -> FALSE  (sees non-null!)
-                                   return instance  <-- partially constructed object!
-<init>(memory)       <-- writes fields AFTER Thread B already returned the object
+```mermaid
+sequenceDiagram
+    participant A as Thread A (creating)
+    participant S as instance (static field)
+    participant B as Thread B (reading)
+    A->>S: memory = allocate(...)
+    A->>S: instance = memory (write reordered before init!)
+    B->>S: check instance == null
+    Note right of B: sees non-null, check fails
+    S-->>B: return instance
+    Note right of B: partially constructed object!
+    A->>A: run constructor, initialize fields
+    Note right of A: too late -- B already returned the object
 ```
 
 Thread B gets a reference to an object whose constructor hasn't finished yet. Its fields may contain default values (0, null, false). This causes `NullPointerException` or `ClassCastException` downstream — bugs that appear randomly under load.
@@ -259,6 +299,25 @@ More specifically, JLS §12.4.2 specifies that class initialization is synchroni
 4. Thread B calls `getInstance()` concurrently. JVM sees `SingletonHolder` is being initialized. Thread B **blocks** on `LC`.
 5. Thread A finishes initialization. Releases `LC`. `INSTANCE` is fully constructed and `final`.
 6. Thread B acquires `LC`, sees initialization is done, proceeds. Returns the same `INSTANCE`.
+
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant JVM as JVM class-init lock (LC)
+    participant B as Thread B
+    A->>JVM: getInstance() touches SingletonHolder
+    JVM-->>A: not yet initialized, LC granted
+    A->>A: run static initializer
+    Note right of A: INSTANCE = new HolderSingleton()
+    B->>JVM: getInstance() touches SingletonHolder (concurrently)
+    JVM-->>B: initialization in progress, block on LC
+    A->>JVM: static initializer finished, release LC
+    Note over JVM: INSTANCE is final and fully constructed
+    JVM-->>B: LC granted, init already done
+    B-->>B: return the same INSTANCE
+```
+
+The six steps above as a timeline: Thread B's `getInstance()` call blocks on the JVM's per-class init lock (`LC`) until Thread A's static initializer finishes, so it can never observe a half-built `INSTANCE`.
 
 ### Why `final` Matters
 

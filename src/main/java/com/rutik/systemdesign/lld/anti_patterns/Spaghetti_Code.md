@@ -246,6 +246,39 @@ public class OrderService {
 }
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["processOrder(requestData)"]) --> S1{"Step 1: validate<br/>4 levels deep"}
+    S1 -- invalid --> E1["return error code<br/>(5 distinct exits)"]
+    S1 -- valid --> S2{"Step 2: inventory<br/>raw SQL in loop"}
+    S2 -- low stock --> E2["return OUT_OF_STOCK"]
+    S2 -- sql error --> E3["return DB_ERROR"]
+    S2 -- stock ok --> S3{"Step 3: charge payment<br/>direct Stripe call"}
+    S3 -- no token --> E4["return MISSING_PAYMENT_TOKEN"]
+    S3 -- charge fails --> E5["return PAYMENT_FAILED or<br/>PAYMENT_ERROR"]
+    S3 -- charged --> S4{"Step 4: persist order<br/>raw SQL insert"}
+    S4 -- sql error --> E6["return PERSISTENCE_ERROR<br/>payment already charged"]
+    S4 -- saved --> S5["Step 5: email<br/>errors swallowed"]
+    S5 --> S6["Step 6: SMS<br/>errors swallowed"]
+    S6 --> S7["Step 7: loyalty points<br/>raw SQL update"]
+    S7 --> Done(["return SUCCESS: orderId"])
+
+    class Start,Done io
+    class S1,S2,S3,S4 mathOp
+    class S5,S6,S7 train
+    class E1,E2,E3,E4,E5,E6 lossN
+```
+
+*`processOrder`'s actual control-flow graph: seven sequential responsibilities linked by twelve return statements, with validation alone producing five distinct exits before any business logic runs. Step 4 shows the cost directly — a persistence failure there strands the payment already captured in Step 3, exactly the "no rollback" gap called out below.*
+
 **What is wrong with this code:**
 - One method handles 7 distinct responsibilities simultaneously
 - 6+ levels of nesting make control flow nearly impossible to follow
@@ -359,6 +392,36 @@ public class OrderValidator {
     }
 }
 ```
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant O as OrderProcessingService
+    participant V as OrderValidator
+    participant I as InventoryService
+    participant P as PricingService
+    participant Pay as PaymentService
+    participant R as OrderRepository
+    participant N as NotificationService
+    participant L as LoyaltyService
+
+    C->>O: processOrder(request)
+    O->>V: validate(request)
+    V-->>O: ok
+    O->>I: reserveStock(items)
+    I-->>O: reserved
+    O->>P: calculateTotal(items)
+    P-->>O: total
+    O->>Pay: charge(token, total)
+    Pay-->>O: receipt
+    O->>R: save(order)
+    R-->>O: order
+    O->>N: notifyOrderConfirmed(order)
+    O->>L: awardPoints(order)
+    O-->>C: OrderConfirmation
+```
+
+*The same eight lines from `processOrder` above, drawn as a call sequence: one orchestrator, seven collaborators, one call each. No branching, no shared flags, no early-return maze — the linear opposite of the control-flow graph in the Java Violation Example above.*
 
 **What changed:**
 - `processOrder` is now 8 lines — readable as a specification of what happens

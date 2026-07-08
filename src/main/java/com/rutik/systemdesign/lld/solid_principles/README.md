@@ -95,12 +95,30 @@ SOLID principles directly counteract each of these symptoms.
 
 ## How the Principles Relate to Each Other
 
-```
-SRP  ──────► Keeps classes focused, making OCP and LSP easier to achieve
-OCP  ──────► Requires good abstractions, reinforces DIP
-LSP  ──────► Ensures polymorphism is safe, which OCP relies on
-ISP  ──────► Produces narrow abstractions, which DIP depends on
-DIP  ──────► Ties everything together at the architectural boundary level
+The five principles form a dependency chain rather than five isolated rules: SRP and ISP lay the foundation, LSP keeps polymorphism safe for OCP to build on, and OCP's abstractions feed into DIP — the architectural boundary that ties the whole chain together.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SRP(["SRP<br/>focused classes"]) -->|"keeps classes focused"| OCP("OCP<br/>extension points")
+    SRP -->|"keeps classes focused"| LSP("LSP<br/>safe polymorphism")
+    LSP -->|"ensures safe polymorphism"| OCP
+    ISP(["ISP<br/>narrow abstractions"]) -->|"produces narrow abstractions"| DIP("DIP<br/>inverted dependencies")
+    OCP -->|"requires abstractions, reinforces"| DIP
+    DIP -->|"ties everything together"| Boundary(["Architectural<br/>Boundary"])
+
+    class SRP,ISP base
+    class LSP train
+    class OCP mathOp
+    class DIP io
+    class Boundary frozen
 ```
 
 - **SRP + ISP** together prevent God objects and bloated interfaces

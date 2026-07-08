@@ -46,31 +46,38 @@ Key distinction: these patterns operate at the structural level — the relation
 
 ## 4. Decision Flowchart
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Root(["Need to STRUCTURE or<br/>COMPOSE objects?"])
+    Root --> Q1{"Two INCOMPATIBLE interfaces?<br/>Retrofit existing code?"}
+    Q1 --> Adapter([Adapter])
+    Root --> Q2{"Separate abstraction from<br/>implementation? Designed upfront?"}
+    Q2 --> Bridge([Bridge])
+    Root --> Q3{"Build TREE structures,<br/>leaves and composites uniform?"}
+    Q3 --> Composite([Composite])
+    Root --> Q4{"Add BEHAVIOR at runtime,<br/>stackably, no subclassing?"}
+    Q4 --> Decorator([Decorator])
+    Root --> Q5{"Provide a SIMPLE interface<br/>to a complex subsystem?"}
+    Q5 --> Facade([Facade])
+    Root --> Q6{"Share STATE across many<br/>fine-grained objects?"}
+    Q6 --> Flyweight([Flyweight])
+    Root --> Q7{"CONTROL ACCESS to an object?<br/>(lazy load, security, remote)"}
+    Q7 --> Proxy([Proxy])
+
+    class Root io
+    class Q1,Q2,Q3,Q4,Q5,Q6,Q7 mathOp
+    class Adapter,Bridge,Composite,Decorator,Facade,Flyweight,Proxy train
 ```
-Need to STRUCTURE or COMPOSE objects?
-  |
-  +-- Making two INCOMPATIBLE interfaces work together?
-  |     Retrofit existing code?                        -> Adapter
-  |
-  +-- Separating abstraction from implementation
-  |     to allow both to evolve independently?
-  |     Designed upfront?                              -> Bridge
-  |
-  +-- Building TREE structures where leaves
-  |   and composites are treated uniformly?            -> Composite
-  |
-  +-- Adding BEHAVIOR to an object at runtime,
-  |   stackably, without subclassing?                  -> Decorator
-  |
-  +-- Providing a SIMPLE interface to a
-  |   complex subsystem?                               -> Facade
-  |
-  +-- Sharing STATE across many fine-grained
-  |   objects to save memory?                          -> Flyweight
-  |
-  +-- CONTROLLING ACCESS to an object?
-      (lazy load, security, logging, remote)           -> Proxy
-```
+
+Each branch asks the deciding question for one of the seven patterns; the leaf it lands on names the pattern to reach for.
 
 ---
 
@@ -104,23 +111,30 @@ Need to STRUCTURE or COMPOSE objects?
 
 Structural patterns often appear together in real systems:
 
-```
-Client
-  |
-  v
-Facade  <-- hides complexity of multiple subsystems
-  |
-  +-- Subsystem A (accessed via Adapter -- was incompatible)
-  |
-  +-- Subsystem B (accessed via Proxy -- lazy-loaded or secured)
-  |       |
-  |       +-- Real Subject (Decorator chain wraps it for logging/compression)
-  |
-  +-- Subsystem C (Composite tree -- treat files and folders uniformly)
-  |       |
-  |       +-- Leaf nodes (Flyweight -- share glyph/icon state across nodes)
-  |
-  +-- Subsystem D (Bridge -- abstraction decoupled from implementation)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Client"])
+    Client --> Facade("Facade<br/>(hides subsystem complexity)")
+    Facade --> SubA(["Subsystem A<br/>(via Adapter, was incompatible)"])
+    Facade --> SubB("Subsystem B<br/>(via Proxy, lazy-loaded or secured)")
+    SubB --> RealSubject(["Real Subject<br/>(Decorator chain: logging, compression)"])
+    Facade --> SubC("Subsystem C<br/>(Composite tree: files and folders)")
+    SubC --> Leaf(["Leaf nodes<br/>(Flyweight: shared glyph/icon state)"])
+    Facade --> SubD(["Subsystem D<br/>(Bridge: abstraction decoupled from impl)"])
+
+    class Client io
+    class Facade mathOp
+    class SubA,SubB,SubC,SubD base
+    class RealSubject frozen
+    class Leaf train
 ```
 
 Example: A document rendering system uses Composite (document tree), Flyweight (character glyphs), Decorator (bold/italic wrappers), Facade (one `render()` entry point), and Proxy (lazy image loading). All seven patterns can coexist in a single system.

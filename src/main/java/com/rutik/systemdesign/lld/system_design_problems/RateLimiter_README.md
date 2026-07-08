@@ -44,56 +44,84 @@ Requirements given in the prompt are typically:
 
 ## ASCII Class Diagram
 
+```mermaid
+classDiagram
+    class RateLimiter {
+        <<interface>>
+        +allowRequest(clientId) boolean
+    }
+
+    class FixedWindowCounterRateLimiter {
+        -windows ConcurrentHashMap~String,WindowCounter~
+        -limit int
+        -windowSizeMs long
+        +allowRequest(clientId) boolean
+    }
+
+    class SlidingWindowLogRateLimiter {
+        -requestLogs ConcurrentHashMap~String,Deque~
+        -limit int
+        -windowSizeMs long
+        +allowRequest(clientId) boolean
+    }
+
+    class SlidingWindowCounterRateLimiter {
+        -windows ConcurrentHashMap~String,WindowCounter~
+        -limit int
+        -windowSizeMs long
+        +allowRequest(clientId) boolean
+    }
+
+    class TokenBucketRateLimiter {
+        -buckets ConcurrentHashMap~String,Bucket~
+        -capacity int
+        -refillTokensPerSecond double
+        +allowRequest(clientId) boolean
+    }
+
+    class RateLimiterFactory {
+        <<Factory>>
+        +create(RateLimiterType, RateLimiterConfig) RateLimiter
+    }
+
+    class RateLimiterConfig {
+        -limit int
+        -windowSizeMs long
+        -bucketCapacity int
+        -refillTokensPerSecond double
+    }
+
+    class RateLimiterType {
+        <<enumeration>>
+        FIXED_WINDOW
+        SLIDING_WINDOW_LOG
+        SLIDING_WINDOW_COUNTER
+        TOKEN_BUCKET
+    }
+
+    class WindowCounter {
+        -windowStartSec long
+        -count int
+    }
+
+    class Bucket {
+        -tokens double
+        -lastRefillTimestampMs long
+    }
+
+    RateLimiter <|.. FixedWindowCounterRateLimiter : implements
+    RateLimiter <|.. SlidingWindowLogRateLimiter : implements
+    RateLimiter <|.. SlidingWindowCounterRateLimiter : implements
+    RateLimiter <|.. TokenBucketRateLimiter : implements
+    RateLimiterFactory ..> RateLimiterConfig : reads
+    RateLimiterFactory ..> RateLimiterType : switches on
+    RateLimiterFactory ..> RateLimiter : creates
+    FixedWindowCounterRateLimiter "1" *-- "*" WindowCounter : per-client state
+    SlidingWindowCounterRateLimiter "1" *-- "*" WindowCounter : per-client state
+    TokenBucketRateLimiter "1" *-- "*" Bucket : per-client state
 ```
-+---------------------------+
-|      RateLimiter           |  <<interface>>
-+---------------------------+
-| +allowRequest(clientId)    |
-|         : boolean          |
-+--------------+-------------+
-               ^
-               | implements
-   +-----------+------------+------------------------+----------------------+
-   |                         |                        |                      |
-+--+-----------------+ +-----+-------------------+ +--+---------------------+ +--+--------------------+
-|FixedWindowCounter  | |SlidingWindowLog          | |SlidingWindowCounter    | |TokenBucket            |
-|RateLimiter         | |RateLimiter                | |RateLimiter             | |RateLimiter             |
-+--------------------+ +---------------------------+ +------------------------+ +------------------------+
-|-windows:            | |-requestLogs:              | |-windows:                | |-buckets:                |
-|  ConcurrentHashMap  | |  ConcurrentHashMap<String, | |  ConcurrentHashMap<     | |  ConcurrentHashMap<     |
-|  <String,           | |  Deque<Long>>              | |   String, WindowCounter>| |   String, Bucket>       |
-|   WindowCounter>    | |-limit, windowSizeMs        | |-limit, windowSizeMs     | |-capacity, refillRate    |
-|-limit, windowSizeMs | |+allowRequest()             | |+allowRequest()          | |+allowRequest()          |
-|+allowRequest()      | +---------------------------+ +------------------------+ +------------------------+
-+---------------------+
 
-+---------------------------+        +----------------------------+
-|     RateLimiterFactory     |        |    RateLimiterConfig       |
-| <<Factory>>                 |       +----------------------------+
-| +create(RateLimiterType,    |------>| -limit: int                |
-|         RateLimiterConfig)   |       | -windowSizeMs: long        |
-|         : RateLimiter        |       | -bucketCapacity: int       |
-+------------------------------+       | -refillTokensPerSecond:    |
-                                        |    double                  |
-                                        +----------------------------+
-
-+---------------------------+
-|     RateLimiterType        |  <<enum>>
-+---------------------------+
-| FIXED_WINDOW                |
-| SLIDING_WINDOW_LOG           |
-| SLIDING_WINDOW_COUNTER        |
-| TOKEN_BUCKET                  |
-+---------------------------+
-
-Per-client state holders:
-+-------------------+      +----------------------+
-| WindowCounter     |      |  Bucket               |
-+-------------------+      +----------------------+
-| windowStartSec    |      | tokens: double        |
-| count: int        |      | lastRefillTimestampMs |
-+-------------------+      +----------------------+
-```
+Strategy (`RateLimiter` realized by all four algorithms), Factory (`RateLimiterFactory` turns a `RateLimiterType` + `RateLimiterConfig` into the right concrete class), and the per-client state records (`WindowCounter` shared by the two window-based algorithms, `Bucket` for Token Bucket) that keep each implementation's memory footprint at O(1) — `SlidingWindowLogRateLimiter` is the odd one out, storing a `Deque<Long>` of raw timestamps per client instead, which is exactly the O(N) memory tradeoff called out below.
 
 ---
 
@@ -118,6 +146,27 @@ Per-client state holders:
 
 **How**: `InstrumentedRateLimiter implements RateLimiter`, holds a delegate `RateLimiter`, and on each `allowRequest()` call increments an `allowedCount` or `deniedCount` (per-client or global) before/after delegating. This is a natural fit because it composes with the Strategy pattern above — any of the four algorithms can be wrapped identically. Not exercised in the demo `main()` below, but mentioned because it is a common interview follow-up ("how would you add metrics?").
 
+The "before/after" question above resolves to *after*: the decorator waits for the delegate's answer, then increments whichever counter matches the outcome, so metrics never drift from what was actually decided.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Instr as InstrumentedRateLimiter
+    participant Inner as wrapped RateLimiter
+
+    Client->>Instr: allowRequest(clientId)
+    Instr->>Inner: allowRequest(clientId)
+    Inner-->>Instr: true / false
+    alt allowed
+        Instr->>Instr: allowedCount++
+    else denied
+        Instr->>Instr: deniedCount++
+    end
+    Instr-->>Client: true / false
+```
+
+`Inner` can be any of the four `RateLimiter` implementations interchangeably — the decorator only depends on the interface, so instrumentation composes with Strategy for free.
+
 ---
 
 ## Design Decisions & Tradeoffs
@@ -133,50 +182,71 @@ Per-client state holders:
 
 **Why Sliding Window Log is still worth knowing**: it is the *reference implementation* for correctness — if an interviewer asks "what's the exact rate-limiting algorithm, with no approximation error?", this is the answer, with the explicit caveat that its O(N) memory makes it impractical for high limits (a 10,000 req/min limit = 10,000 timestamps per client = ~80KB/client, which multiplied across millions of clients becomes a real memory concern).
 
+Turning the tradeoffs above into a concrete decision procedure for the interview:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Choose a rate-limiting<br/>algorithm"]) --> Q1{"Need exact accuracy,<br/>memory not a concern?"}
+    Q1 -- yes --> Log(["Sliding Window Log<br/>exact, O(N) memory"])
+    Q1 -- no --> Q2{"Need to allow controlled<br/>bursts above steady rate?"}
+    Q2 -- yes --> Token(["Token Bucket<br/>production default"])
+    Q2 -- no --> Q3{"Must avoid the 2x<br/>boundary burst artifact?"}
+    Q3 -- yes --> Counter(["Sliding Window Counter<br/>Cloudflare, Kong"])
+    Q3 -- no --> Fixed(["Fixed Window Counter<br/>simplest, O(1)"])
+
+    class Start io
+    class Q1,Q2,Q3 mathOp
+    class Log req
+    class Token,Counter train
+    class Fixed base
+```
+
+Default to Token Bucket unless a constraint rules it out: exactness pushes you to Sliding Window Log despite its O(N) cost, and tolerating the 2x boundary artifact is the only thing that gets you back down to Fixed Window Counter's simplicity.
+
 ---
 
 ## State / Flow
 
 `allowRequest()` for **Token Bucket** — the most stateful of the four, since it must compute elapsed time and refill tokens on every call:
 
-```
-allowRequest(clientId)
-        |
-        v
-  bucket = buckets.computeIfAbsent(clientId, -> new Bucket(capacity, now))
-        |
-        v
-  synchronized(bucket) {
-        |
-        v
-  now = currentTimeMillis()
-        |
-        v
-  elapsedMs = now - bucket.lastRefillTimestamp
-        |
-        v
-  tokensToAdd = elapsedMs / 1000.0 * refillTokensPerSecond
-        |
-        v
-  bucket.tokens = min(capacity, bucket.tokens + tokensToAdd)
-        |
-        v
-  bucket.lastRefillTimestamp = now
-        |
-        v
-  +-----------------------+
-  | bucket.tokens >= 1 ?   |
-  +-----------------------+
-        |                  \
-       yes                  no
-        |                    \
-        v                     v
-  bucket.tokens -= 1     return false  (DENY)
-        |
-        v
-  return true  (ALLOW)
-        |
-  }  <-- end synchronized block
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["allowRequest(clientId)"]) --> Lookup["bucket = buckets.computeIfAbsent(clientId)<br/>new Bucket(capacity, now) if absent"]
+
+    subgraph Sync["synchronized(bucket)"]
+        Now["now = currentTimeMillis()"] --> Elapsed["elapsedMs =<br/>now - lastRefillTimestamp"]
+        Elapsed --> Refill["tokensToAdd =<br/>elapsedMs / 1000.0 * refillRate"]
+        Refill --> Cap["tokens = min(capacity,<br/>tokens + tokensToAdd)"]
+        Cap --> Stamp["lastRefillTimestamp = now"]
+        Stamp --> Check{"at least 1 token available?"}
+        Check -- yes --> Spend["tokens -= 1"]
+        Check -- no --> Deny(["DENIED: return false"])
+        Spend --> Allow(["ALLOWED: return true"])
+    end
+
+    Lookup --> Now
+
+    class Start io
+    class Lookup base
+    class Now,Elapsed,Refill,Cap,Stamp,Check mathOp
+    class Spend,Allow train
+    class Deny lossN
 ```
 
 The key subtlety: refill is **lazy** — there is no background thread ticking a timer. Tokens are only computed "as of now" when a request actually arrives, which is why `lastRefillTimestamp` must be updated on every call (even denied ones) to avoid double-counting elapsed time on the next call.

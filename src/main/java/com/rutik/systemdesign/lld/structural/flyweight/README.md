@@ -55,30 +55,37 @@ A **FlyweightFactory** manages a pool of Flyweight objects keyed by their intrin
 
 ## 5. UML Structure
 
-```
-+------------------+          +---------------------------+
-|  FlyweightFactory|          |     <<interface>>         |
-|------------------|          |       Flyweight            |
-| - pool: Map      |--------->|---------------------------|
-|------------------|          | + operation(extrinsicState)|
-| + getFlyweight() |          +---------------------------+
-+------------------+                    ^
-                                        |
-                          +-------------+-------------+
-                          |                           |
-               +---------------------+   +------------------------+
-               |  ConcreteFlyweight  |   | UnsharedConcreteFlyweight|
-               |---------------------|   |------------------------|
-               | - intrinsicState    |   | - allState             |
-               |---------------------|   |------------------------|
-               | + operation(extState)|  | + operation(extState)  |
-               +---------------------+   +------------------------+
+```mermaid
+classDiagram
+    class FlyweightFactory {
+        -pool Map
+        +getFlyweight(key) Flyweight
+    }
+    class Flyweight {
+        <<interface>>
+        +operation(extrinsicState)
+    }
+    class ConcreteFlyweight {
+        -intrinsicState
+        +operation(extrinsicState)
+    }
+    class UnsharedConcreteFlyweight {
+        -allState
+        +operation(extrinsicState)
+    }
+    class Client {
+        -extrinsicState
+        +invokeOperation()
+    }
 
-Client:
-  - Holds reference to Flyweight (shared)
-  - Maintains extrinsic state locally
-  - Passes extrinsic state when calling operation()
+    FlyweightFactory --> Flyweight : creates & caches
+    Flyweight <|.. ConcreteFlyweight
+    Flyweight <|.. UnsharedConcreteFlyweight
+    Client --> FlyweightFactory : requests flyweight
+    Client --> Flyweight : holds ref, passes extrinsic state
 ```
+
+The `FlyweightFactory` is the single gatekeeper to `Flyweight` instances — `ConcreteFlyweight` and `UnsharedConcreteFlyweight` both realize the `Flyweight` interface, while `Client` holds a shared reference and supplies extrinsic state on every call instead of storing it inside the flyweight.
 
 ---
 
@@ -91,6 +98,33 @@ Client:
 5. **When rendering**, the client calls `flyweight.render(x, y, color)` — passing extrinsic state as parameters.
 6. **The Flyweight uses its intrinsic state** (font, character code) combined with the passed extrinsic state to perform the operation.
 7. The same ConcreteFlyweight instance handles thousands of render calls for the character 'A' — one object, many contexts.
+
+The class diagram in §5 shows *what* the roles are; the sequence below shows *when* they talk to each other — two successive calls to `getCharacter('A', Arial, 12)`, the first a pool miss (create + cache) and the second a pool hit (instant reuse):
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant F as FlyweightFactory
+    participant P as pool (Map)
+    participant CF as ConcreteFlyweight (A)
+
+    C->>F: getCharacter('A', Arial, 12)
+    F->>P: lookup(key)
+    alt key not found (first call)
+        P-->>F: miss
+        F->>CF: new ConcreteFlyweight(intrinsicState)
+        F->>P: put(key, flyweight)
+    else key found (later calls)
+        P-->>F: cached instance
+    end
+    F-->>C: flyweight reference
+    Note over C: stores extrinsic state (x=100, y=200) locally
+    C->>CF: render(x, y, color)
+    Note over CF: intrinsic (font, glyph) + extrinsic (x, y, color)
+    CF-->>C: rendered
+```
+
+Only the first request for a given intrinsic-state key pays the creation cost; every later call for the same key — even from a different position on the page — is a pool hit that returns the identical shared `ConcreteFlyweight`.
 
 ---
 

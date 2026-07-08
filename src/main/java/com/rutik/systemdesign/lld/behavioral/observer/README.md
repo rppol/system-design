@@ -65,25 +65,37 @@ Concrete Subjects hold state. Concrete Observers react to notifications. Neither
 
 ## 5. UML Structure
 
+```mermaid
+classDiagram
+    class Subject {
+        <<interface>>
+        +attach(o)
+        +detach(o)
+        +notifyObservers()
+    }
+    class Observer {
+        <<interface>>
+        +update()
+    }
+    class ConcreteSubject {
+        -state
+        +getState()
+        +setState()
+    }
+    class ConcreteObserverA {
+        +update()
+    }
+    class ConcreteObserverB {
+        +update()
+    }
+
+    Subject "1" --> "*" Observer : notifies
+    Subject <|.. ConcreteSubject
+    Observer <|.. ConcreteObserverA
+    Observer <|.. ConcreteObserverB
 ```
-         +------------------+          +-------------------+
-         |    <<interface>> |          |  <<interface>>    |
-         |     Subject      |1       * |     Observer      |
-         |------------------|--------->|-------------------|
-         | +attach(o)       |          | +update()         |
-         | +detach(o)       |          +-------------------+
-         | +notifyObservers()|                  ^
-         +------------------+                  |
-                  ^                            |
-                  |                +-----------+----------+
-         +------------------+      |                      |
-         | ConcreteSubject  |  ConcreteObserverA   ConcreteObserverB
-         |------------------|      |                      |
-         | -state           |  +update()             +update()
-         | +getState()      |
-         | +setState()      |
-         +------------------+
-```
+
+*Subject holds a one-to-many reference to Observer and never learns the concrete type of anyone it notifies; ConcreteSubject realizes Subject to own the state, while ConcreteObserverA and ConcreteObserverB independently realize Observer to react to it.*
 
 **Push vs. Pull Model:**
 - **Push model:** Subject sends the changed data to `update(data)` directly.
@@ -99,6 +111,28 @@ Concrete Subjects hold state. Concrete Observers react to notifications. Neither
 4. **Each Observer is called** — `notifyObservers()` iterates the list and calls `observer.update()` on each.
 5. **Observers react** — each Observer reads the relevant state (either from the argument or by calling `getState()`) and updates itself.
 6. **Subject is unaware of specifics** — the Subject only knows it has a list of `Observer` objects; it doesn't know their concrete types.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Subject
+    participant ObserverA as ConcreteObserverA
+    participant ObserverB as ConcreteObserverB
+
+    ObserverA->>Subject: attach(this)
+    ObserverB->>Subject: attach(this)
+    Client->>Subject: setState(newValue)
+    activate Subject
+    Subject->>Subject: notifyObservers()
+    Subject->>ObserverA: update()
+    Subject->>ObserverB: update()
+    deactivate Subject
+    ObserverA->>Subject: getState()
+    Subject-->>ObserverA: state
+    Note over Subject,ObserverB: Subject only holds Observer references — it never learns ConcreteObserverA/B's actual type
+```
+
+*The six steps above traced as a runtime sequence: both Observers attach before any state change, `setState()` triggers `notifyObservers()` internally, and `update()` fires on each Observer in registration order; the closing note is step 6 — the Subject stays oblivious to who it just notified.*
 
 ---
 
@@ -209,26 +243,43 @@ processes asynchronously within its own executor thread.
 - Memory: each `@Subscribe` registration costs ~80 bytes (method handle + WeakReference wrapper)
 - Fraud subscriber SLA: 200ms; async executor isolates timeout from payment thread
 
-```
-Production Architecture — Payment Event Fan-Out via AsyncEventBus
-==================================================================
+**Production Architecture — Payment Event Fan-Out via AsyncEventBus**
 
-  [ Payment API Thread ]
-         |
-         | paymentEventBus.post(PaymentEvent)   <-- returns in < 1ms
-         |
-  +------+------+
-  | AsyncEventBus|  (Guava, backed by BoundedExecutor, 16 threads, queue=10000)
-  +------+------+
-         |
-    fan-out to 8 @Subscribe handlers (each runs on executor thread pool)
-         |
-   +-----+------+------+------+------+------+------+------+
-   |     |      |      |      |      |      |      |      |
- Audit Fraud Ledger Notify Analyt Comply Retry  DLQ
-  Log  Check Update  Svc  Pipeline Rcrdr Queue Handler
-  (DB) (HTTP)(DB)  (SMTP) (Kafka) (S3)  (Redis)(SQS)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PT(["Payment API Thread"]) -->|"post(PaymentEvent)<br/>returns under 1ms"| BUS("AsyncEventBus<br/>Guava, 16 threads,<br/>queue=10000")
+    BUS -->|"fan-out to 8<br/>@Subscribe handlers"| H1("Audit Log")
+    BUS --> H2("Fraud Check")
+    BUS --> H3("Ledger Update")
+    BUS --> H4("Notify Svc")
+    BUS --> H5("Analytics Pipeline")
+    BUS --> H6("Compliance Rcrdr")
+    BUS --> H7("Retry Queue")
+    BUS --> H8("DLQ Handler")
+    H1 --> B1(["DB"])
+    H2 --> B2(["HTTP"])
+    H3 --> B3(["DB"])
+    H4 --> B4(["SMTP"])
+    H5 --> B5(["Kafka"])
+    H6 --> B6(["S3"])
+    H7 --> B7(["Redis"])
+    H8 --> B8(["SQS"])
+
+    class PT io
+    class BUS base
+    class H1,H2,H3,H4,H5,H6,H7,H8 req
+    class B1,B2,B3,B4,B5,B6,B7,B8 frozen
 ```
+
+*Guava's `AsyncEventBus` decouples the payment thread from all eight subscribers — `post()` returns in under 1ms while each handler runs independently on the 16-thread pool, so a slow fraud check can no longer stall billing or notifications.*
 
 ```java
 // Java 17 LTS — Guava 32.x AsyncEventBus with bounded executor
@@ -506,26 +557,35 @@ public class FraudObserver {
 
 ---
 
-        v
-  [ OrderService ]
-        |
-        | ApplicationEventPublisher.publishEvent(OrderPlacedEvent)
-        |
-        v
-  [ Spring ApplicationContext Event Bus ]
-        |
-   +----+----+----+----+
-   |    |    |    |    |
-   v    v    v    v    v
-[Inv] [Bil] [Email] [Ship] [Analytics]
- svc   svc   svc     svc    svc
-  |     |     |       |       |
-  DB   PSP  SMTP    3PL     DWH
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
- @TransactionalEventListener(phase=AFTER_COMMIT)
- ensures observers fire only after TX commits
- — no phantom events on rollback
+    OS(["OrderService"]) -->|"publishEvent<br/>(OrderPlacedEvent)"| BUS("Spring ApplicationContext<br/>Event Bus")
+    BUS -->|"@TransactionalEventListener<br/>AFTER_COMMIT only"| S1("Inventory svc")
+    BUS --> S2("Billing svc")
+    BUS --> S3("Email svc")
+    BUS --> S4("Shipping svc")
+    BUS --> S5("Analytics svc")
+    S1 --> D1(["DB"])
+    S2 --> D2(["PSP"])
+    S3 --> D3(["SMTP"])
+    S4 --> D4(["3PL"])
+    S5 --> D5(["DWH"])
+
+    class OS io
+    class BUS base
+    class S1,S2,S3,S4,S5 req
+    class D1,D2,D3,D4,D5 frozen
 ```
+
+*Every listener is registered with `phase = AFTER_COMMIT`, so inventory, billing, email, shipping, and analytics only fire once the order transaction actually commits — a rollback produces zero phantom events.*
 
 ### Code 1: Spring `@TransactionalEventListener` (Java 17 LTS, Spring Boot 3.x)
 
@@ -834,6 +894,33 @@ public class EmailObserver implements OrderObserver {
 | **Command** | Both support action triggering | Command encapsulates a specific action with parameters; Observer is about broadcasting state-change notifications. |
 | **Event Bus / Pub-Sub** | Both broadcast events | Pub-Sub adds an intermediary broker; Subject and Subscriber are fully decoupled (don't know about each other). Observer has a direct Subject reference. |
 | **Chain of Responsibility** | Both pass information to multiple objects | CoR passes a request along a chain until one handler handles it; Observer notifies all registered observers. |
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["One state change must<br/>reach several objects —<br/>which pattern?"]) --> Q1{"Every receiver reacts,<br/>or just one handler<br/>in a chain?"}
+    Q1 -->|"One handler,<br/>chain of candidates"| CHAIN("Chain of<br/>Responsibility")
+    Q1 -->|"Every receiver reacts"| Q2{"Independent reactors,<br/>or one central<br/>orchestrator?"}
+    Q2 -->|"Central orchestrator"| MEDIATOR("Mediator")
+    Q2 -->|"Independent reactors"| Q3{"State-change notice,<br/>or encapsulating ONE<br/>action with params?"}
+    Q3 -->|"Encapsulated action"| COMMAND("Command<br/>(specific action,<br/>not a broadcast)")
+    Q3 -->|"State-change<br/>notification"| Q4{"Publisher & subscriber<br/>fully decoupled, maybe<br/>cross-process?"}
+    Q4 -->|"Yes — via broker"| PUBSUB("Event Bus / Pub-Sub")
+    Q4 -->|"No — direct<br/>in-process reference"| OBSERVER("Observer")
+
+    class START io
+    class Q1,Q2,Q3,Q4 mathOp
+    class CHAIN,MEDIATOR,COMMAND,PUBSUB,OBSERVER train
+```
+
+*The table above compares Observer pairwise against each neighbor; this tree turns those same distinctions into one routing decision for picking a pattern from a scenario.*
 
 ---
 

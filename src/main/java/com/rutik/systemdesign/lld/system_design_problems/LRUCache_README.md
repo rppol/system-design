@@ -40,58 +40,68 @@ Design an in-memory cache with a fixed capacity that:
 
 ## ASCII Class Diagram
 
+```mermaid
+classDiagram
+    class Node~K,V~ {
+        -K key
+        -V value
+        -Node~K,V~ prev
+        -Node~K,V~ next
+    }
+
+    class CacheEventListener~K,V~ {
+        <<interface>>
+        +onEviction(key, value)
+    }
+
+    class LRUCacheImpl~K,V~ {
+        -int capacity
+        -HashMap~K, Node~ map
+        -Node~K,V~ head
+        -Node~K,V~ tail
+        -CacheEventListener~K,V~ listener
+        +get(key) V
+        +put(key, value) void
+        -addToFront(node) void
+        -removeNode(node) void
+        -moveToFront(node) void
+        -evictLRU() void
+    }
+
+    class ThreadSafeLRUCache~K,V~ {
+        -LRUCacheImpl~K,V~ delegate
+        -ReentrantLock lock
+        +get(key) V
+        +put(key, value) void
+    }
+
+    class LFUCache~K,V~ {
+        -int capacity
+        -int minFreq
+        -Map~K, FreqNode~ keyToNode
+        -Map~Integer, LinkedHashSet~ freqToList
+        +get(key) V
+        +put(key, value) void
+        -incrementFrequency(node) void
+    }
+
+    LRUCacheImpl~K,V~ --> CacheEventListener~K,V~ : notifies
+    ThreadSafeLRUCache~K,V~ --> LRUCacheImpl~K,V~ : wraps
 ```
-+-----------------------------+
-|         Node<K,V>           |
-+-----------------------------+
-| - key: K                    |
-| - value: V                  |
-| - prev: Node<K,V>            |
-| - next: Node<K,V>            |
-+-----------------------------+
 
-+--------------------------------------+        +----------------------------+
-|          LRUCacheImpl<K,V>            |------->|   CacheEventListener<K,V>  |
-+--------------------------------------+ notifies| (interface, Observer)      |
-| - capacity: int                       |        +----------------------------+
-| - map: HashMap<K, Node<K,V>>          |        | + onEviction(key, value)   |
-| - head: Node<K,V>  (MRU sentinel)     |        +----------------------------+
-| - tail: Node<K,V>  (LRU sentinel)     |
-| - listener: CacheEventListener<K,V>   |        Doubly-linked list layout:
-+--------------------------------------+
-| + get(key): V                         |        head <-> [MRU] <-> ... <-> [LRU] <-> tail
-| + put(key, value): void               |         ^                              ^
-| - addToFront(node): void              |         |                              |
-| - removeNode(node): void              |    most recently used          least recently used
-| - moveToFront(node): void             |    (evicted last)               (evicted first)
-| - evictLRU(): void                    |
-+--------------------------------------+
+`LRUCacheImpl` pairs a `HashMap` (O(1) lookup) with a doubly-linked list of `Node` sentinels (O(1) reorder/evict), and optionally notifies a `CacheEventListener` on eviction. `ThreadSafeLRUCache` decorates it with a `ReentrantLock` around `get`/`put`, released in a `finally` block; `LFUCache` is a separate, unrelated implementation with its own frequency-bucket fields — it shares no code or interface with `LRUCacheImpl`.
 
-       Decorator (wraps LRUCacheImpl, adds locking)
-+--------------------------------------+        +----------------------------+
-|       ThreadSafeLRUCache<K,V>         |------->|     LRUCacheImpl<K,V>      |
-+--------------------------------------+  wraps  +----------------------------+
-| - delegate: LRUCacheImpl<K,V>         |
-| - lock: ReentrantLock                 |
-+--------------------------------------+
-| + get(key): V    [locked]             |
-| + put(key, value): void  [locked]     |
-+--------------------------------------+
+**Doubly-linked list layout** — the list order *is* the recency order, so no separate timestamp or counter is needed:
 
-       Separate implementation (different eviction policy, same shape)
-+----------------------------------------------+
-|              LFUCache<K,V>                    |
-+----------------------------------------------+
-| - capacity: int                               |
-| - minFreq: int                                |
-| - keyToNode: Map<K, FreqNode<K,V>>            |
-| - freqToList: Map<Integer, LinkedHashSet<K>>  |
-+----------------------------------------------+
-| + get(key): V                                 |
-| + put(key, value): void                       |
-| - incrementFrequency(node): void              |
-+----------------------------------------------+
 ```
+head <-> [MRU] <-> ... <-> [LRU] <-> tail
+ ^                                    ^
+ |                                    |
+most recently used    least recently used
+  (evicted last)          (evicted first)
+```
+
+`head` holds the most-recently-used node (evicted last); `tail` holds the least-recently-used node (evicted first) — every `get`/`put` relinks the accessed node to sit just after `head`.
 
 ---
 
@@ -111,6 +121,32 @@ This problem is fundamentally a **data structure** problem, not a pattern catalo
 
 **How**: `LRUCacheImpl<K,V>` optionally holds a single `CacheEventListener<K,V>` (set via constructor or setter). When `evictLRU()` runs, it calls `listener.onEviction(key, value)` before removing the node. The listener is a no-op by default (`null`-checked), so callers who don't care pay zero cost.
 
+**Runtime collaboration** — a `put` that both requires locking (Decorator) and triggers an eviction (Observer) in one call:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant TSC as ThreadSafeLRUCache
+    participant LRU as LRUCacheImpl
+    participant Listener as CacheEventListener
+
+    Client->>TSC: put(key, value)
+    activate TSC
+    TSC->>TSC: lock.lock()
+    TSC->>LRU: put(key, value)
+    activate LRU
+    Note over LRU: size == capacity, calls evictLRU()
+    LRU->>Listener: onEviction(evictedKey, evictedValue)
+    Listener-->>LRU: no-op if unset
+    LRU-->>TSC: void
+    deactivate LRU
+    TSC->>TSC: lock.unlock() in finally
+    TSC-->>Client: void
+    deactivate TSC
+```
+
+The lock is held for the entire delegated `put` — including the eviction and notification — and released in a `finally` block so it unlocks even if `put` throws; `onEviction` fires synchronously before `put` returns, so a write-back listener can safely assume the evicted value is still valid at notification time.
+
 ---
 
 ### Why not Strategy / Template Method for eviction policy?
@@ -129,54 +165,91 @@ A `Strategy`-based `EvictionPolicy` interface (pluggable LRU/LFU/FIFO inside one
 | `ReentrantLock` around a plain `LRUCache` (Decorator) | `synchronized` methods on `LRUCache` directly | `ReentrantLock` supports `tryLock()` with timeout (fail fast under contention), is `Decorator`-friendly (wraps without modifying), and avoids paying lock overhead for single-threaded callers. `synchronized` is simpler but bakes locking into the core class permanently |
 | `ReentrantLock` / `synchronized` (pessimistic) | Lock-free CAS-based structures (e.g., `ConcurrentHashMap` + atomic pointer swaps) | CAS-based doubly-linked lists are notoriously hard to get correct (ABA problem, concurrent removal races) and rarely worth it — `ConcurrentLinkedHashMap`-style designs (used by Guava/Caffeine) instead use **striped locks** or amortize recency tracking via a sampled/approximate LRU, trading strict ordering for throughput |
 
+**Choosing an eviction policy** — the access-pattern question the LRU-vs-LFU-vs-FIFO row above answers visually:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A{"dominant access pattern?"} -->|"recently used likely<br/>reused soon"| B("LRU<br/>web sessions, recently-viewed items")
+    A -->|"small set of hot keys,<br/>stable high rate"| C("LFU<br/>popular CDN assets, trending posts")
+    A -->|"uniform / random,<br/>no locality"| D("FIFO<br/>simplest, no recency bookkeeping")
+
+    class A mathOp
+    class B,C train
+    class D base
+```
+
+A single burst of unrelated accesses evicts the wrong key under LRU if the real hot set is frequency-based (and vice versa) — picking the axis that matches the workload's actual locality is the interview-defensible answer, not a default reach for LRU.
+
 ---
 
 ## State / Flow
 
 ### `get(key)`
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["get(key)"]) --> B{"key in map?"}
+    B -->|"no"| C(["return null<br/>(cache miss)"])
+    B -->|"yes"| D("node = map.get(key)")
+    D --> E("moveToFront(node):<br/>removeNode + addToFront")
+    E --> F(["return node.value<br/>(cache hit)"])
+
+    class A io
+    class B mathOp
+    class C lossN
+    class D,E,F train
 ```
-get(key)
-   |
-   v
-key in map? -------- no -------> return null (cache miss)
-   |
-  yes
-   |
-   v
-node = map.get(key)
-   |
-   v
-moveToFront(node)   <- removeNode(node); addToFront(node)
-   |                    (recency updated: node is now MRU)
-   v
-return node.value   (cache hit)
-```
+
+A cache hit (green) relinks the node to just after `head` in O(1) before returning; a cache miss (red) returns immediately with no list mutation — recency is updated on every hit, never on a miss.
 
 ### `put(key, value)`
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["put(key, value)"]) --> B{"key in map?"}
+    B -->|"yes"| C("node = map.get(key)")
+    C --> D("node.value = value")
+    D --> E("moveToFront(node)")
+    B -->|"no"| F{"size == capacity?"}
+    F -->|"yes"| G("evictLRU():<br/>remove tail.prev,<br/>map.remove(key),<br/>notify listener")
+    F -->|"no"| H("create new Node(key, value)")
+    G --> H
+    H --> I("addToFront(node);<br/>map.put(key, node);<br/>size++")
+    E --> Z(["done"])
+    I --> Z
+
+    class A,Z io
+    class B,F mathOp
+    class C,D,E train
+    class G lossN
+    class H,I base
 ```
-put(key, value)
-   |
-   v
-key in map? ------------------- yes ----> node = map.get(key)
-   |                                          |
-   no                                    node.value = value
-   |                                          |
-   v                                          v
-size == capacity? --- yes ---> evictLRU()  moveToFront(node)
-   |                              |              |
-   no                       (remove tail.prev,   v
-   |                          map.remove(key),  done
-   |                          notify listener)
-   v                              |
-create new Node(key, value)  <----+
-   |
-   v
-addToFront(node)
-map.put(key, node)
-size++
-```
+
+The **update** branch (green) never touches capacity or eviction; the **insert** branch forks again on `size == capacity`, evicting the LRU tail (red) only when the cache is actually full before constructing and registering the new node (gold).
 
 ---
 

@@ -63,21 +63,19 @@ This gives the class full control over its lifecycle while providing a well-know
 
 ## 5. UML Structure
 
+```mermaid
+classDiagram
+    class Singleton {
+        -instance : Singleton
+        -Singleton()
+        +getInstance() Singleton
+        +businessMethod()
+    }
+    class Client
+    Client ..> Singleton : getInstance()
 ```
-+---------------------------+
-|        Singleton          |
-+---------------------------+
-| - instance: Singleton     |  <-- static field
-| - Singleton()             |  <-- private constructor
-+---------------------------+
-| + getInstance(): Singleton|  <-- static factory method
-| + businessMethod()        |
-+---------------------------+
-        |
-        | (returns the single instance)
-        |
-   [Client Code]
-```
+
+*The private constructor blocks `new Singleton()`; the static `instance` field and the static `getInstance()` factory method are the only path in, so every `Client` that depends on `Singleton` receives the same object back.*
 
 **Relationships:**
 - No inheritance or composition — the Singleton manages itself.
@@ -199,31 +197,38 @@ The Archaius `ConfigurationManager` is one of the most referenced production Sin
 in the Java ecosystem. It uses the class-level static instance pattern, backed by `AbstractConfiguration`
 from Apache Commons Configuration.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph JVM["Netflix Microservice JVM (32 GB heap, 200 request threads)"]
+        direction LR
+        T1(["Thread-1"])
+        T2(["Thread-2"])
+        TN(["Thread-N"])
+        CM["ConfigurationManager (Singleton)<br/>static INSTANCE field<br/>ConcurrentCompositeConfiguration<br/>500k reads/sec, P99 under 5 microseconds"]
+        PS["PolledConfigSource<br/>(ZooKeeper / etcd)<br/>refresh every 30s"]
+        DPF["DynamicPropertyFactory<br/>(watches + callbacks)"]
+        T1 -->|"getInstance().getProperty()"| CM
+        T2 --> CM
+        TN --> CM
+        CM --> PS
+        CM --> DPF
+    end
+
+    class T1,T2,TN req
+    class CM base
+    class PS frozen
+    class DPF mathOp
 ```
-Netflix Microservice JVM (32 GB heap, 200 request threads)
-+-----------------------------------------------------------------------+
-|  HTTP Thread Pool (Tomcat, 200 threads)                               |
-|    Thread-1 ──> ConfigurationManager.getInstance().getProperty(...)   |
-|    Thread-2 ──> ConfigurationManager.getInstance().getProperty(...)   |
-|    Thread-N ──> ConfigurationManager.getInstance().getProperty(...)   |
-|                              |                                        |
-|                              v                                        |
-|          +----------------------------------------+                  |
-|          |   ConfigurationManager (Singleton)     |                  |
-|          |   static INSTANCE field                |                  |
-|          |   ConcurrentCompositeConfiguration     |                  |
-|          |   500k reads/sec, p99 < 5 microseconds |                  |
-|          +----------------------------------------+                  |
-|                              |                                        |
-|            +-----------------+----------------+                       |
-|            v                                  v                       |
-|  +--------------------+           +------------------------+          |
-|  | PolledConfigSource |           | DynamicPropertyFactory |          |
-|  | (ZooKeeper/etcd)   |           | (watches + callbacks)  |          |
-|  | refresh every 30s  |           +------------------------+          |
-|  +--------------------+                                               |
-+-----------------------------------------------------------------------+
-```
+
+*Every HTTP-handling thread calls the same `ConfigurationManager` singleton instance (gold) rather than constructing its own — the shared object fans out to the remote poller (purple, external ZooKeeper/etcd) and the callback-driven property factory (orange), sustaining 500k reads/sec at p99 under 5 microseconds instead of N per-thread copies.*
 
 ### Famous Codebase Usages
 
@@ -273,6 +278,25 @@ public class ConfigRegistry {
     }
 }
 ```
+
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant F as INSTANCE field
+    participant B as Thread B
+
+    A->>F: read INSTANCE (null)
+    A->>A: enter synchronized block
+    A->>F: 1. allocate memory
+    A->>F: 2. assign reference to INSTANCE
+    Note over F: missing volatile - JVM/CPU may reorder step 2 before step 3
+    B->>F: read INSTANCE (non-null!)
+    F-->>B: return partially-built object
+    Note over B: reads zeroed fields -> NullPointerException
+    A->>F: 3. run constructor body (too late)
+```
+
+*Without `volatile`, the JVM/CPU may reorder step 2 (publishing the reference) ahead of step 3 (running the constructor). Thread B's null-check then sees a non-null `INSTANCE` whose fields are still zeroed, reading a half-built object — the exact race the interview answer below asks you to draw out step by step.*
 
 ```java
 // FIX: add volatile to INSTANCE — required since Java 5 (Java Memory Model update)
@@ -434,6 +458,39 @@ Lock contention with `synchronized getInstance()` at 500k/sec would saturate one
 - The application has multiple logical "tenants" (multi-tenant SaaS) that need independent instances.
 - The team migrates to Spring Boot 3.x where the container manages singleton scope via
   `@Bean` or `@Component`, making hand-rolled Singletons redundant and harder to manage.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{"Tests must mock it, or<br/>multiple tenants need separate instances?"}
+    Q2{"Must survive serialization<br/>or resist reflection attacks?"}
+    Q3{"Need lazy init with<br/>zero per-call sync cost?"}
+    DI(["Use a DI container instead<br/>(Spring/Guice singleton-scoped bean)"])
+    ENUM(["Enum Singleton<br/>thread/serialization/reflection-safe"])
+    HOLDER(["Bill Pugh holder idiom<br/>lazy, lock-free reads"])
+    EAGER(["Eager static field<br/>simplest, pays init cost at class load"])
+
+    Q1 -->|"yes"| DI
+    Q1 -->|"no"| Q2
+    Q2 -->|"yes"| ENUM
+    Q2 -->|"no"| Q3
+    Q3 -->|"yes"| HOLDER
+    Q3 -->|"no, eager is fine"| EAGER
+
+    class Q1,Q2,Q3 mathOp
+    class DI req
+    class ENUM train
+    class HOLDER,EAGER base
+```
+
+*Reading the migration criteria above as a single decision: testability/multi-tenancy needs route to a DI container, serialization/reflection risk routes to the Enum form, and the remaining lazy-vs-eager choice picks between the holder idiom and a plain static field — the same ordering the "thread-safe Singleton" interview answer walks through.*
 
 ---
 

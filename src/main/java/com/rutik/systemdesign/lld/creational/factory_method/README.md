@@ -62,23 +62,39 @@ The Creator calls its own factory method to get the product — it never uses `n
 
 ## 5. UML Structure
 
-```
-+----------------------------+         +----------------------+
-|       <<interface>>        |         |     <<interface>>    |
-|         Creator            |         |       Product        |
-+----------------------------+         +----------------------+
-| + factoryMethod(): Product |<------->| + operation()        |
-| + someOperation()          |         +----------------------+
-+----------------------------+                   ^
-            ^                                    |
-            |                          +---------+---------+
-  +---------+----------+               |                   |
-  |                    |    creates    |                   |
-ConcreteCreatorA  ConcreteCreatorB  ConcreteProductA  ConcreteProductB
-  |                    |               |                   |
-  | +factoryMethod()   | +factoryMethod()| +operation()   | +operation()
-  | returns ProductA   | returns ProductB
-  +--------------------+
+```mermaid
+classDiagram
+    direction LR
+
+    class Creator {
+        <<abstract>>
+        +factoryMethod() Product
+        +someOperation()
+    }
+    class Product {
+        <<interface>>
+        +operation()
+    }
+    class ConcreteCreatorA {
+        +factoryMethod() Product
+    }
+    class ConcreteCreatorB {
+        +factoryMethod() Product
+    }
+    class ConcreteProductA {
+        +operation()
+    }
+    class ConcreteProductB {
+        +operation()
+    }
+
+    Creator <|-- ConcreteCreatorA
+    Creator <|-- ConcreteCreatorB
+    Product <|.. ConcreteProductA
+    Product <|.. ConcreteProductB
+    Creator ..> Product : depends on
+    ConcreteCreatorA ..> ConcreteProductA : creates
+    ConcreteCreatorB ..> ConcreteProductB : creates
 ```
 
 **Relationships:**
@@ -96,6 +112,23 @@ ConcreteCreatorA  ConcreteCreatorB  ConcreteProductA  ConcreteProductB
 4. Because `factoryMethod()` is overridden in the ConcreteCreator, the correct ConcreteProduct is returned.
 5. **`someOperation()`** uses the product via the `Product` interface — no knowledge of concrete type.
 6. The ConcreteProduct does its work and returns the result up the chain.
+
+**Runtime collaboration:**
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant CC as ConcreteCreator
+    participant CP as ConcreteProduct
+
+    Client->>CC: someOperation()
+    CC->>CC: factoryMethod()
+    CC->>CP: create ConcreteProduct
+    CP-->>CC: product instance
+    CC->>CP: operation()
+    CP-->>CC: result
+    CC-->>Client: result
+```
 
 Key insight: `someOperation()` is the template. `factoryMethod()` is the hook that subclasses fill in.
 
@@ -193,30 +226,43 @@ to create new physical connections when the pool is exhausted. At a throughput o
 transactions per second with a pool size of 10, the factory is called rarely (only on pool growth),
 but each call must return a correctly configured, authenticated connection in under 50ms.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    App(["Application<br/>(10,000 TPS)"])
+    Pool("HikariCP Pool<br/>(size: 10)")
+    Exhausted{"pool exhausted?"}
+    Reuse(["reuse pooled connection<br/>(no factory call)"])
+    DM("DriverManager.getConnection<br/>(jdbcUrl, props) — Factory Method")
+    Pick{"first driver where<br/>acceptsURL(url) is true"}
+    MysqlDriver("com.mysql.cj.jdbc.Driver<br/>.connect(url, props)")
+    PgDriver("org.postgresql.Driver<br/>.connect(url, props)")
+    MysqlConn("MySQLConnection<br/>(concrete)")
+    PgConn("PgConnection<br/>(concrete)")
+    Iface(["returned as<br/>java.sql.Connection (interface)"])
+
+    App --> Pool --> Exhausted
+    Exhausted -->|no| Reuse
+    Exhausted -->|yes| DM --> Pick
+    Pick -->|mysql| MysqlDriver --> MysqlConn --> Iface
+    Pick -->|postgres| PgDriver --> PgConn --> Iface
+
+    class App,Iface io
+    class Pool req
+    class DM base
+    class Reuse,MysqlConn,PgConn train
+    class MysqlDriver,PgDriver frozen
+    class Exhausted,Pick mathOp
 ```
-Application (10,000 TPS)
-       |
-       v
-HikariCP Connection Pool (default size: 10 connections)
-       |
-       | pool exhausted? create new connection
-       v
-+-----------------------------------------------+
-|   DriverManager.getConnection(jdbcUrl, props) |  <-- Factory Method
-+-----------------------------------------------+
-       |
-       | DriverManager iterates registered drivers
-       | first driver where driver.acceptsURL(url) == true wins
-       v
-+----------------------------+    +---------------------------+
-| com.mysql.cj.jdbc.Driver   |    | org.postgresql.Driver     |
-| .connect(url, props)       |    | .connect(url, props)      |
-+----------------------------+    +---------------------------+
-       |                                  |
-       v                                  v
-MySQLConnection (concrete)       PgConnection (concrete)
-  both returned as java.sql.Connection (interface)
-```
+
+*DriverManager.getConnection() is the Factory Method call itself: it hides driver selection behind one call, and — as the throughput numbers above show — HikariCP only invokes it when the pool of 10 connections is exhausted; most requests take the green "reuse" path with no factory call at all.*
 
 ### Famous Codebase Usages
 

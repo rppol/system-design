@@ -27,6 +27,28 @@ Design principles are the building codes of software: DRY says don't wire the sa
 
 Understanding where principles reinforce each other — and where they create tension — is the mark of senior engineering judgment.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    DRY((DRY)) -->|"tension: extract now<br/>vs wait for 3rd occurrence"| YAGNI((YAGNI))
+    KISS((KISS)) -->|"tension: overhead<br/>vs testability"| PTI((PtI))
+    LOD((LoD)) -->|"apparent conflict:<br/>same object, not a violation"| FLUENT(["Fluent API"])
+    COI((CoI)) -->|"partnership:<br/>field typed as interface"| PTI
+    DRY -->|"partnership:<br/>one place, one reason to change"| SRP(["SRP (SOLID)"])
+
+    class DRY,YAGNI,KISS,PTI,LOD,COI base
+    class FLUENT,SRP frozen
+```
+
+Gold nodes are the six principles from this page; purple nodes are the outside concepts they interact with (a fluent builder, and SOLID's SRP). Edge labels name the relationship — tension, apparent conflict, or partnership — matching the prose below.
+
 **Tensions:**
 
 DRY vs YAGNI — DRY pushes you to extract shared logic immediately; YAGNI says wait for the third occurrence. Extracting prematurely (DRY) creates a shared abstraction that couples two pieces of code that may evolve independently. YAGNI wins at the first duplication; DRY wins at the third.
@@ -49,33 +71,28 @@ DRY + SOLID SRP — together prevent the "one class does everything" problem. SR
 
 When principles compete, use this guide to decide which one governs:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{"Tempted to<br/>duplicate code?"} --> A1["DRY: extract only if both copies<br/>change together<br/>(wait for the 3rd occurrence)"]
+    Q2{"Tempted to add an<br/>abstraction for later?"} --> A2["YAGNI: wait for a real<br/>second concrete use case"]
+    Q3{"Tempted to call<br/>a.getB().getC().doSomething()?"} --> A3["LoD: ask 'a' directly;<br/>add a delegation method"]
+    Q4{"Tempted to extend a base<br/>class for code reuse?"} --> A4["CoI: use a field + interface<br/>instead of inheritance"]
+    Q5{"Tempted to hardcode<br/>a concrete type?"} --> A5["PtI: depend on an interface;<br/>inject the concrete type"]
+    Q6{"Tempted to add complexity<br/>for correctness?"} --> A6["KISS: the simplest thing<br/>that works is usually right"]
+
+    class Q1,Q2,Q3,Q4,Q5,Q6 mathOp
+    class A1,A2,A3,A4,A5,A6 train
 ```
-Tempted to duplicate code?
-  -> DRY says: extract if you'll change the logic in both places together.
-     Wait for the third occurrence (Rule of Three) before abstracting.
 
-Tempted to add an abstraction for future flexibility?
-  -> YAGNI says: wait until you have the second concrete use case.
-     Premature abstraction is worse than duplication — the wrong abstraction
-     is load-bearing and hard to remove.
-
-Tempted to call a.getB().getC().doSomething()?
-  -> LoD says: ask 'a' for what you need; don't reach through it.
-     Add a delegation method to 'a'.
-
-Tempted to extend a base class for code reuse?
-  -> CoI says: use a field + interface instead.
-     Inheritance exposes implementation details to subclasses
-     and creates the fragile base class problem.
-
-Tempted to hardcode a concrete type?
-  -> PtI says: depend on an interface; inject the concrete type.
-     Test doubles and alternative implementations become possible.
-
-Tempted to add complexity for "correctness"?
-  -> KISS says: the simplest thing that could possibly work is usually right.
-     Measure complexity in cognitive overhead, not lines of code.
-```
+Six independent temptation-to-principle lookups, not a sequential flow: each diamond names the situation, each box names the resolving principle and its concrete fix.
 
 ---
 
@@ -191,6 +208,37 @@ String city = user.getCityName();
 ```
 
 ### Composition over Inheritance — Stack Example
+
+```mermaid
+classDiagram
+    direction LR
+    class Vector~T~ {
+        +add(item T) boolean
+        +set(index int, item T) T
+        +remove(index int) T
+    }
+    class BrokenStack~T~ {
+        +push(item T)
+        +pop() T
+    }
+    class List~T~ {
+        <<interface>>
+        +add(item T) boolean
+        +get(index int) T
+        +remove(index int) T
+    }
+    class FixedStack~T~ {
+        -elements List~T~
+        +push(item T)
+        +pop() T
+        +peek() T
+        +isEmpty() boolean
+    }
+    Vector~T~ <|-- BrokenStack~T~ : extends, inherits add/set/remove
+    FixedStack~T~ *-- List~T~ : has-a, exposes only push/pop/peek
+```
+
+BrokenStack inherits Vector's entire public surface (solid triangle), so callers can still call `add(0, item)` and bypass stack discipline. FixedStack instead composes a `List` (filled diamond) and exposes only the four stack-safe operations the code below implements.
 
 ```java
 // BROKEN: Stack inherits add(), set(), remove() from Vector

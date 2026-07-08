@@ -39,46 +39,53 @@ Circular Dependencies occur when two or more modules, packages, or classes form 
 
 **Before: Circular Dependency (problematic)**
 
+```mermaid
+classDiagram
+    direction LR
+    class UserService {
+        +getOrderCount()
+        +notifyUser()
+    }
+    class OrderService {
+        +getUser()
+        +createOrder()
+    }
+    class LoyaltyService {
+        +awardPoints(userId, order)
+    }
+    UserService --> OrderService
+    OrderService --> UserService
+    OrderService --> LoyaltyService
+    LoyaltyService --> UserService
 ```
-  +─────────────────+          +─────────────────+
-  │   UserService   │ ───────> │  OrderService   │
-  │                 │          │                 │
-  │ getOrderCount() │          │ getUser()       │
-  │ notifyUser()    │ <─────── │ createOrder()   │
-  +─────────────────+          +─────────────────+
-           ^                            |
-           |                            |
-           +──────────────+             |
-                          |             v
-                  +─────────────────────────────+
-                  │      LoyaltyService         │
-                  │  awardPoints(userId, order) │
-                  +─────────────────────────────+
-                  (depends on both UserService and OrderService,
-                   which depend on each other — a 3-node cycle)
-```
+
+*`LoyaltyService.awardPoints()` pulls in both `UserService` and `OrderService`, which already call each other directly — together the three form a 3-node cycle with no valid initialization order.*
 
 **After: Acyclic Dependency (correct)**
 
+```mermaid
+classDiagram
+    direction LR
+    class UserService {
+        +getUser()
+        +updateUser()
+    }
+    class OrderService {
+        +createOrder()
+        +getOrders()
+    }
+    class LoyaltyService {
+        +awardPoints()
+    }
+    class OrderEventPublisher {
+        +publish(OrderEvent)
+    }
+    OrderEventPublisher --> UserService : notifies
+    OrderEventPublisher --> OrderService : notifies
+    OrderEventPublisher --> LoyaltyService : notifies
 ```
-  +────────────────+     +────────────────+     +────────────────+
-  │   UserService  │     │  OrderService  │     │ LoyaltyService │
-  │                │     │                │     │                │
-  │ getUser()      │     │ createOrder()  │     │ awardPoints()  │
-  │ updateUser()   │     │ getOrders()    │     │                │
-  +────────────────+     +────────────────+     +────────────────+
-         ^                      ^                       ^
-         |                      |                       |
-         +──────────────────────+───────────────────────+
-                                |
-                    +───────────────────────+
-                    │   OrderEventPublisher │  (shared abstraction)
-                    │                       │
-                    │ publish(OrderEvent)   │
-                    +───────────────────────+
-                    (services communicate via events,
-                     not direct method calls — cycle eliminated)
-```
+
+*`UserService`, `OrderService`, and `LoyaltyService` no longer hold references to each other — each is simply notified by the shared `OrderEventPublisher` (the extracted abstraction), turning the cycle into an acyclic star.*
 
 ---
 
@@ -219,6 +226,31 @@ public class Order {
 - `getUserTier()` lives in `UserService` but is really a derived fact computed from `OrderService` data — the responsibility is misplaced
 - `notifyUserOfOrderConfirmation()` in `UserService` is an event handler that was placed in the wrong class
 - Static initialization cycle in `ConfigA`/`ConfigB` causes incorrect constant values depending on class load order — a class of bug that is nearly impossible to reproduce in tests
+
+**The Runtime Call Graph (Why It's a Loop, Not Just a Cycle)**
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant US as UserService
+    participant OS as OrderService
+
+    Client->>OS: createOrder(userId, items)
+    OS->>US: getUser(userId)
+    US-->>OS: User
+    Note over OS: validate, then save the Order
+    OS->>US: notifyUserOfOrderConfirmation(userId, orderId)
+    US-->>OS: void
+
+    Note over Client,OS: One createOrder() call already crosses<br/>the OrderService/UserService boundary twice
+
+    Client->>US: getUserTier(userId)
+    US->>OS: getOrderCount(userId)
+    OS-->>US: int
+    US-->>Client: UserTier
+```
+
+*A single `createOrder()` call already ping-pongs between `OrderService` and `UserService` twice (`getUser()`, then `notifyUserOfOrderConfirmation()`) before `getUserTier()` adds a third cross-call in the opposite direction — the cycle is a live call loop at runtime, not just a compile-time reference.*
 
 ---
 
@@ -410,6 +442,35 @@ public class OrderService {
 - Communication happens via `ApplicationEventPublisher` — `OrderService` publishes events, `UserNotificationHandler` consumes them
 - `getUserTier()` moved to `UserTierService`, a coordinator class that lives at a higher layer and can depend on both without creating a cycle
 - Dependency diagram is now a DAG (directed acyclic graph): `UserTierService` -> `UserService`, `OrderService`; `UserNotificationHandler` -> `UserService`; no cycles
+
+**Choosing Between the Two Fixes**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A["Cycle detected:<br/>A calls B, B calls A"] --> B{"Does the caller need<br/>a synchronous return value?"}
+    B -->|"No - fire and forget"| C["Publish a domain event<br/>(ApplicationEventPublisher)"]
+    C --> D["Listener reacts independently;<br/>no compile-time reference back"]
+    D --> G(["Dependency graph is acyclic"])
+    B -->|"Yes - needs a value back"| E["Extract an interface owned<br/>by the upstream module"]
+    E --> F["Downstream class implements it;<br/>inject the interface, not the concrete class"]
+    F --> G
+
+    class A lossN
+    class B mathOp
+    class C,D train
+    class E,F base
+    class G train
+```
+
+*Reach for a domain event (SOLUTION 1) when the caller doesn't need anything back; reach for an extracted interface (SOLUTION 2) when the caller needs a synchronous value, like validating a user exists before creating an order.*
 
 ---
 

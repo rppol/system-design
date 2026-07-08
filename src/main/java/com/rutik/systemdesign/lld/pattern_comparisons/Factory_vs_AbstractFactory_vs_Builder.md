@@ -20,23 +20,76 @@ All three are creational patterns that hide object construction from the client.
 
 ## Side-by-Side UML
 
+Three independent class hierarchies — read left to right as Factory Method → Abstract Factory → Builder, then compare against the table below.
+
+**Factory Method** — `ConcreteCreator` overrides `createProduct()` to decide the concrete type; the inherited `someOperation()` never changes.
+
+```mermaid
+classDiagram
+    class Creator {
+        <<abstract>>
+        +createProduct() Product
+        +someOperation()
+    }
+    class ConcreteCreator {
+        +createProduct() Product
+    }
+    class Product {
+        <<interface>>
+    }
+    class ConcreteProduct
+
+    Creator <|-- ConcreteCreator
+    Product <|.. ConcreteProduct
+    ConcreteCreator ..> ConcreteProduct : creates
 ```
-FACTORY METHOD                    ABSTRACT FACTORY                  BUILDER
-──────────────────────────        ──────────────────────────        ──────────────────────────
-<<abstract>> Creator               <<interface>> AbstractFactory     <<interface>> Builder
-└── createProduct(): Product       ├── createButton(): Button        ├── buildPartA()
-    └── someOperation()            └── createCheckbox(): Checkbox    ├── buildPartB()
-                                                                     └── getResult(): Product
-ConcreteCreator                   WinFactory
-└── createProduct()                ├── createButton(): WinButton     ConcreteBuilder
-    returns new ConcreteProduct    └── createCheckbox(): WinChk      ├── buildPartA()
-                                                                     ├── buildPartB()
-<<interface>> Product              MacFactory                        └── getResult()
-ConcreteProduct                   ├── createButton(): MacButton
-                                  └── createCheckbox(): MacChk      Director
-                                                                     └── construct(Builder)
-                                  Client uses factory interface
-                                  Client gets consistent family
+
+**Abstract Factory** — one factory interface produces an entire family of related products; swapping `WinFactory` for `MacFactory` swaps the whole family at once.
+
+```mermaid
+classDiagram
+    class AbstractFactory {
+        <<interface>>
+        +createButton() Button
+        +createCheckbox() Checkbox
+    }
+    class WinFactory {
+        +createButton() WinButton
+        +createCheckbox() WinChk
+    }
+    class MacFactory {
+        +createButton() MacButton
+        +createCheckbox() MacChk
+    }
+    class Client
+
+    AbstractFactory <|.. WinFactory
+    AbstractFactory <|.. MacFactory
+    Client ..> AbstractFactory : uses
+    note for AbstractFactory "Client depends only on this interface — guaranteed a consistent family"
+```
+
+**Builder** — the optional `Director` drives a `Builder` through the same step sequence to assemble a product incrementally, ending in `getResult()`.
+
+```mermaid
+classDiagram
+    class Builder {
+        <<interface>>
+        +buildPartA()
+        +buildPartB()
+        +getResult() Product
+    }
+    class ConcreteBuilder {
+        +buildPartA()
+        +buildPartB()
+        +getResult()
+    }
+    class Director {
+        +construct(builder Builder)
+    }
+
+    Builder <|.. ConcreteBuilder
+    Director ..> Builder : directs
 ```
 
 ---
@@ -295,12 +348,34 @@ System.out.println(margherita);
 
 ## Summary Decision Tree
 
-```
-Need to create objects?
-├── One type of object, creation logic varies by subclass?
-│   └── FACTORY METHOD
-├── Multiple related objects that must be consistent?
-│   └── ABSTRACT FACTORY
-└── One complex object with many optional parts or steps?
-    └── BUILDER
+Answer one question about what you're creating and the branch below names the pattern to reach for.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Need to<br/>create objects?"])
+    D1{"One type of object,<br/>creation logic varies by subclass?"}
+    D2{"Multiple related objects<br/>that must be consistent?"}
+    D3{"One complex object with<br/>many optional parts or steps?"}
+    R1(["FACTORY METHOD"])
+    R2(["ABSTRACT FACTORY"])
+    R3(["BUILDER"])
+
+    Start --> D1
+    Start --> D2
+    Start --> D3
+    D1 --> R1
+    D2 --> R2
+    D3 --> R3
+
+    class Start io
+    class D1,D2,D3 mathOp
+    class R1,R2,R3 train
 ```

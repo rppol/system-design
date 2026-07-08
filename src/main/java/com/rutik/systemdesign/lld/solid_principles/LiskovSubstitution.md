@@ -95,6 +95,25 @@ Rectangle r = new Square(); // LSP says this should work
 resizeToDoubleWidth(r);      // It does NOT work — assertion fails
 ```
 
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Resize as resizeToDoubleWidth
+    participant Sq as Square
+
+    Note over Caller,Sq: Rectangle r = new Square() — passed in as rect, declared Rectangle, actually a Square
+    Caller->>Resize: resizeToDoubleWidth(r)
+    Resize->>Sq: getHeight()
+    Sq-->>Resize: originalHeight
+    Resize->>Sq: setWidth(getWidth() * 2)
+    Note over Sq: Square's override also sets height, to keep width == height
+    Resize->>Sq: getHeight()
+    Sq-->>Resize: new height (changed!)
+    Note over Resize: assert new height == originalHeight fails — Rectangle's postcondition is broken
+```
+
+Tracing the exact call from the code above: `rect` answers `getHeight()` differently the second time, purely because its runtime type is `Square` — the assertion the caller trusted about `Rectangle` breaks at that instant, which is the substitution failure LSP forbids.
+
 **Why LSP is violated:**
 - `Rectangle` has an implicit postcondition: `setWidth` only changes width, not height
 - `Square` violates this postcondition by changing both
@@ -149,6 +168,45 @@ public void printArea(Shape shape) {
     System.out.println("Area: " + shape.calculateArea()); // Works for both
 }
 ```
+
+```mermaid
+classDiagram
+    class MutableRectangle {
+        -int width
+        -int height
+        +setWidth(width)
+        +setHeight(height)
+        +getWidth() int
+        +getHeight() int
+        +calculateArea() int
+    }
+    class MutableSquare {
+        +setWidth(width)
+        +setHeight(height)
+    }
+    MutableRectangle <|-- MutableSquare : overrides to force width == height
+
+    class Shape {
+        <<interface>>
+        +calculateArea() int
+    }
+    class ImmutableRectangle {
+        -int width
+        -int height
+        +calculateArea() int
+    }
+    class ImmutableSquare {
+        -int side
+        +calculateArea() int
+    }
+    Shape <|.. ImmutableRectangle
+    Shape <|.. ImmutableSquare
+
+    note for MutableSquare "setWidth/setHeight also mutate the other field — breaks Rectangle's postcondition"
+    note for Shape "No mutable setters to violate — both shapes only ever promise calculateArea()"
+```
+
+The naive hierarchy forces `MutableSquare` to override both setters just to preserve its own invariant, breaking `Rectangle`'s postcondition; the `Shape`-based redesign removes the shared mutable state entirely, so `ImmutableRectangle` and `ImmutableSquare` only ever promise `calculateArea()` — nothing left to violate.
 
 **Option 2: Factory method approach**
 

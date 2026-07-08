@@ -10,6 +10,42 @@ The contrast:
 - **Anemic Domain Model**: `Order` has fields. `OrderService` has all the business logic that operates on `Order`.
 - **Rich Domain Model**: `Order` knows how to place itself, cancel itself, calculate its total, and enforce its own invariants.
 
+The diagram below puts both shapes side by side: in the anemic model `OrderService` reaches into `Order`'s fields and owns every rule; in the rich model `Order` owns its rules and `OrderService` is reduced to coordinating infrastructure.
+
+```mermaid
+classDiagram
+    direction LR
+    class AnemicOrder {
+        -status OrderStatus
+        -items List~OrderItem~
+        -totalAmount BigDecimal
+        +getStatus() OrderStatus
+        +setStatus(status OrderStatus)
+        +getItems() List~OrderItem~
+        +setTotalAmount(total BigDecimal)
+    }
+    class AnemicOrderService {
+        +placeOrder(customerId, items, address) Order
+        +cancelOrder(orderId)
+        +addItem(orderId, newItem)
+    }
+    AnemicOrderService ..> AnemicOrder : reads/writes fields directly,<br/>owns every business rule
+
+    class RichOrder {
+        -status OrderStatus
+        -items List~OrderItem~
+        +cancel()
+        +addItem(item OrderItem)
+        +calculateTotal() BigDecimal
+        +markShipped()
+    }
+    class RichOrderService {
+        +placeOrder(customerId, items, address) Order
+        +cancelOrder(orderId)
+    }
+    RichOrderService ..> RichOrder : delegates rules,<br/>coordinates infrastructure only
+```
+
 ---
 
 ## Intuition
@@ -282,6 +318,35 @@ class OrderTest {
         assertEquals(new BigDecimal("45.00"), order.calculateTotal());
     }
 }
+```
+
+The two `cancelOrder` implementations above differ in exactly one way: who makes the decision. The sequence below lines up the anemic call chain (the service asks `Order` for its status, decides externally, then commands a raw setter) against the rich call chain (the service simply tells `Order` to `cancel()` and the entity enforces its own rule) — the runtime picture of the Tell, Don't Ask violation and its fix.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as OrderService
+    participant O as Order
+    participant R as OrderRepository
+
+    Note over C,R: Anemic — service asks, then commands (violates Tell, Don't Ask)
+    C->>S: cancelOrder(orderId)
+    S->>R: findById(orderId)
+    R-->>S: order
+    S->>O: getStatus()
+    O-->>S: status
+    Note over S: if/else decides legality<br/>outside the entity
+    S->>O: setStatus(CANCELLED)
+    S->>R: save(order)
+
+    Note over C,R: Rich — service tells, Order decides (Tell, Don't Ask)
+    C->>S: cancelOrder(orderId)
+    S->>R: findById(orderId)
+    R-->>S: order
+    S->>O: cancel()
+    Note over O: checks its own status,<br/>throws if already shipped/cancelled
+    O-->>S: cancelled or IllegalStateException
+    S->>R: save(order)
 ```
 
 ---

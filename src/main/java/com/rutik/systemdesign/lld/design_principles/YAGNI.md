@@ -148,6 +148,31 @@ Practical balance:
 2. When the second or third variant of something arrives, refactor to a clean abstraction (DRY's Rule of Three + SOLID).
 3. Trust that good code — well-tested, well-named, with clear boundaries — can be refactored when the real requirement appears.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["New code for a<br/>current requirement"]) --> B{"What to build?"}
+    B -->|"YAGNI governs"| C["No unused<br/>extension points"]
+    A --> D{"How to build it well?"}
+    D -->|"SOLID governs"| E["Clean, testable,<br/>well-bounded code"]
+    C --> F(["Safe to refactor once the<br/>2nd/3rd variant really arrives"])
+    E --> F
+
+    class A io
+    class B,D mathOp
+    class C,F train
+    class E base
+```
+
+*YAGNI and SOLID answer two different questions about the same new code — what to build (nothing speculative) and how to build it well (clean, testable boundaries) — and together they are what makes refactoring safe and cheap once the Rule of Three actually fires.*
+
 The key: **SOLID enables safe refactoring later; YAGNI says don't refactor before the need exists**.
 
 ---

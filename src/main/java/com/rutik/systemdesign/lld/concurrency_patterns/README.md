@@ -23,22 +23,39 @@ Concurrency patterns solve the coordination problem: multiple threads competing 
 
 ## 3. When to Use Which Pattern
 
-```
-Multiple threads share ONE resource that must be initialized exactly once?
-  -> Thread-Safe Singleton (prefer enum; else Holder idiom)
-     Do not use DCL unless enum and Holder are impossible.
+Decision tree from coordination characteristic to pattern; each leaf also carries the key caveat called out in the surrounding text.
 
-Threads PRODUCE work items; other threads CONSUME them at different rates?
-  -> Producer-Consumer (use BlockingQueue for simplicity over raw wait/notify)
-     Bound the queue to prevent OOM if producers outrun consumers.
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Data is READ frequently, WRITTEN rarely (read-heavy workload)?
-  -> Read-Write Lock (ReentrantReadWriteLock; StampedLock for optimistic reads)
-     Fairness=true prevents writer starvation on highly-read data.
+    Start(["Coordination need?"])
 
-Many short-lived TASKS need execution without creating a thread per task?
-  -> Thread Pool (ExecutorService; tune corePoolSize, maxPoolSize, queue type)
-     For I/O-bound tasks on Java 21+, consider virtual threads instead.
+    Start --> Q1{"One resource,<br/>init exactly once?"}
+    Start --> Q2{"Producers/consumers<br/>at different rates?"}
+    Start --> Q3{"Read-heavy,<br/>write-rare workload?"}
+    Start --> Q4{"Many short-lived<br/>tasks to run?"}
+
+    Q1 --> S1["Thread-Safe Singleton<br/>(enum, else Holder)"]
+    Q2 --> S2["Producer-Consumer<br/>(BlockingQueue)"]
+    Q3 --> S3["Read-Write Lock<br/>(RRWL / StampedLock)"]
+    Q4 --> S4["Thread Pool<br/>(ExecutorService)"]
+
+    S1 --> N1["Avoid DCL unless enum<br/>and Holder are impossible"]
+    S2 --> N2["Bound the queue —<br/>prevents OOM"]
+    S3 --> N3["fairness=true stops<br/>writer starvation"]
+    S4 --> N4["Java 21+: consider<br/>virtual threads"]
+
+    class Start io
+    class Q1,Q2,Q3,Q4 mathOp
+    class S1,S2,S3,S4 train
+    class N1,N2,N3,N4 frozen
 ```
 
 ---
@@ -91,24 +108,27 @@ Java 21 virtual threads (`Thread.ofVirtual().start(...)`) are cheap enough (~few
 
 ## 7. Pattern Selection by Failure Mode
 
-```
-Failure: Two threads initialize the same expensive resource twice
-  -> Thread-Safe Singleton (Holder idiom or enum)
+Same four patterns, indexed by the symptom you'd actually see in production rather than by upfront design characteristics — the reactive/debugging counterpart to the tree above.
 
-Failure: Fast producer fills memory; slow consumer crashes
-  -> Producer-Consumer with bounded BlockingQueue + backpressure
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Failure: Write lock blocks all concurrent read traffic
-  -> Read-Write Lock; writers get exclusive access; readers don't block each other
+    F1["Two threads init the<br/>same resource twice"] --> P1["Thread-Safe Singleton<br/>(Holder idiom or enum)"]
+    F2["Fast producer fills memory;<br/>slow consumer crashes"] --> P2["Producer-Consumer +<br/>bounded BlockingQueue"]
+    F3["Write lock blocks all<br/>concurrent reads"] --> P3["Read-Write Lock —<br/>exclusive writers only"]
+    F4["10,000 concurrent requests;<br/>JVM OOM on thread creation"] --> P4["Thread Pool<br/>(or virtual threads, Java 21+)"]
+    F5["check-then-act race<br/>(if empty, add)"] --> P5["putIfAbsent() or<br/>AtomicReference.compareAndSet()"]
+    F6["Readers starve writers<br/>(continuous read traffic)"] --> P6["fairness=true, or<br/>StampedLock optimistic reads"]
 
-Failure: 10,000 concurrent requests; JVM OOM on thread creation
-  -> Thread Pool (or virtual threads on Java 21+)
-
-Failure: check-then-act race ("if empty, add")
-  -> ConcurrentHashMap.putIfAbsent() or AtomicReference.compareAndSet()
-
-Failure: Readers starve writers (continuous read traffic blocks writes)
-  -> ReentrantReadWriteLock with fairness=true, or StampedLock optimistic reads
+    class F1,F2,F3,F4,F5,F6 lossN
+    class P1,P2,P3,P4,P5,P6 train
 ```
 
 ---
@@ -159,6 +179,24 @@ public class Singleton {
 }
 ```
 
+The interleaving below is what the "BROKEN" version above actually allows: Thread B can observe a non-null `instance` before Thread A's constructor has finished running.
+
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant B as Thread B
+
+    Note over A,B: instance starts null, both threads enter getInstance()
+    A->>A: 1. allocate memory for Singleton
+    A->>A: 2. assign reference to instance
+    Note right of A: without volatile, step 3 can<br/>reorder to run after step 2
+    B->>B: getInstance() sees instance already set
+    Note over B: sees a non-null reference,<br/>but the constructor hasn't run yet
+    B-->>B: uses a partially-constructed object
+    A->>A: 3. invoke Singleton() constructor
+    Note over A,B: volatile forbids this reorder —<br/>step 3 happens-before the reference is visible
+```
+
 ### notify() Lost Wakeup — Broken and Fixed
 
 ```java
@@ -206,6 +244,31 @@ BlockingQueue<String> queue = new ArrayBlockingQueue<>(1000);
 queue.put(item);  // blocks when full; no notify() needed
 // consumer:
 String item = queue.take(); // blocks when empty; no notify() needed
+```
+
+The interleaving below is the classic lost wakeup the "BROKEN" version's comments warn about: with two consumers and one producer sharing a single wait-set, `notify()` can pick the wrong role, and the thread that could actually make progress is left asleep — exactly what `notifyAll()` (in the "FIXED" version above) eliminates.
+
+```mermaid
+sequenceDiagram
+    participant C1 as Consumer 1
+    participant C2 as Consumer 2
+    participant P as Producer
+
+    Note over C1,P: capacity = 1, queue starts empty
+    C1->>C1: take() — empty, wait()
+    C2->>C2: take() — empty, wait()
+    Note over C1,C2: wait-set = {C1, C2}
+
+    P->>P: put(x) — adds x, size = 1
+    P-->>C1: notify() wakes C1
+
+    P->>P: put(y) — full, wait()
+    Note over C2,P: wait-set = {C2, P} — mixed roles
+
+    C1->>C1: resumes, polls x, size = 0
+    C1-->>C2: notify() wakes C2 — wrong choice
+    C2->>C2: rechecks — still empty, waits again
+    Note over C2,P: C2 re-parks, P is never woken — system stalls
 ```
 
 ### ThreadPoolExecutor with CallerRunsPolicy — Backpressure

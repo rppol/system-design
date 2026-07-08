@@ -97,6 +97,34 @@ class RunningSwimmingFlyingAnimal extends SwimmingFlyingAnimal { ... }
 
 Every new combination of behaviors requires a new class. The hierarchy becomes unmaintainable.
 
+```mermaid
+classDiagram
+    class Animal
+
+    class FlyingAnimal {
+        +fly()
+    }
+    class SwimmingAnimal {
+        +swim()
+    }
+    class SwimmingFlyingAnimal {
+        +fly()
+        +swim()
+    }
+    class RunningSwimmingFlyingAnimal {
+        +fly()
+        +swim()
+        +run()
+    }
+
+    Animal <|-- FlyingAnimal
+    Animal <|-- SwimmingAnimal
+    Animal <|-- SwimmingFlyingAnimal
+    SwimmingFlyingAnimal <|-- RunningSwimmingFlyingAnimal
+```
+
+*Two capabilities already force a third sibling (`SwimmingFlyingAnimal`) that duplicates both method bodies; adding a third capability (`run`) forces yet another subclass down the chain — this is the class explosion the code above warns about.*
+
 ---
 
 ## Compliant Example
@@ -162,6 +190,52 @@ public class Animal {
 ```
 
 Any combination of behaviors is possible with no class explosion. Behaviors can be changed at runtime by swapping the injected object.
+
+```mermaid
+classDiagram
+    class Flyable {
+        <<interface>>
+        +fly()
+    }
+    class Swimmable {
+        <<interface>>
+        +swim()
+    }
+    class FlyingBehavior {
+        +fly()
+    }
+    class SwimmingBehavior {
+        +swim()
+    }
+    class Duck {
+        -flyingBehavior Flyable
+        -swimmingBehavior Swimmable
+        +fly()
+        +swim()
+    }
+    class Eagle {
+        -flyingBehavior Flyable
+        +fly()
+    }
+    class Animal {
+        -flyingBehavior Flyable
+        -swimmingBehavior Swimmable
+        +setFlyingBehavior(fb) void
+    }
+
+    Flyable <|.. FlyingBehavior
+    Swimmable <|.. SwimmingBehavior
+    Flyable <|.. Duck
+    Swimmable <|.. Duck
+    Flyable <|.. Eagle
+    Duck *-- FlyingBehavior : owns
+    Duck *-- SwimmingBehavior : owns
+    Eagle *-- FlyingBehavior : owns
+    Animal o-- Flyable : injected, swappable
+    Animal o-- Swimmable : injected, swappable
+```
+
+*`Duck` and `Eagle` compose their behavior — each constructs its own `FlyingBehavior`/`SwimmingBehavior` for life; `Animal` only aggregates it, since the behavior is injected via the constructor and `setFlyingBehavior()` can swap it at runtime without touching `Animal`'s own lifecycle.*
 
 ---
 

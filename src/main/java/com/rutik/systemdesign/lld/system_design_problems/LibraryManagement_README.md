@@ -25,43 +25,88 @@ Design a Library Management System that:
 
 ## Class Diagram
 
-```
-Library
-  + catalog: BookCatalog
-  + copies: Map<copyId, BookCopy>
-  + members: Map<memberId, Member>
-  + reservations: Map<isbn, Queue<memberId>>
-  + observers: List<LibraryObserver>
-  ──────────────────────────────────
-  + borrowBook(memberId, isbn): boolean
-  + returnBook(memberId, isbn): boolean
-  + reserveBook(memberId, isbn): void
-  + searchByTitle(keyword): List<Book>
-  + searchByGenre(genre): List<Book>
+```mermaid
+classDiagram
+    class Library {
+        +BookCatalog catalog
+        +Map~copyId,BookCopy~ copies
+        +Map~memberId,Member~ members
+        +Map~isbn,Queue~ reservations
+        +List~LibraryObserver~ observers
+        +borrowBook(memberId, isbn) boolean
+        +returnBook(memberId, isbn) boolean
+        +reserveBook(memberId, isbn) void
+        +searchByTitle(keyword) List~Book~
+        +searchByGenre(genre) List~Book~
+    }
 
-Book (built via Builder)              BookCopy
-  + isbn: String                        + copyId: String
-  + title: String                       + isbn: String
-  + author: String                      + status: BookStatus
-  + genre: String              Loan
-  + copies: int                  + memberId: String
-                                 + copyId: String
-Book.Builder                     + borrowDate: LocalDate
-  + isbn (required)              + dueDate: LocalDate
-  + title (required)             + returnDate: LocalDate
-  + author()
-  + genre()                    Member
-  + copies()                     + memberId, name, email
-  + build(): Book                + loanHistory: List<Loan>
-                                 + canBorrow(): boolean
+    class Book {
+        +String isbn
+        +String title
+        +String author
+        +String genre
+        +int copies
+    }
+    note for Book "Instances are constructed via Book.Builder (Builder pattern)"
 
-BookCatalog (Iterable<Book>)    <<interface>>
-  + iterator(): Iterator<Book>  LibraryObserver
-  + byGenre(genre)                + onNotification(type, member, book, msg)
-  + byAuthor(author)                    △
-  + byTitleContaining(keyword)   ┌──────┴───────────┐
-                          EmailNotificationObserver  AuditLogObserver
+    class BookBuilder["Book.Builder"]
+    BookBuilder : +BookBuilder(isbn, title)
+    BookBuilder : +author()
+    BookBuilder : +genre()
+    BookBuilder : +copies()
+    BookBuilder : +build() Book
+
+    class BookCopy {
+        +String copyId
+        +String isbn
+        +BookStatus status
+    }
+
+    class Loan {
+        +String memberId
+        +String copyId
+        +LocalDate borrowDate
+        +LocalDate dueDate
+        +LocalDate returnDate
+    }
+
+    class Member {
+        +String memberId
+        +String name
+        +String email
+        +List~Loan~ loanHistory
+        +canBorrow() boolean
+    }
+
+    class BookCatalog {
+        +iterator() Iterator~Book~
+        +byGenre(genre)
+        +byAuthor(author)
+        +byTitleContaining(keyword)
+    }
+    note for BookCatalog "Implements JDK Iterable of Book for uniform traversal (Iterator pattern)"
+
+    class LibraryObserver {
+        <<interface>>
+        +onNotification(type, member, book, msg)
+    }
+
+    class EmailNotificationObserver
+    class AuditLogObserver
+
+    BookBuilder ..> Book : creates
+    Library "1" --> "1" BookCatalog : catalog
+    Library "1" --> "*" BookCopy : tracks
+    Library "1" --> "*" Member : registers
+    Library "1" --> "*" LibraryObserver : notifies
+    BookCopy "*" --> "1" Book : copyOf
+    Loan "*" --> "1" BookCopy : forCopy
+    Member "1" --> "*" Loan : loanHistory
+    LibraryObserver <|.. EmailNotificationObserver : implements
+    LibraryObserver <|.. AuditLogObserver : implements
 ```
+
+`Library` composes `BookCatalog`, the per-copy inventory, members, and the observer list; `Book.Builder` constructs `Book` (Builder), `BookCatalog` implements `Iterable<Book>` for uniform traversal (Iterator), and `LibraryObserver` is realized by `EmailNotificationObserver`/`AuditLogObserver` (Observer). `Library.reservations` maps each ISBN to a FIFO queue of waiting member IDs (see Key Design Decisions below).
 
 ---
 
@@ -103,12 +148,25 @@ This decouples the catalog's internal structure from clients. The catalog could 
 
 ### 3. Observer Pattern — Notifications
 
+```mermaid
+classDiagram
+    class Library {
+        <<Subject>>
+    }
+
+    class LibraryObserver {
+        <<interface>>
+    }
+
+    class EmailObserver
+    class AuditLogObserver
+
+    Library "1" --> "*" LibraryObserver : notifies
+    LibraryObserver <|.. EmailObserver
+    LibraryObserver <|.. AuditLogObserver
 ```
-Library (Subject)  ──────────────────►  LibraryObserver (interface)
-                                              △
-                                    ┌─────────┴─────────┐
-                                EmailObserver     AuditLogObserver
-```
+
+`Library` (the Subject) depends only on the `LibraryObserver` interface, never on a concrete implementation — new channels like SMS or push notifications just add another realization, with zero changes to `Library`.
 
 Events published:
 - `BORROW_CONFIRMED` — when book is checked out
@@ -122,27 +180,53 @@ New notification channels (SMS, push notification) just implement `LibraryObserv
 
 ## Data Model
 
-```
-Book             1──────────────── N    BookCopy
-  isbn PK                                copyId PK
-  title                                  isbn FK → Book
-  author                                 status (AVAILABLE/BORROWED/RESERVED/LOST)
-  genre
-  totalCopies
+```mermaid
+classDiagram
+    direction LR
 
-Member           1──────────────── N    Loan
-  memberId PK                            loanId PK
-  name                                   memberId FK → Member
-  email                                  copyId FK → BookCopy
-  status                                 borrowDate
-                                         dueDate
-                                         returnDate (null if active)
+    class Book {
+        +String isbn PK
+        +String title
+        +String author
+        +String genre
+        +int totalCopies
+    }
 
-Reservation (Queue per ISBN)
-  isbn FK → Book
-  memberId FK → Member
-  queuePosition
+    class BookCopy {
+        +String copyId PK
+        +String isbn FK → Book
+        +BookStatus status
+    }
+
+    class Member {
+        +String memberId PK
+        +String name
+        +String email
+        +status
+    }
+
+    class Loan {
+        +String loanId PK
+        +String memberId FK → Member
+        +String copyId FK → BookCopy
+        +LocalDate borrowDate
+        +LocalDate dueDate
+        +LocalDate returnDate
+    }
+
+    class Reservation {
+        +String isbn FK → Book
+        +String memberId FK → Member
+        +int queuePosition
+    }
+
+    Book "1" --> "*" BookCopy : hasCopies
+    Member "1" --> "*" Loan : hasLoans
+    Book "1" --> "*" Reservation : queuedIn
+    Member "1" --> "*" Reservation : reserves
 ```
+
+The persistence layer mirrors the class model with explicit keys: `Book` is 1-to-many with `BookCopy` (one row per physical copy), `Member` is 1-to-many with `Loan` (full borrow history), and `Reservation` joins `Book`/`Member` per ISBN queue position. `BookCopy.status` cycles AVAILABLE, BORROWED, RESERVED, LOST; `Loan.returnDate` stays null while a loan is active.
 
 ---
 
@@ -161,22 +245,27 @@ In `returnBook()` — when a copy is returned, the library immediately checks th
 
 ## Reservation Flow
 
+```mermaid
+sequenceDiagram
+    actor Alice
+    participant Library
+    actor Bob
+    participant Observer as EmailNotificationObserver
+
+    Alice->>Library: borrowBook(A001, "978-xxx")
+    Library-->>Alice: only copy checked out
+    Bob->>Library: borrowBook(M002, "978-xxx")
+    Library-->>Bob: no copies available
+    Bob->>Library: reserveBook(M002, "978-xxx")
+    Note over Library: reservation queue for 978-xxx now holds member M002
+    Alice->>Library: returnBook(A001, "978-xxx")
+    Library->>Library: reservation queue is non-empty
+    Library->>Library: copy status → RESERVED (not AVAILABLE)
+    Library->>Observer: notify(Bob, RESERVATION_AVAILABLE)
+    Observer-->>Bob: "Design Patterns is available for pickup!"
 ```
-Alice borrows "Design Patterns" (only 1 copy)
-           │
-Bob tries to borrow — no copies available
-           │
-Bob reserves the book
-           │  reservations["978-xxx"] = Queue["M002"]
-           │
-Alice returns "Design Patterns"
-           │
-Library.returnBook() sees reservation queue is non-empty
-           │
-Copy status → RESERVED (not AVAILABLE)
-           │
-Observer notifies Bob: "Design Patterns is available for pickup!"
-```
+
+Two members converge on the same single-copy title: Bob's reservation queues behind Alice's active loan, and `Library.returnBook()` — instead of flipping the copy back to AVAILABLE — marks it RESERVED and pushes an Observer notification straight to Bob, an event-driven alternative to polling a cron job.
 
 ---
 
@@ -188,6 +277,41 @@ Observer notifies Bob: "Design Patterns is available for pickup!"
 - **Observer notifications → notification microservice** — Due-date reminders, return notifications, and reservation availability alerts map to a dedicated notification microservice at HLD scale: it subscribes to library domain events (BookReturned, OverdueBook) and dispatches email/SMS/push via appropriate channels.
 - **Availability tracking → distributed inventory** — Tracking available copies across a library network (multiple branches) is a distributed inventory management problem — the same challenge as e-commerce stock management across fulfillment centers. Consistency requirements determine whether you need strong or eventual consistency.
 - **Builder for complex queries → search microservice** — Complex catalog search (by title, author, genre, availability, language) at scale becomes a dedicated search service backed by Elasticsearch, with the Builder pattern used to construct search queries from multiple optional filters.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph LLD["LLD — Library Management"]
+        A("Reservation queue<br/>per ISBN")
+        B("Observer notifications")
+        C("Availability tracking<br/>per branch")
+        D("Builder for complex queries")
+    end
+
+    subgraph HLD["HLD Scale-Out"]
+        A2("Distributed priority queue<br/>spot instances, waitlists")
+        B2("Notification microservice<br/>email / SMS / push")
+        C2("Distributed inventory<br/>fulfillment centers")
+        D2("Search microservice<br/>Elasticsearch")
+    end
+
+    A --> A2
+    B --> B2
+    C --> C2
+    D --> D2
+
+    class A,B,C,D req
+    class A2,B2,C2,D2 base
+```
+
+Each Library Management mechanic has a direct distributed-systems analogue — the same "queue waiters, notify on availability" shape recurs at both scales, just with different infrastructure underneath.
 
 ---
 

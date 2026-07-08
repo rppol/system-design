@@ -206,6 +206,34 @@ public class SocialNetworkService {
 // The right answer depends on the actual scale requirements.
 ```
 
+The code comment above collapses three different "right answers" into one line each. Making the scale thresholds an explicit checkpoint — instead of a habit — is what stops the SQL hammer from creeping back in as the data grows:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Shortest-path query"]) --> B{"Graph scale?"}
+    B -->|"approx. 100 users"| C["SQL recursive CTE<br/>(fine at this scale)"]
+    B -->|"fits in memory"| D["In-memory BFS O(V+E)<br/>+ periodic Postgres snapshot"]
+    B -->|"over 100M edges"| E["Neo4j native<br/>graph algorithms"]
+    C --> F(["Right tool<br/>for the scale"])
+    D --> F
+    E --> F
+
+    class A io
+    class B mathOp
+    class C train
+    class D train
+    class E train
+    class F io
+```
+
 ---
 
 ## Prevention Strategies
@@ -221,6 +249,36 @@ public class SocialNetworkService {
 5. **Challenge "we already use X":** In architecture reviews, require justification that addresses fit, not just familiarity.
 
 6. **Prototype alternative approaches:** A two-day spike with the right tool often demonstrates it is faster than weeks of fighting the wrong one.
+
+These six strategies form a single feedback loop rather than a checklist: define the problem before the tool, hold the familiar option to a fitness function, and only spend prototyping effort once that check actually fails:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["New problem<br/>arrives"]) --> B["Write down problem<br/>characteristics"]
+    B --> C["Express solution as<br/>tech-neutral abstractions"]
+    C --> D["Define a fitness function<br/>(latency, throughput, fit)"]
+    D --> E{"Familiar tool<br/>meets it?"}
+    E -->|"yes"| F(["Use it -<br/>healthy standardization"])
+    E -->|"no"| G["Prototype the<br/>right-fit alternative"]
+    G --> H(["Choose based on fit,<br/>not familiarity"])
+
+    class A io
+    class B req
+    class C base
+    class D base
+    class E mathOp
+    class F train
+    class G mathOp
+    class H train
+```
 
 ---
 

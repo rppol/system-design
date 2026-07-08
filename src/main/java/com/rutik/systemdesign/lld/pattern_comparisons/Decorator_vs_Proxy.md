@@ -20,30 +20,57 @@ Both Decorator and Proxy wrap a target object and implement the same interface. 
 
 ## Side-by-Side UML
 
+```mermaid
+classDiagram
+    direction LR
+
+    namespace DecoratorPattern {
+        class Component {
+            <<interface>>
+            +operation()
+        }
+        class ConcreteComponent {
+            +operation()
+        }
+        class Decorator {
+            <<abstract>>
+            -wrappee : Component
+            +operation()
+        }
+        class ConcreteDecoratorA {
+            +operation()
+        }
+        class ConcreteDecoratorB {
+            +operation()
+        }
+    }
+
+    namespace ProxyPattern {
+        class Subject {
+            <<interface>>
+            +request()
+        }
+        class RealSubject {
+            +request()
+        }
+        class Proxy {
+            -realSubject : RealSubject
+            +request()
+        }
+    }
+
+    Component <|.. ConcreteComponent
+    Component <|.. Decorator
+    Decorator o-- Component : wraps
+    Decorator <|-- ConcreteDecoratorA
+    Decorator <|-- ConcreteDecoratorB
+
+    Subject <|.. RealSubject
+    Subject <|.. Proxy
+    Proxy *-- RealSubject : creates/controls
 ```
-DECORATOR                             PROXY
-──────────────────────────────        ──────────────────────────────
-<<interface>> Component               <<interface>> Subject
-└── operation()                       └── request()
 
-ConcreteComponent                     RealSubject
-└── operation()  <── wraps            └── request()   <── proxied
-
-Decorator (abstract)                  Proxy
-├── wrappee: Component                ├── realSubject: RealSubject
-└── operation()                       └── request()
-    calls wrappee.operation()             pre-processing
-                                          realSubject.request()
-ConcreteDecoratorA                        post-processing
-├── Decorator fields
-└── operation()                       (Proxy often creates/controls
-    super.operation()                  the RealSubject itself)
-    add extra behavior
-
-ConcreteDecoratorB
-└── operation()
-    add different extra behavior
-```
+Both hierarchies wrap the same interface, but the wrapping edge differs in kind: `Decorator` only aggregates a `Component` it never created (`wrappee`) — matching "Who creates the wrapped object: Client creates the component, wraps externally" below — while `Proxy` typically composes its `RealSubject`, creating and owning it directly (`realSubject`), matching "Lifecycle control: Often yes — lazy init, pooling, caching." `ConcreteDecoratorA`/`ConcreteDecoratorB` each layer one new behavior around `super.operation()`; `Proxy.request()` wraps `realSubject.request()` with pre-/post-processing instead of changing what the call does.
 
 ---
 
@@ -178,6 +205,27 @@ System.out.println(latte.getDescription() + " $" + latte.getCost());
 // "Simple coffee, milk, milk $1.50"
 ```
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant CD as CaramelDecorator
+    participant WD as WhipDecorator
+    participant MD as MilkDecorator
+    participant SC as SimpleCoffee
+
+    Note over Client,SC: order now wraps CaramelDecorator(WhipDecorator(MilkDecorator(SimpleCoffee)))
+    Client->>CD: getDescription()
+    CD->>WD: decoratedCoffee.getDescription()
+    WD->>MD: decoratedCoffee.getDescription()
+    MD->>SC: decoratedCoffee.getDescription()
+    SC-->>MD: "Simple coffee"
+    MD-->>WD: "Simple coffee, milk"
+    WD-->>CD: "Simple coffee, milk, whip"
+    CD-->>Client: "Simple coffee, milk, whip, caramel"
+```
+
+Each decorator delegates first and appends its own text on the way back up — `order.getDescription()` reaches all the way down to `SimpleCoffee` before any decorator adds a word, producing the `"Simple coffee, milk, whip, caramel"` result from the stacking above.
+
 ---
 
 ### Proxy — Virtual Proxy for expensive resource
@@ -281,6 +329,28 @@ Image secured = new SecureImageProxy(
 );
 secured.display();
 ```
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant IP as img1 : ImageProxy
+    participant HR as HighResolutionImage
+
+    Note over Client,HR: First display() call — realImage is still null
+    Client->>IP: display()
+    IP->>HR: new HighResolutionImage("photo.jpg")
+    HR->>HR: loadFromDisk()
+    Note right of HR: "Loading photo.jpg from disk..."
+    IP->>HR: display()
+    HR-->>Client: "Displaying: photo.jpg"
+
+    Note over Client,HR: Second display() call — realImage already cached
+    Client->>IP: display()
+    IP->>HR: display()
+    HR-->>Client: "Displaying: photo.jpg" (no reload)
+```
+
+The expensive `HighResolutionImage` construction — and its `loadFromDisk()` call — runs exactly once, on the first `display()`; the second call skips straight to the cached `realImage`, which is "lazy initialization" from the Key Differences table in action. `img2` (never displayed) never triggers loading at all.
 
 ---
 

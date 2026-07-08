@@ -20,28 +20,77 @@ Both Observer and Mediator address communication between multiple objects. Obser
 
 ## Side-by-Side UML
 
-```
-OBSERVER                              MEDIATOR
-──────────────────────────────        ──────────────────────────────
-Subject (Observable)                  <<interface>> Mediator
-├── observers: List<Observer>         └── notify(sender, event)
-├── subscribe(Observer)
-├── unsubscribe(Observer)             ConcreteMediator
-└── notifyObservers()                 ├── component1: Component1
-    for each o: o.update(this)        ├── component2: Component2
-                                      └── notify(sender, event)
-ConcreteSubject                           routes events between components
-├── state
-└── getState()
+Both patterns replace scattered peer-to-peer wiring with one clear point of contact, but the class shapes differ: Observer's Subject depends only on the Observer interface, while Mediator's components depend only on the Mediator interface and never see each other.
 
-<<interface>> Observer               <<abstract>> BaseComponent
-└── update(Subject)                  ├── mediator: Mediator
-                                     └── setMediator(Mediator)
-ConcreteObserver1
-ConcreteObserver2                    Component1, Component2, Component3
-                                     └── doAction()
-                                         mediator.notify(this, "event")
+**Observer**
+
+```mermaid
+classDiagram
+    direction LR
+    class Subject {
+        -observers List~Observer~
+        +subscribe(Observer)
+        +unsubscribe(Observer)
+        +notifyObservers()
+    }
+    class ConcreteSubject {
+        -state
+        +getState()
+    }
+    class Observer {
+        <<interface>>
+        +update(Subject)
+    }
+    class ConcreteObserver1
+    class ConcreteObserver2
+
+    Subject <|-- ConcreteSubject
+    Observer <|.. ConcreteObserver1
+    Observer <|.. ConcreteObserver2
+    Subject "1" --> "*" Observer : notifies
 ```
+
+Subject owns the observer list, and `notifyObservers()` loops straight over it calling `update(this)` on every registered Observer — each observer is one hop from the subject.
+
+**Mediator**
+
+```mermaid
+classDiagram
+    direction LR
+    class Mediator {
+        <<interface>>
+        +notify(sender, event)
+    }
+    class ConcreteMediator {
+        -component1 Component1
+        -component2 Component2
+        +notify(sender, event)
+    }
+    class BaseComponent {
+        <<abstract>>
+        -mediator Mediator
+        +setMediator(Mediator)
+    }
+    class Component1 {
+        +doAction()
+    }
+    class Component2 {
+        +doAction()
+    }
+    class Component3 {
+        +doAction()
+    }
+
+    Mediator <|.. ConcreteMediator
+    BaseComponent <|-- Component1
+    BaseComponent <|-- Component2
+    BaseComponent <|-- Component3
+    ConcreteMediator --> Component1 : routes to
+    ConcreteMediator --> Component2 : routes to
+    BaseComponent --> Mediator : notifies via
+```
+
+Every component's `doAction()` calls `mediator.notify(this, "event")` and knows nothing else; only ConcreteMediator holds references to the components and decides how to route between them.
 
 ---
 
@@ -187,6 +236,24 @@ apple.setPrice(185.00);
 // [AUDIT] AAPL price changed to $185.0
 ```
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant S as Stock
+    participant M as MobileApp
+    participant A as AlertService
+    participant L as AuditLogger
+
+    Client->>S: setPrice(185.00)
+    S->>M: update("AAPL", 185.00)
+    S->>A: update("AAPL", 185.00)
+    Note right of A: 185.00 > 180.00 threshold -> ALERT
+    S->>L: update("AAPL", 185.00)
+    Note over S,L: Stock fans out directly to every registered Observer - no intermediary in between
+```
+
+Stock (the Subject) walks its observer list inside `notifyObservers()` and pushes `update()` straight to MobileApp, AlertService, and AuditLogger — each is one hop from the subject, the direct star topology from the Key Differences Table above.
+
 ---
 
 ### Mediator — Chat room (users don't message each other directly)
@@ -267,6 +334,21 @@ bob.send("Hey Alice!");
 // Alice received from Bob: Hey Alice!
 // Carol received from Bob: Hey Alice!
 ```
+
+```mermaid
+sequenceDiagram
+    participant Alice
+    participant R as ChatRoom
+    participant Bob
+    participant Carol
+
+    Alice->>R: sendMessage("Hello everyone!", Alice)
+    R->>Bob: receive("Hello everyone!", "Alice")
+    R->>Carol: receive("Hello everyone!", "Alice")
+    Note over Alice,Carol: Alice holds no reference to Bob or Carol - ChatRoom is the only object every user talks to
+```
+
+Alice never calls Bob or Carol directly; every message passes through ChatRoom (the Mediator), which is what keeps adding a fourth user a one-line change instead of the N*(N-1) direct-connection mesh described above.
 
 ---
 

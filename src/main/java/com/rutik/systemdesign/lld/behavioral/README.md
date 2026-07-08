@@ -58,51 +58,63 @@ The 11 GoF behavioral patterns covered here are:
 
 Use this tree when you know what behavior you need but are unsure which pattern applies.
 
-```
-What problem are you solving?
-|
-+-- Managing control flow — who handles this request?
-|   |
-|   +-- One of many handlers should process it, and you don't know which
-|   |   --> Chain of Responsibility
-|   |
-|   +-- You need to execute, queue, or undo an action
-|       --> Command
-|
-+-- Managing state — the object behaves differently based on its current state
-|   |
-|   +-- Behavior changes at runtime based on internal state transitions
-|   |   --> State
-|   |
-|   +-- You need to snapshot state and restore it later
-|       --> Memento
-|
-+-- Managing communication — objects need to interact without tight coupling
-|   |
-|   +-- One object broadcasts changes to many subscribers
-|   |   --> Observer
-|   |
-|   +-- Many objects communicate with many others (N*M connections)
-|       --> Mediator
-|
-+-- Varying an algorithm — you want to swap the "how" at runtime or per subclass
-|   |
-|   +-- Swap the entire algorithm at runtime (composition)
-|   |   --> Strategy
-|   |
-|   +-- Fix the algorithm skeleton; allow subclasses to fill in steps (inheritance)
-|       --> Template Method
-|
-+-- Processing a structure — traversing or operating on a collection or tree
-    |
-    +-- Sequential element access with a cursor
-    |   --> Iterator
-    |
-    +-- Run different operations on heterogeneous element types in a tree/graph
-    |   --> Visitor
-    |
-    +-- Parse and evaluate sentences of a grammar
-        --> Interpreter
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Root(["What problem<br/>are you solving?"])
+
+    subgraph CF["Control Flow"]
+        direction TB
+        Q1{"Who handles<br/>this request?"}
+        Q1 -->|"One of many handlers,<br/>unknown which"| P1("Chain of Responsibility")
+        Q1 -->|"Need to execute, queue,<br/>or undo an action"| P2("Command")
+    end
+
+    subgraph ST["State"]
+        direction TB
+        Q2{"Behavior tied to<br/>current state?"}
+        Q2 -->|"Changes at runtime via<br/>state transitions"| P3("State")
+        Q2 -->|"Need to snapshot state<br/>and restore later"| P4("Memento")
+    end
+
+    subgraph COMM["Communication"]
+        direction TB
+        Q3{"How do objects<br/>interact?"}
+        Q3 -->|"One broadcasts to<br/>many subscribers"| P5("Observer")
+        Q3 -->|"Many talk to many<br/>(N x M connections)"| P6("Mediator")
+    end
+
+    subgraph ALGO["Algorithm Variation"]
+        direction TB
+        Q4{"Swap the how, at runtime<br/>or per subclass?"}
+        Q4 -->|"Swap whole algorithm at<br/>runtime (composition)"| P7("Strategy")
+        Q4 -->|"Fix skeleton; subclasses<br/>fill in steps (inheritance)"| P8("Template Method")
+    end
+
+    subgraph STRUCT["Structure Processing"]
+        direction TB
+        Q5{"Traverse or operate on a<br/>collection or tree?"}
+        Q5 -->|"Sequential access<br/>with a cursor"| P9("Iterator")
+        Q5 -->|"Heterogeneous ops on<br/>a tree or graph"| P10("Visitor")
+        Q5 -->|"Parse and evaluate<br/>a grammar"| P11("Interpreter")
+    end
+
+    Root --> Q1
+    Root --> Q2
+    Root --> Q3
+    Root --> Q4
+    Root --> Q5
+
+    class Root io
+    class Q1,Q2,Q3,Q4,Q5 mathOp
+    class P1,P2,P3,P4,P5,P6,P7,P8,P9,P10,P11 train
 ```
 
 ---
@@ -118,6 +130,70 @@ These pairs are structurally similar — the difference is behavioral and concep
 | Command vs Strategy | Both wrap behavior in an object | Strategy encapsulates an algorithm for immediate use. Command encapsulates an action for later execution — it carries receiver + parameters and enables undo, queuing, and logging. |
 | Template Method vs Strategy | Both vary part of an algorithm | Template Method uses inheritance (hook methods in subclasses). Strategy uses composition (swappable object reference). Prefer Strategy — see Effective Java Item 18. |
 | Iterator vs Visitor | Both traverse an object structure | Iterator gives sequential access to elements (homogeneous, cursor-based). Visitor applies type-specific operations to heterogeneous elements using double dispatch. |
+
+The Strategy/State and Observer/Mediator rows are the hardest to internalize from a table alone — their class diagrams are nearly identical, so the diagrams below make the runtime difference concrete.
+
+_Strategy vs State — who drives the switch:_
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Context
+    participant StrategyB as Strategy B
+    participant StateA as State A
+    participant StateB as State B
+
+    Note over Client,StrategyB: Strategy — the client drives the switch
+    Client->>Context: setStrategy(StrategyB)
+    Client->>Context: execute()
+    Context->>StrategyB: run()
+    StrategyB-->>Context: result
+
+    Note over Context,StateB: State — the state object drives its own transition
+    Client->>Context: request()
+    Context->>StateA: handle(context)
+    StateA->>Context: setState(StateB)
+    StateA-->>Context: done
+```
+
+Only the Client ever calls `setStrategy()` — Strategy B never touches the Context's reference back. With State, the Client just calls `request()`; StateA decides on its own to call `Context.setState(StateB)`, so the transition is invisible to the caller, exactly matching the table row above.
+
+_Observer vs Mediator — connection topology:_
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Mesh["Without Mediator — quadratic connections"]
+        direction TB
+        MA("A") --- MB("B")
+        MA --- MC("C")
+        MA --- MD("D")
+        MB --- MC
+        MB --- MD
+        MC --- MD
+    end
+
+    subgraph Hub["With Mediator — linear connections"]
+        direction TB
+        HA("A") --- HM("Mediator")
+        HB("B") --- HM
+        HC("C") --- HM
+        HD("D") --- HM
+    end
+
+    class MA,MB,MC,MD lossN
+    class HA,HB,HC,HD train
+    class HM base
+```
+
+Four participants need six direct connections without a mediator, growing quadratically as more join; with a mediator the same four need only four connections to the hub — the N-squared-to-N reduction the table row describes.
 
 ---
 

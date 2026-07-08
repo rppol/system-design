@@ -59,39 +59,34 @@ Define a `Prototype` interface with a `clone()` method. Each concrete class impl
 
 ## 5. UML Structure
 
-```
-        +----------------------------+
-        |   <<interface>>            |
-        |      Prototype             |
-        +----------------------------+
-        | + clone(): Prototype       |
-        +----------------------------+
-                    ^
-         ___________|___________
-        |                       |
-+------------------+   +------------------+
-| ConcretePrototype|   | ConcretePrototype|
-|       A          |   |       B          |
-+------------------+   +------------------+
-| - fieldA         |   | - fieldX         |
-| - nested: Config |   | - items: List    |
-+------------------+   +------------------+
-| + clone()        |   | + clone()        |
-+------------------+   +------------------+
-
-+----------------------------+
-|    PrototypeRegistry       |   (optional)
-+----------------------------+
-| - registry: Map<String,    |
-|             Prototype>     |
-+----------------------------+
-| + register(key, proto)     |
-| + getClone(key): Prototype |
-+----------------------------+
-
-Client ──> PrototypeRegistry.getClone("enemy") ──> ConcretePrototypeA.clone()
-                                                         |
-                                                    returns new copy
+```mermaid
+classDiagram
+    class Prototype {
+        <<interface>>
+        +clone() Prototype
+    }
+    class ConcretePrototypeA {
+        -fieldA
+        -nested Config
+        +clone() ConcretePrototypeA
+    }
+    class ConcretePrototypeB {
+        -fieldX
+        -items List
+        +clone() ConcretePrototypeB
+    }
+    class PrototypeRegistry {
+        -registry Map~String, Prototype~
+        +register(key, proto)
+        +getClone(key) Prototype
+    }
+    class Client {
+        +main()
+    }
+    Prototype <|.. ConcretePrototypeA : implements
+    Prototype <|.. ConcretePrototypeB : implements
+    PrototypeRegistry "1" o-- "*" Prototype : stores originals
+    Client ..> PrototypeRegistry : getClone(key)
 ```
 
 **Relationships:**
@@ -222,31 +217,44 @@ spawn hundreds of entity instances per second. Each entity type (Archer, Warrior
 Without Prototype: spawning 500 Archers = 500 × (20ms + 10ms + 10ms) = 20 seconds of loading.
 With Prototype: load once (40ms total), clone 500 times (< 1 microsecond each) = 40ms total.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SU["Startup on the Game Server JVM, one-time cost"]
+        direction LR
+        A("Archer<br/>sprite 20ms + AI 10ms + DB 10ms")
+        W2("Warrior<br/>sprite 30ms + AI 12ms + DB 8ms")
+        D("Dragon<br/>sprite 80ms + AI 15ms + DB 25ms")
+        REG("EntityRegistry<br/>name to prototype map<br/>never mutated")
+        A --> REG
+        W2 --> REG
+        D --> REG
+    end
+
+    subgraph RT["Wave: 500 archer spawns per sec"]
+        direction LR
+        GC(["getClone('archer')<br/>deep copy, under 1 microsecond"])
+        CU("setPosition / setHealth<br/>per-instance customize")
+        WM(["worldMap.add(clone)<br/>independent of every other clone"])
+        GC --> CU --> WM
+    end
+
+    REG --> GC
+
+    class A,W2,D io
+    class REG base
+    class GC mathOp
+    class CU,WM train
 ```
-Game Server JVM (Java 17 LTS, 16 GB heap, G1GC)
-+-----------------------------------------------------------------------+
-|  Startup: PrefabLoader initializes prototype registry (one-time cost) |
-|                                                                       |
-|  ArcherPrototype: load sprite (20ms) + compile AI (10ms) + DB (10ms) |
-|  WarriorPrototype: load sprite (30ms) + compile AI (12ms) + DB (8ms) |
-|  DragonPrototype: load sprite (80ms) + compile AI (15ms) + DB (25ms) |
-|                                                                       |
-|  EntityRegistry                                                       |
-|  +----------------------------+                                       |
-|  | "archer"  -> ArcherEntity  |  (prototype — never mutated)         |
-|  | "warrior" -> WarriorEntity |                                       |
-|  | "dragon"  -> DragonEntity  |                                       |
-|  +----------------------------+                                       |
-|                |                                                      |
-|  Wave starts: 500 archer spawns/sec                                   |
-|                |                                                      |
-|                v                                                      |
-|  registry.getClone("archer")  // returns deep copy in < 1 microsecond |
-|  clone.setPosition(x, y)      // customize per-instance              |
-|  clone.setHealth(80)          // customize per-instance              |
-|  worldMap.add(clone)          // independent from all other clones    |
-+-----------------------------------------------------------------------+
-```
+
+The 40 ms sprite/AI/DB cost is paid once per entity type at startup; every one of the 500 archer spawns/sec afterward is a sub-microsecond `getClone()` off the registry, never touching disk, AI compilation, or the database again.
 
 ### Famous Codebase Usages
 
@@ -772,6 +780,35 @@ System.out.println(clone1.getPriceRule().getRuleId()); // prints "SUMMER20" — 
 System.out.println(clone1.getPriceRule() == rule);     // prints false — independent copy
 ```
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Item1 as item1 (OrderItem)
+    participant Reg as registry (IdentityHashMap)
+    participant Rule as rule (PriceRule)
+
+    Note over Client,Rule: Two-phase clone breaks the item1 to rule to item1 cycle
+
+    Client->>Item1: deepClone(registry)
+    Item1->>Reg: get(item1)
+    Reg-->>Item1: null, not cloned yet
+    Note over Item1: Phase 1: pre-allocate copy,<br/>priceRule left null, THEN register
+    Item1->>Reg: put(item1, copy)
+    Item1->>Rule: priceRule.deepClone(registry)
+    Rule->>Reg: get(rule)
+    Reg-->>Rule: null, not cloned yet
+    Note over Rule: Phase 1: pre-allocate copy,<br/>empty applicableItems, THEN register
+    Rule->>Reg: put(rule, copy)
+    Rule->>Item1: item.deepClone(registry)
+    Item1->>Reg: get(item1)
+    Reg-->>Item1: existing copy found
+    Item1-->>Rule: return existing copy, no recursion
+    Rule-->>Item1: return cloned PriceRule
+    Item1-->>Client: return cloned OrderItem
+```
+
+The registry lookup at the top of every `deepClone()` call is what breaks the cycle: because the copy is registered *before* `priceRule.deepClone()` recurses, the second call to `item1.deepClone()` finds the pre-allocated copy already in the map and returns it immediately instead of recursing forever.
+
 ### Spring Framework Prototype Scope: Framework-Level Prototype Pattern (Spring Boot 3.2+)
 
 ```java
@@ -872,6 +909,30 @@ Serialization is acceptable only for infrequent deep-copy of complex object grap
 - The object is a Spring-managed bean (services, processors) that needs independent
   state per use. Spring's DI container handles construction, injection of dependencies,
   and lifecycle callbacks — removing the need for a hand-rolled registry and clone().
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["Construction is expensive<br/>I/O, DB, or heavy compute"]) --> Q{"What are the clones'<br/>lifetime and ownership?"}
+    Q -->|"Long-lived, varied<br/>per-instance state"| P(["Keep Prototype:<br/>clone the pre-built instance"])
+    Q -->|"Short-lived, recycled<br/>at high frequency"| POOL(["Replace with Object Pooling:<br/>reuse instances, zero new alloc"])
+    Q -->|"Spring-managed bean<br/>needing per-use state"| SPR(["Replace with @Scope prototype:<br/>container clones for you"])
+
+    class START io
+    class Q mathOp
+    class P train
+    class POOL base
+    class SPR frozen
+```
+
+This distills the migration guidance above into one decision: once construction is expensive, the clones' lifetime and ownership — not the pattern's popularity — determines whether Prototype, object pooling, or Spring's container-managed prototype scope is the right fit.
 
 ---
 

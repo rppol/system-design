@@ -74,33 +74,34 @@ Now client code works entirely through the Component interface. A `Directory` an
 
 ## 5. UML Structure
 
+```mermaid
+classDiagram
+    direction TB
+    class Component {
+        <<interface>>
+        +operation()
+        +add(Component c)
+        +remove(Component c)
+        +getChild(int i) Component
+    }
+    class Leaf {
+        +operation()
+    }
+    class Composite {
+        -children List~Component~
+        +operation()
+        +add(Component c)
+        +remove(Component c)
+        +getChild(int i) Component
+    }
+    Component <|.. Leaf
+    Component <|.. Composite
+    Composite "1" o-- "0..*" Component : children
+    note for Component "add/remove/getChild are optional here (transparency design); the safety design declares them only on Composite"
+    note for Composite "operation() iterates children and delegates, aggregating each child's result"
 ```
-         +----------------------+
-         |   <<interface>>      |
-         |     Component        |
-         |  (FileSystemItem)    |
-         +----------------------+
-         | +operation()         |
-         | +add(Component)      |  <-- optional; can be in Composite only
-         | +remove(Component)   |
-         | +getChild(int)       |
-         +----------------------+
-                  ^
-        __________|___________
-       |                      |
-+-------------+       +------------------+
-|    Leaf      |       |    Composite     |
-|    (File)    |       |  (Directory)     |
-+-------------+       +------------------+
-| +operation()|       | -children: List  |
-+-------------+       | +operation()     |  <-- iterates children, delegates
-                       | +add(Component)  |
-                       | +remove(Component)|
-                       | +getChild(int)   |
-                       +------------------+
-                                |
-                       has 0..* Component children
-```
+
+*Component is the shared interface — in a file system, `Leaf` is `File` and `Composite` is `Directory`. Both implement `operation()` (realization arrows), and a `Composite` holds 0..* `Component` children, so the same call recurses transparently whether `item` is a single file or a directory full of them.*
 
 **Two design choices for the Component interface:**
 
@@ -122,6 +123,32 @@ GoF prefers transparency; most modern implementations prefer safety.
 5. **Base cases are Leaves** — no children to iterate; recursion terminates.
 6. **Tree building:** Client calls `composite.add(leaf)` and `composite.add(anotherComposite)` to build the tree.
 7. **Client is oblivious** — once the tree is built, the client calls `root.operation()` and the tree handles traversal internally.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant root as root:Directory
+    participant sub as sub:Directory
+    participant file1 as file1:File
+    participant file2 as file2:File
+
+    Note over Client,file2: Tree building - client assembles the hierarchy once
+    Client->>root: add(file1)
+    Client->>root: add(sub)
+    Client->>sub: add(file2)
+
+    Note over Client,file2: Uniform traversal - one call, recursion handles the rest
+    Client->>root: getSize()
+    root->>file1: getSize()
+    file1-->>root: size1
+    root->>sub: getSize()
+    sub->>file2: getSize()
+    file2-->>sub: size2
+    sub-->>root: size2
+    root-->>Client: size1 + size2
+```
+
+*The client builds the tree once via `add()`, then issues a single `getSize()` call on `root`; recursion — not client code — walks into `sub` and back out, summing leaf sizes as results bubble up (steps 1-7 above in action).*
 
 ---
 
@@ -420,6 +447,26 @@ The build tool originally had a flat `List<Task>` executed sequentially. As the 
 **Composite + Visitor** is a very common combination: Composite defines the tree structure; Visitor adds operations to traverse and process the tree without modifying the node classes.
 
 **Composite vs. Decorator:** Both use recursive composition, but Composite builds trees (children can be many) while Decorator wraps a single object to add behavior.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q{"Does removing this node<br/>also remove what's beneath it?"} -->|"Yes, a folder<br/>and all its files"| C(["Composite"])
+    Q -->|"No, it just unwraps<br/>to the object inside"| D(["Decorator"])
+
+    class Q mathOp
+    class C train
+    class D frozen
+```
+
+*The practical tell from the interview Q&A: deleting a Composite node cascades to everything beneath it in the tree, while "removing" a Decorator just unwraps back to the single object it was wrapping — that asymmetry is the fastest way to tell the two apart under interview pressure.*
 
 ---
 

@@ -43,21 +43,34 @@ new ThreadPoolExecutor(
 ```
 
 ### Thread lifecycle:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A([Submit task]) --> B{Core thread<br/>available?}
+    B -->|yes| C(Assign to<br/>core thread)
+    B -->|no| D{Queue has<br/>space?}
+    D -->|yes| E(Task waits<br/>in queue)
+    D -->|no| F{Under max<br/>pool size?}
+    F -->|yes| G(Create new<br/>extra thread)
+    F -->|no| H([REJECT])
+    G --> I(Extra thread idles,<br/>then dies after keepAliveTime)
+
+    class A io
+    class C,E,G train
+    class B,D,F mathOp
+    class H lossN
+    class I frozen
 ```
-Submit task
-     │
-     ├── core threads available? → assign to core thread
-     │
-     ├── all core threads busy → add to queue
-     │        │
-     │        ├── queue has space → task waits in queue
-     │        │
-     │        └── queue full → create new thread (up to max)
-     │                  │
-     │                  └── at max threads AND queue full → REJECT
-     │
-     └── idle extra threads alive for keepAliveTime, then die
-```
+
+Each submitted task walks this cascade in order — core thread, then queue, then a fresh thread up to `maximumPoolSize`, then rejection — which is exactly the four knobs (`corePoolSize`, `workQueue`, `maximumPoolSize`, `rejectionHandler`) from the constructor above.
 
 ---
 
@@ -117,6 +130,34 @@ For queue to handle peak: `queueSize ≥ peak_arrival_rate × acceptable_wait_ti
 
 **Warning**: `newCachedThreadPool()` and `newFixedThreadPool(n)` with default queue can OOM — the queue is **unbounded**. In production, always use `ThreadPoolExecutor` directly with bounded queue.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A([Choose an executor]) --> B{Periodic or<br/>delayed tasks?}
+    B -->|yes| C(newScheduledThreadPool)
+    B -->|no| D{Divide-and-conquer<br/>parallel work?}
+    D -->|yes| E(newWorkStealingPool)
+    D -->|no| F{Must run<br/>strictly sequential?}
+    F -->|yes| G(newSingleThreadExecutor)
+    F -->|no| H{Stable, known<br/>concurrency level?}
+    H -->|yes| J(ThreadPoolExecutor<br/>with bounded queue)
+    H -->|no| I("newCachedThreadPool<br/>(unbounded, OOM risk)")
+
+    class A io
+    class C,E,G,J train
+    class B,D,F,H mathOp
+    class I lossN
+```
+
+Match the task shape to the factory method instead of defaulting to `newFixedThreadPool()` or `newCachedThreadPool()` — both are convenient but hide the unbounded queue that the warning above calls out.
+
 ---
 
 ## Common Pitfalls
@@ -161,6 +202,19 @@ executor.submit(() -> {
 
 ### 4. Shutdown Not Called
 If `shutdown()` is never called, the JVM won't exit (daemon threads would, but pool threads are not daemon by default).
+
+```mermaid
+stateDiagram-v2
+    [*] --> RUNNING
+    RUNNING --> SHUTDOWN: shutdown()
+    RUNNING --> STOP: shutdownNow()
+    SHUTDOWN --> TIDYING: queue drained
+    STOP --> TIDYING: workers stopped
+    TIDYING --> TERMINATED: terminated() hook
+    TERMINATED --> [*]
+```
+
+`shutdown()` moves the pool to `SHUTDOWN` and lets already-queued tasks finish before it reaches `TERMINATED`; `shutdownNow()` jumps straight to `STOP`, interrupting running tasks and returning whatever was still queued. Neither transition happens on its own — this is exactly why forgetting to call `shutdown()` leaves a pool (and the JVM) stuck in `RUNNING` forever.
 
 ---
 

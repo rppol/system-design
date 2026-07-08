@@ -227,39 +227,70 @@ public class StrategyDemo {
 
 ### Command
 
+```mermaid
+classDiagram
+    direction LR
+
+    class Invoker {
+        -history Deque~Command~
+        +executeCommand(cmd Command) void
+        +undo() void
+    }
+
+    class Command {
+        <<interface>>
+        +execute() void
+        +undo() void
+    }
+
+    class Receiver
+
+    class CutCommand {
+        +execute() void
+        +undo() void
+    }
+
+    class PasteCommand {
+        +execute() void
+        +undo() void
+    }
+
+    Invoker --> Command : invokes
+    Command <|.. CutCommand : implements
+    Command <|.. PasteCommand : implements
+    CutCommand --> Receiver : delegates to
+    PasteCommand --> Receiver : delegates to
 ```
-+----------+       +------------------+       +----------+
-| Invoker  |------>| <<interface>>    |       | Receiver |
-|          |       |    Command       |<------+----------+
-| history  |       |+ execute()       |
-| stack    |       |+ undo()          |
-+----------+       +------------------+
-                          ^
-               +----------+----------+
-               |                     |
-       +---------------+    +----------------+
-       |  CutCommand   |    |  PasteCommand  |
-       |+ execute()    |    |+ execute()     |
-       |+ undo()       |    |+ undo()        |
-       +---------------+    +----------------+
-```
+
+*`Invoker` only ever holds the `Command` interface in its `history` stack; `CutCommand`/`PasteCommand` each stash a `Receiver` (the `TextBuffer`) so `execute()`/`undo()` can act on it directly.*
 
 ### Strategy
 
+```mermaid
+classDiagram
+    direction LR
+
+    class Context["Context (Sorter)"]
+
+    class SortStrategy {
+        <<interface>>
+        +sort(data) void
+    }
+
+    class BubbleSortStrategy {
+        +sort(data) void
+    }
+
+    class QuickSortStrategy {
+        +sort(data) void
+    }
+
+    Context --> SortStrategy : delegates to
+    SortStrategy <|.. BubbleSortStrategy : implements
+    SortStrategy <|.. QuickSortStrategy : implements
 ```
-+----------+       +------------------+
-| Context  |------>| <<interface>>    |
-| (Sorter) |       |  SortStrategy    |
-|          |       |+ sort(int[])     |
-+----------+       +------------------+
-                          ^
-               +----------+----------+
-               |                     |
-  +---------------------+   +--------------------+
-  | BubbleSortStrategy  |   | QuickSortStrategy  |
-  |+ sort(int[])        |   |+ sort(int[])       |
-  +---------------------+   +--------------------+
-```
+
+*`Sorter` (the Context) holds only the `SortStrategy` interface — swapping in `QuickSortStrategy` for `BubbleSortStrategy` at runtime, exactly as `StrategyDemo` does, never touches `Sorter` itself.*
 
 **Structural note**: Both patterns look similar in UML. The distinction is semantic:
 - Command holds a *Receiver* reference and encapsulates *who* and *what*.
@@ -281,6 +312,36 @@ Use **Strategy** when you need:
 - Removing large if/else or switch blocks that select behavior
 - Runtime algorithm selection based on context (e.g., device, load, user preference)
 - Unit testing algorithms in isolation
+
+As a decision tree, the two lists above collapse to three questions:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Need to encapsulate<br/>a request or an algorithm?"]) --> Q1{"Need undo, a job<br/>queue, or audit log?"}
+    Q1 -- yes --> Cmd(["Use Command<br/>Invoker to Receiver"])
+    Q1 -- no --> Q2{"Just swapping the<br/>algorithm at runtime?"}
+    Q2 -- yes --> Strat(["Use Strategy<br/>Context plus interface"])
+    Q2 -- no --> Q3{"Need reversibility AND<br/>a swappable algorithm?"}
+    Q3 -- yes --> Combo(["Combine: SortCommand<br/>wraps a SortStrategy"])
+    Q3 -- no --> Other(["Neither fits —<br/>reconsider the design"])
+
+    class Start io
+    class Q1,Q2,Q3 mathOp
+    class Cmd req
+    class Strat base
+    class Combo train
+    class Other lossN
+```
+
+*The two branches mirror the bullets above: reversibility/queuing/logging routes to Command, pure algorithm-swapping routes to Strategy, and needing both — exactly what `SortCommand` does further below — means composing one inside the other.*
 
 ---
 
@@ -336,6 +397,32 @@ public class SortCommand implements Command {
         System.arraycopy(backup, 0, data, 0, backup.length);
     }
 }
+```
+
+Here's that collaboration playing out at runtime — `execute()` snapshots `data` into `backup` before handing it to the Strategy, and `undo()` restores that snapshot without ever calling back into the Strategy:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Cmd as sortCommand : SortCommand
+    participant S as strategy : SortStrategy
+
+    C->>Cmd: new SortCommand(data, strategy)
+    C->>Cmd: execute()
+    activate Cmd
+    Cmd->>Cmd: backup = data.clone()
+    Cmd->>S: sort(data)
+    activate S
+    Note over S: decides HOW to sort
+    S-->>Cmd: data sorted in place
+    deactivate S
+    deactivate Cmd
+
+    Note over C,Cmd: later, user requests Undo
+    C->>Cmd: undo()
+    activate Cmd
+    Cmd->>Cmd: arraycopy(backup into data)
+    deactivate Cmd
 ```
 
 The Command handles *what happened and reversibility*; the Strategy handles *how the sort is performed*.

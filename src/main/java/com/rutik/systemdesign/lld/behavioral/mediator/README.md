@@ -55,34 +55,79 @@ This transforms an O(n²) interconnected graph into a hub-and-spoke topology whe
 
 ## 5. UML Structure
 
+Left: without a mediator, colleagues form a dense mesh — every object can reach several others, so the interaction graph grows toward O(n²) edges. Right: every colleague has exactly one relationship — to the hub — collapsing that mesh to O(n) edges (the N²→N reduction from the Intuition section, made visible).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph S["Without Mediator (spaghetti)"]
+        direction LR
+        SA(A) --- SB(B)
+        SA --- SC(C)
+        SA --- SD(D)
+        SB --- SC
+        SB --- SD
+        SC --- SD
+        SC --- SE(E)
+        SD --- SF(F)
+        SE --- SF
+    end
+
+    subgraph H["With Mediator (hub-and-spoke)"]
+        direction LR
+        HA(A) --> HM([Mediator])
+        HB(B) --> HM
+        HC(C) --> HM
+        HD(D) --> HM
+    end
+
+    class SA,SB,SC,SD,SE,SF lossN
+    class HA,HB,HC,HD train
+    class HM base
 ```
-Without Mediator (spaghetti):          With Mediator (hub-and-spoke):
 
-  A <-----> B                           A      B
-  ^  \   / ^                            |      |
-  |   \ /  |                            v      v
-  C <--X-> D                         +----------+
-  |   / \  |                         | Mediator |
-  v  /   \ v                         +----------+
-  E <-----> F                            ^      ^
-                                         |      |
-                                         C      D
+The class shape behind the hub: every `Colleague` implementation holds a reference to the `Mediator` interface and calls it on any state change; `ConcreteMediator` realizes `Mediator` and aggregates the concrete colleagues it coordinates, so colleagues never hold references to each other.
 
-+--------------------+          +------------------+
-| <<interface>>      |          | <<interface>>    |
-| Mediator           |          | Colleague        |
-+--------------------+          +------------------+
-| +notify(sender,evt)|<---------| - mediator       |
-+--------------------+          | +setMediator()   |
-          ^                     +------------------+
-          |                              ^
-+-----------------------+        ___________________
-| ConcreteMediator      |       |                   |
-+-----------------------+   +----------+    +----------+
-| - colleague1          |   |Colleague1|    |Colleague2|
-| - colleague2          |   +----------+    +----------+
-| +notify(sender, evt)  |   | +action()|    | +action()|
-+-----------------------+   +----------+    +----------+
+```mermaid
+classDiagram
+    class Mediator {
+        <<interface>>
+        +notify(sender, evt)
+    }
+
+    class Colleague {
+        <<interface>>
+        -mediator
+        +setMediator()
+    }
+
+    class ConcreteMediator {
+        -colleague1
+        -colleague2
+        +notify(sender, evt)
+    }
+
+    class Colleague1 {
+        +action()
+    }
+
+    class Colleague2 {
+        +action()
+    }
+
+    ConcreteMediator ..|> Mediator
+    Colleague1 ..|> Colleague
+    Colleague2 ..|> Colleague
+    Colleague "*" --> "1" Mediator : mediator
+    ConcreteMediator "1" o-- "1" Colleague1 : colleague1
+    ConcreteMediator "1" o-- "1" Colleague2 : colleague2
 ```
 
 ---
@@ -96,16 +141,29 @@ Without Mediator (spaghetti):          With Mediator (hub-and-spoke):
 5. **No direct references** between colleagues — they only know the mediator.
 
 **Event flow example (form validation):**
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant PF as PasswordField
+    participant M as ConcreteMediator
+    participant CPF as ConfirmPasswordField
+    participant SB as SubmitButton
+    participant SL as StatusLabel
+
+    U->>PF: types password
+    PF->>PF: onChange()
+    PF->>M: notify(passwordField, "changed")
+    M->>PF: getValue()
+    M->>CPF: getValue()
+    alt values match
+        M->>SB: setEnabled(true)
+    else values differ
+        M->>SL: setText("Passwords don't match")
+    end
 ```
-User types in PasswordField
-  → PasswordField.onChange()
-     → mediator.notify(passwordField, "changed")
-        → ConcreteMediator.notify():
-           - reads passwordField.getValue()
-           - reads confirmPasswordField.getValue()
-           - if they match: submitButton.setEnabled(true)
-           - else: statusLabel.setText("Passwords don't match")
-```
+
+PasswordField never references ConfirmPasswordField, SubmitButton, or StatusLabel directly — every arrow above passes through the mediator, which is the whole point of the pattern.
 
 ---
 
@@ -218,21 +276,33 @@ Observed numbers in a Tomcat cluster (200 worker threads, 10k req/sec sustained)
 - Adding a new fraud-check colleague: 1 class + 1 registration line, zero modifications to existing colleagues.
 - Memory: mediator is stateless singleton (~2 KB); state lives in a sharded `ConcurrentHashMap<OrderId, OrderState>`.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    HTTP([HTTP request]) --> DS(DispatcherServlet<br/>canonical Spring Mediator)
+    DS --> OM(OrderMediator)
+    OM --> Cart(Cart)
+    OM --> Inv(Inventory)
+    OM --> Pric(Pricing)
+    OM --> Tax(Tax)
+    OM --> Pay(Payment)
+    OM --> Fraud(Fraud)
+    OM --> Notif(Notification)
+    OM --> Audit(Audit)
+
+    class HTTP io
+    class DS,OM mathOp
+    class Cart,Inv,Pric,Tax,Pay,Fraud,Notif,Audit req
 ```
-                  +-----------------------------+
-   HTTP --------> |   DispatcherServlet         |  <-- canonical Spring Mediator
-                  |   (routes to Controllers)   |
-                  +--------------+--------------+
-                                 |
-                                 v
-                  +-----------------------------+
-                  |      OrderMediator          |
-                  +--+----+----+----+----+----+-+
-                     |    |    |    |    |    |
-                     v    v    v    v    v    v
-                   Cart  Inv Pric Tax  Pay  Fraud   (colleagues — no peer refs)
-                                                    Notification, Audit also bind here
-```
+
+Eight colleagues (Cart, Inventory, Pricing, Tax, Payment, Fraud, Notification, Audit) bind to `OrderMediator` with zero peer references — matching the p50 38 ms / mediator-overhead ~0.4 ms numbers above.
 
 ### Production-grade colleague + mediator
 
@@ -385,6 +455,35 @@ public final class OrderMediator {
 | **Chain of Responsibility** | CoR routes a request linearly through a chain. Mediator routes events between peers with arbitrary logic. |
 | **Command** | Command encapsulates an operation. Mediator can use Commands to represent interactions, but they serve different purposes. |
 | **Proxy** | Proxy controls access to one object. Mediator coordinates many objects communicating with each other. |
+
+The same table as a decision path — walk it top to bottom to pick between Mediator and its closest lookalikes:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start{"How many objects<br/>must coordinate?"} -->|"2-3, linear"| Direct(["Direct calls<br/>no pattern needed"])
+    Start -->|"many, complex interplay"| Q2{"One-way broadcast,<br/>no coordination logic?"}
+    Q2 -->|yes| Observer(["Observer"])
+    Q2 -->|no| Q3{"Simplifying ONE<br/>subsystem's interface?"}
+    Q3 -->|yes| Facade(["Facade"])
+    Q3 -->|no| Q4{"Request passed along a<br/>linear chain until handled?"}
+    Q4 -->|yes| CoR(["Chain of<br/>Responsibility"])
+    Q4 -->|no| Q5{"Colleagues need bidirectional<br/>coordination via a central hub?"}
+    Q5 -->|yes| Mediator(["Mediator"])
+    Q5 -->|no| Reexamine(["Re-examine the<br/>object graph"])
+
+    class Start,Q2,Q3,Q4,Q5 mathOp
+    class Direct,Reexamine frozen
+    class Observer,Facade,CoR train
+    class Mediator base
+```
 
 ---
 

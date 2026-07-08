@@ -383,6 +383,21 @@ class Order {
 }
 ```
 
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Paid: pay()
+    Paid --> Shipped: ship()
+    Shipped --> Delivered: deliver()
+    Pending --> Cancelled: cancel()
+    Paid --> Cancelled: cancel()
+    Shipped --> Cancelled: cancel()
+    Delivered --> [*]
+    Cancelled --> [*]
+```
+
+**Result**: every arrow above is a method that only type-checks from its source state — `pay()` compiles solely from `Pending`, `cancel()` is unreachable once `Delivered` — so the Before code's impossible combination (`isPaid=true` and `isCancelled=true` at once) can no longer be represented.
+
 **Refactoring steps**:
 1. Create `OrderState` interface with all operations
 2. Create one concrete state class per valid state
@@ -418,6 +433,47 @@ Ask these questions about the code:
 → Many-to-many (reduce coupling): **Mediator**
 → Encapsulate requests: **Command**
 → Pass along a chain: **Chain of Responsibility**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["what changed<br/>in the code?"]) --> Q1{"what is<br/>VARYING?"}
+    Start --> Q2{"what is being<br/>CREATED?"}
+    Start --> Q3{"what is the<br/>RELATIONSHIP?"}
+    Start --> Q4{"how do they<br/>COMMUNICATE?"}
+
+    Q1 -->|algorithm varies| PStrategy(Strategy)
+    Q1 -->|varies by state| PState(State)
+    Q1 -->|varies by type| PVisitor("Visitor /<br/>polymorphism")
+
+    Q2 -->|one object,<br/>many configs| PBuilder(Builder)
+    Q2 -->|unknown type| PFactoryMethod("Factory<br/>Method")
+    Q2 -->|families of<br/>related objects| PAbstractFactory("Abstract<br/>Factory")
+    Q2 -->|copy of an<br/>expensive object| PPrototype(Prototype)
+
+    Q3 -->|part-whole<br/>hierarchy| PComposite(Composite)
+    Q3 -->|add behavior,<br/>no subclassing| PDecorator(Decorator)
+    Q3 -->|simplify a complex<br/>subsystem| PFacade(Facade)
+    Q3 -->|surrogate /<br/>placeholder| PProxy(Proxy)
+
+    Q4 -->|one-to-many<br/>notification| PObserver(Observer)
+    Q4 -->|many-to-many,<br/>reduce coupling| PMediator(Mediator)
+    Q4 -->|encapsulate<br/>requests| PCommand(Command)
+    Q4 -->|pass along<br/>a chain| PChain("Chain of<br/>Responsibility")
+
+    class Start io
+    class Q1,Q2,Q3,Q4 mathOp
+    class PStrategy,PState,PVisitor,PBuilder,PFactoryMethod,PAbstractFactory,PPrototype,PComposite,PDecorator,PFacade,PProxy,PObserver,PMediator,PCommand,PChain train
+```
+
+*A single decision tree distilling the four questions above — trace root to leaf to go from "what's changing in this code" to the specific pattern to reach for.*
 
 ---
 

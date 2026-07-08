@@ -37,17 +37,26 @@ You are building a UI framework that needs to support:
 - **Rendering engines:** OpenGL, DirectX, Vulkan, Software (and more platforms coming)
 
 With plain inheritance:
+```mermaid
+classDiagram
+    class Shape {
+        <<abstract>>
+    }
+    Shape <|-- CircleOpenGL
+    Shape <|-- CircleDirectX
+    Shape <|-- CircleVulkan
+    Shape <|-- CircleSoftware
+    Shape <|-- RectangleOpenGL
+    Shape <|-- RectangleDirectX
+    Shape <|-- RectangleVulkan
+    Shape <|-- RectangleSoftware
+    Shape <|-- TriangleOpenGL
+    Shape <|-- TriangleDirectX
+    Shape <|-- TriangleVulkan
+    Shape <|-- TriangleSoftware
 ```
-Shape
-  CircleOpenGL
-  CircleDirectX
-  CircleVulkan
-  RectangleOpenGL
-  RectangleDirectX
-  RectangleVulkan
-  TriangleOpenGL
-  ...
-```
+
+*All 12 shape x renderer combinations fan out from a single `Shape` base — the "Cartesian explosion" plain inheritance produces.*
 
 With 3 shapes and 4 renderers, you already need 12 subclasses. Add one new renderer and you need 3 new classes. Add one new shape and you need 4 new classes. This is the "class explosion" problem.
 
@@ -78,25 +87,37 @@ Now:
 
 ## 5. UML Structure
 
+```mermaid
+classDiagram
+    class Abstraction {
+        -Implementor impl
+        +operation()
+    }
+    class Implementor {
+        <<interface>>
+        +operationImpl()
+    }
+    class RefinedAbstraction {
+        +operation()
+    }
+    class ConcreteImplA {
+        +operationImpl()
+    }
+    class ConcreteImplB {
+        +operationImpl()
+    }
+    Abstraction --> Implementor : impl
+    Abstraction <|-- RefinedAbstraction
+    Implementor <|.. ConcreteImplA
+    Implementor <|.. ConcreteImplB
+    note for Abstraction "aka Shape"
+    note for RefinedAbstraction "aka Circle"
+    note for Implementor "aka Renderer"
+    note for ConcreteImplA "aka OpenGLRenderer"
+    note for ConcreteImplB "aka DirectXRenderer"
 ```
-+---------------------------+        +-------------------------------+
-|      Abstraction          |        |   <<interface>>               |
-|      (Shape)              |------->|   Implementor                 |
-+---------------------------+  impl  |   (Renderer)                  |
-| -impl: Implementor        |        +-------------------------------+
-| +operation()              |        | +operationImpl()              |
-+---------------------------+        +-------------------------------+
-        ^                                    ^              ^
-        |                                    |              |
-+------------------+          +------------------+   +------------------+
-| RefinedAbstraction|         | ConcreteImplA    |   | ConcreteImplB    |
-| (Circle)          |         | (OpenGLRenderer) |   | (DirectXRenderer)|
-+------------------+          +------------------+   +------------------+
-| +operation()     |          | +operationImpl() |   | +operationImpl() |
-+------------------+          +------------------+   +------------------+
 
-Abstraction.operation() calls this.impl.operationImpl()
-```
+*`Abstraction.operation()` delegates to `this.impl.operationImpl()` — the one call that crosses from the Abstraction hierarchy into the Implementor hierarchy.*
 
 **The "Bridge" is the reference from Abstraction to Implementor.**
 
@@ -111,6 +132,27 @@ Abstraction.operation() calls this.impl.operationImpl()
 3. **Define Abstraction** — `Shape` holds a reference to an `Implementor`. Its high-level `draw()` method calls the implementor's primitives.
 4. **Create Refined Abstractions** — `Circle` and `Rectangle` override `draw()` to call the correct sequence of primitive implementor calls.
 5. **Client wires them together** — `Circle circle = new Circle(new OpenGLRenderer())`. At runtime, `circle.draw()` delegates to OpenGL. Swap the renderer and the same `Circle` renders with DirectX.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant C as Circle
+    participant GL as OpenGLRenderer
+    participant DX as DirectXRenderer
+
+    Client->>C: new Circle(new OpenGLRenderer())
+    Client->>C: draw()
+    C->>GL: operationImpl()
+    GL-->>C: rendered via OpenGL
+
+    Note over Client,DX: swap the implementor - same Circle class, new Renderer
+    Client->>C: new Circle(new DirectXRenderer())
+    Client->>C: draw()
+    C->>DX: operationImpl()
+    DX-->>C: rendered via DirectX
+```
+
+*The class diagram in Section 5 is static; this sequence shows the runtime half — `draw()` always resolves to `this.impl.operationImpl()`, so re-pointing `impl` at construction time is enough to retarget every call without touching `Circle`.*
 
 The abstraction and implementation can now change independently. The only coupling point is the `Implementor` interface.
 
@@ -209,22 +251,45 @@ The abstraction and implementation can now change independently. The only coupli
 
 A B2C product sends 2M notifications/day across Email, SMS, and Push (FCM/APNs). Each channel can carry the message in Markdown, Plain text, or HTML — and the product team adds a new channel (WhatsApp) and a new format (AMP-Email) every quarter. Naive class explosion would yield 3 channels × 3 formats = 9 classes today, scaling to 4×4 = 16 next quarter, then 5×5 = 25. Bridge separates `NotificationSender` (channel — the abstraction) from `MessageFormatter` (format — the implementor). Adding WhatsApp adds 1 class. Adding AMP-Email adds 1 class. The two axes vary independently. Latency budget per notification: 50ms p99 (composition is in-process; channel I/O dominates). Throughput: 25 notifications/sec sustained, 500/sec burst during product launches.
 
+```mermaid
+classDiagram
+    class NotificationSender {
+        <<abstract>>
+        #MessageFormatter formatter
+        +send(Recipient, Message) SendResult
+    }
+    class MessageFormatter {
+        <<interface>>
+        +contentType() String
+        +format(Message) String
+    }
+    NotificationSender --> MessageFormatter : formatter
+    NotificationSender <|-- EmailSender
+    NotificationSender <|-- SmsSender
+    NotificationSender <|-- PushSender
+    MessageFormatter <|.. MarkdownFormatter
+    MessageFormatter <|.. PlainTextFormatter
+    MessageFormatter <|.. HtmlFormatter
+    MessageFormatter <|.. AmpEmailFormatter
 ```
-        Abstraction hierarchy            Implementor hierarchy
-        (channels)                       (formats)
 
-        NotificationSender ------------> MessageFormatter
-              ^                                ^
-   -----------+----------                ------+------+--------+
-   |          |         |                |     |      |        |
- Email      SMS       Push           Markdown Plain  HTML    AMP-Email
- Sender    Sender    Sender          Formatter ...
+*The channel axis (`NotificationSender` subclasses) and the format axis (`MessageFormatter` subclasses) vary independently — the `formatter` field is the bridge; adding WhatsApp or AMP-Email is one new leaf class, never a cross-product of both.*
 
-   sender.send(to, msg)
-        |
-        v
-   formatter.format(msg) ---> channel.transport(to, formatted)
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Sender as NotificationSender
+    participant Fmt as MessageFormatter
+    participant Ch as Channel
+
+    Client->>Sender: send(recipient, msg)
+    Sender->>Fmt: format(msg)
+    Fmt-->>Sender: formatted body
+    Sender->>Ch: transport(to, formatted)
+    Ch-->>Sender: SendResult
 ```
+
+*One `send()` call crosses the bridge exactly once, at `formatter.format()`, before reaching the channel-specific transport (SES for Email, SNS for SMS, FCM for Push) — matching the ~200ns indirection cost cited below.*
 
 ```java
 // Implementor — the "format" axis
@@ -392,6 +457,35 @@ The team started with `EmailHtmlSender`, `EmailPlainSender`, `SmsPlainSender` �
 **Bridge vs. Strategy:** Both use composition to delegate to an interface. The difference is intent: Strategy is about swapping algorithms/behaviors; Bridge is about platform independence and preventing class explosion across two dimensions.
 
 **Bridge vs. Adapter:** Bridge is designed proactively; Adapter is applied reactively. Bridge has two parallel hierarchies; Adapter translates between two existing incompatible interfaces.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["What are you trying to do?"]) --> Q1{"Create families<br/>of related objects?"}
+    Q1 -->|yes| AF(["Abstract Factory"])
+    Q1 -->|no| Q2{"Add responsibilities<br/>dynamically, same interface?"}
+    Q2 -->|yes| DEC(["Decorator"])
+    Q2 -->|no| Q3{"Retrofit two already-built<br/>incompatible interfaces?"}
+    Q3 -->|yes| ADP(["Adapter"])
+    Q3 -->|no| Q4{"Swap one algorithm/behavior,<br/>no second hierarchy?"}
+    Q4 -->|yes| STRAT(["Strategy"])
+    Q4 -->|no| Q5{"Two hierarchies must vary<br/>independently, designed upfront?"}
+    Q5 -->|yes| BRIDGE(["Bridge"])
+
+    class Start io
+    class Q1,Q2,Q3,Q4,Q5 mathOp
+    class AF,DEC,ADP,STRAT frozen
+    class BRIDGE train
+```
+
+*A quick elimination path through the five patterns in the table above — most interview confusion sits at the last branch (Strategy vs. Bridge), which is why both comparison paragraphs above exist.*
 
 ---
 

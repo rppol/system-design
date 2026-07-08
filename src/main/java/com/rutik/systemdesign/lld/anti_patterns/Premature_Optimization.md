@@ -16,6 +16,35 @@ Premature Optimization is the practice of investing engineering effort in perfor
 
 **Key insight**: The right process: write clear, simple, correct code first → profile in production (or with realistic load) → identify actual bottlenecks → optimize only the measured hotspot → verify the optimization actually helps with benchmarks. Any other order wastes effort.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Write correct,<br/>simple code"]) --> Profile(Profile under<br/>realistic load)
+    Profile --> Bottleneck{"Bottleneck<br/>measured?"}
+    Bottleneck -->|No| ShipAsIs(["Ship as-is"])
+    Bottleneck -->|Yes| OptimizeHotspot(Optimize only<br/>the hotspot)
+    OptimizeHotspot --> Verify{"Benchmark<br/>confirms gain?"}
+    Verify -->|Yes| ShipOptimized(["Ship verified fix"])
+    Verify -->|No| Revert(["Revert; ship<br/>original code"])
+
+    Guess(["Assume it's slow<br/>(intuition only)"]) --> HandOptimize(Hand-optimize<br/>blindly)
+    HandOptimize --> MergeUnmeasured(["Merged without<br/>measuring"])
+
+    class Start,ShipAsIs,ShipOptimized,Revert io
+    class Profile,OptimizeHotspot train
+    class Bottleneck,Verify mathOp
+    class Guess,HandOptimize,MergeUnmeasured lossN
+```
+
+*The green backbone is the evidence-driven loop from the Key insight above — profile, confirm the bottleneck, optimize only the hotspot, then verify with a benchmark before shipping. The red chain is the premature-optimization shortcut — guess, hand-optimize, merge unmeasured — which is exactly what produced the nine numbered "PREMATURE OPTIMIZATION" markers in the Java Violation Example below.*
+
 ---
 
 ## How to Spot It

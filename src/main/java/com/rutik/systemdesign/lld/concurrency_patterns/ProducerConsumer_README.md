@@ -32,6 +32,23 @@ The buffer's capacity is critical:
 - **Too large**: memory exhaustion; backpressure signal arrives too late
 - **Rule of thumb**: queue size = (max throughput) × (max acceptable latency)
 
+The buffer's own fill level *is* the backpressure signal — producers and consumers each block on exactly one edge of it, with no other coordination required:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Empty
+    Empty --> PartiallyFull: put()
+    PartiallyFull --> PartiallyFull: put() / take() (still partial)
+    PartiallyFull --> Full: put()
+    Full --> PartiallyFull: take()
+    PartiallyFull --> Empty: take()
+
+    note right of Empty: consumers block waiting for put()
+    note right of Full: producers block waiting for take()
+```
+
+Producers only stall at `Full`; consumers only stall at `Empty` — this is the "self-regulates" behavior from the Key insight above, driven entirely by the buffer's own capacity check.
+
 ---
 
 ## Implementation Comparison
@@ -100,6 +117,36 @@ while (true) {
 ```
 
 Alternative: `ExecutorService.shutdown()` + `awaitTermination()`.
+
+The full lifecycle — normal blocking handoff, then poison-pill shutdown relayed across a consumer pool — looks like this end to end:
+
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant Q as BoundedBuffer
+    participant C1 as Consumer A
+    participant C2 as Consumer B
+
+    P->>Q: put(task1)
+    P->>Q: put(task2)
+    Note over Q: buffer full (capacity 2)
+    P->>Q: put(task3)
+    Note over P,Q: producer blocks - backpressure
+    C1->>Q: take()
+    Q-->>C1: task1
+    Q-->>P: notifyAll() - slot freed
+    Note over P,Q: producer wakes, rechecks, put(task3) completes
+    P->>Q: put(PoisonPill)
+    C1->>Q: take()
+    Q-->>C1: PoisonPill
+    C1->>Q: put(PoisonPill)
+    Note over C1: relay pill to next consumer, then exit
+    C2->>Q: take()
+    Q-->>C2: PoisonPill
+    Note over C2: exit
+```
+
+Consumer A never swallows the pill — it re-`put()`s it before exiting, so Consumer B (and any other pool member) also sees it and shuts down cleanly.
 
 ---
 

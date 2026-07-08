@@ -48,35 +48,55 @@ This directory contains deep-dive comparisons of commonly confused GoF design pa
 
 ## Pattern Relationship Map
 
-```
-CREATIONAL
-  Factory Method ──extends──> Abstract Factory (factory of factories)
-  Builder ──────────────────> complex object construction
-  Prototype ────────────────> clone-based creation
-  Singleton ────────────────> single instance (often combined with Factory)
+```mermaid
+flowchart LR
+    classDef base   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
 
-STRUCTURAL
-  Adapter ──wraps──> incompatible interface (retrofit)
-  Bridge ───separates──> abstraction + implementation (designed upfront)
-  Facade ───simplifies──> subsystem (one-way simplification)
-  Decorator ──wraps──> adds behavior (stackable)
-  Proxy ────wraps──> controls access (same interface)
-  Composite ──composes──> tree structures (part-whole hierarchy)
-  Flyweight ──shares──> many fine-grained objects
+    subgraph CR["CREATIONAL"]
+        direction TB
+        FM["Factory Method"] -->|extends| AF["Abstract Factory<br/>(factory of factories)"]
+        BLD["Builder<br/>complex object construction"]
+        PRO["Prototype<br/>clone-based creation"]
+        SIN["Singleton<br/>single instance"]
+    end
 
-BEHAVIORAL
-  Strategy ──────────> choose algorithm at runtime
-  State ─────────────> behavior changes with state (looks like Strategy)
-  Template Method ───> fixed algorithm skeleton, variable steps
-  Command ───────────> encapsulate action as object
-  Chain of Responsibility > pass request along chain
-  Observer ──────────> event notification (1-to-many)
-  Mediator ──────────> centralize communication (many-to-many)
-  Iterator ──────────> traverse collection
-  Memento ───────────> undo/snapshot
-  Visitor ───────────> add operations without modifying classes
-  Interpreter ───────> parse/execute grammar
+    subgraph ST["STRUCTURAL"]
+        direction TB
+        ADP["Adapter<br/>wraps incompatible interface (retrofit)"]
+        BRI["Bridge<br/>separates abstraction + implementation"]
+        FAC["Facade<br/>simplifies subsystem"]
+        DEC["Decorator<br/>wraps, adds behavior (stackable)"]
+        PRX["Proxy<br/>wraps, controls access"]
+        CMP["Composite<br/>composes tree structures (part-whole)"]
+        FLY["Flyweight<br/>shares many fine-grained objects"]
+    end
+
+    subgraph BE["BEHAVIORAL"]
+        direction TB
+        STR["Strategy<br/>choose algorithm at runtime"]
+        STA["State<br/>behavior changes with state"]
+        TM["Template Method<br/>fixed skeleton, variable steps"]
+        CMD["Command<br/>encapsulate action as object"]
+        COR["Chain of Responsibility<br/>pass request along chain"]
+        OBS["Observer<br/>event notification (1-to-many)"]
+        MED["Mediator<br/>centralize communication (many-to-many)"]
+        ITR["Iterator<br/>traverse collection"]
+        MEM["Memento<br/>undo/snapshot"]
+        VIS["Visitor<br/>add ops without modifying classes"]
+        INT["Interpreter<br/>parse/execute grammar"]
+    end
+
+    SIN -.->|often combined with| FM
+    STA -.->|looks like| STR
+
+    class FM,AF,BLD,PRO,SIN base
+    class ADP,BRI,FAC,DEC,PRX,CMP,FLY frozen
+    class STR,STA,TM,CMD,COR,OBS,MED,ITR,MEM,VIS,INT mathOp
 ```
+
+*Patterns cluster by GoF category — gold for Creational, purple for Structural, orange for Behavioral. The two dashed edges are the classic look-alike traps: Singleton is frequently paired with Factory Method, and State's structure is often confused with Strategy's — exactly the pairs the comparison table below digs into.*
 
 ---
 
@@ -97,6 +117,50 @@ BEHAVIORAL
 ---
 
 ## Quick Selection Guide
+
+```mermaid
+flowchart LR
+    classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef base   fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+    classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+
+    ROOT(["What do you<br/>need to do?"]) --> CAT_CR(["CREATE objects"])
+    ROOT --> CAT_ST(["STRUCTURE classes"])
+    ROOT --> CAT_BE(["DEFINE behavior"])
+
+    CAT_CR -->|"type varies by subclass"| QFM(["Factory Method"])
+    CAT_CR -->|"families of related objects"| QAF(["Abstract Factory"])
+    CAT_CR -->|"many optional parts"| QBLD(["Builder"])
+    CAT_CR -->|"copy an existing object"| QPRO(["Prototype"])
+    CAT_CR -->|"only one instance ever"| QSIN(["Singleton"])
+
+    CAT_ST -->|"incompatible interfaces"| QADP(["Adapter"])
+    CAT_ST -->|"separate abstraction / impl"| QBRI(["Bridge"])
+    CAT_ST -->|"add behavior at runtime"| QDEC(["Decorator"])
+    CAT_ST -->|"simplify a subsystem"| QFAC(["Facade"])
+    CAT_ST -->|"tree, part-whole"| QCMP(["Composite"])
+    CAT_ST -->|"control access"| QPRX(["Proxy"])
+    CAT_ST -->|"share many small objects"| QFLY(["Flyweight"])
+
+    CAT_BE -->|"swap algorithms at runtime"| QSTR(["Strategy"])
+    CAT_BE -->|"behavior changes with state"| QSTA(["State"])
+    CAT_BE -->|"skeleton, variable steps"| QTM(["Template Method"])
+    CAT_BE -->|"undo-able operations"| QCMD(["Command"])
+    CAT_BE -->|"event notifications"| QOBS(["Observer"])
+    CAT_BE -->|"many-to-many communication"| QMED(["Mediator"])
+    CAT_BE -->|"pass request along a chain"| QCOR(["Chain of<br/>Responsibility"])
+    CAT_BE -->|"traverse a collection"| QITR(["Iterator"])
+    CAT_BE -->|"save / restore state"| QMEM(["Memento"])
+    CAT_BE -->|"add ops without<br/>modifying classes"| QVIS(["Visitor"])
+
+    class ROOT io
+    class CAT_CR,QFM,QAF,QBLD,QPRO,QSIN base
+    class CAT_ST,QADP,QBRI,QDEC,QFAC,QCMP,QPRX,QFLY frozen
+    class CAT_BE,QSTR,QSTA,QTM,QCMD,QOBS,QMED,QCOR,QITR,QMEM,QVIS mathOp
+```
+
+*Triage first by job type (colors matching the relationship map above), then follow the branch whose condition matches your situation to the recommended pattern. The checklists below spell out the same 22 rules in prose — use whichever you scan faster.*
 
 ### "I need to CREATE objects"
 - Single object, type varies by subclass -> **Factory Method**

@@ -228,61 +228,97 @@ public class DecoratorDemo {
 }
 ```
 
+**Runtime call chain**: the demo nests four objects, but `read()` doesn't evaluate outside-in — each decorator's `super.read()` first delegates to the object it wraps, and only formats the string on the way back out, which is why `FileDataStream` supplies the raw data first and `CompressedDataStream` is the last to wrap it.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Compressed as CompressedDataStream
+    participant Encrypted as EncryptedDataStream
+    participant Buffered as BufferedDataStream
+    participant File as FileDataStream
+
+    Client->>Compressed: read()
+    Compressed->>Encrypted: super.read()
+    Encrypted->>Buffered: super.read()
+    Buffered->>File: super.read()
+    File-->>Buffered: raw data from data.txt
+    Buffered-->>Encrypted: [buffered] raw data from data.txt
+    Encrypted-->>Compressed: [encrypted([buffered] raw data from data.txt)]
+    Compressed-->>Client: [compressed([encrypted([buffered] raw data from data.txt)])]
+    Note over Compressed,File: Delegation runs inward first (super.read()), formatting happens only on the way back out.
+```
+
 ---
 
 ## Key Structural Differences — ASCII Class Diagrams
 
 ### Composite
 
+```mermaid
+classDiagram
+    direction TB
+    class FileSystemComponent {
+        <<interface>>
+        +getName() String
+        +getSize() long
+        +display(indent)
+    }
+    class File {
+        +getName() String
+        +getSize() long
+        +display(indent)
+    }
+    class Directory {
+        -children List~FileSystemComponent~
+        +getName() String
+        +getSize() long
+        +display(indent)
+        +add(component)
+        +remove(component)
+    }
+    FileSystemComponent <|.. File
+    FileSystemComponent <|.. Directory
+    Directory "1" o-- "*" FileSystemComponent : children
 ```
-+-------------------------+
-|  <<interface>>          |
-|  FileSystemComponent    |
-|-------------------------|
-|+ getName(): String      |
-|+ getSize(): long        |
-|+ display(indent)        |
-+-------------------------+
-         ^         ^
-         |         |
-  +------+---+  +--+------------------+
-  |   File   |  |     Directory       |
-  |          |  |---------------------|
-  |+ getName |  |+ getName()          |
-  |+ getSize |  |+ getSize()          |
-  |+ display |  |+ display()          |
-  +----------+  |+ add(Component)     |
-                |+ remove(Component)  |
-                |- children: List<..> |-----> FileSystemComponent (self-referential)
-                +---------------------+
-```
+
+`File` and `Directory` both realize `FileSystemComponent`; `Directory` aggregates a list of `FileSystemComponent` — which can itself include more `Directory` nodes — so `getSize()` recurses through the whole subtree via one polymorphic call.
 
 ### Decorator
 
+```mermaid
+classDiagram
+    direction TB
+    class DataStream {
+        <<interface>>
+        +read() String
+    }
+    class FileDataStream {
+        +read() String
+    }
+    class DataStreamDecorator {
+        <<abstract>>
+        #wrappee DataStream
+        +read() String
+    }
+    class BufferedDataStream {
+        +read() String
+    }
+    class EncryptedDataStream {
+        +read() String
+    }
+    class CompressedDataStream {
+        +read() String
+    }
+    DataStream <|.. FileDataStream
+    DataStream <|.. DataStreamDecorator
+    DataStreamDecorator "1" o-- "1" DataStream : wrappee
+    DataStreamDecorator <|-- BufferedDataStream
+    DataStreamDecorator <|-- EncryptedDataStream
+    DataStreamDecorator <|-- CompressedDataStream
 ```
-+-------------------------+
-|  <<interface>>          |
-|     DataStream          |
-|-------------------------|
-|+ read(): String         |
-+-------------------------+
-         ^         ^
-         |         |
-+--------+------+  +---------------------------+
-| FileDataStream|  |   DataStreamDecorator     |
-| (Concrete)    |  | (Abstract Decorator)      |
-|+ read()       |  |---------------------------|
-+---------------+  |- wrappee: DataStream      |-----> DataStream (wraps)
-                   |+ read()                   |
-                   +---------------------------+
-                              ^
-                +-------------+-------------+
-                |             |             |
-    +------------------+ +----------+ +---------------+
-    |BufferedDataStream| |Encrypted.| |Compressed.    |
-    |+ read()          | |+ read()  | |+ read()       |
-    +------------------+ +----------+ +---------------+
-```
+
+`FileDataStream` and the abstract `DataStreamDecorator` both realize `DataStream`; `DataStreamDecorator` aggregates exactly one wrapped `DataStream` (`wrappee`), and `BufferedDataStream`, `EncryptedDataStream`, and `CompressedDataStream` each extend it to layer one behavior around `read()`.
 
 **Key structural tell:**
 - Composite holds a *collection* of the same component type (children list).
@@ -303,6 +339,29 @@ Use **Decorator** when:
 - You want combinations of behaviors that would create an explosion of subclasses if done via inheritance
 - Behaviors should be stackable and removable at runtime
 - The structure is primarily about *augmenting* a single object
+
+Both checklists collapse into one branching question:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Composite or<br/>Decorator?"]) --> Q1{"Does one node hold<br/>many children?"}
+    Q1 -- "Yes: List of children" --> Composite(["Composite<br/>uniform tree, recursive ops"])
+    Q1 -- "No: single wrappee" --> Q2{"Stacking behaviors on<br/>one object at runtime?"}
+    Q2 -- "Yes" --> Decorator(["Decorator<br/>layered augmentation"])
+
+    class Start io
+    class Q1,Q2 mathOp
+    class Composite train
+    class Decorator base
+```
 
 ---
 

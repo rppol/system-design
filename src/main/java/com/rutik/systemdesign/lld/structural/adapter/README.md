@@ -63,41 +63,51 @@ The client only ever sees the `PaymentProcessor` interface. The adapter handles 
 ## 5. UML Structure
 
 ### Class Adapter (using inheritance)
-```
-+------------------+         +-------------------+
-|   <<interface>>  |         |     Adaptee        |
-|     Target       |         |   (StripeClient)   |
-+------------------+         +-------------------+
-| +request()       |         | +specificRequest() |
-+------------------+         +-------------------+
-        ^                              ^
-        |                              |
-        +----------+-------------------+
-                   |
-           +----------------+
-           |    Adapter     |
-           +----------------+
-           | +request()     |  <-- calls specificRequest() internally
-           +----------------+
+```mermaid
+classDiagram
+    class Target {
+        <<interface>>
+        +request()
+    }
+    class Adaptee {
+        +specificRequest()
+    }
+    class Adapter {
+        +request()
+    }
+    Target <|.. Adapter : implements
+    Adaptee <|-- Adapter : extends
+    note for Adaptee "e.g., StripeClient"
+    note for Adapter "request() delegates internally to specificRequest()"
 ```
 
+*Adapter multiply-inherits from both `Target` and `Adaptee`, so `request()` and `specificRequest()` live in one class — this variant needs multiple class inheritance, which Java doesn't support.*
+
 ### Object Adapter (using composition — preferred)
+```mermaid
+classDiagram
+    class Target {
+        <<interface>>
+        +request()
+    }
+    class Adaptee {
+        +specificRequest()
+    }
+    class Client {
+        -target: Target
+        +doWork()
+    }
+    class Adapter {
+        -adaptee: Adaptee
+        +request()
+    }
+    Client --> Target : uses
+    Target <|.. Adapter : implements
+    Adapter --> Adaptee : holds reference
+    note for Adaptee "e.g., StripeClient"
 ```
-+------------------+        uses       +-------------------+
-|   <<interface>>  |<---------+        |     Adaptee        |
-|     Target       |          |        |   (StripeClient)   |
-+------------------+          |        +-------------------+
-| +request()       |          |        | +specificRequest() |
-+------------------+          |        +-------------------+
-        ^                     |                 ^
-        |                     |                 | (holds reference)
-+----------------+            |        +--------+---------+
-|    Client      +------------+        |    Adapter        |
-+----------------+                     +------------------+
-| -target:Target |                     | -adaptee:Adaptee  |
-| +doWork()      |                     | +request()        |
-+----------------+                     +------------------+
-```
+
+*`Adapter` implements `Target` and merely holds a reference to `Adaptee` (composition, not inheritance), so `Client` only ever depends on `Target` — this is the preferred Java approach because it avoids the multiple-inheritance coupling of the Class Adapter variant.*
 
 ### Two-Way (Bidirectional) Adapter
 Implements both Target and Adaptee interfaces so objects from either side can use it.
@@ -118,6 +128,22 @@ Implements both Target and Adaptee interfaces so objects from either side can us
 5. **The adaptee** executes its native logic and returns a result.
 6. **The adapter translates** the return value back to the format the client expects.
 7. **The client receives** a result in the format it understands — completely unaware of the adaptee.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Adapter
+    participant Adaptee as Adaptee (StripeClient)
+
+    Client->>Adapter: request()
+    Note over Adapter: translate params<br/>(e.g. double dollars to long cents)
+    Adapter->>Adaptee: specificRequest(translatedParams)
+    Adaptee-->>Adapter: nativeResult
+    Note over Adapter: translate result back<br/>to Target's format
+    Adapter-->>Client: result
+```
+
+*The client calls `request()` believing it is talking to a plain `Target`; the Adapter silently translates parameters, delegates to `specificRequest()`, then translates the result back — the runtime version of the seven steps above.*
 
 The client is decoupled from the adaptee. Neither needs to know about the other. Only the adapter knows both interfaces.
 
@@ -218,31 +244,39 @@ The client is decoupled from the adaptee. Neither needs to know about the other.
 
 A mid-size SaaS platform has 40 call sites scattered across 12 microservices invoking an in-house `LdapAuthService` running against an aging Active Directory cluster. Scale: ~500 auth requests/sec at peak, p99 latency 80ms, 99.95% availability requirement. Leadership decides to migrate to Okta OAuth2 over 6 months, but a flag-day cutover is impossible — different services have different release trains. Solution: introduce a new `AuthProvider` interface; build `OAuth2AuthProvider` (new) and `LdapAuthProviderAdapter` (wraps the legacy service). Callers depend only on `AuthProvider`; a feature flag routes between the two. Net result: zero changes to the 40 call sites during migration; rollback is a config flip.
 
+```mermaid
+classDiagram
+    class CallSites
+    class AuthProvider {
+        <<interface>>
+        +authenticate(username, password) AuthResult
+        +lookup(username) UserPrincipal
+    }
+    class OAuth2Provider {
+        +authenticate(username, password) AuthResult
+        +lookup(username) UserPrincipal
+    }
+    class LdapAuthProviderAdapter {
+        -legacy: LdapAuthService
+        +authenticate(username, password) AuthResult
+        +lookup(username) UserPrincipal
+    }
+    class Okta
+    class LdapAuthService
+
+    CallSites --> AuthProvider : calls
+    AuthProvider <|.. OAuth2Provider : implements
+    AuthProvider <|.. LdapAuthProviderAdapter : implements
+    OAuth2Provider --> Okta : delegates to
+    LdapAuthProviderAdapter --> LdapAuthService : wraps (adaptee)
+
+    note for CallSites "40 call sites across 12 microservices"
+    note for OAuth2Provider "new code"
+    note for LdapAuthProviderAdapter "translates calls; maps LdapException to AuthException"
+    note for LdapAuthService "legacy, untouched"
 ```
-                +----------------------+
-                |     CallSites (40)   |
-                +----------+-----------+
-                           |
-                           v
-                +----------------------+
-                |    AuthProvider      |  <-- target interface
-                |    (interface)       |
-                +----+-----------+-----+
-                     |           |
-        +------------+           +-------------+
-        |                                      |
-        v                                      v
-+----------------+                  +-------------------------+
-| OAuth2Provider |                  | LdapAuthProviderAdapter |
-| (new code)     |                  |  - translates calls     |
-+--------+-------+                  |  - maps exceptions      |
-         |                          +-----------+-------------+
-         v                                      |
-   Okta / IdP                                   v
-                                       +------------------+
-                                       | LdapAuthService  |  (legacy, untouched)
-                                       +------------------+
-```
+
+*`AuthProvider` is the Target both implementations realize; `LdapAuthProviderAdapter` is the Adapter wrapping the legacy `LdapAuthService` (Adaptee), while `OAuth2Provider` is a direct, non-adapted implementation — the 40 call sites depend only on `AuthProvider` and a feature flag picks which implementation they get.*
 
 ```java
 // Target interface — what callers depend on

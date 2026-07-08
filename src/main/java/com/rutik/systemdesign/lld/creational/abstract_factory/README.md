@@ -65,29 +65,47 @@ Swapping the factory object swaps the entire product family atomically.
 
 ## 5. UML Structure
 
-```
-+---------------------+          +----------------------+
-|   <<interface>>     |          |   <<interface>>      |
-|   AbstractFactory   |          |   AbstractProductA   |
-+---------------------+          +----------------------+
-| +createProductA()   |          | +operationA()        |
-| +createProductB()   |          +----------------------+
-+---------------------+               ^           ^
-         ^        ^                   |           |
-         |        |            ProductA1      ProductA2
-+--------+   +----+-------+
-|            |             |     +----------------------+
-ConcreteFactory1  ConcreteFactory2|   AbstractProductB   |
-|            |             |     +----------------------+
-|creates     |creates       |    | +operationB()        |
-|ProductA1   |ProductA2     |    +----------------------+
-|ProductB1   |ProductB2     |         ^           ^
-+------------+--------------+         |           |
-                                  ProductB1    ProductB2
+```mermaid
+classDiagram
+    class AbstractFactory {
+        <<interface>>
+        +createProductA() AbstractProductA
+        +createProductB() AbstractProductB
+    }
+    class AbstractProductA {
+        <<interface>>
+        +operationA()
+    }
+    class AbstractProductB {
+        <<interface>>
+        +operationB()
+    }
+    class ConcreteFactory1 {
+        +createProductA() AbstractProductA
+        +createProductB() AbstractProductB
+    }
+    class ConcreteFactory2 {
+        +createProductA() AbstractProductA
+        +createProductB() AbstractProductB
+    }
+    class ProductA1
+    class ProductA2
+    class ProductB1
+    class ProductB2
 
-ConcreteFactory1 creates the "Family 1" products: ProductA1 + ProductB1
-ConcreteFactory2 creates the "Family 2" products: ProductA2 + ProductB2
+    AbstractFactory <|.. ConcreteFactory1
+    AbstractFactory <|.. ConcreteFactory2
+    AbstractProductA <|.. ProductA1
+    AbstractProductA <|.. ProductA2
+    AbstractProductB <|.. ProductB1
+    AbstractProductB <|.. ProductB2
+    ConcreteFactory1 ..> ProductA1 : creates
+    ConcreteFactory1 ..> ProductB1 : creates
+    ConcreteFactory2 ..> ProductA2 : creates
+    ConcreteFactory2 ..> ProductB2 : creates
 ```
+
+ConcreteFactory1 realizes the "Family 1" set (ProductA1 + ProductB1); ConcreteFactory2 realizes the "Family 2" set (ProductA2 + ProductB2) — the dashed `creates` arrows show which concrete products each factory is wired to, and the two families never cross.
 
 **Key relationship:** Products from the same ConcreteFactory are designed to work together.
 
@@ -204,37 +222,36 @@ come from the same platform family — no mixing of Windows buttons with macOS s
 (`WindowsLookAndFeel`, `MetalLookAndFeel`, `NimbusLookAndFeel`, `AquaLookAndFeel`) each produce
 a consistent family of `ComponentUI` objects: `ButtonUI`, `TextFieldUI`, `ScrollBarUI`, etc.
 
-```
-JVM (Swing Application — Windows deployment)
-+-----------------------------------------------------------------------+
-|  UIManager.setLookAndFeel("com.sun.java.swing.plaf.windows.WindowsLookAndFeel")
-|                              |
-|                              v
-|          +---------------------------------------+
-|          |  WindowsLookAndFeel (ConcreteFactory) |
-|          +---------------------------------------+
-|          | createUI(JButton)  -> WindowsButtonUI |
-|          | createUI(JTextField) -> WinTextFieldUI|
-|          | createUI(JScrollBar) -> WinScrollBarUI|
-|          +---------------------------------------+
-|                              |
-|          all components guaranteed to be from Windows family
-|          mixing AquaLookAndFeel components here would cause
-|          visual inconsistency and potential ClassCastException
-+-----------------------------------------------------------------------+
+```mermaid
+sequenceDiagram
+    participant App as Application Code
+    participant UIM as UIManager
+    participant WLF as WindowsLookAndFeel
+    participant ALF as AquaLookAndFeel
 
-macOS JVM (same application code, different factory)
-+-----------------------------------------------------------------------+
-|  UIManager.setLookAndFeel("com.apple.laf.AquaLookAndFeel")
-|          +---------------------------------------+
-|          |  AquaLookAndFeel (ConcreteFactory)    |
-|          +---------------------------------------+
-|          | createUI(JButton)  -> AquaButtonUI    |
-|          | createUI(JTextField) -> AquaTextFieldUI
-|          | createUI(JScrollBar) -> AquaScrollBarUI
-|          +---------------------------------------+
-+-----------------------------------------------------------------------+
+    alt Windows deployment
+        App->>UIM: setLookAndFeel("WindowsLookAndFeel")
+        UIM->>WLF: select as ConcreteFactory
+        App->>WLF: createUI(JButton)
+        WLF-->>App: WindowsButtonUI
+        App->>WLF: createUI(JTextField)
+        WLF-->>App: WinTextFieldUI
+        App->>WLF: createUI(JScrollBar)
+        WLF-->>App: WinScrollBarUI
+        Note over App,WLF: All components guaranteed from the Windows family
+    else macOS deployment (same App code, different factory)
+        App->>UIM: setLookAndFeel("AquaLookAndFeel")
+        UIM->>ALF: select as ConcreteFactory
+        App->>ALF: createUI(JButton)
+        ALF-->>App: AquaButtonUI
+        App->>ALF: createUI(JTextField)
+        ALF-->>App: AquaTextFieldUI
+        App->>ALF: createUI(JScrollBar)
+        ALF-->>App: AquaScrollBarUI
+    end
 ```
+
+Swapping the `setLookAndFeel()` call is the only change between the two deployments — every subsequent `createUI()` call is guaranteed to return a component from that one family; reaching across families (e.g. an `AquaButtonUI` inside a Windows-family render) risks visual inconsistency and a `ClassCastException`.
 
 ### Famous Codebase Usages
 

@@ -64,33 +64,53 @@ This separates:
 
 ## 5. UML Structure
 
-```
-  +----------+        +-------------------+        +-----------+
-  |  Client  |------->|    <<interface>>  |        |  Receiver |
-  +----------+        |      Command      |        +-----------+
-                       +-------------------+        | +action() |
-                       | + execute(): void |        +-----------+
-                       | + undo(): void    |              ^
-                       +-------------------+              |
-                                ^                         |
-                    ____________|____________             |
-                   |                         |           |
-          +------------------+   +------------------+   |
-          | ConcreteCommand1 |   | ConcreteCommand2 |   |
-          +------------------+   +------------------+   |
-          | - receiver       |-->|                  |   |
-          | + execute()      |   | + execute()      |   |
-          | + undo()         |   | + undo()         |   |
-          +------------------+   +------------------+   |
-                                                         |
-  +----------+                                           |
-  |  Invoker |                                           |
-  +----------+                                           |
-  | -command |----(holds Command reference)              |
-  | +setCmd()|                                           |
-  | +invoke()|---calls execute()                         |
-  +----------+                                           |
+The `Command` interface decouples `Invoker` from `Receiver`: `Client` creates a `ConcreteCommand` and wires it to a `Receiver`, `ConcreteCommand1`/`ConcreteCommand2` implement `execute()`/`undo()` by delegating to that `Receiver`, and `Invoker` only ever holds a `Command` reference — it never sees `Receiver` at all.
 
+```mermaid
+classDiagram
+    direction LR
+
+    class Client
+
+    class Command {
+        <<interface>>
+        +execute() void
+        +undo() void
+    }
+
+    class ConcreteCommand1 {
+        -receiver Receiver
+        +execute() void
+        +undo() void
+    }
+
+    class ConcreteCommand2 {
+        -receiver Receiver
+        +execute() void
+        +undo() void
+    }
+
+    class Receiver {
+        +action() void
+    }
+
+    class Invoker {
+        -command Command
+        +setCommand(cmd Command) void
+        +invoke() void
+    }
+
+    Client --> Command : creates
+    Command <|.. ConcreteCommand1 : implements
+    Command <|.. ConcreteCommand2 : implements
+    ConcreteCommand1 --> Receiver : delegates to
+    ConcreteCommand2 --> Receiver : delegates to
+    Invoker --> Command : holds
+```
+
+Undo/redo rides on a simple stack of executed commands — the `Invoker` (or a dedicated history object) keeps a `Stack<Command>`; undoing pops the most recent entry and calls its `undo()`:
+
+```
 Command history (for undo/redo):
   Stack<Command> history = [cmd1, cmd2, cmd3] <- top
   undo() pops cmd3 and calls cmd3.undo()
@@ -108,11 +128,60 @@ Command history (for undo/redo):
 6. For macro/queue: commands are stored in a list and executed in order.
 7. For logging: executed commands are serialized and stored; can be replayed on recovery.
 
+The class diagram above shows *who* is decoupled from *whom*; the sequence below shows those same steps playing out at runtime — the `Invoker` never learns what `execute()` actually does, only that the `Receiver` eventually gets called:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Inv as Invoker
+    participant Cmd as ConcreteCommand
+    participant R as Receiver
+
+    C->>Cmd: new ConcreteCommand(receiver)
+    C->>Inv: setCommand(cmd)
+    Note over Inv: user clicks / event fires
+    Inv->>Cmd: execute()
+    Cmd->>Cmd: capture pre-state
+    Cmd->>R: action()
+    R-->>Cmd: result
+    Cmd-->>Inv: done
+
+    Note over Inv,Cmd: later, user requests Undo
+    Inv->>Cmd: undo()
+    Cmd->>R: reverse(preState)
+    R-->>Cmd: reversed
+```
+
 **Undo/Redo mechanics:**
 ```
 Execute: push to historyStack, push null to redoStack
 Undo:    pop from historyStack, call cmd.undo(), push to redoStack
 Redo:    pop from redoStack, call cmd.execute(), push to historyStack
+```
+
+The same push/pop choreography, as a runtime sequence across the two stacks — `execute()` clears the redo stack (a fresh action invalidates any "future" the user had undone into), while `undo()`/`redo()` simply ferry the same command back and forth between stacks:
+
+```mermaid
+sequenceDiagram
+    participant Inv as Invoker
+    participant U as UndoStack
+    participant Rd as RedoStack
+    participant Cmd as Command
+
+    Note over Inv,Rd: execute(cmd)
+    Inv->>Cmd: execute()
+    Inv->>U: push(cmd)
+    Inv->>Rd: clear()
+
+    Note over Inv,Rd: undo()
+    Inv->>U: pop() returns cmd
+    Inv->>Cmd: undo()
+    Inv->>Rd: push(cmd)
+
+    Note over Inv,Rd: redo()
+    Inv->>Rd: pop() returns cmd
+    Inv->>Cmd: execute()
+    Inv->>U: push(cmd)
 ```
 
 ---
@@ -240,31 +309,30 @@ object is ~200 bytes in memory (text snapshot + metadata); a 1,000-command log p
 - Spring `@Async` task executor: `Callable` commands submitted to `ThreadPoolTaskExecutor`
   achieve 10,000 concurrent background tasks at < 2 ms dispatch latency
 
-```
-Collaborative Editor — Command Log Architecture
-================================================
+**Collaborative Editor — Command Log Architecture.** A keystroke becomes a Command via the factory; the Invoker drives `execute()`/`undo()` against the `DocumentEditor` while holding the bounded undo/redo stacks (ring buffer, max 1,000); every applied command is appended to a Redis-backed log compacted every 1,000 entries:
 
-  [ User Keystroke ]
-         |
-         v
-  +----------------+
-  | CommandFactory | creates InsertTextCommand / DeleteTextCommand / FormatCommand
-  +----------------+
-         |
-         v
-  +-------------------+
-  | CommandInvoker    |
-  | - executeStack[]  |  <-- undo history (ring buffer, max 1000)
-  | - redoStack[]     |  <-- redo candidates
-  +-------------------+
-         |
-   execute(cmd)  -->  cmd.execute()  -->  DocumentEditor.applyDelta()
-   undo()        -->  cmd.undo()     -->  DocumentEditor.revertDelta()
-         |
-  +----------------+
-  | CommandLog     |  persisted to Redis Sorted Set (score = sequenceNum)
-  | (append-only)  |  compacted to snapshot every 1000 commands
-  +----------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    K(["User Keystroke"]) --> F("CommandFactory<br/>creates Insert / Delete / Format Command")
+    F --> I("CommandInvoker<br/>executeStack + redoStack<br/>ring buffer, max 1000")
+    I -->|"execute(cmd)"| E("cmd.execute triggers<br/>DocumentEditor.applyDelta")
+    I -->|"undo()"| U("cmd.undo triggers<br/>DocumentEditor.revertDelta")
+    I --> L[("CommandLog, append-only<br/>Redis Sorted Set, score = seq#<br/>compacted every 1000 cmds")]
+
+    class K io
+    class F mathOp
+    class I base
+    class E train
+    class U train
+    class L frozen
 ```
 
 ```java

@@ -27,69 +27,74 @@ This problem is the **canonical State pattern example** — the same button pres
 
 ## State Transition Diagram
 
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+
+    Idle --> HasMoney : insertCoin()
+    HasMoney --> HasMoney : insertCoin()<br/>(adds to balance)
+    HasMoney --> ProductSelected : selectProduct()<br/>in stock, enough funds
+    HasMoney --> OutOfStock : selectProduct()<br/>out of stock
+    HasMoney --> Idle : refund()
+
+    ProductSelected --> Dispensing : dispense()
+    ProductSelected --> Idle : refund()
+
+    Dispensing --> Idle : dispense()<br/>(internal completion)
+
+    OutOfStock --> Idle : refund()
 ```
-                    ┌─────────────────────────────────────────┐
-                    │                                         │
-         ┌──────────▼──────────┐                             │
-         │                     │                             │
-    ────► │       IDLE          │ ◄── restock/refund         │
-         │                     │                             │
-         └──────────┬──────────┘                             │
-                    │ insertCoin()                            │
-                    ▼                                         │
-         ┌──────────────────────┐                            │
-         │                      │                            │
-         │      HAS_MONEY        │ ──── refund() ────────────┤
-         │                      │                            │
-         └──────────┬───────────┘                            │
-                    │ selectProduct()                         │
-          ┌─────────┴──────────┐                             │
-          │                    │                             │
-          │(out of stock)       │(in stock, enough money)    │
-          ▼                    ▼                             │
-   ┌──────────────┐  ┌─────────────────────┐                │
-   │              │  │                     │                 │
-   │ OUT_OF_STOCK │  │  PRODUCT_SELECTED   │                 │
-   │              │  │                     │                 │
-   └──────┬───────┘  └──────────┬──────────┘                │
-          │ refund()             │ dispense()                 │
-          └──────────────────────┤                           │
-                                 ▼                           │
-                       ┌──────────────────┐                  │
-                       │                  │                  │
-                       │   DISPENSING     │                  │
-                       │                  │                  │
-                       └──────────┬───────┘                  │
-                                  │ (done)                   │
-                                  └──────────────────────────┘
-```
+
+Five states, one thin context: every action's meaning depends entirely on `currentState` — `insertCoin()` only advances `Idle`, `refund()` fires from `HasMoney`, `ProductSelected`, or `OutOfStock` and always lands back on `Idle`, and `Dispensing` rejects every external action until its own internal `dispense()` completes — the full action matrix is in the Valid and Invalid Transitions table below.
 
 ---
 
 ## Class Diagram
 
+```mermaid
+classDiagram
+    class VendingMachineState {
+        <<interface>>
+        +insertCoin(amount double)
+        +selectProduct(code String)
+        +dispense()
+        +refund()
+        +getStateName() String
+    }
+
+    class IdleState
+    class HasMoneyState
+    class ProductSelectedState
+    class DispensingState
+    class OutOfStockState
+
+    class VendingMachine {
+        -balance double
+        -selectedItem Item
+        -inventory Inventory
+        -currentState VendingMachineState
+        +insertCoin(amount double)
+        +selectProduct(code String)
+        +dispense()
+        +refund()
+    }
+
+    VendingMachineState <|.. IdleState
+    VendingMachineState <|.. HasMoneyState
+    VendingMachineState <|.. ProductSelectedState
+    VendingMachineState <|.. DispensingState
+    VendingMachineState <|.. OutOfStockState
+
+    IdleState --> VendingMachine : machine
+    HasMoneyState --> VendingMachine : machine
+    ProductSelectedState --> VendingMachine : machine
+    DispensingState --> VendingMachine : machine
+    OutOfStockState --> VendingMachine : machine
+
+    VendingMachine o-- VendingMachineState : delegates to
 ```
-<<interface>>
-VendingMachineState
-  + insertCoin(amount: double)
-  + selectProduct(code: String)
-  + dispense()
-  + refund()
-  + getStateName(): String
-         △
-         │
-  ┌──────┴────────────────────────────┐
-  │       │          │        │       │
-IdleState HasMoneyState ProductSelected DispensingState OutOfStockState
-  │       │          │        │       │
-  └───────┴──────────┴────────┴───────┘
-              all hold reference to:
-                   VendingMachine (Context)
-                     + balance: double
-                     + selectedItem: Item
-                     + inventory: Inventory
-                     + currentState: VendingMachineState
-```
+
+All five concrete states realize `VendingMachineState` and hold a back-reference to their `VendingMachine` context; the context itself holds only a single `currentState` pointer, so reassigning that one field — not a growing `if/else` — is the entire transition (Flyweight: the five state instances are created once in the constructor and reused for the life of the machine, per the Patterns Used table above).
 
 ---
 
@@ -152,6 +157,45 @@ Each state class handles its own behavior. Adding `MaintenanceState` means creat
 | DISPENSING | any | Error: "Please wait" |
 | DISPENSING | (internal dispense()) | Dispenses, → IDLE |
 | OUT_OF_STOCK | refund | Returns balance, → IDLE |
+
+---
+
+## Runtime Collaboration: A Normal Purchase Walkthrough
+
+The class diagram above shows structure; this sequence shows the one behavior that trips people up in the Sample Output demo below — `ProductSelectedState.dispense()` does not dispense anything itself, it re-invokes `machine.dispense()` after switching the state, so the freshly-installed `DispensingState` ends up doing the real work.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant VM as VendingMachine
+    participant HM as HasMoneyState
+    participant PS as ProductSelectedState
+    participant DS as DispensingState
+    participant Inv as Inventory
+
+    Note over C,VM: two insertCoin(1.00) calls already ran<br/>balance = $2.00, state = HasMoney
+    C->>VM: selectProduct("A1")
+    VM->>HM: selectProduct("A1")
+    HM->>Inv: getItem("A1")
+    Inv-->>HM: Coke, $1.50
+    HM->>VM: setSelectedItem(Coke)
+    HM->>VM: setState(productSelectedState)
+
+    C->>VM: dispense()
+    VM->>PS: dispense()
+    PS->>VM: setState(dispensingState)
+    Note right of VM: currentState is now Dispensing
+    PS->>VM: dispense()
+    Note over VM,PS: same call, re-invoked —<br/>VM delegates to whichever<br/>state is current NOW
+    VM->>DS: dispense()
+    DS->>Inv: dispense("A1")
+    DS->>VM: deductBalance(1.50)
+    Note over VM: balance = $0.50 (change)
+    DS->>VM: setState(idleState)
+    DS-->>C: "Dispensing Coke... change $0.50"
+```
+
+This double-dispatch is the entire point of `VendingMachine.dispense()` always reading `currentState` fresh: the second `dispense()` call is textually identical to the first, but because `setState(dispensingState)` already ran, it now resolves to `DispensingState.dispense()` instead of looping back into `ProductSelectedState` — exactly the thin-context, no-`if/else` design the Key insight in the Intuition section promises.
 
 ---
 

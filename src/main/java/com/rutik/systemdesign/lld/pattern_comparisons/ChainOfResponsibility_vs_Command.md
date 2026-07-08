@@ -246,52 +246,126 @@ Nothing to undo.
 
 ### Chain of Responsibility
 
+```mermaid
+classDiagram
+    direction LR
+
+    class Client
+
+    class SupportHandler {
+        <<abstract>>
+        -nextHandler SupportHandler
+        +setNext(next SupportHandler) SupportHandler
+        +handle(ticket SupportTicket) void
+    }
+
+    class L1Support {
+        +handle(ticket SupportTicket) void
+    }
+    class L2Support {
+        +handle(ticket SupportTicket) void
+    }
+    class L3Support {
+        +handle(ticket SupportTicket) void
+    }
+
+    Client --> SupportHandler : submits ticket to first handler
+    SupportHandler <|-- L1Support : extends
+    SupportHandler <|-- L2Support : extends
+    SupportHandler <|-- L3Support : extends
+    SupportHandler "1" --> "0..1" SupportHandler : nextHandler
 ```
-Client ──> +---------------+     +---------------+     +---------------+
-           |  L1Support    |---->|  L2Support    |---->|  L3Support    |
-           |               |     |               |     |               |
-           |+ handle(req)  |     |+ handle(req)  |     |+ handle(req)  |
-           +---------------+     +---------------+     +---------------+
-                 ^                      ^                      ^
-                 |                      |                      |
-           +----+---------------------------------------------+-------+
-           |          <<abstract>> SupportHandler                      |
-           |  - nextHandler: SupportHandler                            |
-           |  + setNext(handler): SupportHandler                       |
-           |  + handle(ticket) [abstract]                              |
-           +-----------------------------------------------------------+
 
 Request travels along the chain until a handler claims it (or it falls off the end).
-```
 
 ### Command
 
+```mermaid
+classDiagram
+    direction LR
+
+    class Client
+
+    class Command {
+        <<interface>>
+        +execute() void
+        +undo() void
+    }
+
+    class RemoteControl {
+        -history Deque~Command~
+        +pressButton(command Command) void
+        +pressUndo() void
+    }
+
+    class TurnOnLightCommand {
+        -light Light
+        +execute() void
+        +undo() void
+    }
+
+    class SetThermostatCommand {
+        -thermostat Thermostat
+        -newTemp int
+        -previousTemp int
+        +execute() void
+        +undo() void
+    }
+
+    class Light {
+        -location String
+        +turnOn() void
+        +turnOff() void
+    }
+
+    class Thermostat {
+        -temperature int
+        +setTemperature(temp int) void
+        +getTemperature() int
+    }
+
+    Client --> RemoteControl : presses buttons on
+    Command <|.. TurnOnLightCommand : implements
+    Command <|.. SetThermostatCommand : implements
+    RemoteControl "1" --> "*" Command : history
+    TurnOnLightCommand --> Light : receiver
+    SetThermostatCommand --> Thermostat : receiver
 ```
-+--------+      +------------------+      +------------------+
-| Client |----->|    Invoker       |      |    Receiver      |
-+--------+      |  (RemoteControl) |      |  (Light /        |
-                |------------------|      |   Thermostat)    |
-                |- history: Deque  |      +------------------+
-                |+ pressButton()   |              ^
-                |+ pressUndo()     |              |
-                +------------------+      +-------+--------+
-                        |                 | ConcreteCommand|
-                        |                 |+ execute()     |
-                        +---------------->|+ undo()        |
-                                          +----------------+
-                                                 ^
-                                    +------------+------------+
-                                    |                         |
-                        +-------------------+  +------------------------+
-                        | TurnOnLightCommand|  | SetThermostatCommand   |
-                        |+ execute()        |  |+ execute()             |
-                        |+ undo()           |  |+ undo()                |
-                        +-------------------+  +------------------------+
-```
+
+The Invoker (`RemoteControl`) never references `Light` or `Thermostat` directly — it only calls `Command.execute()`/`undo()`, so new receiver types can be added without touching the invoker.
 
 ---
 
 ## Decision Guide
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{"Correct handler<br/>unknown until runtime?"}
+    Q2{"Also need to log, undo,<br/>or queue the action?"}
+    CMD(["Command<br/>capture the action as an object"])
+    COR(["Chain of Responsibility<br/>route to whichever handler claims it"])
+    BOTH(["Compose both<br/>CoR routes, Command executes"])
+
+    Q1 -- no --> CMD
+    Q1 -- yes --> Q2
+    Q2 -- no --> COR
+    Q2 -- yes --> BOTH
+
+    class Q1,Q2 mathOp
+    class CMD train
+    class COR req
+    class BOTH base
+```
+
+*The two questions above collapse the detailed criteria below into a single path — the "compose both" leaf is exactly the combination shown later in [Can They Work Together?](#can-they-work-together).*
 
 Use **Chain of Responsibility** when:
 - More than one handler may be able to handle a request and the correct one is determined at runtime
@@ -399,18 +473,49 @@ public class SupportOrchestrator {
 }
 ```
 
-**Flow summary:**
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant O as SupportOrchestrator
+    participant AR as AutomatedRouter
+    participant HR as HumanRouter
+    participant Cmd as Command
+
+    C->>O: process(ticket)
+    O->>AR: route(ticket)
+    alt severity is 1
+        AR-->>O: Optional of AutoResolveCommand
+    else severity is above 1
+        AR->>HR: next.route(ticket)
+        HR-->>AR: Optional of AssignToAgentCommand
+        AR-->>O: Optional of AssignToAgentCommand
+    end
+    O->>Cmd: execute()
+    O->>O: auditLog.push(cmd)
+    Note over O,Cmd: later, rollbackLast() pops the log and calls cmd.undo()
 ```
-Incoming Request
-     |
-     v
-[CoR Chain] — routes request to the appropriate handler
-     |
-     v
-[Command returned] — encapsulates the action + receiver
-     |
-     v
-[Invoker executes Command] — logged to audit trail, supports undo
+
+`AutomatedRouter` either resolves the ticket itself (severity 1) or delegates down the chain to `HumanRouter`; either way `SupportOrchestrator` only ever calls `execute()` on whatever `Command` comes back, then logs it so `rollbackLast()` can undo it later.
+
+**Flow summary:**
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["Incoming Request"]) --> B["CoR Chain<br/>routes to the right handler"]
+    B --> C["Command returned<br/>encapsulates the action + receiver"]
+    C --> D["Invoker executes Command<br/>logged to audit trail, undo-able"]
+
+    class A io
+    class B mathOp
+    class C base
+    class D train
 ```
 
 This pattern is common in event-driven architectures, workflow engines, and API gateway implementations where requests must first be routed and then reliably executed.

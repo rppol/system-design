@@ -42,54 +42,112 @@ Design a ride-sharing system (Uber/Lyft-style) that supports:
 
 ## ASCII Class Diagram
 
-```
-+---------------------+        +----------------------+
-|  RideSharingSystem  |        |   VehicleFactory     |  <<Factory>>
-|  -riders: Map        |        | +create(type, plate) |
-|  -drivers: Map       |        +-----------+----------+
-|  -activeRides: Map   |                    |
-|  +registerDriver()   |          creates   v
-|  +requestRide()       |        +-------------------+
-|  +acceptRide()        |        |   Vehicle (abs)   |
-|  +arriveAtPickup()     |        +---+-----+-----+--+
-|  +startRide()          |            |     |     |
-|  +completeRide()        |     Economy Premium  XL
-|  +cancelRide()           |     Vehicle  Vehicle Vehicle
-+----------+-----------+--+
-           |
-           | creates / orchestrates
-           v
-+-----------------------------+        +----------------------+
-|           Ride              |<>------>|   FareStrategy       |  <<Strategy>>
-| -rider, driver, vehicle      |        |  +calculateFare()    |
-| -pickup, dropoff (Location)  |        +-----------+----------+
-| -state: RideState            |                    |
-| -fareStrategy                |     +--------------+---------------+
-| -observers: List              |     |              |               |
-| +requestTransition(to)        | Standard      Surge Pricing   Premium
-| +addObserver()                 | FareStrategy  FareStrategy   FareStrategy
-| +notifyObservers()              +
-+-------------------------------+
+`RideSharingSystem` orchestrates `Ride` creation via `VehicleFactory`; each `Ride` aggregates one `FareStrategy` (Strategy), fans state changes out to every `RideObserver` (Observer), and guards its lifecycle through the `RideState` enum (State).
 
-+----------------------+        +-----------------------+
-|   RideState (enum)   |        |   RideObserver        |  <<Observer>>
-| REQUESTED            |        |  +onRideStatusChanged()|
-| ACCEPTED             |        +-----------+-----------+
-| DRIVER_ARRIVED       |                    |
-| IN_PROGRESS          |     +--------------+--------------+
-| COMPLETED            |     |              |               |
-| CANCELLED            | RiderNotifier DriverNotifier  DispatchDashboard
-| +canTransitionTo()   |
-+----------------------+
+```mermaid
+classDiagram
+    class RideSharingSystem {
+        -riders: Map
+        -drivers: Map
+        -activeRides: Map
+        +registerDriver()
+        +requestRide()
+        +acceptRide()
+        +arriveAtPickup()
+        +startRide()
+        +completeRide()
+        +cancelRide()
+    }
 
-+------------------+        +------------------+
-|     Rider        |        |      Driver      |
-| -id, name         |        | -id, name         |
-| -location          |        | -location         |
-| -rideHistory        |        | -vehicle           |
-+------------------+        | -available: bool  |
-                              | -rating            |
-                              +------------------+
+    class VehicleFactory {
+        <<Factory>>
+        +create(type, plate) Vehicle
+    }
+
+    class Vehicle {
+        <<abstract>>
+    }
+    class EconomyVehicle
+    class PremiumVehicle
+    class XLVehicle
+
+    class Ride {
+        -rider: Rider
+        -driver: Driver
+        -vehicle: Vehicle
+        -pickup: Location
+        -dropoff: Location
+        -state: RideState
+        -fareStrategy: FareStrategy
+        -observers: List~RideObserver~
+        +requestTransition(to)
+        +addObserver()
+        +notifyObservers()
+    }
+
+    class FareStrategy {
+        <<Strategy>>
+        +calculateFare()
+    }
+    class StandardFareStrategy
+    class SurgePricingFareStrategy
+    class PremiumFareStrategy
+
+    class RideState {
+        <<enumeration>>
+        REQUESTED
+        ACCEPTED
+        DRIVER_ARRIVED
+        IN_PROGRESS
+        COMPLETED
+        CANCELLED
+        +canTransitionTo()
+    }
+
+    class RideObserver {
+        <<Observer>>
+        +onRideStatusChanged()
+    }
+    class RiderNotifier
+    class DriverNotifier
+    class DispatchDashboard
+
+    class Rider {
+        -id
+        -name
+        -location
+        -rideHistory
+    }
+
+    class Driver {
+        -id
+        -name
+        -location
+        -vehicle
+        -available: bool
+        -rating
+    }
+
+    RideSharingSystem --> Ride : creates / orchestrates
+    VehicleFactory ..> Vehicle : creates
+    Vehicle <|-- EconomyVehicle
+    Vehicle <|-- PremiumVehicle
+    Vehicle <|-- XLVehicle
+
+    Ride o-- FareStrategy : fareStrategy
+    FareStrategy <|.. StandardFareStrategy
+    FareStrategy <|.. SurgePricingFareStrategy
+    FareStrategy <|.. PremiumFareStrategy
+
+    Ride --> RideState : state
+    Ride "1" --> "*" RideObserver : notifies
+    RideObserver <|.. RiderNotifier
+    RideObserver <|.. DriverNotifier
+    RideObserver <|.. DispatchDashboard
+
+    Ride --> Rider : rider
+    Ride --> Driver : driver
+    Ride --> Vehicle : vehicle
 ```
 
 ---
@@ -134,14 +192,22 @@ Design a ride-sharing system (Uber/Lyft-style) that supports:
 
 **How**: `RideState` enum defines the six states and a `canTransitionTo(RideState)` method encoding the legal-transition table. `Ride.requestTransition(newState)` checks `canTransitionTo` before mutating state; an illegal request throws `IllegalStateException` with the current and attempted states named.
 
-```
-Legal transitions:
-  REQUESTED      -> ACCEPTED, CANCELLED
-  ACCEPTED       -> DRIVER_ARRIVED, CANCELLED
-  DRIVER_ARRIVED -> IN_PROGRESS, CANCELLED
-  IN_PROGRESS    -> COMPLETED
-  COMPLETED      -> (terminal — no transitions out)
-  CANCELLED      -> (terminal — no transitions out)
+Legal transitions enforced by `RideState.canTransitionTo()` — both `COMPLETED` and `CANCELLED` are terminal, matching the illegal `CANCELLED -> ACCEPTED` jump rejected in the Sample Output below.
+
+```mermaid
+stateDiagram-v2
+    [*] --> REQUESTED
+
+    REQUESTED --> ACCEPTED: acceptRide
+    REQUESTED --> CANCELLED: cancelRide
+    ACCEPTED --> DRIVER_ARRIVED: arriveAtPickup
+    ACCEPTED --> CANCELLED: cancelRide
+    DRIVER_ARRIVED --> IN_PROGRESS: startRide
+    DRIVER_ARRIVED --> CANCELLED: cancelRide
+    IN_PROGRESS --> COMPLETED: completeRide
+
+    COMPLETED --> [*]
+    CANCELLED --> [*]
 ```
 
 ---
@@ -161,48 +227,48 @@ Legal transitions:
 
 ## State / Flow
 
-```
-Rider calls requestRide(rider, pickup, dropoff, vehicleType)
-      |
-      v
- findNearestDriver(pickup, vehicleType)   <-- linear scan (geo-index in production)
-      |
-      +--[no driver available]--> return null, print "No drivers available"
-      |
-      +--[driver found]
-            |
-            v
-   new Ride(rider, driver, vehicle, pickup, dropoff, fareStrategy)
-   state = REQUESTED
-            |
-            v
-   register observers: RiderNotifier, DriverNotifier, DispatchDashboard
-            |
-            v
-   driver.setAvailable(false)
-            |
-            v
- ===== acceptRide(ride) =====
-   REQUESTED -> ACCEPTED        --> notifyObservers()
-            |
-            v
- ===== arriveAtPickup(ride) =====
-   ACCEPTED -> DRIVER_ARRIVED   --> notifyObservers()
-            |
-            v
- ===== startRide(ride) =====
-   DRIVER_ARRIVED -> IN_PROGRESS --> notifyObservers()
-            |
-            v
- ===== completeRide(ride, distanceKm, durationMin) =====
-   IN_PROGRESS -> COMPLETED
-            |
-            +--> fare = fareStrategy.calculateFare(distanceKm, durationMin, vehicleType)
-            +--> driver.setAvailable(true)
-            +--> notifyObservers()
-            |
-            v
-   rider rates driver --> driver.addRating(stars)
+One full ride end to end: `RideSharingSystem` matches a driver, then every lifecycle call (`acceptRide`, `arriveAtPickup`, `startRide`, `completeRide`) transitions `Ride`'s state and fans the change out to all registered `RideObserver`s before the rider rates the driver.
+
+```mermaid
+sequenceDiagram
+    participant Rd as Rider
+    participant Sys as RideSharingSystem
+    participant R as Ride
+    participant Dr as Driver
+    participant Obs as Observers
+
+    Rd->>Sys: requestRide(pickup, dropoff, vehicleType)
+    Sys->>Sys: findNearestDriver (linear scan)
+
+    alt no driver available
+        Sys-->>Rd: null (no drivers available)
+    else driver found
+        Sys->>R: new Ride(rider, driver, vehicle, fareStrategy)
+        Note over R: state = REQUESTED
+        Sys->>R: addObserver(RiderNotifier, DriverNotifier, DispatchDashboard)
+        Sys->>Dr: setAvailable(false)
+
+        Rd->>Sys: acceptRide(ride)
+        Sys->>R: requestTransition(ACCEPTED)
+        R->>Obs: notifyObservers()
+
+        Rd->>Sys: arriveAtPickup(ride)
+        Sys->>R: requestTransition(DRIVER_ARRIVED)
+        R->>Obs: notifyObservers()
+
+        Rd->>Sys: startRide(ride)
+        Sys->>R: requestTransition(IN_PROGRESS)
+        R->>Obs: notifyObservers()
+
+        Rd->>Sys: completeRide(ride, distanceKm, durationMin)
+        Sys->>R: requestTransition(COMPLETED)
+        R->>R: fare = fareStrategy.calculateFare(...)
+        Sys->>Dr: setAvailable(true)
+        R->>Obs: notifyObservers()
+
+        Rd->>Dr: rate(stars)
+        Dr->>Dr: addRating(stars)
+    end
 ```
 
 ---

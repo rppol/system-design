@@ -24,37 +24,112 @@ Design a movie ticket booking system that handles:
 
 ## Class Diagram
 
-```
-Movie (built via Builder)           Show (built via Builder)
-  + movieId, title, duration          + showId
-  + genre, rating, language           + movie: Movie
-  + imdbScore                         + theater, screen
-  + Movie.Builder                     + startTime: LocalDateTime
-      required: movieId, title,       + seats: List<Seat>
-               duration               + isPeakHour: boolean
-                                      + Show.Builder
+```mermaid
+classDiagram
+    class Movie {
+        -movieId String
+        -title String
+        -duration int
+        -genre Genre
+        -rating String
+        -language String
+        -imdbScore double
+    }
 
-Seat                                Booking
-  + seatId, row, number               + bookingId, userId
-  + type: SeatType                    + show: Show
-  + basePrice: double                 + seats: List<Seat>
-  + reserved: boolean                 + totalAmount: double
-                                      + pricingStrategy
-<<interface>>                         + status: BookingStatus
-PricingStrategy
-  + calculatePrice(seat, show): double
-        △
-  ┌─────┴──────────────────────────────────┐
-RegularPricing  PeakHourPricing  MemberDiscount  ChildPricing  GroupPricing
+    class MovieBuilder {
+        <<Builder>>
+        +Builder(movieId, title, duration)
+        +genre(genre) Builder
+        +imdbScore(score) Builder
+        +build() Movie
+    }
+    note for MovieBuilder "Movie.Builder — required: movieId, title, duration"
 
-<<interface>>                       BookingService
-BookingObserver                       + addShow(show)
-  + onBookingConfirmed(booking)       + searchShows(title, date)
-  + onBookingCancelled(booking)       + selectAndBook(userId, showId, seatIds, strategy)
-        △                             + cancelBooking(bookingId)
-  ┌─────┴──────────────────┐
-EmailService  SMSService  LoyaltyPointsService
+    class Show {
+        -showId String
+        -movie Movie
+        -theater String
+        -screen String
+        -startTime LocalDateTime
+        -seats List~Seat~
+        -isPeakHour boolean
+    }
+
+    class ShowBuilder {
+        <<Builder>>
+        +Builder(showId, movie, theater, screen, startTime)
+        +withDefaultSeating(rows, seatsPerRow) Builder
+        +build() Show
+    }
+    note for ShowBuilder "Show.Builder — nested static builder"
+
+    class Seat {
+        -seatId String
+        -row int
+        -number int
+        -type SeatType
+        -basePrice double
+        -reserved boolean
+    }
+
+    class Booking {
+        -bookingId String
+        -userId String
+        -show Show
+        -seats List~Seat~
+        -totalAmount double
+        -pricingStrategy PricingStrategy
+        -status BookingStatus
+    }
+
+    class PricingStrategy {
+        <<interface>>
+        +calculatePrice(seat, show) double
+    }
+    class RegularPricing
+    class PeakHourPricing
+    class MemberDiscount
+    class ChildPricing
+    class GroupPricing
+
+    class BookingObserver {
+        <<interface>>
+        +onBookingConfirmed(booking)
+        +onBookingCancelled(booking)
+    }
+    class EmailService
+    class SMSService
+    class LoyaltyPointsService
+
+    class BookingService {
+        +addShow(show)
+        +searchShows(title, date)
+        +selectAndBook(userId, showId, seatIds, strategy)
+        +cancelBooking(bookingId)
+    }
+
+    MovieBuilder ..> Movie : builds
+    ShowBuilder ..> Show : builds
+    Show "*" --> "1" Movie : movie
+    Show "1" *-- "*" Seat : seats
+    Booking "*" --> "1" Show : show
+    Booking "1" o-- "*" Seat : books
+    Booking "*" --> "1" PricingStrategy : pricingStrategy
+    PricingStrategy <|.. RegularPricing
+    PricingStrategy <|.. PeakHourPricing
+    PricingStrategy <|.. MemberDiscount
+    PricingStrategy <|.. ChildPricing
+    PricingStrategy <|.. GroupPricing
+    BookingObserver <|.. EmailService
+    BookingObserver <|.. SMSService
+    BookingObserver <|.. LoyaltyPointsService
+    BookingService "1" --> "*" Show : manages
+    BookingService "1" --> "*" BookingObserver : notifies
+    BookingService ..> PricingStrategy : uses
+    BookingService ..> Booking : creates
 ```
+
+Movie/Show are assembled via nested Builders (required fields enforced in the constructor, optional fields via fluent setters); `PricingStrategy` and `BookingObserver` are the two interfaces realized by five pricing algorithms and three notification channels respectively — swapping either in requires zero changes to `BookingService`.
 
 ---
 
@@ -99,10 +174,16 @@ service.selectAndBook(userId, showId, seatIds, strategy);
 
 ### Observer — Notifications
 
-```
-BookingService ──onBookingConfirmed──► EmailNotificationService
-               ──onBookingConfirmed──► SMSNotificationService
-               ──onBookingConfirmed──► LoyaltyPointsService
+```mermaid
+sequenceDiagram
+    participant BS as BookingService
+    participant Email as EmailNotificationService
+    participant SMS as SMSNotificationService
+    participant Loyalty as LoyaltyPointsService
+
+    BS->>Email: onBookingConfirmed(booking)
+    BS->>SMS: onBookingConfirmed(booking)
+    BS->>Loyalty: onBookingConfirmed(booking)
 ```
 
 Adding a new channel (push notification, WhatsApp) = add one class + register it. No changes to `BookingService`.
@@ -114,12 +195,25 @@ Adding a new channel (push notification, WhatsApp) = add one class + register it
 The hardest problem in booking systems is concurrent seat selection.
 
 ### The Race Condition:
+```mermaid
+sequenceDiagram
+    participant UserA as User A
+    participant UserB as User B
+    participant DB as Seat A1 (DB)
+
+    UserA->>DB: read seat A1 status
+    DB-->>UserA: available
+    UserB->>DB: read seat A1 status
+    DB-->>UserB: available
+    Note over UserA,UserB: same moment — both think it's free
+    UserA->>DB: book seat A1
+    DB-->>UserA: confirmed
+    UserB->>DB: book seat A1
+    DB-->>UserB: confirmed
+    Note over DB: DOUBLE BOOKING — two confirmations for one seat
 ```
-User A reads: seat A1 is available  ←──┐
-User B reads: seat A1 is available  ←──┘ (same moment)
-User A books seat A1 ✓
-User B books seat A1 ✓  ← DOUBLE BOOKING!
-```
+
+Both reads land in the same race window before either write commits, so both bookings appear to succeed — this is exactly why the fix below needs an atomic check-and-set instead of a read-then-write.
 
 ### Solutions:
 
@@ -129,6 +223,23 @@ UPDATE seats SET reserved = true, version = version + 1
 WHERE seat_id = 'A1' AND reserved = false AND version = :expectedVersion
 -- If 0 rows updated → someone else got it first → retry
 ```
+
+This resolves the exact UserA/UserB race shown above: both transactions read the same `version`, but only the first `UPDATE` to commit advances it — the second's `WHERE version = :expectedVersion` then matches zero rows instead of silently overwriting.
+
+```mermaid
+sequenceDiagram
+    participant UserA as User A
+    participant UserB as User B
+    participant DB as seats table
+
+    UserA->>DB: UPDATE ... WHERE seat_id='A1' AND version=5
+    DB-->>UserA: 1 row updated, version to 6
+    UserB->>DB: UPDATE ... WHERE seat_id='A1' AND version=5
+    DB-->>UserB: 0 rows updated, version already 6
+    Note over UserB: stale version — retry with version=6
+```
+
+UserB's compare-and-set fails cleanly instead of double-booking; the retry re-reads the seat at `version = 6` and, if it is now reserved, surfaces `SeatAlreadyTakenException` to the caller.
 
 **2. Pessimistic Locking**
 ```sql
@@ -156,19 +267,29 @@ The current implementation uses in-memory synchronization suitable for single-in
 
 ## Pricing Calculation Flow
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["User selects seats<br/>A1 STANDARD $10, C1 PREMIUM $15"]) --> B["PricingStrategy.calculatePrice(seat, show)<br/>for each seat"]
+    B --> C["PeakHourPricing applies<br/>9 PM show, isPeakHour = true"]
+    C --> D["A1: $10 × 1.5 = $15.00"]
+    C --> E["C1: $15 × 1.5 = $22.50"]
+    D --> F(["Total = $37.50"])
+    E --> F
+
+    class A,F io
+    class B,C mathOp
+    class D,E train
 ```
-User selects seats [A1 (STANDARD $10), C1 (PREMIUM $15)]
-         │
-         ▼
-PricingStrategy.calculatePrice(seat, show) for each seat
-         │
-         ▼ (PeakHourPricing, 9 PM show → isPeakHour = true)
-A1: $10 × 1.5 = $15.00
-C1: $15 × 1.5 = $22.50
-         │
-         ▼
-Total = $37.50
-```
+
+Each seat's `calculatePrice` runs independently through the same `PeakHourPricing` strategy (9 PM show triggers the 1.5× multiplier), then the per-seat results sum to the booking's `totalAmount`.
 
 ---
 

@@ -66,45 +66,67 @@ This decouples the sender from receivers — the sender only knows about the fir
 
 ## 5. UML Structure
 
-```
-          Client
-            |
-            v
-    +----------------+
-    |    Handler     |  <<interface>>
-    +----------------+
-    | + setNext()    |
-    | + handle()     |
-    +----------------+
-            ^
-            |
-   +--------+--------+
-   |                 |
-+----------+   +----------+
-|ConcreteH1|   |ConcreteH2|
-+----------+   +----------+
-| -next    |-->| -next    |--> ... --> null
-| +handle()|   | +handle()|
-+----------+   +----------+
+```mermaid
+classDiagram
+    direction LR
 
-Abstract base:
-+---------------------+
-| AbstractHandler     |
-+---------------------+
-| - next: Handler     |
-+---------------------+
-| + setNext(h):Handler|
-| + handle(req): void |  // calls next.handle(req) by default
-+---------------------+
+    class Client
+
+    class Handler {
+        <<interface>>
+        +setNext(next) Handler
+        +handle(request) void
+    }
+
+    class AbstractHandler {
+        <<abstract>>
+        -next Handler
+        +setNext(h) Handler
+        +handle(req) void
+    }
+
+    class ConcreteHandler1 {
+        +handle(req) void
+    }
+    class ConcreteHandler2 {
+        +handle(req) void
+    }
+
+    Client --> Handler : submits request to first handler
+    Handler <|.. AbstractHandler : implements
+    AbstractHandler <|-- ConcreteHandler1 : extends
+    AbstractHandler <|-- ConcreteHandler2 : extends
+    AbstractHandler "1" --> "0..1" Handler : next
 ```
+
+*`AbstractHandler` supplies the default forwarding logic (`handle()` calls `next` unless a subclass short-circuits), so `ConcreteHandler1`/`ConcreteHandler2` only implement their own check-and-act step — the shared `next` reference (typed `Handler`) is what links arbitrary instances into a chain at runtime via `setNext()`.*
 
 **Request flow:**
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C([Client]) --> H1{"Handler1<br/>process?"}
+    H1 -- yes --> D1(["handled"])
+    H1 -- no --> H2{"Handler2<br/>process?"}
+    H2 -- yes --> D2(["handled"])
+    H2 -- no --> H3{"Handler3<br/>process?"}
+    H3 -- yes --> D3(["handled"])
+    H3 -- no --> E(["end of chain<br/>(unhandled)"])
+
+    class C io
+    class H1,H2,H3 mathOp
+    class D1,D2,D3 train
+    class E lossN
 ```
-Client --> Handler1 --> Handler2 --> Handler3 --> (end of chain)
-              |              |              |
-           process?       process?       process?
-            yes/no         yes/no         yes/no
-```
+
+*Each handler is asked in turn whether it can process the request; a "no" forwards to the next link, and falling off the end without a catch-all handler is exactly the "no fallback" pitfall described in Section 13.*
 
 ---
 
@@ -121,9 +143,68 @@ Client --> Handler1 --> Handler2 --> Handler3 --> (end of chain)
 5. **Client sends a request** to the first handler (`h1.handle(request)`).
 6. The request travels down the chain until a handler processes it or the chain ends.
 
+The class diagram in Section 5 shows the static shape, but not the runtime call sequence implied by steps 4-6 — `h1.setNext(h2).setNext(h3)` followed by `h1.handle(request)`:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant h1 as h1 : Handler
+    participant h2 as h2 : Handler
+    participant h3 as h3 : Handler
+
+    Client->>h1: handle(request)
+    activate h1
+    h1->>h1: canHandle(request)?
+    Note over h1: no match, forward
+    h1->>h2: next.handle(request)
+    activate h2
+    h2->>h2: canHandle(request)?
+    Note over h2: no match, forward
+    h2->>h3: next.handle(request)
+    activate h3
+    h3->>h3: canHandle(request)?
+    Note over h3: match, process and stop
+    h3-->>h2: return
+    deactivate h3
+    h2-->>h1: return
+    deactivate h2
+    h1-->>Client: return
+    deactivate h1
+```
+
+*Client only ever calls `h1`; each handler decides locally whether to act or forward. `h3` is the one that matches and stops the chain, but because `handle()` is a plain synchronous call, control still unwinds back through `h2` and `h1` — nothing downstream of `h3` is ever invoked, but everything upstream of it still returns.*
+
 **Two variants:**
 - **Pure CoR:** Only one handler processes the request (like event bubbling in DOM).
 - **Impure CoR:** Multiple handlers can process the same request (like servlet filters — each one runs).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph PURE["Pure CoR - DOM event bubbling"]
+        direction LR
+        P1([request]) --> P2("h1<br/>can't handle, forwards") --> P3("h2<br/>handles it, chain stops")
+    end
+
+    subgraph IMPURE["Impure CoR - servlet filters"]
+        direction LR
+        I1([request]) --> I2("h1<br/>runs, forwards") --> I3("h2<br/>runs, forwards") --> I4("h3<br/>runs, forwards")
+    end
+
+    class P1,I1 io
+    class P2 req
+    class P3 train
+    class I2,I3,I4 base
+```
+
+*In pure CoR the chain halts the instant a handler processes the request (a configured `h3` would simply never be invoked); in impure CoR every handler runs and forwards regardless of outcome — this is why servlet `FilterChain` and Spring `HandlerInterceptor` are impure CoR (see the Interview Tips Q&A below).*
 
 ---
 
@@ -233,29 +314,63 @@ Client --> Handler1 --> Handler2 --> Handler3 --> (end of chain)
 
 The canonical Java Chain of Responsibility in production is Spring Security's `FilterChainProxy`, which threads every HTTP request through 15+ filters in a strictly-ordered pipeline. A typical chain:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    REQ([HTTP Request]) --> F1
+
+    subgraph SGA["Context and Headers (1-4)"]
+        direction LR
+        F1("1 WebAsyncManager<br/>Integration") --> F2("2 SecurityContext<br/>Persistence")
+        F2 --> F3("3 HeaderWriter<br/>(X-Frame, HSTS)")
+        F3 --> F4("4 CorsFilter")
+    end
+
+    subgraph SGB["CSRF / Logout (5-6)"]
+        direction LR
+        F5("5 CsrfFilter") --> F6("6 LogoutFilter")
+    end
+
+    subgraph SGC["Authentication (7-9)"]
+        direction LR
+        F7("7 UsernamePassword<br/>(form login)") --> F8("8 BasicAuthentication")
+        F8 --> F9("9 BearerToken<br/>(JWT)")
+    end
+
+    subgraph SGD["Post-Auth Context (10-13)"]
+        direction LR
+        F10("10 RequestCacheAware") --> F11("11 SecurityContextHolder<br/>AwareRequest")
+        F11 --> F12("12 Anonymous<br/>Authentication")
+        F12 --> F13("13 SessionManagement")
+    end
+
+    subgraph SGE["Authorization Decision (14-15)"]
+        direction LR
+        F14("14 ExceptionTranslation<br/>(AccessDenied to 403)") --> F15("15 FilterSecurityInterceptor<br/>final authz decision")
+    end
+
+    F4 --> F5
+    F6 --> F7
+    F9 --> F10
+    F13 --> F14
+    F15 --> CTRL(["@Controller method"])
+
+    class REQ,CTRL io
+    class F1,F2,F3,F4 base
+    class F5,F6 req
+    class F7,F8,F9 mathOp
+    class F10,F11,F12,F13 train
+    class F14,F15 lossN
 ```
-HTTP Request
-   |
-   v
-[1] WebAsyncManagerIntegrationFilter
-[2] SecurityContextPersistenceFilter      <-- loads SecurityContext from session
-[3] HeaderWriterFilter                    <-- adds X-Frame-Options, HSTS
-[4] CorsFilter
-[5] CsrfFilter
-[6] LogoutFilter
-[7] UsernamePasswordAuthenticationFilter  <-- form login
-[8] BasicAuthenticationFilter             <-- Authorization: Basic ...
-[9] BearerTokenAuthenticationFilter       <-- Authorization: Bearer <jwt>
-[10] RequestCacheAwareFilter
-[11] SecurityContextHolderAwareRequestFilter
-[12] AnonymousAuthenticationFilter        <-- fills in anonymous user if none
-[13] SessionManagementFilter
-[14] ExceptionTranslationFilter           <-- catches AccessDeniedException -> 403
-[15] FilterSecurityInterceptor / AuthorizationFilter  <-- final authz decision
-   |
-   v
-@Controller method
-```
+
+*Every filter only knows about forwarding to the next link (or short-circuiting by writing a response directly) — the strict left-to-right order shown here is a security invariant, not an implementation detail (see the reordering anti-pattern below).*
 
 Observed numbers at 50k req/sec on a 16-vCPU JVM cluster:
 - Full 15-filter traversal overhead: **< 2 ms p99** (most filters are no-ops on cache hit).

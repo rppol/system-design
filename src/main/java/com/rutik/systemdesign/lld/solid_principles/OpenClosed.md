@@ -143,6 +143,38 @@ public class AreaCalculator {
 
 Now adding `Hexagon`, `Pentagon`, or any future shape means writing a new class only. `AreaCalculator` and the existing shapes are never touched. Their tests never break.
 
+The class diagram below makes the OCP mechanism visible: `Shape` is the stable abstraction — the single "open" extension point — while `Circle`, `Rectangle`, and `Triangle` are interchangeable, unboundedly-growable implementations. `AreaCalculator` depends only on `Shape`, never on any concrete shape, so it is "closed" — it never needs to change again.
+
+```mermaid
+classDiagram
+    direction LR
+    class Shape {
+        <<interface>>
+        +calculateArea() double
+    }
+    class Circle {
+        -radius double
+        +calculateArea() double
+    }
+    class Rectangle {
+        -width double
+        -height double
+        +calculateArea() double
+    }
+    class Triangle {
+        -base double
+        -height double
+        +calculateArea() double
+    }
+    class AreaCalculator {
+        +calculateTotalArea(shapes List~Shape~) double
+    }
+    Shape <|.. Circle
+    Shape <|.. Rectangle
+    Shape <|.. Triangle
+    AreaCalculator "1" --> "*" Shape : sums area of
+```
+
 ---
 
 ## A More Enterprise-Level Example: Payment Processing
@@ -294,6 +326,34 @@ public class PaymentProcessor {
 - **Simple scripts and utilities:** A CLI tool that formats three output types does not need a `Formatter` interface hierarchy.
 - **Configuration-driven variation:** Sometimes a data-driven approach (strategy map or configuration) is cleaner than class hierarchies.
 - **Sealed class hierarchies (Java 17+):** When you intentionally want an exhaustive set of types (sum types), sealed classes + pattern matching are more appropriate than open extension hierarchies.
+
+The four bullets above collapse into one decision path: check for recurrence (YAGNI) first, then whether the type set is meant to be closed (sealed classes), then whether the variation is simpler as data than as code (configuration-driven) — only what's left over earns a full OCP abstraction.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["New variant of<br/>behavior needed"]) --> B{"Seen this variation<br/>at least twice?"}
+    B -- No --> C("Write plain if-else<br/>YAGNI")
+    B -- Yes --> D{"Is the set of types<br/>fixed by design?"}
+    D -- Yes --> E("Sealed classes +<br/>pattern matching")
+    D -- No --> F{"Simpler as data<br/>than as classes?"}
+    F -- Yes --> G("Configuration-driven<br/>strategy map")
+    F -- No --> H(["Extract stable interface:<br/>true OCP"])
+
+    class A io
+    class B,D,F mathOp
+    class C base
+    class E frozen
+    class G req
+    class H train
+```
 
 ---
 

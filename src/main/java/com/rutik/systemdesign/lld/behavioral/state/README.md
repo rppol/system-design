@@ -72,25 +72,40 @@ Each concrete state class contains:
 
 ## 5. UML Structure
 
-```
-+------------------+          has a          +------------------+
-|    Context       |----------------------->|  <<interface>>   |
-|------------------|                         |     State        |
-| -state: State    |                         |------------------|
-|------------------|      delegates to       | +insertCoin()    |
-| +request()       |------------------------>| +selectProduct() |
-| +setState(s)     |                         | +dispense()      |
-+------------------+                         +------------------+
-                                                      ^
-                                      +---------------+-------------+
-                                      |               |             |
-                               +-----------+   +-----------+  +-----------+
-                               | IdleState |   |HasMoney   |  |OutOfStock |
-                               |-----------|   |State      |  |State      |
-                               |+insertCoin|   |-----------|  |-----------|
-                               |+select()  |   |+insertCoin|  |+insertCoin|
-                               |+dispense()|   |+select()  |  |+select()  |
-                               +-----------+   +-----------+  +-----------+
+```mermaid
+classDiagram
+    direction LR
+    class Context {
+        -state State
+        +request()
+        +setState(s)
+    }
+    class State {
+        <<interface>>
+        +insertCoin()
+        +selectProduct()
+        +dispense()
+    }
+    class IdleState {
+        +insertCoin()
+        +selectProduct()
+        +dispense()
+    }
+    class HasMoneyState {
+        +insertCoin()
+        +selectProduct()
+        +dispense()
+    }
+    class OutOfStockState {
+        +insertCoin()
+        +selectProduct()
+        +dispense()
+    }
+
+    Context --> State : delegates to
+    State <|.. IdleState : implements
+    State <|.. HasMoneyState : implements
+    State <|.. OutOfStockState : implements
 ```
 
 **Key structural insight:** The Context is the stable public interface. Clients interact only with the Context, never with concrete State classes. State transitions are triggered either by the Context (centralized) or by the State classes themselves (distributed).
@@ -106,6 +121,31 @@ Each concrete state class contains:
 5. **Context now points to new State** — subsequent calls delegate to `HasMoneyState`.
 6. **State machine progresses** — each operation either stays in state or transitions to another.
 7. **Client is unaware of state changes** — it only sees the Context's public interface.
+
+**Runtime collaboration for one transition (steps 2-5 above):**
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant VM as VendingMachine<br/>(Context)
+    participant Idle as IdleState
+    participant HasMoney as HasMoneyState
+
+    Client->>VM: new VendingMachine()
+    VM->>Idle: state = new IdleState(this)
+
+    Client->>VM: insertCoin(1.00)
+    VM->>Idle: insertCoin(1.00)
+    Idle->>Idle: accept coin, add to balance
+    Idle->>VM: setState(new HasMoneyState(this))
+    Note over VM: state now points to HasMoneyState
+
+    Client->>VM: selectProduct()
+    VM->>HasMoney: selectProduct()
+    Note over Client,VM: Client only ever calls Context —<br/>it never sees the State swap
+```
+
+The Client only ever talks to `VendingMachine`; `IdleState` is the object that decides the next state and swaps itself out via `setState()` — the Context's reference now resolves every subsequent call to `HasMoneyState` instead.
 
 ---
 
@@ -218,22 +258,32 @@ one new class and one line in the transition registry — zero changes to existi
 - Adding new state (PARTIAL_REFUND): 1 new class, 1 test file, 0 existing class changes
 - Before State pattern: 1,200-line OrderService; After: 8 state classes x ~80 lines each
 
-```
-Order Lifecycle State Machine
-==============================
+```mermaid
+stateDiagram-v2
+    [*] --> CREATED
+    CREATED --> PAYMENT_PENDING : pay()
+    PAYMENT_PENDING --> PAID : pay()
+    PAID --> FULFILLING : ship()
+    FULFILLING --> SHIPPED : ship()
+    SHIPPED --> DELIVERED : deliver()
 
-  CREATED -----> PAYMENT_PENDING -----> PAID -----> FULFILLING -----> SHIPPED -----> DELIVERED
-     |                 |                 |                                               |
-     v                 v                 v                                               v
- CANCELLED         CANCELLED         CANCELLED                                       REFUNDED
-                                         |
-                                         v
-                                    PARTIAL_REFUND (new 2022 — 1 class, 0 existing changes)
+    CREATED --> CANCELLED : cancel()
+    PAYMENT_PENDING --> CANCELLED : cancel()
+    PAID --> CANCELLED : cancel()
+    CANCELLED --> PARTIAL_REFUND : partial refund issued
+    DELIVERED --> REFUNDED : refund()
 
-  Context: Order (holds reference to current OrderState)
-  State:   each enum value IS a class (or a separate class in full State pattern)
-  Guard:   each state's cancel()/pay()/ship() either transitions or throws
+    CANCELLED --> [*]
+    PARTIAL_REFUND --> [*]
+    REFUNDED --> [*]
+
+    note right of PARTIAL_REFUND
+        Added 2022: 1 new class,
+        0 changes to existing states
+    end note
 ```
+
+Context = `Order` (holds a reference to the current `OrderState`); each state is a class — here, a singleton enum constant — whose `pay()/ship()/cancel()/refund()` either transitions or throws. `CANCELLED` merges the three cancel paths from `CREATED`, `PAYMENT_PENDING`, and `PAID`; `PARTIAL_REFUND` was added in 2022 as one new class with zero changes to the existing six.
 
 ```java
 // Java 17 LTS — Order state machine with explicit guard enforcement
@@ -482,6 +532,32 @@ public enum OrderStates implements OrderState {
 - Business users need to configure transitions at runtime (BPMN editor) without code changes.
 - The state machine spans multiple microservices (sagas) — Spring State Machine with Redis
   persister or Camunda with a process engine is more appropriate than in-process State objects.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["Status field driving<br/>if-else / switch logic"]) --> Q1{"Over ~150 lines, or a new<br/>state touches 3+ methods?"}
+    Q1 -->|"No"| KEEP(["Keep the if-else —<br/>pattern not justified yet"])
+    Q1 -->|"Yes"| REFACTOR(["Refactor to<br/>State pattern"])
+    REFACTOR --> Q2{"Needs persisted audit trail,<br/>runtime-configurable transitions,<br/>or a multi-service saga?"}
+    Q2 -->|"No"| INPROC(["In-process State<br/>(enum or class hierarchy)"])
+    Q2 -->|"Yes"| FRAMEWORK(["Spring State Machine<br/>or Camunda"])
+
+    class START io
+    class Q1,Q2 mathOp
+    class KEEP,INPROC train
+    class REFACTOR req
+    class FRAMEWORK frozen
+```
+
+*Same decision the two bullet lists above make explicit: refactor only once the conditional is genuinely unmanageable, then pick in-process State vs. a framework based on persistence, configurability, and cross-service scope.*
 
 ---
 

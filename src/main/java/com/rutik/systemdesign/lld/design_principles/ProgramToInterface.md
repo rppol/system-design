@@ -89,6 +89,28 @@ public class OrderService {
 - Cannot add a `SlackNotificationService` alongside email without modifying `OrderService`.
 - `OrderService` depends on the concrete construction details of its collaborators.
 
+**The resulting class structure — tightly coupled, nothing to substitute:**
+
+```mermaid
+classDiagram
+    class OrderService {
+        -notificationService EmailNotificationService
+        -repository MySQLOrderRepository
+        +placeOrder(order Order)
+    }
+    class EmailNotificationService {
+        +sendConfirmation(order Order)
+    }
+    class MySQLOrderRepository {
+        +save(order Order)
+    }
+
+    OrderService --> EmailNotificationService : constructs and holds
+    OrderService --> MySQLOrderRepository : constructs and holds
+```
+
+There is no interface layer — `OrderService` is wired straight to `EmailNotificationService` and `MySQLOrderRepository`, so swapping in `PostgreSQLOrderRepository` or adding `SlackNotificationService` means editing `OrderService` itself.
+
 ---
 
 ## Compliant Example: Dependency Injection + Interfaces
@@ -190,6 +212,55 @@ public class CompositeNotificationService implements NotificationService {
 }
 // OrderService: unchanged
 ```
+
+**The resulting class structure — one interface, many interchangeable collaborators:**
+
+```mermaid
+classDiagram
+    class OrderService {
+        -notificationService NotificationService
+        -repository OrderRepository
+        +placeOrder(order Order)
+    }
+    class NotificationService {
+        <<interface>>
+        +sendConfirmation(order Order)
+    }
+    class OrderRepository {
+        <<interface>>
+        +save(order Order)
+        +findById(id String) Order
+    }
+    class EmailNotificationService {
+        +sendConfirmation(order Order)
+    }
+    class SlackNotificationService {
+        +sendConfirmation(order Order)
+    }
+    class CompositeNotificationService {
+        -services List~NotificationService~
+        +sendConfirmation(order Order)
+    }
+    class MySQLOrderRepository {
+        +save(order Order)
+        +findById(id String) Order
+    }
+    class PostgreSQLOrderRepository {
+        +save(order Order)
+        +findById(id String) Order
+    }
+
+    OrderService --> NotificationService : depends on
+    OrderService --> OrderRepository : depends on
+    NotificationService <|.. EmailNotificationService
+    NotificationService <|.. SlackNotificationService
+    NotificationService <|.. CompositeNotificationService
+    CompositeNotificationService "1" o-- "*" NotificationService : fans out to
+    OrderRepository <|.. MySQLOrderRepository
+    OrderRepository <|.. PostgreSQLOrderRepository
+```
+
+`OrderService` now couples only to `NotificationService` and `OrderRepository`. Every concrete class shown here — including `SlackNotificationService`, `CompositeNotificationService`, and `PostgreSQLOrderRepository`, all introduced above without touching `OrderService` — satisfies one of the two contracts.
 
 ---
 

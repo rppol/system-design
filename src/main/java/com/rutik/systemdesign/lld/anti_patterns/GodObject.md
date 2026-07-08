@@ -139,6 +139,39 @@ public class UserManager {
 
 This single class is responsible for authentication, session management, registration, profile management, password management, payments, notifications, and admin operations. It has 8 dependencies injected directly.
 
+The class diagram below makes the hub-and-spoke shape concrete: one `UserManager` wired directly to every collaborator it needs, carrying auth, registration, profile, password, payment, and admin logic as its own methods.
+
+```mermaid
+classDiagram
+    direction LR
+    class UserManager {
+        -Database database
+        -EmailService emailService
+        -AuditLogger auditLogger
+        -PasswordEncoder passwordEncoder
+        -SessionStore sessionStore
+        -PaymentGateway paymentGateway
+        -NotificationService notificationService
+        +login(email, password) User
+        +logout(sessionToken)
+        +register(email, password, name) User
+        +updateProfile(userId, name, bio)
+        +changePassword(userId, oldPw, newPw)
+        +resetPassword(email)
+        +subscribe(userId, planId)
+        +cancelSubscription(userId)
+        +getAllUsers() List~User~
+        +deactivateUser(userId)
+    }
+    UserManager --> Database : queries
+    UserManager --> EmailService : sends mail
+    UserManager --> AuditLogger : logs
+    UserManager --> PasswordEncoder : hashes
+    UserManager --> SessionStore : tracks
+    UserManager --> PaymentGateway : charges
+    UserManager --> NotificationService : notifies
+```
+
 ---
 
 ## Why It Happens
@@ -242,6 +275,40 @@ public class SubscriptionService {
         notificationService.notify(userId, "Subscription activated");
     }
 }
+```
+
+Same collaborators, redistributed: each service now owns a small, focused slice of the dependency graph instead of all of it, so a payment bug can no longer force a change to authentication code.
+
+```mermaid
+classDiagram
+    direction LR
+    class AuthenticationService {
+        -UserRepository userRepository
+        -PasswordEncoder passwordEncoder
+        -SessionStore sessionStore
+        -AuditLogger auditLogger
+        +login(email, password) String
+        +logout(sessionToken)
+    }
+    class UserRegistrationService {
+        -UserRepository userRepository
+        -PasswordEncoder passwordEncoder
+        -EmailService emailService
+        -AuditLogger auditLogger
+        +register(email, password, name) User
+    }
+    class SubscriptionService {
+        -UserRepository userRepository
+        -PaymentGateway paymentGateway
+        -NotificationService notificationService
+        +subscribe(userId, planId)
+    }
+    AuthenticationService --> SessionStore : tracks
+    AuthenticationService --> UserRepository : reads
+    UserRegistrationService --> EmailService : sends mail
+    UserRegistrationService --> UserRepository : saves
+    SubscriptionService --> PaymentGateway : charges
+    SubscriptionService --> UserRepository : reads
 ```
 
 Each service now:

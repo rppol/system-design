@@ -66,22 +66,38 @@ Extract each algorithm into its own class that implements a common `Strategy` in
 
 ## 5. UML Structure
 
+```mermaid
+classDiagram
+    direction LR
+
+    class Context {
+        -strategy Strategy
+        +setStrategy(s) void
+        +executeStrategy() void
+    }
+
+    class Strategy {
+        <<interface>>
+        +execute(data) void
+    }
+
+    class ConcreteStrategyA {
+        +execute(data) void
+    }
+    class ConcreteStrategyB {
+        +execute(data) void
+    }
+    class ConcreteStrategyC {
+        +execute(data) void
+    }
+
+    Context --> Strategy : delegates to
+    Strategy <|.. ConcreteStrategyA
+    Strategy <|.. ConcreteStrategyB
+    Strategy <|.. ConcreteStrategyC
 ```
-+------------------+         uses          +------------------+
-|    Context       |---------------------->|  <<interface>>   |
-|------------------|                        |     Strategy     |
-| -strategy:       |                        |------------------|
-|   Strategy       |    delegates to        | +execute(data)   |
-|------------------|----------------------->+------------------+
-| +setStrategy(s)  |                                 ^
-| +executeStrategy |              +------------------+------------------+
-+------------------+              |                  |                  |
-                        +------------------+ +------------------+ +------------------+
-                        |ConcreteStrategyA | |ConcreteStrategyB | |ConcreteStrategyC |
-                        |------------------| |------------------| |------------------|
-                        |+execute(data)    | |+execute(data)    | |+execute(data)    |
-                        +------------------+ +------------------+ +------------------+
-```
+
+*Context holds a reference to the `Strategy` interface only — it never sees `ConcreteStrategyA/B/C` directly, which is what lets the client (or a DI container) swap the concrete algorithm without touching `Context`.*
 
 **Key structural insight:** The Context does not know the concrete type of its Strategy. The client code (or a factory/DI container) selects and injects the appropriate Strategy.
 
@@ -95,6 +111,28 @@ Extract each algorithm into its own class that implements a common `Strategy` in
 4. **Context delegates to Strategy** — `strategy.execute(order)` is called inside `processPayment()`.
 5. **Concrete Strategy executes** — `CreditCardStrategy.execute()` runs its specific algorithm.
 6. **Context is agnostic** — Context doesn't care which Strategy is running; it only knows the `Strategy` interface.
+
+**Runtime collaboration:**
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Ctx as processor : PaymentProcessor
+    participant S as strategy : CreditCardStrategy
+
+    C->>Ctx: new PaymentProcessor(new CreditCardStrategy())
+    C->>Ctx: processPayment(order)
+    activate Ctx
+    Ctx->>S: execute(order)
+    activate S
+    Note over S: runs its own algorithm
+    S-->>Ctx: result
+    deactivate S
+    Ctx-->>C: result
+    deactivate Ctx
+```
+
+*The client picks and injects `CreditCardStrategy` before ever calling `processPayment()` (steps 1–2); from that point on, `PaymentProcessor` (step 3) just forwards to whichever `Strategy` it was given (step 4) and never branches on the concrete type (step 6) — swap in `PayPalStrategy` and this diagram is unchanged except for the participant name.*
 
 ---
 
@@ -203,29 +241,31 @@ from 6 hours to 45 minutes; regression scope narrowed to the new strategy module
 - Adding Processor 4: 1 new class, 1 registry entry, 0 changes to existing strategies
 - Before Strategy refactor: 6-hour deploy cycle; After: 45-minute deploy cycle
 
-```
-Payment Gateway — Strategy Routing Architecture
-================================================
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  [ Payment Request ]
-         |
-         v
-  +-------------------+
-  | StrategySelector  |  (currency + country + cardNetwork + availability)
-  | registry: Map<K,  |
-  |   PaymentStrategy>|
-  +-------------------+
-         |
-   selects one of:
-         |
-   +-----+----------+----------+
-   |                |          |
- StripeStrategy  AdyenStrategy  BraintreeStrategy
- (EU/Visa/MC)   (APAC/Amex)    (US/Discover)
-   (stateless)   (stateless)    (stateless)
-         |
-   [ Processor HTTP Call ]  200ms SLA, circuit-breaker gated
+    PR(["Payment Request"]) --> SEL["StrategySelector<br/>registry: currency + country +<br/>cardNetwork + availability"]
+    SEL -->|"selects one of"| STRIPE["StripeStrategy<br/>EU / Visa, MC (stateless)"]
+    SEL -->|"selects one of"| ADYEN["AdyenStrategy<br/>APAC / Amex (stateless)"]
+    SEL -->|"selects one of"| BRAINTREE["BraintreeStrategy<br/>US / Discover (stateless)"]
+    STRIPE --> HTTP(["Processor HTTP Call<br/>200ms SLA, circuit-breaker gated"])
+    ADYEN --> HTTP
+    BRAINTREE --> HTTP
+
+    class PR io
+    class SEL base
+    class STRIPE,ADYEN,BRAINTREE train
+    class HTTP frozen
 ```
+
+*`StrategySelector` is the single registry-backed decision point: currency, country, card network, and live processor availability route each of the ~80 TPS peak requests to exactly one stateless strategy, which then makes the outbound call under the 200ms, circuit-breaker-gated SLA.*
 
 ```java
 // Java 17 LTS — Payment strategy interface and registry

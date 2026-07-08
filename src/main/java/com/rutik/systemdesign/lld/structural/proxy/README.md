@@ -51,31 +51,33 @@ Create a **Proxy** class that implements the same interface as the real object (
 
 ## 5. UML Structure
 
-```
-Client
-  |
-  | uses
-  v
-+-------------------+           (implements same interface)
-|   <<interface>>   |
-|     Subject       |
-|-------------------|
-| + request()       |
-+-------------------+
-        ^                   ^
-        |                   |
-+---------------+   +-----------------------+
-|  RealSubject  |   |        Proxy          |
-|---------------|   |-----------------------|
-| + request()   |   | - realSubject: ref    |
-+---------------+   | - [access state]      |
-        ^            |-----------------------|
-        |            | + request()           |
-        |  creates / holds reference         |
-        +------------------------------------+
+```mermaid
+classDiagram
+    direction TB
+    class Client
 
-Proxy wraps RealSubject and mediates all calls.
+    class Subject {
+        <<interface>>
+        +request()
+    }
+
+    class RealSubject {
+        +request()
+    }
+
+    class Proxy {
+        -realSubject : RealSubject
+        -accessState
+        +request()
+    }
+
+    Client --> Subject : uses
+    Subject <|.. RealSubject
+    Subject <|.. Proxy
+    Proxy --> RealSubject : creates / holds reference
 ```
+
+Client, RealSubject, and Proxy all program to the same `Subject` interface — Proxy realizes it exactly like RealSubject does, but internally holds a reference to (and can lazily create) the RealSubject it wraps, mediating every call before optionally delegating to it.
 
 **Proxy Types Structural Variants:**
 
@@ -99,6 +101,30 @@ Smart Reference: Proxy performs ref-counting, locking, or loading
 4. Proxy calls `realImage.display()` and returns the result.
 5. On subsequent calls to `display()`, `realImage != null`, so the proxy skips creation and delegates directly.
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Proxy as imageProxy : ImageProxy
+    participant Real as realImage : HighResImage
+
+    Note over Client,Real: First call — realImage is null
+    Client->>Proxy: display()
+    Proxy->>Proxy: realImage == null?
+    Proxy->>Real: new HighResImage(filename)
+    Real-->>Proxy: loaded (expensive disk read)
+    Proxy->>Real: display()
+    Real-->>Proxy: rendered
+    Proxy-->>Client: rendered
+
+    Note over Client,Real: Subsequent calls — realImage already set
+    Client->>Proxy: display()
+    Proxy->>Real: display()
+    Real-->>Proxy: rendered
+    Proxy-->>Client: rendered
+```
+
+The first `display()` call pays the creation cost once — the proxy checks `realImage == null`, constructs the real object, then delegates. Every later call finds `realImage` already set and skips straight to delegation, which is the entire lazy-loading mechanic in one picture.
+
 ### Protection Proxy (Access Control)
 1. Client calls `proxy.sensitiveOperation()`.
 2. Proxy checks the caller's role/permissions.
@@ -110,6 +136,36 @@ Smart Reference: Proxy performs ref-counting, locking, or loading
 2. Proxy checks its internal cache for `key`.
 3. Cache hit: return cached result immediately — `realSubject` is never called.
 4. Cache miss: delegate to `realSubject.fetchData(key)`, store result in cache, return.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Proxy
+    participant Real as realSubject
+
+    Note over Client,Real: Protection Proxy — authorization gate
+    Client->>Proxy: sensitiveOperation()
+    alt authorized
+        Proxy->>Real: sensitiveOperation()
+        Real-->>Proxy: result
+        Proxy-->>Client: result
+    else not authorized
+        Proxy-->>Client: throw AccessDeniedException
+    end
+
+    Note over Client,Real: Caching Proxy — short-circuit on a hit
+    Client->>Proxy: fetchData(key)
+    alt cache hit
+        Proxy-->>Client: cached result (realSubject never called)
+    else cache miss
+        Proxy->>Real: fetchData(key)
+        Real-->>Proxy: result
+        Proxy-->>Proxy: store result in cache
+        Proxy-->>Client: result
+    end
+```
+
+The two mechanics are easy to confuse but branch on different things: a Protection Proxy is a gate that can reject a call before `realSubject` is ever touched, while a Caching Proxy is a wrapper that short-circuits on a hit but still delegates (and remembers the result) on a miss.
 
 ---
 
@@ -213,21 +269,22 @@ A typical Spring Boot service runs at ~20k `@Transactional` method invocations/s
 
 In parallel, Hibernate wraps every `@ManyToOne(fetch = LAZY)` association in a `HibernateProxy` (Javassist or ByteBuddy). `order.getCustomer()` returns the proxy immediately; the database is hit only when a field is touched (`customer.getName()`).
 
+```mermaid
+sequenceDiagram
+    participant Caller as caller code
+    participant Proxy as proxy ($$EnhancerByCGLIB)
+    participant Bean as target bean (OrderServiceImpl)
+
+    Caller->>Proxy: ctx.getBean() then service.create(Order req)
+    Note right of Proxy: interceptor chain:<br/>TxInterceptor, CacheInterceptor,<br/>ValidationInterceptor
+    Proxy->>Bean: invoke real createOrder()
+    Bean-->>Proxy: result
+    Proxy-->>Caller: result
+
+    Note over Bean: anti-pattern fix #1 — this.cachedMethod()<br/>called from inside Bean skips the proxy layer entirely (BAD)
 ```
-  caller code                              proxy (CGLIB subclass)               target bean
-  +-----------------+   ctx.getBean()      +-----------------------+              +-----------------+
-  | service.create  |  --------------->    | $$EnhancerByCGLIB     |              | OrderServiceImpl|
-  | Order(req)      |                      |  - delegate           | -----------> |  createOrder()  |
-  +-----------------+                      |  - interceptors:      |  invoke real |   ...           |
-                                           |    TxInterceptor      |              +-----------------+
-                                           |    CacheInterceptor   |
-                                           |    ValidationInterc.  |
-                                           +-----------------------+
-                                                       ^
-                                                       | (anti-pattern fix #1)
-                                                       | self-invocation skips this layer
-                                              this.cachedMethod()  <-- BAD
-```
+
+The caller obtains the CGLIB proxy via `ctx.getBean()`; the proxy runs its interceptor chain (transaction, cache, validation) before invoking the real `OrderServiceImpl` method. A self-invocation like `this.cachedMethod()` from inside the bean never reaches the proxy, so none of those interceptors run — the anti-pattern detailed later in this section.
 
 ```java
 // Custom dynamic Protection Proxy via JDK Proxy

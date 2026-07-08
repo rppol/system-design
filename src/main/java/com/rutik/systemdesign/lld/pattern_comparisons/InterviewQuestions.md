@@ -411,6 +411,31 @@ _These test design decisions, tradeoffs, pattern selection in context, and abili
 - If the switch dispatches operations over a class hierarchy: use the Visitor pattern.
 - Steps: (1) identify each case as a concept; (2) create an interface; (3) move each case to a concrete class; (4) use a Factory to instantiate the right concrete class based on the original switch key; (5) delete the switch.
 
+The branch you take depends entirely on what the switch varies on — worth drawing as an explicit decision tree:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["large switch/if-else<br/>on type"]) --> Q{"what does the<br/>switch vary on?"}
+    Q -->|"object's concrete type"| Poly["Replace Conditional<br/>with Polymorphism"]
+    Q -->|"state transitions"| St["State pattern:<br/>each case becomes<br/>a State class"]
+    Q -->|"algorithm choice"| Str["Strategy pattern:<br/>each case becomes<br/>a Strategy class"]
+    Q -->|"ops over a stable<br/>class hierarchy"| Vis["Visitor pattern:<br/>accept/visit<br/>double dispatch"]
+
+    class Start io
+    class Q mathOp
+    class Poly,St,Str,Vis train
+```
+
+*Same symptom (a type-keyed switch), four different fixes — the correct one depends on what varies, not on the fact that something varies.*
+
 **Follow-up:** What SOLID principle does this refactoring enforce? (Open/Closed Principle and Single Responsibility Principle.)
 
 ---
@@ -743,6 +768,24 @@ _These test system design thinking, pattern combinations, architectural decision
 - Strategy: failure counting strategy (count-based threshold, percentage-based, time-window-based). Recovery strategy (how long to wait before HALF-OPEN).
 - Decorator: apply the circuit breaker as a Decorator on any service interface without modifying the service.
 - Template Method: define the request execution skeleton in the base circuit breaker: check state → attempt call → handle success/failure. Subclasses customize threshold behavior.
+
+The state names above hide the actual transition triggers — drawing them out is what makes the State-pattern mapping click:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open: failure threshold exceeded
+    Open --> HalfOpen: recovery timeout elapses
+    HalfOpen --> Closed: trial call succeeds
+    HalfOpen --> Open: trial call fails
+    note right of Open
+        Reject fast: calls fail
+        immediately with no call
+        to the real service
+    end note
+```
+
+*Closed and Open are the steady states; HalfOpen is the probe the Proxy uses to test recovery before committing back to Closed — exactly the 'testing recovery' bullet above, made concrete.*
 
 **Follow-up:** How would you combine circuit breaker with retry and timeout to build a resilience pipeline? (Hint: Chain of Responsibility with each resilience concern as a handler.)
 

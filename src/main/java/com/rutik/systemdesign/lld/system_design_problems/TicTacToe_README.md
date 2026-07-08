@@ -40,53 +40,77 @@ Design an NxN Tic-Tac-Toe game that supports:
 
 ## ASCII Class Diagram
 
-```
-+---------------------+        +----------------------+
-|   TicTacToeGame     |        |       Board          |
-|   (coordinator)     |------->| -grid: Symbol[][]     |
-| -board: Board       |  has-a | -rowCounts[]          |
-| -players: List      |        | -colCounts[]          |
-| -currentPlayerIndex |        | -diagonalCount        |
-| -state: GameState   |        | -antiDiagonalCount    |
-| +playTurn()         |        | +placeMove(r,c,sym)   |
-| +getState()         |        | +isFull()             |
-+----------+----------+        | +print()              |
-           |                   +----------------------+
-           | aggregates
-           v
-+---------------------+
-|   Player (abstract) |
-| -id: String         |
-| -symbol: Symbol     |
-| +getMove(board)     |
-+----+-----------+----+
-     |           |
-+----+----+  +---+----------+
-|HumanPlayer|  | AIPlayer    |
-| -moveQueue|  | -strategy   |
-+----------+  +------+-------+
-                     |
-                     | uses
-                     v
-            +--------------------+
-            | MoveStrategy        |  <<interface>>
-            | +selectMove(board,  |
-            |   mySymbol, oppSym) |
-            +----+-----------+----+
-                 |           |
-       +---------+--+   +----+-------------+
-       |RandomMove   |   |BlockingMove      |
-       |Strategy     |   |Strategy          |
-       +-------------+   +------------------+
+```mermaid
+classDiagram
+    class TicTacToeGame {
+        -board Board
+        -players List~Player~
+        -currentPlayerIndex int
+        -state GameState
+        +playTurn()
+        +getState() GameState
+    }
+    note for TicTacToeGame "Coordinator: owns the Board, drives turn order, and reads Board's win signal into GameState."
 
-+----------------------+      +----------------------+
-|  GameState (enum)    |      |  Symbol (enum)        |
-|  IN_PROGRESS         |      |  X, O, EMPTY          |
-|  X_WINS              |      +----------------------+
-|  O_WINS              |
-|  DRAW                |
-+----------------------+
+    class Board {
+        -grid Symbol[][]
+        -rowCounts int[]
+        -colCounts int[]
+        -diagonalCount int
+        -antiDiagonalCount int
+        +placeMove(r, c, sym) boolean
+        +isFull() boolean
+        +print()
+    }
+
+    class Player {
+        <<abstract>>
+        -id String
+        -symbol Symbol
+        +getMove(board)
+    }
+
+    class HumanPlayer {
+        -moveQueue
+    }
+
+    class AIPlayer {
+        -strategy MoveStrategy
+    }
+
+    class MoveStrategy {
+        <<interface>>
+        +selectMove(board, mySymbol, oppSym)
+    }
+
+    class RandomMoveStrategy
+    class BlockingMoveStrategy
+
+    class GameState {
+        <<enumeration>>
+        IN_PROGRESS
+        X_WINS
+        O_WINS
+        DRAW
+    }
+
+    class Symbol {
+        <<enumeration>>
+        X
+        O
+        EMPTY
+    }
+
+    TicTacToeGame *-- Board : has-a
+    TicTacToeGame "1" o-- "2..*" Player : aggregates
+    Player <|-- HumanPlayer
+    Player <|-- AIPlayer
+    AIPlayer --> MoveStrategy : uses
+    MoveStrategy <|.. RandomMoveStrategy
+    MoveStrategy <|.. BlockingMoveStrategy
 ```
+
+`TicTacToeGame` composes exactly one `Board` and aggregates 2+ `Player`s; `HumanPlayer`/`AIPlayer` both extend the abstract `Player`, and only `AIPlayer` holds a swappable `MoveStrategy` (realized by `RandomMoveStrategy`/`BlockingMoveStrategy`) — the Strategy seam covered next.
 
 ---
 
@@ -97,12 +121,54 @@ Design an NxN Tic-Tac-Toe game that supports:
 
 **How**: `MoveStrategy` declares `selectMove(Board, Symbol mySymbol, Symbol opponentSymbol)`. `RandomMoveStrategy` picks any empty cell uniformly at random. `BlockingMoveStrategy` first checks whether placing the opponent's symbol in any empty cell would let *them* win on their next turn — if so, it plays there to block; otherwise it falls back to a random empty cell. `AIPlayer` holds a `MoveStrategy` reference and delegates, so swapping difficulty is a one-line constructor change.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["selectMove(board, my, opp)"]) --> scan{"empty cell where opp<br/>would win next turn?"}
+    scan -->|"found one"| block["play that cell (block)"]
+    scan -->|"none found"| rand["play a random empty cell"]
+
+    class start io
+    class scan mathOp
+    class block train
+    class rand base
+```
+
+`BlockingMoveStrategy` scans every empty cell for one where the opponent would complete a line next turn; a match always wins priority over the random fallback — exactly the "block first, randomize otherwise" rule above.
+
 ---
 
 ### 2. State — `GameState`
 **Why**: The set of legal operations changes as the game progresses. While `IN_PROGRESS`, moves are accepted; once the state becomes `X_WINS`, `O_WINS`, or `DRAW`, `playTurn()` must refuse further moves. Scattering `if (gameOver)` checks throughout the code is error-prone.
 
 **How**: `GameState` is implemented as a simple enum-based state holder on `TicTacToeGame`. After every move, `Board.placeMove()` reports whether it created a win, and `TicTacToeGame` transitions `state` accordingly (`IN_PROGRESS -> X_WINS/O_WINS` or `IN_PROGRESS -> DRAW`). `playTurn()` checks `state == IN_PROGRESS` as its first guard. This is a lightweight, enum-driven variant of the State pattern rather than a full class-per-state hierarchy — appropriate here because the *transition logic* is simple even though the *gating* behavior is exactly what State formalizes.
+
+```mermaid
+stateDiagram-v2
+    [*] --> IN_PROGRESS
+    IN_PROGRESS --> IN_PROGRESS: valid move,<br/>no win, board not full
+    IN_PROGRESS --> X_WINS: X completes a line
+    IN_PROGRESS --> O_WINS: O completes a line
+    IN_PROGRESS --> DRAW: board full, no winner
+    X_WINS --> [*]
+    O_WINS --> [*]
+    DRAW --> [*]
+
+    note right of IN_PROGRESS
+        playTurn()'s first guard:
+        state == IN_PROGRESS,
+        else throw IllegalStateException
+    end note
+```
+
+`IN_PROGRESS` is the only re-entrant state — every other transition is terminal, which is exactly the invariant `playTurn()`'s first guard enforces.
 
 ---
 
@@ -132,40 +198,39 @@ A `PlayerFactory` was considered for creating `HumanPlayer`/`AIPlayer` instances
 
 ## State / Flow
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["playTurn()"]) --> checkState{"state == IN_PROGRESS?"}
+    checkState -->|no| errState["throw IllegalStateException<br/>('Game already over')"]
+    checkState -->|yes| getMove["player = players.get(idx)<br/>move = player.getMove(board)"]
+    getMove --> checkBounds{"row, col in bounds?"}
+    checkBounds -->|no| errBounds["throw IllegalArgumentException<br/>('Out of bounds')"]
+    checkBounds -->|yes| checkEmpty{"cell == EMPTY?"}
+    checkEmpty -->|no| errOccupied["throw IllegalArgumentException<br/>('Cell occupied')"]
+    checkEmpty -->|yes| placeMove["board.placeMove(row, col, symbol)<br/>update row/col/diag/anti-diag counters"]
+    placeMove --> checkWin{"any touched counter<br/>== size?"}
+    checkWin -->|yes| setWin["state = X_WINS or O_WINS<br/>return"]
+    checkWin -->|no| checkFull{"board.isFull()?"}
+    checkFull -->|yes| setDraw["state = DRAW<br/>return"]
+    checkFull -->|no| nextTurn(["currentPlayerIndex++<br/>state stays IN_PROGRESS"])
+
+    class start,nextTurn io
+    class checkState,checkBounds,checkEmpty,checkWin,checkFull mathOp
+    class errState,errBounds,errOccupied lossN
+    class getMove req
+    class placeMove base
+    class setWin,setDraw train
 ```
-playTurn()
-    |
-    v
-state == IN_PROGRESS ? ---- no ----> throw IllegalStateException("Game already over")
-    | yes
-    v
-player = players.get(currentPlayerIndex)
-move   = player.getMove(board)   // human: dequeue pre-set move; AI: strategy.selectMove()
-    |
-    v
-validate move
-  - row, col in [0, size)?  ---- no ----> throw IllegalArgumentException("Out of bounds")
-  - grid[row][col] == EMPTY? ---- no ----> throw IllegalArgumentException("Cell occupied")
-    |
-    v
-board.placeMove(row, col, player.symbol)
-  - grid[row][col] = symbol
-  - rowCounts[row]    += delta(symbol)     // delta = +1 for X, -1 for O
-  - colCounts[col]    += delta(symbol)
-  - if (row == col)         diagonalCount     += delta(symbol)
-  - if (row + col == N-1)   antiDiagonalCount += delta(symbol)
-  - return |any touched counter| == size   // win?
-    |
-    v
-won? ---- yes ----> state = (symbol == X) ? X_WINS : O_WINS  --> return
-    | no
-    v
-board.isFull()? ---- yes ----> state = DRAW --> return
-    | no
-    v
-currentPlayerIndex = (currentPlayerIndex + 1) % players.size()
-state remains IN_PROGRESS
-```
+
+Four guard clauses run before any state mutation — game-over, out-of-bounds, and cell-occupied all short-circuit to an exception; only after `board.placeMove` do the win/draw checks run, and those are the O(N) counter comparisons from the intuition above, never a board rescan.
 
 ---
 

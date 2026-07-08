@@ -27,27 +27,28 @@ The system must be extensible to support multi-currency ATMs, network timeouts, 
 
 ## State Transition Diagram (ASCII)
 
-```
-  ┌────────────────────────────────────────────────────────────────┐
-  │                      ATM STATE MACHINE                         │
-  └────────────────────────────────────────────────────────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
 
-         insertCard()                  enterPIN() [correct]
-  IDLE ─────────────────> CARD_INSERTED ──────────────────> PIN_VERIFIED
-   ^                           │                                  │
-   │     ejectCard()           │ ejectCard() / 3 wrong PINs       │ selectTransaction()
-   │◄──────────────────────────┘                                  │
-   │                                                              ▼
-   │              ejectCard()                             TRANSACTION_STATE
-   │◄─────────────────────────────────────────────────────────────│
-   │                                                              │
-   │                                              processTransaction() success
-   │                                              [cash > 0] → PIN_VERIFIED
-   │                                              [cash = 0] → OUT_OF_CASH
-   │
-   │  (technician refills cash)
-   └──────────────────── OUT_OF_CASH
+    IDLE --> CARD_INSERTED : insertCard()
+
+    CARD_INSERTED --> PIN_VERIFIED : enterPIN() correct
+    CARD_INSERTED --> IDLE : enterPIN() 3x wrong
+    CARD_INSERTED --> IDLE : ejectCard()
+
+    PIN_VERIFIED --> TRANSACTION : selectTransaction()
+    PIN_VERIFIED --> IDLE : ejectCard()
+
+    TRANSACTION --> PIN_VERIFIED : processTransaction() success, cash remaining
+    TRANSACTION --> OUT_OF_CASH : processTransaction() success, cash exhausted
+    TRANSACTION --> IDLE : ejectCard()
+
+    OUT_OF_CASH --> OUT_OF_CASH : any action rejected
+    OUT_OF_CASH --> IDLE : technician refills cash
 ```
+
+Five states, one absorbing state: `ejectCard()` and three wrong PIN attempts always fall back to `IDLE`, `processTransaction()` forks to `OUT_OF_CASH` the instant the cassette empties, and only a technician refill escapes `OUT_OF_CASH` — the table below is the authoritative version this diagram mirrors.
 
 **Valid transitions summary:**
 
@@ -67,81 +68,145 @@ The system must be extensible to support multi-currency ATMs, network timeouts, 
 
 ## Class Diagram (ASCII)
 
+```mermaid
+classDiagram
+    class ATMState {
+        <<enumeration>>
+        IDLE
+        CARD_INSERTED
+        PIN_VERIFIED
+        TRANSACTION
+        OUT_OF_CASH
+    }
+
+    class TransactionType {
+        <<enumeration>>
+        WITHDRAWAL
+        DEPOSIT
+        BALANCE_INQUIRY
+        TRANSFER
+    }
+
+    class BankAccount {
+        -accountNumber String
+        -pin int
+        -balance double
+        +verifyPIN() boolean
+        +debit()
+        +credit()
+    }
+
+    class Cash {
+        -denominations Map~Integer,Integer~
+        -totalAmount double
+        +canDispense() boolean
+        +dispense()
+        +addCash()
+    }
+
+    class Transaction {
+        <<interface>>
+        +execute()
+        +rollback()
+        +getReceipt() Receipt
+        +getTransactionId() String
+    }
+
+    class WithdrawalTx
+    class DepositTx
+    class BalanceInquiryTx
+    class TransferTx
+
+    class ATMStateHandler {
+        <<interface>>
+        +insertCard(ATMContext, BankAccount)
+        +enterPIN(ATMContext, int)
+        +selectTransaction(ATMContext)
+        +processTransaction(ATMContext, Transaction)
+        +ejectCard(ATMContext)
+    }
+
+    class IdleState
+    class CardInsertedState
+    class PINVerifiedState
+    class TransactionState
+    class OutOfCashState
+
+    class ATMContext {
+        -state ATMStateHandler
+        -currentAccount BankAccount
+        -cash Cash
+        -history TransactionHistory
+        +insertCard()
+        +enterPIN()
+        +selectTransaction()
+        +processTransaction()
+        +ejectCard()
+    }
+
+    class ATMFacade {
+        -atm ATMContext
+        -accounts Map~String,BankAccount~
+        +withdraw(accountNum, pin, amount)
+        +deposit(accountNum, pin, amount)
+        +checkBalance(accountNum, pin)
+        +transfer(from, pin, to, amount)
+    }
+
+    Transaction <|.. WithdrawalTx
+    Transaction <|.. DepositTx
+    Transaction <|.. BalanceInquiryTx
+    Transaction <|.. TransferTx
+
+    ATMStateHandler <|.. IdleState
+    ATMStateHandler <|.. CardInsertedState
+    ATMStateHandler <|.. PINVerifiedState
+    ATMStateHandler <|.. TransactionState
+    ATMStateHandler <|.. OutOfCashState
+
+    ATMStateHandler ..> Transaction : processes
+    ATMContext o-- ATMStateHandler : delegates to
+    ATMContext --> BankAccount : currentAccount
+    ATMContext *-- Cash : cash
+    ATMContext *-- TransactionHistory : history
+    TransactionHistory --> Transaction : records
+    ATMFacade --> ATMContext : uses
+    ATMFacade "1" --> "*" BankAccount : accounts
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        «enum»                               │
-│  ATMState        TransactionType                            │
-│  IDLE            WITHDRAWAL                                 │
-│  CARD_INSERTED   DEPOSIT                                    │
-│  PIN_VERIFIED    BALANCE_INQUIRY                            │
-│  TRANSACTION     TRANSFER                                   │
-│  OUT_OF_CASH                                                │
-└─────────────────────────────────────────────────────────────┘
 
-┌───────────────────┐     ┌───────────────────┐
-│   BankAccount     │     │      Cash         │
-│───────────────────│     │───────────────────│
-│ accountNumber     │     │ denominations     │
-│ pin (private)     │     │ totalAmount       │
-│ balance           │     │───────────────────│
-│───────────────────│     │ canDispense()     │
-│ verifyPIN()       │     │ dispense()        │
-│ debit()           │     │ addCash()         │
-│ credit()          │     └───────────────────┘
-└───────────────────┘
+State (`ATMStateHandler` + 5 handlers), Command (`Transaction` + 4 concrete transactions logged in `TransactionHistory` for rollback), and Facade (`ATMFacade`) collaborate here: the facade drives `ATMContext`, which delegates every call to whichever handler is currently active, and each concrete `Transaction` knows how to undo itself.
 
-┌─────────────────────────────────────────────┐
-│           «interface» Transaction           │
-│─────────────────────────────────────────────│
-│ execute()                                   │
-│ rollback()                                  │
-│ getReceipt()                                │
-│ getTransactionId()                          │
-└──────────────────┬──────────────────────────┘
-                   │ implements
-     ┌─────────────┼──────────────┬──────────────────┐
-     ▼             ▼              ▼                  ▼
-WithdrawalTx  DepositTx  BalanceInquiryTx  TransferTx
+---
 
-┌──────────────────────────────────────────────────────┐
-│           «interface» ATMStateHandler                │
-│──────────────────────────────────────────────────────│
-│ insertCard(ATMContext, BankAccount)                  │
-│ enterPIN(ATMContext, int)                            │
-│ selectTransaction(ATMContext)                        │
-│ processTransaction(ATMContext, Transaction)          │
-│ ejectCard(ATMContext)                                │
-└──────────────────┬───────────────────────────────────┘
-                   │ implements
-    ┌──────────────┼──────────────┬──────────────┬────────────────┐
-    ▼              ▼              ▼              ▼                ▼
-IdleState  CardInsertedState  PINVerifiedState  TransactionState  OutOfCashState
+## Cash Dispensing Algorithm (Chain of Responsibility)
 
-┌─────────────────────────────────────────┐
-│              ATMContext                 │  ◄── State Pattern Context
-│─────────────────────────────────────────│
-│ state: ATMStateHandler                  │
-│ currentAccount: BankAccount             │
-│ cash: Cash                              │
-│ history: TransactionHistory             │
-│─────────────────────────────────────────│
-│ insertCard() → delegates to state       │
-│ enterPIN()   → delegates to state       │
-│ ...                                     │
-└─────────────────────────────────────────┘
-           △ uses
-┌──────────────────────────────────────┐
-│           ATMFacade                  │  ◄── Facade Pattern
-│──────────────────────────────────────│
-│ atm: ATMContext                      │
-│ accounts: Map<String, BankAccount>   │
-│──────────────────────────────────────│
-│ withdraw(accountNum, pin, amount)    │
-│ deposit(accountNum, pin, amount)     │
-│ checkBalance(accountNum, pin)        │
-│ transfer(from, pin, to, amount)      │
-└──────────────────────────────────────┘
+The Intuition section flags denomination-aware dispensing as a place candidates stumble: each denomination behaves like a handler in a chain, greedily taking as many notes as it can before passing the remainder to the next-smaller denomination.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    In(["remaining = withdrawal amount"]) --> H1["Highest-denomination handler<br/>take as many notes as possible"]
+    H1 --> H2["Next-denomination handler<br/>same rule on the remainder"]
+    H2 --> H3["Lowest-denomination handler<br/>same rule on the remainder"]
+    H3 --> Chk{"remainder is zero?"}
+    Chk -->|"yes"| Ok(["dispense approved<br/>Cash.dispense()"])
+    Chk -->|"no"| Bad(["reject: no partial dispense<br/>Cash.canDispense() = false"])
+
+    class In io
+    class H1,H2,H3 mathOp
+    class Chk mathOp
+    class Ok train
+    class Bad lossN
 ```
+
+This is exactly the `Cash.canDispense()` / `Cash.dispense()` pair from the class diagram above, made concrete: the ATM never partially dispenses, so a chain that bottoms out with a nonzero remainder must reject the whole withdrawal rather than hand over an incomplete stack of notes.
 
 ---
 
@@ -168,6 +233,53 @@ IdleState  CardInsertedState  PINVerifiedState  TransactionState  OutOfCashState
 **Where:** `ATMFacade`
 
 **Why:** The raw ATM protocol requires 5 steps (insert → PIN → select → process → eject). The facade collapses these into single intent-expressing calls (`withdraw`, `deposit`, `transfer`, `checkBalance`), making integration tests and demos readable.
+
+---
+
+## Runtime Collaboration: A Withdrawal Walkthrough
+
+The class diagram shows structure; this sequence shows the five-step protocol the Facade Pattern section describes above — insert, PIN, select, process, eject — collapsed by a single `ATMFacade.withdraw()` call, with the State pattern re-delegating at every step and the Command pattern logging the transaction for rollback.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant F as ATMFacade
+    participant Ctx as ATMContext
+    participant St as ATMStateHandler
+    participant Tx as WithdrawalTx
+    participant Acc as BankAccount
+    participant Csh as Cash
+    participant Hist as TransactionHistory
+
+    C->>F: withdraw(accountNum, pin, amount)
+    F->>Ctx: insertCard(account)
+    Ctx->>St: insertCard()
+    Note over Ctx,St: IDLE to CARD_INSERTED
+    F->>Ctx: enterPIN(pin)
+    Ctx->>St: enterPIN()
+    St->>Acc: verifyPIN()
+    Acc-->>St: true
+    Note over Ctx,St: CARD_INSERTED to PIN_VERIFIED
+    F->>Ctx: selectTransaction()
+    Ctx->>St: selectTransaction()
+    Note over Ctx,St: PIN_VERIFIED to TRANSACTION
+    F->>Ctx: processTransaction(tx)
+    Ctx->>St: processTransaction()
+    St->>Tx: execute()
+    Tx->>Acc: debit(amount)
+    Tx->>Csh: dispense(amount)
+    Csh-->>Tx: notes out
+    Tx-->>St: success
+    St->>Hist: record(tx)
+    Note over Hist: enables rollback() later
+    Note over Ctx,St: TRANSACTION to PIN_VERIFIED
+    F->>Ctx: ejectCard()
+    Ctx->>St: ejectCard()
+    Note over Ctx,St: to IDLE
+    F-->>C: receipt
+```
+
+Every `Ctx->>St` call is dispatched to whichever `ATMStateHandler` is currently installed — `IdleState`, then `CardInsertedState`, then `PINVerifiedState`, then `TransactionState` — the same field reassigned after each step, which is exactly what keeps `ATMContext` free of `if/else` state checks.
 
 ---
 

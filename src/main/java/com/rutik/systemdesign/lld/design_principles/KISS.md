@@ -94,6 +94,39 @@ public class UserRepository {
 
 Same behavior. One class. Immediately understandable. Easy to test. Easy to replace when requirements change.
 
+```mermaid
+classDiagram
+    class AbstractUserDataAccessStrategyFactoryManagerInterface~T~ {
+        <<interface>>
+        +createFactory(context) UserDataAccessStrategyFactory~T~
+    }
+    class UserDataAccessStrategyFactory~T~ {
+        <<abstract>>
+        +buildStrategy() UserDataAccessStrategy~T~
+    }
+    class UserDataAccessStrategy~T~ {
+        <<interface>>
+        +store(entity)
+        +retrieve(key) T
+    }
+    class ConcreteUserDataAccessStrategy {
+        -store Map~String,User~
+        +store(user)
+        +retrieve(key) User
+    }
+    class UserRepository {
+        -users Map~String,User~
+        +save(user)
+        +findById(id) Optional~User~
+    }
+
+    AbstractUserDataAccessStrategyFactoryManagerInterface ..> UserDataAccessStrategyFactory : creates
+    UserDataAccessStrategyFactory ..> UserDataAccessStrategy : builds
+    UserDataAccessStrategy <|.. ConcreteUserDataAccessStrategy
+```
+
+*Three dependency/realization arrows chain four classes — the interface, its abstract factory, the strategy interface, and `ConcreteUserDataAccessStrategy` — before the three more Factory/Manager classes the code comment mentions even join the picture; `UserRepository` sits alone, with no arrows, because there is nothing left to indirect through.*
+
 ---
 
 ## Simple is NOT Simplistic
@@ -134,6 +167,32 @@ Add complexity only when driven by **genuine, current requirements**, not hypoth
 - **No:** a pattern was used because it's intellectually interesting or shows technical sophistication.
 
 The question to ask: **"What real problem does this complexity solve, and is that problem real today?"**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q{"Real problem,<br/>real today?"} -->|Yes| A("Add the complexity")
+    Q -->|No| B("Skip it - YAGNI")
+    A --> R1(["Horizontal scaling because<br/>traffic warrants it"])
+    A --> R2(["Eliminates a bug class<br/>you've experienced"])
+    B --> R3(["'We might need it<br/>someday' - YAGNI"])
+    B --> R4(["Intellectually interesting,<br/>shows sophistication"])
+
+    class Q mathOp
+    class A train
+    class B base
+    class R1,R2 req
+    class R3,R4 lossN
+```
+
+*Every yes/no example above collapses to the same gate: does a real, current requirement justify this, or is it a hypothetical "someday" or self-indulgent "interesting" add — the same test YAGNI applies to features.*
 
 ---
 

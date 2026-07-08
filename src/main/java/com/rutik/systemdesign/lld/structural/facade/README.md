@@ -52,32 +52,51 @@ Introduce a **Facade** class that knows the subsystem and provides high-level me
 
 ## 5. UML Structure
 
-```
-Client
-  |
-  | uses
-  v
-+-------------------+
-|     Facade        |
-|-------------------|
-| - projector       |---> ProjectorSubsystem
-| - amplifier       |---> AmplifierSubsystem
-| - dvdPlayer       |---> DvdPlayerSubsystem
-| - lights          |---> LightsSubsystem
-|-------------------|
-| + watchMovie()    |
-| + endMovie()      |
-+-------------------+
+```mermaid
+classDiagram
+    class Client
 
-Subsystems (each has its own complex interface):
-+---------------------+   +---------------------+   +---------------------+
-|  ProjectorSubsystem |   | AmplifierSubsystem  |   |  DvdPlayerSubsystem |
-|---------------------|   |---------------------|   |---------------------|
-| + on()              |   | + on()              |   | + on()              |
-| + setInput()        |   | + setDvd()          |   | + play()            |
-| + wideScreenMode()  |   | + setVolume()       |   | + stop()            |
-| + off()             |   | + off()             |   | + off()             |
-+---------------------+   +---------------------+   +---------------------+
+    class Facade {
+        -ProjectorSubsystem projector
+        -AmplifierSubsystem amplifier
+        -DvdPlayerSubsystem dvdPlayer
+        -LightsSubsystem lights
+        +watchMovie()
+        +endMovie()
+    }
+
+    class ProjectorSubsystem {
+        +on()
+        +setInput()
+        +wideScreenMode()
+        +off()
+    }
+
+    class AmplifierSubsystem {
+        +on()
+        +setDvd()
+        +setVolume()
+        +off()
+    }
+
+    class DvdPlayerSubsystem {
+        +on()
+        +play()
+        +stop()
+        +off()
+    }
+
+    class LightsSubsystem {
+        +dim()
+        +on()
+        +off()
+    }
+
+    Client ..> Facade : uses
+    Facade --> ProjectorSubsystem
+    Facade --> AmplifierSubsystem
+    Facade --> DvdPlayerSubsystem
+    Facade --> LightsSubsystem
 ```
 
 The client only sees and depends on `Facade`. All subsystem arrows are internal.
@@ -96,6 +115,33 @@ The client only sees and depends on `Facade`. All subsystem arrows are internal.
    - `dvdPlayer.on(); dvdPlayer.play(movie)`
 4. The client receives a ready theater with zero knowledge of the internals.
 5. When `facade.endMovie()` is called, the facade reverses the sequence in the correct teardown order.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Facade
+    participant Lights as LightsSubsystem
+    participant Screen
+    participant Projector as ProjectorSubsystem
+    participant Amp as AmplifierSubsystem
+    participant Dvd as DvdPlayerSubsystem
+
+    Client->>Facade: watchMovie("Inception")
+    Facade->>Lights: dim(10)
+    Facade->>Screen: down()
+    Facade->>Projector: on()
+    Facade->>Projector: setInput(dvdPlayer)
+    Facade->>Projector: wideScreenMode()
+    Facade->>Amp: on()
+    Facade->>Amp: setDvd(dvdPlayer)
+    Facade->>Amp: setVolume(5)
+    Facade->>Dvd: on()
+    Facade->>Dvd: play(movie)
+    Facade-->>Client: theater ready
+    Note over Facade,Dvd: endMovie() replays this sequence<br/>in reverse teardown order
+```
+
+The client issues a single call; the Facade fans it out into the exact subsystem call order shown above, and reverses that same order for teardown on `endMovie()`.
 
 ---
 
@@ -182,27 +228,33 @@ The client only sees and depends on `Facade`. All subsystem arrows are internal.
 
 A data platform ingests ~50k S3 operations/day across 20 microservices: object puts (event logs), multipart uploads (backups), pre-signed URL generation (user uploads), and bucket listings. The AWS SDK v2 `S3Client` is a Facade over a complex subsystem: HTTP transport (Apache or Netty), Sigv4 request signing, CRC32C checksum computation, automatic retry with exponential backoff, multipart upload coordination, XML/JSON error parsing, and endpoint discovery. A caller writes `s3.putObject(req, body)` — one line that internally coordinates ~200 LoC of subsystem work. Quantified impact: feature teams previously wrote 400+ LoC of S3 integration code per use case; with the Facade, integrations average 40 LoC. p99 latency for a small put is 80ms (network-bound); facade overhead is <0.5ms.
 
+```mermaid
+classDiagram
+    class S3Client {
+        <<Facade>>
+        +putObject()
+        +getObject()
+        +createMultipartUpload()
+    }
+    class HttpTransport
+    class Sigv4Signer
+    class RetryPolicy
+    class CRC32CChecksum
+    class ErrorParser
+    class EndpointResolver
+    class CredentialsProviderChain
+
+    S3Client --> HttpTransport
+    S3Client --> Sigv4Signer
+    S3Client --> RetryPolicy
+    S3Client --> CRC32CChecksum
+    S3Client --> ErrorParser
+    HttpTransport --> EndpointResolver
+    HttpTransport --> CredentialsProviderChain
+    Sigv4Signer --> CredentialsProviderChain
 ```
-                     +---------------------------+
-                     |     S3Client (Facade)     |
-                     |  putObject / getObject /  |
-                     |  createMultipartUpload    |
-                     +-------------+-------------+
-                                   |
-       +---------------+-----------+----------+----------------+
-       |               |           |          |                |
-       v               v           v          v                v
-  +---------+   +-----------+  +--------+ +---------+   +-----------+
-  | HTTP    |   | Sigv4     |  | Retry  | | CRC32C  |   | XML/JSON  |
-  | (Netty) |   | Signer    |  | Policy | | Checksum|   | ErrorParse|
-  +---------+   +-----------+  +--------+ +---------+   +-----------+
-       |               |           |          |                |
-       +---------+-----+-----+-----+----------+----------------+
-                 |           |
-                 v           v
-            Endpoint    Credentials
-            Resolver    Provider Chain
-```
+
+*S3Client is the Facade; callers depend only on it while it internally coordinates transport, signing, retry, checksum, and error-parsing subsystems that in turn share endpoint and credential resolution.*
 
 ```java
 // Caller-side: one line. The Facade hides the entire subsystem.
@@ -370,6 +422,37 @@ A 5-year-old order service had grown an `OrderManager` god-object (3,800 LoC, 78
 | **Decorator** | Adds behavior to objects dynamically | Decorator wraps *one* object to add behavior; Facade wraps *many* objects to simplify access |
 | **Abstract Factory** | Creates families of related objects | Abstract Factory produces objects; Facade coordinates existing objects |
 | **Proxy** | Controls access to a single object | Proxy wraps *one* object; Facade wraps an entire *subsystem* of objects |
+
+**Quick decision aid** — when two rows above still feel similar, walk this tree top-down; the first "yes" wins:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Need to simplify how a client<br/>deals with something?"]) --> Q1{"Interfaces are incompatible —<br/>client expects a different shape?"}
+    Q1 -->|yes| Adapter([Adapter])
+    Q1 -->|no| Q2{"Adding behavior to<br/>ONE object at runtime?"}
+    Q2 -->|yes| Decorator([Decorator])
+    Q2 -->|no| Q3{"Controlling access to<br/>ONE object (lazy, remote, guarded)?"}
+    Q3 -->|yes| Proxy([Proxy])
+    Q3 -->|no| Q4{"Peer objects coordinate<br/>bidirectionally through a hub?"}
+    Q4 -->|yes| Mediator([Mediator])
+    Q4 -->|no| Q5{"Creating families of<br/>related objects?"}
+    Q5 -->|yes| AbstractFactory(["Abstract Factory"])
+    Q5 -->|no| FacadeNode(["Facade: simplify access<br/>to a many-class subsystem"])
+
+    class Start io
+    class Q1,Q2,Q3,Q4,Q5 mathOp
+    class Adapter,Decorator,Proxy,Mediator,AbstractFactory,FacadeNode train
+```
+
+Facade is the fallback when none of the more specific relationships apply: you simply want fewer, higher-level entry points into an existing multi-class subsystem that doesn't know or care who is calling it.
 
 ---
 

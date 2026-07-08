@@ -78,49 +78,43 @@ Optionally, a **Director** can pre-define common builder configurations (recipes
 
 ## 5. UML Structure
 
+```mermaid
+classDiagram
+    class Product {
+        -fieldA String
+        -fieldB int
+        -fieldC String
+        -Product(b)
+        +getFieldA() String
+        +getFieldB() int
+    }
+
+    class Builder {
+        -fieldA String required
+        -fieldB int optional, default 0
+        -fieldC String optional, default "x"
+        +Builder(requiredA)
+        +fieldB(val) Builder
+        +fieldC(val) Builder
+        +build() Product
+    }
+
+    class Director {
+        -builder BuilderInterface
+        +setBuilder(b)
+        +buildMinimal() Product
+        +buildFull() Product
+    }
+
+    class Client
+
+    Client --> Builder : creates
+    Client ..> Director : optionally uses
+    Director --> Builder : holds
+    Builder ..> Product : creates
 ```
-           +----------------------------------+
-           |           Product                |
-           +----------------------------------+
-           | - fieldA: String (final)         |
-           | - fieldB: int (final)            |
-           | - fieldC: String (final)         |
-           | - Product(Builder b)  <<private>>|
-           +----------------------------------+
-           | + getFieldA(): String            |
-           | + getFieldB(): int               |
-           +----------------------------------+
-                          ^
-                          | creates
-                          |
-           +----------------------------------+
-           |        Product.Builder           |  <-- static nested class
-           +----------------------------------+
-           | - fieldA: String  (required)     |
-           | - fieldB: int = 0 (optional)     |
-           | - fieldC: String = "x" (optional)|
-           +----------------------------------+
-           | + Builder(requiredA: String)     |
-           | + fieldB(val: int): Builder      |  returns this (fluent)
-           | + fieldC(val: String): Builder   |  returns this (fluent)
-           | + build(): Product               |  validates + constructs
-           +----------------------------------+
 
-           +----------------------------------+
-           |           Director               |
-           +----------------------------------+
-           | - builder: BuilderInterface      |
-           +----------------------------------+
-           | + setBuilder(b: BuilderInterface)|
-           | + buildMinimal(): Product        |
-           | + buildFull(): Product           |
-           +----------------------------------+
-
-Client ──> Director ──> Builder ──> Product
-
-Note: Director is optional. In the modern Java idiom (nested fluent builder),
-      clients call the Builder directly without a Director.
-```
+*`Builder` is a static nested class inside `Product` — the only code path to its private constructor. All of `Product`'s fields are `final`; `Builder`'s required field has no default while its optional fields do, and `fieldB()`/`fieldC()` return `Builder` (not `void`) so calls chain fluently. `build()` is the sole place that validates and constructs the immutable `Product`. `Director` is optional: in the modern Java idiom used throughout this file, the client calls the Builder directly and skips it entirely.*
 
 **Relationships:**
 - `Builder` is a static nested class inside `Product` (preferred modern idiom) OR a separate top-level class.
@@ -143,6 +137,40 @@ If a Director is used:
 - Director receives the Builder and calls setter methods in a predefined order.
 - Director defines reusable "recipes" like `buildMinimalProduct()` or `buildFullProduct()`.
 - Director calls `builder.build()` and returns the finished product.
+
+**Runtime collaboration:**
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Dir as director : Director
+    participant B as builder : Builder
+    participant P as product : Product
+
+    Client->>B: new Builder(requiredFields)
+    Client->>B: fieldB(10).fieldC("x")
+    Note over B: each setter returns `this` — fluent chaining
+    Client->>B: build()
+    activate B
+    B->>B: validate required + cross-field constraints
+    B->>P: new Product(this)
+    activate P
+    Note over P: all fields stored as final — now immutable
+    P-->>B: product
+    deactivate P
+    B-->>Client: product
+    deactivate B
+
+    opt Director drives the Builder instead
+        Client->>Dir: new Director(builder)
+        Dir->>B: fieldB(...).fieldC(...) in a fixed recipe
+        Dir->>B: build()
+        B-->>Dir: product
+        Dir-->>Client: product
+    end
+```
+
+*Steps 1–3 show the client driving the Builder directly (the modern idiom); step 4's validation is the only place invariants are enforced, and step 5's `new Product(this)` is the sole call to the private constructor. The optional `Director` branch changes who calls the setters but never bypasses `build()`'s validation.*
 
 ---
 
@@ -257,32 +285,32 @@ immutable message object. A JVM service processing 1 million messages/second wit
 builders and no intermediate allocations maintains GC pause times under 10ms (G1GC default: 200ms
 pause goal; well-tuned services see < 5ms at p99).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["gRPC request<br/>Netty, 64 I/O threads"]) --> B["EventLoop-1 deserializes<br/>Message.parseFrom(bytes)"]
+    B --> C["OrderRequest.Builder<br/>pooled, reused"]
+    C --> D["business logic sets fields<br/>orderId / status / totalCents / timestampMs"]
+    D --> E["builder.build()<br/>single allocation"]
+    E --> F(["OrderResponse<br/>immutable, thread-safe"])
+    F --> G["gRPC serializes<br/>response.toByteArray()"]
+
+    class A,G io
+    class B req
+    class C base
+    class D mathOp
+    class E train
+    class F frozen
 ```
-gRPC Service — OrderProcessor (Java 17 LTS, 1M messages/sec)
-+------------------------------------------------------------------------+
-|  gRPC Server (Netty, 64 I/O threads)                                   |
-|                                                                        |
-|  EventLoop-1: deserialize -> Message.parseFrom(bytes)                  |
-|                              |                                         |
-|                              v                                         |
-|                     +------------------+                               |
-|                     | OrderRequest     |  (immutable protobuf message) |
-|                     | .Builder (pooled)|                               |
-|                     +------------------+                               |
-|                              |                                         |
-|  Business logic manipulates builder:                                   |
-|  OrderResponse.Builder builder = OrderResponse.newBuilder()            |
-|    .setOrderId(req.getOrderId())                                        |
-|    .setStatus(Status.CONFIRMED)                                         |
-|    .setTotalAmountCents(computeTotal(req))                             |
-|    .setTimestampMs(Instant.now().toEpochMilli());                      |
-|                              |                                         |
-|  OrderResponse response = builder.build();  // single allocation       |
-|  // response is immutable — safe to pass across threads                |
-|                              |                                         |
-|  gRPC serializes: response.toByteArray()  // zero-copy where possible  |
-+------------------------------------------------------------------------+
-```
+
+*OrderProcessor's steady-state path (Java 17 LTS, 1M messages/sec): the pooled `OrderRequest.Builder` (step 3) is reused across requests so only `build()` (step 5) allocates — producing the immutable, thread-safe `OrderResponse` (step 6) that keeps G1GC pause times under 10ms even at this throughput.*
 
 ### Famous Codebase Usages
 
@@ -583,6 +611,32 @@ At 1M OrderEvents/sec, allocating a Builder per event creates 1M short-lived obj
 G1GC handles this well (Eden space fills, minor GC reclaims in < 5ms), but if GC pause
 SLA is < 1ms, switch to a ThreadLocal builder pool with an explicit reset() method between uses.
 Protobuf 3.x uses this technique internally for generated code.
+
+**Visualized as an escalation path:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["new immutable DTO<br/>2-4 fields, no invariants"]) -->|"default choice"| B["Phase 1: Lombok<br/>@Builder + @Value"]
+    B -->|"first invariant appears<br/>3-5 field checks"| C["Phase 2: custom build()<br/>override on generated builder"]
+    C -->|"cross-field constraints,<br/>6+ fields"| D["Phase 3: hand-written builder<br/>+ toBuilder()"]
+    D -->|"GC pause SLA<br/>under 1ms"| E(["Phase 4: ThreadLocal<br/>builder pool + reset()"])
+
+    class A io
+    class B train
+    class C base
+    class D req
+    class E lossN
+```
+
+*Each arrow is a trigger, not a fixed schedule — most DTOs never leave Phase 1, and only a steady-state, high-throughput service like the 1M-messages/sec `OrderProcessor` above needs Phase 4's pooled, reset-able builder.*
 
 ---
 

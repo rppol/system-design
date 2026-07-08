@@ -18,84 +18,62 @@ A comprehensive guide to choosing the right design pattern for your problem.
 
 ## 1. Pattern Selection Decision Tree
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Root(["What is your<br/>primary concern?"])
+    Root --> Creation
+    Root --> Structure
+    Root --> Behavior
+
+    subgraph Creation["OBJECT CREATION"]
+        direction LR
+        C1{"Need only ONE instance<br/>across the application?"} --> CP1(["Singleton"])
+        C2{"Create objects, defer exact<br/>class to subclasses?"} --> CP2(["Factory Method"])
+        C3{"Create FAMILIES of related<br/>objects, no concrete classes?"} --> CP3(["Abstract Factory"])
+        C4{"Build COMPLEX objects step<br/>by step, many optional parts?"} --> CP4(["Builder"])
+        C5{"Create a new object by<br/>COPYING an existing one?"} --> CP5(["Prototype"])
+    end
+
+    subgraph Structure["OBJECT STRUCTURE"]
+        direction LR
+        S1{"Make an INCOMPATIBLE<br/>interface work with yours?"} --> SP1(["Adapter"])
+        S2{"Separate ABSTRACTION from<br/>IMPLEMENTATION, vary both?"} --> SP2(["Bridge"])
+        S3{"Treat individual objects and<br/>GROUPS uniformly (tree)?"} --> SP3(["Composite"])
+        S4{"ADD RESPONSIBILITIES to an<br/>object dynamically, no subclass?"} --> SP4(["Decorator"])
+        S5{"Provide a SIMPLIFIED interface<br/>to a complex subsystem?"} --> SP5(["Facade"])
+        S6{"Share many FINE-GRAINED<br/>objects to save memory?"} --> SP6(["Flyweight"])
+        S7{"CONTROL ACCESS to an object<br/>(lazy, security, remote)?"} --> SP7(["Proxy"])
+    end
+
+    subgraph Behavior["OBJECT BEHAVIOR"]
+        direction LR
+        B1{"Pass a request along a CHAIN<br/>of handlers until handled?"} --> BP1(["Chain of Responsibility"])
+        B2{"ENCAPSULATE a request as an<br/>object (queue, log, undo)?"} --> BP2(["Command"])
+        B3{"Define a GRAMMAR and<br/>interpret sentences in it?"} --> BP3(["Interpreter"])
+        B4{"ACCESS elements SEQUENTIALLY<br/>without exposing internals?"} --> BP4(["Iterator"])
+        B5{"Reduce DEPENDENCIES between<br/>many communicating objects?"} --> BP5(["Mediator"])
+        B6{"CAPTURE and RESTORE state<br/>without breaking encapsulation?"} --> BP6(["Memento"])
+        B7{"NOTIFY multiple objects when<br/>one object changes state?"} --> BP7(["Observer"])
+        B8{"Let an object ALTER behavior<br/>when INTERNAL STATE changes?"} --> BP8(["State"])
+        B9{"Define a FAMILY OF ALGORITHMS,<br/>make them interchangeable?"} --> BP9(["Strategy"])
+        B10{"Fix an algorithm's SKELETON,<br/>subclasses fill in steps?"} --> BP10(["Template Method"])
+        B11{"Perform an OPERATION on elements<br/>without changing their classes?"} --> BP11(["Visitor"])
+    end
+
+    class Root io
+    class C1,C2,C3,C4,C5,S1,S2,S3,S4,S5,S6,S7,B1,B2,B3,B4,B5,B6,B7,B8,B9,B10,B11 mathOp
+    class CP1,CP2,CP3,CP4,CP5,SP1,SP2,SP3,SP4,SP5,SP6,SP7,BP1,BP2,BP3,BP4,BP5,BP6,BP7,BP8,BP9,BP10,BP11 train
 ```
-What is your primary concern?
-│
-├── OBJECT CREATION (How objects are created/instantiated)
-│   │
-│   ├── Do you need only ONE instance across the application?
-│   │   └── YES → SINGLETON
-│   │
-│   ├── Do you need to create objects but want to defer the exact class to subclasses?
-│   │   └── YES → FACTORY METHOD
-│   │
-│   ├── Do you need to create FAMILIES of related objects without specifying concrete classes?
-│   │   └── YES → ABSTRACT FACTORY
-│   │
-│   ├── Do you need to build COMPLEX objects step by step, with many optional parts?
-│   │   └── YES → BUILDER
-│   │
-│   └── Do you need to create a new object by COPYING an existing one?
-│       └── YES → PROTOTYPE
-│
-├── OBJECT STRUCTURE (How objects are composed and related)
-│   │
-│   ├── Do you need to make an INCOMPATIBLE interface work with your system?
-│   │   └── YES → ADAPTER
-│   │
-│   ├── Do you need to separate ABSTRACTION from IMPLEMENTATION so both can vary independently?
-│   │   └── YES → BRIDGE
-│   │
-│   ├── Do you need to treat individual objects and GROUPS of objects uniformly (tree structure)?
-│   │   └── YES → COMPOSITE
-│   │
-│   ├── Do you need to ADD RESPONSIBILITIES to an object dynamically without subclassing?
-│   │   └── YES → DECORATOR
-│   │
-│   ├── Do you need to provide a SIMPLIFIED interface to a complex subsystem?
-│   │   └── YES → FACADE
-│   │
-│   ├── Do you need to share a large number of FINE-GRAINED objects efficiently to save memory?
-│   │   └── YES → FLYWEIGHT
-│   │
-│   └── Do you need to CONTROL ACCESS to an object (lazy load, security, logging, remote)?
-│       └── YES → PROXY
-│
-└── OBJECT BEHAVIOR (How objects interact and distribute responsibility)
-    │
-    ├── Do you need to pass a request along a CHAIN of handlers until one handles it?
-    │   └── YES → CHAIN OF RESPONSIBILITY
-    │
-    ├── Do you need to ENCAPSULATE a request as an object (queue, log, undo)?
-    │   └── YES → COMMAND
-    │
-    ├── Do you need to define a GRAMMAR and interpret sentences in a language?
-    │   └── YES → INTERPRETER
-    │
-    ├── Do you need to ACCESS elements of a collection SEQUENTIALLY without exposing internals?
-    │   └── YES → ITERATOR
-    │
-    ├── Do you need to reduce DEPENDENCIES between many objects communicating with each other?
-    │   └── YES → MEDIATOR
-    │
-    ├── Do you need to CAPTURE and RESTORE an object's state without violating encapsulation?
-    │   └── YES → MEMENTO
-    │
-    ├── Do you need to NOTIFY multiple objects when one object changes state?
-    │   └── YES → OBSERVER
-    │
-    ├── Do you need an object to ALTER its behavior when its INTERNAL STATE changes?
-    │   └── YES → STATE
-    │
-    ├── Do you need to define a FAMILY OF ALGORITHMS and make them interchangeable?
-    │   └── YES → STRATEGY
-    │
-    ├── Do you need to define the SKELETON of an algorithm in a base class and let subclasses fill in steps?
-    │   └── YES → TEMPLATE METHOD
-    │
-    └── Do you need to perform an OPERATION on elements of an object structure without changing their classes?
-        └── YES → VISITOR
-```
+
+The tree mirrors the file's own structure: pick a concern (creation, structure, or behavior — blue root, gold clusters), then follow the first orange question that fits — the green leaf is your starting pattern. If two leaves seem equally applicable, prefer the simpler pattern (see Intuition above).
 
 ---
 
@@ -137,6 +115,31 @@ What is your primary concern?
 - **Memento** captures the full state snapshot before an operation if fine-grained undo is not feasible.
 - Keep a history stack (list of Commands); pop to undo, re-execute to redo.
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Invoker
+    participant Cmd as Command
+    participant Receiver
+    participant Hist as History Stack
+
+    Client->>Invoker: execute(command)
+    Invoker->>Cmd: execute()
+    Cmd->>Receiver: action()
+    Invoker->>Hist: push(command)
+
+    Note over Client,Hist: later — user triggers Undo
+
+    Client->>Invoker: undo()
+    Invoker->>Hist: pop()
+    Hist-->>Invoker: command
+    Invoker->>Cmd: undo()
+    Cmd->>Receiver: reverseAction()
+    Note over Cmd,Receiver: if reverseAction() isn't feasible,<br/>Command restores a Memento snapshot instead
+```
+
+The Invoker never inspects a Command's internals — it just pushes onto the history stack on `execute()` and pops + calls `undo()` on undo, which is why Command composes so cleanly with Memento for undo/redo.
+
 ### Plugin Architecture
 - **Patterns:** Strategy + Factory Method (or Abstract Factory)
 - **Strategy** defines the plugin interface; each plugin is a concrete strategy.
@@ -153,6 +156,29 @@ What is your primary concern?
 - **Patterns:** Proxy + Chain of Responsibility
 - **Proxy** intercepts every call to the real service and delegates to the auth layer.
 - **Chain of Responsibility** passes the request through a series of guards (auth check, role check, rate limit) before reaching the real handler.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Proxy
+    participant Auth as Auth Guard
+    participant Role as Role Guard
+    participant Rate as Rate-Limit Guard
+    participant Real as RealService
+
+    Client->>Proxy: request()
+    Proxy->>Auth: handle(request)
+    alt any guard rejects
+        Auth-->>Proxy: 401/403 (chain short-circuits)
+    else all guards pass
+        Auth->>Role: handle(request)
+        Role->>Rate: handle(request)
+        Rate->>Real: handle(request)
+        Real-->>Client: response
+    end
+```
+
+Proxy is the single entry point that intercepts every call; internally it delegates into a Chain of Responsibility of guards, any one of which can short-circuit with a rejection before the request ever reaches RealService.
 
 ### UI Component Tree
 - **Patterns:** Composite + Decorator
