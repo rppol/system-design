@@ -208,6 +208,33 @@ When a new value arrives:
 
 The heap root always answers "what is the k-th largest?" in O(1). Each insertion is O(log k).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A([New value arrives]) --> B{Heap size<br/>under k?}
+    B -->|"yes"| C(Push value<br/>heap grows)
+    B -->|"no"| D{Beats<br/>heap root?}
+    D -->|"yes"| E(Evict root<br/>push value)
+    D -->|"no"| F(Discard value)
+    C --> G([Root = k-th largest])
+    E --> G
+    F -.->|"heap unchanged"| G
+
+    class A,G io
+    class B,D mathOp
+    class C train
+    class E,F lossN
+```
+
+The size-k min-heap is a bouncer: only a value that beats the current weakest entry (the root) survives, so the heap never exceeds k and every branch costs O(log k) — the identical decision flow drives Variant 1's static heap build above.
+
 ---
 
 ### Variant 3 — Streaming Median: Two-Heap Pattern
@@ -255,6 +282,34 @@ Rebalancing rule:
 3. Rebalance if sizes differ by more than 1.
 
 Each insertion is O(log n) — one or two heap operations.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A([New value arrives]) --> B(Push to lower<br/>max-heap)
+    B --> C{Lower max beats<br/>upper min?}
+    C -->|"yes"| D(Migrate to upper)
+    C -->|"no"| E{Heap sizes<br/>balanced?}
+    D --> E
+    E -->|"lower 2+ ahead"| F(Move lower max<br/>to upper)
+    E -->|"upper ahead"| G(Move upper min<br/>to lower)
+    E -->|"balanced"| H([Median ready<br/>constant-time read])
+    F --> H
+    G --> H
+
+    class A,H io
+    class B train
+    class C,D,E,F,G mathOp
+```
+
+Every insertion follows the same three-step shape: push to lower by default, migrate across the partition if the invariant breaks, then rebalance if the halves drift apart by more than one element — each branch costs at most O(log n), matching the insertion algorithm above.
 
 ---
 

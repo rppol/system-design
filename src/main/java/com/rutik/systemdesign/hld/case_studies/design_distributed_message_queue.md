@@ -104,44 +104,54 @@ A single message written once is commonly read multiple times — once per indep
 
 ## 3. High-Level Architecture
 
-```
-                              PRODUCERS
-        +-------------+   +-------------+   +-------------+
-        | Producer A   |   | Producer B   |   | Producer C   |
-        | (key=user_1) |   | (key=user_2) |   | (key=null,   |
-        |              |   |              |   |  round-robin)|
-        +------+-------+   +------+-------+   +------+-------+
-               |                  |                   |
-               |  Partitioner (key hash / round-robin / sticky) - §4.2
-               v                  v                   v
-   +---------------------------------------------------------------+
-   |                     KAFKA CLUSTER (Topic: orders, 3 partitions, RF=3)|
-   |                                                                 |
-   |   Broker 1              Broker 2              Broker 3          |
-   |   +-------------+       +-------------+       +-------------+   |
-   |   | P0 [LEADER] |<----->| P0 [FOLLOWER]|<----->| P0 [FOLLOWER]|   |
-   |   | P1 [FOLLOWER]|<---->| P1 [LEADER] |<------>| P1 [FOLLOWER]|   |
-   |   | P2 [FOLLOWER]|<---->| P2 [FOLLOWER]|<------>| P2 [LEADER] |   |
-   |   +-------------+       +-------------+       +-------------+   |
-   |        ISR(P0)={B1,B2,B3}  ISR(P1)={B1,B2,B3}  ISR(P2)={B1,B2,B3}|
-   +---------------------------------------------------------------+
-               |                  |                   |
-               |  Pull-based fetch (consumer-driven, §5)
-               v                  v                   v
-   +---------------------------------------------------------------+
-   |              CONSUMER GROUP: order-processor (3 consumers)      |
-   |                                                                 |
-   |   Consumer 1 <--- reads P0    Consumer 2 <--- reads P1          |
-   |   Consumer 3 <--- reads P2                                      |
-   |                                                                 |
-   |   Offsets committed to internal topic: __consumer_offsets       |
-   |   {group=order-processor, P0: 104233, P1: 98871, P2: 110456}    |
-   +---------------------------------------------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-                    (a second, independent consumer group
-                     "analytics" can read the same topic
-                     from its own offsets, at its own pace)
+    subgraph Producers["Producers"]
+        direction TB
+        PA(["Producer A<br/>key=user_1"])
+        PB(["Producer B<br/>key=user_2"])
+        PC(["Producer C<br/>key=null, round-robin"])
+    end
+
+    Part{"Partitioner<br/>hash / round-robin / sticky"}
+
+    subgraph Cluster["Kafka Cluster - topic orders<br/>3 partitions, RF=3"]
+        direction TB
+        Br1(["Broker 1<br/>P0 LEADER<br/>P1, P2 follower"])
+        Br2(["Broker 2<br/>P1 LEADER<br/>P0, P2 follower"])
+        Br3(["Broker 3<br/>P2 LEADER<br/>P0, P1 follower"])
+    end
+
+    subgraph ConsumerGroup["Consumer Group: order-processor<br/>3 consumers"]
+        direction TB
+        C1(["Consumer 1<br/>reads P0"])
+        C2(["Consumer 2<br/>reads P1"])
+        C3(["Consumer 3<br/>reads P2"])
+    end
+
+    PA --> Part
+    PB --> Part
+    PC --> Part
+    Part --> Br1
+    Part --> Br2
+    Part --> Br3
+    Cluster -->|"pull-based fetch"| ConsumerGroup
+
+    class PA,PB,PC io
+    class Part mathOp
+    class Br1,Br2,Br3 base
+    class C1,C2,C3 req
 ```
+
+Each broker leads exactly one partition and follows the other two, so every partition's ISR is `{B1,B2,B3}`; the `order-processor` group's three consumers each own one partition, committing offsets (`P0:104233, P1:98871, P2:110456`) to `__consumer_offsets` — a second, independent group like `analytics` can read the same topic from its own offsets, at its own pace.
 
 ### Request Flow
 
@@ -306,20 +316,81 @@ Each partition has one **leader** replica and `RF - 1` **follower** replicas. Al
 | `acks=1` | Producer waits for the **leader only** to write to its local log | Survives consumer-side issues, but not leader crash before replication | Low (one round trip to leader) | If the leader crashes before followers replicate, and an out-of-sync follower becomes the new leader (unclean election), the message is lost (War Story 2) |
 | `acks=all` (`-1`) | Producer waits for **all members of the current ISR** to acknowledge | Survives any single broker failure, given `min.insync.replicas >= 2` | Highest (round trip to leader + replication to followers) | If ISR shrinks below `min.insync.replicas`, the leader rejects writes (`NotEnoughReplicasException`) rather than risk under-replicated commits — an availability/durability tradeoff, not data loss |
 
+```mermaid
+quadrantChart
+    title acks: Latency vs Durability Tradeoff
+    x-axis "Low Latency" --> "High Latency"
+    y-axis "Low Durability" --> "High Durability"
+    quadrant-1 "safest, slowest"
+    quadrant-2 "ideal, rarely achievable"
+    quadrant-3 "fastest, riskiest"
+    quadrant-4 "slow and risky - avoid"
+    "acks=0": [0.08, 0.05]
+    "acks=1": [0.4, 0.48]
+    "acks=all": [0.85, 0.95]
+```
+
+As latency rises left-to-right, durability rises with it — `acks=0` buys the lowest latency at zero durability, `acks=all` buys survival of any single-broker failure (with `min.insync.replicas>=2`) at the highest latency, and `acks=1` sits in between, durable against everything except a leader crash before replication (§4.3 table above).
+
 **Leader election on broker failure**: when a broker hosting a partition leader fails (detected via the cluster's metadata/controller layer — ZooKeeper historically, KRaft in modern Kafka), the controller picks a new leader from the partition's current ISR — by construction, every member of the ISR has all committed records, so any ISR member can become leader with zero data loss. **Unclean leader election** (`unclean.leader.election.enable=true`) allows a replica *outside* the ISR (one that was lagging) to become leader if no ISR members are available — this restores availability faster but can silently drop the records the new leader never received (War Story 2 walks through exactly this scenario).
 
-```
-Before failure:                     After Broker 2 (leader of P1) fails:
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Broker 1: P0[F] P1[F] P2[L]          Broker 1: P0[F] P1[L*] P2[L]   (*newly elected
-Broker 2: P0[L] P1[L] P2[F]          Broker 2: (down)                  from ISR={B1,B3})
-Broker 3: P0[F] P1[F] P2[F]          Broker 3: P0[F] P1[F] P2[F]
+    start(["Partition leader<br/>broker fails"]) --> isr{"ISR member<br/>available?"}
+    isr -->|"yes"| elect("Elect new leader<br/>from ISR<br/>zero data loss")
+    isr -->|"no"| unclean{"unclean.leader.election<br/>enabled?"}
+    unclean -->|"false, default"| unavail("Partition unavailable<br/>rejects reads and writes")
+    unclean -->|"true"| risky("Elect out-of-ISR replica<br/>may silently drop records")
 
-ISR(P1) = {B1, B2, B3}                ISR(P1) = {B1, B3}  (B2 removed, will
-                                                            rejoin as follower
-                                                            once it recovers
-                                                            and catches up)
+    class start io
+    class isr,unclean mathOp
+    class elect train
+    class unavail base
+    class risky lossN
 ```
+
+The safe path always runs through the ISR; only when the ISR is empty does `unclean.leader.election.enable` decide between two bad options — stay unavailable (safe, the recommended default) or elect a lagging replica and risk exactly the silent data loss War Story 2 walks through.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Before["Before Failure - ISR(P1) = B1,B2,B3"]
+        direction TB
+        B1b(["Broker 1<br/>P0 follower, P1 follower<br/>P2 LEADER"])
+        B2b(["Broker 2<br/>P0 LEADER, P1 LEADER<br/>P2 follower"])
+        B3b(["Broker 3<br/>P0, P1, P2 all follower"])
+    end
+
+    subgraph After["After Broker 2 Fails - ISR(P1) = B1,B3"]
+        direction TB
+        B1a(["Broker 1<br/>P0 follower<br/>P1 LEADER newly elected, P2 LEADER"])
+        B2a(["Broker 2<br/>DOWN"])
+        B3a(["Broker 3<br/>P0, P1, P2 all follower"])
+    end
+
+    Before -.->|"Broker 2 crashes"| After
+
+    class B1b,B2b,B1a train
+    class B3b,B3a frozen
+    class B2a lossN
+```
+
+Broker 2 (leader for P0 and P1) crashes; the controller elects Broker 1 — already in P1's ISR — as the new leader for P1 with zero data loss, P0 and P2 are unaffected, and Broker 2 rejoins later as a catching-up follower once it recovers.
 
 ### 4.4 Consumer Groups and Partition Rebalancing
 
@@ -434,12 +505,25 @@ public class ConsumerGroupCoordinator {
 
 **Idempotent producer (`enable.idempotence=true`)**: the producer is assigned a **Producer ID (PID)** by the broker at session start, and tags every batch sent to a given partition with a monotonically increasing **sequence number**, starting from 0. The broker tracks the last sequence number it committed per `(PID, partition)`. On a retry, the broker sees a sequence number it has already committed and **silently discards the duplicate** (returning the original offset as if the write succeeded) rather than appending it again.
 
+```mermaid
+sequenceDiagram
+    participant P as Producer PID=1001
+    participant B as Broker Partition 0
+
+    P->>B: send seq=0
+    B->>B: append at offset 500
+    B--xP: ack lost on the wire
+
+    P->>B: retry send seq=0
+    Note over B: seq=0 already committed<br/>for PID=1001 - DISCARD
+    B-->>P: return offset=500, no duplicate write
+
+    P->>B: send seq=1
+    B->>B: append at offset 501
+    B-->>P: ack success
 ```
-Producer (PID=1001) -> Partition 0:
-  send seq=0  -> broker appends at offset 500, acks... but ack is lost on the wire
-  [retry] send seq=0 -> broker sees seq=0 already committed for PID=1001 -> DISCARD, return offset=500
-  send seq=1  -> broker appends at offset 501, acks successfully
-```
+
+The ack for the first send is lost on the wire; because the broker tracks the last committed sequence number per `(PID, partition)`, the retried `seq=0` is recognized as a duplicate and silently discarded rather than double-appended, while `seq=1` proceeds normally.
 
 This makes retries safe **within a single producer session, for a single partition** — exactly the failure mode `acks=all` retries create. It does *not* by itself make a multi-partition, multi-topic write atomic — that's what transactions add.
 

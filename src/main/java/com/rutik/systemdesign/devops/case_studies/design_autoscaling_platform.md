@@ -14,10 +14,44 @@
 
 **Mental model.** There are two nested loops:
 
-```
-Inner loop (fast, 15s):   metric -> HPA/KEDA -> desired replicas -> pending pods
-Outer loop (slow, 40s+):  pending pods -> Karpenter/CAS -> new nodes -> pods scheduled
-Reclaim loop (slow, mins): low util -> consolidation -> drain (PDB-aware) -> node deleted
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph inner["Inner loop (fast, ~15s)"]
+        m([metric]) --> hk{"HPA / KEDA"}
+        hk --> dr(desired replicas)
+        dr --> pp(pending pods)
+    end
+
+    subgraph outer["Outer loop (slow, 40s+)"]
+        pp2(pending pods) --> kc{"Karpenter / CAS"}
+        kc --> nn(new nodes)
+        nn --> ps(pods scheduled)
+    end
+
+    subgraph reclaim["Reclaim loop (slow, minutes)"]
+        lu(low utilization) --> cons{consolidation}
+        cons --> dp["drain<br/>(PDB-aware)"]
+        dp --> nd(node deleted)
+    end
+
+    pp -.-> pp2
+    ps -.-> lu
+
+    class m io
+    class hk,kc,cons mathOp
+    class dr,ps train
+    class pp,pp2 req
+    class nn base
+    class dp mathOp
+    class lu,nd lossN
 ```
 
 The inner loop decides *how many pods*. The outer loop decides *how much hardware*. The reclaim loop is the one everyone forgets, and it is where the cost savings actually come from. A platform that only scales up is a cost generator; a platform that scales down aggressively but ignores PodDisruptionBudgets is an outage generator. The job is to do both safely.
@@ -136,51 +170,60 @@ Modest in raw dollars but it also removes 1,100 idle pods from the scheduler's a
 
 ## 3. High-Level Architecture
 
-```
-                         ┌─────────────────────────────────────────────┐
-                         │              METRICS PLANE                   │
-                         │  Prometheus  ── Kafka/SQS lag exporters      │
-                         │     │              │                         │
-                         │  prometheus-adapter (custom.metrics.k8s.io)  │
-                         │  KEDA metrics-adapter (external.metrics...)  │
-                         └───────┬──────────────────────┬──────────────┘
-                                 │ custom/external metrics
-                  ┌──────────────▼───────────┐   ┌───────▼────────────┐
-                  │   HPA controller (15s)    │   │   KEDA Operator    │
-                  │  desiredReplicas =        │   │  scalers + ScaledObj│
-                  │  ceil(cur × m / target)   │   │  scale 0..N, cron   │
-                  └──────────────┬───────────┘   └───────┬────────────┘
-                                 │ patch .spec.replicas   │ (manages an HPA)
-                  ┌──────────────▼────────────────────────▼─────────────┐
-                  │           Deployments / StatefulSets                  │
-                  │           (replica count changes)                     │
-                  └──────────────────────┬───────────────────────────────┘
-                                         │ creates Pods
-                  ┌──────────────────────▼───────────────────────────────┐
-                  │   kube-scheduler  -> schedulable? -> Pending pods     │
-                  └──────────────────────┬───────────────────────────────┘
-                          pending pods    │   (Unschedulable: Insufficient cpu)
-                  ┌──────────────────────▼───────────────────────────────┐
-                  │   NODE AUTOSCALER:  Karpenter  (or Cluster Autoscaler)│
-                  │   - watches Pending pods                              │
-                  │   - solves bin-pack -> picks cheapest instance types  │
-                  │   - launches EC2 (spot first, on-demand fallback)     │
-                  │   - consolidation loop: pack & delete underused nodes │
-                  │   - PDB-aware drain on scale-down / spot reclaim       │
-                  └──────────────────────┬───────────────────────────────┘
-                                         │ provisions / terminates
-                  ┌──────────────────────▼───────────────────────────────┐
-                  │   EC2 NODES  ┌──────────────┐   ┌──────────────────┐  │
-                  │              │ Spot pool 70%│   │ On-demand 30%    │  │
-                  │              │ (stateless)  │   │ (stateful/crit)  │  │
-                  │              └──────────────┘   └──────────────────┘  │
-                  └───────────────────────────────────────────────────────┘
-                            ▲                              │
-                            │ spot interruption (120s)     │ node events
-                  ┌─────────┴──────────────────────────────▼─────────────┐
-                  │   Node Termination Handler / Karpenter interruption   │
-                  │   queue (SQS) -> cordon+drain -> reschedule           │
-                  └───────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph metrics["Metrics Plane"]
+        prom(["Prometheus +<br/>Kafka/SQS lag exporters"])
+        pa["prometheus-adapter<br/>(custom.metrics.k8s.io)"]
+        keda_ma["KEDA metrics-adapter<br/>(external.metrics)"]
+        prom --> pa
+        prom --> keda_ma
+    end
+
+    subgraph controllers["Scaling Controllers"]
+        hpa{"HPA controller 15s<br/>desired = ceil(cur×m/target)"}
+        kedaop{"KEDA Operator<br/>scalers + ScaledObject"}
+    end
+
+    deploy["Deployments / StatefulSets<br/>replica count changes"]
+    sched{"kube-scheduler<br/>schedulable?"}
+    pending(("Pending pods<br/>insufficient cpu"))
+    karpenter{"Node Autoscaler<br/>Karpenter / CAS<br/>bin-pack + consolidate"}
+
+    subgraph ec2["EC2 Nodes"]
+        spot["Spot pool 70%<br/>stateless"]
+        ondemand["On-demand 30%<br/>stateful / crit"]
+    end
+
+    nth["Node Termination Handler /<br/>interruption queue (SQS)"]
+
+    pa -->|"custom metrics"| hpa
+    keda_ma -->|"external metrics"| kedaop
+    hpa -->|"patch .spec.replicas"| deploy
+    kedaop -.->|"manages an HPA"| deploy
+    deploy -->|"creates pods"| sched
+    sched -.->|"unschedulable"| pending
+    pending --> karpenter
+    karpenter -->|"provisions"| spot
+    karpenter -->|"provisions"| ondemand
+    spot -.->|"spot interruption 120s"| nth
+    nth -.->|"cordon+drain<br/>reschedule"| sched
+
+    class prom io
+    class pa,keda_ma,hpa,kedaop,karpenter,sched mathOp
+    class deploy train
+    class pending req
+    class spot frozen
+    class ondemand base
+    class nth lossN
 ```
 
 ### Component inventory
@@ -211,34 +254,63 @@ The boundary between the planes matters: the **metrics plane** is the source of 
 
 ### Worked scale-up timeline (10x spike)
 
-```
-t=0s    traffic 10x; per-pod RPS jumps 50 -> 500
-t=2s    Prometheus scrape captures the rate increase
-t=15s   HPA sync fires: desired = ceil(24000 × 500/50) ... capped per-HPA
-        Deployments patched; ~48,000 new pods created
-t=16s   scheduler binds what fits; ~46,000 pods go Pending (no capacity)
-t=18s   Karpenter batch-solves: needs ~1,600 nodes, picks spot-first c6i/m6i
-t=20s   EC2 RunInstances issued (parallel, hundreds at once)
-t=58s   first wave of nodes Ready (~40s provision)
-t=62s   pods bind; readiness probes start
-t=78s   first new pods Ready and serving
-t=90s   p95 of new capacity serving  <-- SLO met
+```mermaid
+sequenceDiagram
+    participant T as Traffic
+    participant P as Prometheus
+    participant H as HPA
+    participant S as Scheduler
+    participant K as Karpenter
+    participant E as EC2
+
+    T->>P: t=0s 10x spike (RPS 50 to 500)
+    Note over P: t=2s scrape captures the increase
+    P->>H: updated metric
+    H->>H: t=15s desired = ceil(24000 × 500/50)
+    H->>S: patch replicas (~48,000 new pods)
+    S->>S: t=16s binds what fits,<br/>~46,000 pods Pending
+    S->>K: pending pods, no capacity
+    K->>K: t=18s batch-solve needs ~1,600 nodes
+    K->>E: t=20s RunInstances (parallel)
+    E-->>K: t=58s nodes Ready (~40s provision)
+    K-->>S: nodes joined, pods bind
+    S->>S: t=62s readiness probes start
+    Note over S: t=78s first new pods Ready and serving
+    Note over T,E: t=90s p95 of new capacity serving - SLO met
 ```
 
 The tall pole is unambiguous: **steps t=20->58s (node provision) consume ~40 of the 90 seconds.** This is exactly why Karpenter (40s) beats Cluster Autoscaler (3–5 min) for the SLO, and why a warm-pool of pause-pods can shave the tail to near-zero for the most spike-prone services.
 
 ### Multi-cluster topology
 
-```
-   Region us-east-1                      Region eu-west-1
-   ┌───────────────────────┐             ┌───────────────────────┐
-   │ cluster-use1 (prod)   │             │ cluster-euw1 (prod)   │
-   │  HPA/KEDA + Karpenter │             │  HPA/KEDA + Karpenter │
-   │  own NodePools, quota │             │  own NodePools, quota │
-   └──────────┬────────────┘             └──────────┬────────────┘
-              │  federated metrics (Thanos/Mimir)   │
-              └──────────────┬──────────────────────┘
-                  global capacity dashboard + cost rollup
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph use1["Region us-east-1"]
+        c1["cluster-use1 (prod)<br/>HPA/KEDA + Karpenter<br/>own NodePools, quota"]
+    end
+
+    subgraph euw1["Region eu-west-1"]
+        c2["cluster-euw1 (prod)<br/>HPA/KEDA + Karpenter<br/>own NodePools, quota"]
+    end
+
+    fed(["federated metrics<br/>(Thanos / Mimir)"])
+    dash(["global capacity dashboard<br/>+ cost rollup"])
+
+    c1 -->|"metrics"| fed
+    c2 -->|"metrics"| fed
+    fed --> dash
+
+    class c1,c2 train
+    class fed mathOp
+    class dash base
 ```
 
 Each cluster autoscales independently (no cross-cluster pod scheduling), but a federated metrics layer gives one global view of utilization and spend. Cross-region traffic shifting and cluster failover are out of scope here — see [`cross_cutting/multi_cluster_networking.md`](cross_cutting/multi_cluster_networking.md).
@@ -251,12 +323,25 @@ The platform has six load-bearing components. Four are scaling controllers (HPA,
 
 ### 4.1 HPA with Custom & External Metrics
 
-```
-   app /metrics ──> Prometheus ──> prometheus-adapter
-                                        │ custom.metrics.k8s.io/v1beta1
-                                        ▼
-   HPA: target http_requests_per_second = 50  ── reads cur=80
-        desired = ceil( replicas × 80/50 ) = ceil( 10 × 1.6 ) = 16
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    app(["app /metrics"]) --> prom["Prometheus"]
+    prom -->|"custom.metrics.k8s.io<br/>v1beta1"| pa["prometheus-adapter"]
+    pa --> hpa{"HPA target RPS=50<br/>reads cur=80"}
+    hpa --> out(["desired = ceil(10 × 1.6) = 16"])
+
+    class app io
+    class prom,pa mathOp
+    class hpa mathOp
+    class out train
 ```
 
 The default CPU HPA is too coarse for latency-sensitive HTTP services. We scale on **requests-per-second per pod**, exposed through prometheus-adapter.
@@ -330,13 +415,15 @@ Asymmetric behavior — **fast up, slow down** — is the single most important 
 
 ### 4.2 KEDA Scalers + Scale-to-Zero
 
-```
-   Kafka topic lag = 12,000 msgs
-          │ KEDA Kafka scaler: lagThreshold=500
-          ▼
-   desiredReplicas = ceil(12000 / 500) = 24   (capped at maxReplicaCount)
-   ... lag drains to 0 ...
-   idle > cooldownPeriod(300s) ──> scale to 0 pods  (no cost)
+```mermaid
+stateDiagram-v2
+    [*] --> Zero
+    Zero --> Active: lag above activationLagThreshold<br/>(12,000 msgs)
+    Active --> Idle: lag drains to 0
+    Idle --> Active: new lag arrives
+    Idle --> Zero: idle exceeds cooldownPeriod (300s)
+    note right of Zero: scale to 0 pods, no cost
+    note right of Active: desiredReplicas = ceil(lag/500)<br/>capped at maxReplicaCount (24)
 ```
 
 KEDA scales on the *event backlog* directly, and uniquely can scale to **zero** — HPA's floor is 1. For 4000 services, hundreds are async workers idle most of the day; scale-to-zero alone reclaims significant cost.
@@ -400,13 +487,30 @@ Now a low-but-steady trickle keeps a single replica warm (cooldown never elapses
 
 ### 4.3 Karpenter Provisioner & Consolidation
 
-```
-   Pending pods (need 4 vCPU, on spot, zone us-east-1a)
-          │
-          ▼  Karpenter solves: cheapest instance covering pods + constraints
-   candidates: c6i.xlarge $0.17 | m6i.xlarge $0.192 | r6i.xlarge $0.252
-          ▼  picks c6i.xlarge spot ($0.051)  -> launches in ~40s
-   later: node at 28% util  -> consolidation: replace with smaller / empty & delete
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pend(["Pending pods<br/>4 vCPU, spot, us-east-1a"]) --> solve{"cheapest fit<br/>covering constraints"}
+    solve -.-> c1["c6i.xlarge<br/>$0.17/hr on-demand"]
+    solve -.-> c2["m6i.xlarge<br/>$0.192/hr on-demand"]
+    solve -.-> c3["r6i.xlarge<br/>$0.252/hr on-demand"]
+    solve -->|"picks cheapest"| pick(["c6i.xlarge spot<br/>$0.051/hr, launches ~40s"])
+    pick -.->|"later: 28% util"| cons{"Consolidation"}
+    cons -->|"replace smaller<br/>or empty + delete"| done(("node removed"))
+
+    class pend req
+    class solve mathOp
+    class c1,c2,c3 base
+    class pick train
+    class cons mathOp
+    class done lossN
 ```
 
 Karpenter does not use node groups — it looks at pending pods and provisions *right-sized* instances directly, choosing across a wide instance family for the cheapest fit.
@@ -473,12 +577,18 @@ Karpenter now honors the PDB during drain (it will *not* evict if doing so breac
 
 ### 4.4 PDB-Aware Scale-Down & Spot Reclaim
 
-```
-   spot interruption notice (SQS) ── t=0
-        │ Karpenter cordons node, taints it
-        ▼ t=0..115s  evict pods respecting PDB (minAvailable)
-        │   - pod re-scheduled, new pod Ready BEFORE old terminates
-        ▼ t=120s     EC2 reclaims instance
+```mermaid
+sequenceDiagram
+    participant AWS as AWS Spot
+    participant K as Karpenter
+    participant N as Node
+    participant Pod as Pod
+
+    AWS->>K: t=0 spot interruption notice (SQS)
+    K->>N: cordon + taint
+    K->>Pod: t=0..115s evict (respect PDB minAvailable)
+    Pod->>Pod: new pod Ready before old terminates
+    K-->>AWS: t=120s EC2 reclaims instance
 ```
 
 Spot nodes get a **120s** warning. The drain must respect PDBs *and* finish inside 120s. The Go control logic that ties it together:
@@ -519,11 +629,26 @@ The key correctness property: the **Eviction API** (`POST .../pods/{name}/evicti
 
 ### 4.5 VPA Right-Sizing for Accurate Bin-Packing
 
-```
-   90 days of usage ── VPA recommender ── p95 CPU=180m, p95 mem=420Mi
-        │  current request 250m/512Mi  -> over-requested by 28% CPU
-        ▼  apply recommendation -> request 200m/450Mi
-   bin-pack density: 7.3/0.25 = 29 pods  ->  7.3/0.20 = 36 pods/node (+24%)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    usage(["90 days of usage"]) --> vpa{"VPA recommender<br/>p95 CPU=180m, mem=420Mi"}
+    vpa --> cmp["current 250m/512Mi<br/>over-requested 28% CPU"]
+    cmp --> apply(["apply recommendation<br/>request 200m/450Mi"])
+    apply --> density["bin-pack density:<br/>29 to 36 pods/node (+24%)"]
+
+    class usage io
+    class vpa mathOp
+    class cmp lossN
+    class apply train
+    class density base
 ```
 
 HPA and Karpenter both reason about *requests*, not actual usage. If requests are inflated, every node is under-packed and the whole fleet is over-provisioned regardless of how good the autoscalers are. VPA closes this gap by recommending requests from observed usage.
@@ -550,11 +675,28 @@ We run VPA in `updateMode: "Off"` so it *recommends* but never evicts — evicti
 
 ### 4.6 Predictive Pre-Warming for Seasonal Peaks
 
-```
-   forecast: daily peak at 09:00, 4.2x baseline, ramp over 6 min
-        │  reactive alone: node-provision tail adds 40s to first-pod latency
-        ▼  KEDA cron trigger pre-scales at 08:54 -> nodes warm before traffic
-   cold-start cliff eliminated for the predictable peak
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    forecast(["forecast: 09:00 peak<br/>4.2x baseline, 6min ramp"]) --> reactive{"reactive alone?"}
+    reactive -->|"yes"| tail["node-provision tail<br/>+40s first-pod latency"]
+    reactive -->|"no: pre-warm"| cron["KEDA cron pre-scales<br/>at 08:54"]
+    cron --> warm(["nodes warm<br/>before traffic"])
+    warm --> done((" cliff eliminated "))
+
+    class forecast io
+    class reactive mathOp
+    class tail lossN
+    class cron mathOp
+    class warm train
+    class done base
 ```
 
 For the ~600 services with strong daily seasonality, the 40s node-provision tail is a recurring, *predictable* latency hit. A KEDA `cron` trigger pre-scales ahead of the known ramp:
@@ -695,6 +837,32 @@ deny[msg] {
 }
 ```
 
+As a decision pipeline, the same three checks read like this:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pr(["HPA / ScaledObject /<br/>NodePool change (PR)"]) --> g1{"scaleDown stabilization<br/>under 60s?"}
+    g1 -->|"yes"| deny1["deny: thrash risk"]
+    g1 -->|"no"| g2{"maxReplicas over 500<br/>and no cost-approved<br/>annotation?"}
+    g2 -->|"yes"| deny2["deny: needs<br/>cost approval"]
+    g2 -->|"no"| g3{"Deployment missing<br/>a PodDisruptionBudget?"}
+    g3 -->|"yes"| deny3["deny: PDB required"]
+    g3 -->|"no"| merge(["merged"])
+
+    class pr io
+    class g1,g2,g3 mathOp
+    class deny1,deny2,deny3 lossN
+    class merge train
+```
+
 The gate enforces: scale-down stabilization >= 60s, a cost-ceiling annotation for high `maxReplicas`, and a mandatory PDB for any consolidatable workload. This is the same class of guardrail described in [`cross_cutting/kubernetes_production_hardening.md`](cross_cutting/kubernetes_production_hardening.md).
 
 ### (b) Observability for scaling decisions
@@ -714,13 +882,26 @@ node_cpu_utilization:ratio                          # vs 65% target
 
 OTel spans wrap the full scale path so a slow scale-up can be attributed to the exact stage:
 
-```
-span: scale.event (root)
- ├─ hpa.evaluate         (metric read + desired calc, ~50ms)
- ├─ deployment.patch     (replica update, ~20ms)
- ├─ scheduler.bind       (or -> Pending if no capacity)
- ├─ karpenter.provision  (EC2 RunInstances -> node Ready, ~40s)  <-- usual tall pole
- └─ pod.ready            (image pull + readiness probe pass)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root(["scale.event (root)"]) --> a["hpa.evaluate<br/>~50ms"]
+    a --> b["deployment.patch<br/>~20ms"]
+    b --> c{"scheduler.bind<br/>capacity?"}
+    c -->|"no capacity"| d["karpenter.provision<br/>~40s - tall pole"]
+    d --> e["pod.ready<br/>image pull + probe"]
+
+    class root io
+    class a,b,c mathOp
+    class d lossN
+    class e train
 ```
 
 When the 90s SLO is missed, the trace immediately shows whether the delay was metric latency, the node-provision tail, or a slow image pull / readiness probe — three completely different fixes. The key derived alerts:
@@ -774,6 +955,28 @@ A pattern runs through all seven incidents below: the autoscaler did exactly wha
 ## 10. Capacity Planning
 
 Capacity planning here answers two questions: *how many pods* a service needs at a given load, and *how many nodes* the fleet needs to host all pods at the target utilization and spot mix. The formulas chain — pod demand feeds node demand feeds cost — and the burst buffer and disruption-budget math below bound the two operational extremes (instant spike absorption and safe fleet-wide recycling).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    metric(["metric + replicas"]) --> pods{"Pod replicas (HPA)<br/>desired = ceil(cur×m/target)"}
+    pods --> nodes{"Node count<br/>ceil(pod requests / allocatable)"}
+    nodes --> split{"Spot / on-demand split<br/>by interruption tolerance"}
+    split --> cost(["monthly cost"])
+
+    class metric io
+    class pods,nodes,split mathOp
+    class cost base
+```
+
+The three formulas below implement each stage in turn — pod demand, then node demand, then the spot/on-demand cost split.
 
 ### Scaling formulas
 

@@ -19,6 +19,30 @@
 
 The migration is "done" only when all three clocks have converged: backfill complete, CDC lag near zero, and 100% of traffic served by the target with the source kept as a hot rollback for a bake period.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    c1["Backfill clock<br/>200TB once,<br/>hours to days"] --> done{"All three<br/>converged?"}
+    c2["CDC clock<br/>chase mutations,<br/>lag under 5s"] --> done
+    c3["Traffic clock<br/>1% to 100%,<br/>weighted shift"] --> done
+    done -->|"yes"| migrated(["Migration done<br/>source = hot rollback"])
+
+    class c1 frozen
+    class c2 mathOp
+    class c3 train
+    class done mathOp
+    class migrated io
+```
+
+*The migration is "done" only when all three clocks converge — backfill complete, CDC lag near zero, and 100% of traffic on the target — with the source retained as a hot rollback through the bake period.*
+
 **Why this system exists**: Companies migrate estates for cost (data-center lease expiry, cloud arbitrage), capability (managed services, autoscaling, multi-region), compliance (data residency), or end-of-life (a vendor sunset). A "maintenance window" big-bang migration of 4000 services and 200TB is impossible — there is no 44-hour window where a global product can be down. The only viable path is an *online* migration where the business never notices. This is the strangler-fig pattern applied to infrastructure: the new system slowly grows around the old until the old can be cut away.
 
 ---
@@ -119,15 +143,15 @@ Per service, shift in steps **1% → 5% → 25% → 50% → 100%**, each baked f
 
 ### Parallel-Estate Cost (overlap)
 
+```mermaid
+xychart-beta
+    title "Parallel-Estate Cost (multiples of baseline)"
+    x-axis ["Source", "Target", "CDC infra", "Snowball", "Peak (worst case)", "Phased avg"]
+    y-axis "Cost (x baseline)" 0 --> 2.2
+    bar [1.00, 0.95, 0.10, 0.05, 2.05, 1.55]
 ```
-Source steady-state run cost (on-prem, amortized)      = $1.00x baseline
-Target run cost during overlap (AWS, full footprint)   = $0.95x baseline
-CDC + replication infra (DMS instances, NAT, transfer) = $0.10x baseline
-Snowball + egress one-time                             = ~$0.05x (one-time)
 
-Peak parallel monthly = 1.00 + 0.95 + 0.10 = 2.05x  WORST CASE
-Phased (only migrated fraction runs on both) averages ~1.55x over 6 months.
-```
+Four cost components — source (1.00x), target (0.95x), CDC infra (0.10x), one-time Snowball (0.05x) — sum to a 2.05x worst-case peak if both estates ran at full parallel footprint; phasing the cutover so only the in-flight fraction dual-runs brings the six-month average down to 1.55x.
 
 Target the **≤ 1.6×** NFR by never running 100% of both estates hot simultaneously — decommission source per service immediately after its bake period.
 
@@ -135,61 +159,50 @@ Target the **≤ 1.6×** NFR by never running 100% of both estates hot simultane
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    entry(["Global Traffic Entry"]) --> gslb{"Edge / GSLB<br/>Route53 weighted +<br/>health check"}
+
+    gslb -->|"weight = W_src"| srcMesh["Service Mesh<br/>(Consul)"]
+    gslb -->|"weight = W_tgt"| tgtMesh["EKS + Istio Mesh"]
+
+    subgraph SRC["Source Estate (on-prem DC)"]
+        srcMesh --> srcApp["App Pods / VMs<br/>(4000)"]
+        srcApp --> srcDb("PG / MySQL / Mongo /<br/>Object Store")
+    end
+
+    subgraph TGT["Target Estate (AWS, multi-AZ)"]
+        tgtMesh --> tgtApp["App Pods<br/>(mirrored)"]
+        tgtApp --> tgtDb("Aurora / DocumentDB / S3")
+    end
+
+    srcApp -->|"dual-write proxy"| tgtApp
+    srcDb -.->|"CDC + Snowball<br/>(bulk)"| tgtDb
+
+    srcDb --> recon["Reconciliation and Validation<br/>count, checksum, sample, shadow-read"]
+    tgtDb --> recon
+
+    recon -->|"parity signal"| ctrl["Migration Control Plane<br/>flags, shift orchestrator,<br/>rollback engine, gates"]
+    ctrl --> obs["Observability (both estates)<br/>Prometheus + OTel + lag exporter"]
+
+    class entry io
+    class gslb mathOp
+    class srcMesh,srcApp,srcDb frozen
+    class tgtMesh,tgtApp,tgtDb train
+    class recon mathOp
+    class ctrl mathOp
+    class obs base
 ```
-                         GLOBAL TRAFFIC ENTRY
-                               │
-                  ┌────────────▼─────────────┐
-                  │   Edge / GSLB (Route53    │  weighted records +
-                  │   weighted + health chk)  │  health-gated failover
-                  └─────┬───────────────┬─────┘
-        weight=W_src    │               │   weight=W_tgt
-                        │               │
-        ┌───────────────▼──┐         ┌──▼────────────────┐
-        │  SOURCE ESTATE    │         │  TARGET ESTATE     │
-        │  (on-prem DC)     │         │  (AWS, multi-AZ)   │
-        │                   │         │                    │
-        │  ┌─────────────┐  │         │  ┌──────────────┐  │
-        │  │ Service Mesh│  │         │  │ EKS + Istio  │  │
-        │  │ (Consul)    │  │         │  │ mesh         │  │
-        │  └──────┬──────┘  │         │  └──────┬───────┘  │
-        │         │         │         │         │          │
-        │  ┌──────▼──────┐  │  dual   │  ┌──────▼───────┐  │
-        │  │ App pods /  │◄─┼─write──►│  │ App pods     │  │
-        │  │ VMs (4000)  │  │  proxy  │  │ (mirrored)   │  │
-        │  └──────┬──────┘  │         │  └──────┬───────┘  │
-        │         │         │         │         │          │
-        │  ┌──────▼──────┐  │  CDC    │  ┌──────▼───────┐  │
-        │  │ PG / MySQL  │──┼────────►│  │ Aurora /     │  │
-        │  │ Mongo /     │  │ DMS +   │  │ DocumentDB / │  │
-        │  │ Object store│──┼─Snowball┼─►│ S3           │  │
-        │  └──────┬──────┘  │ (bulk)  │  └──────┬───────┘  │
-        └─────────┼─────────┘         └─────────┼──────────┘
-                  │                             │
-                  └──────────┬──────────────────┘
-                             │
-                  ┌──────────▼───────────────┐
-                  │  RECONCILIATION & VALIDATION│
-                  │  - row-count diff           │
-                  │  - rolling checksum (chunked)│
-                  │  - sampled-row deep compare  │
-                  │  - shadow-read compare       │
-                  └──────────┬──────────────────┘
-                             │ parity signal
-                  ┌──────────▼───────────────┐
-                  │  MIGRATION CONTROL PLANE   │
-                  │  - per-service flag store  │
-                  │  - weighted-shift orchestr.│
-                  │  - rollback engine (<10min)│
-                  │  - CDC-lag / parity gates  │
-                  └────────────────────────────┘
-                             │
-                  ┌──────────▼───────────────┐
-                  │  OBSERVABILITY (both estates)│
-                  │  Prometheus (federated) +    │
-                  │  OTel traces + replication   │
-                  │  lag exporter + SLO budgets  │
-                  └──────────────────────────────┘
-```
+
+*Traffic enters through GSLB and splits by weight across two fully parallel estates; the source (purple) stays authoritative while dual-write and CDC keep the target (green) converged, and both feed a shared reconciliation-to-observability spine that gates the cutover.*
 
 ### Component Inventory
 
@@ -215,24 +228,61 @@ Target the **≤ 1.6×** NFR by never running 100% of both estates hot simultane
 7. **Bake**: Source kept hot as rollback for N days; CDC may *reverse* (target → source) for safety.
 8. **Decommission**: Disable dual-write, stop reverse CDC, tear down source for that service.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Backfill
+
+    state "1. Backfill" as Backfill
+    state "2. CDC Catch-up" as CDCCatchup
+    state "3. Dual-Write Enable" as DualWrite
+    state "4. Shadow Read" as ShadowRead
+    state "5. Validate" as Validate
+    state "6. Traffic Shift" as TrafficShift
+    state "7. Bake" as Bake
+    state "8. Decommission" as Decommission
+
+    Backfill --> CDCCatchup: L0 recorded
+    CDCCatchup --> DualWrite: lag drains toward zero
+    DualWrite --> ShadowRead: source still authoritative
+    ShadowRead --> Validate: divergence logged
+    Validate --> TrafficShift: parity = 100%
+    TrafficShift --> Bake: target authoritative
+    Bake --> Decommission: N days healthy
+    Decommission --> [*]
+```
+
+*Each service moves through this eight-phase lifecycle independently and in dependency order — Section 4's four deep dives (replication, dual-write, traffic shift, rollback) each zoom into one phase of this same journey.*
+
 ---
 
 ## 4. Component Deep Dives
 
 ### 4.1 Data Replication: Backfill + CDC (DMS / Debezium)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src("Source PG<br/>heap + WAL, LSN advancing") -->|"1. snapshot @ L0"| snow["Snowball<br/>(bulk)"]
+    snow --> tgt("Target Aurora PG")
+
+    src -->|"2. WAL stream<br/>from L0"| deb["Debezium<br/>logical decode (slot)"]
+    deb --> kafka["Kafka Topics"]
+    kafka --> apply["Apply Workers<br/>parallel by PK hash"]
+    apply --> tgt
+
+    class src frozen
+    class tgt train
+    class snow,deb,kafka,apply mathOp
 ```
-   SOURCE PG (LSN advancing)                TARGET Aurora PG
-   ┌───────────────┐                        ┌───────────────┐
-   │ heap + WAL     │   1. snapshot @ L0     │ tables (bulk)  │
-   │                │ ─────Snowball────────► │                │
-   │                │                        │                │
-   │  WAL stream    │   2. logical decode    │  apply workers │
-   │  from L0 ──────┼──► Debezium ──► Kafka ─┼─► sink (parallel│
-   │                │     (slot)     topics  │     by PK hash) │
-   └───────────────┘                        └───────────────┘
-        lag = now() - source_commit_ts(last applied)
-```
+
+Replication lag is measured as `now() - source_commit_ts(last applied)` per slot and exported to the control plane so it can gate the traffic shift on lag (see the Go exporter below).
 
 Debezium PostgreSQL connector config (logical replication slot, snapshot already done by Snowball so we start from the recorded LSN):
 
@@ -272,15 +322,35 @@ func recordLag(reg *prometheus.GaugeVec, slot string, srcTs, appliedTs time.Time
 
 ### 4.2 Dual-Write / Dual-Read with Shadow Validation
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph W["Write"]
+        appW(["app"]) --> proxyW{"proxy"}
+        proxyW -->|"authority"| srcW["source"]
+        proxyW -.->|"idempotent"| tgtW["target"]
+    end
+
+    subgraph R["Read (shadow phase)"]
+        appR(["app"]) --> proxyR{"proxy"}
+        proxyR -->|"served"| srcR["source"]
+        proxyR -.->|"compare, discard,<br/>log diff"| tgtR["target"]
+    end
+
+    class appW,appR io
+    class proxyW,proxyR mathOp
+    class srcW,srcR frozen
+    class tgtW,tgtR train
 ```
-        WRITE                         READ (shadow phase)
-        ┌────────┐                    ┌────────┐
-   app─►│ proxy  │                app►│ proxy  │
-        └──┬──┬──┘                    └──┬──┬──┘
-           │  │                          │  │
-   source◄─┘  └─►target          source◄─┘  └─►target (compare,
-   (authority)  (idempotent)     (served)     discard, log diff)
-```
+
+On the write path the proxy fans out synchronously to source (authoritative) and asynchronously to target (idempotent apply); on the read path only source is served while target is shadow-compared, discarded, and any diff logged for reconciliation.
 
 #### BROKEN — dual-write with no idempotency, producing duplicate / divergent rows
 
@@ -364,14 +434,24 @@ func (p *Proxy) ShadowRead(ctx context.Context, q Query) Result {
 
 ### 4.3 Traffic Shifting at LB / DNS / Mesh
 
+```mermaid
+stateDiagram-v2
+    [*] --> Shift1
+
+    state "1% traffic (soak)" as Shift1
+    state "5% traffic (soak)" as Shift5
+    state "25% traffic (soak)" as Shift25
+    state "50% traffic (soak)" as Shift50
+    state "100% (cutover complete)" as Shift100
+
+    Shift1 --> Shift5: parity = 100%
+    Shift5 --> Shift25: err within base + 0.1%
+    Shift25 --> Shift50: err within base + 0.1%
+    Shift50 --> Shift100: p99 ok, CDC lag under 5s
+    Shift100 --> [*]: bake N days, reverse-CDC armed
 ```
-   1%        5%         25%        50%        100%
-   ├──soak──►├──soak───►├──soak───►├──soak───►├ cutover complete
-   │         │          │          │          │
-   gate:    gate:      gate:      gate:      gate:
-   parity   err<base   err<base   p99 ok     bake N days
-   =100%    +0.1%      +0.1%      CDC<5s     reverse-CDC armed
-```
+
+Each increment is a gated state: the shift advances to the next percentage only once its own gate condition is satisfied, and even 100% still leads to a bake period with reverse-CDC armed before the source is decommissioned.
 
 #### BROKEN — flip DNS with a 1h TTL and no health-gated rollback
 
@@ -448,18 +528,45 @@ Mesh weighting takes effect in **< 1s** (config push) versus DNS at **TTL second
 
 ### 4.4 Rollback + Reconciliation
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph REC["Reconciliation (continuous)"]
+        r1["1. row-count diff"]
+        r2["2. chunked checksum"]
+        r3["3. sampled deep compare"]
+        r4["4. shadow-read diff"]
+    end
+
+    gate{"parity = 100%?"}
+    r1 --> gate
+    r2 --> gate
+    r3 --> gate
+    r4 --> gate
+
+    gate -->|"gate fail OR err-spike<br/>OR manual trigger"| rb["Rollback<br/>armed, under 10 min"]
+
+    subgraph RB["Rollback"]
+        rb1["1. weight target to 0"]
+        rb2["2. source authoritative"]
+        rb3["3. reverse-CDC catches<br/>target deltas back"]
+        rb1 --> rb2 --> rb3
+    end
+    rb --> rb1
+
+    class r1,r2,r3,r4 mathOp
+    class gate mathOp
+    class rb,rb1,rb2,rb3 lossN
 ```
-   RECONCILIATION (continuous)            ROLLBACK (armed, <10min)
-   ┌──────────────────────┐              ┌──────────────────────┐
-   │ 1. row-count diff     │              │ trigger: gate fail OR │
-   │ 2. chunked checksum   │── parity ───►│  err-spike OR manual  │
-   │ 3. sampled deep cmp   │   100%?      │                       │
-   │ 4. shadow-read diff    │              │ 1. weight target -> 0 │
-   └──────────────────────┘              │ 2. source authoritative│
-                                          │ 3. reverse-CDC catches │
-                                          │    target deltas back  │
-                                          └──────────────────────┘
-```
+
+Reconciliation continuously computes four parity checks; any gate failure, error spike, or manual trigger arms the under-10-minute rollback, which zeroes target weight, restores source authority, and drains target-only writes back via reverse CDC.
 
 Chunked checksum reconciliation (so we never full-scan 200TB at once):
 
@@ -661,13 +768,28 @@ groups:
 
 OTel span hierarchy makes dual-write and shadow paths visible:
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root["request<br/>estate=source or target"] --> ws["write.source<br/>authoritative, status"]
+    root --> wo["write.outbox.enqueue<br/>target async"]
+    wo --> wa["write.target.apply<br/>idempotent, conflict?"]
+    root --> sr["shadow.read.compare<br/>diff = 0 or N"]
+
+    class root req
+    class ws train
+    class wo,wa mathOp
+    class sr lossN
 ```
-span: request (estate=source|target, service, shift_weight)
- ├─ span: write.source        (authoritative, status)
- ├─ span: write.outbox.enqueue (target async)
- │    └─ span: write.target.apply (idempotent, conflict?)
- └─ span: shadow.read.compare  (diff=0|N)
-```
+
+Each request span forks a synchronous `write.source` path that must succeed, plus two decoupled paths — the async outbox apply and the shadow-read comparison — so a slow or failed target shows up in traces without ever blocking the user-facing write.
 
 Beware metric cardinality: labeling by `service` (4000 values) × `estate` (2) × `chunk` would explode the series count — keep `chunk` out of long-lived metrics and use it only in reconciliation job logs. See [`cross_cutting/prometheus_cardinality_and_scale.md`](./cross_cutting/prometheus_cardinality_and_scale.md).
 

@@ -82,28 +82,46 @@ These seven files live in `cross_cutting/` and are referenced by multiple case s
 
 Some case studies build on patterns established by others.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    K8S(design_kubernetes_platform)
+    CICD(design_ci_cd_platform)
+    OBS(design_observability_platform)
+    DR(design_multi_region_dr_architecture)
+    AUTO(design_autoscaling_platform)
+    IDP(design_internal_developer_platform)
+    GITOPS(design_gitops_delivery_pipeline)
+    REGISTRY(design_container_registry)
+    LOGS(design_log_aggregation_pipeline)
+    INCIDENT(design_incident_response_system)
+    MIGRATION(design_zero_downtime_infra_migration)
+    MLPLATFORM(design_ml_platform_infrastructure)
+
+    K8S -->|"cost-aware<br/>elasticity"| AUTO
+    K8S -->|"self-service<br/>abstraction"| IDP
+    K8S -->|"delivery onto<br/>the platform"| GITOPS
+    CICD -->|"pull-based<br/>delivery layer"| GITOPS
+    CICD -->|"artifact source<br/>of truth"| REGISTRY
+    OBS -->|"logging sub-system<br/>at scale"| LOGS
+    OBS -->|"alerting and SLO<br/>consumption"| INCIDENT
+    DR -->|"traffic-shifting<br/>+ cutover"| MIGRATION
+    AUTO -->|"GPU scheduling +<br/>Spot autoscaling"| MLPLATFORM
+
+    class K8S,CICD,OBS base
+    class DR frozen
+    class AUTO,IDP,GITOPS,REGISTRY,LOGS,INCIDENT,MIGRATION train
+    class MLPLATFORM mathOp
 ```
-design_kubernetes_platform
-    +-> design_autoscaling_platform        (adds cost-aware elasticity)
-    +-> design_internal_developer_platform (adds self-service abstraction)
-    +-> design_gitops_delivery_pipeline    (delivery onto the platform)
 
-design_ci_cd_platform
-    +-> design_gitops_delivery_pipeline    (pull-based delivery layer)
-    +-> design_container_registry          (artifact source of truth)
-
-design_observability_platform
-    +-> design_log_aggregation_pipeline    (logging sub-system at scale)
-    +-> design_incident_response_system    (alerting/SLO consumption)
-
-design_multi_region_dr_architecture
-    +-> design_zero_downtime_infra_migration (shares traffic-shifting + cutover)
-
-design_kubernetes_platform
-    +-> design_autoscaling_platform
-            +-> design_ml_platform_infrastructure (GPU scheduling + Spot autoscaling
-                                                   on top of the autoscaling platform)
-```
+Gold marks the foundation platforms (Kubernetes, CI/CD, observability) that everything else is built on; purple is the replica/cold-standby DR path; green is a capability layered on top of a foundation; orange is the GPU-scheduling leaf that inherits autoscaling — the same platform-then-capability shape repeats across all four clusters.
 
 ---
 

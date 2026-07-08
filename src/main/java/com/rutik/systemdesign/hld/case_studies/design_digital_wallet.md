@@ -86,59 +86,46 @@
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CL(["Clients<br/>mobile / web app"]) -->|"POST /transfers,<br/>Idempotency-Key"| GW("API Gateway<br/>authn, rate limit, TLS")
+
+    GW --> WTS("Wallet Transfer Service<br/>P2P, §4.1-§4.3")
+    GW --> TUS("Top-Up Service<br/>bank/card to wallet, async")
+    GW --> WDS("Withdrawal Service<br/>wallet to bank, async")
+
+    WTS -->|"sharded by<br/>wallet_id"| LDB(["Wallet Ledger DB<br/>~64 shards"])
+    TUS -->|"saga + outbox"| PSPC("PSP / Bank Rail Adapter<br/>ACH / card")
+    WDS -->|"saga + outbox"| PSPR("PSP / Bank Rail Adapter<br/>ACH / RTP")
+
+    PSPC --> BCN(["Bank / Card Network<br/>settles in minutes to days"])
+    PSPR --> BRTP(["Bank ACH/RTP<br/>1-3 days standard, minutes instant"])
+
+    LDB -->|outbox| KFK(["Kafka<br/>topic: wallet.*"])
+
+    KFK --> NOT(["Notification Service<br/>push: you got paid"])
+    KFK --> FRD{"Fraud / AML Engine<br/>§4.6"}
+    KFK --> REC("Reconciliation Service<br/>nightly ledger vs balance")
+
+    class CL io
+    class GW mathOp
+    class WTS train
+    class TUS,WDS req
+    class LDB,KFK base
+    class PSPC,PSPR,BCN,BRTP frozen
+    class NOT io
+    class FRD,REC mathOp
 ```
-                          +---------------------+
-                          |       Clients        |
-                          |  (mobile / web app)   |
-                          +-----------+-----------+
-                                       |
-                                       | POST /transfers
-                                       | Idempotency-Key: <uuid>
-                                       v
-                          +---------------------+
-                          |    API Gateway        |
-                          | (authn, rate limit,   |
-                          |  TLS termination)     |
-                          +-----------+-----------+
-                                       |
-              +------------------------+------------------------+
-              |                        |                          |
-              v                        v                          v
-   +-------------------+   +----------------------+   +----------------------+
-   | Wallet Transfer    |   | Top-Up Service        |   | Withdrawal Service    |
-   | Service            |   | (bank/card -> wallet, |   | (wallet -> bank,      |
-   | (P2P, §4.1-§4.3)   |   | async, §4.4)          |   | async, §4.4)          |
-   +---------+----------+   +-----------+-----------+   +-----------+-----------+
-             |                          |                            |
-             | sharded by               | saga + outbox              | saga + outbox
-             | wallet_id (§4.3)         | (cross-ref                 | (cross-ref
-             v                          |  distributed_transactions) |  distributed_transactions)
-   +-------------------+                v                            v
-   | Wallet Ledger DB   |     +----------------------+   +----------------------+
-   | (sharded, ~64      |     |  PSP / Bank Rail      |   |  PSP / Bank Rail      |
-   |  shards, §10)      |     |  Adapter (ACH/card)   |   |  Adapter (ACH/RTP)    |
-   |  - accounts        |     +-----------+-----------+   +-----------+-----------+
-   |  - ledger_entries  |                 |                            |
-   |  - idempotency_keys|                 v                            v
-   +---------+----------+      +-------------------+         +-------------------+
-             |                  |  Bank / Card       |         |  Bank (ACH/RTP)    |
-             | outbox           |  Network           |         |  settlement,       |
-             v                  |  (settles in       |         |  1-3 days standard,|
-   +-------------------+        |   minutes-days)    |         |  minutes if instant|
-   |   Kafka            |        +-------------------+         +-------------------+
-   |  topic: wallet.*   |
-   +----+------+----+---+
-        |      |    |
-        v      v    v
-  +--------+ +--------+ +----------------------+
-  | Notif. | | Fraud/ | | Reconciliation        |
-  | Service| | AML    | | Service (nightly:     |
-  | (push  | | Engine | | sum(ledger) == sum    |
-  |  "you  | | (§4.6) | |  (balances) per       |
-  |  got   | |        | |  shard + cross-check  |
-  |  paid")| |        | |  vs. bank settlement) |
-  +--------+ +--------+ +----------------------+
-```
+
+*Three parallel service paths fan out from the API Gateway: P2P transfers stay inside the Wallet Ledger DB as a single ACID transaction (§4.1), while top-up and withdrawal reach external bank rails via saga + outbox (§4.4); the ledger's own outbox feeds Kafka, which fans out to notifications, fraud/AML, and nightly reconciliation.*
 
 ### Request Flow
 
@@ -362,69 +349,54 @@ The one wallet-specific wrinkle vs. the payment system: **`request_hash`** must 
 
 **Chosen approach: optimistic locking with version-column retry** (§4.1's `WalletLedgerService`). The sequence for "Alice sends Bob $50 while Alice's balance is also being debited by another transfer (Alice -> Carol, $30)":
 
-```
-Time  Thread 1 (Alice->Bob $50)         Thread 2 (Alice->Carol $30)
-----  --------------------------         --------------------------
-t0    SELECT balance, version
-      FROM wallets WHERE id=Alice
-      -> balance=100, version=7
-                                          SELECT balance, version
-                                          FROM wallets WHERE id=Alice
-                                          -> balance=100, version=7
+```mermaid
+sequenceDiagram
+    participant T1 as Thread 1 (Alice to Bob $50)
+    participant W as Wallets Row (Alice)
+    participant T2 as Thread 2 (Alice to Carol $30)
 
-t1    UPDATE wallets SET
-      balance = balance - 50,
-      version = version + 1
-      WHERE id=Alice AND version=7
-        AND balance >= 50
-      -> 1 row updated.
-         balance=50, version=8
+    Note over T1,T2: t0 - both threads read the same row
+    T1->>W: SELECT balance, version
+    W-->>T1: balance=100, version=7
+    T2->>W: SELECT balance, version
+    W-->>T2: balance=100, version=7
 
-t2                                       UPDATE wallets SET
-                                          balance = balance - 30,
-                                          version = version + 1
-                                          WHERE id=Alice AND version=7
-                                            AND balance >= 30
-                                          -> 0 ROWS updated!
-                                             (version is now 8, not 7 --
-                                              someone else committed first)
+    Note over T1,W: t1 - Thread 1 commits first
+    T1->>W: UPDATE balance -= 50, version += 1<br/>WHERE version=7 AND balance ≥ 50
+    W-->>T1: 1 row updated - balance=50, version=8
 
-t3    [commits debit + credit +          Thread 2's transaction RETRIES:
-       2 ledger rows for Alice->Bob]      re-reads balance=50, version=8
-                                          UPDATE ... WHERE version=8
-                                            AND balance >= 30 -> 1 row.
-                                          balance=20, version=9
-                                          [commits debit + credit + ledger
-                                           rows for Alice->Carol]
+    Note over T2,W: t2 - Thread 2 loses the race
+    T2->>W: UPDATE balance -= 30, version += 1<br/>WHERE version=7 AND balance ≥ 30
+    W-->>T2: 0 rows updated (version is now 8)
 
-RESULT: Alice's final balance = 100 - 50 - 30 = 20. Correct. Thread 2 paid
-a small retry cost (one extra round trip) but NEVER read a stale balance
-that let it overdraw Alice's account.
+    Note over T2: optimistic-lock retry:<br/>re-read and reapply
+    T2->>W: SELECT balance, version
+    W-->>T2: balance=50, version=8
+    T2->>W: UPDATE balance -= 30, version += 1<br/>WHERE version=8 AND balance ≥ 30
+    W-->>T2: 1 row updated - balance=20, version=9
+
+    Note over T1,T2: Result: Alice's final balance = 100 - 50 - 30 = 20.<br/>Thread 2 paid one retry round trip but never overdrew Alice.
 ```
 
+*Thread 2's conditional UPDATE targets a version Thread 1 has already advanced past, so it fails closed (0 rows updated) and retries against the fresh balance -- no lost update, no overdraft.*
+
+```mermaid
+sequenceDiagram
+    participant C as Alice (client)
+    participant WLS as Wallet Ledger Service<br/>(shard owning Alice & Bob)
+    participant B as Bob (wallet)
+
+    C->>WLS: POST /transfers {from=Alice, to=Bob, $50}<br/>Idempotency-Key: k1
+    Note over WLS: claim(k1) = CLAIMED
+    Note over WLS: SELECT balance, version (Alice)
+    Note over WLS: UPDATE wallets SET balance -= 50, version += 1<br/>WHERE version=7 AND balance ≥ 50 - 1 row
+    Note over WLS: UPDATE wallets SET balance += 50<br/>WHERE id=Bob
+    Note over WLS: INSERT ledger (D, Alice, 50)<br/>INSERT ledger (C, Bob, 50)<br/>COMMIT
+    WLS-->>C: 200 OK {balances}
+    WLS-->>B: publish WalletCredited<br/>(outbox to Kafka to push notification)
 ```
-+-------+                +----------------------+              +-------+
-| Alice |                | Wallet Ledger Service |              |  Bob  |
-| client|                | (shard owning Alice & |              | wallet|
-+---+---+                |        Bob)           |              +---+---+
-    |  POST /transfers              |                                |
-    |  {from=Alice, to=Bob, $50}     |                                |
-    |  Idempotency-Key: k1 --------->|                                |
-    |                                | claim(k1) -> CLAIMED            |
-    |                                | SELECT balance,version (Alice)  |
-    |                                | UPDATE wallets SET balance-=50, |
-    |                                |   version+=1 WHERE version=7    |
-    |                                |   AND balance>=50  -> 1 row     |
-    |                                | UPDATE wallets SET balance+=50  |
-    |                                |   WHERE id=Bob                  |
-    |                                | INSERT ledger (D, Alice, 50)    |
-    |                                | INSERT ledger (C, Bob, 50)      |
-    |                                | COMMIT                          |
-    |<--- 200 OK {balances} ---------|                                |
-    |                                |--- publish WalletCredited ----->|
-    |                                |    (outbox -> Kafka -> push     |
-    |                                |     notification to Bob)        |
-```
+
+*One client round trip covers the entire transfer: claim the idempotency key, debit-then-credit inside a single local transaction, and only publish the WalletCredited event once the commit has already happened.*
 
 **Alternatives considered**:
 
@@ -460,21 +432,42 @@ Unlike the instant, single-transaction P2P transfer (§4.1-§4.3), top-up and wi
 4. **Instant tier** (Visa Direct / RTP-style push-to-card or push-to-bank, settling in **minutes**, for a fee — this is the rail Venmo and Cash App use for "Instant Transfer to bank," §6): the adapter calls the instant-rail API synchronously-ish (a few seconds), and on success marks the withdrawal `COMPLETED`; on failure, a **new ledger entry credits the wallet back** (`entry_type='REVERSAL'`) — the original debit entry is never modified.
 5. If a standard-tier ACH credit later fails (invalid account number, closed account — discovered days later via an ACH return), the same reversal-credit pattern applies, only days after the original debit.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph TU["Top-Up (bank to wallet)"]
+        TU1(["topups row PENDING + outbox<br/>(no ledger entry yet)"]) --> TU2("bank rail debit initiated")
+        TU2 --> TUD{"ACH or<br/>instant card?"}
+        TUD -->|ACH| TU3a("optimistic CREDIT now,<br/>settles 1-3 days,<br/>60-day reversal risk")
+        TUD -->|"instant card"| TU3b("confirmed CREDIT in seconds,<br/>no reversal risk")
+        TU3a --> TU4("ACH return: NEW REVERSAL entry<br/>debits wallet, may go negative,<br/>frozen (§8)")
+    end
+
+    subgraph WD["Withdrawal (wallet to bank)"]
+        WD1(["wallet DEBITED immediately<br/>(sync, optimistic-locked)"]) --> WD2("outbox row<br/>WithdrawalInitiated")
+        WD2 --> WDD{"standard or<br/>instant tier?"}
+        WDD -->|standard| WD3a("ACH credit,<br/>1-3 days, free")
+        WDD -->|instant| WD3b("push-to-bank,<br/>minutes, fee")
+        WD3a --> WD4("on rail failure: NEW ledger entry<br/>CREDITS wallet back")
+        WD3b --> WD4
+    end
+
+    class TU1,WD1 req
+    class TU2,WD2 mathOp
+    class TUD,WDD mathOp
+    class TU3a,WD3a frozen
+    class TU3b,WD3b train
+    class TU4,WD4 lossN
 ```
-Top-Up (bank -> wallet)                  Withdrawal (wallet -> bank)
-------------------------                  ----------------------------
-1. topups row PENDING + outbox            1. wallet DEBITED immediately
-   (no ledger entry yet)                     (sync, optimistic-locked)
-2. bank rail debit initiated               2. outbox row WithdrawalInitiated
-3a. ACH: optimistic wallet CREDIT          3a. standard: ACH credit,
-    now, settles in 1-3 days,                  1-3 days, free
-    reversal risk window 60 days           3b. instant: push-to-bank,
-3b. instant card: confirmed CREDIT             minutes, fee, sync-ish
-    in seconds, no reversal risk           4. on rail failure: NEW ledger
-4. on ACH return: NEW ledger entry             entry CREDITS wallet back
-   (REVERSAL) debits wallet,                   (never edits original debit)
-   may go negative -> frozen (§8)
-```
+
+*Top-up optimistically credits the wallet before bank settlement (fast UX, up to a 60-day ACH reversal risk); withdrawal debits the wallet immediately and only reverses via a brand-new ledger entry if the rail later fails -- the original debit is never edited.*
 
 The unifying principle, stated once: **the wallet ledger only ever gains entries — it never edits or deletes them. "Undo" is always a new, offsetting entry of `entry_type='REVERSAL'` linked to the original via `transaction_id`** — identical in spirit to [`./design_payment_system.md`](./design_payment_system.md)'s refund-as-new-transaction principle (§4.3 there), applied to bank-rail reversals here.
 
@@ -498,6 +491,27 @@ A digital wallet is a regulated money-transmission product in most jurisdictions
 | Tier 1 (basic) | Name, DOB, SSN/national ID (or last-4) | $1,000 | $500 | $1,000 |
 | Tier 2 (verified) | Government ID + selfie match | $10,000 | $5,000 | $10,000 |
 | Tier 3 (enhanced) | Proof of address, source-of-funds for large amounts | $50,000+ | $25,000 | $50,000+ |
+
+```mermaid
+stateDiagram-v2
+    [*] --> Tier0
+
+    state "Tier 0 - unverified" as Tier0
+    state "Tier 1 - basic" as Tier1
+    state "Tier 2 - verified" as Tier2
+    state "Tier 3 - enhanced" as Tier3
+
+    Tier0 --> Tier1: phone + email +<br/>name/DOB/SSN
+    Tier1 --> Tier2: government ID +<br/>selfie match
+    Tier2 --> Tier3: proof of address +<br/>source of funds
+
+    note right of Tier0: balance $0<br/>top-up/transfer disabled
+    note right of Tier1: balance up to $1,000<br/>single transfer up to $500
+    note right of Tier2: balance up to $10,000<br/>single transfer up to $5,000
+    note right of Tier3: balance $50,000+<br/>single transfer up to $25,000
+```
+
+*Each KYC tier gates both the wallet's maximum balance and its maximum transfer size (table above) -- a user climbs this ladder by completing progressively stronger identity verification, never the reverse.*
 
 **Velocity limits** (checked inline, before `WalletLedgerService.transfer()` is invoked, so a rejected transfer never touches the ledger):
 - **Transfer-count velocity**: more than N transfers in a rolling 10-minute window from one wallet (e.g., N=20) — flags automated/bot behavior, common in account-takeover fraud where an attacker drains a compromised wallet via many small transfers to evade single-transfer limits.
@@ -674,23 +688,21 @@ A non-zero `SUM(ledger_entries) - wallets.balance_minor` for any wallet means th
 
 **Broken**: An early version of the mobile client's "Pay" button implementation did not persist a generated `Idempotency-Key` across app states — the key was generated fresh, in memory, each time the "Confirm Payment" screen was rendered. On a slow or flaky mobile network, the sequence was:
 
+```mermaid
+sequenceDiagram
+    participant App as Mobile Client
+    participant Srv as Wallet Transfer Service
+
+    App->>Srv: POST /transfers<br/>Idempotency-Key: K1 ($200 Alice to Bob)
+    Note over Srv: debits Alice $200, credits Bob $200,<br/>writes ledger rows, key[K1] = COMPLETED
+    Srv-->>App: 200 OK (lost - connection drops<br/>before response arrives)
+    Note over App: 10s timeout, shows<br/>"Something went wrong, tap to retry"
+    App->>Srv: POST /transfers<br/>Idempotency-Key: K2 (fresh key,<br/>same amount + recipient)
+    Note over Srv: K2 never seen before,<br/>claim() = CLAIMED
+    Srv->>Srv: transfer() runs AGAIN:<br/>debits Alice ANOTHER $200,<br/>credits Bob ANOTHER $200
 ```
-1. User taps "Confirm Payment" ($200, Alice -> Bob).
-   Client generates key=K1, sends POST /transfers {Idempotency-Key: K1, ...}
-2. Server processes the transfer fully: debits Alice $200, credits Bob
-   $200, writes ledger rows, marks idempotency_keys[K1] = COMPLETED.
-3. Response is sent, but the mobile device's connection drops at exactly
-   this moment -- the 200 OK never arrives at the client.
-4. The client's UI, seeing no response after its timeout (10s), shows a
-   "Something went wrong, tap to retry" screen.
-5. User taps "Confirm Payment" AGAIN. Because the key was generated fresh
-   on screen-render (not persisted from step 1), the client generates a
-   NEW key=K2 and sends POST /transfers {Idempotency-Key: K2, ...} --
-   same amount, same recipient, but a DIFFERENT idempotency key.
-6. The server has never seen K2 before -> claim() returns CLAIMED ->
-   WalletLedgerService.transfer() runs AGAIN: debits Alice ANOTHER $200,
-   credits Bob ANOTHER $200.
-```
+
+*A fresh idempotency key generated on every screen-render makes the retry look like a brand-new request to claim() -- Alice is charged twice for one intended $200 payment.*
 
 **Impact**: Alice was debited $400 for a single intended $200 payment to Bob, with two entirely legitimate-looking (different idempotency keys, both successfully completed) transactions in the ledger. Because **both transfers succeeded** — there was no error, no failed-request signal, nothing for an error-rate alert to catch — this was invisible to the operational metrics in §8 entirely. It was first reported by users as "I sent money twice for one payment" support tickets, and the pattern (specifically correlated with users on poor network connections, e.g., subway commuters) wasn't recognized as systemic until a support-ticket-clustering analysis several weeks later identified ~3,200 affected transactions totaling approximately $410,000 in unintended duplicate transfers.
 
@@ -728,6 +740,31 @@ The broader lesson: **optimistic-credit windows (§4.4, §5) trade settlement ri
 
 - For two **independently chosen** wallet IDs hashed across 64 shards, the probability both land on the same shard is `1/64 ≈ 1.6%` — naively, ~98.4% of P2P transfers would be cross-shard, which would make the "common case is same-shard, atomic transaction" framing of §5 backwards.
 - In practice, **P2P transfer graphs are highly clustered** — most transfers are between friends/contacts who tend to have signed up around the same time, in the same region, often via the same referral chains, which correlates with `user_id` ranges and thus (if shard placement considers signup cohort/region as a placement hint, not pure hash) with shard co-location. Production systems achieve **same-shard rates of 80-90%+** for P2P-heavy products by incorporating a lightweight **affinity hint** (e.g., initial shard placement weighted by region) into otherwise consistent-hash-based placement — at 80% same-shard, only ~20% of the ~81 transfers/sec average (§2) — about **16/sec** — require the cross-shard saga path (§5), comfortably within the saga infrastructure's capacity.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    REQ(["P2P transfer request<br/>from_wallet, to_wallet"]) --> HASH{"same shard?<br/>hash(wallet_id) % 64"}
+    HASH -->|"yes - ~80%<br/>affinity-aware placement"| SAME("single ACID transaction<br/>debit + credit + 2 ledger rows")
+    HASH -->|"no - ~20%<br/>~16 transfers/sec"| CROSS("two-phase saga<br/>debit shard A, outbox,<br/>credit shard B, confirm")
+    SAME --> DONE(["both balances updated,<br/>sub-second"])
+    CROSS --> DONE2(["both balances updated,<br/>shortly after"])
+
+    class REQ req
+    class HASH mathOp
+    class SAME train
+    class CROSS frozen
+    class DONE,DONE2 io
+```
+
+*At 64 shards, roughly 80% of P2P transfers land on the same shard (affinity-aware placement) and settle as one ACID transaction (§4.1); the remaining ~20% (~16 transfers/sec at average load) fall back to the two-phase saga from §5.*
 
 ### Database Connection Pool and Throughput
 

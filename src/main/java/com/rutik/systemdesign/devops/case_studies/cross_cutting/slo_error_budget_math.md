@@ -70,72 +70,133 @@ This file is the shared reference for SLI/SLO/SLA definitions, error budget arit
 - **Graduated** — slow releases / require extra review at 50% spent.
 - **Silver-bullet** — a small number of override deploys per quarter for urgent business needs.
 
+These three stances compose into one policy lifecycle rather than three independent choices:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy
+    Healthy --> Graduated: budget at or below 50%
+    Graduated --> Frozen: budget hits 0% - freeze
+    Frozen --> Frozen: silver-bullet override (rare, per quarter)
+    Frozen --> Healthy: budget recovers above 25%
+    Graduated --> Healthy: budget recovers above 50%
+```
+
+A healthy budget ships freely; crossing 50% spent triggers graduated extra review; hitting 0% triggers the hard freeze, with only rare silver-bullet overrides; the freeze lifts once the budget recovers — the exact thresholds the §14 case study applies at a 25% recovery bar.
+
 ---
 
 ## 5. Architecture Diagrams
 
 Error budget as a depleting balance:
 
+```mermaid
+xychart-beta
+    title "Error budget balance (99.9% SLO, 43.2 min per 30d)"
+    x-axis ["Start", "Incident 1 (8m)", "5xx trickle", "Incident 2 (15m)", "Policy trigger", "Day 31 reset"]
+    y-axis "Budget remaining %" 0 --> 100
+    bar [100, 81.5, 62, 27.3, 0, 100]
 ```
-budget (99.9% / 30d) = 43.2 min/month  =========================  100%
-                                          \
-            incident 1 (8 min)             \--------------------   81.5%
-            steady trickle of 5xx            \------------------   62%
-            incident 2 (15 min)               \---------------     27.3%
-                                                \
-            >>> POLICY TRIGGER at 0% <<<         \------------      0%   FREEZE
-            window resets (day 31)  ============================   100% (refill)
-```
+
+Two incidents and a steady 5xx trickle drain the 43.2-minute budget from 100% down to 0% (the policy trigger), then the rolling window resets it to 100% on day 31.
 
 Multi-window multi-burn-rate alert decision:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Fast["Fast burn"]
+        FL(["long window<br/>14.4x over 1h"]) --> FA{"AND"}
+        FS(["short window<br/>14.4x over 5m"]) --> FA
+        FA -->|"agree"| FP(["PAGE<br/>urgent"])
+    end
+
+    subgraph Slow["Slow burn"]
+        SL(["long window<br/>6x over 6h"]) --> SA{"AND"}
+        SS(["short window<br/>6x over 30m"]) --> SA
+        SA -->|"agree"| SP(["PAGE<br/>ticket"])
+    end
+
+    class FL,FS,SL,SS req
+    class FA,SA mathOp
+    class FP,SP lossN
 ```
-              long window         short window        page?
-fast burn:    14.4x over 1h   AND  14.4x over 5m   ->  PAGE (urgent)
-slow burn:     6.0x over 6h   AND   6.0x over 30m  ->  PAGE (ticket)
-              both windows must agree -> suppresses transient blips
-                                       -> short window auto-resolves alert
-```
+
+Both the long and short window must agree before paging, which suppresses transient blips; because the short window reacts in minutes, the alert also auto-resolves quickly once the burn stops.
 
 SLI computation pipeline:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req(["requests"]) --> Instr("instrumentation<br/>http_requests_total by status")
+    Instr --> SLI("PromQL SLI<br/>5xx rate / total rate")
+    SLI --> Rec("recording rule<br/>slo:sli_error:ratio_rate5m")
+    SLI --> Alert("burn-rate alert rules<br/>multi-window multi-burn")
+    Rec --> Graf(["Grafana SLO panel"])
+    Alert --> AM("Alertmanager") --> Page(["PagerDuty / ticket"])
+
+    class Req req
+    class Instr,SLI mathOp
+    class Rec base
+    class Alert lossN
+    class AM mathOp
+    class Graf,Page io
 ```
-   requests --> instrumentation (http_requests_total{status})
-                       |
-                       v
-     PromQL SLI = sum(rate(...5xx...[5m])) / sum(rate(...all...[5m]))
-                       |
-        +--------------+--------------+
-        v                             v
-   recording rule:               burn-rate alert rules
-   slo:sli_error:ratio_rate5m    (multi-window multi-burn)
-        |                             |
-        v                             v
-   Grafana SLO panel            Alertmanager -> PagerDuty / ticket
-```
+
+The same SLI ratio forks into two consumers: a recording rule that feeds the Grafana budget panel, and the multi-burn alert rules that route through Alertmanager to PagerDuty or a ticket queue.
 
 The SLI/SLO/SLA nesting:
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Perfect(["100% - perfect"]) --> SLO("internal SLO 99.9%<br/>43.2 min/mo budget<br/>engineering aims here")
+    SLO --> Headroom{"headroom<br/>safety margin"}
+    Headroom --> SLA("customer SLA 99.5%<br/>contractual<br/>credits owed below")
+    SLO -.->|"actual result"| Measured(["measured SLI<br/>99.94% this window"])
+
+    class Perfect base
+    class SLO train
+    class Headroom mathOp
+    class SLA frozen
+    class Measured req
 ```
-   100% --------------------------------------------------- perfect
-     |   internal SLO  (99.9%, 43.2 min/mo budget)   <- engineering aims here
-     |        |  headroom (the safety margin)
-     |        v
-     |   customer SLA (99.5%, contractual)           <- credits owed below here
-     v
-   measured SLI (actual: 99.94% this window)         <- what really happened
-```
+
+Engineering aims at the internal SLO (99.9%), which sits inside a safety-margin headroom above the looser, contractual customer SLA (99.5%); the measured SLI (99.94% this window) is the live number showing how much of that headroom is actually being used.
 
 Burn rate over an incident timeline (30-day budget, 99.9% SLO):
 
+```mermaid
+xychart-beta
+    title "Burn rate during an incident (99.9% SLO)"
+    x-axis ["Fast burn (page)", "Slow burn (ticket)", "Recovered (nominal)"]
+    y-axis "Error ratio %" 0 --> 1.6
+    line [1.44, 0.6, 0.1]
 ```
-   error ratio
-   1.44% |####            <- 14.4x burn: fast-burn page fires (2% in 1h)
-   0.60% |    ######      <- 6x burn:   slow-burn ticket (5% in 6h)
-   0.10% |----------====  <- 1x burn:   nominal, no alert (budget on track)
-   0.00% +-----------------------------------------> time
-         ^page    ^ticket   ^recovered (short window clears alert in ~5m)
-```
+
+The error ratio spikes to 1.44% (14.4x burn, fast-burn page), eases to 0.60% (6x burn, slow-burn ticket), then settles back to the nominal 0.10% (1x, budget on track) once the short window confirms recovery in about 5 minutes.
 
 ---
 
@@ -281,6 +342,31 @@ If the trailing-28-day error ratio is 0.0004 (0.04%), then `0.0004 / 0.001 = 0.4
 - **Amazon / AWS** publishes customer-facing SLAs (e.g., S3 at 99.9% monthly with service credits) that sit deliberately looser than their internal availability targets, the textbook SLA-looser-than-SLO relationship that gives engineering headroom before a contractual breach.
 
 - **A multi-dependency budget allocation example**: a checkout flow depends on auth (99.95%), inventory (99.9%), and payments (99.9%). If all three must succeed serially, the achievable availability is the product `0.9995 × 0.999 × 0.999 ≈ 0.9975`, i.e. ~99.75% — so an SLO of 99.9% on checkout is impossible without redundancy or graceful degradation. Teams that skip this multiplication ship an SLO they can never hit and live in a permanent freeze.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Auth(["auth 99.95%"]) --> Mult((" × "))
+    Inv(["inventory 99.9%"]) --> Mult
+    Pay(["payments 99.9%"]) --> Mult
+    Mult --> Comp(["composite ~99.75%"])
+    Comp --> Target{"meets 99.9%<br/>checkout SLO?"}
+    Target -->|"no - unachievable"| Freeze(["permanent freeze<br/>needs redundancy"])
+
+    class Auth,Inv,Pay frozen
+    class Mult,Target mathOp
+    class Comp base
+    class Freeze lossN
+```
+
+The three serial dependencies multiply down to a ~99.75% ceiling, below the 99.9% checkout target — this is why the SLO above is unreachable without redundancy or graceful degradation.
 
 - **Low-traffic trap, observed widely**: a backoffice admin API doing 80 requests/day sets a 99.9% SLO. A single failed request is `1/80 = 1.25%` error ratio for that day — 12.5x the budget — so the SLO is statistical noise. The correct pattern for low-traffic services is an absolute threshold ("no more than 3 failures/day") or a much longer window, not a fine-grained availability ratio.
 

@@ -31,46 +31,42 @@ without distributed transactions), real-time task progress streaming to the brow
 
 ## Architecture Overview
 
-```
-HTTP Layer
-  POST /orders
-       |
-       v
- FastAPI Handler
-  (< 200 ms)
-       |
-       | enqueue(order_id, task_name, payload)
-       v
-+------+-------+       +------------------------+
-|  Redis Queue  |       |   Redis Result Backend |
-|               |       |   key: result:{job_id} |
-|  arq:default  |<---+  |   TTL: 24 h            |
-|  arq:{queue}  |    |  +------------------------+
-+------+--------+    |
-       |              |
-       | dequeue      | store result / error
-       v              |
-+------+--------+     |
-|  ARQ Workers  |-----+
-|  (N processes)|
-|               |
-|  send_email   |
-|  gen_invoice  |
-|  update_erp   |
-+------+--------+
-       |
-       | max retries exceeded
-       v
-+------+--------+
-|  DLQ          |
-|  arq:dlq      |
-|  (Redis List) |
-+---------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Idempotency Layer (Redis SET NX EX):
-  key: idem:{order_id}:{task_name}
-  prevents duplicate execution on retry storms
+    Client(["POST /orders"])
+    Handler("FastAPI Handler<br/>under 200 ms")
+    Queue[("Redis Queue<br/>arq:default · arq:high")]
+    Workers("ARQ Workers<br/>N processes<br/>send_email · gen_invoice · update_erp")
+    Idem[("Idempotency Layer<br/>Redis SET NX EX<br/>blocks duplicate retries")]
+    Results[("Redis Result Backend<br/>result:job_id · TTL 24h")]
+    DLQ[("DLQ<br/>arq:dlq Redis List")]
+
+    Client --> Handler
+    Handler -->|"enqueue(order_id, task_name, payload)"| Queue
+    Queue -->|dequeue| Workers
+    Workers -.->|"check / set key"| Idem
+    Workers -.->|"store result or error"| Results
+    Workers -->|"max retries exceeded"| DLQ
+
+    class Client io
+    class Handler mathOp
+    class Queue req
+    class Workers mathOp
+    class Idem,Results base
+    class DLQ lossN
 ```
+
+The handler responds in under 200 ms after enqueueing three independent jobs; workers dequeue,
+guard against duplicates via the idempotency store, and either record a result or fall through to
+the DLQ after 3 failed attempts.
 
 **Data flow:**
 1. `POST /orders` persists the order row in PostgreSQL and immediately enqueues three ARQ jobs.
@@ -80,6 +76,45 @@ Idempotency Layer (Redis SET NX EX):
 4. On failure the job is retried up to 3 times with exponential backoff + jitter.
 5. After 3 failures the worker writes the job metadata to the DLQ list (`arq:dlq`).
 6. A separate FastAPI endpoint `GET /admin/dlq` lets ops inspect and re-enqueue DLQ items.
+
+```mermaid
+stateDiagram-v2
+    classDef req    fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef lossN  fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+
+    state "Checking idempotency" as Checking
+    state "Executing task" as Executing
+    state "Retrying (backoff wait)" as Retrying
+    state "Dead lettered" as DeadLettered
+    state "Skipped (duplicate)" as Skipped
+
+    [*] --> Enqueued
+    Enqueued --> Checking: worker dequeues
+    Checking --> Skipped: key already set
+    Checking --> Executing: key absent
+    Executing --> Done: success
+    Executing --> Retrying: failure<br/>attempts 1-2
+    Retrying --> Executing: backoff delay elapses
+    Executing --> DeadLettered: failure<br/>3rd attempt
+    DeadLettered --> Enqueued: admin requeue
+    Skipped --> Done
+    Done --> [*]
+
+    class Enqueued req
+    class Checking mathOp
+    class Executing mathOp
+    class Retrying frozen
+    class Done train
+    class Skipped train
+    class DeadLettered lossN
+```
+
+Every task moves through this state machine on each attempt: a duplicate short-circuits straight
+to `Done`, a failure below the 3-attempt ceiling loops back through a backoff wait, and only
+`POST /admin/dlq/requeue` can return a dead-lettered job to the queue.
 
 ---
 
@@ -174,6 +209,17 @@ cap   = 60 s
 jitter = 10 s
 attempts 1→2→3: ~5 s, ~15 s, ~45 s (approximate; jitter varies)
 ```
+
+```mermaid
+xychart-beta
+    title "Backoff delay by retry attempt (base 5 s, cap 60 s)"
+    x-axis ["Attempt 1", "Attempt 2", "Attempt 3"]
+    y-axis "Delay before retry (seconds)" 0 --> 60
+    bar [5, 15, 45]
+```
+
+The delay roughly doubles each attempt (`5 × 2^attempt`) before jitter is added; growth would
+flatten at the 60 s cap, but this system dead-letters after the 3rd attempt and never reaches it.
 
 After 3 failures the worker catches the terminal exception, serialises the job metadata to the DLQ
 list, and marks the ARQ job as complete (so ARQ stops retrying). The DLQ entry contains enough

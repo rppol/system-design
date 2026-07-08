@@ -63,98 +63,83 @@
 - Each transaction generates 1-3 webhook events (e.g., `payment.created` -> `payment.succeeded`, plus `charge.refunded` for the ~2-5% of transactions that get refunded).
 - ~15-20M webhook deliveries/day = **~175-230/sec average**, peak **~1,000/sec** — well within Kafka + a modest consumer pool's capacity.
 
+```mermaid
+xychart-beta
+    title "Average vs Peak Throughput by Subsystem (req or writes / sec)"
+    x-axis ["Transactions", "Ledger writes", "Webhook deliveries"]
+    y-axis "Per second" 0 --> 1200
+    bar [580, 1160, 1000]
+    line [116, 232, 200]
+```
+
+Bars show peak per-second load, the line shows the daily average — peak runs roughly 5x average across every subsystem, and ledger writes (double-entry) run at roughly double the raw transaction rate, exactly as computed above (116 to 580 TPS, 232 to 1,160 ledger writes/sec, ~200 to ~1,000 webhook deliveries/sec).
+
 ---
 
 ## 3. High-Level Architecture
 
-```
-                                +-------------------+
-                                |     Client         |
-                                | (mobile/web app)   |
-                                +---------+----------+
-                                          |
-                                          | POST /charges
-                                          | Idempotency-Key: <uuid>
-                                          v
-                                +-------------------+
-                                |   API Gateway      |
-                                | (authn, TLS term,  |
-                                |  rate limiting)    |
-                                +---------+----------+
-                                          |
-                                          v
-        +---------------------------------------------------------------+
-        |                  Payment Orchestrator                          |
-        |                                                                 |
-        |  1. Idempotency-Key check (Redis + DB unique constraint)       |
-        |  2. Validate request (amount > 0, currency supported, etc.)    |
-        |                                                                 |
-        |  +-----------------------------------------------------------+ |
-        |  |        LOCAL DB TRANSACTION (single ACID commit)           | |
-        |  |                                                             | |
-        |  |   INSERT INTO payments (id, status='PENDING', ...)         | |
-        |  |   INSERT INTO outbox   (event_type='PaymentInitiated',...) | |
-        |  |   INSERT INTO idempotency_keys (key, status='IN_PROGRESS') | |
-        |  |                                                             | |
-        |  +-----------------------------------------------------------+ |
-        +---------+-------------------------------------------------------+
-                  |
-                  | (sync, <100ms budget)
-                  v
-        +-------------------+
-        |  Risk / Fraud      |   <-- sync scoring call; ALLOW / REVIEW / DENY
-        |  Service           |       (model internals out of scope, §1)
-        +---------+----------+
-                  | ALLOW
-                  v
-        +-------------------+        +----------------------------+
-        |  PSP Adapter       | -----> |  PSP (Stripe / Adyen)       |
-        |  (tokenized card,  |        |  - tokenizes card (PCI      |
-        |   no raw PAN ever  |        |    scope stays with PSP)    |
-        |   touches us)      | <----- |  - returns auth result      |
-        +---------+----------+  sync  +-------------+----------------+
-                  |                                  |
-                  | update payments.status           | async webhook
-                  | = AUTHORIZED / FAILED            | (final settlement,
-                  v                                  |  chargebacks, etc.)
-        +-------------------+                        |
-        |  Ledger Service    | <----------------------+
-        |  (append-only      |  on settlement webhook:
-        |   double-entry     |  POST /webhooks/psp
-        |   write, ACID)     |  - verify HMAC signature
-        +---------+----------+  - dedupe on PSP event_id
-                  |                - update payments.status = SUCCEEDED
-                  | (same local txn as ledger write)
-                  v
-        +-------------------+
-        |  outbox table      |
-        |  (event:           |
-        |   PaymentSucceeded)|
-        +---------+----------+
-                  |
-                  | polled by / CDC-tailed by
-                  v
-        +-------------------+
-        |  Outbox Relay      |
-        |  (Debezium or      |
-        |   polling process) |
-        +---------+----------+
-                  |
-                  v
-        +-------------------+
-        |   Kafka            |
-        |  topic: payments.* |
-        +----+------+----+---+
-             |      |    |
-             v      v    v
-       +--------+ +--------+ +------------------+
-       | Order  | |Notif.  | | Reconciliation   |
-       | Service| |Service | | Service          |
-       |        | |(sends  | | (nightly batch:  |
-       | marks  | | merchant| | ledger totals    |
-       | order  | | webhook)| | vs PSP settlement|
-       | paid   | |        | | reports)         |
-       +--------+ +--------+ +------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Ingress["Client to Gateway"]
+        Client(["Client<br/>mobile/web app"])
+        Gateway("API Gateway<br/>authn · TLS term · rate limit")
+    end
+
+    subgraph Orchestration["Payment Orchestrator"]
+        Validate("Idempotency-Key check<br/>+ validate request")
+        LocalTxn["Local DB Txn (ACID)<br/>payments + outbox + idem_keys"]
+    end
+
+    subgraph RiskAndPSP["Risk + PSP Call"]
+        Risk{"Risk / Fraud Service<br/>ALLOW / REVIEW / DENY"}
+        PSPAdapter("PSP Adapter<br/>tokenized, no raw PAN")
+        PSP(["PSP<br/>Stripe / Adyen"])
+    end
+
+    subgraph LedgerAndEvents["Ledger to Kafka"]
+        Ledger("Ledger Service<br/>append-only double-entry")
+        Outbox["outbox table<br/>event: PaymentSucceeded"]
+        Relay("Outbox Relay<br/>Debezium or polling")
+        Kafka("Kafka<br/>topic: payments.*")
+    end
+
+    subgraph Consumers["Downstream Consumers"]
+        OrderSvc(["Order Service"])
+        NotifSvc(["Notification Service"])
+        ReconSvc(["Reconciliation Service"])
+    end
+
+    Client -->|"POST /charges<br/>Idempotency-Key"| Gateway
+    Gateway --> Validate
+    Validate --> LocalTxn
+    LocalTxn -->|"sync, under 100ms budget"| Risk
+    Risk -->|"ALLOW"| PSPAdapter
+    PSPAdapter -->|"tokenized charge"| PSP
+    PSP -->|"auth result"| PSPAdapter
+    PSPAdapter -->|"status = AUTHORIZED / FAILED"| Ledger
+    PSP -.->|"async webhook<br/>settlement, chargebacks"| Ledger
+    Ledger --> Outbox
+    Outbox -->|"polled / CDC-tailed"| Relay
+    Relay --> Kafka
+    Kafka --> OrderSvc
+    Kafka --> NotifSvc
+    Kafka --> ReconSvc
+
+    class Client io
+    class Gateway req
+    class Validate,Risk,PSPAdapter,Relay mathOp
+    class LocalTxn,Outbox,Kafka base
+    class PSP frozen
+    class Ledger train
+    class OrderSvc,NotifSvc,ReconSvc req
 ```
 
 The single most important box in this diagram is the **LOCAL DB TRANSACTION** in the Payment Orchestrator: the payment row, the outbox row, and the idempotency-key claim are written **atomically in one transaction**. This is the Outbox pattern from [`../distributed_transactions/README.md`](../distributed_transactions/README.md) (§4.5/§6.3) applied to its canonical use case — without it, "save the payment" and "publish the event that downstream services depend on" would be a dual write, and a crash between them would leave an order that thinks it's unpaid forever, or a payment that nothing downstream ever hears about.
@@ -410,6 +395,19 @@ The end-to-end "charge a customer" flow — **reserve funds -> call PSP -> confi
 
 This sequencing — **ledger writes happen only after the PSP has confirmed success** — is the single biggest design decision in this case study, and it's why the architecture diagram (§3) places the Ledger Service *after* the PSP Adapter, not before.
 
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: Step 1 -- reserve<br/>(payment + outbox, local txn)
+    PENDING --> AUTHORIZED: Step 2 -- PSP call<br/>succeeds
+    PENDING --> FAILED: Step 2 -- PSP call<br/>fails (declined, timeout)
+    AUTHORIZED --> SUCCEEDED: Step 3 -- ledger<br/>transfer() commits
+    SUCCEEDED --> REFUNDED: refund = new txn<br/>(accounts reversed)
+    FAILED --> [*]: order cancelled,<br/>no ledger entries ever written
+    REFUNDED --> [*]
+```
+
+Failure before Step 3 needs no ledger compensation at all — the `FAILED` branch never touches the ledger, because the ledger is the *last* saga step, not the first. A refund is not an undo of `SUCCEEDED`; it is a new transaction with accounts reversed, which is why `REFUNDED` is a forward transition, never a rollback.
+
 ### 4.4 Outbox Pattern Implementation
 
 Every state transition that downstream services need to know about (`PaymentInitiated`, `PaymentSucceeded`, `PaymentFailed`, `RefundIssued`) is written to the `outbox` table in the **same local transaction** as the state change itself — collapsing the dual-write problem exactly as described in [`../distributed_transactions/README.md`](../distributed_transactions/README.md) §4.5/§6.3.
@@ -505,37 +503,46 @@ public class OutboxRelay {
 
 Even with idempotency keys, an outbox, and a double-entry ledger, the system's internal view of "what happened" and the PSP's view can drift — a webhook can be lost in transit, a settlement can post a day later than expected, or a bug can cause a ledger entry to be written with the wrong amount. The **reconciliation job** is the safety net that catches this drift before it becomes a customer-facing or regulatory problem.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["Nightly batch<br/>02:00 UTC"]) --> Download("Download PSP<br/>settlement report")
+
+    Download --> CompareEach{"Compare each PSP txn<br/>to payments row"}
+    CompareEach -->|"match"| Matched(["MATCHED"])
+    CompareEach -->|"mismatch"| Discrepancy(["DISCREPANCY<br/>flag only, no auto-fix"])
+
+    Download --> OrphanCheck{"payments = SUCCEEDED<br/>but missing from PSP report?"}
+    OrphanCheck -->|"yes"| Orphan(["ORPHAN<br/>possible forged webhook"])
+
+    Download --> UnrecordedCheck{"PSP entry with<br/>no payments row?"}
+    UnrecordedCheck -->|"yes"| Unrecorded(["UNRECORDED<br/>charged, we don't know"])
+
+    Start -.->|"independently"| LedgerSum{"SUM(debits) minus<br/>SUM(credits) = 0 ?"}
+    LedgerSum -->|"no -- P0"| Page(["Page on-call<br/>immediately"])
+
+    Matched --> Report["Publish daily report<br/>alert finance if flagged"]
+    Discrepancy --> Report
+    Orphan --> Report
+    Unrecorded --> Report
+    LedgerSum -->|"yes"| Report
+
+    class Start io
+    class Download req
+    class CompareEach,OrphanCheck,UnrecordedCheck,LedgerSum mathOp
+    class Matched train
+    class Discrepancy,Orphan,Unrecorded,Page lossN
+    class Report base
 ```
-Nightly batch (runs at 02:00 UTC, after PSP settlement files are available):
 
-1. Download the PSP's settlement report for the previous day
-   (Stripe: "Balance Transactions" API export; Adyen: settlement batch CSV).
-
-2. For each settled transaction in the PSP report:
-     - Look up the corresponding `payments` row by psp_reference_id.
-     - Compare amount_minor, currency, and status.
-     - If MATCH: mark as reconciled (reconciliation_status = 'MATCHED').
-     - If MISMATCH (amount differs, or status differs):
-         -> flag as DISCREPANCY, write to discrepancies table,
-            DO NOT auto-correct the ledger.
-
-3. For each `payments` row with status = SUCCEEDED but NOT present in
-   the PSP settlement report:
-     -> flag as ORPHAN (we think we got paid, PSP has no record)
-        -> CRITICAL: this could mean a forged/replayed webhook (§4.6)
-
-4. For each PSP settlement entry with NO corresponding `payments` row:
-     -> flag as UNRECORDED (PSP charged, we have no record)
-        -> CRITICAL: customer was charged but our system doesn't know it
-
-5. Independently, sum all ledger_entries grouped by transaction_id and
-   assert SUM(debits) - SUM(credits) = 0 for every transaction AND for
-   the ledger as a whole. A non-zero global sum is a P0 (§8).
-
-6. Publish a daily reconciliation report: total transactions, total
-   matched, total flagged, total discrepancy amount. Alert finance team
-   if discrepancy count > 0 or discrepancy amount > $1.
-```
+Four independent checks run off the same nightly download — line-item matching, orphan detection, unrecorded-charge detection, and the global ledger-balance invariant — and all four feed one daily report; only the global-sum check pages on-call directly, as a P0 (§8).
 
 The job is intentionally conservative: it **flags, never auto-corrects**. An automated "fix" to a financial ledger is itself a risk — every correction goes through the same `transfer()` code path (§4.2) as a normal transaction, with its own audit trail, after a human (finance/ops) reviews the discrepancy.
 
@@ -696,88 +703,60 @@ A non-zero `SUM(debits) - SUM(credits)` across the ledger is **not a "data quali
 
 **The broken sequence**:
 
-```
-Client                          API Server                    PSP
-  |                                  |                          |
-  |--- POST /charges (no            |                          |
-  |     idempotency key)            |                          |
-  |     amount=$49.99 ------------->|                          |
-  |                                  |--- charge $49.99 ------->|
-  |                                  |                          |  (PSP processes
-  |                                  |                          |   the charge --
-  |                                  |                          |   card IS billed)
-  |                                  |<-- 200 OK ---------------|
-  |        X  <-- response lost      |                          |
-  |        (network timeout          |                          |
-  |         on the way back)         |                          |
-  |                                  |                          |
-  |  Client sees a timeout.          |                          |
-  |  From the client's view, it      |                          |
-  |  has NO IDEA whether the         |                          |
-  |  charge succeeded. The only      |                          |
-  |  "safe" thing to do is retry.    |                          |
-  |                                  |                          |
-  |--- POST /charges (RETRY,        |                          |
-  |     no idempotency key,          |                          |
-  |     amount=$49.99 -------------->|                          |
-  |                                  |--- charge $49.99 ------->|
-  |                                  |                          |  (PSP has no idea
-  |                                  |                          |   this is a retry --
-  |                                  |                          |   card IS BILLED
-  |                                  |                          |   AGAIN)
-  |                                  |<-- 200 OK ---------------|
-  |<-- 200 OK ------------------------|                          |
-  |                                  |                          |
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as API Server
+    participant P as PSP
 
-RESULT: customer billed $49.99 TWICE for one purchase. Support ticket,
-chargeback, refund processing, and a very unhappy customer -- all because
-a network blip happened at exactly the wrong millisecond.
+    C->>S: POST /charges (no Idempotency-Key)<br/>amount=$49.99
+    S->>P: charge $49.99
+    Note right of P: PSP processes the charge --<br/>card IS billed
+    P-->>S: 200 OK
+    S--xC: 200 OK<br/>(lost -- network timeout)
+    Note over C: sees a timeout -- no idea if the<br/>charge succeeded, only safe move is retry
+
+    C->>S: POST /charges RETRY (still no key)<br/>amount=$49.99
+    S->>P: charge $49.99
+    Note right of P: PSP has no idea this is a retry --<br/>card IS BILLED AGAIN
+    P-->>S: 200 OK
+    S-->>C: 200 OK
+
+    Note over C,P: RESULT -- billed $49.99 TWICE
 ```
+
+RESULT: customer billed $49.99 TWICE for one purchase. Support ticket, chargeback, refund processing, and a very unhappy customer — all because a network blip happened at exactly the wrong millisecond.
 
 **The fixed sequence** (with `Idempotency-Key`, §4.1):
 
-```
-Client                          API Server                    PSP
-  |                                  |                          |
-  |--- POST /charges                |                          |
-  |     Idempotency-Key: abc-123     |                          |
-  |     amount=$49.99 ------------->|                          |
-  |                                  |--- INSERT INTO           |
-  |                                  |    idempotency_keys      |
-  |                                  |    (key='abc-123',       |
-  |                                  |     status=IN_PROGRESS)  |
-  |                                  |    -- SUCCEEDS, claimed  |
-  |                                  |--- charge $49.99 ------->|
-  |                                  |                          |  (card IS billed)
-  |                                  |<-- 200 OK ---------------|
-  |                                  |--- UPDATE idempotency_   |
-  |                                  |    keys SET status=      |
-  |                                  |    COMPLETED, response=  |
-  |                                  |    {...} WHERE key=      |
-  |                                  |    'abc-123'             |
-  |        X  <-- response lost      |                          |
-  |                                  |                          |
-  |--- POST /charges (RETRY,        |                          |
-  |     SAME Idempotency-Key:        |                          |
-  |     abc-123,                     |                          |
-  |     amount=$49.99 -------------->|                          |
-  |                                  |--- INSERT INTO           |
-  |                                  |    idempotency_keys      |
-  |                                  |    (key='abc-123', ...)  |
-  |                                  |    -- FAILS: UNIQUE      |
-  |                                  |    constraint violation  |
-  |                                  |--- SELECT ... WHERE      |
-  |                                  |    key='abc-123'         |
-  |                                  |    -> status=COMPLETED,  |
-  |                                  |    response={...}        |
-  |                                  |--- NO CALL TO PSP --------|  (none!)
-  |<-- 200 OK (cached response) -----|                          |
-  |                                  |                          |
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as API Server
+    participant DB as idempotency_keys
+    participant P as PSP
 
-RESULT: customer billed $49.99 ONCE. The retry is a pure database read
-(one INSERT that fails fast on a unique-constraint violation, one SELECT)
--- no PSP call, no second charge, response time ~1-2ms.
+    C->>S: POST /charges<br/>Idempotency-Key: abc-123, amount=$49.99
+    S->>DB: INSERT (key=abc-123, status=IN_PROGRESS)
+    DB-->>S: succeeds -- key claimed
+    S->>P: charge $49.99
+    Note right of P: card IS billed
+    P-->>S: 200 OK
+    S->>DB: UPDATE status=COMPLETED, response={...}
+    S--xC: 200 OK<br/>(lost -- network timeout)
+
+    C->>S: POST /charges RETRY<br/>SAME Idempotency-Key: abc-123
+    S->>DB: INSERT (key=abc-123, ...)
+    DB-->>S: FAILS -- unique constraint violation
+    S->>DB: SELECT WHERE key=abc-123
+    DB-->>S: status=COMPLETED, response={...}
+    Note over S,P: no call to PSP -- replay only
+    S-->>C: 200 OK (cached response)
+
+    Note over C,P: RESULT -- billed $49.99 ONCE, ~1-2ms
 ```
+
+RESULT: customer billed $49.99 ONCE. The retry is a pure database read (one INSERT that fails fast on a unique-constraint violation, one SELECT) — no PSP call, no second charge, response time ~1-2ms.
 
 **Fix**: Every state-changing endpoint requires `Idempotency-Key`; the dedup table's UNIQUE constraint is the enforcement mechanism, and "unique constraint violation" is treated as "cache hit," not "error" (§4.1 code).
 
@@ -785,22 +764,29 @@ RESULT: customer billed $49.99 ONCE. The retry is a pure database read
 
 **Broken** — the classic "read, compute, write" race:
 
-```
-Initial state: customer wallet balance = $100
+```mermaid
+sequenceDiagram
+    participant A as Thread A ($80 withdrawal)
+    participant B as Thread B ($80 withdrawal)
+    participant DB as accounts (id=42)
 
-Thread A (withdraw $80)              Thread B (withdraw $80)
-  SELECT balance FROM accounts          SELECT balance FROM accounts
-  WHERE id = 42  --> returns 100        WHERE id = 42  --> returns 100
-  (in application code:                 (in application code:
-   newBalance = 100 - 80 = 20)           newBalance = 100 - 80 = 20)
-  UPDATE accounts SET balance = 20      UPDATE accounts SET balance = 20
-  WHERE id = 42                         WHERE id = 42
+    Note over DB: initial balance = $100
 
-RESULT: balance = $20, but $160 was withdrawn from a $100 balance.
-$80 "vanished" -- the account is overdrawn by $60 with NO record of it,
-because both withdrawals "succeeded" according to the application logic
-that read balance=100 before either write happened.
+    A->>DB: SELECT balance WHERE id=42
+    DB-->>A: 100
+    B->>DB: SELECT balance WHERE id=42
+    DB-->>B: 100
+
+    Note over A: app code: 100 - 80 = 20
+    Note over B: app code: 100 - 80 = 20
+
+    A->>DB: UPDATE balance = 20 WHERE id=42
+    B->>DB: UPDATE balance = 20 WHERE id=42
+
+    Note over DB: RESULT -- balance = $20,<br/>but $160 was withdrawn from $100
 ```
+
+RESULT: balance = $20, but $160 was withdrawn from a $100 balance. $80 "vanished" — the account is overdrawn by $60 with NO record of it, because both withdrawals "succeeded" according to the application logic that read balance=100 before either write happened.
 
 **Fixed** — atomic conditional update, no separate SELECT:
 

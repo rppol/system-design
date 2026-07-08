@@ -46,18 +46,30 @@ If you only have time for three case studies, read these in order:
 
 ## Dependency Map
 
-```
-design_rate_limited_api_fastapi  (read first — establishes DI + Redis + error patterns)
-        |
-        +---> design_multi_tenant_saas_api    (adds async SQLAlchemy + RBAC on top of DI)
-        |
-        +---> design_realtime_chat_fastapi    (adds WebSocket + Redis pub/sub layer)
-        |
-        +---> design_ml_inference_api_fastapi (adds lifespan + SSE + micro-batching)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-design_async_task_queue  (independent — starts from BackgroundTasks first principles)
-        |
-        +---> design_async_web_scraper        (shares Semaphore/producer-consumer patterns)
+    RL("design_rate_limited_api_fastapi<br/>read first — DI + Redis + error patterns")
+    MT("design_multi_tenant_saas_api<br/>+ async SQLAlchemy + RBAC")
+    RC("design_realtime_chat_fastapi<br/>+ WebSocket + Redis pub/sub layer")
+    ML("design_ml_inference_api_fastapi<br/>+ lifespan + SSE + micro-batching")
+    ATQ("design_async_task_queue<br/>independent — BackgroundTasks first principles")
+    AWS("design_async_web_scraper<br/>shares Semaphore / producer-consumer patterns")
+
+    RL --> MT
+    RL --> RC
+    RL --> ML
+    ATQ --> AWS
+
+    class RL,ATQ base
+    class MT,RC,ML,AWS train
 ```
 
 **Always read `design_rate_limited_api_fastapi` first.** It establishes the `Depends`-injected service layer pattern that all other FastAPI case studies extend.

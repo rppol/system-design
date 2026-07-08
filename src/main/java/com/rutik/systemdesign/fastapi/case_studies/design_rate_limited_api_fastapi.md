@@ -27,49 +27,49 @@ Design a production-grade rate limiter for a public API with the following requi
 
 ## Architecture Overview
 
-```
- Client
-   |
-   | HTTP request with X-Api-Key header
-   v
- Load Balancer (nginx / AWS ALB)
-   |
-   | Round-robin to pod
-   v
-+-----------------------------------+
-|  FastAPI Pod                      |
-|                                   |
-|  Router                           |
-|    |                              |
-|    | FastAPI resolves Depends()   |
-|    v                              |
-|  RateLimiter.__call__(request)    |
-|    |                              |
-|    | 1. Extract api_key           |
-|    | 2. Build Redis key           |
-|    | 3. Run Lua script (atomic)   |
-|    |      INCR + TTL in one trip  |
-|    |                              |
-|    +-- Redis unavailable? --------+---> fail-open: log warning, continue
-|    |                              |
-|    | 4. count > limit?            |
-|    |      YES --> raise           |
-|    |             RateLimitExceeded|
-|    |      NO  --> set             |
-|    |             request.state    |
-|    v                              |
-|  Route Handler                    |
-|    |                              |
-|    | builds response              |
-|    v                              |
-|  Exception Handler                |
-|  (RateLimitExceeded)              |
-|    --> 429 + Retry-After header   |
-+-----------------------------------+
-   |
-   v
- Redis (Standalone / Sentinel / Cluster)
+The `RateLimiter` dependency sits between the router and the route handler on every request; the two decision diamonds are what make it a rate limiter — a Redis outage takes the dotted fail-open bypass instead of blocking the 100 req/min and 1000 req/day checks that protect the API.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client([Client]) -->|"X-Api-Key header"| LB(Load Balancer<br/>nginx / AWS ALB)
+    LB -->|"round-robin"| Router(Router<br/>resolves Depends)
+
+    subgraph Pod["FastAPI Pod"]
+        Router --> RL(RateLimiter call<br/>extract key + build Redis key)
+        RL --> Lua(Lua script<br/>atomic INCR + EXPIRE)
+        Lua --> Down{Redis unavailable?}
+        Down -->|"yes"| FailOpen(Fail-open<br/>log warning + continue)
+        Down -->|"no"| Limit{count over limit?}
+        Limit -->|"yes"| Raise(raise RateLimitExceeded)
+        Limit -->|"no"| SetState(set request.state)
+        FailOpen -.->|"bypass"| Handler(Route Handler)
+        SetState --> Handler
+        Raise --> ExcHandler(Exception Handler)
+    end
+
+    Lua -->|"eval"| Redis(Redis<br/>Standalone / Sentinel / Cluster)
+    Handler --> Resp200([200 response])
+    ExcHandler --> Resp429([429 + Retry-After])
+
+    class Client io
+    class LB,RL,Lua,Down,Limit mathOp
+    class Router req
+    class FailOpen,Raise,ExcHandler,Resp429 lossN
+    class SetState,Handler,Resp200 train
+    class Redis base
+```
+
+Each of the two windows gets its own Redis key so the minute and day counters expire independently; every TTL is set to twice the window length so a key can never vanish while it is still the authoritative counter.
+
+```
 Redis key layout
 -----------------
   rate::{api_key}::minute::{window_start_unix_second}
@@ -92,6 +92,16 @@ Example keys
 **1. Sliding window counter vs token bucket vs fixed window**
 
 A fixed window counter has a well-known boundary spike: a client can fire 100 requests in the last second of minute N and 100 more in the first second of minute N+1 — 200 requests in 2 seconds while staying within both windows. The token bucket eliminates spikes entirely but requires storing per-key float state (last-fill timestamp, token count) and is harder to inspect in Redis. The sliding window counter used here approximates a true sliding window: the key is bucketed to the start of the current 60-second window, and all requests within that window share one counter. This eliminates the boundary spike at the cost of resetting the counter at each exact window boundary (not a continuous roll). For interview purposes, explain this trade-off and note that a sliding window *log* (storing timestamps of every request) gives perfect accuracy but requires O(request-count) Redis memory per key.
+
+Both windows are individually compliant with the 100 req/min rule, yet the client still bursts 200 requests into a 2-second span at the seam between them:
+
+```mermaid
+xychart-beta
+    title "Fixed-window boundary spike (100 req/min limit)"
+    x-axis ["Window N (last 1s)", "Window N+1 (first 1s)", "Combined (2s span)"]
+    y-axis "Requests allowed" 0 --> 220
+    bar [100, 100, 200]
+```
 
 **2. `Depends()` injection vs middleware**
 
@@ -518,6 +528,33 @@ The `except aioredis.RedisError` block in `__call__` catches all connection erro
 
 **Q: How would you implement burst capacity (token bucket) on top of this?**
 Store two values per key: `tokens_remaining` and `last_refill_timestamp`. In the Lua script: compute `elapsed = now - last_refill`; compute `refill = elapsed * refill_rate`; set `tokens = min(bucket_capacity, tokens_remaining + refill)`; if `tokens >= 1`, decrement and allow; otherwise deny. The Lua script must be updated to accept `bucket_capacity` and `refill_rate` as arguments. Token bucket allows short bursts up to `bucket_capacity` while still enforcing a long-run average rate.
+
+The refill arithmetic is three sequential computations feeding one threshold check — easy to skim past in prose, so laid out as steps:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req([Request arrives]) --> Stored(tokens_remaining<br/>last_refill_timestamp)
+    Stored --> Elapsed(elapsed = now minus last_refill)
+    Elapsed --> Refill(refill = elapsed times refill_rate)
+    Refill --> Tokens("tokens = min(capacity, remaining + refill)")
+    Tokens --> Check{tokens at least 1?}
+    Check -->|"yes"| Allow(decrement + allow)
+    Check -->|"no"| Deny(deny with 429)
+
+    class Req req
+    class Stored base
+    class Elapsed,Refill,Tokens,Check mathOp
+    class Allow train
+    class Deny lossN
+```
 
 **Q: How do you test a rate limiter reliably in pytest?**
 Inject a mock Redis into `app_state.redis` before each test. Use `AsyncMock` with `eval` returning a controlled `[count, exceeded]` tuple. This avoids spinning up a real Redis in CI. For integration tests, use `fakeredis` (an in-process Redis emulator with Lua support) or Testcontainers with a real Redis image. Never rely on `time.sleep` loops in tests — they are flaky; instead mock `time.time` or use `freezegun`.

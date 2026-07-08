@@ -62,45 +62,53 @@ SLSA (Supply-chain Levels for Software Artifacts) is the framework that grades h
 
 ## 5. Architecture Diagrams
 
-```
-              SUPPLY CHAIN SECURITY PIPELINE (build → admit)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   git push tag v1.2.3
-        │
-        ▼
- ┌──────────────────────────────────────────────────────────┐
- │  CI (GitHub Actions, OIDC-federated, no long-lived keys)  │
- │                                                            │
- │  1. Hermetic build  ──►  image@sha256:abcd…  (digest)      │
- │  2. syft img  ──────►  SBOM (CycloneDX / SPDX)             │
- │  3. trivy/grype ────►  vuln report  (fail on CRITICAL)    │
- │  4. cosign sign ────►  ┐                                   │
- │  5. cosign attest ──►  │  OIDC token (workflow identity)  │
- └────────────────────────┼──────────────────────────────────┘
-                          │  request cert
-                          ▼
-                 ┌─────────────────┐      ┌──────────────────┐
-                 │  Fulcio (CA)    │      │  Rekor           │
-                 │ 10-min X.509    │─────►│ transparency log │
-                 │ bound to OIDC   │ log  │ (append-only)    │
-                 └─────────────────┘      └──────────────────┘
-                          │ signature + cert + attestations
-                          ▼
-                 ┌─────────────────────────────────┐
-                 │   OCI Registry (ECR/GAR/GHCR)   │
-                 │  image + .sig + .att (referrers)│
-                 └─────────────────────────────────┘
-                          │ kubectl apply / GitOps sync
-                          ▼
- ┌──────────────────────────────────────────────────────────┐
- │  Kubernetes Admission (policy-controller / Kyverno)       │
- │  verify: signature valid?  AND  signer identity ==        │
- │     subject: repo/.github/workflows/release.yml@refs/tags │
- │     issuer:  https://token.actions.githubusercontent.com  │
- │  verify: provenance attestation present + matches digest  │
- │     PASS → admit     FAIL → deny (fail closed)            │
- └──────────────────────────────────────────────────────────┘
+    push(["git push tag<br/>v1.2.3"])
+
+    subgraph CI["CI: GitHub Actions<br/>OIDC-federated, no long-lived keys"]
+        direction TB
+        build("1. Hermetic build<br/>→ image@sha256 digest")
+        sbom("2. syft<br/>→ SBOM (CycloneDX / SPDX)")
+        scan("3. trivy / grype<br/>→ vuln scan (CRITICAL gate)")
+        sign("4. cosign sign")
+        attest("5. cosign attest<br/>→ OIDC token")
+        build --> sbom --> scan --> sign --> attest
+    end
+
+    fulcio("Fulcio CA<br/>~10-min X.509<br/>bound to OIDC")
+    rekor("Rekor<br/>transparency log<br/>append-only")
+    registry(["OCI Registry<br/>image + .sig + .att"])
+    admission{"K8s admission:<br/>sig + identity<br/>+ provenance match?"}
+    admit(["PASS → admit"])
+    deny(["FAIL → deny<br/>fail closed"])
+
+    push --> build
+    attest -->|"request cert"| fulcio
+    fulcio -.->|"log entry"| rekor
+    fulcio -->|"sig + cert<br/>+ attestations"| registry
+    registry -->|"kubectl apply /<br/>GitOps sync"| admission
+    admission -->|"PASS"| admit
+    admission -->|"FAIL"| deny
+
+    class push io
+    class build,sbom,scan,sign,attest mathOp
+    class fulcio,rekor frozen
+    class registry base
+    class admission mathOp
+    class admit train
+    class deny lossN
 ```
+
+*The canonical `build → SBOM → scan → sign → attest → admission-gate` flow: CI mints a short-lived Fulcio certificate from its OIDC identity, Rekor logs the signing event, and the registry-stored signature, cert, and attestations travel with the digest to the Kubernetes admission gate, which fails closed unless signature, identity, and provenance all verify.*
 
 ---
 
@@ -174,6 +182,42 @@ spec:
 ```
 
 When a Pod is created, the webhook resolves the image to its digest, fetches the `.sig`/`.att` referrers from the registry, verifies the cosign signature against Fulcio's CA, confirms the signing cert's SAN matches `subjectRegExp` and `issuer`, and checks the Rekor inclusion proof. End-to-end admission verification adds ~150-400ms per new image (cached thereafter).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pod(["New Pod:<br/>image@sha256:..."])
+    c1{"Cosign signature<br/>verifies against Fulcio CA?"}
+    c2{"Cert issuer ==<br/>expected OIDC issuer?"}
+    c3{"Cert subject matches<br/>subjectRegExp?"}
+    c4{"Provenance attestation<br/>present + digest matches?"}
+    admitN(["ADMIT"])
+    denyN(["DENY<br/>fail closed"])
+
+    pod --> c1
+    c1 -->|"no"| denyN
+    c1 -->|"yes"| c2
+    c2 -->|"no: wrong issuer"| denyN
+    c2 -->|"yes"| c3
+    c3 -->|"no: wrong<br/>repo/workflow"| denyN
+    c3 -->|"yes"| c4
+    c4 -->|"no: missing<br/>or mismatched"| denyN
+    c4 -->|"yes"| admitN
+
+    class pod io
+    class c1,c2,c3,c4 mathOp
+    class admitN train
+    class denyN lossN
+```
+
+*Checking "is this image signed?" alone — the single most common admission-policy mistake — only satisfies the first gate; an attacker's own valid keyless signature passes it too. Only after the cert's issuer, its subject regex, and a matching provenance attestation all also verify does the Pod admit — any single "no" fails closed to DENY.*
 
 **Putting it together — the full CI workflow.** The OIDC permission (`id-token: write`) is what lets the runner mint a token Fulcio trusts; no secret is stored.
 
@@ -283,6 +327,24 @@ spec:
 | Signature + identity | No | Yes (wrong signer rejected) | Medium |
 | SLSA L3 provenance | No | Yes (builder tamper caught) | High (hardened builder) |
 | Reproducible build | No | Yes (bit-for-bit divergence) | Highest |
+
+```mermaid
+quadrantChart
+    title Vuln scanning vs tamper detection are independent axes
+    x-axis Misses injection --> Catches injection
+    y-axis Misses vulns --> Catches vulns
+    quadrant-1 Catches both
+    quadrant-2 Vuln detection only
+    quadrant-3 Catches neither
+    quadrant-4 Injection detection only
+    "CVE scan (Trivy)": [0.1, 0.85]
+    "SBOM": [0.15, 0.55]
+    "Signature + identity": [0.85, 0.12]
+    "SLSA L3 provenance": [0.88, 0.2]
+    "Reproducible build": [0.92, 0.3]
+```
+
+*Reading the table above as coordinates: scanning and SBOMs land in the vuln-detection-only quadrant while signing, SLSA L3 provenance, and reproducible builds land in the injection-detection-only quadrant — no single control reaches "catches both," which is exactly why Core Principle #6 (defense in depth) requires layering controls from each side.*
 
 ---
 

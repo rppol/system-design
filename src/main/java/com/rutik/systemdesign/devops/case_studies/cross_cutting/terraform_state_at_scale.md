@@ -76,55 +76,83 @@ This file is the shared reference that the DevOps case studies — `design_gitop
 
 ## 5. Architecture Diagrams
 
+**Config vs. state vs. cloud — the three-way diff**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    desired(["main.tf<br/>DESIRED<br/>type = m5.large"]) <--> tfstate(["terraform.tfstate<br/>RECORDED<br/>type = m5.large"])
+    tfstate <--> cloud(["AWS<br/>ACTUAL<br/>m5.LARGE"])
+    desired --> diffOp{"plan = three-way diff"}
+    tfstate --> diffOp
+    cloud --> diffOp
+    diffOp --> result(["change detected:<br/>m5.large to m5.xlarge"])
+
+    class desired io
+    class tfstate base
+    class cloud frozen
+    class diffOp mathOp
+    class result lossN
 ```
-          TERRAFORM STATE: CONFIG vs STATE vs CLOUD (three-way diff)
-          ==========================================================
 
-   main.tf (DESIRED)        terraform.tfstate (RECORDED)      AWS (ACTUAL)
-   +----------------+       +-----------------------+        +-----------+
-   | aws_instance   |  <--> | id = i-0abc...        |  <-->  | i-0abc... |
-   |   type=m5.large|       | type = m5.large       |        | m5.LARGE  |
-   +----------------+       +-----------------------+        +-----------+
-          |                          ^                            |
-          |   plan = diff(config, refresh(state, cloud))          |
-          +---------------------------+----------------------------+
-                                      v
-                         "~ change type m5.large -> m5.xlarge"
+Terraform never trusts the cloud directly — every `plan` recomputes this three-way diff between desired config, recorded state, and actual cloud reality, then reports the delta.
 
-  -----------------------------------------------------------------------
+**S3 + DynamoDB remote backend with locking**
 
-          S3 + DYNAMODB REMOTE BACKEND WITH LOCKING
-          =========================================
+```mermaid
+sequenceDiagram
+    participant A as CI Run A
+    participant B as CI Run B
+    participant D as DynamoDB Lock Table
+    participant S as S3 Bucket
 
-   CI run A          CI run B
-      |                  |
-      | LockID write     | LockID write (conditional put)
-      v                  v
-   +---------------------------------+
-   |  DynamoDB lock table            |   PK = "<bucket>/path/env/terraform.tfstate-md5"
-   |  (on-demand billing)            |   <- A acquires; B gets 409, retries/blocks
-   +---------------------------------+
-      | A holds lock                 |
-      v                              |
-   +---------------------------------+
-   |  S3 bucket (versioning ON,      |   reads/writes terraform.tfstate
-   |  SSE-KMS, block public access)  |   each apply -> new object version
-   +---------------------------------+
-
-  -----------------------------------------------------------------------
-
-          STATE SPLITTING -> BLAST RADIUS CONTAINMENT
-          ===========================================
-
-   MONOLITH (bad)                 LAYERED (good)
-   +---------------------+        +-----------+  +-----------+  +-----------+
-   | networking          |        | net.tfst  |  | data.tfst |  | app.tfst  |
-   | databases           |        | (VPC,SG)  |->| (RDS,S3)  |->| (EKS,ASG) |
-   | eks + asg + dns     |        +-----------+  +-----------+  +-----------+
-   | 4000 resources      |        ~6 min plan        per-state plan < 45s
-   | one lock, one apply |        independent locks; destroy can't cross layers
-   +---------------------+        outputs flow downstream via remote_state
+    A->>D: conditional PUT LockID
+    D-->>A: lock acquired
+    B->>D: conditional PUT LockID
+    D-->>B: 409 conflict — retry or block
+    Note over D: lock key = state path + md5 suffix
+    A->>S: write terraform.tfstate
+    S-->>A: new object version (versioning ON)
+    Note over S: SSE-KMS, block public access
 ```
+
+CI Run A's conditional PUT wins the lock while CI Run B's write is rejected with a 409 and must retry or block; only the holder may write the next versioned state object into S3.
+
+**State splitting → blast-radius containment**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph MonoBox["MONOLITH (bad)"]
+        mono("networking + databases + eks + asg + dns<br/>4000 resources<br/>one lock, one apply<br/>~6 min plan")
+    end
+
+    subgraph LayeredBox["LAYERED (good)"]
+        netTf(["net.tfstate<br/>VPC, SG"]) -->|"remote_state<br/>outputs"| dataTf(["data.tfstate<br/>RDS, S3"]) -->|"remote_state<br/>outputs"| appTf(["app.tfstate<br/>EKS, ASG"])
+    end
+
+    appTf --> safe("independent locks<br/>per-state plan under 45s<br/>destroy cannot cross layers")
+
+    class mono lossN
+    class netTf,dataTf,appTf train
+    class safe train
+```
+
+Splitting the 4,000-resource monolith into per-layer state cut plan time from about 6 minutes to under 45 seconds per layer, and independent locks let three teams apply in parallel.
 
 ---
 
@@ -178,6 +206,20 @@ resource "aws_dynamodb_table" "tf_locks" {
 
 **Lock mechanics.** On `apply`/`plan -lock=true` (default), Terraform writes a conditional item to DynamoDB keyed by `LockID = <bucket>/<key>-md5`. The conditional put fails if the item exists, so a second run gets `Error acquiring the state lock` and blocks/retries. The lock item carries `Who`, `Created`, and `Operation`. If a run crashes mid-apply the lock can be left dangling and must be cleared with `terraform force-unlock <LOCK_ID>` — only after confirming no apply is actually running.
 
+The lock item moves through a small state machine as CI runs contend for it:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Unlocked
+    Unlocked --> Locked: conditional PUT LockID succeeds
+    Locked --> Locked: concurrent PUT fails (409) — retries or blocks
+    Locked --> Unlocked: apply completes, lock item deleted
+    Locked --> Dangling: process crashes mid-apply
+    Dangling --> Unlocked: force-unlock, after confirming no live apply
+```
+
+A run that crashes mid-apply leaves the lock `Dangling` — the only way back to `Unlocked` is `terraform force-unlock`, and only after confirming the holder is genuinely dead.
+
 **Refresh and the three-way diff.** Every `plan` (unless `-refresh=false`) calls the provider's Read API for each resource in state, compares to recorded state (detecting drift), then diffs against config. On a 2,000-resource state this means 2,000 API calls and is the dominant cost of plan time. `terraform plan -refresh-only` shows drift without computing config changes.
 
 **Surgical operations**:
@@ -209,6 +251,31 @@ moved {
   to   = aws_instance.frontend
 }
 ```
+
+Which command to reach for depends on the goal, not the mechanism:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    goal{"what do you<br/>need to do?"} -->|"resource exists,<br/>not tracked"| doImport(["import<br/>(or import block)"])
+    goal -->|"keep it, rename<br/>in state"| doMove(["state mv<br/>(or moved block)"])
+    goal -->|"stop managing,<br/>keep it running"| doRemove(["state rm"])
+    goal -->|"actually delete<br/>the cloud object"| doDestroy(["destroy<br/>(remove + apply)"])
+
+    class goal mathOp
+    class doImport,doMove train
+    class doRemove frozen
+    class doDestroy lossN
+```
+
+`import` and `state mv` are safe, reviewable adoption/rename operations; `state rm` only stops Terraform from tracking a resource while it keeps running; only `destroy` actually removes the cloud object.
 
 **Cross-state reads**:
 

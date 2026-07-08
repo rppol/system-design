@@ -109,6 +109,31 @@ Time O(V + E), Space O(V + E).
 
 **DFS-based alternative:** color nodes white (unvisited), gray (in current path), black (fully processed). If DFS encounters a gray node, a cycle exists.
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> White
+    White --> Gray: DFS visits node
+    Gray --> Black: all descendants done
+    Gray --> Gray: revisit gray node
+    Black --> [*]
+
+    note right of Gray: Revisiting a gray node<br/>means a cycle exists
+
+    class White frozen
+    class Gray mathOp
+    class Black train
+```
+
+A node is gray only while it sits on the current DFS call stack; if DFS follows an edge back into a still-gray node, that back edge is exactly the cycle the three-color scheme is built to catch.
+
 Kahn's is preferred in interviews because the cycle-detection logic is a natural side effect of the count check, not a separate concern.
 
 ### Problem 3 — Dijkstra's Algorithm
@@ -505,6 +530,36 @@ Bellman-Ford wins when: negative weights present (but no negative cycles).
 Floyd-Warshall wins when: all-pairs shortest path needed and V is small.
 ```
 
+The three competing shortest-path algorithms above collapse into a single routing decision:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Shortest path<br/>needed"]) --> q1{"Negative<br/>edge weights?"}
+    q1 -->|"no"| q2{"All-pairs<br/>needed?"}
+    q1 -->|"yes"| q3{"Negative<br/>cycle?"}
+    q2 -->|"no, single source"| dij("Dijkstra<br/>O((V+E) log V)")
+    q2 -->|"yes"| q4{"V under 400?"}
+    q4 -->|"yes"| fw("Floyd-Warshall<br/>O(V^3)")
+    q4 -->|"no"| dijall("Dijkstra from<br/>every source")
+    q3 -->|"yes"| none("No solution<br/>undefined path")
+    q3 -->|"no"| bf("Bellman-Ford<br/>O(V * E)")
+
+    class start io
+    class q1,q2,q3,q4 mathOp
+    class dij,fw,dijall,bf train
+    class none lossN
+```
+
+Non-negative single-source weights route straight to Dijkstra; a negative cycle makes the shortest path undefined; an all-pairs requirement only outgrows per-source Dijkstra once V passes roughly 400, at which point Floyd-Warshall's O(V^3) becomes competitive.
+
 **Space note on recursion depth:** Python's default recursion limit is 1,000. A 300x300 grid (90,000 cells) entirely covered in land would cause a DFS recursion depth of 90,000, triggering a `RecursionError`. Always use iterative DFS or BFS for grid problems in Python. In Java, the JVM stack is ~512KB–1MB per thread; recursive DFS on a 300x300 grid may trigger a `StackOverflowError` as well. The fix is iterative BFS or explicit stack-based DFS.
 
 ---
@@ -706,19 +761,28 @@ In an unweighted graph, DFS does NOT find shortest paths. DFS finds A path, not 
 
 **Concrete example:**
 
-```
-Graph:
-0 -- 1 -- 2 -- 3
-|              |
-+------4-------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Adjacency of 0: [1, 4]
-DFS from 0 visits 1, then 2, then 3. Records path length to 3 as 3.
-BFS from 0 visits 1 and 4 (layer 1), then 2 and 3 (layer 2).
-Records path length to 3 as 2 (via 0->4->3).
-DFS answer: 3 hops (WRONG).
-BFS answer: 2 hops (CORRECT).
+    n0(["Node 0<br/>source"]) ---|"DFS path: 3 hops"| n1("1")
+    n1 --- n2("2")
+    n2 --- n3(["Node 3<br/>target"])
+    n0 ---|"BFS path: 2 hops"| n4("4")
+    n4 --- n3
+
+    class n0,n3 io
+    class n1,n2 lossN
+    class n4 train
 ```
+
+Adjacency of node 0 is [1, 4]: DFS greedily follows the 1-2-3 branch first, recording 3 hops to reach node 3 (red path, WRONG), while BFS's layer-by-layer expansion finds the 2-hop path through node 4 first (green path, CORRECT).
 
 Frequency: This mistake appears in roughly 1 in 4 candidates who correctly implement DFS for "number of islands" and then naively apply DFS to a "shortest path in an unweighted graph" follow-up.
 
@@ -856,12 +920,32 @@ Courses 0..4, prerequisites:
   Course 3 requires Course 1
   Course 3 requires Course 2
   Course 4 requires Course 3
+```
 
-Directed graph:
-  0 ---> 1 ---> 3 ---> 4
-  |             ^
-  +----> 2 -----+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    c0(["Course 0<br/>in-deg 0"]) --> c1("Course 1")
+    c0 --> c2("Course 2")
+    c1 --> c3(("Course 3<br/>needs 1 and 2"))
+    c2 --> c3
+    c3 --> c4(["Course 4"])
+
+    class c0,c4 io
+    class c1,c2 req
+    class c3 mathOp
+```
+
+Course 3 cannot start until both Course 1 and Course 2 finish (in-degree 2, the merge point above); Kahn's queue processes 0, then 1 and 2, then 3, then 4 — all 5 nodes, so no cycle exists.
+
+```
 In-degrees:  0:0, 1:1, 2:1, 3:2, 4:1
 Kahn's steps:
   Queue: [0]  (only in-degree-0 node)
@@ -875,16 +959,28 @@ Kahn's steps:
 
 ### Weighted Graph for Network Delay Time
 
-```
-Directed weighted graph, 4 nodes, source k=2:
-                w=1
-    2 --------> 1
-    |           ^
-    | w=1       | (no direct edge 1->3)
-    v           |
-    3 --------> 4
-         w=1
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    n2(["Node 2<br/>source, dist 0"]) -->|"w = 1"| n1("Node 1<br/>dist 1")
+    n2 -->|"w = 1"| n3("Node 3<br/>dist 1")
+    n3 -->|"w = 1"| n4(["Node 4<br/>dist 2"])
+
+    class n2 io
+    class n1,n3 req
+    class n4 train
+```
+
+Directed weighted graph, 4 nodes, source k=2 (note: there is no direct edge from 1 to 3). Dijkstra settles nodes 1 and 3 at distance 1 on the first pop, then reaches node 4 at distance 2 — the maximum distance (2) is the Network Delay Time answer.
+
+```
 times = [[2,1,1],[2,3,1],[3,4,1]]
 
 Dijkstra from node 2:

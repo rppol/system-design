@@ -23,31 +23,38 @@ Design the database architecture for a B2B SaaS CRM platform:
 
 ## Architecture Overview
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client"]) --> gw("API Gateway")
+    gw --> router{"Tenant Router"}
+    router -.->|"reads tenant<br/>metadata"| redis["Redis<br/>routing cache"]
+
+    router -->|"SMB · 7000"| shared["Shared DB Cluster<br/>PgBouncer"]
+    router -->|"Mid-Market · 2500"| mid["Mid-Market Clusters 1-5<br/>PgBouncer"]
+    router -->|"Enterprise · 500"| ent["Enterprise DB Instances<br/>Patroni HA"]
+
+    shared -.-> cdc("Debezium CDC")
+    mid -.-> cdc
+    ent -.-> cdc
+    cdc --> kafka["Kafka"]
+    kafka --> ch["ClickHouse<br/>org_id partitioned"]
+    ch --> op(["Platform Operators"])
+
+    class client,op io
+    class gw,kafka req
+    class router,cdc mathOp
+    class redis,shared,mid,ent,ch base
 ```
-Multi-tier isolation model:
-  Tier 1 (SMB):      Shared schema + RLS (7000 tenants, 1 PostgreSQL cluster)
-  Tier 2 (Mid):      Schema-per-tenant (2500 tenants, 5 PostgreSQL clusters)
-  Tier 3 (Enterprise):Database-per-tenant (500 tenants, dedicated instances)
 
-Routing:
-  Client → [API Gateway] → [Tenant Router] (reads tenant metadata from Redis)
-                                  │
-               ┌──────────────────┼──────────────────────┐
-               ▼                  ▼                       ▼
-         [Shared DB             [Mid-Market             [Enterprise DB
-          Cluster]               Cluster 1-5]            Instance]
-          (PgBouncer)            (PgBouncer)             (Patroni HA)
-
-Cross-tenant Analytics:
-  CDC (Debezium) → Kafka → ClickHouse (org_id partitioned)
-  Platform operators only; tenants have no access
-
-Connection Pooling:
-  All tiers → PgBouncer (transaction mode)
-  SMB cluster: 7000 tenants → PgBouncer → 100 PG connections
-  Mid-market: 2500 schemas → PgBouncer → 200 PG connections per cluster
-  Enterprise: dedicated PgBouncer per tenant
-```
+Three isolation tiers sit behind one Redis-cached tenant router: 7,000 SMB tenants share one RLS-protected cluster, 2,500 mid-market tenants get schema-per-tenant across 5 clusters, and 500 enterprise tenants get dedicated Patroni-HA instances. A separate Debezium → Kafka → ClickHouse pipeline mirrors writes into an operator-only, org_id-partitioned analytics store that tenants cannot query.
 
 ---
 
@@ -247,6 +254,18 @@ Enterprise tier (500 dedicated):
 
 ### 6. Zero-Downtime Schema Migrations
 
+```mermaid
+stateDiagram-v2
+    [*] --> Expand
+    state "Dual-Write" as DualWrite
+    Expand --> DualWrite: nullable column added<br/>CREATE INDEX CONCURRENTLY
+    DualWrite --> Contract: existing rows backfilled<br/>app writes old + new
+    Contract --> Validate: CHECK ... NOT VALID added<br/>no scan, no lock
+    Validate --> [*]: VALIDATE CONSTRAINT<br/>scans table, shares lock with reads
+```
+
+Each phase of the expand-contract pattern is its own low-lock deployment, so a breaking change to the shared `contacts` table never blocks the 7,000 SMB tenants reading and writing it; only the final Validate phase takes a table scan, and it shares its lock with concurrent reads.
+
 ```sql
 -- Migration for shared schema (affects all SMB tenants simultaneously)
 -- Must use expand-contract pattern for breaking changes
@@ -327,6 +346,28 @@ public class TenantProvisioningService {
 ```
 
 ### Tenant Migration (SMB → Mid-Market upgrade)
+
+```mermaid
+sequenceDiagram
+    participant M as Migration Service
+    participant Src as Shared Schema
+    participant Tgt as New Schema
+    participant CDC as CDC Bridge
+    participant R as Tenant Router
+
+    M->>Tgt: 1. createSchema(cluster, schema)
+    M->>Src: 2. copyTenant() bulk copy
+    Src-->>Tgt: batched rows, no source lock
+    M->>CDC: 3. startReplication(delta)
+    CDC->>Tgt: replicate changes since copy
+    M->>M: 4. verify row count + checksum
+    M->>R: 5. switchToNewSchema
+    Note over M,R: writes briefly rejected<br/>(under 1 second)
+    R-->>M: routing cache invalidated
+    M->>Src: 6. scheduleCleanup (async)
+```
+
+The source schema stays fully writable through steps 1-4 (background bulk copy plus CDC delta catch-up); only step 5's routing switch pauses writes, and for well under one second.
 
 ```java
 @Service

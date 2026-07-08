@@ -27,54 +27,46 @@ Design a production-grade ML inference API for serving a BERT-based text classif
 
 ## Architecture Overview
 
-```
-Client
-  |
-  | POST /predict or POST /predict/stream
-  v
-+---------------------------+
-|     FastAPI Application   |
-|  (Uvicorn + async workers)|
-|                           |
-|  lifespan: load model     |
-|  into app.state on boot   |
-+----------+----------------+
-           |
-           | 1. Semantic cache lookup (Redis, cosine sim >= 0.95)
-           v
-+---------------------------+
-|     Semantic Cache        |
-|  (Redis + sentence-embed) |
-+----------+----------------+
-           |  cache miss
-           v
-+---------------------------+
-|    Micro-Batch Queue      |
-|  asyncio.Queue            |
-|  background task:         |
-|   - collect up to 8 items |
-|   - flush every 10ms      |
-+----------+----------------+
-           |
-           | batched tensor
-           v
-+---------------------------+
-|   Model Inference         |
-|  (BERT / GPU)             |
-|  app.state.model[slot]    |
-+----------+----------------+
-           |
-    +------+--------+
-    |               |
-    v               v
-Single result    Token stream
-JSON response    StreamingResponse
-                 (SSE async gen)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Zero-downtime update:
-  app.state.slots = {0: model_A, 1: None}
-  Load model_B into slot 1 -> swap active_slot -> unload slot 0
+    Client(["Client"]) -->|"POST /predict or<br/>/predict/stream"| App("FastAPI App<br/>Uvicorn + async workers")
+    App -->|"cache lookup<br/>cosine sim at least 0.95"| Cache[("Semantic Cache<br/>Redis + sentence-embed")]
+    Cache -->|"cache miss"| Queue("Micro-Batch Queue<br/>up to 8 items, 10ms flush")
+    Queue -->|"batched tensor"| Model(("Model Inference<br/>BERT on GPU"))
+    Model --> Single(["Single result<br/>JSON response"])
+    Model --> Stream(["Token stream<br/>SSE async gen"])
+
+    subgraph Swap["Zero-Downtime Model Update"]
+        direction LR
+        Slots("slots: 0=model_A<br/>1=None") -.-> LoadB("Load model_B<br/>into slot 1")
+        LoadB -.-> Flip{"Swap<br/>active_slot"}
+        Flip -.-> Unload("Unload<br/>slot 0")
+    end
+
+    Model -.->|"admin swap, async"| Slots
+
+    class Client io
+    class App req
+    class Cache base
+    class Queue mathOp
+    class Model train
+    class Single io
+    class Stream io
+    class Slots base
+    class LoadB frozen
+    class Flip mathOp
+    class Unload lossN
 ```
+
+A request either short-circuits at the semantic cache or flows through the micro-batch queue into GPU inference; the dual-slot swap on the right runs out-of-band on an admin call, never blocking the request path.
 
 ---
 
@@ -133,6 +125,34 @@ For generative outputs (summarization, token-by-token generation), SSE is prefer
 Exact-match caching (hash of input string) misses near-duplicate prompts that differ only in whitespace, punctuation, or paraphrasing. A semantic cache computes a sentence embedding of the input, stores it with the result in Redis, and on each new request retrieves the top-k stored embeddings and checks cosine similarity. A hit at >= 0.95 returns the cached result and skips GPU inference entirely.
 
 Cache invalidation occurs on model swap or after a configurable TTL (default 1 hour).
+
+The decision path below is the mechanic behind that one sentence: every request pays for an embedding, but only a sub-threshold miss pays for GPU inference.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req(["Request text"]) --> Embed("Encode query<br/>embedding, MiniLM-L6")
+    Embed --> Scan[("Scan cached<br/>embeddings")]
+    Scan --> Sim{"cosine sim<br/>at least 0.95?"}
+    Sim -->|"hit"| Hit(["Return cached result<br/>GPU skipped"])
+    Sim -->|"miss"| Infer("Run micro-batched<br/>GPU inference")
+    Infer --> Store[("Store embedding<br/>+ result in cache")]
+
+    class Req io
+    class Embed mathOp
+    class Scan base
+    class Sim mathOp
+    class Hit train
+    class Infer lossN
+    class Store base
+```
 
 ### 5. Zero-downtime model updates via dual-slot swap
 
@@ -585,6 +605,38 @@ Exact-match hashing misses "What is the sentiment of this review?" and "What's t
 
 **Q: How would you scale this beyond a single process?**
 Run multiple Uvicorn workers behind Gunicorn (`-w 4 --worker-class uvicorn.workers.UvicornWorker`). Each worker has its own copy of the model in GPU memory, so memory scales linearly with worker count. The semantic cache lives in Redis, which is shared across all workers, so cache hits are process-agnostic. The micro-batcher is per-process; cross-process batching requires an external queue (Redis Streams or Kafka) feeding a dedicated inference worker, which is the TorchServe or Triton Inference Server architecture.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Gunicorn(["Gunicorn<br/>-w 4"]) --> W1("Worker 1<br/>model + GPU copy")
+    Gunicorn --> W2("Worker 2<br/>model + GPU copy")
+    Gunicorn --> W3("Worker N<br/>model + GPU copy")
+
+    W1 --> SharedCache[("Shared Redis<br/>semantic cache")]
+    W2 --> SharedCache
+    W3 --> SharedCache
+
+    W1 -.->|"cross-process<br/>batching"| ExtQ("External queue<br/>Redis Streams or Kafka")
+    ExtQ -.-> Dedicated(("Dedicated inference<br/>worker, Triton-style"))
+
+    class Gunicorn req
+    class W1 train
+    class W2 train
+    class W3 train
+    class SharedCache base
+    class ExtQ mathOp
+    class Dedicated frozen
+```
+
+Each Gunicorn worker is an independent GPU tenant — memory scales linearly with `-w` — while Redis is the one piece of shared state; scaling the batcher itself means adding the external-queue tier on the right, which is exactly the TorchServe/Triton shape.
 
 **Q: What observability would you add to this service?**
 At minimum: Prometheus counter for requests (labelled by cached/not-cached and label), histogram for end-to-end latency and per-stage latency (cache lookup, queue wait, inference), and a gauge for micro-batch queue depth. OpenTelemetry spans should wrap the cache lookup and the `run_in_executor` inference call so distributed traces show exactly where latency is spent. See `../../../llm/case_studies/cross_cutting/streaming_at_scale.md` for SSE-specific tracing patterns.

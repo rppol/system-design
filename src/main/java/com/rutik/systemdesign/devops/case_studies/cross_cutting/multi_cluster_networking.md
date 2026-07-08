@@ -64,27 +64,48 @@ The dominant implementations are service-mesh-based (Cilium Cluster Mesh at the 
 
 ## 5. Architecture Diagrams
 
-```
-        GLOBAL LB (Route53 latency routing / Anycast / GCLB)
-                 │  health-checked, nearest-healthy
-        ┌────────┴─────────────────────────────┐
-        ▼                                       ▼
- ┌───────────────── REGION us-east-1 ──┐  ┌──── REGION eu-west-1 ─────────┐
- │  Cluster A   pod CIDR 10.10.0.0/16  │  │ Cluster B  pod CIDR 10.20.0.0/16│
- │  svc CIDR    10.96.0.0/12           │  │ svc CIDR   10.112.0.0/12        │
- │                                     │  │                                 │
- │  ┌─────────┐    east-west gateway   │  │   east-west gateway  ┌────────┐ │
- │  │ frontend│───►[ EW-GW ]═══════════╪══╪═══════[ EW-GW ]◄────│payments│ │
- │  └─────────┘     mTLS (shared root) │  │     mTLS             └────────┘ │
- │  ServiceImport: payments.clusterset │  │  ServiceExport: payments        │
- └─────────────────────────────────────┘  └─────────────────────────────────┘
-            ▲  locality-aware: prefer local                ▲
-            │  endpoints; spill remote only on             │
-            │  local unavailability                        │
-            └──── shared root CA (mTLS trust) ─────────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  Cross-region hop billed ~$0.02/GB → keep fan-out LOCAL by default.
+    LB(["Global LB<br/>Route53 · Anycast · GCLB"])
+    CA(["Shared Root CA<br/>mTLS trust"])
+    LOC["Locality-aware:<br/>local first, remote<br/>only on failure"]
+
+    subgraph regionA ["Region us-east-1<br/>pod 10.10.0.0/16"]
+        FE(["frontend"])
+        EWGWA["EW-GW<br/>ServiceImport:<br/>payments.clusterset"]
+        FE --> EWGWA
+    end
+
+    subgraph regionB ["Region eu-west-1<br/>pod 10.20.0.0/16"]
+        EWGWB["EW-GW<br/>ServiceExport:<br/>payments"]
+        PAY(["payments"])
+        EWGWB --> PAY
+    end
+
+    LB -->|"health-checked<br/>nearest-healthy"| regionA
+    LB -->|"health-checked<br/>nearest-healthy"| regionB
+    EWGWA <-->|"mTLS<br/>shared root"| EWGWB
+    CA -.->|"issues identity"| EWGWA
+    CA -.->|"issues identity"| EWGWB
+    LOC -.-> EWGWA
+    LOC -.-> EWGWB
+
+    class LB,EWGWA,EWGWB mathOp
+    class FE req
+    class PAY base
+    class CA frozen
+    class LOC train
 ```
+
+*Cross-region hop billed ~$0.02/GB → keep fan-out LOCAL by default.*
 
 ---
 
@@ -180,6 +201,42 @@ func pickEndpoint(eps []Endpoint, self Locality) Endpoint {
 }
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    START(["Resolved<br/>endpoint set"])
+    Z{"Same zone<br/>healthy?"}
+    R{"Same region<br/>healthy?"}
+    RM{"Any healthy<br/>endpoint?"}
+    PICKZ(["Use zone endpoint<br/>~sub-ms"])
+    PICKR(["Use region endpoint"])
+    PICKRM(["Use remote endpoint<br/>~60-90ms + $0.02/GB"])
+    FAIL(["Request fails<br/>→ outlier detection"])
+
+    START --> Z
+    Z -->|"yes"| PICKZ
+    Z -->|"no"| R
+    R -->|"yes"| PICKR
+    R -->|"no"| RM
+    RM -->|"yes"| PICKRM
+    RM -->|"no"| FAIL
+
+    class START io
+    class Z,R,RM mathOp
+    class PICKZ,PICKR train
+    class PICKRM frozen
+    class FAIL lossN
+```
+
+*The locality-aware LB walks the tiers in order — same zone, then same region, then any healthy remote — only paying the ~60-90ms RTT and $0.02/GB inter-region cost when every local option is unhealthy; if nothing is healthy anywhere, the request fails and surfaces to outlier detection.*
+
 End-to-end: a user hits the global LB → lands in the nearest region's cluster → frontend calls `payments`, which resolves to *local* endpoints first (sub-ms intra-zone), only crossing to the remote cluster (adding ~60-90ms transcontinental RTT plus $0.02/GB) if local payments is unavailable.
 
 ---
@@ -263,6 +320,32 @@ cilium install --set ipam.operator.clusterPoolIPv4PodCIDRList=10.20.0.0/16 --set
 5. **Treating multi-cluster as automatic HA.** If both clusters depend on one global control plane (primary-remote) or one shared etcd, you reintroduced the SPOF you split to avoid.
 6. **Exporting every Service globally.** MCS exposure is opt-in for a reason; blanket `ServiceExport` widens the attack surface and breaks isolation.
 7. **Forgetting outlier detection.** Locality failover only triggers if unhealthy local endpoints are ejected; without `outlierDetection`, traffic keeps hitting a dead local Service instead of failing over.
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Disconnected
+    Disconnected --> Peering: cilium clustermesh<br/>connect
+    Peering --> ControlPlaneConnected: tunnels established
+    ControlPlaneConnected --> DataPlaneRoutable: CIDRs disjoint,<br/>unique cluster.id
+    ControlPlaneConnected --> DataPlaneBroken: CIDR overlap or<br/>duplicate cluster.id
+    DataPlaneBroken --> DataPlaneRoutable: re-IP pods,<br/>reconnect mesh
+
+    class Disconnected frozen
+    class Peering mathOp
+    class ControlPlaneConnected base
+    class DataPlaneRoutable train
+    class DataPlaneBroken lossN
+```
+
+*Pitfalls 1 and 2 are really one state bug: `cilium clustermesh status` reporting "connected" only confirms the control-plane tunnel came up, not that pod-to-pod traffic is routable — that second, silent state depends entirely on disjoint CIDRs and unique cluster IDs.*
 
 ---
 

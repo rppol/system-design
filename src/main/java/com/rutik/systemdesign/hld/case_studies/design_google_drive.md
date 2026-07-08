@@ -76,53 +76,37 @@ The practical consequence (mirrors §2 of [`./design_object_storage_s3.md`](./de
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    clients(["Clients<br/>desktop · mobile · web"]) --> gateway("API Gateway / Auth<br/>REST + resumable upload")
+    clients --> syncsvc("Sync / Notification<br/>Service")
+
+    gateway --> metaSvc("Metadata Tree<br/>Service")
+    gateway --> permSvc("Permission<br/>Service")
+    gateway --> chunkSvc("Chunking / Dedup<br/>Service")
+    syncsvc --> changeLog("Change Log /<br/>Event Stream")
+
+    metaSvc --> metaDB("Metadata DB<br/>sharded KV/SQL")
+    permSvc --> aclStore("ACL Store<br/>sharded by resource_id")
+    chunkSvc --> chunkIdx("Chunk Hash Index<br/>hash to location + refcount")
+    chunkIdx --> blob("Blob Storage<br/>content-addressed, erasure-coded")
+
+    class clients io
+    class gateway req
+    class syncsvc,metaSvc,permSvc,chunkSvc mathOp
+    class changeLog,metaDB,aclStore,chunkIdx base
+    class blob frozen
 ```
-                                  +--------------------------+
-                                  |    Clients                 |
-                                  |  (Desktop sync client,     |
-                                  |   mobile app, web UI)       |
-                                  +-------------+--------------+
-                                                |
-                       +-------------------------+-------------------------+
-                       |                                                   |
-                       v                                                   v
-        +---------------------------------+              +---------------------------------+
-        |       API Gateway / Auth          |              |   Sync / Notification Service    |
-        |  (REST + resumable upload         |              |  - long-poll / push (websocket)   |
-        |   endpoints, AuthN/AuthZ §7)       |              |  - per-account change cursor      |
-        +-----------------+-----------------+              |  - fans out "something changed"   |
-                          |                                |    events to other devices (§4.3) |
-          +----------------+----------------+              +-----------------+-----------------+
-          |                |                |                                |
-          v                v                v                                v
-+------------------+ +-------------+ +-------------------+   +-------------------------------+
-|  Metadata Tree     | | Permission  | |  Chunking /        |   |  Change Log / Event Stream     |
-|  Service           | | Service     | |  Dedup Service     |   |  (per-account, append-only,    |
-|  - folders/files as | | - ACLs on   | |  - splits uploads   |   |   §4.3, cross-ref event_       |
-|    nodes (§4.2)    | |   metadata   | |    into chunks      |   |   sourcing_cqrs)               |
-|  - parent_id tree   | |   nodes      | |  - hashes chunks    |   +-------------------------------+
-|  - versioned        | | - inherited  | |  - dedup lookup    |
-|    chunk-list       | |   vs explicit| |    against chunk    |
-|    manifests (§4.5) | |   shares     | |    hash index (§4.1)|
-+----------+----------+ +------+------+ +----------+----------+
-           |                    |                   |
-           v                    v                   v
-  +------------------+ +------------------+ +-----------------------------+
-  | Metadata DB        | | ACL Store         | |  Chunk Hash Index            |
-  | (sharded KV/SQL,   | | (sharded by       | |  hash(chunk) -> location,    |
-  |  sharded by        | |  resource_id)     | |  refcount (§4.1, ~72TB)       |
-  |  account/folder,   | +------------------+ +---------------+-------------+
-  |  §4.2, §10)        |                                       |
-  +------------------+                                        v
-                                                  +-----------------------------+
-                                                  |   Blob Storage (Object Store) |
-                                                  |   Chunks stored content-      |
-                                                  |   addressed by SHA-256,       |
-                                                  |   erasure-coded, 11-nines      |
-                                                  |   durable (cross-ref           |
-                                                  |   design_object_storage_s3.md) |
-                                                  +-----------------------------+
-```
+
+Clients talk to two front doors — the API Gateway for CRUD/upload and the Sync/Notification Service for change events — and every downstream service owns its own store, keeping the hot metadata path decoupled from the durable blob path.
 
 ### Request Flow
 
@@ -261,44 +245,30 @@ public class FileChunker {
 
 #### The Dedup Pipeline
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    bytesIn(["Local file bytes<br/>client-side"]) --> chunkStep("FileChunker chunking step<br/>hash + offset + length list")
+    chunkStep --> queryIdx{"Chunk hash already<br/>in Chunk Hash Index?"}
+    queryIdx -->|"exists"| skip("Skip upload<br/>increment refcount")
+    queryIdx -->|"new"| upload("Upload chunk to<br/>Blob Storage")
+    skip --> final("Write new manifest<br/>version — commit point")
+    upload --> final
+
+    class bytesIn io
+    class chunkStep,queryIdx mathOp
+    class skip,final train
+    class upload req
 ```
-                Local file bytes (client-side)
-                          |
-                          v
-        +----------------------------------------+
-        |  FileChunker.chunk(fileBytes)            |
-        |  -> ordered list of (hash, offset, len)  |
-        +----------------------------------------+
-                          |
-                          v
-        +----------------------------------------+
-        |  For each chunk hash, query the          |
-        |  Chunk Hash Index (sharded KV, §2:        |
-        |  ~72TB at 1T unique chunks)               |
-        +----------------------------------------+
-                  |                    |
-         hash EXISTS              hash is NEW
-                  |                    |
-                  v                    v
-   +-------------------------+  +---------------------------+
-   |  Skip upload entirely --  |  |  Upload chunk bytes to     |
-   |  increment refcount on    |  |  Blob Storage, keyed by    |
-   |  the existing chunk        |  |  sha256Hash (cross-ref     |
-   |  (§4.6 GC needs this for   |  |  design_object_storage_    |
-   |  safe reclaim)             |  |  s3.md). Insert new entry   |
-   +-------------------------+  |  into Chunk Hash Index.     |
-                  |              +---------------------------+
-                  |                    |
-                  +---------+----------+
-                            |
-                            v
-        +----------------------------------------+
-        |  Write new ChunkListManifest as the      |
-        |  next VERSION of the file in the          |
-        |  Metadata Tree (§4.2, §4.5) -- this is    |
-        |  the commit point.                        |
-        +----------------------------------------+
-```
+
+Most re-chunked hashes already exist in the index, so only the genuinely new chunks touch Blob Storage — this is the mechanism behind editing one paragraph and uploading only a chunk or two (§4.1's headline efficiency property).
 
 The key efficiency property: when a user edits one paragraph of a 50MB document, the **client re-chunks the file locally**, computes hashes for all chunks, and the *vast majority* of those hashes are unchanged from the previous version (because CDC resynchronizes around the edit) — the dedup lookup against the Chunk Hash Index returns "already exists" for nearly all of them, and only the 1-2 chunks actually touched by the edit are uploaded. This is the architectural mechanism that satisfies the §1 NFR "editing one paragraph must not re-upload all 50MB" — and it is the same mechanism, applied per-user, that produces the cross-user dedup savings estimated in §2.
 
@@ -360,27 +330,21 @@ A sync client (desktop or mobile) maintains:
 
 #### Delta Sync Loop
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Sync Service
+    participant M as Metadata Tree
+
+    C->>S: give me changes since cursor=8841
+    S->>M: read change log entries<br/>seq over 8841 for this account
+    M-->>S: matching change log entries
+    S-->>C: changes 8842..8850,<br/>new cursor=8850
+    Note over C: for each change: update local index,<br/>download changed chunks in parallel,<br/>apply to local filesystem
+    Note over C: persist cursor=8850 locally
 ```
-Client                                Sync Service                Metadata Tree
-  |                                        |                            |
-  | "give me changes since cursor=8841"   |                            |
-  |--------------------------------------->|                            |
-  |                                        | read change log entries    |
-  |                                        | with seq > 8841 for this   |
-  |                                        | account ------------------->|
-  |                                        |<----------------------------|
-  | <-- [changes 8842..8850], new cursor=8850
-  |<----------------------------------------|
-  |                                        |                            |
-  | for each change:                      |                            |
-  |   - update local index                |                            |
-  |   - if file content changed, download |                            |
-  |     new/changed chunks (§4.1) from    |                            |
-  |     Blob Storage in parallel          |                            |
-  |   - apply to local filesystem         |                            |
-  |                                        |                            |
-  | persist cursor=8850 locally           |                            |
-```
+
+The client's only job on each cycle is to compare cursors and pull the delta — the push notification is just a wake-up nudge (§4.3) that triggers this exact round-trip.
 
 **Push vs. poll**: rather than the client polling "anything new?" every few seconds (battery- and bandwidth-expensive at 300M DAU, §2), the **Sync/Notification Service** holds a long-lived connection per active client (long-poll or a persistent websocket, cross-ref [`../../backend/websockets_and_sse/README.md`](../../backend/websockets_and_sse/README.md)) and pushes a lightweight "something changed for your account, your cursor is now stale" signal the instant a metadata write occurs. The client then performs **one** delta-sync round-trip to fetch the actual changes — the push is just a "wake up and ask" nudge, not the payload itself. Idle clients (laptop closed, app backgrounded) fall back to periodic polling on reconnect, using the same cursor-based delta mechanism — there is exactly **one** sync algorithm regardless of how the client was notified to run it.
 
@@ -396,6 +360,29 @@ Each device tracks, per file, the **manifest version it last synced** (`baseVers
 
 - **Fast-forward (no conflict)**: if the server's current manifest version for the file is still `baseVersion` (nobody else changed it while this device was offline), the device's new manifest becomes the next version — a simple linear append, no conflict.
 - **Divergence (conflict)**: if the server's current manifest version is *newer* than `baseVersion` — meaning another device (or the same user from a different device) already pushed a new version while this device was offline — the device's locally-edited version cannot simply become "the next version," because that would silently discard the intervening edit. Drive's resolution: **both versions are kept**. The server's current version remains the file's "real" version under its original name; the reconnecting device's version is uploaded as a **new file** with a name like `report (conflicted copy 2026-06-12).docx`, placed in the same folder.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pending{"Local edit<br/>pending?"} -->|"no"| ff("Fast-forward<br/>download only")
+    pending -->|"yes"| cmp{"serverVersion vs<br/>baseVersion?"}
+    cmp -->|"equal"| nextV("Upload as next<br/>version, no conflict")
+    cmp -->|"newer"| conflict("Upload as<br/>conflicted copy")
+
+    class pending,cmp mathOp
+    class ff base
+    class nextV train
+    class conflict lossN
+```
+
+This is `SyncConflictResolver.resolve()` (below) as a decision tree: a conflicted copy is created only when there is a real pending edit and the server has moved past this device's `baseVersion` — never from a stale re-check with nothing to push, which is exactly the gate War Story 2's bug skipped.
 
 ```java
 package com.rutik.systemdesign.hld.case_studies.drive;
@@ -488,21 +475,29 @@ public class SyncConflictResolver {
 
 Because every edit produces a **new chunk-list manifest** (§4.1) rather than mutating an existing one, version history falls out almost for free:
 
-```
-File "report.docx" -- manifest chain (each manifest is immutable once written):
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-  v1 (created)     v2 (edited intro)   v3 (edited intro again)   v4 (current)
-  +-----------+    +-----------+       +-----------+             +-----------+
-  | chunk A   |    | chunk A'  |       | chunk A'' |             | chunk A''|
-  | chunk B   |--->| chunk B   |------>| chunk B   |------------>| chunk B  |
-  | chunk C   |    | chunk C   |       | chunk C   |             | chunk D  |  <- edit near end
-  +-----------+    +-----------+       +-----------+             +-----------+
-       ^                                                                ^
-       |                                                                |
-  oldest version                                            currentManifestId
-  (still fully addressable                                  (the node's pointer,
-   as long as referenced)                                    §4.2)
+    v1("v1: created<br/>chunks A, B, C") --> v2("v2: edited intro<br/>chunks A', B, C")
+    v2 --> v3("v3: edited intro again<br/>chunks A'', B, C")
+    v3 --> v4("v4: current<br/>chunks A'', B, D<br/>D = edit near end")
+
+    oldestPtr(["oldest version<br/>still addressable"]) -.-> v1
+    currentPtr(["currentManifestId<br/>node's pointer"]) -.-> v4
+
+    class v1,v2,v3 frozen
+    class v4 train
+    class oldestPtr,currentPtr io
 ```
+
+Chunk B never changes across all four versions and is simply referenced again by each manifest instead of being recopied — this is why version history is nearly free once chunks are content-addressed.
 
 - **Each manifest is a complete, immutable description of one version** — a list of `(chunkHash, offset, length)` tuples. Chunks shared between versions (B and C above never changed) are referenced by *both* manifests' chunk lists — there is no "diff" stored; the dedup mechanism (§4.1) means an unchanged chunk simply appears in multiple manifests with no duplication of bytes.
 - **Restoring a previous version** (e.g., "restore v2") is implemented exactly like a metadata-tree move (§4.2): the node's `currentManifestId` pointer is updated to point at v2's manifest, and a **new version (v5) is appended that is a copy of v2's chunk list** — restore is itself a forward-moving operation (never a destructive rewind), which (a) preserves v3 and v4 in history for "undo the restore," and (b) requires **zero chunk re-upload**, since v2's chunks are all still in Blob Storage (they were never garbage-collected, because v2's manifest still referenced them until — and even after — v4 became current).
@@ -518,6 +513,30 @@ Every metadata-tree node (§4.2) can have an **ACL** — a list of `(principal, 
 
 - **Inherited**: by default, a file's effective permissions are the **union of explicit ACL entries on the file itself and on every ancestor folder up to the root**. Sharing a folder with `editor` access grants `editor` access to every file and subfolder inside it, including ones added *after* the share was created — because the check walks the `parentId` chain (§4.2) at query time, not at share time.
 - **Explicit override**: a specific file inside a shared folder can have its *own* ACL entry that is **more restrictive** than the inherited one (e.g., a folder shared as `editor` with a team, but one sensitive file inside it explicitly restricted to `viewer` for everyone except the owner) — explicit entries on a node take precedence over inherited entries from ancestors for that principal.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    checkNode{"Explicit ACL entry<br/>on this node?"} -->|"yes"| useExplicit("Apply explicit<br/>entry, stop")
+    checkNode -->|"no"| atRoot{"Reached root?"}
+    atRoot -->|"yes"| noAccess("No inherited<br/>access")
+    atRoot -->|"no"| goParent("Move to<br/>parent folder")
+    goParent -.-> checkNode
+
+    class checkNode,atRoot mathOp
+    class useExplicit train
+    class noAccess lossN
+    class goParent req
+```
+
+The nearest explicit entry wins: this general ancestor walk is exactly what the worked trace below executes for Bob and `report.docx`, stopping at "Work/" because that is the first ancestor with an explicit entry.
 
 ```
 Permission check for (userId=Bob, nodeId=report.docx, action=EDIT):
@@ -548,20 +567,30 @@ When User A shares a file with User B, the file does **not** get copied into Use
 
 A 2GB video cannot be uploaded as one HTTP request without risking a full restart on any network blip — and on a mobile connection, a multi-minute upload *will* be interrupted. Because §4.1 already splits every file into independent 4-8MB chunks before upload, the chunk boundary doubles as the resumability boundary: the client opens an **upload session** (`POST /uploads -> {sessionId}`), then uploads each chunk as its own multipart-upload part against Blob Storage's [multipart upload API](./design_object_storage_s3.md) (§4.1), tagged with that chunk's content hash.
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Sync Service
+    participant B as Blob Storage
+
+    C->>S: POST /uploads
+    S-->>C: sessionId returned
+    C->>S: PUT chunk h7a3 (4MB)
+    S->>B: multipart part
+    C->>S: PUT chunk b291 (4MB)
+    S->>B: multipart part
+    Note over C,S: connection drops
+    C->>S: GET /uploads/sessionId
+    S-->>C: received so far: h7a3, b291
+    C->>S: PUT chunk f00d (4MB)
+    S->>B: multipart part
+    Note over C,S: resumes from the 3rd chunk
+    C->>S: POST /uploads/id/commit
+    S->>B: complete multipart
+    S-->>C: manifest committed
 ```
-Client                          Sync Service              Blob Storage
-  |--- POST /uploads ------------->|                            |
-  |<-- {sessionId} -----------------|                            |
-  |--- PUT chunk h7a3 (4MB) ------->|--- multipart part -------->|
-  |--- PUT chunk b291 (4MB) ------->|--- multipart part -------->|
-  |   [connection drops]            |                            |
-  |--- GET /uploads/{sessionId} --->|                            |
-  |<-- {received: [h7a3, b291]} ----|                            |
-  |--- PUT chunk f00d (4MB) ------->|--- multipart part -------->|  (resumes
-  |--- PUT chunk ...    ----------->|--- multipart part -------->|   from the
-  |--- POST /uploads/{id}/commit -->|--- complete multipart ---->|   3rd chunk)
-  |<-- {manifest committed} --------|                            |
-```
+
+Because the chunk boundary already doubles as the resumability boundary, reconnecting only has to diff two small hash lists — it never re-uploads a chunk the server already acknowledged.
 
 On resume, the client calls `GET /uploads/{sessionId}` to learn which chunk hashes the session has already durably received, diffs that against its local chunk list (§4.1), and uploads only the remainder — an interrupted upload of a 2GB file loses at most one in-flight 4-8MB chunk, not the whole transfer. The session itself is a row in the metadata database with a TTL (e.g., 7 days); an abandoned session's already-uploaded chunks are still content-addressed and reference-counted (§4.1), so they aren't wasted if the same file is uploaded again later — they're simply orphaned until garbage collection (below) reclaims them.
 

@@ -11,6 +11,33 @@ Intervals represent ownership of a resource over time. Merging intervals means c
 
 The key mental model: **convert intervals into sorted events, then sweep a pointer across time**. At each decision point, the greedy choice is either to extend the current span (merge) or to release the earliest-ending resource (rooms) or to pick the highest-priority ready task (scheduler).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw([Raw Intervals]) --> sortKey(Sort by Key)
+    sortKey --> sweep(Sweep Pointer<br/>Across Time)
+    sweep --> mergeDec{Extend or<br/>Append Span}
+    sweep --> roomDec{Reuse or<br/>Allocate Room}
+    sweep --> schedDec{Anchor Task or<br/>Idle Slot}
+    mergeDec --> mergeOut([Merged Intervals])
+    roomDec --> roomOut([Min Room Count])
+    schedDec --> schedOut([Min Schedule Length])
+
+    class raw io
+    class sortKey,sweep mathOp
+    class mergeDec,roomDec,schedDec mathOp
+    class mergeOut,roomOut,schedOut train
+```
+
+All three problems share this single spine — sort into event order, then sweep a pointer across time; only the greedy decision after the sweep diverges into extend-or-append (merge), reuse-or-allocate (rooms), or anchor-or-idle (scheduler).
+
 The exchange argument — "swapping any two adjacent decisions in the optimal solution never improves it" — is the informal proof that greedy works for all three problems.
 
 ---
@@ -147,6 +174,35 @@ Algorithm:
    - If heap is non-empty and `heap[0] <= m.start`: pop (room is freed) and push `m.end`.
    - Otherwise: push `m.end` (new room needed).
 4. Answer is heap size at the end.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start([Sorted Meetings]) --> next(Next Meeting m)
+    next --> check{Earliest Room<br/>Free by m.start?}
+    check -->|"yes"| reuse(Reuse Room<br/>Pop and Push End)
+    check -->|"no"| alloc(Allocate New Room<br/>Push End Time)
+    reuse --> more{More<br/>Meetings?}
+    alloc --> more
+    more -.->|"yes"| next
+    more -->|"no"| answer([Answer = Heap Size])
+
+    class start io
+    class next req
+    class check,more mathOp
+    class reuse train
+    class alloc base
+    class answer io
+```
+
+This one branch, repeated once per meeting, is the entire algorithm — skip the "otherwise" and every meeting silently allocates a fresh room, which is exactly the bug called out in Mistake 3 below.
 
 Time: O(n log n) — sort + n heap operations each O(log n).
 Space: O(n) heap.

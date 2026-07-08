@@ -132,53 +132,74 @@ Loki-based total lands near **$55K–70K/month ≈ $660K–840K/year**, comforta
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src(["~4000 services<br/>~50 K8s clusters<br/>~2000 VMs"])
+
+    subgraph collect["Collection Tier - DaemonSet per node"]
+        direction LR
+        fb("Fluent Bit agent")
+        vec("Vector agent")
+        dbuf("Disk buffer<br/>filesystem, 5-10 GB")
+        fb --> dbuf
+        vec --> dbuf
+    end
+
+    subgraph surge["Transport / Surge Buffer"]
+        direction LR
+        kafka("Kafka topic logs.raw<br/>256 partitions, RF=3, lz4<br/>retention=8h, peak=4h x2")
+    end
+
+    subgraph proc["Processing Tier - Vector/Bytewax"]
+        direction LR
+        parse("parse multiline") --> norm("normalize schema") --> pii("PII redaction") --> enrich("enrich tenant/geo") --> route{"route by tenant<br/>+ level + sampling"}
+    end
+
+    ok(["logs.parsed topic"])
+    dlq(["logs.dlq topic"])
+
+    subgraph store["Storage Tiers"]
+        direction LR
+        loki("Loki hot 30d<br/>labels + chunks in S3<br/>index in TSDB")
+        osrch("OpenSearch<br/>security / high-value<br/>subset only")
+        s3c("S3 cold 1yr<br/>parquet/json<br/>by day/tenant")
+    end
+
+    qt(["Query Tier<br/>Grafana LogQL /<br/>OpenSearch Dashboards"])
+    rh("cold rehydrate<br/>Athena / S3 Select")
+
+    src -->|"stdout/files/<br/>syslog/json"| fb
+    src --> vec
+    dbuf -.->|"backpressure<br/>propagates upstream"| kafka
+    kafka -.->|"consumer-group lag =<br/>backpressure signal"| parse
+    route -->|"ok"| ok
+    route -->|"parse fail"| dlq
+    ok --> loki
+    ok --> osrch
+    ok --> s3c
+    loki --> qt
+    osrch --> qt
+    s3c --> rh --> qt
+
+    class src io
+    class fb,vec req
+    class dbuf,kafka,loki,osrch base
+    class parse,norm,pii,enrich,route,rh mathOp
+    class ok train
+    class dlq lossN
+    class s3c frozen
+    class qt io
 ```
-                          ┌──────────────────────────────────────────────┐
-   ~4000 services         │   COLLECTION TIER  (DaemonSet, one per node)  │
-   ~50 K8s clusters       │                                              │
-   ~2000 VMs              │   ┌──────────┐   ┌──────────┐                 │
-   ───────────────────────┼──▶│Fluent Bit│   │  Vector  │  (file/stdout) │
-     stdout / files /     │   │  agent   │   │  agent   │                 │
-     syslog / json        │   └────┬─────┘   └────┬─────┘                 │
-                          │        │  DISK BUFFER (filesystem, 5–10 GB)   │
-                          └────────┼──────────────┼──────────────────────┘
-                                   │   backpressure propagates UPSTREAM   │
-                                   ▼              ▼
-                          ┌──────────────────────────────────────────────┐
-                          │   TRANSPORT / SURGE BUFFER                    │
-                          │   ┌────────────────────────────────────────┐ │
-                          │   │  KAFKA  topic=logs.raw  256 partitions  │ │
-                          │   │  RF=3   lz4   retention=8h (peak=4h x2) │ │
-                          │   └───────────────┬────────────────────────┘ │
-                          └───────────────────┼──────────────────────────┘
-                                              │  consumer-group lag = backpressure signal
-                                              ▼
-                          ┌──────────────────────────────────────────────┐
-                          │   PROCESSING TIER  (Vector/Bytewax workers)   │
-                          │   parse multiline ──▶ normalize schema ──▶    │
-                          │   PII redaction ──▶ enrich (tenant, geo) ──▶  │
-                          │   route by tenant + level + sampling          │
-                          │        │ ok                    │ parse fail   │
-                          │        ▼                        ▼             │
-                          │   logs.parsed topic        logs.dlq topic     │
-                          └────────┬──────────────────────┬──────────────┘
-                                   │                       │
-              ┌────────────────────┼───────────────┐       │
-              ▼                    ▼               ▼        ▼
-   ┌──────────────────┐  ┌──────────────────┐  ┌───────────────┐
-   │  LOKI (hot 30d)  │  │  OPENSEARCH      │  │  S3 COLD 1yr  │
-   │  labels + chunks │  │  (security/      │  │  parquet/json │
-   │  chunks in S3    │  │   high-value     │  │  partitioned  │
-   │  index in TSDB   │  │   subset only)   │  │  by day/tenant│
-   └────────┬─────────┘  └────────┬─────────┘  └──────┬────────┘
-            │                     │                   │
-            ▼                     ▼                   ▼
-   ┌──────────────────────────────────────────────────────────┐
-   │   QUERY TIER   Grafana (LogQL) | OpenSearch Dashboards    │
-   │   query-frontend: split + cache + per-tenant limits       │
-   │   cold rehydrate: Athena/S3 Select on parquet on demand   │
-   └──────────────────────────────────────────────────────────┘
-```
+
+*Backpressure propagates upstream through the dotted edges: a slow Kafka fills the agent's disk buffer, and a slow store shows up as consumer-group lag rather than agent drops. Only unparseable lines detour off the "ok" path into `logs.dlq`; everything else tees into all three storage tiers.*
 
 ### Component inventory
 
@@ -207,18 +228,33 @@ Loki-based total lands near **$55K–70K/month ≈ $660K–840K/year**, comforta
 
 ### 4.1 Collection agent + disk buffer (Fluent Bit / Vector)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph node["node - DaemonSet pod"]
+        direction LR
+        logf(["/var/log/containers/<br/>*.log"])
+        tailin("INPUT: tail<br/>inotify + offset DB")
+        fsbuf("FILESYSTEM BUFFER<br/>8 GB<br/>overflow spills to disk,<br/>never /dev/null")
+        out(["OUTPUT: Kafka<br/>acks=all"])
+        logf -->|"tail"| tailin
+        tailin -->|"in-mem ring, small"| fsbuf
+        fsbuf --> out
+    end
+
+    class logf,out io
+    class tailin mathOp
+    class fsbuf base
 ```
-   ┌──────────────────────── node (DaemonSet pod) ──────────────────────┐
-   │  /var/log/containers/*.log                                          │
-   │        │ tail (inotify + offset DB)                                 │
-   │        ▼                                                            │
-   │   ┌─────────┐   in-mem ring  ┌──────────────┐   ┌───────────────┐  │
-   │   │ INPUT   │──────────────▶│ FILESYSTEM    │──▶│ OUTPUT (kafka)│  │
-   │   │ tail    │   (small)      │ BUFFER 8 GB   │   │ acks=all      │  │
-   │   └─────────┘                └──────────────┘   └───────────────┘  │
-   │                              ▲ overflow goes to DISK, not /dev/null │
-   └────────────────────────────────────────────────────────────────────┘
-```
+
+*The filesystem buffer is what makes the "never drop" guarantee real: overflow spills to the 8 GB disk buffer instead of `/dev/null`, so a stalled Kafka output only delays delivery — see the BROKEN/FIX configs below for the two ways this can go.*
 
 The single most common production outage in log pipelines: **the agent buffers in memory only, the downstream slows, memory fills, and either the agent OOM-kills (losing the buffer) or it drops new lines.**
 
@@ -285,22 +321,57 @@ When Kafka stalls for 10 minutes during a broker rebalance, `Mem_Buf_Limit` fill
 
 Now when Kafka stalls, the agent spills to an 8 GB disk buffer (≈ several minutes of a single node's volume), and because `Retry_Limit no_limits`, it keeps the data and drains it when Kafka recovers. The `tail.db` offset DB ensures that even an agent restart resumes at the exact byte, so a rotated-but-unread file is still read from the saved offset.
 
+The BROKEN and FIX configs above are really two different answers to one question — what does the agent do while it is buffering?
+
+```mermaid
+stateDiagram-v2
+    [*] --> Tailing
+    Tailing --> Buffering: Kafka stalls,<br/>output blocked
+
+    state "Memory-only (BROKEN)" as MemOnly
+    state "Filesystem-backed (FIX)" as FSBacked
+
+    Buffering --> MemOnly: Mem_Buf_Limit<br/>fills in seconds
+    Buffering --> FSBacked: overflow spills<br/>to 8 GB disk
+
+    MemOnly --> Dropped: tail stops,<br/>OOM or line drop
+    FSBacked --> FSBacked: Retry_Limit=no_limits,<br/>keeps retrying
+    FSBacked --> Tailing: Kafka recovers,<br/>disk buffer drains
+
+    Dropped --> [*]
+```
+
+*The single config knob that decides "delay" versus "loss": a memory-only buffer forces a choice between OOM-killing the agent or dropping lines the instant `Mem_Buf_Limit` fills, while the filesystem-backed FIX spills to the 8 GB disk buffer and retries forever, so it always drains back to normal once Kafka recovers.*
+
 **Why two agents?** Fluent Bit (C, ~450 KB RSS idle, ~1% CPU/node) handles the bulk DaemonSet collection cheaply. Vector (Rust, richer VRL transform language) runs as a smaller fleet of *aggregator* nodes for the paths that need complex routing/enrichment before Kafka, or where Fluent Bit's transform language is too limited.
 
 ### 4.2 Kafka as the surge buffer
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    prod(["Producers: agents<br/>acks=all, lz4"])
+    topic("Topic logs.raw<br/>256 partitions - key=sha tenant+service<br/>e.g. p0 lag=120k, p1 lag=90k<br/>retention=8h, segment=1G")
+    cons(["Consumers: processors<br/>group=log-processors"])
+    lag{"lag = log_end_offset -<br/>committed_offset<br/>= backpressure metric"}
+
+    prod --> topic --> cons
+    topic -.-> lag
+    cons -.-> lag
+
+    class prod,cons io
+    class topic base
+    class lag lossN
 ```
-   producers (agents)                      consumers (processors)
-        │  acks=all, lz4                          │  group=log-processors
-        ▼                                         ▼
-   ┌──────────────────── topic: logs.raw ───────────────────────┐
-   │  partition 0  [====================>      ]  lag=120k       │
-   │  partition 1  [=================>         ]  lag=90k        │
-   │     ...   256 partitions ...   key = sha(tenant+service)    │
-   │  retention.ms = 28800000 (8h)   segment.bytes=1G           │
-   └────────────────────────────────────────────────────────────┘
-       lag(t) = log_end_offset - committed_offset  ==>  backpressure metric
-```
+
+*Consumer-group lag — the gap between what's been written (`log_end_offset`) and what's been committed — is Kafka's backpressure signal: it climbs when a downstream sink slows, long before any data is actually at risk of loss.*
 
 Kafka is the heart of the "never drop" guarantee: it gives **8 hours of retention at peak** (2x the 4h SLO), so even a total processing-tier outage of several hours loses nothing — consumers just catch up afterward.
 
@@ -324,16 +395,38 @@ max.message.bytes=10485760     # 10 MB (multiline stack traces can be large)
 
 ### 4.3 Parsing + PII redaction pipeline (Vector VRL)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw(["logs.raw"])
+    merge("1. multiline merge<br/>stack traces")
+    parse("2. parse<br/>json / regex nginx / syslog")
+    norm("3. normalize<br/>ts, service, level, trace_id")
+    pii("4. PII redaction<br/>regex + per-tenant rules")
+    enrich("5. enrich<br/>tenant, k8s meta, geo")
+    route{"6. route"}
+    ok(["logs.parsed"])
+    fail(["logs.dlq"])
+
+    raw --> merge --> parse --> norm --> pii --> enrich --> route
+    route -->|"ok"| ok
+    route -->|"fail"| fail
+
+    class raw io
+    class merge,parse,norm,pii,enrich mathOp
+    class route mathOp
+    class ok train
+    class fail lossN
 ```
-   logs.raw ──▶ ┌─────────────────────────────────────────────┐
-                │ 1. multiline merge (stack traces)            │
-                │ 2. parse: json | regex(nginx) | syslog        │
-                │ 3. normalize -> {ts, service, level, trace_id}│
-                │ 4. PII redaction (regex + per-tenant rules)   │
-                │ 5. enrich: tenant, k8s meta, geo              │
-                │ 6. route: ok -> logs.parsed | fail -> logs.dlq│
-                └─────────────────────────────────────────────┘
-```
+
+*Every line passes through all six stages in order; only a parse failure detours to `logs.dlq` — everything else reaches `logs.parsed` and fans out to storage (§3).*
 
 Multiline reassembly happens at the *agent* (so a Java stack trace is one Kafka message), and final parsing happens here. Vector VRL config:
 
@@ -400,15 +493,43 @@ Two design rules encoded here: (1) **redact before store, never after** — a re
 
 ### 4.4 Storage + tiering (Loki hot, S3 cold)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    parsed(["logs.parsed"])
+    dist("Loki distributor")
+    ingest("Loki ingester")
+    chunks("chunks")
+    hots3("S3 hot bucket")
+    tsdb("index TSDB<br/>on S3/gp3")
+    coldsink("S3 cold sink<br/>parquet by dt/tenant")
+    expire(("hot expires<br/>at 30d"))
+    ia("Standard-IA<br/>0-90d")
+    glacier("Glacier IR<br/>90-365d")
+    delete((" delete<br/>at 365d "))
+
+    parsed --> dist --> ingest
+    ingest -->|"flush at 1h<br/>or 1.5MB"| chunks --> hots3
+    ingest --> tsdb
+    parsed --> coldsink
+    hots3 -.-> expire
+    coldsink --> ia -.-> glacier -.-> delete
+
+    class parsed io
+    class dist,ingest mathOp
+    class chunks,tsdb,hots3,coldsink base
+    class ia,glacier frozen
+    class expire,delete lossN
 ```
-   logs.parsed ──┬──▶ Loki distributor ──▶ ingester ──▶ chunks ─▶ S3 (hot bucket)
-                 │                              │ index (TSDB) -> S3/gp3
-                 │                              │ flush @ 1h or 1.5MB
-                 └──▶ S3 cold sink (parquet, partitioned by dt=YYYY-MM-DD/tenant=)
-                                                        │
-   S3 lifecycle:  hot bucket 30d -> expire                  cold bucket:
-                  cold bucket  0-90d Standard-IA -> 90-365d Glacier IR -> delete @365d
-```
+
+*`logs.parsed` tees into Loki (hot, label-indexed chunks plus a TSDB index) and S3 (cold, day/tenant-partitioned parquet); Loki expires chunks at 30 days while the cold copy steps down Standard-IA to Glacier IR before deleting at 365 days, per Decision 4.*
 
 Loki's model: it indexes only **labels** (`service`, `level`, `tenant`, `cluster`), not log content. A query like `{service="checkout", level="error"} |= "timeout"` uses the index to find the right chunks, then greps the chunk contents for `timeout`. This is why Loki's index is ~1000x smaller than OpenSearch's — and why **high-cardinality labels are catastrophic** for it.
 
@@ -502,6 +623,23 @@ Partition pruning on `dt`+`tenant` means Athena reads gigabytes, not petabytes �
 | Aggregations/analytics | Weak | Good | Excellent | Excellent |
 | Operational complexity | Medium (label discipline) | High (shard mgmt) | Medium | Low (managed) |
 | Best for | bulk, label-filtered grep | security/audit search | analytics on logs | enterprise, $$$ |
+
+```mermaid
+quadrantChart
+    title Log Store Tradeoff — Cost vs Search Capability
+    x-axis Low Cost --> High Cost
+    y-axis Weak Search/Aggregation --> Strong Search/Aggregation
+    quadrant-1 Powerful but pricey
+    quadrant-2 Best of both
+    quadrant-3 Cheap and limited
+    quadrant-4 Overpriced and limited
+    "Loki": [0.12, 0.25]
+    "OpenSearch": [0.72, 0.8]
+    "ClickHouse": [0.42, 0.72]
+    "Splunk": [0.95, 0.85]
+```
+
+*Loki's label-only index buys the lowest-cost corner at the price of weaker full-text/aggregation power (plan on grep, not search); OpenSearch and Splunk sit in the expensive-but-capable corner, which is exactly why Decision 1 routes only the ~3% security/audit subset there instead of all 50 TB/day.*
 
 ---
 

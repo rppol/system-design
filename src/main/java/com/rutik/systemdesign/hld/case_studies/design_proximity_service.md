@@ -60,82 +60,66 @@
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph RP["Read Path: Search"]
+        direction LR
+        ClientR(["Client<br/>lat, lng, radius, filters"])
+        Gateway("API Gateway /<br/>Load Balancer")
+        Orchestrator("Proximity Search Service<br/>orchestrator")
+        GeoIdx("Geo-Index<br/>Redis GEO, ~1.2GB")
+        SearchIdx("Search / Attributes Index<br/>Elasticsearch, ~100GB")
+        AttrCache("Attributes Cache<br/>long TTL: hours")
+        StatusCacheRP("Status Cache<br/>short TTL: 30-60s")
+
+        ClientR --> Gateway --> Orchestrator
+        Orchestrator -->|"Phase 1: geo lookup"| GeoIdx
+        GeoIdx -->|"Phase 2: ~100-1000 candidates"| SearchIdx
+        SearchIdx -->|"filtered, ranked top-20"| AttrCache
+        SearchIdx -->|"filtered, ranked top-20"| StatusCacheRP
+        AttrCache --> ClientR
+        StatusCacheRP --> ClientR
+    end
+
+    subgraph WP["Write Path: Listing Update"]
+        direction LR
+        Owner(["Business Owner /<br/>Admin CMS"])
+        ListingSvc("Listing Service<br/>validation, geocoding")
+        PrimaryDB("Primary DB<br/>PostgreSQL, source of truth")
+        Kafka("Message Queue<br/>Kafka: listing_updates")
+        GeoUpdater("Geo-Index Updater<br/>GEOADD / remove old cell")
+        SearchUpdater("Search-Index Updater<br/>re-index full document")
+
+        Owner --> ListingSvc --> PrimaryDB
+        PrimaryDB -->|"CDC / outbox event"| Kafka
+        Kafka --> GeoUpdater
+        Kafka --> SearchUpdater
+    end
+
+    subgraph FP["Fast Path: Open Now Toggle"]
+        direction LR
+        OwnerToggle(["Business Owner<br/>toggles closed for today"])
+        StatusSvc("Status Service<br/>webhook / API")
+        StatusCacheFP("Status Cache<br/>Redis, TTL 30-60s<br/>+ pub/sub invalidation")
+
+        OwnerToggle --> StatusSvc --> StatusCacheFP
+    end
+
+    class ClientR,Owner,OwnerToggle io
+    class Gateway,Kafka req
+    class Orchestrator,ListingSvc,GeoUpdater,SearchUpdater,StatusSvc mathOp
+    class GeoIdx,SearchIdx,AttrCache,StatusCacheRP,PrimaryDB,StatusCacheFP base
 ```
-                              READ PATH (Search)
-+----------+      +----------------+      +---------------------------+
-|  Client  |----->|  API Gateway /  |----->|   Proximity Search Service |
-| (lat,lng,|      |  Load Balancer  |      |   (orchestrator)           |
-|  radius, |      +----------------+      +-------------+--------------+
-|  filters)|                                             |
-+----------+                            Phase 1: geo candidate retrieval
-                                                          |
-                                                          v
-                                    +---------------------------------------+
-                                    |   Geo-Index (Redis GEO / geo-grid)     |
-                                    |  geohash cell -> set of business IDs   |
-                                    |  in-memory, ~1.2GB total (§2)          |
-                                    +-------------------+---------------------+
-                                                          |
-                                          candidate IDs (~100-1000, §2)
-                                                          |
-                                    Phase 2: attribute filter + ranking
-                                                          v
-                                    +---------------------------------------+
-                                    |  Search/Attributes Index (Elasticsearch)|
-                                    |  geo_point + category + price + rating |
-                                    |  + text fields, ~100GB sharded (§2)    |
-                                    +-------------------+---------------------+
-                                                          |
-                                       filtered, ranked top-20
-                                                          |
-                          +-------------------------------+------------------+
-                          |                                                   |
-                          v                                                   v
-              +---------------------+                          +---------------------------+
-              | Attributes Cache     |                          |  "Open Now" Status Cache    |
-              | (long TTL: hours)    |                          |  (short TTL: 30-60s, §4.5)  |
-              | name/hours/category  |                          |  webhook-invalidated on     |
-              +---------------------+                          |  owner toggle               |
-                                                                 +---------------------------+
-                                                          |
-                                                          v
-                                                  +----------------+
-                                                  |     Client      |
-                                                  +----------------+
 
-
-                              WRITE PATH (Listing Update)
-+------------------+     +-------------------+     +------------------------+
-| Business Owner /  |---->|  Listing Service   |---->|  Primary DB (source    |
-| Admin CMS          |     |  (validation,      |     |  of truth, e.g.        |
-| (create/update/    |     |   geocoding new    |     |  PostgreSQL)           |
-|  close listing)    |     |   addresses)       |     +-----------+------------+
-+------------------+     +-------------------+                 |
-                                                                  |  CDC / outbox event
-                                                                  v
-                                                       +------------------------+
-                                                       |   Message Queue (Kafka) |
-                                                       |   listing_updates topic |
-                                                       +-----------+------------+
-                                                                  |
-                                       +--------------------------+--------------------------+
-                                       |                                                       |
-                                       v                                                       v
-                          +---------------------------+                       +---------------------------+
-                          |  Geo-Index Updater          |                       |  Search-Index Updater       |
-                          |  - on coordinate change:    |                       |  - re-index full document   |
-                          |    GEOADD new cell, remove   |                       |    into Elasticsearch       |
-                          |    from old cell             |                       |  - eventual consistency,    |
-                          +---------------------------+                       |    seconds-to-minutes lag    |
-                                                                                +---------------------------+
-
-                              FAST PATH ("Open Now" toggle)
-+------------------+     +-------------------+     +---------------------------+
-| Business Owner    |---->|  Status Service    |---->|  Status Cache (Redis,      |
-| toggles "closed"  |     |  (webhook/API)     |     |  TTL 30-60s) + pub/sub      |
-| for today         |     +-------------------+     |  invalidation broadcast     |
-+------------------+                                +---------------------------+
-```
+The same infrastructure runs three independent flows: the read-heavy **Search path** (client through the two-phase geo-index/search-index lookup to the split-TTL caches, §4.1-§4.2), the low-rate **Write path** (a listing edit propagates via CDC/outbox to both indexes, §4.6), and the tight-SLA **Fast path** (an "open now" toggle bypasses everything else and writes straight to the short-TTL Status Cache, §4.5).
 
 ### Request Flow
 
@@ -437,6 +421,36 @@ public class AdaptivePrecisionSelector {
 }
 ```
 
+The control flow behind `retrieveCandidates` is a two-branch feedback loop that always terminates back on the same cheap, in-memory Phase 1 lookup:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["requested radius<br/>lat, lng, r"]) --> Query("query geo-index<br/>Phase 1, §4.1")
+    Query --> TooFew{"candidates under 20?"}
+    TooFew -->|"yes, sparse rural"| Widen("double effective radius<br/>cap: 4 expansions, 8x max")
+    Widen -.-> Query
+    TooFew -->|"no"| TooMany{"candidates over 2000?"}
+    TooMany -->|"yes, dense urban"| Narrow("halve effective radius")
+    Narrow -.-> Query
+    TooMany -->|"no"| Proceed(["hand off to Phase 2<br/>filter + rank"])
+
+    class Start io
+    class Query req
+    class TooFew,TooMany mathOp
+    class Widen,Narrow lossN
+    class Proceed train
+```
+
+Both corrective branches (red) only ever re-query the cheap Phase 1 index, not Elasticsearch — which is exactly why the loop can afford up to ~4-5 iterations (§4.4) before ever reaching the green "hand off to Phase 2" path.
+
 The key behaviors:
 
 - **Sparse fallback**: if the initial radius yields fewer than `MIN_CANDIDATES` (20), double the effective radius (up to 8x the original, capped at 4 expansions) — this is the same "expand ring by ring" idea [Design Google Maps](./design_google_maps.md) §11 describes for "find the nearest gas station" in rural areas.
@@ -552,22 +566,30 @@ Both the geo-index (§4.1) and the search index (§4.2) are partitioned **geogra
 
 **Why geographic partitioning, not hash-based**: a search for "coffee near me" in São Paulo never needs to consider businesses in Tokyo. If shards were assigned by `hash(business_id) % num_shards` (the typical default for a generic key-value workload), every search query would need to fan out to *every* shard, because any shard could hold a business near the query point. Partitioning instead by **geohash prefix** (or a coarser region ID derived from it) means a query for `(lat, lng, radius)` only needs to touch the **1-3 shards covering that geographic area** — the same 9-cell neighbor expansion from §4.1 typically spans at most 2-3 shards even near a shard boundary, versus needing to query all 20+ shards under hash partitioning.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Router(["Global Request Router<br/>routes by lat/lng to region"])
+    USEast["US-East Region<br/>Geo-index shards<br/>Search shards: NYC, Boston, Atlanta"]
+    EUWest["EU-West Region<br/>Geo-index shards<br/>Search shards: London, Paris"]
+    APAC["APAC Region<br/>Geo-index shards<br/>Search shards: Tokyo, Singapore"]
+
+    Router --> USEast
+    Router --> EUWest
+    Router --> APAC
+
+    class Router mathOp
+    class USEast,EUWest,APAC base
 ```
-                    Global Request Router
-                    (routes by lat/lng -> region)
-                              |
-        +---------------------+---------------------+
-        |                     |                      |
-        v                     v                      v
-+----------------+   +----------------+    +----------------+
-|  US-East Region  |   |  EU-West Region |    |  APAC Region     |
-|  - Geo-index     |   |  - Geo-index    |    |  - Geo-index     |
-|    shard(s)      |   |    shard(s)     |    |    shard(s)      |
-|  - Search shards |   |  - Search shards|    |  - Search shards |
-|    (NYC, Boston,  |   |    (London,     |    |    (Tokyo,        |
-|     Atlanta...)   |   |     Paris...)   |    |     Singapore...) |
-+----------------+   +----------------+    +----------------+
-```
+
+Each region owns a full slice of the stack — its own geo-index shard(s) plus the search shards for the metro areas it covers — so the router's only job is picking the right slice by geography, not by any hash of the business ID (§4.7, §9 War Story 3).
 
 **Boundary-crossing queries**: a search near a regional boundary (e.g., a user in El Paso, Texas, searching with a 50km radius that spans into Mexico, served by a different region's shard) is handled the same way as the 9-cell neighbor-expansion problem (§4.1) but one level up — the **Global Request Router** identifies all regions whose coverage area intersects the query's bounding circle and fans out to each, merging results before applying the final ranking (§4.3). This is rare in practice (most 1-50km radius searches stay within one region's coverage) but must be handled correctly, since "missing results near a national border" is the same class of support-ticket-generating bug as War Story 1's cell-boundary problem, just at a coarser granularity.
 
@@ -579,17 +601,28 @@ The ranking formula in §4.3 produces a single global ranking for a given query 
 
 **Architecture**: personalization is a thin re-ranking layer **on top of**, not a replacement for, the two-phase pipeline (§3-4.3). Phase 1+2 still produce a geographically- and attribute-filtered candidate list ranked by the base formula (§4.3); a separate **personalization service** then re-orders only the top ~50-100 candidates — never the full candidate set, since re-ranking a small top-K is cheap but re-ranking thousands of per-query candidates is not — using per-user signals.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P1("Phase 1<br/>geo candidate retrieval")
+    P2("Phase 2<br/>filter + rank")
+    PR("Personalization Re-Rank<br/>order history, category affinity")
+    Client(["final top-20<br/>to client"])
+
+    P1 --> P2 -->|"top ~50-100 candidates"| PR --> Client
+
+    class P1,P2,PR mathOp
+    class Client io
 ```
-Phase 1 (geo, §4.1)  ->  Phase 2 (filter+rank, §4.2-4.3)  ->  top ~50-100 candidates
-                                                                      |
-                                                                      v
-                                              Personalization Re-Rank Service
-                                              (per-user signals: order history,
-                                               cuisine/category affinity)
-                                                                      |
-                                                                      v
-                                                          final top-20 to client
-```
+
+Personalization is a thin, swappable stage bolted onto the end of the base pipeline — it only ever re-orders the top ~50-100 candidates that Phase 1/Phase 2 already produced, never the full candidate set (§4.8).
 
 **Blending base score with personalization score**:
 
@@ -755,6 +788,16 @@ public class PersonalizationReRanker {
 **Impact**: Every nearby-search query's geo-radius candidates (§4.1) are, by definition, geographically clustered — a 2km-radius search returns businesses whose IDs are essentially **random** with respect to `hash(business_id)`, meaning those candidates were now spread roughly evenly across **all 20 shards**. Every single search request — regardless of how small its candidate set was — had to fan out to all 20 shards, wait for all 20 to respond, and merge the results. At 500K QPS peak (§2), this meant **10M shard-queries/sec** cluster-wide (20x the per-query work) instead of the ~1-1.5M shard-queries/sec a geography-aware partitioning would require (§10) — a 6-10x amplification purely from the choice of shard key. p99 latency blew past the 100ms target (§1) specifically during peak hours, because the slowest of 20 shards (tail latency amplification — the classic "one slow shard out of N ruins the whole request" problem) determined every request's latency, and at 20-way fan-out, *some* shard was always having a bad millisecond.
 
 **Fixed**: Re-sharded the search index by **geohash prefix** (§4.7) — each shard owns a contiguous range of geohash prefixes, corresponding to a geographic region. A 2km-radius search's 9-cell candidate block (§4.1) now maps to **1-3 shards** in the overwhelming majority of cases (only queries near a shard's geographic boundary touch more than one), reducing cluster-wide shard-queries from 10M/sec to the ~1-1.5M/sec figure used in §10's capacity planning — roughly a 7x reduction. The re-sharding itself required a full reindex (Elasticsearch doesn't support in-place re-sharding by a different key), done via a parallel "build the new index, then atomically swap an alias" approach to avoid downtime — the same alias-swap technique mentioned in §11 for bulk imports. The broader lesson: **the default "shard by hash of primary key" pattern, correct for point-lookup workloads, is actively harmful for any workload whose queries are inherently range-based or spatially clustered** — geo-search is one such workload, but so is time-series data (shard by time range, not `hash(event_id)`) and the lesson generalizes.
+
+```mermaid
+xychart-beta
+    title "Shard-queries per second at 500K QPS peak: hash-sharded vs geo-sharded"
+    x-axis ["hash-sharded", "geo-sharded"]
+    y-axis "Shard-queries / sec, millions" 0 --> 10
+    bar [10, 1.5]
+```
+
+Sharding by `hash(business_id)` scatters every query's geographically-clustered candidates across all 20 shards, forcing a full cluster-wide fan-out at 10M shard-queries/sec; re-sharding by geohash prefix confines each query to 1-3 shards, cutting cluster-wide load to the ~1-1.5M/sec figure carried into §10's capacity planning — roughly a 7x reduction.
 
 ---
 

@@ -73,7 +73,46 @@ This file is the shared reference for cardinality budgeting, measurement, mitiga
 
 **Downsampling tiers (Thanos/Mimir).** Raw samples are kept short-term; the Compactor produces 5-minute-resolution blocks for medium-term queries and 1-hour-resolution blocks for long-range dashboards. A query over a year of data hits 1h-downsampled blocks (8,760 points/series) instead of raw 15s data (~2.1M points/series), a ~240x reduction in points scanned. Downsampling is a query-cost optimization orthogonal to cardinality — it reduces points-per-series, not series-count — but it is essential to make high-retention queries tractable.
 
+Points scanned per series for the same 1-year query, raw versus 1h-downsampled — the ~240x reduction made visible:
+
+```mermaid
+xychart-beta
+    title "Points Scanned per Series - 1-Year Query"
+    x-axis ["Raw 15s data", "1h downsampled"]
+    y-axis "Points scanned per series" 0 --> 2200000
+    bar [2100000, 8760]
+```
+
 **Decision order for a cardinality problem:** (1) measure with `count by (__name__)`; (2) if one label is unbounded, drop it via relabeling or move it to an exemplar; (3) if combinatorial fanout, pre-aggregate with recording rules; (4) if histograms dominate, switch to native histograms; (5) only after the above, if real demand still exceeds ~3-5M series, scale out with remote_write to Mimir/Thanos.
+
+Diagnostic decision flow for a cardinality incident — cheapest fix first, scale-out last:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Cardinality<br/>problem reported"]) --> measure["Measure with<br/>count by (__name__)"]
+    measure --> unbounded{"One label<br/>unbounded?"}
+    unbounded -->|"yes"| dropfix(["Drop via relabeling<br/>or exemplar"])
+    unbounded -->|"no"| fanout{"Combinatorial<br/>fanout?"}
+    fanout -->|"yes"| aggfix(["Pre-aggregate with<br/>recording rules"])
+    fanout -->|"no"| histdom{"Histograms<br/>dominate?"}
+    histdom -->|"yes"| nativefix(["Switch to native<br/>histograms"])
+    histdom -->|"no"| stillbig{"Still over 3-5M<br/>series?"}
+    stillbig -->|"yes"| scaleout(["Scale out via<br/>remote_write"])
+    stillbig -->|"no"| done(["Within budget,<br/>no action"])
+
+    class start io
+    class measure,unbounded,fanout,histdom,stillbig mathOp
+    class dropfix,aggfix,nativefix,done train
+    class scaleout frozen
+```
 
 ---
 
@@ -95,58 +134,129 @@ metric: http_requests_total
 
 Thanos long-term storage topology:
 
-```
-   +------------------+   +------------------+   +------------------+
-   | Prometheus A     |   | Prometheus B     |   | Prometheus C     |
-   |  (2h local TSDB) |   |  (2h local TSDB) |   |  (2h local TSDB) |
-   |  + Thanos sidecar|   |  + Thanos sidecar|   |  + Thanos sidecar|
-   +--------+---------+   +--------+---------+   +--------+---------+
-            | upload 2h blocks      | upload                | upload
-            v                       v                       v
-        +---------------------------------------------------------+
-        |              Object Storage (S3 / GCS)                   |
-        |   raw blocks  ->  Compactor  ->  5m + 1h downsampled     |
-        +---------------------------------------------------------+
-            ^                                       ^
-            | (recent, via sidecar)                 | (historical, via Store Gateway)
-        +---------------------------------------------------------+
-        |                    Thanos Querier                       |
-        |   fan-out + dedup across sidecars + Store Gateways      |
-        +---------------------------------------------------------+
-                                  ^
-                                  | PromQL
-                            Grafana / Alertmanager
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph reps ["Prometheus Replicas A / B / C"]
+        promA("Prometheus A<br/>2h local TSDB<br/>+ Thanos sidecar")
+        promB("Prometheus B<br/>2h local TSDB<br/>+ Thanos sidecar")
+        promC("Prometheus C<br/>2h local TSDB<br/>+ Thanos sidecar")
+    end
+
+    objStore[("Object Storage<br/>S3 / GCS")]
+    compactor{{"Compactor<br/>5m + 1h downsample"}}
+    storeGW("Store Gateway<br/>serves historical blocks")
+    querier("Thanos Querier<br/>fan-out + dedup")
+    grafana(["Grafana / Alertmanager"])
+
+    reps -->|"upload 2h blocks"| objStore
+    objStore -->|"raw blocks"| compactor
+    compactor -.->|"writes 5m + 1h blocks"| objStore
+    objStore -->|"serves blocks"| storeGW
+    reps -.->|"recent, direct"| querier
+    storeGW -->|"historical"| querier
+    querier -->|"PromQL"| grafana
+
+    class promA,promB,promC train
+    class objStore base
+    class compactor,querier mathOp
+    class storeGW frozen
+    class grafana io
 ```
 
 TSDB head and WAL write path:
 
-```
-scrape (15s) -> append sample -> HEAD block (in-memory, mmap'd chunks)
-                                   |  also append to WAL (crash recovery)
-                                   v
-                          every 2h: HEAD -> persisted block on disk
-                                   |
-                          compaction merges blocks; old WAL truncated
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    scrape(["Scrape<br/>every 15s"]) --> append("Append Sample")
+    append --> head[("HEAD Block<br/>in-memory, mmap'd")]
+    append -.->|"also appends"| wal[("WAL<br/>crash recovery")]
+    head -->|"every 2h"| persisted[("Persisted Block<br/>immutable, on disk")]
+    persisted --> compaction{{"Compaction<br/>merges blocks"}}
+    compaction -.->|"truncates"| wal
+
+    class scrape req
+    class append,compaction mathOp
+    class head train
+    class wal base
+    class persisted frozen
 ```
 
 Where an identifier belongs (label vs exemplar vs log):
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    value{"Where does this<br/>value belong?"}
+    value -->|"bounded: method, region"| label(["Label"])
+    value -->|"look up one entity: trace_id"| exemplar(["Exemplar"])
+    value -->|"free text / payload"| logs(["Log / Trace"])
+
+    class value mathOp
+    class label train
+    class exemplar base
+    class logs frozen
 ```
-   dimension you AGGREGATE / FILTER by  ->  LABEL    (bounded: method, region)
-   identifier you LOOK UP one entity by ->  EXEMPLAR (trace_id on a bucket)
-   full detail / free text / payload    ->  LOG / TRACE (request body, stack)
-   ---------------------------------------------------------------------------
-   wrong:  http_requests_total{user_id="u-91823"}      (series per user)
-   right:  http_requests_total{tier="pro"}             (3 values)
-           + exemplar {trace_id="abc"} for drill-down
-```
+
+Wrong: `http_requests_total{user_id="u-91823"}` — a series per user. Right: `http_requests_total{tier="pro"}` (3 values) plus an exemplar `{trace_id="abc"}` for drill-down.
 
 Sharding strategies side by side:
 
-```
-   functional shard:   [Prom-payments] [Prom-search] [Prom-infra]   (by domain)
-   hashmod shard:      target -> hashmod(__address__, 3) -> {0,1,2} (by hash)
-   global view:        Thanos Querier / Mimir   <- fan-out + dedup
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph functional ["Functional Shard (by domain)"]
+        fp("Prom-payments")
+        fs("Prom-search")
+        fi("Prom-infra")
+    end
+
+    subgraph hashmod ["Hashmod Shard (by hash)"]
+        target(["Scrape Target"]) --> hashfn{"hashmod(__address__, 3)"}
+        hashfn -->|"0"| bucket0("Shard 0")
+        hashfn -->|"1"| bucket1("Shard 1")
+        hashfn -->|"2"| bucket2("Shard 2")
+    end
+
+    querier("Thanos Querier / Mimir<br/>fan-out + dedup")
+
+    functional -->|"global query"| querier
+    hashmod -->|"global query"| querier
+
+    class fp,fs,fi train
+    class target req
+    class hashfn mathOp
+    class bucket0,bucket1,bucket2 base
+    class querier mathOp
 ```
 
 ---

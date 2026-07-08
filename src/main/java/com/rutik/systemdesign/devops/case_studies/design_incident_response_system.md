@@ -78,14 +78,28 @@
 
 ### Signal-to-noise reduction (the core math)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["10,000 raw<br/>alerts/day"]) -->|"group by alertname<br/>+ cluster + service<br/>~200:1 collapse"| B(["~50 alert<br/>groups/day"])
+    B -->|"inhibition<br/>-30%"| C(["~35 groups<br/>/day"])
+    C -->|"route: 70% ticket<br/>30% page"| D(["~50 pages<br/>/day"])
+    D -->|"spread across<br/>300 rotations"| E(["1 page per rotation<br/>per ~6 days"])
+
+    class A req
+    class B,C mathOp
+    class D lossN
+    class E io
 ```
-10,000 raw alerts/day
-  → grouping by (alertname, cluster, service): ~200:1 collapse  → ~50 alert groups/day
-  → inhibition (node-down suppresses dependent pod alerts):  -30%  → ~35 groups/day
-  → routing: ~70% map to ticket/Slack-only (SEV3/4), ~30% page → ~50 pages/day
-Target: ~50 actionable PAGES/day across 300 rotations
-      = 0.17 pages/rotation/day = 1 page per rotation per ~6 days
-```
+
+Each stage strips roughly an order of magnitude of noise; the ~50 pages/day that survive grouping, inhibition, and routing spread across 300 rotations to about one page per rotation every six days — the sustainable on-call target this pipeline is built to hit.
 
 A healthy target is **< 2 pages per on-call shift per week**. Above that, alert fatigue sets in and real pages get missed (PagerDuty's own research: responders ignoring > 5 pages/day miss ~25% of subsequent real pages).
 
@@ -112,15 +126,15 @@ Total hot+warm storage ≈ **45 GB** — trivially small; this is a *latency and
 
 ### Latency budget (the 60s SLA, decomposed)
 
+```mermaid
+xychart-beta
+    title "Page latency budget: where the ~48s p99 goes (60s SLA)"
+    x-axis ["group_wait", "Routing + escalation", "Dispatch queue", "Provider delivery"]
+    y-axis "Seconds contributed" 0 --> 35
+    bar [30, 2, 1, 15]
 ```
-Alert fires (rule eval)          : t=0
-Alertmanager group_wait          : +30s   (batch correlated alerts)
-Routing + escalation resolve     : +2s    (who is on-call now?)
-Notification dispatch (queue)    : +1s
-Provider delivery (push/SMS)     : +5–15s
-                                  --------
-p99 first-touch                  : ~48s   (under the 60s budget)
-```
+
+Alert fires at t=0 (no duration, so it is omitted from the bars above).
 
 The `group_wait` of 30s dominates and is intentional — it trades 30s of latency for massive noise reduction. SEV1 routes can use `group_wait: 5s` to trade noise for speed.
 
@@ -140,44 +154,74 @@ The recurring theme: this system is sized for **availability and burst absorptio
 
 The paging path is split into a **signal plane** (lives next to the monitored infra, can fail with it) and a **delivery plane** (deliberately isolated, runs in a separate region/account, more available than anything it watches).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph SIG["Signal Plane<br/>shares fate with infra"]
+        PROM(["Prometheus<br/>per cluster, 30s eval"])
+        DD(["Datadog / CloudWatch<br/>/ custom webhooks"])
+        AM["Alertmanager HA<br/>dedup · group_by<br/>inhibit · silence"]
+        PROM --> AM
+        DD --> AM
+    end
+
+    subgraph DEL["Delivery Plane<br/>isolated region/account"]
+        ING["Ingest API<br/>normalize + dedup_key"]
+        IE["Incident Engine<br/>open/ack/mitigate/resolve"]
+        SS["Schedule Service<br/>resolves on-call now"]
+        EE["Escalation Engine<br/>timers + policy graph"]
+        ND["Notification Dispatcher<br/>SQS/Kafka, idempotent"]
+        PUSH(["Push"])
+        SMS1(["SMS<br/>Twilio"])
+        VOICE1(["Voice<br/>Twilio"])
+        EMAIL(["Email"])
+        CHAT(["Slack/Teams"])
+        SMS2(["SMS<br/>Bandwidth failover"])
+        VOICE2(["Voice<br/>Bandwidth"])
+        ACK["Ack/State Sync"]
+        BOT["ChatOps Bot"]
+        PM["Postmortem Store"]
+        AN["Analytics"]
+        AUD["Audit Log"]
+
+        ING --> IE
+        IE --> SS
+        IE --> EE
+        EE --> ND
+        ND --> PUSH
+        ND --> SMS1
+        ND --> VOICE1
+        ND --> EMAIL
+        ND --> CHAT
+        SMS1 -.->|"health-check<br/>failover"| SMS2
+        VOICE1 -.->|"failover"| VOICE2
+        PUSH --> ACK
+        SMS1 --> ACK
+        VOICE1 --> ACK
+        ACK --> BOT
+        ACK --> PM
+        ACK --> AN
+        ACK --> AUD
+    end
+
+    AM -->|"signed webhook<br/>cross-region mTLS"| ING
+
+    class PROM,DD,PUSH,SMS1,VOICE1,EMAIL,CHAT io
+    class AM,ING,ACK mathOp
+    class IE,SS,EE train
+    class ND req
+    class SMS2,VOICE2 frozen
+    class BOT,PM,AN,AUD base
 ```
-                          SIGNAL PLANE (per cluster, shares fate w/ infra)
-  +-----------------------------------------------------------------------+
-  |  Prometheus (per cluster)        Datadog / CloudWatch / custom        |
-  |       | rules eval 30s                |  webhooks                      |
-  |       v                               v                               |
-  |  Alertmanager (HA, 3 replicas, gossip)                                |
-  |    - dedup / group_by / inhibit / silence                             |
-  |       |  (webhook, signed)                                            |
-  +-------|---------------------------------------------------------------+
-          |  cross-region, mTLS, idempotency-key
-          v
-  ====================== DELIVERY PLANE (isolated region/account) =========
-  |                                                                       |
-  |   [Ingest API]  --(99.99%, multi-AZ, behind anycast LB)               |
-  |        |  normalize -> common Event schema, dedup_key                 |
-  |        v                                                              |
-  |   [Incident Engine] -- state machine: open/ack/mitigate/resolve       |
-  |        |   correlation, severity, SLO burn-rate tagging               |
-  |        +--> [Schedule Service] "who is on-call for service X now?"     |
-  |        +--> [Escalation Engine] timers, policy graph, jitter          |
-  |        |                                                              |
-  |        v                                                              |
-  |   [Notification Dispatcher]  (queue: SQS/Kafka, idempotent)           |
-  |        |        |          |          |          |                    |
-  |        v        v          v          v          v                    |
-  |     Push     SMS(Twilio) Voice(Twilio) Email   Slack/Teams            |
-  |              SMS(Bandwidth-failover) Voice(Bandwidth)                 |
-  |        |                                                              |
-  |        v   <-- ack callbacks (push tap / SMS reply / DTMF) -->        |
-  |   [Ack/State Sync]                                                    |
-  |        |                                                              |
-  |        +--> [ChatOps Bot] auto-create channel, bridge, runbooks       |
-  |        +--> [Postmortem Store] timeline, action items                 |
-  |        +--> [Analytics] MTTD/MTTA/MTTR, page precision, EB burn       |
-  |        +--> [Audit Log] immutable, append-only (Kinesis -> S3)        |
-  =======================================================================
-```
+
+Two isolated planes: the signal plane collapses raw metrics into deduped alerts and shares fate with production, while the delivery plane never does — it runs in a separate cloud account and region so it can still page when everything it watches is dark (D7).
 
 ### Component inventory
 
@@ -203,6 +247,18 @@ The paging path is split into a **signal plane** (lives next to the monitored in
 5. On ack (push tap / SMS reply `4` / DTMF), Ack/State Sync cancels escalation timers and transitions the incident to `acknowledged`.
 6. ChatOps opens a war-room channel; Postmortem Store records the timeline; Analytics and Audit consume the same event stream.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Open: incident created<br/>(new dedup_key)
+    Open --> Acknowledged: on-call acks<br/>(push / SMS / DTMF)
+    Acknowledged --> Mitigated: symptom stops<br/>(fix applied)
+    Mitigated --> Resolved: confirmed stable
+    Acknowledged --> Resolved: verified fixed,<br/>no separate mitigation
+    Resolved --> [*]: postmortem +<br/>analytics recorded
+```
+
+The Incident Engine's core lifecycle (F7) — distinct from the escalation ladder in §4.3, which only governs *how a page is delivered*, this is the state every ChatOps message, postmortem, and analytics event keys off.
+
 ### Why the delivery plane is isolated (multi-region)
 
 The delivery plane runs in a **separate cloud account and region** from production, with its own DNS, its own database, and no dependency on the monitored services. If `us-east-1` (where production lives) goes fully dark, the paging path in `us-west-2` still pages the on-call engineer to tell them about it. See `cross_cutting/multi_cluster_networking.md` for cross-region webhook delivery and failover routing, and `cross_cutting/kubernetes_production_hardening.md` for running the delivery plane itself with anti-affinity and PodDisruptionBudgets.
@@ -213,18 +269,28 @@ The delivery plane runs in a **separate cloud account and region** from producti
 
 ### 4.1 Alertmanager — routing, grouping, inhibition
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["firing alerts"]) --> RT{"route tree<br/>matches receiver"}
+    RT --> GB["group_by<br/>alertname · cluster · service<br/>wait 30s / interval 5m"]
+    GB --> INH["inhibition rules<br/>node-down suppresses<br/>pod-down"]
+    INH --> SIL["silences<br/>maintenance windows"]
+    SIL --> WH(["webhook to<br/>Ingest API"])
+
+    class A req
+    class RT,GB,INH,SIL mathOp
+    class WH io
 ```
-   firing alerts ──> [ route tree ] ──> matched receiver
-                          |
-              group_by (alertname,cluster,service)
-              group_wait 30s / group_interval 5m / repeat_interval 4h
-                          |
-              [ inhibition rules ] node-down  =====> suppress pod-down
-                          |
-              [ silences ]  (maintenance windows)
-                          v
-                    webhook -> Ingest API
-```
+
+Every firing alert crosses four gates before it can page: route (pick a receiver), group (batch by alertname/cluster/service), inhibit (drop dependents), and silence (respect maintenance windows) — only what survives all four reaches the webhook.
 
 The single most common production failure is **a pager storm**: one root cause (a node dies) fires 50 dependent alerts, each becomes a separate page. The fix is grouping + inhibition.
 
@@ -317,24 +383,57 @@ Static-threshold alerts ("error rate > 1% for 5 min") are the #2 cause of pager 
 
 The long window (1h) prevents flapping; the short window (5m) ensures the problem is still active before paging. A 14.4x burn rate means: at this rate, you'll exhaust a month's error budget in ~2 hours — that warrants waking someone. A 1x slow burn is a tomorrow-morning ticket.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ER(["error-ratio<br/>stream"]) --> LW{"1h window<br/>over 14.4x?"}
+    ER --> SW{"5m window<br/>over 14.4x?"}
+    LW -->|"yes"| AND{"both<br/>windows agree?"}
+    SW -->|"yes"| AND
+    LW -->|"no"| QUIET(["no page yet<br/>(not sustained)"])
+    SW -->|"no"| QUIET
+    AND -->|"yes"| PAGE(["PAGE:<br/>fast burn confirmed"])
+    AND -->|"no"| QUIET
+
+    class ER io
+    class LW,SW,AND mathOp
+    class PAGE lossN
+    class QUIET frozen
+```
+
+Why "multi-window" matters: a single 5m window alone would page on any 90-second blip, and a single 1h window alone would take an hour to confirm a real fast burn — only agreement across both gates the page.
+
 ### 4.3 Escalation policy engine
 
 The escalation engine is a durable timer + policy-graph traversal. The hard requirement: **zero missed escalations** even if the engine process restarts mid-timer. Timers must be persisted, not in-memory.
 
+```mermaid
+stateDiagram-v2
+    state "L1 Page" as L1
+    state "Acknowledged" as Acked
+    state "L2 Page" as L2
+    state "L3 Page" as L3
+    state "Manager Broadcast" as Mgr
+
+    [*] --> L1: page sent (t=0)<br/>arm timer 5m
+    L1 --> Acked: ack received<br/>cancel all timers
+    L1 --> L2: no ack at t=5m<br/>arm timer 5m
+    L2 --> Acked: ack received<br/>cancel all timers
+    L2 --> L3: no ack at t=10m<br/>arm timer 5m
+    L3 --> Acked: ack received<br/>cancel all timers
+    L3 --> Mgr: no ack at t=15m
+    Acked --> [*]
+    Mgr --> [*]: pages manager,<br/>broadcasts incident channel
 ```
-  page sent (t=0)
-     |-- arm timer(L1, 5m) persisted to durable store
-     v
-  ack? --yes--> cancel all timers, incident=acknowledged
-     |
-     no, t=5m fires
-     v
-  L2 page --> arm timer(L2, 5m)
-     |
-     no, t=10m
-     v
-  L3 page --> arm timer(L3, 5m) --> manager --> #incident-broadcast
-```
+
+Each level arms a durable timer before advancing; an ack at any level cancels every outstanding timer and moves straight to Acknowledged, while three straight misses over 15 minutes reach the manager and the incident-wide broadcast.
 
 ```go
 // Escalation step evaluation. Timers persisted in a durable store (e.g. Temporal
@@ -381,16 +480,43 @@ Two correctness rules baked in above: (1) on-call is resolved *fresh* at each es
 
 Notification is at-least-once with idempotent dedup keys, channel laddering (push → SMS → voice), and **multi-provider failover** so a single SMS provider outage doesn't black-hole pages.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    PG(["page"]) --> DQ["dispatch queue<br/>Kafka / SQS"] --> WK{"worker:<br/>channel ladder"}
+    WK --> PUSH["push<br/>t+1s"]
+    PUSH --> A1{"ack within 2m?"}
+    A1 -->|"yes"| OK(["delivered"])
+    A1 -->|"no"| SMS["SMS"]
+    SMS --> A2{"ack within 4m?"}
+    A2 -->|"yes"| OK
+    A2 -->|"no"| VOICE["voice"]
+    VOICE --> OK
+
+    SMS --> PSMS{"Twilio<br/>healthy?"}
+    PSMS -->|"yes"| TW1(["Twilio"])
+    PSMS -->|"no"| BW1(["Bandwidth<br/>failover under 10s"])
+
+    VOICE --> PVOICE{"Twilio<br/>healthy?"}
+    PVOICE -->|"yes"| TW2(["Twilio"])
+    PVOICE -->|"no"| BW2(["Bandwidth<br/>failover"])
+
+    class PG io
+    class DQ req
+    class WK,A1,A2,PSMS,PVOICE mathOp
+    class PUSH,SMS,VOICE train
+    class OK io
+    class TW1,TW2,BW1,BW2 frozen
 ```
-  page -> [dispatch queue (Kafka/SQS)] -> worker
-                                            |
-                  channel ladder per target preference:
-                  push(1s) -> if no-ack 2m -> SMS -> if no-ack 4m -> VOICE
-                                            |
-                  provider ring per channel:
-                  SMS: Twilio  --health--> [fail] --> Bandwidth (failover < 10s)
-                  Voice: Twilio --> Bandwidth
-```
+
+Two independent redundancy axes stack on every page: the channel ladder escalates push to SMS to voice on no-ack, while a per-channel provider ring fails over from Twilio to Bandwidth within 10s (N7) on a health-check failure.
 
 ```go
 // Send with provider failover. Idempotency key prevents double-paging on retry.

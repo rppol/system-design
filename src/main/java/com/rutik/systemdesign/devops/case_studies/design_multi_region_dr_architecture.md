@@ -107,16 +107,12 @@ If full prod is ~$180K/month in one region, the standby region adds ~$150K/month
 
 ### Failover Time Budget (must sum to < 5 min)
 
-```
-Health-check detection      :  3 failures × 10s interval        = 30 s
-Failover decision/orchestr. :  controller evaluates + locks      = 15 s
-DNS cutover (TTL + propag.)  :  Route53 record TTL               = 10 s
-                                + resolver propagation            ≈ 30 s
-DB writer promotion (if AP)  :  Aurora Global DB managed failover ≈ 60 s
-App tier warmup (warm-standby):  ASG scale-out + LB registration ≈ 90 s
-Connection drain/retry storm :  client backoff + reconnect       ≈ 30 s
-                              ----------------------------------------
-                              TOTAL                              ≈ 265 s ≈ 4 min 25 s
+```mermaid
+xychart-beta
+    title "Failover Time Budget - sums to ~265s vs 300s (5 min) budget"
+    x-axis ["Detection", "Orchestration", "DNS TTL", "DNS Propagation", "DB Promotion", "App Warmup", "Conn Drain"]
+    y-axis "Seconds" 0 --> 100
+    bar [30, 15, 10, 30, 60, 90, 30]
 ```
 
 This leaves ~35 s of slack. Every term above is a thing we *engineer down* in §4 — and the single biggest lever is making reads active-active so only the *writer* needs promotion.
@@ -125,58 +121,55 @@ This leaves ~35 s of slack. Every term above is a thing we *engineer down* in §
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    R53(Route 53 global DNS<br/>health checks: 10s / 3-fail<br/>ALIAS records, TTL 10s)
+
+    subgraph PRI["PRIMARY REGION us-east-1<br/>write authority"]
+        ALB1([ALB / NLB])
+        SVC1(payments-svc<br/>N pods)
+        AUR1[(Aurora Global DB<br/>PRIMARY writer<br/>+ 2 readers)]
+        DDB1[(DynamoDB<br/>Global Table)]
+        S31[(S3 bucket<br/>receipts, KYC)]
+        ALB1 --> SVC1 --> AUR1
+    end
+
+    subgraph SEC["SECONDARY REGION us-west-2<br/>active reads, standby writes"]
+        ALB2([ALB / NLB])
+        SVC2(payments-svc<br/>0.3N pods, warm)
+        AUR2[(Aurora Global DB<br/>SECONDARY readers<br/>promotable)]
+        DDB2[(DynamoDB<br/>Global Table<br/>replica)]
+        S32[(S3 bucket<br/>replica)]
+        ALB2 --> SVC2 --> AUR2
+    end
+
+    CTRL(Failover Controller<br/>lock table + Step Functions<br/>emits region_active)
+
+    R53 -->|healthy?| ALB1
+    R53 -.->|healthy?| ALB2
+    SVC2 -.->|writes cross-region<br/>until failover| AUR1
+    AUR1 -->|storage-layer redo<br/>async, p99 lag under 1s| AUR2
+    DDB1 <-->|multi-active replicate| DDB2
+    S31 -.->|S3 CRR| S32
+    CTRL -.->|fence + promote| PRI
+    CTRL -.->|flips Route53| SEC
+
+    class R53,CTRL mathOp
+    class ALB1,ALB2 req
+    class SVC1,AUR1 train
+    class SVC2,AUR2 frozen
+    class DDB1,DDB2,S31,S32 base
 ```
-                                  ┌────────────────────────────────┐
-                                  │     Route 53 (global DNS)       │
-                                  │  - Health checks (10s, 3-fail)  │
-                                  │  - Failover / latency routing   │
-                                  │  - ALIAS records, TTL 10s       │
-                                  └───────────────┬────────────────┘
-                       healthy?  ◄────────────────┼────────────────►  healthy?
-                                                  │
-              ┌───────────────────────────────────┴───────────────────────────────────┐
-              │                                                                          │
-   ╔══════════▼═══════════════════════╗                           ╔════════════════════▼═════════════╗
-   ║  PRIMARY REGION  us-east-1        ║                           ║  SECONDARY REGION  us-west-2     ║
-   ║  (write authority)               ║                           ║  (active reads, standby writes)  ║
-   ║                                  ║                           ║                                  ║
-   ║  ┌────────────┐                  ║                           ║  ┌────────────┐                  ║
-   ║  │  ALB / NLB │                  ║                           ║  │  ALB / NLB │                  ║
-   ║  └─────┬──────┘                  ║                           ║  └─────┬──────┘                  ║
-   ║        │                         ║                           ║        │                         ║
-   ║  ┌─────▼───────┐  (EKS)          ║                           ║  ┌─────▼───────┐  (EKS, warm)    ║
-   ║  │ payments-svc│  N pods         ║                           ║  │ payments-svc│  0.3N pods      ║
-   ║  └─────┬───────┘                 ║                           ║  └─────┬───────┘                 ║
-   ║        │ writes → primary writer ║                           ║   reads from local reader        ║
-   ║        │                         ║                           ║   writes → cross-region to        ║
-   ║  ┌─────▼─────────────────┐       ║                           ║          primary (until failover) ║
-   ║  │ Aurora Global DB       │      ║   storage-layer redo      ║  ┌─────────────────────────┐      ║
-   ║  │  PRIMARY cluster       │──────╫────  async replication ──╫─►│ Aurora Global SECONDARY  │      ║
-   ║  │  writer + 2 readers    │      ║   (p99 lag < 1s)          ║  │ readers (promotable)     │      ║
-   ║  └────────────────────────┘      ║                           ║  └─────────────────────────┘      ║
-   ║                                  ║                           ║                                  ║
-   ║  ┌────────────────────────┐      ║   multi-active replicate  ║  ┌─────────────────────────┐      ║
-   ║  │ DynamoDB Global Table   │◄─────╫───────────────────────────╫─►│ DynamoDB Global Table    │     ║
-   ║  │ (idempotency, sessions) │      ║                           ║  │ (same table, replicated) │     ║
-   ║  └────────────────────────┘      ║                           ║  └─────────────────────────┘      ║
-   ║                                  ║                           ║                                  ║
-   ║  ┌────────────┐  S3 CRR          ║───────────────────────────╫─►┌────────────┐                  ║
-   ║  │ S3 bucket   │  (receipts,KYC) ║                           ║  │ S3 bucket   │ (replica)        ║
-   ║  └────────────┘                  ║                           ║  └────────────┘                  ║
-   ║                                  ║                           ║                                  ║
-   ╚══════════════════════════════════╝                           ╚══════════════════════════════════╝
-              │                                                                          │
-              └───────────────────────┐                          ┌────────────────────────┘
-                                      ▼                          ▼
-                          ┌──────────────────────────────────────────────┐
-                          │  FAILOVER CONTROLLER (lives in 3rd region or  │
-                          │   on-call human-in-loop for promotion)        │
-                          │  - DynamoDB lock table (single-writer fence)  │
-                          │  - Step Functions / Lambda orchestration       │
-                          │  - Promotes Aurora secondary, flips Route53    │
-                          │  - Emits region_active=<region> as truth       │
-                          └──────────────────────────────────────────────┘
-```
+
+Route 53 steers healthy traffic to the primary and keeps the secondary standing by; both regions serve reads locally off their own Aurora readers, but only the primary writer accepts commits until the Failover Controller fences the lock table and promotes us-west-2.
 
 ### Component Inventory
 
@@ -213,15 +206,39 @@ This leaves ~35 s of slack. Every term above is a thing we *engineer down* in §
 
 Aurora Global Database replicates at the **storage layer** (the redo log), not via logical replication. This gives typical cross-region lag < 1s and decouples replication from the database engine's CPU. A "managed failover" promotes the secondary to a full standalone cluster with RPO 0 for committed transactions; an "unplanned/manual failover" (detach-and-promote) is used when the primary region is *unreachable* and accepts the small RPO of in-flight redo not yet shipped.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph P["us-east-1 PRIMARY cluster"]
+        W(writer)
+        R1(reader)
+        R2(reader)
+    end
+
+    STORE(Aurora storage<br/>replication, physical)
+
+    subgraph S["us-west-2 SECONDARY cluster<br/>read-only until promoted"]
+        SR(readers<br/>promotable)
+    end
+
+    W -->|redo log| STORE
+    R1 -.-> STORE
+    R2 -.-> STORE
+    STORE -->|"RPO approx lag<br/>(sub-second)"| SR
+
+    class W,R1,R2 train
+    class STORE mathOp
+    class SR frozen
 ```
-   us-east-1 PRIMARY cluster                    us-west-2 SECONDARY cluster
-   ┌──────────────────────┐                     ┌──────────────────────┐
-   │ writer  ── redo log ──┼──► Aurora storage ──┼──► readers (promote) │
-   │ reader                │     replication      │  (read-only until    │
-   │ reader                │     (physical)       │   promoted)          │
-   └──────────────────────┘                     └──────────────────────┘
-         RPO ≈ lag (sub-second)   ── manual failover promotes secondary ──►
-```
+
+An unplanned (manual) failover promotes the secondary's readers directly, accepting whatever redo had not yet replicated; a managed failover instead drains in-flight redo first for RPO 0.
 
 **Terraform — Aurora Global Database:**
 
@@ -338,19 +355,32 @@ resource "aws_dynamodb_table" "idempotency" {
 
 ### 4.2 DNS / Global Traffic Failover (Route 53)
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ZONE(Route 53 hosted zone<br/>api.payments.example.com)
+    HC1{Health check #1<br/>10s / 3-fail}
+    HC2{Health check #2<br/>10s / 3-fail}
+    ALB1([ALB use1])
+    ALB2([ALB usw2])
+
+    ZONE -->|"PRIMARY failover<br/>ALIAS"| HC1 --> ALB1
+    ZONE -.->|"SECONDARY failover<br/>ALIAS"| HC2 -.-> ALB2
+
+    class ZONE mathOp
+    class HC1,HC2 mathOp
+    class ALB1 train
+    class ALB2 frozen
 ```
-            ┌──────────────────────────────────────────┐
-            │  Route 53 hosted zone                     │
-            │  api.payments.example.com                 │
-            │                                           │
-            │  PRIMARY  ── ALIAS → ALB(use1) ── health  │
-            │  failover                       check #1  │
-            │  SECONDARY ─ ALIAS → ALB(usw2) ── health  │
-            │  failover                       check #2  │
-            └──────────────────────────────────────────┘
-   health check: HTTPS GET /healthz on the ALB target,
-   interval 10s, failure threshold 3  → 30s detection
-```
+
+Each health check is an HTTPS GET /healthz against the ALB target, 10s interval with a 3-failure threshold — the 30s detection budget already used in the §2 time budget.
 
 #### BROKEN → FIX: failover record with 1-hour TTL and no health check
 
@@ -421,25 +451,31 @@ ALIAS records are resolved by Route 53 itself (the IP is never cached by the cli
 
 Pure DNS failover handles *reads*. The ledger writer must be promoted in a coordinated, fenced way. The controller lives in a **third region (eu-west-1)** so a us-east-1 loss cannot take down the brain making the failover decision.
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Detect
+    Detect --> Fence: primary health fails 3x<br/>CloudWatch alarm
+    Fence --> Promote: conditional write<br/>SET writer=usw2 if stale over 30s
+    Promote --> Steer: failover_global_cluster<br/>Aurora managed promotion
+    Steer --> Verify: SSM active_write_region=usw2<br/>R53 already shifting reads
+    Verify --> [*]: writer accepts writes,<br/>lag=0, DONE
+
+    class Detect mathOp
+    class Fence mathOp
+    class Promote train
+    class Steer mathOp
+    class Verify train
 ```
-   ┌──────────────────────────────────────────────────────────────┐
-   │  Failover Controller (Step Functions in eu-west-1)            │
-   │                                                              │
-   │  [Detect] ── primary health fails 3x (CloudWatch alarm) ──┐  │
-   │     │                                                     │  │
-   │  [Fence] ── conditional-write lock table:                 │  │
-   │     │       SET writer=usw2 IF writer=use1 AND stale>30s   │  │
-   │     │       (atomic; only one actor can win)               │  │
-   │     ▼                                                     │  │
-   │  [Promote] ── failover_global_cluster(target=usw2) ───────┘  │
-   │     │         (Aurora managed promotion)                      │
-   │     ▼                                                          │
-   │  [Steer] ── update SSM /payments/active_write_region=usw2     │
-   │     │       + (R53 failover already shifting reads)           │
-   │     ▼                                                          │
-   │  [Verify] ── poll new writer accepts writes, lag=0 ──► DONE   │
-   └──────────────────────────────────────────────────────────────┘
-```
+
+Only the Fence to Promote transition is destructive; Decision 3 in §5 gates it behind a 90-second auto-promote-or-on-call-confirmation window so a transient partition can't trigger an unnecessary failover.
 
 **Go — the split-brain fence (single-writer guarantee):**
 
@@ -483,21 +519,59 @@ The current primary **renews its lease every 5s**; a partition where the primary
 
 Every write the app issues carries the `fenced_token`; the database rejects writes whose token does not match the current generation, so a "zombie" primary that comes back cannot write stale data. This is a **fencing token** (the standard distributed-lock correctness primitive).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    HC(Health check<br/>fails 3x) --> LOCK{Old writer lease<br/>stale over 30s?}
+    LOCK -->|yes| WIN(Conditional write wins<br/>writer=usw2, new fenced_token)
+    LOCK -->|"no, still renewing"| REFUSE(Refuse promotion<br/>ConditionalCheckFailed)
+    WIN --> STAMP{Write carries<br/>fenced_token}
+    STAMP -->|"matches current<br/>generation"| ACCEPT(DB accepts write)
+    STAMP -->|"stale token,<br/>zombie primary"| REJECT(DB rejects write)
+
+    class HC req
+    class LOCK,STAMP mathOp
+    class WIN,ACCEPT train
+    class REFUSE,REJECT lossN
+```
+
+Two independent checks prevent split-brain: the lock only transfers if the old writer's lease has gone stale for over 30s (so a reachable-but-partitioned primary keeps authority), and every write afterward carries a fencing token so a zombie primary that wakes up mid-partition still gets its writes rejected.
+
 ---
 
 ### 4.4 State & Config Replication
 
 Stateless app tiers still depend on *out-of-band* state: feature flags, secrets, KMS keys, TLS certs, and configuration. If these are not present in the secondary region, failover lands traffic on a region that cannot decrypt the database or validate JWTs.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    S1(Secrets<br/>DB creds, API keys) --> M1(Secrets Manager<br/>multi-region) --> F1(App can't<br/>auth to DB)
+    S2(KMS encryption keys) --> M2(Multi-Region<br/>KMS keys) --> F2(Can't decrypt<br/>ledger / S3)
+    S3(Feature flags /<br/>runtime cfg) --> M3(SSM Param Store<br/>replicated) --> F3(Wrong behavior<br/>on cutover)
+    S4(Container images) --> M4(ECR cross-region<br/>replication) --> F4(ASG can't pull,<br/>no warmup)
+    S5(TLS certificates) --> M5(ACM per-region<br/>regional!) --> F5(ALB has no cert,<br/>525s)
+
+    class S1,S2,S3,S4,S5 io
+    class M1,M2,M3,M4,M5 base
+    class F1,F2,F3,F4,F5 lossN
 ```
-   Config/State source              Replication mechanism            Failure if missing
-   ─────────────────────────────────────────────────────────────────────────────────────
-   Secrets (DB creds, API keys)  →  Secrets Manager multi-region  →  app can't auth to DB
-   KMS encryption keys           →  multi-Region KMS keys         →  can't decrypt ledger/S3
-   Feature flags / runtime cfg   →  SSM Param Store (replicated)  →  wrong behavior on cutover
-   Container images              →  ECR cross-region replication  →  ASG can't pull → no warmup
-   TLS certificates              →  ACM per-region (regional!)    →  ALB has no cert → 525s
-```
+
+If any row's replication mechanism is missing in the DR region, the app comes up looking healthy but fails at the exact moment it needs that piece — which is why this mapping, not the architecture diagram, is what a game-day drill actually has to exercise.
 
 A frequently-missed item: **ACM certificates are regional and cannot be copied.** You must request the cert in *both* regions (or use a wildcard issued separately per region). KMS keys must be **multi-Region keys** so ciphertext written in us-east-1 is decryptable in us-west-2 — a single-region key makes your replicated, encrypted S3 objects unreadable in the DR region, which is a silent data-availability bomb that only detonates during a real failover.
 
@@ -584,6 +658,23 @@ For the Kubernetes-side hardening of the warm standby tier (pod-disruption budge
 | Pilot Light | 10–30 min | seconds–minutes | ~1.1x | Important but RTO-tolerant |
 | Warm Standby | 1–10 min | seconds | ~1.3x | **Payments-grade, our choice** |
 | Active-Active (multi-writer) | seconds | ~0 (read), conflict-bound (write) | ~2.0x+ | Highest tier, conflict-tolerant data |
+
+```mermaid
+quadrantChart
+    title DR Tier Tradeoff: Cost vs Recovery Speed
+    x-axis Slower RTO --> Faster RTO
+    y-axis Cheaper --> More Expensive
+    quadrant-1 Premium and instant
+    quadrant-2 Overpriced, still slow
+    quadrant-3 Cheap but slow
+    quadrant-4 Sweet spot fast and cheap
+    "Backup & Restore": [0.05, 0.05]
+    "Pilot Light": [0.3, 0.15]
+    "Warm Standby": [0.6, 0.4]
+    "Active-Active": [0.95, 0.9]
+```
+
+The bottom-right quadrant is otherwise empty: Backup and Pilot Light are cheap but too slow for a 5-minute RTO, Active-Active buys seconds-level recovery at ~2.0x+ cost, and Warm Standby (~1.3x) is the only tier that clears RTO under 5 min without paying the active-active premium.
 
 Our build is **warm-standby app + active-active reads + active-passive single-writer DB** — the sweet spot for RTO < 5 min / RPO < 1s on financial data.
 

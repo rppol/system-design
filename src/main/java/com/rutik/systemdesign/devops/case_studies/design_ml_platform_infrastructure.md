@@ -111,36 +111,62 @@ Cardinality risk: DCGM exports ~30 series/GPU x 360 GPUs x (MIG multiplies) -> w
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Product(["Self-service CLI / SDK / Backstage<br/>submit jobs · deploy models · view cost"])
+
+    subgraph Orch["ORCHESTRATION LAYER"]
+        direction LR
+        Kueue["Kueue<br/>quotas + fair-share + gang"]
+        TrainOp["Training Operator / KubeRay<br/>PyTorchJob · RayJob"]
+        KServeN["KServe<br/>serving"]
+        PipeN["Pipelines/Argo + Katib<br/>DAGs + HPO"]
+        MLflowN["MLflow<br/>tracking + registry"]
+    end
+
+    subgraph Sub["SUBSTRATE LAYER (Kubernetes / EKS)"]
+        direction LR
+        Sched["kube-scheduler + Volcano<br/>topology/gang"]
+        PoolServe["NodePool: serving<br/>On-Demand · MIG"]
+        PoolTrain["NodePool: training<br/>Spot · whole GPU"]
+        PoolDev["NodePool: dev<br/>time-sliced"]
+        GPUNodes["GPU nodes + GPU Operator<br/>driver/toolkit/DCGM/MIG"]
+    end
+
+    Storage["S3 + FSx Lustre<br/>datasets · checkpoints · models"]
+    Obs(["Prometheus/Thanos<br/>Grafana"])
+
+    Product -->|"TrainingJob CRD"| Kueue
+    Product -->|"InferenceService CRD"| KServeN
+    Kueue --> Sched
+    TrainOp --> Sched
+    KServeN --> Sched
+    PipeN --> Sched
+    MLflowN --> Sched
+    Sched --> PoolServe
+    Sched --> PoolTrain
+    Sched --> PoolDev
+    PoolServe --> GPUNodes
+    PoolTrain --> GPUNodes
+    PoolDev --> GPUNodes
+    GPUNodes -->|"artifacts/checkpoints"| Storage
+    GPUNodes -.->|"DCGM + app metrics"| Obs
+
+    class Product io
+    class Kueue,TrainOp,KServeN,PipeN,MLflowN,Sched mathOp
+    class PoolServe,PoolTrain,PoolDev,GPUNodes base
+    class Storage frozen
+    class Obs io
 ```
-                     ┌──────────────────────── PRODUCT LAYER ────────────────────────┐
-                     │  Self-service CLI / SDK / Backstage portal                      │
-                     │  - submit TrainingJob   - deploy InferenceService               │
-                     │  - view quotas, costs, dashboards                               │
-                     └───────────────┬──────────────────────────────┬─────────────────┘
-                                     │ TrainingJob CRD                │ InferenceService CRD
-                                     v                                v
-   ┌──────────────────────── ORCHESTRATION LAYER ──────────────────────────────────────┐
-   │  Kueue (quotas + fair-share + gang admission)                                       │
-   │  Kubeflow Training Operator (PyTorchJob) / KubeRay (RayJob)   KServe (serving)       │
-   │  Kubeflow Pipelines / Argo Workflows (DAGs)   Katib/Ray Tune (HPO)                   │
-   │  MLflow (experiment tracking + model registry)                                       │
-   └───────────────┬───────────────────────────────────────────────┬─────────────────────┘
-                   │ Pods request nvidia.com/gpu (or mig-1g.10gb)    │ InferenceService -> Pods
-                   v                                                 v
-   ┌──────────────────────────── SUBSTRATE LAYER (Kubernetes / EKS) ───────────────────────┐
-   │  kube-scheduler + Volcano (topology/gang)                                              │
-   │  ┌───────────────────────┐   ┌───────────────────────┐   ┌──────────────────────────┐ │
-   │  │ Karpenter NodePool:    │   │ Karpenter NodePool:    │   │ Karpenter NodePool:       │ │
-   │  │ serving (On-Demand,MIG)│   │ training (Spot, whole) │   │ dev (time-sliced)         │ │
-   │  └──────────┬────────────┘   └──────────┬────────────┘   └────────────┬─────────────┘ │
-   │             v                            v                             v               │
-   │   GPU nodes + NVIDIA GPU Operator (driver/toolkit/device-plugin/DCGM/MIG)              │
-   │   (lifecycle per ./cross_cutting/gpu_node_lifecycle.md)                                │
-   └───────────────┬───────────────────────────────────────────────┬─────────────────────────┘
-                   │ artifacts/checkpoints                           │ DCGM + app metrics
-                   v                                                 v
-        S3 (datasets, checkpoints, models)  /  FSx Lustre (hot data)   Prometheus/Thanos -> Grafana
-```
+*Three planes stacked: the product layer turns a CLI/SDK call into a `TrainingJob` or `InferenceService` CRD, the orchestration layer (Kueue/Training Operator/KServe/Pipelines/MLflow) turns that into scheduled Pods, and the substrate layer (Karpenter's three NodePools + the GPU Operator) turns Pods into running GPUs — artifacts land in S3/FSx and metrics flow to Prometheus/Thanos/Grafana.*
 
 **Component inventory:**
 - **Product layer**: CLI/SDK + Backstage golden paths; quota & cost views.
@@ -158,28 +184,37 @@ Cardinality risk: DCGM exports ~30 series/GPU x 360 GPUs x (MIG multiplies) -> w
 
 **Multi-region note:** Tier-1 serving runs active-active across two regions for the 99.9% SLA; training is single-region (data gravity — datasets live in one region's S3/FSx). Cross-region serving topology and failover follow [`./cross_cutting/multi_cluster_networking.md`](./cross_cutting/multi_cluster_networking.md).
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Route53{"Route 53<br/>latency / weighted routing<br/>health-checked"}
+    EastStack["us-east-1 (primary)<br/>EKS + serving NodePool<br/>KServe endpoints · MIG A100s"]
+    WestStack["us-west-2 (active)<br/>EKS + serving NodePool<br/>KServe endpoints · MIG A100s"]
+    S3Primary["S3 models bucket"]
+    S3Replica["S3 models bucket<br/>(replica)"]
+    TrainNote(["Training pinned single-region<br/>us-east-1 only — data gravity"])
+
+    Route53 --> EastStack
+    Route53 --> WestStack
+    EastStack -.->|"KServe sync · failover<br/>RTO under 2 min"| WestStack
+    EastStack -->|"model artifacts"| S3Primary
+    S3Primary -.->|"async S3 CRR"| S3Replica
+    S3Replica -.-> WestStack
+    EastStack -.-> TrainNote
+
+    class Route53 mathOp
+    class EastStack,WestStack train
+    class S3Primary base
+    class S3Replica,TrainNote frozen
 ```
-                         Route 53 latency / weighted routing  (health-checked)
-                          ┌───────────────────────────┬───────────────────────────┐
-                          v                            v
-              ┌──────────────────────┐      ┌──────────────────────┐
-              │  us-east-1 (primary)  │      │  us-west-2 (active)   │
-              │  EKS + serving NodePool│      │  EKS + serving NodePool│
-              │  KServe endpoints      │◄────►│  KServe endpoints      │
-              │  MIG-sliced A100s      │ async│  MIG-sliced A100s      │
-              └──────────┬────────────┘ model └──────────┬────────────┘
-                         │ model artifacts   replication  │
-                         v   (S3 CRR)                      v
-                   S3 models bucket  ──────────────► S3 models bucket (replica)
-              ┌──────────────────────────────────────────────────────────────┐
-              │ TRAINING is single-region (us-east-1 only): datasets/checkpoints│
-              │ live in one region's S3/FSx — replicating PBs cross-region is   │
-              │ cost-prohibitive. Only the trained MODEL artifact replicates.   │
-              └──────────────────────────────────────────────────────────────┘
-  Failover: if us-east-1 serving degrades, Route 53 health checks shift 100% to
-  us-west-2 (each region sized to absorb full load); training pauses, resumes when
-  the region recovers (checkpoints are durable in S3). RTO for serving < 2 min.
-```
+*Serving is active-active across two regions (Route 53 health-checked routing, RTO under 2 min on failover); training stays pinned to us-east-1 because moving petabyte datasets is cost-prohibitive — only the trained model artifact replicates via async S3 CRR.*
 
 The asymmetry is deliberate: **serving is replicated** (small model artifacts, latency-SLA-bound, needs regional redundancy) while **training is pinned** (petabyte datasets have gravity; you move the model to the data's region, not the data to the model). This is the standard ML-platform multi-region pattern.
 
@@ -250,6 +285,27 @@ spec:
 ```
 
 For tier-1 models that can't tolerate cold start, `minReplicas: 1` plus a warm GPU pool (see [`./cross_cutting/gpu_node_lifecycle.md`](./cross_cutting/gpu_node_lifecycle.md) §"warm pool") keeps p99 within 150ms.
+
+```mermaid
+stateDiagram-v2
+    classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef train  fill:#98c379,stroke:#27ae60,color:#1a1a1a
+
+    [*] --> Idle
+    Idle --> Provisioning: request arrives<br/>(minReplicas = 0)
+    Provisioning --> NodeBringUp: Karpenter provisions<br/>a Spot/On-Demand node
+    NodeBringUp --> WeightLoad: driver/toolkit/device-plugin<br/>~110s bring-up
+    WeightLoad --> Serving: weights loaded<br/>(multi-GB unless pre-staged)
+    Serving --> Idle: idle timeout<br/>scale to zero
+    Idle --> Warm: minReplicas = 1<br/>+ warm pool
+    Warm --> Serving: always-on<br/>no cold start
+
+    class Idle frozen
+    class Provisioning,NodeBringUp,WeightLoad mathOp
+    class Serving,Warm train
+```
+*The cold path (Idle → Provisioning → NodeBringUp → WeightLoad) is what a scale-to-zero model pays on its first request after idling — the ~95s that paged on-call in War story 4 (§9). `minReplicas: 1` plus a warm pool detours straight through Warm to Serving, which is why it's reserved for tier-1 and compliance-critical models.*
 
 ### 4.3 Karpenter NodePools — the three workload classes
 
@@ -390,6 +446,30 @@ Impact of the fix: serving collapsed from ~40 A100s to ~24 (slices), and the dea
 - *Rationale:* Matches isolation to risk — serving needs hardware isolation (MIG) for predictable p99; training is fault-tolerant so Spot's 70% discount wins; dev is trusted/bursty so time-slicing maximizes packing.
 - *Consequences:* MIG fragments (slices wasted if model sizes mismatch slice sizes); Spot needs checkpointing discipline.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["New GPU<br/>workload"]) --> Q1{"Needs a full card?<br/>(training / largest models)"}
+    Q1 -->|"yes"| Exclusive["Exclusive GPU<br/>whole card, max isolation"]
+    Q1 -->|"no"| Q2{"Latency SLA or tenant<br/>isolation matters?"}
+    Q2 -->|"yes"| MIG["MIG slice<br/>multi-tenant serving"]
+    Q2 -->|"no"| TimeSlice["Time-slicing<br/>dev/notebooks, max packing"]
+
+    class Start io
+    class Q1,Q2 mathOp
+    class Exclusive frozen
+    class MIG train
+    class TimeSlice base
+```
+*The rule of thumb from Section 11's Q&A made visual: exclusive whole cards for training and the biggest models, hardware-isolated MIG slices wherever a latency SLA or multi-tenant isolation matters, and time-sliced sharing only for trusted, bursty dev/notebook use.*
+
 **Decision 4: KServe for serving over a homegrown deployment.**
 - *Alternatives:* plain Deployments + HPA, Ray Serve, SageMaker endpoints.
 - *Rationale:* KServe gives a standard `InferenceService` CRD with scale-to-zero, canary, and multi-framework support — the self-service "golden path." Triton inside it maximizes GPU throughput.
@@ -459,15 +539,34 @@ Impact of the fix: serving collapsed from ~40 A100s to ~24 (slices), and the dea
 
 Every model promotion runs through an automated gate before it can serve tier-1 traffic — mirroring the LLM eval-harness pattern ([`../../llm/case_studies/cross_cutting/llm_eval_harness_in_production.md`](../../llm/case_studies/cross_cutting/llm_eval_harness_in_production.md)) but for classical/online models:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Candidate(["Candidate model<br/>vN+1"]) --> OfflineEval["Offline eval<br/>golden holdout set"]
+    OfflineEval --> GateEval{"Regresses key metric<br/>beyond -0.5%?"}
+    GateEval -->|"no"| Shadow["Shadow deploy<br/>mirror live traffic"]
+    GateEval -->|"yes"| Reject(("Reject"))
+    Shadow --> Canary["Canary (KServe)<br/>5% traffic · 30-min bake"]
+    Canary --> GateCanary{"p99 under 150ms<br/>and error rate OK?"}
+    GateCanary -->|"yes"| Promote["Auto-promote<br/>to 100%"]
+    GateCanary -->|"no"| Rollback(("Rollback"))
+    Promote --> Register["Register in MLflow<br/>+ eval report"]
+
+    class Candidate io
+    class OfflineEval,GateEval,GateCanary mathOp
+    class Shadow,Canary req
+    class Promote train
+    class Register base
+    class Reject,Rollback lossN
 ```
-Promote candidate model vN+1:
-  1. Offline eval on a golden holdout set -> compare AUC/precision/recall vs current prod vN.
-     Gate: must not regress key metric beyond -0.5% (configurable per model).
-  2. Shadow deploy: mirror live traffic to vN+1 (no user impact); compare predictions + latency.
-  3. Canary (KServe): 5% live traffic, monitor p99 < 150ms and error rate; 30-min bake.
-  4. Auto-promote to 100% if metric gates hold; auto-rollback on breach.
-  5. Register the promoted version in MLflow with the eval report attached.
-```
+*Every promotion runs the same staged gate — offline eval, shadow, canary — with an automatic rollback the moment a metric gate breaks, so a bad model version never survives long enough to hurt the SLA.*
 
 ### (b) Observability — the span/metric hierarchy
 

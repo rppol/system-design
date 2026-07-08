@@ -53,6 +53,35 @@ Given a text string T (length n) and a pattern P (length m), find all starting i
 4. Expected character set?
    - Large alphabet (Unicode) can hurt Boyer-Moore's bad-character table size; KMP is alphabet-agnostic.
 
+The four clarifying questions above collapse into a single algorithm-selection path:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start([Substring search need]) --> exact{"Exact match<br/>required?"}
+    exact -->|"No"| bitap("Bitap / DP<br/>edit distance up to k")
+    exact -->|"Yes"| count{"How many<br/>patterns?"}
+    count -->|"Single"| alpha{"Large or Unicode<br/>alphabet?"}
+    alpha -->|"Yes"| kmp("KMP<br/>alphabet-agnostic")
+    alpha -->|"No"| bm("Boyer-Moore<br/>fastest in practice")
+    count -->|"Multiple"| samelen{"Patterns share one<br/>fixed length?"}
+    samelen -->|"Yes"| rk("Rabin-Karp<br/>rolling hash set")
+    samelen -->|"No"| ac("Aho-Corasick<br/>trie + failure links")
+
+    class start io
+    class exact,count,alpha,samelen mathOp
+    class bitap,kmp,bm,rk,ac train
+```
+
+Exact-match single-pattern searches split on alphabet size (KMP is alphabet-agnostic; Boyer-Moore is faster in practice on natural text); multi-pattern searches split on whether the patterns share one length (Rabin-Karp) or not (Aho-Corasick); anything tolerating errors routes to bitap/DP.
+
 ---
 
 ## 2. Brute Force & Complexity Baseline
@@ -492,28 +521,45 @@ Where alpha is the branching factor (up to 26 for lowercase ASCII). The space ov
 
 Nodes with a single child are merged into their parent, storing multi-character edge labels. The number of nodes is O(W) rather than O(W * L). This is what production systems use (the Linux kernel's IP routing table, NGINX's URL router, and Rust's `radix` crate all use radix tries).
 
+Trie for `["slow", "slower", "slowly"]`: the naive form allocates one node per character, while the compressed radix form merges every single-child chain into one multi-character edge label.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph NAIVE["Naive Trie"]
+        direction TB
+        nroot(root) --> ns(s)
+        ns --> nl1(l)
+        nl1 --> no(o)
+        no --> nw(["w<br/>END slow"])
+        nw --> ne(e)
+        ne --> nr(["r<br/>END slower"])
+        nw --> nl2(l)
+        nl2 --> ny(["y<br/>END slowly"])
+    end
+
+    subgraph RADIX["Compressed Radix Trie"]
+        direction TB
+        rroot(root) --> rslow(["slow<br/>END"])
+        rslow --> rer(["er<br/>END"])
+        rslow --> rly(["ly<br/>END"])
+    end
+
+    NAIVE -.->|"compress"| RADIX
+
+    class nroot,rroot base
+    class ns,nl1,no,ne,nl2 mathOp
+    class nw,nr,ny,rslow,rer,rly train
 ```
-Naive trie for ["slow", "slower", "slowly"]:
-
-root
- +-- s
-      +-- l
-           +-- o
-                +-- w  [END]
-                     +-- e
-                     |    +-- r  [END]
-                     +-- l
-                          +-- y  [END]
-
-Compressed (radix) trie:
-
-root
- +-- "slow" [END]
-       +-- "er"  [END]
-       +-- "ly"  [END]
 
 3 nodes instead of 7. Space: O(W) nodes regardless of word length.
-```
 
 ### KMP vs Boyer-Moore vs Rabin-Karp
 
@@ -714,6 +760,16 @@ A production search API serving 50,000 requests/second with 500,000 words per re
 
 This gap is the root cause of the "our search box is slow" postmortem in at least three production incidents reported on the HackerNews "Ask: what's the worst bug you shipped" thread. In all cases the fix was switching from a `[w for w in words if w.startswith(prefix)]` list comprehension to a trie or sorted-array binary search.
 
+```mermaid
+xychart-beta
+    title "Worker Processes Needed at 50,000 req/s (32-core box)"
+    x-axis ["Naive scan", "Trie lookup", "Cores available"]
+    y-axis "Python worker processes" 0 --> 1300
+    bar [1250, 1, 32]
+```
+
+Reusing the numbers above: naive scanning needs ~1,250 Python worker processes to keep up, a trie needs essentially 1 — but the box only has 32 cores, the "40x under-provisioned from day one" gap made visible.
+
 ### Mistake 2 — Not handling the overlapping match case in KMP
 
 Naive implementations stop after the first match. The correct behavior after a match at position i is to set `j = lps[j - 1]`, not `j = 0`. Setting `j = 0` misses overlapping occurrences.
@@ -831,19 +887,31 @@ For nodes near the root (short prefixes like "a", "the"), the completion subtree
 
 ### Trie Structure for ["cat", "car", "card", "care", "app", "apple"]
 
-```
-root
- +-- 'c'
- |    +-- 'a'
- |         +-- 't' [END: "cat"]
- |         +-- 'r' [END: "car"]
- |              +-- 'd' [END: "card"]
- |              +-- 'e' [END: "care"]
- +-- 'a'
-      +-- 'p'
-           +-- 'p' [END: "app"]
-                +-- 'l'
-                     +-- 'e' [END: "apple"]
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    troot(root) --> tc("'c'")
+    tc --> ta1("'a'")
+    ta1 --> tt(["'t'<br/>END cat"])
+    ta1 --> tr(["'r'<br/>END car"])
+    tr --> td(["'d'<br/>END card"])
+    tr --> te(["'e'<br/>END care"])
+    troot --> ta2("'a'")
+    ta2 --> tp1("'p'")
+    tp1 --> tp2(["'p'<br/>END app"])
+    tp2 --> tl("'l'")
+    tl --> te2(["'e'<br/>END apple"])
+
+    class troot base
+    class tc,ta1,ta2,tp1,tl mathOp
+    class tt,tr,td,te,tp2,te2 train
 ```
 
 Node count: 10 (root + 9 character nodes). Each node stores a dict of children.

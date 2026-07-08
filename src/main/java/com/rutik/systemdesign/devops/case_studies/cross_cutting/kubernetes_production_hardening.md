@@ -83,55 +83,122 @@ This file is the shared reference that the DevOps case studies — `design_kuber
 
 ## 5. Architecture Diagrams
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph HostNode["Node: 16 GiB allocatable"]
+        direction TB
+        P1("BestEffort pod<br/>no requests/limits<br/>1st killed")
+        P2("Burstable pod<br/>req 512Mi / lim 2Gi<br/>2nd, if over request")
+        P3("Burstable pod<br/>req 1Gi, no limit")
+        P4("Guaranteed pod<br/>req == lim 4Gi<br/>last killed")
+        P1 --> P2 --> P3 --> P4
+    end
+
+    HostNode --> Pressure{"pressure<br/>source?"}
+    Pressure -->|"node-level<br/>memory pressure"| Kubelet("kubelet<br/>soft eviction")
+    Pressure -->|"container over<br/>its own limit"| OOM("kernel cgroup<br/>OOM killer")
+    Kubelet --> EvictPod(["evict<br/>whole pod"])
+    OOM --> OOMKill(["OOMKilled<br/>restart per restartPolicy"])
+
+    class P1 lossN
+    class P2,P3 req
+    class P4 train
+    class Pressure,Kubelet,OOM mathOp
+    class EvictPod,OOMKill lossN
 ```
-                    NODE MEMORY PRESSURE -> kubelet eviction + kernel OOM
-                    ===================================================
 
-  Node: 16 GiB allocatable                      Eviction / OOM kill order
-  +------------------------------------------+   (worst victim first)
-  |  BestEffort pod  (no requests/limits)    |  <-- 1st killed
-  |  Burstable pod   (req 512Mi, lim 2Gi)    |  <-- 2nd, if over request
-  |  Burstable pod   (req 1Gi,  no limit)    |
-  |  Guaranteed pod  (req==lim 4Gi)          |  <-- last killed
-  +------------------------------------------+
-       |                         |
-       | kubelet soft eviction   | kernel cgroup OOM (container > mem limit)
-       | (node-level pressure)   | -> only that container's process killed
-       v                         v
-   evict whole pod          OOMKilled, restart per restartPolicy
+*A per-container OOMKill and a node-level kubelet eviction are two independent kill paths: the kernel's cgroup OOM killer fires the instant one container exceeds its own limit, while the kubelet evicts whole pods in QoS order — BestEffort first, Burstable-over-request second, Guaranteed last — only once the node's 16 GiB allocatable itself runs low.*
 
-  ----------------------------------------------------------------------
+```mermaid
+stateDiagram-v2
+    state "startupProbe running" as Startup
+    state "liveness + readiness active" as Active
+    state "removed from Service endpoints" as NoTraffic
+    state "container restarted" as Restart
 
-       PROBE STATE MACHINE (one container)
-       ====================================
+    [*] --> Startup: container start
+    Startup --> Restart: fail x failureThreshold
+    Restart --> Startup: restartPolicy
+    Startup --> Active: success
 
-   container start
-        |
-        v
-   [ startupProbe ]  --fail x failureThreshold--> RESTART
-        | success
-        v
-   liveness + readiness now active
-        |
-        +--> [ readinessProbe ] --fail--> remove from Service endpoints
-        |                          (no traffic, NO restart)
-        |
-        +--> [ livenessProbe ]  --fail x failureThreshold--> RESTART container
-
-  ----------------------------------------------------------------------
-
-       GRACEFUL SHUTDOWN TIMELINE (terminationGracePeriodSeconds: 30)
-       ==============================================================
-
-   t=0   Pod marked Terminating
-         |-- endpoints controller removes pod from Service (async!)
-         |-- preStop hook runs (e.g., sleep 5)  ----+
-         |                                          | overlap absorbs
-   t=5   SIGTERM sent to PID 1 <--------------------+ endpoint propagation
-         |-- app stops accepting new conns, drains in-flight
-   t<30  app exits cleanly  -> done
-   t=30  if still running -> SIGKILL (connections dropped)
+    Active --> NoTraffic: readinessProbe fails<br/>(no restart)
+    NoTraffic --> Active: readinessProbe<br/>passes again
+    Active --> Restart: livenessProbe fails<br/>x failureThreshold
 ```
+
+*A startupProbe failure restarts the container before liveness or readiness ever switch on; once active, a failing readinessProbe only pulls traffic and rejoins once healthy (no restart), while a failing livenessProbe restarts the container outright — conflating the two is what turns one slow dependency into a restart storm.*
+
+```mermaid
+sequenceDiagram
+    participant K as Kubelet
+    participant EC as Endpoints<br/>Controller
+    participant PS as preStop<br/>Hook
+    participant App as App
+
+    K->>K: t=0 pod marked Terminating
+    K-->>EC: begin removing pod from<br/>Service endpoints (async)
+    K->>PS: t=0 run preStop (sleep 5)
+    Note over EC,PS: overlap absorbs the<br/>endpoint-removal lag
+    PS-->>K: t=5 preStop done
+    K->>App: t=5 SIGTERM to PID 1
+    App->>App: stop accepting conns,<br/>drain in-flight requests
+    alt clean exit before t=30
+        App-->>K: exits cleanly
+    else still running at t=30
+        K->>App: SIGKILL
+        Note over App: connections dropped
+    end
+```
+
+*The preStop sleep buys time for the asynchronous endpoint removal to finish propagating before SIGTERM ever reaches the app; only a process still running when the 30-second terminationGracePeriodSeconds elapses gets SIGKILLed, dropping connections instead of draining them.*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req(["new pod request"]) --> LimRange("LimitRange<br/>default + per-pod cap")
+    LimRange --> RQ{"fits namespace<br/>ResourceQuota?"}
+    RQ -->|"no"| Reject(["rejected<br/>at admission"])
+    RQ -->|"yes"| Sched(["pod scheduled"])
+    Sched --> NetPol("NetworkPolicy<br/>default-deny")
+    NetPol -->|"explicit allow only"| Allowed(["traffic flows"])
+
+    Sched -.-> Trust{"untrusted or<br/>compliance tenant?"}
+    Trust -->|"yes: escalate"| Hard("hard isolation:<br/>node pool / cluster")
+    Trust -->|"no: shared OK"| Soft(["stays on<br/>shared nodes"])
+
+    class Req io
+    class LimRange,NetPol,RQ,Trust mathOp
+    class Reject lossN
+    class Sched,Allowed,Soft train
+    class Hard frozen
+```
+
+*Three walls gate every tenant workload — LimitRange caps the pod before it can even be created, ResourceQuota caps the namespace's total consumption, and a default-deny NetworkPolicy caps its traffic — while untrusted or compliance-bound tenants escalate past all three to hard isolation on separate node pools or clusters.*
+
+```mermaid
+xychart-beta
+    title "Pods schedulable per node: max-pods default vs. ENI IP ceiling"
+    x-axis ["m5.large, no prefix delegation", "Larger instances, no prefix delegation", "kubelet --max-pods default"]
+    y-axis "Pods per node" 0 --> 120
+    bar [29, 58, 110]
+```
+
+*The kubelet's configured ceiling of 110 pods/node is rarely the real limit on AWS: without prefix delegation, ENI IP capacity caps density at ~29 pods on an m5.large and up to ~58 on larger instance types, which is why pods stall in ContainerCreating long before the node looks full on CPU or memory.*
 
 ---
 

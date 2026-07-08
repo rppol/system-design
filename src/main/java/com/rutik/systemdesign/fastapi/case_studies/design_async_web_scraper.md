@@ -22,67 +22,64 @@ Build a web scraper that processes 10,000 product pages per hour from multiple e
 
 ## Architecture Overview
 
-```
-                         FastAPI Management API
-                        /       |        \
-                  POST /jobs  GET /jobs  DELETE /jobs/{id}
-                       |
-               +-----------------+
-               |   Job Manager   |  (asyncio.Task coordinator)
-               +-----------------+
-                       |
-                       v
-          +-------------------------+
-          |    URL Frontier         |
-          |  asyncio.Queue[str]     |  <-- seed URLs enqueued here
-          +-------------------------+
-                       |
-         +-------------+-------------+
-         |             |             |
-         v             v             v
-   +-----------+ +-----------+ +-----------+
-   | Consumer  | | Consumer  | | Consumer  |   (N=50 concurrent workers)
-   | Worker 0  | | Worker 1  | | Worker N  |
-   +-----------+ +-----------+ +-----------+
-         |             |             |
-         v             v             v
-   +-----------------------------------------------+
-   |          DomainRateLimiter                    |
-   |  per-domain asyncio.Semaphore + sleep(1/rate) |
-   +-----------------------------------------------+
-         |
-         v
-   +----------------------+
-   |  robots.txt Checker  |  (cached 1 hour per domain)
-   +----------------------+
-         |
-         v
-   +----------------------+
-   |   aiohttp Session    |  (shared ClientSession, connection pool)
-   +----------------------+
-         |
-         v
-   +----------------------+
-   |  Retry Decorator     |  (exponential backoff + jitter)
-   +----------------------+
-         |
-         v
-   +---------------------+        +-----------------+
-   |  HTML Parser        |        |  URL Dedup      |
-   |  (BeautifulSoup4)   |        |  Redis SADD     |
-   +---------------------+        +-----------------+
-         |
-         v
-   +---------------------+
-   |  DB Writer          |
-   |  asyncpg + insert   |
-   +---------------------+
-         |
-         v
-   +---------------------+
-   |  PostgreSQL         |
-   |  products table     |
-   +---------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    api([FastAPI Management API])
+    postJobs([POST /jobs])
+    getJobs([GET /jobs])
+    delJobs(["DELETE /jobs/{id}"])
+    jobMgr(Job Manager<br/>asyncio.Task coordinator)
+    frontier(URL Frontier<br/>asyncio.Queue)
+
+    subgraph pool ["Consumer Workers · N=50"]
+        w0(Consumer Worker 0)
+        w1(Consumer Worker 1)
+        wN(Consumer Worker N)
+    end
+
+    rateLimiter(DomainRateLimiter<br/>semaphore + politeness sleep)
+    robots(robots.txt Checker<br/>cached 1h per domain)
+    session(aiohttp Session<br/>shared connection pool)
+    retry(Retry Decorator<br/>backoff + jitter)
+    parser(HTML Parser<br/>BeautifulSoup4)
+    dedup[(URL Dedup<br/>Redis SADD)]
+    writer(DB Writer<br/>asyncpg upsert)
+    pg[(PostgreSQL<br/>products table)]
+
+    api --> postJobs
+    api --> getJobs
+    api --> delJobs
+    postJobs --> jobMgr
+    jobMgr --> frontier
+    frontier --> w0
+    frontier --> w1
+    frontier --> wN
+    w0 --> rateLimiter
+    w1 --> rateLimiter
+    wN --> rateLimiter
+    rateLimiter --> robots
+    robots --> session
+    session --> retry
+    retry --> parser
+    retry --> dedup
+    parser --> writer
+    dedup --> writer
+    writer --> pg
+
+    class api,postJobs,getJobs,delJobs io
+    class frontier,w0,w1,wN req
+    class jobMgr,rateLimiter,robots,retry,parser mathOp
+    class session frozen
+    class dedup,pg base
+    class writer train
 ```
 
 **Data flow:**
@@ -187,6 +184,54 @@ Not all failures deserve a retry:
 - **5xx**: server error — retry with exponential backoff.
 - **Connection errors / timeouts**: network transient — retry with backoff.
 
+The status code determines whether `fetch_with_retry` gives up immediately, waits for the server-specified cooldown, or backs off exponentially — the same branching the code below implements:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    attempt(["Send fetch request"])
+    status{"Response<br/>outcome?"}
+    ok(2xx success)
+    returnHtml(["Return HTML text"])
+    ret4xx(4xx except 429<br/>client error)
+    permFail(["Return None<br/>permanent, no retry"])
+    rl429(429<br/>too many requests)
+    waitRA(Wait Retry-After<br/>header seconds)
+    err5xx(5xx<br/>server error)
+    connErr(Connection error<br/>or timeout)
+    backoff(Exponential backoff<br/>2^attempt + jitter)
+    attemptsLeft{"Attempts<br/>remaining?"}
+    giveUp(["Return None<br/>attempts exhausted"])
+
+    attempt --> status
+    status --> ok
+    status --> ret4xx
+    status --> rl429
+    status --> err5xx
+    status --> connErr
+    ok --> returnHtml
+    ret4xx --> permFail
+    rl429 --> waitRA
+    err5xx --> backoff
+    connErr --> backoff
+    waitRA --> attemptsLeft
+    backoff --> attemptsLeft
+    attemptsLeft -.->|"yes"| attempt
+    attemptsLeft -->|"no"| giveUp
+
+    class attempt,returnHtml,permFail,giveUp io
+    class status,attemptsLeft,waitRA,backoff mathOp
+    class ok train
+    class ret4xx,rl429,err5xx,connErr lossN
+```
+
 ```python
 import random
 
@@ -248,6 +293,51 @@ class RobotsCache:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, parser.read)
         return parser
+```
+
+The cache serves a hot path when an entry is under 1 hour old, and only falls to the blocking `run_in_executor` fetch on a cold or stale domain — a failed fetch degrades safely to `allow_all` rather than blocking the crawl:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Check URL permission"])
+    cacheCheck{"Cached and<br/>under 1h old?"}
+    useCached(Use cached parser)
+    fetchNew(Fetch robots.txt<br/>via executor)
+    fetchOk{"Fetch<br/>succeeded?"}
+    cacheParser(Cache parser<br/>+ timestamp)
+    fallbackAllow(Fallback:<br/>allow_all = true)
+    permCheck{"parser.can_fetch<br/>user_agent, url"}
+    allowed(["Allowed<br/>fetch proceeds"])
+    disallowed(["Disallowed<br/>skip URL"])
+
+    start --> cacheCheck
+    cacheCheck -->|"yes"| useCached
+    cacheCheck -->|"no"| fetchNew
+    useCached --> permCheck
+    fetchNew --> fetchOk
+    fetchOk -->|"yes"| cacheParser
+    fetchOk -->|"no"| fallbackAllow
+    cacheParser --> permCheck
+    fallbackAllow --> permCheck
+    permCheck -->|"allowed"| allowed
+    permCheck -->|"blocked"| disallowed
+
+    class start io
+    class cacheCheck,fetchOk,permCheck mathOp
+    class useCached train
+    class fetchNew frozen
+    class cacheParser base
+    class fallbackAllow lossN
+    class allowed train
+    class disallowed lossN
 ```
 
 ---

@@ -31,46 +31,45 @@ Design a production-grade multi-tenant SaaS API for a project management tool wi
 
 ## Architecture Overview
 
-```
-                          ┌─────────────────────────────────────────────────────┐
-                          │                Load Balancer (L7)                   │
-                          └──────────────────────┬──────────────────────────────┘
-                                                 │  HTTPS
-                               ┌─────────────────▼─────────────────┐
-                               │        FastAPI Pod (x N)           │
-                               │                                     │
-                               │  1. JWTMiddleware                  │
-                               │     ├─ decode + validate JWT       │
-                               │     └─ attach TenantContext        │
-                               │                                     │
-                               │  2. get_tenant() dependency        │
-                               │     └─ extract tenant_id from ctx  │
-                               │                                     │
-                               │  3. get_db() dependency            │
-                               │     ├─ acquire AsyncSession        │
-                               │     └─ SET LOCAL app.tenant_id     │
-                               │         (RLS context variable)     │
-                               │                                     │
-                               │  4. get_current_user() dependency  │
-                               │     └─ load user + roles from DB   │
-                               │                                     │
-                               │  5. Route handler                  │
-                               │     └─ query projects / tasks      │
-                               └─────────────────┬─────────────────┘
-                                                 │ asyncpg
-                               ┌─────────────────▼─────────────────┐
-                               │       PostgreSQL (single DB)       │
-                               │                                     │
-                               │  tables: tenants, users, roles,   │
-                               │          projects, tasks           │
-                               │                                     │
-                               │  RLS policies:                     │
-                               │    projects: WHERE tenant_id =     │
-                               │      current_setting(             │
-                               │        'app.current_tenant_id')   │
-                               │                                     │
-                               │  Shared connection pool (asyncpg)  │
-                               └─────────────────────────────────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client"])
+    lb("Load Balancer (L7)")
+
+    subgraph pod["FastAPI Pod (x N)"]
+        direction LR
+        mw["1. JWTMiddleware<br/>decode + attach<br/>TenantContext"] --> gt["2. get_tenant()<br/>extract tenant_id"]
+        gt --> gdb["3. get_db()<br/>SET LOCAL<br/>app.tenant_id"]
+        gdb --> gcu["4. get_current_user()<br/>load user + roles"]
+        gcu --> rh["5. Route handler<br/>query projects / tasks"]
+    end
+
+    pg[("PostgreSQL<br/>single DB")]
+    tbl["tables: tenants, users,<br/>roles, projects, tasks"]
+    rls{"RLS policy<br/>tenant_id = current_setting(...)"}
+    pool[("Shared asyncpg<br/>connection pool")]
+
+    client -->|"HTTPS + Bearer JWT"| lb
+    lb --> mw
+    rh -->|"asyncpg"| pg
+    pg --> tbl
+    pg --> rls
+    pg --> pool
+
+    class client io
+    class lb req
+    class mw,gt,gcu mathOp
+    class gdb,rls lossN
+    class rh train
+    class pg,tbl,pool base
 ```
 
 **Request flow:**
@@ -93,6 +92,22 @@ Three options were considered:
 | Database-per-tenant | Strongest | Very High (500 DBs) | Impossible | Per-tenant |
 | Schema-per-tenant | Strong | High (500 schemas) | Limited | Per-tenant |
 | Row-Level Security (RLS) | Strong (DB-enforced) | Low (1 schema) | Full | Single migration |
+
+```mermaid
+quadrantChart
+    title Isolation Strength vs Operational Complexity
+    x-axis Low Complexity --> High Complexity
+    y-axis Weak Isolation --> Strong Isolation
+    quadrant-1 Strong but costly
+    quadrant-2 Ideal - strong and cheap
+    quadrant-3 Weak and cheap
+    quadrant-4 Weak but costly
+    "Database-per-tenant": [0.95, 0.97]
+    "Schema-per-tenant": [0.62, 0.78]
+    "RLS - chosen": [0.15, 0.82]
+```
+
+Plotting the same three strategies on isolation strength vs operational complexity shows RLS alone in the low-complexity, strong-isolation quadrant — schema- and database-per-tenant only buy marginal extra isolation for a much larger jump in ops cost at 500 tenants.
 
 **Decision: RLS with a PostgreSQL session variable.**
 
@@ -630,6 +645,37 @@ app = create_app()
 ### `SET LOCAL` vs `SET` (session-scoped)
 
 `SET` persists for the lifetime of the database session (connection). In a connection pool, a connection is reused across many requests. Using `SET` would mean tenant A's context bleeds into tenant B's request on the same connection. `SET LOCAL` is automatically reverted when the transaction ends, making it safe to share connections.
+
+```mermaid
+sequenceDiagram
+    participant A as Request 1 - Tenant A
+    participant Pool as Shared Pool
+    participant C as Connection C1
+    participant B as Request 2 - Tenant B
+
+    A->>Pool: acquire connection
+    Pool->>C: hand out C1
+    A->>C: set tenant context = A
+    A->>C: COMMIT
+    C-->>Pool: release C1
+
+    alt BROKEN - used SET, session-scoped
+        Note over C: tenant context = A still set
+        B->>Pool: acquire connection
+        Pool->>C: hand out C1, reused
+        B->>C: query projects, no new SET
+        C-->>B: Tenant A rows leaked
+    else FIX - used SET LOCAL, transaction-scoped
+        Note over C: tenant context reverted at commit
+        B->>Pool: acquire connection
+        Pool->>C: hand out C1, reused
+        B->>C: SET LOCAL tenant context = B
+        B->>C: query projects
+        C-->>B: Tenant B rows only
+    end
+```
+
+The same pooled connection `C1` is handed to a second, different tenant's request — `SET` leaves tenant A's context on the connection so tenant B's query is silently scoped to the wrong tenant, while `SET LOCAL` reverts at commit so tenant B starts clean.
 
 ### JWT claims vs subdomain resolution
 

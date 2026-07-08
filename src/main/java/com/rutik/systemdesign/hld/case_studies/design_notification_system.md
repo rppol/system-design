@@ -82,76 +82,95 @@
 
 ## 3. High-Level Architecture
 
-```
-+----------------+   +----------------+   +-------------------+
-| Order Service  |   |  Chat Service  |   | Marketing/Campaign |
-| (transactional)|   |  (transactional)  |   Service (broadcast) |
-+--------+-------+   +--------+-------+   +---------+----------+
-         |                     |                     |
-         +----------+----------+----------+----------+
-                    |
-                    v
-          +-----------------------+
-          |   Notification API    |  <-- async enqueue-ack (returns 202 immediately)
-          |  (validation, authn)  |
-          +-----------+-----------+
-                    |
-                    v
-          +-----------------------+
-          |  Preference Service   |  <-- opt-in/out + quiet-hours-by-timezone filter
-          |  (Redis cache + DB)   |
-          +-----------+-----------+
-                    | (passes filter)
-                    v
-          +-----------------------+
-          | Idempotency / Dedup   |  <-- Redis SETNX on
-          | Check (Redis SETNX)   |      hash(event_id+user_id+channel), 24h TTL
-          +-----------+-----------+
-                    | (not a duplicate)
-                    v
-          +-----------------------+
-          |    Priority Router    |  <-- transactional vs marketing/broadcast
-          +-----+----+----+----+--+
-                |    |    |    |
-        +-------+  +-+  +-+  +-+-------+
-        |          |    |            |
-        v          v    v            v
-   +--------+ +--------+ +--------+ +--------+
-   | Kafka  | | Kafka  | | Kafka  | | Kafka  |
-   | topic: | | topic: | | topic: | | topic: |
-   | push   | | sms    | | email  | | in-app |
-   +---+----+ +---+----+ +---+----+ +---+----+
-       |          |          |          |
-       v          v          v          v
-   +--------+ +--------+ +--------+ +--------+
-   | Push   | | SMS    | | Email  | | In-app |
-   | Worker | | Worker | | Worker | | Worker |
-   | Pool   | | Pool   | | Pool   | | Pool   |
-   +---+----+ +---+----+ +---+----+ +---+----+
-       |          |          |          |
-       | (token-bucket rate limiter + circuit breaker per provider)
-       v          v          v          v
-   +--------+ +--------+ +--------+ +--------+
-   | FCM /  | | Twilio | | SES /  | | WS Hub /
-   | APNs   | | / SNS  | | SendGrid| | Polling |
-   +---+----+ +---+----+ +---+----+ +---------+
-       |          |          |
-       +----------+----------+
-                  |
-       (async delivery-receipt webhooks)
-                  v
-       +------------------------+
-       |     Status DB          |  --> Kafka --> Data Warehouse
-       | (Cassandra/DynamoDB)   |      (analytics: open rates,
-       +------------------------+       delivery rates, CTR)
+*Three producer classes enter through one validate-preference-dedup-route pipeline; the Priority Router then fans out to four isolated per-channel Kafka-and-worker pipelines, each calling its own provider, with async delivery-receipt webhooks converging back on the Status DB.*
 
-   Supporting services (consulted by API / Router / Workers):
-   +------------------+      +----------------------+
-   | Template Service |      |   Scheduler           |
-   | (render +        |      |  (Redis sorted set by |
-   |  localization)   |      |   send-time, or       |
-   +------------------+      |   delayed Kafka topic)|
-                              +----------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Producers["Event Producers"]
+        Order(Order Service<br/>transactional)
+        Chat(Chat Service<br/>transactional)
+        Campaign(Marketing/Campaign<br/>broadcast)
+    end
+
+    NotifAPI([Notification API<br/>returns 202 Accepted])
+    PrefSvc{Preference Service<br/>opt-in/out + quiet hours}
+    DedupChk{Idempotency/Dedup<br/>Redis SETNX}
+    Router{Priority Router<br/>transactional vs marketing}
+
+    subgraph PushCh["Push Channel"]
+        KPush(Kafka topic:<br/>push)
+        WPush(Push Worker Pool)
+        KPush --> WPush
+    end
+    subgraph SmsCh["SMS Channel"]
+        KSms(Kafka topic:<br/>sms)
+        WSms(SMS Worker Pool)
+        KSms --> WSms
+    end
+    subgraph EmailCh["Email Channel"]
+        KEmail(Kafka topic:<br/>email)
+        WEmail(Email Worker Pool)
+        KEmail --> WEmail
+    end
+    subgraph InAppCh["In-App Channel"]
+        KInApp(Kafka topic:<br/>in-app)
+        WInApp(In-app Worker Pool)
+        KInApp --> WInApp
+    end
+
+    subgraph Providers["Third-Party Providers"]
+        FcmApns([FCM / APNs])
+        Twilio([Twilio / SNS])
+        Ses([SES / SendGrid])
+        WsHub([WS Hub / Polling])
+    end
+
+    StatusDB[(Status DB<br/>Cassandra/DynamoDB)]
+    Warehouse[(Data Warehouse<br/>open/delivery rates, CTR)]
+
+    subgraph Supporting["Supporting Services<br/>consulted by API / Router / Workers"]
+        TemplateSvc(Template Service<br/>render + localize)
+        SchedulerSvc(Scheduler<br/>delayed sends)
+    end
+
+    Order --> NotifAPI
+    Chat --> NotifAPI
+    Campaign --> NotifAPI
+    NotifAPI --> PrefSvc
+    PrefSvc -->|passes filter| DedupChk
+    DedupChk -->|not a duplicate| Router
+
+    Router --> KPush
+    Router --> KSms
+    Router --> KEmail
+    Router --> KInApp
+
+    WPush -->|rate limiter + breaker| FcmApns
+    WSms -->|rate limiter + breaker| Twilio
+    WEmail -->|rate limiter + breaker| Ses
+    WInApp -->|rate limiter + breaker| WsHub
+
+    FcmApns -.->|async webhook| StatusDB
+    Twilio -.->|async webhook| StatusDB
+    Ses -.->|async webhook| StatusDB
+
+    StatusDB -->|via Kafka| Warehouse
+
+    class Order,Chat,Campaign io
+    class NotifAPI req
+    class PrefSvc,DedupChk,Router mathOp
+    class KPush,KSms,KEmail,KInApp req
+    class WPush,WSms,WEmail,WInApp train
+    class FcmApns,Twilio,Ses,WsHub frozen
+    class StatusDB,Warehouse,TemplateSvc,SchedulerSvc base
 ```
 
 **Request flow (transactional)**: Order Service publishes "order shipped" -> Notification API validates and returns `202 Accepted` with a `notification_id` (async enqueue-ack, not synchronous send) -> Preference Service checks the user opted into "order updates" on push+email and that it's not within quiet hours -> Dedup check via Redis `SETNX` -> Priority Router places it on the **transactional** partition of the `push` and `email` Kafka topics -> Channel workers pick it up, apply the per-provider token-bucket rate limiter, call FCM/SES -> provider returns a message ID -> async webhook later confirms delivery -> Status DB updated.
@@ -252,6 +271,48 @@ CREATE TABLE user_quiet_hours (
 2. **Quiet hours check**: For non-critical categories, compute the user's current local time from `timezone` (an IANA name, e.g. `Asia/Kolkata`) and compare against `[quiet_start, quiet_end)`, handling the wrap-around case (e.g., 22:00-08:00 spans midnight). If inside quiet hours:
    - **Transactional but non-critical** (e.g., "your delivery is 10 minutes away"): hold and re-evaluate at `quiet_end`, OR downgrade to in-app-only (silent, no push sound/vibration).
    - **Marketing/broadcast**: defer to the next non-quiet window for that user (the Scheduler, §4.5, handles this).
+
+The decision logic above forms a small branching flow, mirroring `PreferenceFilter.evaluate()` below:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Notif([Incoming notification])
+    Critical{security or<br/>transactional_critical?}
+    OptIn{opted in to this<br/>category + channel?}
+    Quiet{currently in<br/>quiet hours?}
+    Priority{transactional or<br/>marketing?}
+
+    SendNow([Send now])
+    Suppress([Suppress])
+    Downgrade([Send now,<br/>downgrade to silent in-app])
+    Defer([Defer until<br/>quiet hours end])
+
+    Notif --> Critical
+    Critical -->|bypass checks| SendNow
+    Critical -->|not critical| OptIn
+    OptIn -->|opted out| Suppress
+    OptIn -->|opted in| Quiet
+    Quiet -->|outside window| SendNow
+    Quiet -->|inside window| Priority
+    Priority -->|transactional| Downgrade
+    Priority -->|marketing| Defer
+
+    class Notif io
+    class Critical,OptIn,Quiet,Priority mathOp
+    class SendNow,Downgrade train
+    class Suppress lossN
+    class Defer frozen
+```
+
+Critical categories bypass every check; everything else is subject to opt-out, then quiet hours — where marketing traffic defers to the next window but non-critical transactional traffic is instead downgraded to a silent in-app send, as implemented below.
 
 ```java
 import java.time.*;
@@ -494,6 +555,40 @@ Batch size: 500 tokens/FCM request
 => 100,000,000 / 145,000 = 689.7 sec ≈ 11.5 minutes to fully drain
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Segment([100M-user segment<br/>streamed, not materialized])
+    Producer(Fan-out Producer<br/>token bucket, 145K/sec cap)
+    Topic(push.marketing<br/>Kafka topic)
+    Workers(Push Worker Pool)
+    Fcm([FCM batch API<br/>500 tokens/request])
+    LagMonitor{consumer lag<br/>over 2 min?}
+
+    Segment --> Producer
+    Producer -->|paced enqueue| Topic
+    Topic --> Workers
+    Workers -->|290 batches/sec| Fcm
+    Topic -.->|lag reading| LagMonitor
+    LagMonitor -.->|yes, slow down| Producer
+
+    class Segment io
+    class Producer mathOp
+    class Topic req
+    class Workers train
+    class Fcm frozen
+    class LagMonitor mathOp
+```
+
+The fan-out producer's token bucket caps its enqueue rate at the shared 145,000 msgs/sec peak budget, and a feedback loop watching `push.marketing` consumer lag slows it further if a backlog builds — the exact mechanism War Story 2 (§9) shows the cost of skipping.
+
 ---
 
 ### 4.6 Delivery Tracking via Async Provider Webhooks
@@ -505,21 +600,55 @@ Providers don't deliver synchronously — `sendSms()` / FCM's send call returns 
 - **Twilio**: status callback webhook (`queued -> sent -> delivered -> failed/undelivered`) posted to a configured URL per message.
 - **SES**: SNS-based notifications for `Delivery`, `Bounce`, `Complaint` events.
 
+*Every channel's webhook vocabulary above collapses into one lifecycle: a notification enters at Queued (the API's `202 Accepted`), reaches Sent once a worker clears the rate limiter and calls the provider (§4.4), and from there either completes the happy path from §1 (`queued -> sent -> delivered -> opened/clicked`) or terminates early in a provider-reported Failed, Bounced, or Complaint state.*
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued
+    Queued --> Sent: worker calls provider
+    Sent --> Delivered: provider confirms<br/>acceptance or delivery
+    Sent --> Failed: permanent failure,<br/>e.g. invalid token
+    Sent --> Bounced: SES bounce or<br/>Twilio undelivered
+    Delivered --> Opened: user opens or clicks,<br/>if channel supports it
+    Delivered --> Complaint: SES spam complaint
+    Opened --> [*]
+    Delivered --> [*]
+    Failed --> [*]
+    Bounced --> [*]
+    Complaint --> [*]
+
+    note right of Sent: rate limiter and circuit<br/>breaker already passed here
+    note right of Delivered: terminal for channels with<br/>no open/click telemetry
 ```
-Provider Webhook Receiver (stateless HTTP endpoint, behind LB)
-    |
-    | 1. Validate webhook signature (per-provider HMAC/cert check)
-    | 2. Extract provider_message_id + new status
-    | 3. Look up notification_id via provider_message_id -> notification_id index
-    | 4. Publish status-change event to Kafka (notifications.delivery_status)
-    v
-Status DB Consumer
-    |
-    | Update Status DB: notification_id -> status, delivered_at
-    v
-Analytics Pipeline (Kafka -> Warehouse)
-    |
-    | Aggregate: delivery rate, bounce rate, open rate per template/campaign
+
+*A stateless webhook receiver validates each provider's callback and republishes the status change onto Kafka; independent consumers update the Status DB and roll the same event into delivery/bounce/open-rate analytics.*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Webhook([Provider Webhook Receiver<br/>stateless, behind LB])
+    Consumer(Status DB Consumer<br/>validate + extract + lookup)
+    StatusDB[(Status DB)]
+    Analytics(Analytics Pipeline<br/>aggregate rates)
+    Warehouse[(Data Warehouse)]
+
+    Webhook -.->|publish status-change<br/>event via Kafka| Consumer
+    Consumer -->|update notification_id,<br/>status + delivered_at| StatusDB
+    StatusDB -.->|via Kafka| Analytics
+    Analytics --> Warehouse
+
+    class Webhook req
+    class Consumer train
+    class StatusDB base
+    class Analytics mathOp
+    class Warehouse base
 ```
 
 The **Status DB** (Cassandra/DynamoDB, partitioned by `notification_id`) is the source of truth for "what happened to notification X" — used for support tickets ("did my order-shipped email go out?"), producer-facing delivery APIs, and feeding the analytics warehouse for dashboards (campaign open rates, channel-level delivery SLAs).
@@ -631,6 +760,39 @@ Following the RED method (Rate, Errors, Duration) — see [`../observability/REA
    - If workers are under-provisioned: scale out the consumer group (Kafka partitions already provisioned for headroom — §10 — so this is a quick horizontal scale, not a repartitioning operation).
    - If the provider is degraded: check circuit-breaker state; if open, confirm failover path (e.g., FCM degraded has no clean failover for Android push — mitigation here is queueing and waiting, with user-facing impact communicated).
 4. **Verify**: Lag trending back toward zero; p99 latency back under 5s.
+
+*Triage branches first on worker health, then — only if workers are fine — on the circuit breaker's state (§4.4); both mitigation paths converge on the same lag-and-latency check the Verify step performs.*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Page(["push.transactional<br/>lag over 5 min: page fires"])
+    Triage{workers healthy?}
+    Breaker{circuit breaker<br/>open?}
+    ScaleOut([Scale out<br/>consumer group])
+    Failover([Failover, or queue<br/>and wait if none exists])
+    Verify([Lag to zero,<br/>p99 under 5s])
+
+    Page --> Triage
+    Triage -->|"no: under-provisioned"| ScaleOut
+    Triage -->|"yes: bottleneck<br/>is downstream"| Breaker
+    Breaker -->|"open: provider degraded"| Failover
+    Breaker -->|"closed: limiter<br/>set too low"| ScaleOut
+    ScaleOut --> Verify
+    Failover --> Verify
+
+    class Page lossN
+    class Triage,Breaker mathOp
+    class ScaleOut,Verify train
+    class Failover frozen
+```
 
 ---
 

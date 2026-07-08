@@ -123,6 +123,15 @@ Realistic working set (hot + 90-day retention) ≈ 4 PB after GC of stale tags.
 
 S3 Standard at $0.023/GB-month → 4 PB = 4,194,304 GB × $0.023 = **$96,468/month** for hot blobs. Tiering 70% to S3-IA ($0.0125/GB) and 20% to Glacier IR drops this to ~$55,000/month.
 
+```mermaid
+pie showData title Hot Blob Storage Tier Mix - 4 PB Working Set
+    "S3 Standard - 10%" : 10
+    "S3-IA - 70%" : 70
+    "Glacier IR - 20%" : 20
+```
+
+The tier mix, not raw capacity, drives the bill: shifting 90% of the 4 PB working set off S3 Standard turns a flat $96,468/month into a blended ~$55,000/month.
+
 ### Egress cost
 
 ```
@@ -148,64 +157,72 @@ At 1.4/sec peak × 30 s = 42 concurrent scans needed → fleet of ~50 scan worke
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CI(["CI / Buildkit<br/>push image"])
+    Auth("Auth / OIDC<br/>+ RBAC")
+    RL("Rate Limiter<br/>Redis token-bucket")
+
+    subgraph ORIGIN["Origin Region us-east-1"]
+        API("Registry API<br/>OCI /v2/...")
+        DB("Manifest DB<br/>Postgres: tags,<br/>manifests, scan status")
+        S3B("S3 Blob Store<br/>content-addressed")
+        SQS("Scan Queue<br/>SQS")
+        TRIVY("Trivy Workers<br/>vuln scan")
+        SIGN("cosign sign<br/>keyless, Fulcio")
+        REKOR("Rekor<br/>transparency log")
+    end
+
+    subgraph EUWEST["Region eu-west-1"]
+        CACHE1("Pull-through cache<br/>Zot / Harbor proxy")
+        K8S1("K8s clusters<br/>kubelet pull")
+        ADM1{"Admission Controller<br/>verify sig + issuer/subject"}
+    end
+
+    subgraph APSE["Region ap-southeast-1"]
+        CACHE2("Pull-through cache")
+        K8S2("K8s clusters")
+        ADM2{"Admission Controller<br/>verify sig + issuer/subject"}
+    end
+
+    MORE(["+ more regions"])
+
+    CI -->|push| API
+    Auth -->|token| API
+    API -->|rate-limit check| RL
+    API --> DB
+    API -->|PUT/GET by digest| S3B
+    S3B -.->|on push event| SQS
+    SQS --> TRIVY
+    TRIVY -->|results| DB
+    CI -.->|cosign sign step| SIGN
+    SIGN --> REKOR
+    DB -.->|replicate async<br/>$0.02/GB| CACHE1
+    DB -.->|replicate async| CACHE2
+    DB -.-> MORE
+    CACHE1 -->|pull, 98% cache hit| K8S1
+    CACHE2 -->|pull, 98% cache hit| K8S2
+    K8S1 --> ADM1
+    K8S2 --> ADM2
+
+    class CI,Auth io
+    class RL,SQS req
+    class API mathOp
+    class DB,S3B,CACHE1,CACHE2 base
+    class TRIVY,K8S1,K8S2 train
+    class SIGN,REKOR,MORE frozen
+    class ADM1,ADM2 lossN
 ```
-                                  ┌──────────────────────────────────────────┐
-   CI / Buildkit                  │              ORIGIN REGION (us-east-1)     │
-   (push image) ───push──────────►│                                            │
-                                  │  ┌────────────┐    ┌──────────────────┐    │
-                                  │  │  Registry  │    │  Manifest DB     │    │
-                                  │  │  API (OCI) ├───►│  (Postgres):     │    │
-   ┌────────────┐                 │  │  /v2/...   │    │  tags, manifests,│    │
-   │ Auth /     │◄──token─────────┤  │            │    │  blob refs, scan │    │
-   │ OIDC + RBAC│                 │  └─────┬──────┘    │  status, sigs    │    │
-   └────────────┘                 │        │           └──────────────────┘    │
-                                  │        │ blob PUT/GET (by digest)          │
-                                  │        ▼                                    │
-   ┌────────────┐  rate-limit     │  ┌────────────────────────────────────┐    │
-   │ Rate Limiter│◄───────────────┤  │  S3 Blob Store (content-addressed) │    │
-   │ (Redis tok-  │                │  │  blobs/sha256/ab/abcd...           │    │
-   │  bucket)     │                │  │  immutable, 11-nines durable       │    │
-   └────────────┘                 │  └────────────────────────────────────┘    │
-                                  │        │ on push event                     │
-                                  │        ▼                                    │
-                                  │  ┌────────────┐   ┌──────────────────┐     │
-                                  │  │ Scan Queue ├──►│ Trivy Workers     │     │
-                                  │  │ (SQS)      │   │ (vuln scan)       │     │
-                                  │  └────────────┘   └────────┬─────────┘     │
-                                  │                            │ results        │
-                                  │  ┌────────────┐            ▼                │
-                                  │  │ cosign sign│──► Rekor (transparency log) │
-                                  │  │ (keyless,  │    + Fulcio (cert)          │
-                                  │  │  Fulcio)   │                             │
-                                  │  └────────────┘                             │
-                                  │        │ replicate (async)                  │
-                                  └────────┼───────────────────────────────────┘
-                                           │ cross-region replication ($0.02/GB)
-              ┌────────────────────────────┼───────────────────────────────┐
-              ▼                            ▼                                ▼
-   ┌──────────────────┐        ┌──────────────────┐           ┌──────────────────┐
-   │ REGION eu-west-1 │        │ REGION ap-se-1   │           │   (more regions) │
-   │ ┌──────────────┐ │        │ ┌──────────────┐ │           │                  │
-   │ │ Pull-through │ │        │ │ Pull-through │ │           │                  │
-   │ │ cache (Zot/  │ │        │ │ cache        │ │           │                  │
-   │ │ Harbor proxy)│ │        │ │              │ │           │                  │
-   │ └──────┬───────┘ │        │ └──────┬───────┘ │           │                  │
-   └────────┼─────────┘        └────────┼─────────┘           └──────────────────┘
-            │ pull (98% cache hit)      │
-            ▼                           ▼
-   ┌──────────────────┐        ┌──────────────────┐
-   │ K8s clusters     │        │ K8s clusters     │
-   │ (kubelet pull)   │        │                  │
-   │   │              │        │                  │
-   │   ▼              │        │                  │
-   │ ┌──────────────┐ │        │                  │
-   │ │ Admission    │ │        │  Admission       │
-   │ │ Controller   │ │        │  verifies cosign │
-   │ │ verify sig + │ │        │  sig + issuer +  │
-   │ │ issuer/subj  │ │        │  subject         │
-   │ └──────────────┘ │        │                  │
-   └──────────────────┘        └──────────────────┘
-```
+
+Push, scan, sign, and replication all happen inside the origin region; each downstream region runs only a thin pull-through cache and its own admission controller, so a pull crosses a region boundary just once per image — the 98% cache-hit path — instead of on every request.
 
 ### Component inventory
 
@@ -232,22 +249,70 @@ At 1.4/sec peak × 30 s = 42 concurrent scans needed → fleet of ~50 scan worke
 5. **Pull.** A kubelet in eu-west-1 pulls from the regional pull-through cache. Cache hit (98%) serves from local S3/disk; miss fetches from origin and caches.
 6. **Admit.** Before the pod runs, the admission controller verifies the cosign signature, pinning the **issuer** (`https://token.actions.githubusercontent.com`) and **subject** (the exact CI workflow identity). Unsigned or wrong-signer images are rejected.
 
+The six steps above read as a straight line, but every stage has a reject branch — an image can die at scan, at the promotion gate, or at admission, and only a digest that clears all three ever reaches a running pod:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Pushed
+    Pushed --> Scanning: async Trivy scan
+    Scanning --> ScanFailed: CRITICAL/HIGH unfixed
+    Scanning --> ScanPassed: no CRITICAL unfixed
+    ScanFailed --> [*]: blocked in dev
+    ScanPassed --> Signed: cosign keyless + Rekor log
+    Signed --> PromotionGate: scan pass AND signature present
+    PromotionGate --> Rejected: wrong signer or unscanned digest
+    PromotionGate --> Promoted: issuer + subject pinned, verified
+    Promoted --> Replicated: async cross-region copy
+    Replicated --> Cached: pull-through cache, first miss
+    Cached --> AdmissionCheck: kubelet pull, pod admit
+    AdmissionCheck --> Rejected: signer identity not pinned
+    AdmissionCheck --> Running: signature + issuer/subject verified
+    Rejected --> [*]
+    Running --> [*]
+
+    class Pushed io
+    class Scanning,ScanPassed,Promoted,Running train
+    class Signed,Replicated frozen
+    class Cached base
+    class PromotionGate,AdmissionCheck mathOp
+    class ScanFailed,Rejected lossN
+```
+
+This is exactly the branching that Common Pitfalls #3 and #4 (§9) violate: a signature-exists check with no signer pinning, and a promotion gate keyed on tag instead of digest, both let an image slip past a gate straight to `Running` without ever really clearing it.
+
 ### Push sequence (digest-addressed, dedup-aware)
 
-```
-CI                          Registry API                S3            Postgres
- │  POST /v2/app/blobs/uploads/   │                       │              │
- │ ─────────────────────────────►│  202 + upload uuid    │              │
- │  HEAD blob sha256:L1          │                       │              │
- │ ─────────────────────────────►│ ── HEAD blobs/L1 ────►│ (exists?)    │
- │ ◄──────── 200 (skip!) ────────│ ◄──── yes ────────────│              │
- │  PATCH/PUT layer L2 (new)     │                       │              │
- │ ─────────────────────────────►│ ── stream + verify ──►│ commit L2    │
- │                               │ ──────────────────────│──UpsertRef──►│
- │  PUT manifest (refs L1,L2,cfg)│                       │              │
- │ ─────────────────────────────►│ ── store manifest ────│─────────────►│
- │ ◄──── 201 + Docker-Content-Digest ────────────────────│              │
- │                               │ emit push event → SQS (scan)         │
+```mermaid
+sequenceDiagram
+    participant CI
+    participant API as Registry API
+    participant S3
+    participant PG as Postgres
+
+    CI->>API: POST /v2/app/blobs/uploads/
+    API-->>CI: 202 + upload uuid
+    CI->>API: HEAD blob sha256:L1
+    API->>S3: HEAD blobs/L1
+    S3-->>API: exists = yes
+    API-->>CI: 200 (skip!)
+    CI->>API: PATCH/PUT layer L2 (new)
+    API->>S3: stream + verify digest
+    S3-->>API: commit L2
+    API->>PG: UpsertBlobRef(L2)
+    CI->>API: PUT manifest (refs L1, L2, cfg)
+    API->>S3: store manifest body
+    API->>PG: insert manifest row
+    API-->>CI: 201 + Docker-Content-Digest
+    Note over API,PG: emit push event to SQS scan queue
 ```
 
 Only **new** layers cross the wire; L1 was deduped by a single `HEAD`. A typical 8-layer push uploads 1-2 layers in practice.
@@ -349,13 +414,31 @@ func (r *Registry) GetManifest(ctx context.Context, repo, ref string) ([]byte, s
 
 ### 4.2 Scan pipeline (Trivy) + promotion gate
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["push event"]) --> B("SQS scan queue")
+    B --> C("Trivy worker pool")
+    C --> D("scan_results<br/>Postgres")
+    D --> E{"promotion gate:<br/>query scan_status"}
+    E -.->|"fail: CRITICAL/HIGH<br/>unfixed present"| F("promotion blocked")
+
+    class A io
+    class B req
+    class C train
+    class D base
+    class E mathOp
+    class F lossN
 ```
-  push event ─► SQS scan queue ─► Trivy worker pool ─► scan_results (Postgres)
-                                        │
-                                        ▼
-                          promotion gate: query scan_status
-                          (FAIL if CRITICAL/HIGH unfixed > 0)
-```
+
+Every push triggers an async scan; the gate reads `scan_status` at promotion time and blocks any digest with an unresolved CRITICAL or HIGH finding.
 
 Trivy worker (Bash, runs in the worker container):
 
@@ -656,10 +739,28 @@ Rule of thumb: **Harbor as origin** (policy, scan, sign, replicate), **Zot as th
 
 The promotion pipeline is a hard gate keyed on the **image digest** (immutable), never the tag:
 
-```
-dev push ─► async Trivy scan ─► cosign sign (keyless) ─► [GATE] ─► prod copy
-                                                           │
-            GATE passes ⇔  scan_status(digest)==pass  AND  cosign verify (issuer+subject)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A(["dev push"]) --> B("async Trivy scan")
+    B --> C("cosign sign<br/>keyless")
+    C --> D{"GATE:<br/>scan pass AND<br/>signature verified"}
+    D -->|pass| E("prod copy")
+    D -.->|fail| F("blocked")
+
+    class A io
+    class B train
+    class C frozen
+    class D mathOp
+    class E train
+    class F lossN
 ```
 
 Implementation is the `promote.yml` snippet in §4.2 + the pinned `cosign verify` in §4.3. The gate runs in CI and is double-enforced by the admission controller at the cluster — defense in depth, so a bypassed CI gate still can't run an unsigned image. See [`../devsecops_and_supply_chain_security/README.md`](../devsecops_and_supply_chain_security/README.md).

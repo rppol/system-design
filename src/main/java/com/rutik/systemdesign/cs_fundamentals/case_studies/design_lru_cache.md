@@ -162,41 +162,100 @@ The doubly-linked list is ordered by recency: head ↔ most recently used; tail 
 
 Instead of handling null-pointer edge cases on every insert/remove, use two sentinel (dummy) nodes: `head` and `tail`. The real data lives between them. This eliminates all conditional logic in `_add` and `_remove`.
 
-```
- head (dummy)  <--> [node A] <--> [node B] <--> [node C] <-->  tail (dummy)
-  MRU side                                                       LRU side
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    H(["head<br/>sentinel"]) --> A("node A") --> B("node B") --> C("node C") --> T(["tail<br/>sentinel"])
+
+    class H,T base
+    class A train
+    class B req
+    class C lossN
 ```
 
+*Green sits next to head (most recently used); red sits next to tail (least recently used) — the next eviction target.*
+
 After `get(B)` — B becomes MRU:
-```
- head (dummy)  <--> [node B] <--> [node A] <--> [node C] <-->  tail (dummy)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    H(["head<br/>sentinel"]) --> B("node B") --> A("node A") --> C("node C") --> T(["tail<br/>sentinel"])
+
+    class H,T base
+    class B train
+    class A req
+    class C lossN
 ```
 
 After `put(D)` when at capacity — C (LRU = tail.prev) is evicted, D inserted at head:
-```
- head (dummy)  <--> [node D] <--> [node B] <--> [node A] <-->  tail (dummy)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    H(["head<br/>sentinel"]) --> D("node D") --> B("node B") --> A("node A") --> T(["tail<br/>sentinel"])
+
+    class H,T base
+    class D train
+    class B req
+    class A lossN
 ```
 
 ### ASCII Diagram: HashMap + Doubly-Linked List
 
-```
-HashMap (key → Node pointer)
-+-----+      +-----+      +-----+
-|  A  |----> | Node|      | Node|
-|  B  |----> | Node|      | Node|
-|  C  |----> | Node|      | Node|
-+-----+      +-----+      +-----+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Doubly-Linked List (MRU ... LRU):
+    subgraph MAP["HashMap: key to Node pointer"]
+        direction LR
+        KA(["key A"])
+        KB(["key B"])
+        KD(["key D"])
+    end
 
-         [prev]          [prev]          [prev]          [prev]
- [head] <======> [node D] <======> [node B] <======> [node A] <======> [tail]
- (dummy)         key=D,val=4       key=B,val=2       key=A,val=1       (dummy)
-                  [next]            [next]             [next]
-                  
- head.next = MRU (most recently used)
- tail.prev = LRU (least recently used)  ← evict this one
+    subgraph LIST["Doubly-Linked List: MRU to LRU"]
+        direction LR
+        HEAD(["head<br/>sentinel"]) --> ND("node D<br/>val 4") --> NB("node B<br/>val 2") --> NA("node A<br/>val 1") --> TAIL(["tail<br/>sentinel"])
+    end
+
+    KA -.-> NA
+    KB -.-> NB
+    KD -.-> ND
+
+    class KA,KB,KD mathOp
+    class HEAD,TAIL base
+    class ND train
+    class NB req
+    class NA lossN
 ```
+
+`head.next` is the MRU node (green); `tail.prev` is the LRU node (red) — the next eviction target. HashMap entries (orange) hold O(1) pointers straight to their list node, shown as dotted references, so both `get` and `put` never scan.
 
 ### Algorithm
 
@@ -210,6 +269,41 @@ Doubly-Linked List (MRU ... LRU):
 2. Else:
    a. If len == capacity → remove `tail.prev` from list, remove its key from map
    b. Create new node, insert at head, add to map
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph GET["get lookup"]
+        direction LR
+        G0(["get call"]) --> G1{"key in map?"}
+        G1 -->|no| G2(["return -1"])
+        G1 -->|yes| G3("move node to head") --> G4(["return val"])
+    end
+
+    subgraph PUT["put insert or update"]
+        direction LR
+        P0(["put call"]) --> P1{"key in map?"}
+        P1 -->|yes| P2("update val<br/>move to head")
+        P1 -->|no| P3{"at capacity?"}
+        P3 -->|yes| P4("evict tail.prev<br/>remove from map")
+        P3 -->|no| P5("create node<br/>insert at head")
+        P4 --> P5
+    end
+
+    class G0,G4,P0 io
+    class G1,P1,P3 mathOp
+    class G2,P4 lossN
+    class G3,P2,P5 train
+```
+
+`get` is a hit-or-miss branch that promotes the node on success; `put` branches on whether the key already exists, then on whether the cache is full, before it ever touches the list — eviction (red) fires only on the insert path once the cache is at capacity.
 
 ---
 
@@ -538,6 +632,28 @@ A single-node LRU cache does not scale to millions of keys or multiple applicati
 - **Cross-shard eviction**: not needed — each shard manages its own capacity
 
 Redis implements this model with the `maxmemory-policy lru` setting.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    C(["client<br/>get / put key"]) --> H{"hash(key) mod N"}
+    H -->|shard 0| S0(["LRU shard 0"])
+    H -->|shard 1| S1(["LRU shard 1"])
+    H -->|shard N-1| SN(["LRU shard N-1"])
+
+    class C io
+    class H mathOp
+    class S0,S1,SN base
+```
+
+Consistent hashing routes each key to exactly one shard; every shard is a self-contained LRU with its own capacity, so eviction never crosses shard boundaries — this is the model behind Redis Cluster's `maxmemory-policy lru`.
 
 ### Variation 4: Thread-Safe LRU with Read/Write Lock
 

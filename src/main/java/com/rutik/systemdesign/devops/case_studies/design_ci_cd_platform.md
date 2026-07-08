@@ -144,51 +144,72 @@ Spot pricing and right-sizing the dominant lever; see §10 and [../cloud_cost_op
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    gh(["GitHub / GitLab<br/>webhooks"])
+
+    subgraph CP["Control Plane (stateless, 99.9%)"]
+        direction LR
+        ingress(["Webhook Ingress<br/>dedup, HMAC verify"])
+        compiler("Pipeline Compiler<br/>YAML to DAG, needs edges")
+        scheduler("Scheduler / Job Planner<br/>topo sort, fan-out/in")
+        jqueue("Job Queue<br/>Postgres + Redis")
+        ingress --> compiler --> scheduler --> jqueue
+    end
+
+    subgraph DP["Data Plane (ephemeral, hostile)"]
+        direction LR
+        autoscaler{"Runner Autoscaler<br/>KEDA + HPA on queue depth"}
+        controller("Runner Controller<br/>ARC / custom operator")
+        runners("Ephemeral Runner Pods<br/>single-use · gVisor/Kata/Firecracker")
+        autoscaler -->|"provisions"| controller --> runners
+    end
+
+    subgraph ST["State and Storage"]
+        direction LR
+        pg("Postgres<br/>jobs, DAG, tenant config")
+        rds("Redis<br/>queue, locks")
+        s3art("S3<br/>artifacts 1.4 PB")
+        s3cache("S3/EFS<br/>cache 6 TB")
+        logs("Loki/S3<br/>logs 105 TB")
+        vault("Vault<br/>secrets")
+    end
+
+    subgraph SVC["Shared Data-Plane Services"]
+        direction LR
+        cacheproxy("Cache Proxy<br/>keyed by lockfile hash")
+        artifactapi(["Artifact API<br/>presigned S3 PUT/GET"])
+        secretsbroker("Secrets Broker<br/>short-TTL tokens")
+    end
+
+    gh -->|"push"| ingress
+    jqueue -->|"pull dispatch"| autoscaler
+    jqueue -.->|"state / logs"| ST
+    runners --> cacheproxy
+    runners --> artifactapi
+    runners --> secretsbroker
+
+    class gh io
+    class ingress req
+    class compiler,scheduler mathOp
+    class jqueue base
+    class autoscaler mathOp
+    class controller train
+    class runners frozen
+    class pg,rds,s3art,s3cache,logs,vault base
+    class cacheproxy,secretsbroker mathOp
+    class artifactapi req
 ```
-                            ┌──────────────────────────────────────────────────────────┐
-   GitHub / GitLab  ─push─▶ │                    CONTROL PLANE (stateless, 99.9%)        │
-   webhooks                 │                                                            │
-        │                   │   ┌────────────┐   ┌──────────────┐   ┌────────────────┐  │
-        └──────HTTPS───────▶│   │  Webhook   │──▶│   Pipeline   │──▶│   Scheduler /   │ │
-                            │   │  Ingress   │   │   Compiler   │   │   Job Planner   │ │
-                            │   │ (dedup,    │   │ (YAML → DAG, │   │ (topo sort,     │ │
-                            │   │  HMAC verify)  │  needs: edges)│   │  fan-out/in)    │ │
-                            │   └────────────┘   └──────────────┘   └───────┬─────────┘  │
-                            │                                               │            │
-                            │   ┌──────────────────────────────────────────▼─────────┐  │
-                            │   │            Job Queue (per-tenant fair queues)        │ │
-                            │   │     Postgres (durable state) + Redis (hot queue)     │ │
-                            │   └───────┬──────────────────────────────────┬──────────┘  │
-                            │           │ (pull dispatch)                  │ state/logs  │
-                            └───────────┼──────────────────────────────────┼─────────────┘
-                                        │                                  │
-        ┌───────────────────────────────▼──────────────┐      ┌───────────▼─────────────┐
-        │             DATA PLANE (ephemeral, hostile)    │      │     STATE & STORAGE     │
-        │                                                │      │                         │
-        │  ┌─────────────────┐   Runner Controller       │      │  Postgres (jobs, DAG,   │
-        │  │ Runner Autoscaler│─ (ARC / custom operator) │      │   tenant config)        │
-        │  │  (KEDA + HPA on  │   watches queue depth     │      │  Redis (queue, locks)   │
-        │  │   queue depth)   │                           │      │  S3 (artifacts 1.4 PB)  │
-        │  └────────┬─────────┘                           │      │  S3/EFS (cache 6 TB)    │
-        │           │ provisions                          │      │  Loki/S3 (logs 105 TB)  │
-        │           ▼                                     │      │  Vault (secrets)        │
-        │  ┌───────────────────────────────────────────┐ │      └─────────────────────────┘
-        │  │  Ephemeral Runner Pods (single-use)        │ │
-        │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐    │ │      gVisor / Kata / Firecracker
-        │  │  │ runner-1 │ │ runner-2 │ │ runner-N │    │◀┼───── microVM isolation per job
-        │  │  │ tenant A │ │ tenant B │ │ tenant A │    │ │
-        │  │  └────┬─────┘ └────┬─────┘ └────┬─────┘    │ │
-        │  └───────┼────────────┼────────────┼─────────┘ │
-        └──────────┼────────────┼────────────┼───────────┘
-                   │            │            │
-                   ▼            ▼            ▼
-            ┌─────────────────────────────────────────┐
-            │  Cache Proxy   Artifact API   Secrets    │
-            │  (keyed by     (presigned     Broker     │
-            │   lockfile     S3 PUT/GET)    (short-TTL  │
-            │   hash)                        tokens)    │
-            └─────────────────────────────────────────┘
-```
+
+The control plane (stateless, 99.9% available) compiles and schedules jobs; the data plane provisions ephemeral, tenant-isolated runners that pull work and talk only to the shared cache/artifact/secrets services, never to each other.
 
 ### Component inventory
 
@@ -221,16 +242,44 @@ Spot pricing and right-sizing the dominant lever; see §10 and [../cloud_cost_op
 
 ### 4.1 Scheduler — fair-share, topological, concurrency-bounded
 
-```
-        DAG (one pipeline)                Per-tenant fair queue
-        ┌───────┐                         ┌──────────────────────────┐
-        │ lint  │──┐                       │ tenant A: [j1 j2 j3 ...] │
-        └───────┘  │   ┌──────┐            │ tenant B: [j4]           │
-        ┌───────┐  ├──▶│ test │──┐         │ tenant C: [j5 j6]        │
-        │ build │──┘   │ ×200 │  ├─▶ deploy└──────────────────────────┘
-        └───────┘      └──────┘  │                 │ weighted round-robin
-                                  fan-in            ▼
-                                              dispatch to runners
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph DAG["DAG (one pipeline)"]
+        direction LR
+        lint("lint")
+        build("build")
+        test("test<br/>×200 shards")
+        deploy("deploy")
+        lint --> test
+        build --> test
+        test -->|"fan-in"| deploy
+    end
+
+    subgraph FQ["Per-Tenant Fair Queue"]
+        direction LR
+        tA("tenant A: j1, j2, j3 ...")
+        tB("tenant B: j4")
+        tC("tenant C: j5, j6")
+    end
+
+    rr{"weighted<br/>round-robin"}
+    dispatch(["dispatch to runners"])
+
+    deploy -.->|"runnable jobs enqueue"| FQ
+    FQ --> rr --> dispatch
+
+    class lint,build,test,deploy train
+    class tA,tB,tC req
+    class rr mathOp
+    class dispatch io
 ```
 
 The scheduler dequeues runnable jobs but must enforce (a) DAG dependencies, (b) per-tenant max concurrency, and (c) global fleet cap, while preventing one tenant from starving others.
@@ -321,10 +370,19 @@ func (s *Scheduler) nextRunnable(ctx context.Context, tenant string) (Job, bool)
 
 ### 4.2 Ephemeral Runner — single-use, tenant-isolated (BROKEN → FIX)
 
+```mermaid
+stateDiagram-v2
+    [*] --> Assigned
+    Assigned --> Booting: boot microVM
+    Booting --> Registered: register
+    Registered --> Pulling: pull job
+    Pulling --> Running: run steps
+    Running --> Reporting: report status
+    Reporting --> [*]: DESTROY
+    note right of Registered: clean rootfs, no prior tenant state ever
 ```
-   Job assigned ──▶ boot microVM ──▶ register ──▶ pull job ──▶ run steps ──▶ report ──▶ DESTROY
-                       (clean rootfs, no prior tenant state ever)
-```
+
+Every runner passes through this lifecycle exactly once, from job assignment to self-destruction, so no tenant's state ever survives into the next job.
 
 The most dangerous bug in a multi-tenant CI platform is reusing a runner across tenants. Here is a runner registration script that does exactly that, then the fix.
 
@@ -401,11 +459,26 @@ See [cross_cutting/kubernetes_production_hardening.md](cross_cutting/kubernetes_
 
 ### 4.3 Cache Proxy — content-addressed, bounded (BROKEN → FIX on unbounded growth)
 
+```mermaid
+sequenceDiagram
+    participant R as Runner
+    participant P as Cache Proxy
+    participant S as S3
+
+    Note over R,S: restore -- key = sha256(package-lock.json)
+    R->>P: GET /cache/{key}
+    P->>S: fetch object
+    S-->>P: hit (85%)
+    P-->>R: cached tarball
+    R->>R: tar -xzf
+
+    Note over R,S: save on miss
+    R->>P: PUT /cache/{key}
+    P->>S: store object
+    P->>P: update LRU index
 ```
-   restore: key = sha256(package-lock.json)
-        runner ──GET /cache/{key}──▶ proxy ──▶ S3 (hit 85%) ──▶ tar -xzf
-   save:   miss ──PUT /cache/{key}──▶ proxy ──▶ S3 + LRU index update
-```
+
+Restores are keyed by the lockfile hash so any runner can hit a cache another runner wrote; a miss falls through to a save that updates the LRU index used for eviction (the fix below).
 
 ```go
 // cache.go — content-addressed cache with eviction (the FIX is the eviction).
@@ -475,11 +548,22 @@ S3 lifecycle backstop (defense in depth against a leaking LRU index):
 
 ### 4.4 Secrets Broker — short-TTL, job-scoped, OIDC
 
+```mermaid
+sequenceDiagram
+    participant CP as Control Plane
+    participant R as Runner
+    participant V as Vault
+
+    CP->>R: sign OIDC JWT (claims: tenant, repo, job, env)
+    R->>V: auth/jwt/login (JWT)
+    V->>V: verify JWT, map claims to policy
+    V-->>R: 15-min lease token
+    R->>V: read secret (policy-scoped path)
+    V-->>R: secret value
+    Note over V: lease auto-revokes at TTL
 ```
-   runner ──OIDC JWT (signed by control plane, claims: tenant,repo,job,env)──▶
-            Vault (verifies JWT, maps claims→policy) ──▶ 15-min lease token
-            ──▶ runner reads only the secrets its policy allows ──▶ lease auto-revokes
-```
+
+Vault maps the JWT's verified claims to a policy path, so a token minted for tenant A's job can never address tenant B's secrets, and the lease self-destructs after 15 minutes even if nothing revokes it explicitly.
 
 ```go
 // secrets.go — job-scoped secret minting via Vault JWT auth.
@@ -527,11 +611,28 @@ See [../secrets_management/README.md](../secrets_management/README.md) for rotat
 
 ### 4.5 Webhook Ingress — verify, dedup, enqueue (BROKEN → FIX on duplicate runs)
 
-```
-   GitHub ──POST /hooks──▶ Ingress ──HMAC verify──▶ dedup(repo,sha,event) ──▶ enqueue
-                              │                          │
-                          reject 401                  Redis SETNX
-                          on bad sig               (idempotency key, 10-min TTL)
+```mermaid
+sequenceDiagram
+    participant GH as GitHub
+    participant I as Ingress
+    participant R as Redis
+
+    GH->>I: POST /hooks (signed payload)
+    I->>I: verify HMAC-SHA256
+
+    alt bad signature
+        I-->>GH: 401 Unauthorized
+    else signature valid
+        I->>R: SETNX dedup:repo:sha:event (TTL 10m)
+        alt key already existed
+            R-->>I: 0 (duplicate delivery)
+            I-->>GH: 200 OK (no-op ack)
+        else new key
+            R-->>I: 1 (first delivery)
+            I->>I: enqueue event
+            I-->>GH: 202 Accepted
+        end
+    end
 ```
 
 GitHub retries webhook deliveries that do not get a 2xx within 10 seconds, and load balancers can replay a request on timeout. Without idempotency, a single push can trigger the same 8-job pipeline two or three times — tripling fleet load and producing duplicate deploys.
@@ -586,9 +687,24 @@ The ingress must ack within GitHub's 10 s window, so it does *only* verify + ded
 
 ### 4.6 Log Pipeline — real-time tail + durable archive
 
-```
-   runner ──stdout/stderr──▶ Vector sidecar ──┬──▶ WebSocket fan-out (UI tail, <2s)
-                                              └──▶ S3 batched objects (30-day retention)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    runner(["runner<br/>stdout/stderr"]) --> vector("Vector sidecar")
+    vector --> ws(["WebSocket fan-out<br/>UI tail, under 2s"])
+    vector --> s3("S3 batched objects<br/>30-day retention")
+
+    class runner io
+    class vector mathOp
+    class ws io
+    class s3 base
 ```
 
 Logs have two consumers with opposite needs: the UI wants a sub-2-second live tail; storage wants large batched objects, not millions of tiny writes. The pipeline forks.
@@ -683,6 +799,22 @@ At 800k jobs/day × ~200 KB logs, per-line S3 PUTs would be ~hundreds of million
 | Cost/job | Low | Medium | Lowest (but unsafe) |
 | Snowflake drift | None | None | High |
 | Best for | Internal jobs | Untrusted/fork PRs | Never (multi-tenant) |
+
+```mermaid
+quadrantChart
+    title Runner isolation: cost vs tenant-isolation strength
+    x-axis Low Cost --> High Cost
+    y-axis Weak Isolation --> Strong Isolation
+    quadrant-1 Costly but bulletproof
+    quadrant-2 Sweet spot
+    quadrant-3 Cheap but risky
+    quadrant-4 Worst of both
+    "Ephemeral - gVisor": [0.32, 0.68]
+    "Ephemeral - Firecracker": [0.58, 0.93]
+    "Persistent Pool": [0.12, 0.15]
+```
+
+gVisor lands in the sweet spot for the 85% of trusted jobs; Firecracker trades a little more cost for the strongest isolation on untrusted forks; a persistent pool is cheap but sits in the quadrant this design refuses to ship (Decision 2).
 
 ---
 
@@ -839,6 +971,16 @@ Monthly compute = 282,750 × $0.312 ≈ $88,200/month
 vs 100% on-demand: 282,750 × $0.68 ≈ $192,270/month
 Spot savings ≈ $104,000/month ≈ $1.25M/year.
 ```
+
+```mermaid
+xychart-beta
+    title "Monthly runner compute cost: on-demand vs 80/20 Spot blend"
+    x-axis ["100% On-Demand", "80/20 Spot Blend"]
+    y-axis "Monthly cost (USD thousands)" 0 --> 220
+    bar [192.27, 88.2]
+```
+
+The 80/20 Spot blend cuts monthly runner compute from about $192k to about $88k — the roughly $104k/month (about $1.25M/year) gap is Decision 6's single biggest cost lever.
 
 Add ~$20k/month for cache/artifact/log storage + egress + control plane → **~$108k/month all-in**, matching the §2 per-job estimate. Node-level hardening (taints, PodDisruptionBudgets, topology spread for the runner ASG) follows [cross_cutting/kubernetes_production_hardening.md](cross_cutting/kubernetes_production_hardening.md). FinOps levers (right-sizing, Savings Plans on the on-demand floor) are in [../cloud_cost_optimization_finops/README.md](../cloud_cost_optimization_finops/README.md).
 

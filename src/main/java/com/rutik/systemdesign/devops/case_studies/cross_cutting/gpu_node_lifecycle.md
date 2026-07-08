@@ -59,14 +59,21 @@ The whole point is to never let a Pod land on a node whose GPUs aren't ready, ne
 | **Draining** | Cordon + evict | Pods evicted respecting PDB; checkpoint fires | No |
 | **Terminating** | Drain complete / timeout | Node deregistered, EC2 terminated | No |
 
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Booting: Karpenter launches EC2
+    Booting --> BringUp: kubelet registers
+    BringUp --> Ready: device plugin advertises GPUs
+    Ready --> Serving: Pods bound
+    Serving --> Cordoned: Spot warning / health fail / scale-down
+    Cordoned --> Draining: evict respecting PDB
+    Draining --> Terminating: checkpoint fires, drain completes
+    Terminating --> Pending: Karpenter relaunches
+
+    state "Bring-up (tainted)" as BringUp
 ```
- Pending ─> Booting ─> Bring-up(tainted) ─> Ready ─> Serving
-   ▲                                                    │
-   │                                  Spot warning / GPU health fail / scale-down
-   │                                                    v
-   └──────────── (Karpenter relaunches) ◄── Terminating ◄── Draining ◄── Cordoned
-                                              (checkpoint fires during Draining)
-```
+*Forward progress runs Pending → Booting → Bring-up → Ready → Serving; every disruption (Spot warning, health failure, scale-down) drains through the same Cordoned → Draining → Terminating loop before Karpenter relaunches a fresh node.*
 
 ---
 
@@ -74,44 +81,52 @@ The whole point is to never let a Pod land on a node whose GPUs aren't ready, ne
 
 Bring-up sequence (why a fresh node shows `nvidia.com/gpu: 0` for ~90s):
 
+```mermaid
+sequenceDiagram
+    participant K as Karpenter
+    participant E as EC2
+    participant N as Node
+    participant G as GPU Operator
+    participant P as Pending Pod
+
+    K->>E: RunInstances p4d.24xlarge, Spot
+    Note over K,E: t=0s
+    E-->>N: instance boots
+    Note over N: t=40s — kubelet registers<br/>NotReady, startup taint applied
+    N->>G: DaemonSets scheduled
+    Note over G: t=45s — driver-daemonset installs NVIDIA 550.x, ~30-60s<br/>container-toolkit configures containerd<br/>device-plugin waits for driver, enumerates 8 GPUs<br/>dcgm-exporter starts scraping health<br/>mig-manager partitions if labeled
+    G-->>N: device-plugin advertises nvidia.com/gpu: 8
+    Note over N: t=110s
+    N-->>N: startup taint removed
+    N->>P: pending GPU Pod binds
+    Note over N,P: t=111s — Ready & schedulable
 ```
- t=0s    Karpenter -> EC2 RunInstances (p4d.24xlarge, Spot)
- t=40s   instance boots, kubelet registers -> Node NotReady, STARTUP TAINT applied
- t=45s   GPU Operator DaemonSets land:
-            [1] driver-daemonset      installs/validates NVIDIA driver 550.x   (~30-60s)
-            [2] container-toolkit     configures containerd runtime
-            [3] device-plugin         waits for driver -> enumerates 8 GPUs
-            [4] dcgm-exporter         starts scraping GPU health
-            [5] mig-manager           (if labeled) partitions GPUs
- t=110s  device-plugin advertises  nvidia.com/gpu: 8
- t=111s  startup taint REMOVED -> node Ready & schedulable -> pending GPU Pod binds
-         ──────────────────────────────────────────────────────────────────────
-         Lesson: ~110s of billed-but-idle time per cold node. Keep a warm pool
-         for latency-sensitive serving; tolerate it for batch training.
-```
+*Lesson: ~110s of billed-but-idle time per cold node — keep a warm pool for latency-sensitive serving; tolerate it for batch training.*
 
 Spot interruption handling (the 2-minute window):
 
+```mermaid
+sequenceDiagram
+    participant A as AWS
+    participant H as NTH / Karpenter
+    participant T as Training Pod
+    participant E as EC2
+    participant K as Karpenter
+
+    A->>H: Spot interruption notice, IMDS/EventBridge
+    Note over A,H: ~120s to termination
+    H->>T: cordon node, no new Pods
+    H->>T: SIGTERM
+    T-->>T: preStop hook checkpoints to S3
+    H->>T: drain, respects PDB + grace period
+    H->>E: terminate
+    Note over H,E: within ~120s
+    E-->>H: instance terminated
+    K->>K: sees pending Pods again
+    K->>E: relaunch, Spot or On-Demand fallback
+    Note over K,T: training resumes from last checkpoint
 ```
-  AWS issues Spot interruption notice (IMDS / EventBridge)  ── ~120s to termination
-                          │
-                          v
-        ┌─────────────────────────────────────────┐
-        │ Node Termination Handler (NTH) /          │
-        │ Karpenter interruption queue              │
-        │   1. cordon node (no new Pods)            │
-        │   2. send SIGTERM to Pods                 │   training Pod's preStop /
-        │   3. drain respecting PDB + grace period  │   signal handler -> CHECKPOINT to S3
-        └─────────────────────────────────────────┘
-                          │ within ~120s
-                          v
-              EC2 terminates the instance
-        ┌─────────────────────────────────────────┐
-        │ Karpenter sees pending Pods again ->      │
-        │ relaunches (Spot or fallback On-Demand)   │
-        │ Training resumes from last checkpoint     │
-        └─────────────────────────────────────────┘
-```
+*The same shape recurs for every disruption: detect → cordon → checkpoint → drain → terminate → replace — here triggered by a Spot notice instead of a DCGM health failure (see §6.2).*
 
 ---
 
@@ -145,6 +160,23 @@ kubectl get node ip-10-0-1-42 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}
 
 ### 6.2 DCGM health monitoring and auto-fencing
 
+Kubelet-Ready and DCGM-Healthy are independent signals; conflating them is the trap:
+
+```mermaid
+quadrantChart
+    title Kubelet-Ready vs DCGM-Healthy
+    x-axis Kubelet NotReady --> Kubelet Ready
+    y-axis DCGM Unhealthy --> DCGM Healthy
+    quadrant-1 Serving safely
+    quadrant-2 Not yet registered
+    quadrant-3 Bring up, unmonitored
+    quadrant-4 Silent trap, fence now
+    Freshly bonded node: [0.85, 0.88]
+    XID 79 fault: [0.82, 0.15]
+    Mid bring up node: [0.3, 0.5]
+```
+*Kubelet readiness and DCGM health are independent axes — the bottom-right quadrant (Ready but unhealthy) is exactly Pitfall 4: a node that passes Kubernetes' checks while a GPU silently degrades.*
+
 DCGM exports health signals to Prometheus; an alert + a remediation controller cordons unhealthy nodes:
 
 ```promql
@@ -161,6 +193,37 @@ DCGM exports health signals to Prometheus; an alert + a remediation controller c
 ```
 
 NVIDIA's GPU Operator can run a **node health check** (`validator`) on a schedule; combined with the above, a controller (or a simple `kubectl` runbook) cordons and drains the node, and Karpenter replaces it.
+
+Both disruption triggers converge on one pipeline:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    t1(["Spot interruption<br/>notice"]) --> detect{"Detect"}
+    t2(["DCGM health<br/>failure"]) --> detect
+    detect --> cordon("Cordon<br/>no new Pods")
+    cordon --> ckpt("Checkpoint<br/>to S3")
+    ckpt --> drain("Drain<br/>respects PDB")
+    drain --> term("Terminate<br/>node")
+    term --> replace(["Karpenter<br/>replaces node"])
+
+    class t1 req
+    class t2 lossN
+    class detect mathOp
+    class cordon lossN
+    class ckpt train
+    class drain lossN
+    class term frozen
+    class replace train
+```
+*A Spot reclaim and a DCGM-detected fault are different triggers but the same response: the detect → cordon → checkpoint → drain → terminate → replace shape named in Sections 2 and 14.*
 
 ### 6.3 Spot interruption → checkpoint → drain
 

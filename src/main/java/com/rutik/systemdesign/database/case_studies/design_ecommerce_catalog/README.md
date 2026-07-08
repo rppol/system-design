@@ -18,32 +18,66 @@ Design the database architecture for a product catalog serving a marketplace wit
 
 ## Architecture Overview
 
-```
-Client
-  │
-[API Gateway]
-  │
-  ├── [Product Detail API] → Redis (L1 cache, 30min TTL) → PostgreSQL
-  │
-  ├── [Search API] → Elasticsearch cluster
-  │
-  ├── [Inventory API] → Redis counters (DECR/INCR) → PostgreSQL (async sync)
-  │
-  └── [Recommendation API] → Redis sorted sets / precomputed pairs
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Data Flow (synchronization):
-  Merchant → [Product Update API] → PostgreSQL (source of truth)
-                                          │
-                                    [Debezium CDC]
-                                          │
-                                    [Kafka: product.events]
-                                          │
-                       ┌─────────────────┼──────────────────────┐
-                       ▼                 ▼                      ▼
-              [ES Indexer]      [Price History Writer]    [Cache Invalidator]
-                       │                 │                      │
-              [Elasticsearch]   [ClickHouse analytics]    [Redis DEL]
+    client(["Client"]) --> gw{"API Gateway"}
+    gw --> detail("Product Detail API")
+    gw --> search("Search API")
+    gw --> inv("Inventory API")
+    gw --> rec("Recommendation API")
+
+    detail --> redisL1("Redis L1 cache<br/>30min TTL")
+    redisL1 --> pg1("PostgreSQL")
+    search --> es("Elasticsearch<br/>cluster")
+    inv --> redisCtr("Redis counters<br/>DECR / INCR")
+    redisCtr -.->|"async sync"| pg2("PostgreSQL")
+    rec --> redisSS("Redis sorted sets<br/>precomputed pairs")
+
+    class client io
+    class gw mathOp
+    class detail,search,inv,rec req
+    class redisL1,redisCtr,redisSS,es,pg1,pg2 base
 ```
+
+*Read path: the gateway routes each request type to its own API, and each API leans on the store that matches its latency budget — Redis L1 ahead of PostgreSQL for product detail, Elasticsearch for faceted search, Redis counters ahead of PostgreSQL for inventory, and precomputed Redis sorted sets for recommendations.*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    merchant(["Merchant"]) --> updateApi("Product Update API")
+    updateApi --> pg("PostgreSQL<br/>source of truth")
+    pg -->|"WAL tail"| debezium("Debezium CDC")
+    debezium -->|"within 100ms"| kafka{"Kafka:<br/>product.events"}
+    kafka --> esIdx("ES Indexer")
+    kafka --> priceWriter("Price History<br/>Writer")
+    kafka --> cacheInv("Cache Invalidator")
+    esIdx --> es2("Elasticsearch")
+    priceWriter --> ch("ClickHouse<br/>analytics")
+    cacheInv --> redisDel("Redis DEL")
+
+    class merchant io
+    class updateApi,kafka req
+    class pg,es2,ch base
+    class debezium,esIdx,priceWriter,cacheInv mathOp
+    class redisDel lossN
+```
+
+*Write path (synchronization): Debezium tails the PostgreSQL WAL and publishes to Kafka within ~100ms; three independent consumers then keep search, price-history analytics, and the read cache eventually consistent, with 1-5 seconds typical end-to-end lag.*
 
 ---
 
@@ -219,6 +253,38 @@ High-demand product (limited edition):
   -- Only for SKUs marked as strict_inventory=true
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    purchase(["Purchase request"]) --> flag{"strict_inventory<br/>flag set?"}
+
+    flag -->|"no, most SKUs"| luaGet("Lua script:<br/>GET available")
+    luaGet --> enough{"available ≥<br/>requested?"}
+    enough -->|"yes"| decrby("DECRBY<br/>atomic decrement")
+    enough -->|"no"| shortfall("return -1<br/>insufficient stock")
+    decrby -.->|"every 5s"| pgSync("PostgreSQL<br/>UPDATE quantity")
+
+    flag -->|"yes, limited-edition"| pgLock("PostgreSQL<br/>SELECT ... FOR UPDATE")
+    pgLock --> positive{"quantity<br/>positive?"}
+    positive -->|"yes"| commit("UPDATE - 1<br/>COMMIT")
+    positive -->|"no"| rollback("ROLLBACK<br/>insufficient stock")
+
+    class purchase req
+    class flag,luaGet,enough,positive mathOp
+    class decrby,commit train
+    class shortfall,rollback lossN
+    class pgSync,pgLock base
+```
+
+*Two-tier inventory consistency: the Lua `DECRBY` fast path handles roughly 1M ops/second with brief oversell risk if Redis restarts before the 5-second sync to PostgreSQL; `strict_inventory=true` SKUs pay 5-10ms of `SELECT ... FOR UPDATE` latency (versus 0.5ms) for a hard zero-oversell guarantee, capped around 1K TPS per product.*
+
 ### 4. CDC Pipeline for Search Index Sync
 
 ```yaml
@@ -307,6 +373,34 @@ public class ProductDetailService {
     }
 }
 ```
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    getP(["getProduct id"]) --> l1{"L1 Caffeine<br/>hit?"}
+    l1 -->|"yes, under 0.1ms"| ret1(["return cached"])
+    l1 -->|"no"| l2{"L2 Redis<br/>hit?"}
+    l2 -->|"yes, 0.5ms"| fillL1("populate L1")
+    fillL1 --> ret2(["return product"])
+    l2 -->|"no"| l3("L3 PostgreSQL<br/>query, 5-20ms")
+    l3 --> fillBoth("populate L2 + L1")
+    fillBoth --> ret3(["return product"])
+
+    class getP req
+    class l1,l2 mathOp
+    class ret1,ret2,ret3 io
+    class fillL1,fillBoth train
+    class l3 base
+```
+
+*Cache cascade: each miss climbs one tier (under 0.1ms L1, then 0.5ms L2, then 5-20ms L3) and writes back to every faster tier it skipped, so a cold L3 read is the last time that product pays the full round trip until eviction.*
 
 ### Price History in ClickHouse
 

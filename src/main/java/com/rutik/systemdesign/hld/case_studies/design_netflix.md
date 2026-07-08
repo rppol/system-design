@@ -64,53 +64,60 @@
 
 ## 3. High-Level Architecture
 
-```
-                    +------------------+
-                    |   Client Apps    |
-                    | (iOS/Android/TV/ |
-                    |  Web/Smart TV)   |
-                    +--------+---------+
-                             |
-              +--------------+---------------+
-              |                              |
-     +--------v---------+        +----------v----------+
-     |   Control Plane  |        |    Data Plane       |
-     |   (AWS Cloud)    |        | (Open Connect CDN)  |
-     +--------+---------+        +----------+----------+
-              |                             |
-     +--------v---------+                  |
-     |   API Gateway    |        Video streams served
-     |   (Zuul)         |        directly from OCA
-     +--------+---------+        nodes embedded at ISPs
-              |
-     +--------v------------------------------------------+
-     |              Netflix Microservices (700+)         |
-     |                                                   |
-     | +-------------+  +-------------+  +-----------+  |
-     | | User Service|  | Catalog Svc |  | Search    |  |
-     | +-------------+  +-------------+  | (ES)      |  |
-     |                                   +-----------+  |
-     | +-------------+  +-------------+  +-----------+  |
-     | | Playback    |  | Recommend.  |  | Billing   |  |
-     | | Service     |  | Service     |  | Service   |  |
-     | +-------------+  +-------------+  +-----------+  |
-     |                                                   |
-     | +-------------+  +-------------+  +-----------+  |
-     | | Encoding    |  | Analytics   |  | A/B Test  |  |
-     | | Service     |  | (Flink)     |  | Platform  |  |
-     | +-------------+  +-------------+  +-----------+  |
-     +---------------------------------------------------+
-              |
-     +--------v---------+
-     |   Data Stores    |
-     | Cassandra | MySQL |
-     | EVCache   | S3    |
-     +------------------+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-     Upload Path (Admin):
-     Studio Upload → S3 (raw) → Encoding Farm (EC2 Spot)
-         → 30+ encoded variants → Open Connect CDN
+    Client(["Client Apps<br/>iOS · Android · TV · Web"])
+    Control(Control Plane<br/>AWS Cloud)
+    Data(Data Plane<br/>Open Connect CDN)
+    Gateway(API Gateway<br/>Zuul)
+    OCAEdge(["OCA edge nodes<br/>video served direct"])
+
+    subgraph MS["Netflix Microservices (700+)"]
+        UserSvc(User Service)
+        CatalogSvc(Catalog Service)
+        SearchSvc(Search · ES)
+        PlaybackSvc(Playback Service)
+        RecSvc(Recommendation<br/>Service)
+        BillingSvc(Billing Service)
+        EncodingSvc(Encoding Service)
+        AnalyticsSvc(Analytics · Flink)
+        ABSvc(A/B Test Platform)
+    end
+
+    subgraph DS["Data Stores"]
+        Cass(Cassandra)
+        MySQLn(MySQL)
+        EVC(EVCache)
+        S3n(S3)
+    end
+
+    Client --> Control
+    Client --> Data
+    Control --> Gateway
+    Data -.->|"direct stream"| OCAEdge
+    Gateway --> MS
+    MS --> DS
+
+    Studio(["Studio Upload"]) --> RawS3(S3 raw bucket)
+    RawS3 --> EncFarm(Encoding Farm<br/>EC2 Spot)
+    EncFarm -->|"30+ variants"| Data
+
+    class Client,Studio io
+    class Control req
+    class Gateway,EncFarm mathOp
+    class Data,OCAEdge frozen
+    class UserSvc,CatalogSvc,SearchSvc,PlaybackSvc,RecSvc,BillingSvc,EncodingSvc,AnalyticsSvc,ABSvc train
+    class Cass,MySQLn,EVC,S3n,RawS3 base
 ```
+Client traffic splits at the top into a control plane (API + microservice logic on AWS) and a data plane (Open Connect CDN serving video bytes directly from ISP-embedded OCAs); the upload path runs encoding asynchronously on the side and feeds finished variants into the data plane.
 
 ---
 
@@ -133,18 +140,31 @@
 ### Content Pre-Positioning
 Netflix does not wait for a cache miss to populate edge nodes — they **proactively push content**:
 
-```
-Daily Proactive Push (runs at off-peak hours, 2-4 AM local time):
-  1. Analytics Service identifies top-500 titles per region for next 24 hours
-  2. Pre-positioning algorithm determines which OCAs to push to
-  3. Content is replicated from S3 origin to selected OCAs via Netflix backbone
-  4. By the time users wake up, content is already at the edge
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Benefits:
-  - Near-zero cache miss rate for popular content
-  - Origin S3 is rarely hit during peak hours
-  - Completely eliminates buffering for popular titles
+    A(Analytics Service<br/>ranks top-500 titles<br/>per region) --> B{Pre-positioning<br/>algorithm}
+    B --> C(Replicate S3 origin<br/>to chosen OCAs)
+    C --> D([Content live at edge<br/>before users wake])
+
+    class A req
+    class B mathOp
+    class C frozen
+    class D train
 ```
+Runs nightly at off-peak hours (2-4 AM local); by the time users wake up the content is already at the edge.
+
+**Benefits:**
+- Near-zero cache miss rate for popular content
+- Origin S3 is rarely hit during peak hours
+- Completely eliminates buffering for popular titles
 
 ### Routing: Steering Service
 - When a client initiates playback, it contacts Netflix's **Steering Service**
@@ -153,16 +173,26 @@ Benefits:
 - Client tries OCAs in order; falls back to next if connection fails
 
 ### CDN Fallback Hierarchy
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Req([Client Request<br/>for Video]) --> OCA1(1st: Local ISP OCA<br/>fastest, same AS)
+    OCA1 -.->|"unavailable"| OCA2(2nd: Regional<br/>OCA cluster)
+    OCA2 -.->|"unavailable"| Origin(3rd: Netflix Origin<br/>AWS S3)
+
+    class Req io
+    class OCA1 train
+    class OCA2 frozen
+    class Origin base
 ```
-Client Request for Video
-    |
-    v
-1st: Local ISP OCA (fastest, same AS)
-    |-- if unavailable --v
-2nd: Regional OCA cluster
-    |-- if unavailable --v
-3rd: Netflix's own data center (origin, AWS S3)
-```
+Each hop is tried only if the previous one is unavailable; roughly 95% of Netflix's bytes resolve at the first hop (local ISP OCA), so the origin S3 fallback is rarely exercised.
 
 ---
 
@@ -190,19 +220,34 @@ Netflix encodes each title at multiple quality levels:
 
 The client maintains a **bandwidth estimator** that measures download speed of recent chunks:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Seg(["Download segment<br/>at quality Q"]) --> Meas(Measure download speed<br/>and buffer depth)
+    Meas --> Dec{"buffer and bandwidth<br/>vs thresholds"}
+    Dec -->|"buffer over 30s and<br/>bandwidth over 1.5x next"| Up(Upgrade quality)
+    Dec -->|"buffer under 10s or<br/>bandwidth under current"| Down(Downgrade quality)
+    Dec -->|"otherwise"| Stay(Stay at<br/>current quality)
+    Up --> Pre([Pre-fetch next<br/>2-3 segments])
+    Down --> Pre
+    Stay --> Pre
+
+    class Seg io
+    class Meas mathOp
+    class Dec mathOp
+    class Up train
+    class Down lossN
+    class Stay base
+    class Pre req
 ```
-Adaptive Algorithm (simplified):
-  1. Client downloads segment at current quality Q
-  2. Measures: download_speed = segment_size / download_time
-  3. Buffer: tracks how many seconds of video are buffered ahead
-  4. Decision logic:
-     - If buffer > 30 sec AND bandwidth > next_quality_bitrate * 1.5:
-         upgrade quality
-     - If buffer < 10 sec OR bandwidth < current_quality_bitrate:
-         downgrade quality
-     - Otherwise: stay at current quality
-  5. Pre-fetch next 2-3 segments at decided quality
-```
+The switch happens chunk-by-chunk, not stream-wide — each 2-10 second segment can land at a different quality than the one before it.
 
 ### Manifest File (MPD/M3U8)
 The client first downloads a **manifest file** that lists all available quality variants and chunk URLs:
@@ -227,40 +272,31 @@ A 2-hour movie in raw studio format (ProRes 4K) = **1-2 TB**. It must be:
 - All of this before the title can go live
 
 ### Pipeline Architecture
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Studio([Studio Delivery]) --> Raw(S3 Raw<br/>Content Bucket)
+    Raw --> Valid(Validation Service<br/>integrity · format · metadata)
+    Valid --> Sched(Job Scheduler<br/>splits into parallel jobs)
+    Sched -->|"100s of jobs<br/>in parallel"| Farm(Encoding Farm<br/>EC2 Spot + FFmpeg)
+    Farm --> QVal(Quality Validation<br/>PSNR · VMAF scores)
+    QVal --> Enc(S3 Encoded<br/>Content Bucket)
+    Enc --> CDN([CDN Distribution<br/>OCA push or on-demand])
+
+    class Studio,CDN io
+    class Raw,Enc base
+    class Valid,QVal mathOp
+    class Sched req
+    class Farm train
 ```
-Studio Delivery
-     |
-     v
-[S3: Raw Content Bucket]
-     |
-     v
-[Validation Service]
-  -- checks file integrity, format compliance, metadata
-     |
-     v
-[Job Scheduler]
-  -- splits movie into parallel encoding jobs
-  -- each job handles one (quality, codec) combination
-     |
-     v (parallel, 100s of jobs simultaneously)
-[Encoding Farm: AWS EC2 Spot Instances]
-  -- Spot instances for cost efficiency (60-90% cheaper)
-  -- Each worker encodes one variant
-  -- Uses FFmpeg under the hood with custom optimizations
-     |
-     v
-[Quality Validation Service]
-  -- automated quality checks (PSNR, VMAF scores)
-  -- catches encoding artifacts, audio sync issues
-     |
-     v
-[S3: Encoded Content Bucket]
-     |
-     v
-[CDN Distribution]
-  -- popular titles pushed to OCAs immediately
-  -- others available on-demand from S3 origin
-```
+Spot instances (60-90% cheaper, §5) run the encoding stage; the whole pipeline completes before a title ever reaches Open Connect.
 
 ### Per-Scene Encoding Optimization
 Netflix's innovation: **Variable Bitrate Encoding per Scene Complexity**
@@ -302,17 +338,27 @@ Netflix's innovation: **Variable Bitrate Encoding per Scene Complexity**
 
 ### A/B Testing at Scale
 Netflix runs **hundreds of A/B tests simultaneously**:
-```
-A/B Test Framework:
-  1. Users randomly assigned to treatment/control (user_id % N)
-  2. Each experiment has a hold-out group
-  3. Metrics tracked: play rate, completion rate, retention, cancel rate
-  4. Statistical significance via automated system
-  5. Winner rolled out to 100% of users
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Example Experiment: "Does showing trailers autoplay increase click rate?"
-  - Result: Yes, +10% click rate → rolled out
+    Assign(["Assign users<br/>treatment vs control<br/>user_id % N"]) --> Hold(Hold-out group<br/>per experiment)
+    Hold --> Track(Track metrics<br/>play · completion · retention · cancel)
+    Track --> Sig(Automated<br/>significance test)
+    Sig --> Roll(["Roll out winner<br/>to 100% of users"])
+
+    class Assign,Roll io
+    class Hold base
+    class Track req
+    class Sig mathOp
 ```
+Example experiment — "Does showing trailers autoplay increase click rate?": result was +10% click rate, so it rolled out to 100% of users.
 
 ### Personalized Thumbnails
 - The same title shows different thumbnails to different users
@@ -322,24 +368,28 @@ Example Experiment: "Does showing trailers autoplay increase click rate?"
 - System tests 10-20 thumbnail candidates per title and learns optimal per user segment
 
 ### Two-Tower Architecture for Recommendations
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    UserF(["User Tower<br/>user features"]) --> UserE(User Embedding)
+    ItemF(["Item Tower<br/>item features"]) --> ItemE(Item Embedding)
+    UserE --> Score((Dot Product<br/>Score))
+    ItemE --> Score
+    Score --> Rank(Ranking + Re-ranking<br/>business rules · diversity)
+    Rank --> Home(["Personalized<br/>Homepage"])
+
+    class UserF,ItemF,Home io
+    class UserE,ItemE train
+    class Score,Rank mathOp
 ```
-User Tower                    Item Tower
-(User Features)              (Item Features)
-    |                              |
-    v                              v
-[User Embedding]            [Item Embedding]
-         \                   /
-          \                 /
-           v               v
-         [Dot Product / Score]
-                 |
-                 v
-         Ranking + Re-ranking
-         (business rules, diversity)
-                 |
-                 v
-         Personalized Homepage
-```
+The two towers are trained independently and only meet at the dot product, so user and item embeddings can be precomputed and served from a vector index rather than recomputed per request.
 
 ---
 
@@ -411,20 +461,49 @@ Netflix operates on the premise: **"Everything will fail — build systems that 
 - Example: inject 500ms latency into recommendation service call from homepage
 - Ensures the homepage degrades gracefully (shows generic rows) instead of failing entirely
 
-### Circuit Breaker Pattern (Hystrix)
-```
-Service A calls Service B:
-  - Circuit starts CLOSED (requests flow normally)
-  - If error rate > 50% in last 10 sec: circuit opens (OPEN state)
-  - In OPEN state: Service A returns cached/fallback response immediately
-  - After 5 seconds: circuit moves to HALF-OPEN, allows one request through
-  - If that request succeeds: circuit closes again
-  - If it fails: circuit stays open
+Netflix's three fault-injection tools occupy different points on a blast-radius x trigger-mode map — Chaos Monkey attacks single instances continuously and randomly, FIT targets one dependency deliberately, and Chaos Kong simulates a full-region loss on a monthly schedule, never randomly, given the stakes:
 
-Fallback for recommendation service failure:
-  - Return generic "Top 10 Most Popular" list
-  - User sees degraded but functional homepage
+```mermaid
+quadrantChart
+    title Chaos Tools: Trigger Mode vs Blast Radius
+    x-axis Random --> Scheduled
+    y-axis Single Instance --> Full Region
+    quadrant-1 Scheduled region-wide drills
+    quadrant-2 Random region-wide, avoided
+    quadrant-3 Continuous instance-level chaos
+    quadrant-4 Targeted dependency injection
+    "Chaos Monkey": [0.15, 0.2]
+    "FIT": [0.6, 0.3]
+    "Chaos Kong": [0.85, 0.85]
 ```
+
+### Circuit Breaker Pattern (Hystrix)
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Closed
+    state "Half-Open" as HalfOpen
+
+    Closed --> Open: error rate over 50%<br/>in last 10 sec
+    Open --> HalfOpen: after 5 sec,<br/>allow one request through
+    HalfOpen --> Closed: request succeeds
+    HalfOpen --> Open: request fails
+
+    note right of Closed: requests flow normally
+    note right of Open: Service A returns cached<br/>or fallback response immediately
+
+    class Closed train
+    class Open lossN
+    class HalfOpen mathOp
+```
+Fallback for a recommendation-service failure specifically: return a generic "Top 10 Most Popular" list, so the user sees a degraded but functional homepage rather than an error.
 
 ---
 
@@ -676,6 +755,32 @@ Netflix's actual production stack (from public engineering blog posts, conferenc
 2. **Traffic shift** (T+60s to T+5min): Zuul (edge gateway) and Denominator (multi-CDN DNS abstraction) reweight traffic to us-west-2 and eu-west-1. DNS TTLs are 60s; most clients shift within 2 min.
 3. **Data tier failover** (T+2min to T+6min): EVCache (Memcached fork) clusters in healthy regions warm from Cassandra; Cassandra remains available because it's multi-region replicated with RF=3 per region.
 4. **Personalization degradation** (T+0 to T+30min): Recommendation models for users normally served from us-east are cold in other regions. Users see "popular in your country" lists rather than personalized rows for ~30 minutes.
+
+The four phases overlap rather than run strictly one-after-another — traffic is already shifting while data-tier warm-up is still in progress, and personalization stays degraded long after streaming has recovered:
+
+```mermaid
+sequenceDiagram
+    participant Atlas as Atlas Metrics
+    participant Mantis as Mantis Stream
+    participant Edge as Zuul + Denominator
+    participant Data as EVCache + Cassandra
+    participant Reco as Personalization
+
+    Note over Atlas,Mantis: T+0 to T+60s — Detection
+    Atlas->>Mantis: elevated error rate, us-east-1
+    Mantis-->>Edge: confirms cross-AZ failure pattern
+
+    Note over Edge: T+60s to T+5min — Traffic shift
+    Edge->>Edge: reweight DNS to us-west-2 / eu-west-1
+
+    Note over Data: T+2min to T+6min — Data tier failover
+    Data->>Data: EVCache warms from Cassandra, RF=3
+
+    Note over Reco: T+0 to T+30min — Personalization degrades
+    Reco-->>Reco: cold cache, serves "popular in your country"
+
+    Note over Atlas,Reco: TTR under 6 min for streaming, ~30 min for personalization
+```
 
 **TTR**: < 6 minutes for streaming traffic to fully shift; ~30 minutes for personalization quality to fully recover. **Zero stream interruption** for currently-playing sessions (the video chunks come from Open Connect, not AWS).
 

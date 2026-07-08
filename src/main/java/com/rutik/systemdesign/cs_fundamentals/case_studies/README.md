@@ -60,22 +60,37 @@ No `cross_cutting/` directory for this section — the case studies are self-con
 
 Some case studies build on patterns established by others.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    lru("design_lru_cache")
+    dpat("dynamic_programming_<br/>patterns")
+    gts("graph_traversal_and_<br/>shortest_path")
+    ivl("interval_and_<br/>scheduling_problems")
+    topk("top_k_and_<br/>streaming_problems")
+    acs("autocomplete_and_<br/>string_search")
+    rec("recursion_and_problem_<br/>solving_patterns")
+
+    lru -->|"augmented<br/>structure pattern"| topk
+    dpat -.->|"easier if<br/>read first"| rec
+    gts -->|"trie = a graph;<br/>DFS on trie"| acs
+    gts -->|"topological<br/>sort variant"| ivl
+    ivl -->|"heap-based<br/>priority order"| topk
+
+    class lru,dpat,gts train
+    class ivl req
+    class topk,acs base
+    class rec frozen
 ```
-design_lru_cache
-    +-> top_k_and_streaming_problems   (both use heaps/hashmaps; LRU first teaches
-                                        the "augmented structure" pattern)
 
-dynamic_programming_patterns
-    +-> (no hard dependencies, but easier if recursion_and_problem_solving_patterns
-         module is read first)
-
-graph_traversal_and_shortest_path
-    +-> autocomplete_and_string_search (trie = a graph; DFS on trie)
-    +-> interval_and_scheduling_problems (topological sort variant)
-
-interval_and_scheduling_problems
-    +-> top_k_and_streaming_problems   (both use heap-based priority ordering)
-```
+*Arrows point from a prerequisite case study to the one that benefits from reading it first. Green marks the three case studies with no prerequisites (start anywhere); teal marks the bridge file that both consumes and forwards a pattern; gold marks the two convergence points where multiple upstream techniques combine; purple marks the one dotted, soft (not hard) recommendation pointing outside this directory to the `recursion_and_problem_solving_patterns` concept module.*
 
 ---
 

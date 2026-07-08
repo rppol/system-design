@@ -75,63 +75,46 @@
 
 ## 3. High-Level Architecture
 
-```
-   +-------------------+   +-------------------+   +-------------------+
-   |  App Instance A    |   |  App Instance B    |   |  Host / Node       |
-   |  /metrics endpoint |   |  /metrics endpoint |   |  exporter          |
-   |  (Prometheus       |   |  (Prometheus       |   |  /metrics endpoint |
-   |   client library)  |   |   client library)  |   |                    |
-   +---------+----------+   +---------+----------+   +---------+----------+
-             ^                          ^                          ^
-             | pull (scrape, §4.2)      |                          |
-             |                          |                          |
-   +---------+--------------------------+--------------------------+----------+
-   |                       Scrape Manager / Agent Fleet                         |
-   |  - service discovery (k8s API, consul, EC2 tags) -> target list            |
-   |  - scrapes each target every 15s, parses exposition format                 |
-   |  - OR: receives pushed metrics (StatsD/DogStatsD agent, §4.2 alt path)      |
-   +-------------------------------------+--------------------------------------+
-                                          | write path (10M+ points/sec, §2)
-                                          v
-   +-------------------------------------------------------------------------+
-   |                    Ingestion / Write-Ahead Layer                          |
-   |  - shards by series ID (hash of metric name + sorted label set)           |
-   |  - short-term write buffer per shard (§4.3 TimeSeriesWriteBuffer)         |
-   |  - replicates writes for durability before ack                           |
-   +---------------------+---------------------------+------------------------+
-                          |                           |
-                          v                           v
-   +----------------------------------+   +-----------------------------------+
-   |   Time-Series Storage Engine       |   |   Downsampling / Rollup Pipeline    |
-   |   (TSM/Gorilla-style columnar,     |   |   (streaming aggregation,           |
-   |    time-partitioned chunks, §4.3)  |-->|    tumbling windows, §4.4 —         |
-   |   - Raw tier: 15s x 15 days        |   |    cross-ref design_ad_click_       |
-   |   - Rollup tiers written here too  |   |    aggregation.md §4.2)             |
-   +---------------------+--------------+   +-----------------------------------+
-                          |
-                          v  query path
-   +-------------------------------------------------------------------------+
-   |                         Query Layer (PromQL-style, §4.5)                  |
-   |  - parses query, fans out to time-partitioned + series-sharded storage   |
-   |  - merges partial results, applies functions (rate, sum by, quantile)    |
-   |  - in-memory cache for recent, frequently-queried ranges                 |
-   +---------------------+---------------------------+------------------------+
-                          |                           |
-                          v                           v
-   +----------------------------+      +---------------------------------------+
-   |   Dashboards (Grafana-style)|      |   Alerting Rule Engine (§4.6)           |
-   |   - federated across data    |      |   - evaluates rules every 15-60s       |
-   |     sources                  |      |   - AlertRuleEvaluator state machine   |
-   |   - human-facing             |      |     OK -> PENDING -> FIRING -> RESOLVED|
-   +----------------------------+      +---------------------+-----------------+
-                                                              |
-                                                              v
-                                          +---------------------------------------+
-                                          |  Alertmanager-style Notification Layer  |
-                                          |  - dedup, group, silence, inhibit       |
-                                          |  - routes to on-call (cross-ref         |
-                                          |    design_notification_system.md)       |
-                                          +---------------------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    AppA(["App Instance A<br/>/metrics endpoint"])
+    AppB(["App Instance B<br/>/metrics endpoint"])
+    Host(["Host / Node exporter<br/>/metrics endpoint"])
+    Scrape("Scrape Manager / Agent Fleet<br/>service discovery + scrape")
+    Ingest("Ingestion / Write-Ahead Layer<br/>shard by series ID, §4.3")
+    Storage("Time-Series Storage Engine<br/>TSM / Gorilla columnar, §4.3")
+    Rollup("Downsampling / Rollup Pipeline<br/>tumbling windows, §4.4")
+    Query("Query Layer<br/>PromQL fan-out + merge, §4.5")
+    Dash(["Dashboards<br/>Grafana-style"])
+    Alert("Alerting Rule Engine<br/>OK to PENDING to FIRING, §4.6")
+    Notify(["Alertmanager-style<br/>Notification Layer"])
+
+    AppA -.->|"scrape every 15s"| Scrape
+    AppB -.->|"scrape every 15s"| Scrape
+    Host -.->|"scrape every 15s"| Scrape
+    Scrape -->|"write path<br/>10M+ pts/sec"| Ingest
+    Ingest --> Storage
+    Storage -->|"streaming agg"| Rollup
+    Rollup -.->|"writes rollups<br/>back to storage"| Storage
+    Storage -->|"query path"| Query
+    Query --> Dash
+    Query -->|"eval every<br/>15-60s"| Alert
+    Alert -->|"FIRING alert"| Notify
+
+    class AppA,AppB,Host io
+    class Scrape,Rollup,Query mathOp
+    class Ingest req
+    class Storage base
+    class Dash,Notify io
+    class Alert lossN
 ```
 
 ### Request / Data Flow
@@ -178,6 +161,29 @@ Adding a fifth label with `K` distinct values multiplies the total by `K`. This 
 - **Write cost**: every active series needs its own append target in storage (§4.3) — more series means more concurrent write streams, more index entries, more chunk files
 
 **The rule that prevents disaster**: a label is safe if its cardinality is **bounded and known in advance** — `status_code` (≈10), `http_method` (≈7), `region` (a handful), `service_name` (tens to low hundreds). A label is dangerous if its cardinality is **unbounded or grows with the business** — `user_id`, `request_id`, `email`, `session_token`, `pod_name` (in environments with frequent pod churn), or raw error messages interpolated into a label value. High-cardinality *identifiers* belong in logs or traces ([`../observability/README.md`](../observability/README.md) §6.5), where they're stored per-event rather than multiplied into the time-series index — War Story 1 (§9) is what happens when this rule is violated.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Base(["Bounded labels only<br/>10,000 series"])
+    Add{"add one label:<br/>pod_id, 50,000 values"}
+    Danger(["10,000 x 50,000 =<br/>500,000,000 series"])
+
+    Base --> Add --> Danger
+
+    class Base train
+    class Add mathOp
+    class Danger lossN
+```
+
+One additional unbounded label is enough to jump a metric from a safe, bounded series count to a series count that alone exceeds the entire fleet's cardinality budget (§2) — exactly the mechanism behind War Story 1 (§9).
 
 ### 4.2 Ingestion — Pull (Scrape) vs. Push (Agent)
 
@@ -243,26 +249,26 @@ Chunk for series http_requests_total{service="checkout",...}, time range [12:00:
 
 Storing every series at 15-second resolution forever is both unaffordable (§2's 284 TB figure) and unnecessary — nobody queries "CPU usage at 15-second resolution from 18 months ago" for a trend dashboard; they query "what did CPU usage look like, hour by hour, over the last 6 months." The **rollup pipeline** progressively aggregates raw data into coarser tiers, each retained longer than the one below it:
 
-```
-   Raw tier: 15s resolution, 15-day retention
-   +-----------------------------------------------------------------+
-   | ...|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|--|... |
-   +-----------------------------------------------------------------+
-                    | tumbling 5-min window aggregation (avg/max/p99)
-                    | (same mechanics as design_ad_click_aggregation.md
-                    |  §4.2 TumblingWindowAggregator -- here the
-                    |  "events" are raw samples, not click events)
-                    v
-   Rollup tier 1: 5-min resolution, 90-day retention
-   +-----------------------------------------------------------------+
-   | .........|------|------|------|------|------|------|......      |
-   +-----------------------------------------------------------------+
-                    | tumbling 1-hour window aggregation
-                    v
-   Rollup tier 2: 1-hour resolution, 2-year retention
-   +-----------------------------------------------------------------+
-   | ......................|----------|----------|...................|
-   +-----------------------------------------------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Raw("Raw tier<br/>15s res, 15d retention")
+    Agg1("Tumbling 5-min window<br/>avg / max / p99")
+    Rollup1("Rollup tier 1<br/>5m res, 90d retention")
+    Agg2("Tumbling 1-hour window<br/>avg / max / p99")
+    Rollup2("Rollup tier 2<br/>1h res, 2y retention")
+
+    Raw --> Agg1 --> Rollup1 --> Agg2 --> Rollup2
+
+    class Raw,Rollup1,Rollup2 base
+    class Agg1,Agg2 mathOp
 ```
 
 A query's time range determines which tier it reads from: a 1-hour dashboard panel reads the raw tier; a 30-day panel reads rollup tier 1; a 1-year capacity-planning panel reads rollup tier 2. The query layer (§4.5) selects the tier automatically based on the requested range and resolution.
@@ -574,14 +580,13 @@ public class AlertRuleEvaluator {
 
 **State machine summary**:
 
-```
-   OK ----(condition true)----> PENDING ----(still true after `for`)----> FIRING
-    ^                               |                                         |
-    |                               | (condition false before `for`)          |
-    +-------------------------------+                                         |
-    ^                                                                          |
-    +------------------------(condition false)-------------------------------+
-                                  RESOLVED (transient -- immediately becomes OK)
+```mermaid
+stateDiagram-v2
+    [*] --> OK
+    OK --> PENDING: condition true
+    PENDING --> OK: false before for-duration
+    PENDING --> FIRING: true past for-duration
+    FIRING --> OK: resolved, condition false
 ```
 
 **Routing, deduplication, and silencing**: a `FIRING` alert is handed to an Alertmanager-style component that **groups** alerts by a configurable label set (so 50 services simultaneously breaching the same SLO during a shared dependency outage produce *one* grouped notification, not 50 pages), **deduplicates** repeat firings of the same alert instance (don't re-page every evaluation cycle while still firing — re-notify on a longer interval, e.g., every 4 hours, unless the alert resolves and re-fires), and respects **silences** (a maintenance window suppresses specific label-matched alerts without disabling the underlying rule). The actual multi-channel delivery — paging vs. Slack vs. email, provider rate limits, on-call schedule routing — is the same fan-out problem covered in [`./design_notification_system.md`](./design_notification_system.md); this system's responsibility ends at "here is a deduplicated, grouped, routable alert object."
@@ -590,26 +595,27 @@ public class AlertRuleEvaluator {
 
 A single monitoring stack — one ingestion tier, one storage cluster, one rule engine — is a single point of failure for the *entire observability surface*, which is precisely the blind spot §8's "who pages when the pager is down" runbook addresses. Production deployments at the scale described in §2 run **per-region monitoring stacks**, each independently capable of ingesting, storing, querying, and alerting on that region's services, plus a **global federation layer** that aggregates a curated subset of series for cross-region dashboards and global SLOs:
 
-```
-   us-east-1 stack          us-west-2 stack          eu-west-1 stack
-   +---------------+        +---------------+        +---------------+
-   | ingest/storage |        | ingest/storage |        | ingest/storage |
-   | rule engine     |        | rule engine     |        | rule engine     |
-   | (full local      |        | (full local      |        | (full local      |
-   |  alerting,       |        |  alerting,       |        |  alerting,       |
-   |  §4.6)           |        |  §4.6)           |        |  §4.6)           |
-   +-------+--------+        +-------+--------+        +-------+--------+
-           |                          |                          |
-           | federate a SMALL,        |                          |
-           | pre-aggregated subset     |                          |
-           | of series (rollup tiers   |                          |
-           | only, §4.4 -- NOT raw)    |                          |
-           v                          v                          v
-   +-------------------------------------------------------------------+
-   |              Global Federation / Cross-Region Query Layer          |
-   |  - cross-region SLO dashboards, capacity-planning views             |
-   |  - global alert rules (e.g., "total fleet error rate")              |
-   +-----------------------------------------------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    US1("us-east-1 stack<br/>ingest + storage + rule engine")
+    US2("us-west-2 stack<br/>ingest + storage + rule engine")
+    EU1("eu-west-1 stack<br/>ingest + storage + rule engine")
+    Fed("Global Federation /<br/>Cross-Region Query Layer")
+
+    US1 -.->|"rollups only, §4.4<br/>not raw"| Fed
+    US2 -.->|"rollups only"| Fed
+    EU1 -.->|"rollups only"| Fed
+
+    class US1,US2,EU1 train
+    class Fed base
 ```
 
 Two properties make this work:
@@ -635,6 +641,16 @@ Each bucket is itself a counter (subject to `rate()` like any other counter, §1
 
 - **Bucket boundaries are a cardinality decision made at instrumentation time** (§4.1): each `le` value is itself a label value, so a histogram with 10 bucket boundaries contributes 10x the series of an equivalent counter or gauge. Choosing bucket boundaries that don't bracket the actual latency distribution (e.g., all boundaries under 100ms for an endpoint that's usually 200-500ms) produces a `histogram_quantile` estimate that's accurate to "somewhere above the highest bucket," which is nearly useless
 - **An alternative, client-side-aggregated "summary" metric type** (which computes exact quantiles in-process and exposes them directly, e.g., `http_request_duration_seconds{quantile="0.99"}`) avoids the interpolation-accuracy tradeoff entirely, but cannot be meaningfully aggregated *across* instances — you cannot average two services' p99 values and get a fleet-wide p99 (percentiles don't compose under averaging). Histograms, because the underlying bucket *counts* are additive, can be summed across every instance and *then* have `histogram_quantile` applied once — which is why this design's `sum by (le, service)` in §4.5 sums bucket counts before computing the quantile, not the other way around
+
+```mermaid
+xychart-beta
+    title "Cumulative requests per histogram bucket (total = 1,000)"
+    x-axis ["le=0.05", "le=0.1", "le=0.5", "le=1.0", "le=+Inf"]
+    y-axis "Cumulative requests" 0 --> 1000
+    bar [184, 612, 980, 998, 1000]
+```
+
+The 990th request (99% of the 1,000 total) falls between the `le=0.5` bucket (980) and the `le=1.0` bucket (998), so `histogram_quantile(0.99, ...)` linearly interpolates within that gap rather than reading an exact stored value.
 
 ---
 

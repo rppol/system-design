@@ -61,70 +61,39 @@
 
 ## 3. High-Level Architecture
 
-```
-                                   +----------------------+
-                                   |       Clients         |
-                                   |  (Web / Mobile App,    |
-                                   |   ~8-9K searches/sec   |
-                                   |   peak, ~150-200       |
-                                   |   bookings/sec peak)   |
-                                   +-----------+------------+
-                                               |
-                                               v
-                                   +----------------------+
-                                   |     API Gateway        |
-                                   |  (authn, rate limiting,|
-                                   |   routing)             |
-                                   +-----------+------------+
-                                               |
-                  +----------------------------+----------------------------+
-                  |                                                          |
-                  v                                                          v
-       +---------------------+                                  +-------------------------+
-       |   Search Service      |                                 |   Booking Service        |
-       |  (read path, §4.4)     |                                 |  (write path / saga,     |
-       |                       |                                  |   §4.2, §4.3)            |
-       |  - resolves dest ->    |                                 |                          |
-       |    candidate hotel IDs |                                 |  1. validate hold        |
-       |  - per-hotel/room-type/|                                 |  2. create/extend hold   |
-       |    date availability   |                                 |     (atomic decrement,   |
-       |    + price lookups     |                                 |     TTL)                 |
-       +-----------+------------+                                 |  3. call Payment Service |
-                   |                                              |  4. confirm or release   |
-                   | cache-aside, short TTL                       +-----------+--------------+
-                   v                                                          |
-       +---------------------+                                               |
-       |  Search Cache         |                                              |
-       |  (Redis, ~540MB hot   |                                              |
-       |   working set, TTL    |                                              |
-       |   30-120s, §4.4)      |                                              |
-       +-----------+------------+                                            |
-                   | cache miss                                              |
-                   v                                                          v
-       +-------------------------------------------------------------------------------+
-       |                       Inventory Service (source of truth, §4.1, §4.2)          |
-       |                                                                                  |
-       |  inventory table: (hotel_id, room_type, date) -> total_rooms, available_rooms, |
-       |  rate_cents, version          -- sharded by hotel_id / region (§4.5)            |
-       |                                                                                  |
-       |  holds table: (hold_id, hotel_id, room_type, date_range, expires_at, status)    |
-       +--------------------------+-------------------------------------------------------+
-                                  |
-                  +----------------+----------------+
-                  |                                  |
-                  v                                  v
-       +---------------------+          +-------------------------+
-       |  Payment Service      |          |   Hold-Expiry Worker     |
-       |  (cross-ref            |         |  (background job, scans  |
-       |   design_payment_      |         |   expired holds, releases|
-       |   system.md)            |         |   inventory back, §4.2)  |
-       +---------------------+          +-------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-                  Out-of-band: Rate/Inventory Management (hoteliers / channel managers / PMS, §6)
-       +---------------------------------------------------------------------------------+
-       |   Channel Manager / PMS Sync  -->  Inventory Service (writes total_rooms, rates)  |
-       +---------------------------------------------------------------------------------+
+    C(["Clients<br/>Web / Mobile App"]) --> GW("API Gateway<br/>authn · rate limit · routing")
+    GW --> SS("Search Service<br/>read path §4.4")
+    GW --> BS("Booking Service<br/>write path / saga §4.2-4.3")
+    SS -.->|"cache-aside"| CACHE("Search Cache<br/>Redis · TTL 30-120s")
+    CACHE -.->|"cache miss"| INV("Inventory Service<br/>source of truth §4.1-4.2")
+    BS --> INV
+    INV --> PAYSVC("Payment Service")
+    INV --> WORKER("Hold-Expiry Worker<br/>background job")
+
+    subgraph OOB["Out-of-band: Rate / Inventory Management"]
+        PMS("Channel Manager / PMS")
+    end
+    PMS -.->|"writes total_rooms, rates"| INV
+
+    class C io
+    class GW req
+    class SS,WORKER mathOp
+    class BS train
+    class CACHE,INV base
+    class PAYSVC,PMS frozen
 ```
+
+Clients hit the API Gateway, which forks into the two architecturally-separate paths this whole design revolves around: the read-heavy **Search Service** (cache-aside into the Search Cache, falling back to the Inventory Service only on a miss) and the write-narrow **Booking Service**, which always talks to the Inventory Service directly — never the cache. The Inventory Service in turn feeds the Payment Service (confirm step) and the Hold-Expiry Worker (compensation step), while hotelier/channel-manager writes land on the Inventory Service out-of-band, independent of guest traffic.
 
 ### Request Flow
 
@@ -335,6 +304,22 @@ public class InventoryService {
 }
 ```
 
+The three methods above (`reserveRoom`, `confirmHold`, `releaseHold`) are really just the transitions of one small state machine living in `holds.status` — making that machine explicit is worth a picture, since no single function shows the whole lifecycle:
+
+```mermaid
+stateDiagram-v2
+    [*] --> ACTIVE: reserveRoom<br/>atomic decrement + hold row
+
+    ACTIVE --> CONFIRMED: confirmHold<br/>payment succeeded
+    ACTIVE --> RELEASED: releaseHold<br/>payment declined
+    ACTIVE --> RELEASED: releaseHold<br/>TTL expiry, Hold-Expiry Worker
+
+    CONFIRMED --> [*]
+    RELEASED --> [*]
+```
+
+Every hold starts `ACTIVE` from `reserveRoom()`'s atomic decrement (§4.2) and terminates in exactly one of two states: `CONFIRMED` (payment succeeded — no additional inventory change) or `RELEASED` (either the booking flow's own payment-declined path or the background Hold-Expiry Worker's TTL sweep call the same `releaseHold()`, per §4.3). There is no path back to `ACTIVE` — this is what makes "abandoned checkout" self-healing rather than a slow inventory leak.
+
 Three correctness properties worth calling out explicitly:
 
 1. **All-or-nothing across nights**: the `@Transactional` boundary around the per-night loop in `reserveRoom` is what prevents the "2 of 3 nights" failure mode described in §4.1 — a `SoldOutException` on night 3 rolls back the decrements already applied to nights 1 and 2.
@@ -359,58 +344,38 @@ This is **strictly worse than Approach B for this problem** and is included main
 
 The end-to-end booking flow — **search (cached) -> hold -> pay -> confirm or release** — is a Saga (cross-ref [`../distributed_transactions/README.md`](../distributed_transactions/README.md)), because it spans two systems (Inventory Service and Payment Service) that cannot share a single database transaction, and one of those systems (the payment provider behind the Payment Service) is external and cannot participate in a 2PC.
 
-```
-  Client            Booking Service          Inventory Service        Payment Service
-    |                      |                         |                        |
-    |--- search (cached) ->|                         |                        |
-    |<-- results ----------|                         |                        |
-    |                      |                         |                        |
-    |--- select room ----->|                         |                        |
-    |   POST /holds        |                         |                        |
-    |   Idempotency-Key:X   |--- reserveRoom() ------>|                        |
-    |                      |   (atomic decrement,    |                        |
-    |                      |    all nights, §4.2)    |                        |
-    |                      |<-- hold {id, expires} ---|                        |
-    |<-- hold_id, expires --|                         |                        |
-    |   (countdown shown    |                         |                        |
-    |    to user)           |                         |                        |
-    |                      |                         |                        |
-    |--- enter payment ---->|                         |                        |
-    |   POST /bookings      |                         |                        |
-    |   {hold_id,           |                         |                        |
-    |    payment_method}    |--- charge() -------------------------------------->|
-    |                      |   (Idempotency-Key,     |                        |  (PSP processes
-    |                      |    cross-ref            |                        |   charge --
-    |                      |    design_payment_      |                        |   cross-ref
-    |                      |    system.md)            |                        |   design_payment_
-    |                      |                         |                        |   system.md §4)
-    |                      |<-- charge succeeded ------------------------------|
-    |                      |                         |                        |
-    |                      |--- confirmHold() ------->|                        |
-    |                      |   (flip hold ->          |                        |
-    |                      |    CONFIRMED, no new     |                        |
-    |                      |    decrement, §4.2)      |                        |
-    |                      |<-- booking confirmed ----|                        |
-    |<-- booking confirmed -|                         |                        |
-    |                      |                         |                        |
-    |     ===== ALTERNATIVE PATH: payment fails or hold expires =====          |
-    |                      |                         |                        |
-    |                      |--- charge() -------------------------------------->|
-    |                      |<-- charge DECLINED -------------------------------|
-    |                      |--- releaseHold() ------->|                        |
-    |                      |   (increment available_  |                        |
-    |                      |    rooms back, §4.2)     |                        |
-    |<-- booking failed ----|                         |                        |
-    |                      |                         |                        |
-    |     (OR: user never completes payment within 12 min)                    |
-    |                      |                         |                        |
-    |                      |     Hold-Expiry Worker --|                        |
-    |                      |     scans holds WHERE    |                        |
-    |                      |     status='ACTIVE' AND  |                        |
-    |                      |     expires_at < now()   |                        |
-    |                      |     -> releaseHold()     |                        |
-    |                      |     (inventory returned  |                        |
-    |                      |      to the pool)        |                        |
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant BS as Booking Service
+    participant INV as Inventory Service
+    participant PAY as Payment Service
+    participant HEW as Hold-Expiry Worker
+
+    C->>BS: search (cached)
+    BS-->>C: results
+
+    C->>BS: select room<br/>POST /holds, Idempotency-Key
+    BS->>INV: reserveRoom()<br/>atomic decrement, all nights §4.2
+    INV-->>BS: hold id, expires
+    BS-->>C: hold_id, expires<br/>countdown shown to user
+
+    C->>BS: enter payment<br/>POST /bookings: hold_id, payment_method
+    BS->>PAY: charge()<br/>Idempotency-Key
+    PAY-->>BS: charge succeeded
+    BS->>INV: confirmHold()<br/>flip to CONFIRMED, no new decrement
+    INV-->>BS: booking confirmed
+    BS-->>C: booking confirmed
+
+    Note over C,PAY: Alternative path -- payment fails or hold expires
+    BS->>PAY: charge()
+    PAY-->>BS: charge DECLINED
+    BS->>INV: releaseHold()<br/>increment available_rooms back
+    BS-->>C: booking failed
+
+    Note over INV,HEW: OR -- user never completes payment within 12 min
+    HEW->>HEW: scan holds: status=ACTIVE<br/>and expires_at earlier than now()
+    HEW->>INV: releaseHold()<br/>inventory returned to the pool
 ```
 
 The saga's steps map onto the outbox/saga vocabulary from [`../distributed_transactions/README.md`](../distributed_transactions/README.md) directly:
@@ -477,6 +442,33 @@ CREATE TABLE rate_plan_overrides (
     PRIMARY KEY (rate_plan_id, stay_date)
 );
 ```
+
+The schema says it in comments ("do NOT have their own `available_rooms`"); the picture makes the fan-in unmistakable — every rate plan on a room type is a priced *view*, and all of them draw down the same physical count:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    POOL("Shared physical pool<br/>40 Deluxe King rooms")
+
+    RP1("Standard Flexible<br/>refundable, full price") --> POOL
+    RP2("Non-Refundable<br/>10-15% cheaper") --> POOL
+    RP3("Member Rate<br/>loyalty login") --> POOL
+    RP4("Breakfast Included<br/>add-on bundled") --> POOL
+    POOL --> DEC("reserveRoom decrements<br/>available_rooms once")
+
+    class RP1,RP2,RP3,RP4 io
+    class POOL base
+    class DEC mathOp
+```
+
+All four rate plans reference the same physical pool (§4.6) — `reserveRoom()`'s atomic decrement (§4.2) draws from this single shared count regardless of which rate plan the guest booked, which is why a hotel with 40 physical "Deluxe King" rooms sold across two rate plans still totals 40 room-nights consumed, never 80.
 
 A search result's "price" for a given `(hotel, room_type, dates)` is therefore computed by joining the **availability** from `inventory` (§4.1, "is there a room at all") with the **cheapest applicable** `rate_plan_overrides` row that satisfies the requested dates' restrictions (`min_stay_nights`, `closed_to_arrival`). Crucially, **the hold step (§4.2) still decrements `inventory.available_rooms`**, regardless of which rate plan the guest chose — the rate plan only determined the *price* and the *cancellation terms*, not which physical pool was decremented. This is why §4.2's `reserveRoom` signature takes `(hotelId, roomTypeId, ...)` rather than `(rate_plan_id, ...)`: the rate plan is recorded on the `holds`/`bookings` row (so the correct price and cancellation policy are honored at confirmation and at cancellation time, per §11's "rate locked at hold time" discussion) but is not part of the atomic decrement's identity.
 
@@ -640,22 +632,26 @@ The unifying point: **the inventory decrement (§4.2) is synchronous and in the 
 
 **Broken**: An early version of the booking flow implemented availability checking as a separate **read-then-write** sequence — a `SELECT available_rooms FROM inventory WHERE ...` followed, in application code, by `if (available_rooms > 0) { UPDATE inventory SET available_rooms = available_rooms - 1 WHERE ... }`. This is the textbook check-then-act race:
 
-```
-Inventory row: hotel_id=42, room_type=DELUXE, date=2026-12-24, available_rooms=1
+```mermaid
+sequenceDiagram
+    participant A as Thread A<br/>User 1
+    participant DB as Inventory DB
+    participant B as Thread B<br/>User 2
 
-Thread A (User 1 booking)              Thread B (User 2 booking)
-  SELECT available_rooms                  SELECT available_rooms
-  WHERE hotel_id=42 ... --> returns 1     WHERE hotel_id=42 ... --> returns 1
-  (app code: 1 > 0, proceed)               (app code: 1 > 0, proceed)
-  UPDATE inventory SET                     UPDATE inventory SET
-  available_rooms = 1 - 1 = 0              available_rooms = 1 - 1 = 0
-  WHERE hotel_id=42 ...                    WHERE hotel_id=42 ...
+    Note over DB: hotel_id=42, DELUXE,<br/>2026-12-24, available_rooms=1
 
-RESULT: available_rooms = 0 (correct final value), but BOTH User 1 and
-User 2 received "booking confirmed" -- the application code's "1 > 0"
-check for BOTH threads ran against the SAME pre-decrement value of 1,
-because nothing prevented both SELECTs from completing before either
-UPDATE.
+    A->>DB: SELECT available_rooms<br/>WHERE hotel_id=42
+    DB-->>A: returns 1
+    B->>DB: SELECT available_rooms<br/>WHERE hotel_id=42
+    DB-->>B: returns 1
+
+    Note over A: app code: room available,<br/>proceed to book
+    Note over B: app code: room available,<br/>proceed to book
+
+    A->>DB: UPDATE available_rooms = 1 - 1 = 0
+    B->>DB: UPDATE available_rooms = 1 - 1 = 0
+
+    Note over A,B: RESULT: available_rooms = 0 (correct final value),<br/>but BOTH users received "booking confirmed" --<br/>both SELECTs ran against the SAME value of 1<br/>before either UPDATE committed
 ```
 
 **Impact**: For New Year's Eve at a popular hotel — the single highest-demand night of the year for that property — the last available "Deluxe King" room was sold to two different guests within the same second, both of whom received confirmation emails, both of whom had been charged (this predated the hold-with-TTL design, so payment had already been captured at booking time). One guest arrived at the front desk on December 31st to find their confirmed reservation occupied by someone else. The resolution required the hotel to comp an upgrade to a suite for one guest (at the hotel's cost, with the OTA absorbing a goodwill credit) and triggered a wider audit that found the same race pattern had produced **dozens of similar double-bookings** across high-demand dates over the preceding months — most resolved quietly via upgrades or refunds, but each one a direct cost and a guest-trust incident.

@@ -12,11 +12,25 @@ A secrets management platform inverts this. Instead of an application *holding* 
 
 **Mental model:** think of it as three layers stacked on one identity plane.
 
-```
-  IDENTITY        →   AUTHORIZATION        →   GENERATION + LEASE
-  (who are you?)      (what can you get?)      (here is a fresh, expiring secret)
-  K8s SA / OIDC       policy: db-read          dynamic DB user, TTL=1h, revoke on expiry
-  IRSA / JWT          path: database/creds/*    PKI cert, transit decrypt grant
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ID(["IDENTITY<br/>who are you?<br/>K8s SA / OIDC · IRSA / JWT"])
+    AUTHZ{"AUTHORIZATION<br/>what can you get?<br/>policy: db-read<br/>path: database/creds/*"}
+    GEN(["GENERATION + LEASE<br/>a fresh, expiring secret<br/>dynamic DB user TTL=1h<br/>PKI cert · transit grant"])
+
+    ID --> AUTHZ --> GEN
+
+    class ID io
+    class AUTHZ mathOp
+    class GEN train
 ```
 
 **Why it exists:** at 5 services you can rotate by hand. At 3,000 services across 40 clusters, manual rotation is impossible, shared secrets are inevitable, and a single leaked static credential is an existential breach. The platform makes "rotate everything in 60 minutes" the *default behavior of the system*, not a heroic incident response.
@@ -101,6 +115,17 @@ Raft DB working set                                    ≈ 3.1 GB
 
 Comfortably fits in RAM on an `r6i.2xlarge` (64 GB). Raft snapshots ~3 GB every few minutes; keep on instance NVMe + ship to S3.
 
+```mermaid
+pie title Raft Working Set Composition (~3.1 GB total)
+    "Leases (2.7 GB)" : 2700
+    "Policies / mounts / identity (200 MB)" : 200
+    "Tokens (120 MB)" : 120
+    "KV secrets (80 MB)" : 80
+    "PKI cert metadata (6 MB)" : 6
+```
+
+Leases alone account for ~87% of the Raft working set — the reason lease math (issuance rate × TTL), not KV or token storage, is the dominant capacity-planning driver for this platform.
+
 ### Audit log volume
 
 Every operation is audited. At 50k ops/sec, each audit entry ~1.2 KB JSON (request + response hashed):
@@ -122,55 +147,75 @@ That is large. We log audit to a local file device *and* a socket device shippin
 
 ## 3. High-Level Architecture
 
-```
-                         APPLICATIONS (3,000 svc / 40 clusters / 8 regions)
-   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-   │ payments-svc │   │ orders-svc   │   │ ci-runner    │   │ batch-job    │
-   │ (K8s SA)     │   │ (K8s SA)     │   │ (OIDC JWT)   │   │ (IRSA/AWS)   │
-   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
-          │ login + read     │                  │                  │
-          ▼                  ▼                  ▼                  ▼
-   ┌───────────────────────────────────────────────────────────────────────┐
-   │                    AUTH METHODS  (identity verification)               │
-   │  kubernetes auth   |   jwt/oidc   |   aws (IRSA)   |   approle (legacy) │
-   │  TokenReview API   |  verify iss  |  STS GetCaller |  role_id+secret_id │
-   └───────────────────────────────┬───────────────────────────────────────┘
-                                    │ short-lived Vault token + policies
-                                    ▼
-   ┌───────────────────────────────────────────────────────────────────────┐
-   │            VAULT HA CLUSTER  (5× Raft voters, active + standby)        │
-   │   ┌─────────┐  raft  ┌─────────┐  raft  ┌─────────┐                    │
-   │   │ ACTIVE  │◄──────►│ STANDBY │◄──────►│ STANDBY │  (+2 more)         │
-   │   └────┬────┘        └─────────┘        └─────────┘                    │
-   │        │ auto-unseal (cloud KMS wraps master key)                      │
-   │        ▼                                                               │
-   │   ┌─────────────────────── SECRETS ENGINES ───────────────────────┐   │
-   │   │  database/   →  dynamic DB users, leases, TTL=1h               │   │
-   │   │  pki/        →  intermediate CA, leaf certs TTL=48h            │   │
-   │   │  transit/    →  encrypt/decrypt/sign, no key egress            │   │
-   │   │  kv-v2/      →  versioned static secrets (3rd-party API keys)  │   │
-   │   └───────────────────────────────────────────────────────────────┘   │
-   │        │ audit (every op)                                              │
-   │        ▼                                                               │
-   │   ┌──────────────┐    ┌──────────────┐                                 │
-   │   │ file device  │    │ socket device│──► SIEM / Splunk / Loki         │
-   │   └──────────────┘    └──────────────┘                                 │
-   └───────────────────────────────────────────────────────────────────────┘
-        ▲ replicate (DR + perf secondaries)        ▲ generate creds on
-        │                                           │ target backends
-   ┌────┴─────────────┐                    ┌────────┴──────────┐
-   │ DR SECONDARY     │                    │ Postgres / MySQL  │
-   │ (warm standby,   │                    │ MongoDB / Redis   │
-   │  another region) │                    │ (target DBs)      │
-   └──────────────────┘                    └───────────────────┘
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   IN-CLUSTER SYNC PATH (for static KV that must land as a native Secret):
-   ┌────────────────────────────────────────────────────────────────────┐
-   │ External Secrets Operator (ESO) per cluster                         │
-   │   ClusterSecretStore ──auth(K8s SA)──► Vault kv-v2                   │
-   │   ExternalSecret  ──poll 1h──► reconcile ──► native k8s Secret      │
-   └────────────────────────────────────────────────────────────────────┘
+    subgraph APPS["Applications<br/>3000 svc / 40 clusters / 8 regions"]
+        A1(["payments-svc<br/>K8s SA"])
+        A2(["orders-svc<br/>K8s SA"])
+        A3(["ci-runner<br/>OIDC JWT"])
+        A4(["batch-job<br/>IRSA / AWS"])
+    end
+
+    AUTHM{"Auth methods:<br/>k8s · oidc · aws · approle"}
+
+    subgraph VAULTHA["Vault HA Cluster<br/>5x Raft voters"]
+        ACTIVE(["ACTIVE"])
+        STANDBY(["STANDBY<br/>+2 more"])
+        subgraph ENGINES["Secrets Engines"]
+            DBENG(["database/<br/>dynamic DB users"])
+            PKIENG(["pki/<br/>leaf certs TTL 48h"])
+            TRENG(["transit/<br/>encrypt / decrypt"])
+            KVENG(["kv-v2/<br/>versioned static"])
+        end
+    end
+
+    subgraph AUDIT["Audit Devices"]
+        AFILE(["file device"])
+        ASOCK(["socket device"])
+    end
+
+    SIEM(["SIEM · Splunk · Loki"])
+    DR(["DR secondary<br/>warm standby, other region"])
+    TARGETDB(["Postgres / MySQL<br/>MongoDB / Redis"])
+
+    subgraph ESOSYNC["In-cluster sync path"]
+        CSSTORE(["ClusterSecretStore"])
+        EXTSEC(["ExternalSecret"])
+        K8SEC(["native k8s Secret"])
+    end
+
+    A1 -- "login + read" --> AUTHM
+    A2 -- "login + read" --> AUTHM
+    A3 -- "login + read" --> AUTHM
+    A4 -- "login + read" --> AUTHM
+    AUTHM -- "short-lived token<br/>+ policies" --> ACTIVE
+    ACTIVE -. "raft" .-> STANDBY
+    ACTIVE -- "auto-unseal via<br/>cloud KMS" --> ENGINES
+    ENGINES -- "every op" --> AUDIT
+    ASOCK --> SIEM
+    VAULTHA -. "replicate" .-> DR
+    ENGINES -- "generate creds" --> TARGETDB
+    CSSTORE -- "auth K8s SA" --> KVENG
+    EXTSEC -- "poll 1h, reconcile" --> K8SEC
+
+    class A1,A2,A3,A4 io
+    class AUTHM mathOp
+    class ACTIVE train
+    class STANDBY,DR frozen
+    class DBENG,PKIENG,TRENG,KVENG,TARGETDB base
+    class AFILE,ASOCK,SIEM req
+    class CSSTORE,EXTSEC,K8SEC io
 ```
+
+Applications authenticate through pluggable auth methods, receive a policy-scoped Vault token, and read from the matching secrets engine; every engine operation is audited to two devices, the cluster replicates to a DR region, and the in-cluster sync path lets External Secrets Operator materialize static KV as native Kubernetes Secrets.
 
 ### Component inventory
 
@@ -204,20 +249,42 @@ That is large. We log audit to a local file device *and* a socket device shippin
 
 ### 4.1 Dynamic Database Secrets Engine + Lease Lifecycle
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    APP(["app"])
+    ENGINE("vault database/ engine<br/>admin conn, rotated root")
+    PG(["Postgres:<br/>CREATE ROLE v-payments-ab12cd<br/>VALID UNTIL now()+1h"])
+    LEASE(["lease: id, expiry,<br/>revocation_stmt"])
+    RAFTN(["Raft"])
+    DECISION{"renew or<br/>expire / revoke?"}
+    RENEW(["extend VALID UNTIL"])
+    DROP(["DROP ROLE<br/>v-payments-ab12cd"])
+
+    APP -- "creds/payments-ro" --> ENGINE
+    ENGINE --> PG
+    PG --> LEASE
+    LEASE --> RAFTN
+    RAFTN --> DECISION
+    DECISION -- "renew, 2/3 TTL" --> RENEW
+    DECISION -- "expire / revoke" --> DROP
+
+    class APP io
+    class ENGINE mathOp
+    class PG,LEASE,RAFTN base
+    class DECISION mathOp
+    class RENEW train
+    class DROP lossN
 ```
-   app ──creds/payments-ro──► vault database/ engine
-                                    │  uses ADMIN conn (rotated root)
-                                    ▼
-                              Postgres: CREATE ROLE v-payments-ab12cd
-                                        GRANT SELECT ...
-                                        VALID UNTIL now()+1h
-                                    │
-                              lease{id, expiry, revocation_stmt} ──► Raft
-                                    │
-                   ┌────────────────┴─────────────────┐
-                   ▼ renew (2/3 TTL)                   ▼ expire/revoke
-            extend VALID UNTIL                  DROP ROLE v-payments-ab12cd
-```
+
+A dynamic credential's whole lifecycle — mint, use, renew at 2/3 TTL, or drop on expiry/revoke — runs without a human ever seeing the password.
 
 Configure the connection with a role Vault itself rotates, so even the *admin* password is never static:
 
@@ -344,19 +411,28 @@ Now: each service gets its own credential, scoped read-only, 1h TTL, auto-revoke
 
 ### 4.2 Kubernetes Auth + IRSA (workload identity, zero static tokens)
 
-```
-  pod (projected SA JWT)──login──► auth/kubernetes
-                                       │ TokenReview(JWT) ─► cluster API
-                                       │ verify: bound SA, namespace, aud
-                                       ▼
-                                 issue Vault token (TTL 1h, policy=payments)
+```mermaid
+sequenceDiagram
+    participant Pod as K8s Pod (SA JWT)
+    participant VK as auth/kubernetes
+    participant API as Cluster API
+    participant EKS as EKS Pod (IRSA)
+    participant VA as auth/aws
+    participant STS as AWS STS
 
-  EKS pod (IRSA)──────login──► auth/aws
-                                       │ sts:GetCallerIdentity (signed)
-                                       │ verify ARN matches bound role
-                                       ▼
-                                 issue Vault token (policy=batch)
+    Pod->>VK: login (JWT)
+    VK->>API: TokenReview(JWT)
+    API-->>VK: verify bound SA, namespace, aud
+    VK-->>Pod: Vault token (TTL 1h, policy=payments)
+
+    Note over EKS,STS: Parallel path for AWS workloads (IRSA)
+    EKS->>VA: login (signed request)
+    VA->>STS: sts:GetCallerIdentity
+    STS-->>VA: verify ARN matches bound role
+    VA-->>EKS: Vault token (policy=batch)
 ```
+
+Both auth methods verify workload identity against an external source of truth — the cluster's TokenReview API or AWS STS — before Vault issues a short-lived, policy-scoped token; no static credential is ever presented.
 
 Kubernetes auth uses *short-lived projected tokens*, not the legacy long-lived SA secret:
 
@@ -421,18 +497,33 @@ vault token revoke -self
 
 ### 4.3 External Secrets Operator (ESO) Sync
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    CSSTORE(["ClusterSecretStore<br/>per cluster, 1 K8s-auth identity"])
+    EXTSEC("ExternalSecret<br/>per app")
+    KVV2(["Vault kv-v2"])
+    SEC(["native k8s Secret"])
+    POD(["mounted / env into pod"])
+
+    CSSTORE --> EXTSEC
+    EXTSEC -- "reconcile loop<br/>refreshInterval" --> KVV2
+    KVV2 -- "kv read, audited<br/>decoded values" --> SEC
+    SEC --> POD
+
+    class CSSTORE,SEC,POD io
+    class EXTSEC mathOp
+    class KVV2 base
 ```
- ClusterSecretStore (per cluster, 1 K8s-auth identity)
-        │
-        ▼
- ExternalSecret (per app) ── reconcile loop (refreshInterval) ──► Vault kv-v2
-        │                                                            │
-        ▼                                                            ▼
- native k8s Secret  ◄──────────── decoded values ─────────── kv read (audited)
-        │
-        ▼
- mounted/env into pod  (app sees an ordinary Secret; rotation is transparent)
-```
+
+ESO's reconcile loop polls Vault kv-v2 on the configured refreshInterval and writes decoded values into a native k8s Secret — the pod sees an ordinary Secret and rotation is transparent to it.
 
 ```yaml
 apiVersion: external-secrets.io/v1beta1
@@ -477,15 +568,44 @@ spec:
 
 ### 4.4 Transit (Encryption-as-a-Service) + PKI
 
-```
- transit: app sends plaintext ──► vault holds key, returns ciphertext
-          key never leaves vault; app cannot exfiltrate key material
-          rotate key → new version; old ciphertext still decryptable
-          rewrap → re-encrypt old ciphertext to new key version (no plaintext)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
- pki: app CSR ──► intermediate CA signs ──► leaf cert TTL=48h
-      auto-renew at 50% lifetime; CRL/OCSP for revocation
+    subgraph TRANSIT["transit: encryption-as-a-service"]
+        T1(["app plaintext"])
+        T2("vault holds key<br/>returns ciphertext")
+        T3(["rotate key<br/>new version"])
+        T4(["old ciphertext<br/>still decryptable"])
+        T5(["rewrap:<br/>re-encrypt to new version"])
+        T1 --> T2
+        T2 -.-> T3
+        T3 --> T4
+        T4 -.-> T5
+    end
+
+    subgraph PKI["pki: intermediate CA"]
+        P1(["app CSR"])
+        P2("intermediate CA<br/>signs")
+        P3(["leaf cert<br/>TTL 48h"])
+        P4(["auto-renew at 50%<br/>CRL / OCSP revocation"])
+        P1 --> P2
+        P2 --> P3
+        P3 -.-> P4
+    end
+
+    class T1,P1 io
+    class T2,P2 mathOp
+    class T3,T4,T5,P3,P4 base
 ```
+
+Transit never lets key material leave Vault — the app only ever handles ciphertext — while the PKI engine issues short-TTL leaf certificates from an intermediate CA that auto-renew well before expiry.
 
 ```bash
 # transit: create a rotatable key, encrypt without app ever seeing key bytes
@@ -559,6 +679,22 @@ The transit pattern means a database breach yields only ciphertext: the attacker
 **Alternatives:** 5m (tighter blast radius), 24h (less DB churn).
 **Rationale:** 1h balances leak-window vs DB DROP/CREATE load. 5m → 12× issuance = DB overload; 24h → leaked cred valid a full day.
 **Consequences:** A leaked dynamic cred is valid up to 1h. Acceptable given full audit + instant revoke capability.
+
+```mermaid
+quadrantChart
+    title Dynamic Credential TTL: Leak Window vs DB Churn
+    x-axis Shorter leak window --> Longer leak window
+    y-axis Lower DB churn --> Higher DB churn
+    quadrant-1 Worst of both
+    quadrant-2 Short window heavy churn
+    quadrant-3 Balanced default
+    quadrant-4 Long exposure light churn
+    "5 min TTL (12x churn)": [0.12, 0.88]
+    "1 hour TTL (chosen)": [0.42, 0.38]
+    "24 hour TTL": [0.88, 0.1]
+```
+
+The TTL choice trades leak window against database churn: 5 minutes tightens the leak window but multiplies CREATE/DROP load 12x, 24 hours minimizes churn but leaves a leaked credential valid all day — 1 hour is the chosen balance.
 
 ### D7 — Performance secondaries vs single big cluster
 

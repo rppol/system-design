@@ -63,47 +63,67 @@
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Clients<br/>Mobile / Web App"])
+
+    subgraph TilePath["Tile Path"]
+        CDN("CDN Edge Cache<br/>over 99% hit rate")
+        TileSvc("Tile Rendering Service<br/>origin · renders on miss")
+    end
+
+    subgraph Services["API Services · ~20K req/sec peak"]
+        GW("API Gateway")
+        Geocode("Geocoding Service")
+        Places("Places / POI Search")
+        Routing("Routing Service")
+        ETA("ETA Service")
+    end
+
+    subgraph DataLayer["Shared Regional Data"]
+        GeoIndex("Geospatial Index<br/>S2 / Quadtree / Geohash")
+        CHGraph("Per-Region CH Road Graphs<br/>~200 regions + live overlay")
+    end
+
+    Traffic("Traffic Service<br/>Kafka · 200K pings/sec")
+
+    Client --> CDN
+    Client --> GW
+    CDN -->|"under 1% miss<br/>~2,000 req/sec"| TileSvc
+    TileSvc -.->|"write-back"| CDN
+    TileSvc --> GeoIndex
+    GW --> Geocode
+    GW --> Places
+    GW --> Routing
+    GW --> ETA
+    Geocode --> GeoIndex
+    Places --> GeoIndex
+    Routing --> CHGraph
+    CHGraph --> ETA
+    Traffic --> CHGraph
+
+    class Client io
+    class CDN base
+    class TileSvc frozen
+    class GW req
+    class Geocode mathOp
+    class Places mathOp
+    class Routing mathOp
+    class ETA mathOp
+    class GeoIndex base
+    class CHGraph base
+    class Traffic req
 ```
-                              +-----------------------+
-                              |        Clients         |
-                              |  (Mobile / Web App)     |
-                              +------------+------------+
-                                           |
-                +---------------------------+---------------------------+
-                |                                                       |
-                v                                                       v
-   +-------------------------+                          +---------------------------+
-   |    CDN Edge Cache        |                          |       API Gateway          |
-   |  (tile requests,         |                          |  (geocode/places/route/ETA |
-   |   >99% hit rate)         |                          |   requests, ~20K/sec peak) |
-   +------------+-------------+                          +---------------+-------------+
-                | <1% miss (~2,000 req/sec)                              |
-                v                                  +----------+----------+----------+
-   +--------------------------+                    |          |          |          |
-   |   Tile Rendering Service  |                    v          v          v          v
-   |  (renders tiles on miss,  |             +----------+ +--------+ +---------+ +--------+
-   |   writes back to CDN)     |             | Geocoding| | Places | | Routing | |  ETA   |
-   +-------------+--------------+            |  Service | | / POI  | | Service | | Service|
-                 |                            +----+-----+ | Search | +----+----+ +---+----+
-                 v                                 |        +---+----+      |          ^
-   +--------------------------+                    |            |           |          |
-   |   Geospatial Index         |<------------------+------------+           v          |
-   |  (S2 / Quadtree / Geohash, |                                  +-----------------------+
-   |   sharded by ~200 regions) |                                  | Per-Region CH Road     |
-   +--------------------------+                                   | Graphs (~200 regions,  |
-                                                                    | ~172MB each) + live    |
-                                                                    | traffic overlay (§4.5) |
-                                                                    +-----------+------------+
-                                                                                ^
-                                                                                |
-                                                                    +-----------+------------+
-                                                                    |     Traffic Service     |
-                                                                    | Kafka ingest (200K       |
-                                                                    | pings/sec) -> map-match  |
-                                                                    | -> per-segment speed agg |
-                                                                    | every 1-2 min (§4.6)     |
-                                                                    +-------------------------+
-```
+
+Clients split across two independent paths — a read-heavy tile path (CDN-backed, over 99% cache hit) and a write-light API path (four services that all share the same S2 geospatial index and per-region CH road graphs, §4.1-§4.7).
 
 ### Request Flow
 
@@ -327,6 +347,41 @@ The order in which nodes are contracted matters enormously. The standard heurist
 #### Query: Bidirectional Upward Search
 
 Given the CH-augmented graph (original edges plus shortcuts) and each node's rank, a query runs **two simultaneous Dijkstra searches** — forward from the source, backward from the destination on the reverse graph — with one critical restriction: **each search only relaxes edges leading to a higher-rank node than the current one.** Both searches are forced to "climb" toward the highest-ranked nodes (the highway backbone) and never need to "descend" again. They meet somewhere in the middle — typically at or near the highway segments connecting the source and destination regions — and the shortest path is `min` over all settled nodes of `forwardDist[node] + backwardDist[node]`.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Source(["Source<br/>low rank"])
+    Target(["Target<br/>low rank"])
+    FSearch("Forward search<br/>relax only to<br/>higher-rank nodes")
+    BSearch("Backward search<br/>relax only to<br/>higher-rank nodes")
+    Meet("Node settled by<br/>both searches<br/>near the highway backbone")
+    Check{"frontier sums no<br/>longer beat bestDist?"}
+    Stop(["Return bestDist<br/>hundreds of nodes touched, not millions"])
+
+    Source --> FSearch
+    Target --> BSearch
+    FSearch -->|"climbs upward"| Meet
+    BSearch -->|"climbs upward"| Meet
+    Meet --> Check
+    Check -.->|"no, keep expanding"| FSearch
+    Check -->|"yes"| Stop
+
+    class Source,Target io
+    class FSearch,BSearch mathOp
+    class Meet train
+    class Check mathOp
+    class Stop io
+```
+
+The forward search (from the source) and backward search (from the destination) each relax only edges toward a higher-rank node, so both frontiers are forced to climb toward the highway backbone and meet near the top; the search terminates the instant neither frontier's remaining distance could beat the best meeting distance found so far (`bestDist` in `ContractionHierarchyRouter`, §4.5).
 
 ```java
 public class ContractionHierarchyRouter {
@@ -599,31 +654,41 @@ While the user is actively navigating, the client periodically reports its curre
 
 Every subsystem in §4.1-§4.7 eventually has to absorb a **map-data update**: a new road opens, a business closes, a speed limit changes, a one-way restriction is added. The out-of-scope data-collection pipeline (§1) produces these as a **diff** — a set of bounding boxes plus the changed entities within them — and this section describes how that diff propagates through tiles, the road graph, and the geocoding/POI indexes. This is the architectural thread connecting War Story 3 (tile versioning) and War Story 4 (CH overlay vs. re-preprocessing): both war stories are really about **the same underlying fact**, that different subsystems can safely absorb updates at very different speeds, and the pipeline must respect that rather than forcing everything onto one timeline.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Diff(["Raw Map Data Diff<br/>bounding boxes + changed entities<br/>out of scope §1"])
+    RM("Release Manager<br/>assigns version N<br/>computes affected regions/tiles/POIs")
+    FanOut("Per-Region Fan-Out<br/>only affected regions queued")
+    TileBump("Tile Version Bump<br/>§4.2 · immediate")
+    CHQueue("CH Graph Rebuild Queue<br/>§4.5 · nightly")
+    POIApply("Geocoding / POI Index Online Apply<br/>§4.3, §4.4 · near-immediate")
+    Rollout(["Staged Regional Rollout<br/>one region at a time · War Story 3"])
+
+    Diff --> RM
+    RM --> FanOut
+    FanOut --> TileBump
+    FanOut --> CHQueue
+    FanOut --> POIApply
+    CHQueue --> Rollout
+
+    class Diff frozen
+    class RM mathOp
+    class FanOut mathOp
+    class TileBump train
+    class CHQueue lossN
+    class POIApply train
+    class Rollout io
 ```
-+-------------------+     +----------------------+     +------------------------+
-| Raw Map Data Diff  |---->| Release Manager       |---->| Per-Region Fan-Out      |
-| (bounding boxes +  |     | - assigns version N   |     | (only affected regions  |
-|  changed entities, |     | - computes affected   |     |  are queued downstream) |
-|  out of scope §1)  |     |   regions/tiles/POIs  |     +-----------+-------------+
-+-------------------+     +-----------------------+                 |
-                                                        +-------------+-------------+
-                                                        |             |             |
-                                                        v             v             v
-                                                 +-----------+ +-----------+ +-------------+
-                                                 |  Tile      | | CH Graph  | | Geocoding /  |
-                                                 |  Version   | | Rebuild   | | POI Index    |
-                                                 |  Bump      | | Queue     | | Online Apply |
-                                                 |  (§4.2)    | | (§4.5,    | | (§4.3, §4.4) |
-                                                 |  immediate | |  nightly) | | near-immediate|
-                                                 +-----------+ +-----+-----+ +-------------+
-                                                                     |
-                                                                     v
-                                                        +-------------------------+
-                                                        | Staged Regional Rollout   |
-                                                        | (one region at a time;    |
-                                                        |  War Story 3)             |
-                                                        +-------------------------+
-```
+
+A single map-data diff fans out to three independent update paths at three different speeds — immediate tile-version bumps, near-immediate index updates, and a nightly-batch CH road-graph rebuild — matching each subsystem's blast radius (§9's "why four speeds" table). Only the CH-rebuild path gates the staged, region-by-region rollout that War Story 3 made mandatory after its 100x origin traffic spike.
 
 ```java
 public class MapDataReleaseManager {
@@ -716,6 +781,22 @@ Not all ~200 regions (§2) carry equal routing/API traffic (~20,000 req/sec peak
 | Tier 1 (major metro) | Tokyo, New York, London, Sao Paulo, Mumbai | ~15 | 50% | ~667 req/sec | 6-8 |
 | Tier 2 (mid-size metro) | regional capitals, secondary cities | ~60 | 35% | ~117 req/sec | 2-3 |
 | Tier 3 (rural / low-density) | remaining global coverage | ~125 | 15% | ~24 req/sec | 1-2 (sometimes pooled across adjacent regions) |
+
+```mermaid
+quadrantChart
+    title Routing Fleet Tiering - Region Share vs Traffic Share
+    x-axis Low Region Share --> High Region Share
+    y-axis Low Traffic Share --> High Traffic Share
+    quadrant-1 Rare - high count and high traffic
+    quadrant-2 Concentrated hotspots - Tier 1
+    quadrant-3 Balanced middle - Tier 2
+    quadrant-4 Long tail - Tier 3
+    Tier 1: [0.075, 0.5]
+    Tier 2: [0.3, 0.35]
+    Tier 3: [0.625, 0.15]
+```
+
+Just 15 Tier-1 regions (7.5% of the roughly 200 total) carry 50% of routing traffic, while 125 Tier-3 regions (62.5% of the total) carry only 15% — the concentration that makes a flat per-region node allocation wrong in both directions (§10).
 
 - Each routing node holds that region's CH-augmented graph in memory — ~172MB average base graph (§2), roughly doubling to **~345MB** once shortcut edges are included (§5) — plus its slice of the POI index (~200MB average) and geocoding index, comfortably within a single modest instance's RAM.
 - Tier 1's 6-8 nodes per region serve two purposes: headroom (each individual CH query is sub-millisecond, but request handling, the live-overlay lookup §4.6, and response serialization add real overhead at 667 req/sec) and **fault isolation** — losing 1 of 8 nodes in Tokyo is a 12.5% capacity hit, while losing 1 of 1-2 nodes in a Tier 3 region is a 50-100% hit, which is acceptable there only because Tier 3's absolute traffic is low enough that a brief failover doesn't threaten the global P99 latency SLO.

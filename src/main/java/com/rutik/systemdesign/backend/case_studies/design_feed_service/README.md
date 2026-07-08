@@ -26,79 +26,107 @@ scale.
 
 ## Architecture Overview
 
+The read path routes through the API Gateway into the Feed Service, which serves the pre-built ZSet
+directly or merges in celebrity timelines through the Feed Merger before Post Service hydrates full
+post details.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client([Client]) --> Gateway(API Gateway)
+    Gateway --> FeedSvc(Feed Service<br/>read path)
+    FeedSvc --> ZSet(Redis ZSet<br/>feed:uid)
+    FeedSvc --> Merger((Feed Merger<br/>pull users))
+    Merger --> PostSvc(Post Service<br/>fetch post details)
+
+    class Client io
+    class Gateway req
+    class FeedSvc mathOp
+    class ZSet base
+    class Merger mathOp
+    class PostSvc base
 ```
-                  +-----------+
-                  |   Client  |
-                  +-----+-----+
-                        |
-                  +-----v-----+
-                  |   API     |
-                  |  Gateway  |
-                  +-----+-----+
-                        |
-             +----------v----------+
-             |    Feed Service     |
-             |  (read path)        |
-             +----+--------+-------+
-                  |        |
-       +----------v--+  +--v-----------+
-       | Redis ZSet  |  | Feed Merger  |
-       | feed:{uid}  |  | (for pull    |
-       | [postId,ts] |  |  users)      |
-       +-------------+  +------+-------+
-                               |
-                        +------v-------+
-                        | Post Service |
-                        | (fetch post  |
-                        |  details)    |
-                        +--------------+
 
-Write Path — Fan-out-on-write (regular users, < 10k followers):
+**Write Path — Fan-out-on-write** (regular users, < 10,000 followers): the Fan-out Worker consumes
+`post-published` events and ZADDs the new post ID into every follower's own feed ZSet.
 
-  +------------+    publish    +------------------+
-  | Post       +-------------> | Kafka            |
-  | Service    |               | post-published   |
-  +------------+               +--------+---------+
-                                        |
-                               +--------v---------+
-                               | Fan-out Worker   |
-                               | (consumer group) |
-                               +--------+---------+
-                                        |
-                          +-------------+-------------+
-                          |             |             |
-                   +------v----+ +------v----+ +------v----+
-                   | Redis     | | Redis     | | Redis     |
-                   | feed:uid1 | | feed:uid2 | | feed:uid3 |
-                   | ZADD      | | ZADD      | | ZADD      |
-                   +-----------+ +-----------+ +-----------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Write Path — Fan-out-on-read (celebrities, > 10k followers):
+    PostSvc([Post Service]) -->|publish| Kafka(Kafka<br/>post-published)
+    Kafka --> Worker(Fan-out Worker<br/>consumer group)
+    Worker --> Z1(Redis feed:uid1<br/>ZADD)
+    Worker --> Z2(Redis feed:uid2<br/>ZADD)
+    Worker --> Z3(Redis feed:uid3<br/>ZADD)
 
-  +------------+    publish    +------------------+
-  | Post       +-------------> | Kafka            |
-  | Post       |               | celebrity-posts  |
-  | Service    |               +--------+---------+
-  +------------+                        |
-                                        | (no fan-out)
-                                 Celebrity post
-                                 stored in
-                                 celebrity_timeline:{uid}
-                                 Redis ZSet
+    class PostSvc io
+    class Kafka req
+    class Worker mathOp
+    class Z1,Z2,Z3 train
+```
 
-Read Path — Hybrid merge for user following celebrities:
+**Write Path — Fan-out-on-read** (celebrities, >= 10,000 followers): the post is written once to the
+celebrity's own timeline — no per-follower fan-out occurs.
 
-  feed:{uid}              celebrity_timeline:{celebId}   celebrity_timeline:{celebId2}
-  [regular posts]    +   [posts from celeb 1]         +  [posts from celeb 2]
-         |                        |                              |
-         +------------------------+------------------------------+
-                                  |
-                        Feed Merger (N-way merge by timestamp)
-                                  |
-                        Cursor-based page returned to client
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Database Layer:
+    PostSvc([Post Service]) -->|publish| Kafka(Kafka<br/>celebrity-posts)
+    Kafka -.->|no fan-out| Timeline(celebrity_timeline:uid<br/>Redis ZSet)
 
+    class PostSvc io
+    class Kafka req
+    class Timeline frozen
+```
+
+**Read Path — Hybrid Merge** for a user following celebrities: the pre-built feed ZSet and each
+followed celebrity's timeline are merged N-way by timestamp before the cursor-based page is returned.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Feed(feed:uid<br/>regular posts) --> Merger((Feed Merger<br/>N-way merge))
+    Celeb1(celebrity_timeline:celebId<br/>posts) --> Merger
+    Celeb2(celebrity_timeline:celebId2<br/>posts) --> Merger
+    Merger --> Page([Cursor-based page<br/>to client])
+
+    class Feed,Celeb1,Celeb2 base
+    class Merger mathOp
+    class Page io
+```
+
+**Database Layer** — schema and Redis key structures backing the feed (kept as a reference listing,
+not a topology diagram):
+
+```
   PostgreSQL:
     follows(follower_id, followee_id, created_at)
     posts(post_id, author_id, content, created_at, media_url)
@@ -162,6 +190,35 @@ older than 7 days are periodically removed with `ZREMRANGEBYSCORE feed:{userId} 
 <7_days_ago_epoch>`. For users who are inactive for more than 30 days, the entire feed ZSet is
 evicted. On their next login, the feed is rebuilt by reading the most recent posts from followed
 accounts — an on-demand warm-up query.
+
+A feed ZSet cycles between an active, periodically pruned state and full eviction after 30 days of
+inactivity; the next login triggers an on-demand warm-up that rebuilds the last 200 posts from a
+7-day lookback before the feed returns to active.
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "Active (1,000-entry cap)" as Active
+    state "Evicted (idle 30+ days)" as Evicted
+    state "Warming Up" as WarmingUp
+
+    [*] --> Active
+    note right of Active: periodic prune drops entries older than 7 days
+    Active --> Evicted: no login for 30+ days
+    Evicted --> WarmingUp: user logs in
+    WarmingUp --> Active: rebuild last 200 posts, 7-day window
+
+    class Active train
+    class Evicted lossN
+    class WarmingUp mathOp
+```
 
 ---
 
@@ -629,6 +686,24 @@ public class FeedWarmUpService {
 | Feed freshness | Near-real-time | Real-time | Near-real-time |
 | Implementation complexity | Low | Medium | High |
 | Chosen for this design | Regular users only | Not used stand-alone | Yes |
+
+Fan-out-on-write buys near-instant reads (~1ms) at the cost of high write amplification; fan-out-on-read
+flips that trade; the hybrid design sits closer to the fast-and-cheap corner because it only pays the
+read-side merge cost for celebrity follows.
+
+```mermaid
+quadrantChart
+    title Fan-out Strategy Tradeoff Space
+    x-axis Low Write Amplification --> High Write Amplification
+    y-axis Low Read Latency --> High Read Latency
+    quadrant-1 Costly both ways
+    quadrant-2 Cheap writes slow reads
+    quadrant-3 Fast and cheap
+    quadrant-4 Fast reads costly writes
+    "Fan-out-on-Write": [0.85, 0.1]
+    "Fan-out-on-Read": [0.1, 0.8]
+    "Hybrid": [0.4, 0.3]
+```
 
 ### Redis vs Cassandra for Feed Storage
 

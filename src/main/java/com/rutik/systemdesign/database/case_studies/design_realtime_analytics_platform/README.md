@@ -18,38 +18,93 @@ Design the database architecture for a real-time analytics platform for a SaaS p
 
 ## Architecture Overview
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sdk(["SDK<br/>web / mobile / server"]) --> api["Event API<br/>stateless"]
+    api --> kafka("Kafka<br/>100K msg/s · 7-day retention")
+    kafka --> ckhkafka["ClickHouse<br/>Kafka Engine Table"]
+    kafka --> rediscounters("Redis Counters<br/>real-time")
+    kafka --> s3raw[["S3 Raw Events<br/>cold archive"]]
+    ckhkafka --> mvs["ClickHouse<br/>Materialized Views"]
+
+    class sdk io
+    class api req
+    class kafka,rediscounters base
+    class ckhkafka mathOp
+    class s3raw frozen
+    class mvs train
 ```
-Ingest Path:
-  SDK (web/mobile/server) → [Event API (stateless)] → Kafka (100K msg/s, 7-day retention)
-                                                             │
-                                              ┌──────────────┼──────────────┐
-                                              ▼              ▼              ▼
-                                      [ClickHouse    [Redis Counters   [S3 Raw Events
-                                       Kafka         (real-time)]      (cold archive)]
-                                       Engine Table]
-                                              │
-                                       [ClickHouse
-                                        Materialized
-                                        Views]
+*Ingest path — one Kafka topic (100 partitions, 100K msg/s peak) fans out to three independent consumers: the ClickHouse Kafka Engine table for durable storage, Redis for real-time counters, and S3 for a raw cold archive.*
 
-Query Path:
-  Customer Dashboard → [Query API] → Redis (dashboard cache, 30s TTL)
-                                          ↓ miss
-                                     [ClickHouse] → merged result
-                                          │
-                                     Tenant isolation:
-                                     WHERE org_id = ?
-                                     (partition pruning by org_id + date)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    dash(["Customer<br/>Dashboard"]) --> qapi["Query API"]
+    qapi --> rcache("Redis<br/>dashboard cache · 30s TTL")
+    rcache -.->|"cache miss"| ckh("ClickHouse")
+    ckh -->|"WHERE org_id = ?<br/>partition pruning"| merged(["Merged<br/>Result"])
 
-Real-Time Counters:
-  Kafka → [Stream Processor (Flink)] → Redis (5-minute windows)
-  GET active_users:{org_id}  → HyperLogLog for cardinality estimation
-
-
-Export:
-  ClickHouse → [Export Service] → S3 (hourly Parquet files per org)
+    class dash,merged io
+    class qapi req
+    class rcache,ckh base
 ```
+*Query path — dashboards hit the 30-second Redis cache first; on a miss, ClickHouse serves the query, but every query is required to filter on `org_id`, which prunes the scan to that tenant's partitions only.*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    kafka2("Kafka") --> flink["Stream Processor<br/>Flink"]
+    flink --> rwin("Redis<br/>5-min windows")
+    getreq(["GET /active-users"]) --> hll["PFCOUNT<br/>HyperLogLog estimate"]
+    rwin --> hll
+
+    class kafka2,rwin base
+    class flink mathOp
+    class getreq io
+    class hll train
+```
+*Real-time counters — Flink maintains a 5-minute sliding window per org_id in Redis; reads use `PFCOUNT` against a HyperLogLog for an O(1), ±1% cardinality estimate of active users.*
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ckh2("ClickHouse") --> exp["Export Service"]
+    exp --> s3out[["S3<br/>hourly Parquet per org"]]
+
+    class ckh2 base
+    class exp req
+    class s3out frozen
+```
+*Export — hourly batch jobs read ClickHouse and write one Parquet file per org directly to that customer's S3 bucket.*
 
 ---
 
@@ -140,6 +195,18 @@ SELECT
     JSONExtractKeysAndValues(properties, 'String') AS properties
 FROM events_kafka;
 ```
+
+```mermaid
+stateDiagram-v2
+    state "Hot Tier<br/>primary SSD" as Hot
+    state "Cold Tier<br/>cold_disk" as Cold
+
+    [*] --> Hot
+    Hot --> Cold: age over 90 days<br/>TTL moves row to cold_disk
+    Cold --> Purged: age over 1825 days (5y)<br/>TTL deletes row
+    Purged --> [*]
+```
+*The `MODIFY TTL` clause above drives every row through the same lifecycle automatically — 90 days on primary SSD for sub-second dashboards, then `cold_disk` until the 5-year (1825-day) mark, then deletion, with no manual archival job required.*
 
 ### 3. Pre-Aggregated Materialized Views for Dashboard Speed
 
@@ -338,6 +405,29 @@ public class DashboardQueryService {
 ```
 
 ### Anomaly Detection
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    cur(["Current 5-min<br/>event count"]) --> z["Compute z-score<br/>(current - mean) / stdDev"]
+    baseline(["30-day baseline<br/>mean, stdDev"]) --> z
+    z --> dec{"abs(z-score)<br/>over 2.0 ?"}
+    dec -->|"no"| normal(["Normal<br/>no alert"])
+    dec -->|"yes"| alert(["Fire alert<br/>org_id, z-score"])
+
+    class cur,baseline io
+    class z,dec mathOp
+    class normal train
+    class alert lossN
+```
+*Every 5-minute window's event count is compared against its 30-day baseline; a z-score beyond ±2σ — the `Math.abs(zScore) > 2.0` check below — fires an alert instead of silently folding into the baseline.*
 
 ```java
 // Flink stream: compare current 5-min window vs 30-day baseline

@@ -29,53 +29,53 @@ Design a production-grade real-time chat backend (Slack-like) with the following
 
 ## Architecture Overview
 
-```
-                        Client A (Room: #general)
-                             |
-                        WebSocket connection
-                             |
-                  +----------v-----------+
-                  |    FastAPI Pod 1      |
-                  |                      |
-                  |  ConnectionManager   |
-                  |  {room_id: [ws1,ws2]}|
-                  |                      |
-                  | /ws/{room_id}        |
-                  +----------+-----------+
-                             |
-              1. JWT auth on first message
-              2. Subscribe to Redis channel "room:{room_id}"
-              3. Publish inbound message to Redis
-                             |
-                  +----------v-----------+
-                  |       Redis          |
-                  |   Pub/Sub broker     |
-                  |  channel: room:xyz   |
-                  +----+----------+------+
-                       |          |
-            fan-out to all        fan-out to all
-            subscribers           subscribers
-                       |          |
-          +------------v--+  +---v-----------+
-          |  FastAPI Pod 1 |  | FastAPI Pod 2 |
-          | (self, skip)   |  | (forward to   |
-          |                |  |  local conns) |
-          +----------------+  +---------------+
-                       |
-              +---------v--------+
-              |   PostgreSQL     |
-              | messages table   |
-              | (async write     |
-              |  via background  |
-              |  task)           |
-              +------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-WebSocket connection lifecycle:
-  CONNECT → TLS upgrade → HTTP 101 Switching Protocols
-  → first text frame: {"type":"auth","token":"<JWT>"}
-  → server validates JWT, joins room subscription
-  → bidirectional frames until CLOSE or ping timeout
+    clientA(["Client A<br/>Room: #general"])
+    pod1("FastAPI Pod 1<br/>ConnectionManager")
+    redis("Redis<br/>Pub/Sub broker<br/>channel: room:xyz")
+    pod2("FastAPI Pod 2<br/>forward to<br/>local conns")
+    postgres("PostgreSQL<br/>messages table")
+
+    clientA -->|"1. JWT auth on<br/>first message"| pod1
+    pod1 -->|"2. subscribe to<br/>room channel"| redis
+    pod1 -->|"3. publish inbound<br/>message"| redis
+    redis -.->|"fan-out<br/>(self, skip)"| pod1
+    redis -.->|"fan-out"| pod2
+    pod1 -.->|"async write<br/>background task"| postgres
+
+    class clientA io
+    class pod1 mathOp
+    class redis base
+    class pod2 train
+    class postgres base
 ```
+
+Redis pub/sub fans a single publish out to every pod, including the sender — no pod ever holds more than its own slice of the 10,000 concurrent connections, and the PostgreSQL write happens off the critical path via a background task.
+
+**WebSocket connection lifecycle:**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Connecting
+    Connecting --> TlsUpgrade: TCP connect
+    TlsUpgrade --> Http101: TLS handshake<br/>complete
+    Http101 --> AwaitingAuth: HTTP 101<br/>Switching Protocols
+    AwaitingAuth --> Active: auth frame verified,<br/>JWT validated, room joined
+    Active --> Active: bidirectional<br/>frames
+    Active --> Closed: CLOSE frame<br/>or ping timeout
+    Closed --> [*]
+```
+
+Every connection passes through the same states before going bidirectional — the JWT travels only inside the encrypted post-handshake frame, never in the TLS/HTTP upgrade path itself.
 
 **Component inventory:**
 
@@ -110,6 +110,30 @@ The broken approach (shown in Implementation) stores connections only in a per-p
 
 Writing to PostgreSQL synchronously before broadcasting adds 5-20 ms database latency to every message delivery, violating the P99 < 200 ms target under load. Instead, the handler broadcasts via Redis immediately, then enqueues a background task (via FastAPI `BackgroundTasks`) to persist to PostgreSQL. The tradeoff is a small durability window: if the pod crashes between publish and persist, that message is lost. For most chat applications this is acceptable. For financial or compliance-critical chat, a write-ahead log or outbox pattern would be required.
 
+```mermaid
+sequenceDiagram
+    participant CA as Client A
+    participant P1 as FastAPI Pod 1
+    participant R as Redis
+    participant P2 as FastAPI Pod 2
+    participant CB as Client B
+    participant DB as PostgreSQL
+
+    CA->>P1: send message frame
+    P1->>R: publish(room channel, payload)
+    Note right of P1: schedule background<br/>persist task (not awaited)
+    R-->>P1: fan-out (self, skip)
+    R-->>P2: fan-out
+    P1-->>P1: deliver to local<br/>room connections
+    P2->>CB: deliver to local<br/>connections
+    Note over P1,DB: broadcast avoids the 5-20 ms sync write,<br/>persistence lags 10-50 ms behind
+    P1->>DB: INSERT message row
+    DB-->>P1: commit ack
+    Note over P1,DB: a pod crash in this window<br/>loses the message (durability gap)
+```
+
+The sender is acknowledged and every subscriber is fanned out to in low single-digit milliseconds; the PostgreSQL write trails behind as a background task, so the 10-50 ms gap between publish and commit is the only window in which a crash can lose a message.
+
 ### 4. Authentication: JWT in First Message vs Query Parameter
 
 **Choice: JWT in first WebSocket message.**
@@ -121,6 +145,51 @@ Passing a JWT as a query parameter (`/ws/room?token=xxx`) is a common shortcut b
 **Choice: Per-connection `asyncio.Queue` with bounded capacity and periodic ping.**
 
 A slow consumer (e.g., a mobile client on a poor connection) can stall `await websocket.send_text()` indefinitely, blocking the subscriber coroutine for all connections in that room. Each connection gets an `asyncio.Queue(maxsize=64)` as a buffer. The sender puts messages into the queue without blocking; a per-connection writer coroutine drains the queue. If the queue is full (slow consumer), the message is dropped and the connection is flagged for eviction. Additionally, the server sends a WebSocket ping frame every 20 seconds; if no pong is received within 10 seconds, the connection is closed and removed from the registry.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph BP["Backpressure: bounded queue"]
+        direction LR
+        msg(["message<br/>arrives"]) --> qfull{"queue<br/>full?"}
+        qfull -->|"no"| enqueue("put_nowait<br/>into queue")
+        enqueue --> writer("writer coroutine<br/>drains queue")
+        writer --> send(["ws.send_text<br/>to client"])
+        qfull -->|"yes"| drop("drop message")
+        drop --> evict("flag connection<br/>for eviction")
+    end
+
+    subgraph HB["Heartbeat: ping / pong"]
+        direction LR
+        ping("send ping<br/>every 20s") --> pwait{"pong within<br/>10s?"}
+        pwait -->|"yes"| healthy("connection<br/>healthy")
+        healthy -.-> ping
+        pwait -->|"no"| close("close ws<br/>code 1001")
+        close --> remove("remove from<br/>registry")
+    end
+
+    class msg io
+    class qfull mathOp
+    class enqueue train
+    class writer mathOp
+    class send io
+    class drop lossN
+    class evict lossN
+    class ping mathOp
+    class pwait mathOp
+    class healthy train
+    class close lossN
+    class remove lossN
+```
+
+Two independent decision trees guard the connection: a full queue drops the message and marks the connection for eviction rather than blocking every other subscriber in the room, while a missed pong closes the socket within 30 seconds total (20 s interval + 10 s timeout), satisfying the zombie-cleanup requirement.
 
 ---
 

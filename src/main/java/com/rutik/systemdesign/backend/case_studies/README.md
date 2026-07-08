@@ -54,20 +54,29 @@ Grouped by primary engineering concern, not product category:
 
 ## Dependency Map
 
-```
-design_booking_system
-    └─ teaches locking primitives used by design_payment_processor
-       └─ design_payment_processor (saga + outbox)
-           └─ outbox pattern reused in design_event_driven_order_system
-              └─ design_event_driven_order_system (Kafka EOS + CQRS)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-design_feed_service
-    └─ fan-out + Redis patterns (standalone)
+    booking(["design_booking_system"]) -->|"locking primitives"| payment(["design_payment_processor<br/>(saga + outbox)"])
+    payment -->|"outbox pattern reused"| eventOrder(["design_event_driven_order_system<br/>(Kafka EOS + CQRS)"])
+    msFund(["microservices_fundamentals<br/>(external module)"]) -->|"decomposition theory"| migration(["design_microservices_migration"])
+    migration -->|"traffic cutover patterns reused"| eventOrder
+    feed(["design_feed_service<br/>(standalone: fan-out + Redis)"])
 
-design_microservices_migration
-    └─ applies decomposition theory from backend/microservices_fundamentals/
-    └─ traffic cutover patterns reused in design_event_driven_order_system
+    class booking,feed base
+    class payment,migration train
+    class eventOrder io
+    class msFund frozen
 ```
+
+Arrows point from the case study that originates a pattern to the one that reuses it — `design_booking_system` → `design_payment_processor` → `design_event_driven_order_system` is the longest chain; `design_feed_service` has no prerequisites and can be read standalone.
 
 ---
 

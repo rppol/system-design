@@ -72,47 +72,46 @@ The averages above assume a roughly uniform key distribution, but real workloads
 
 ## 3. High-Level Architecture
 
-```
-                          +---------------------+
-                          |       Clients        |
-                          | (app servers, using  |
-                          |  a smart client lib)  |
-                          +-----------+-----------+
-                                       |
-                                       v
-                          +---------------------+
-                          |  Coordinator Node     |   <- any node can act as
-                          |  (request entry point) |      coordinator; no
-                          +-----------+-----------+      special "master"
-                                       |
-                       hash(key) -> position on ring
-                                       |
-                                       v
-        +------------------------------------------------------------+
-        |                    Consistent Hash Ring                      |
-        |               (with virtual nodes, §4.1)                     |
-        |                                                                |
-        |     ...--[vnode A7]--[vnode B2]--[vnode C9]--[vnode A3]--...   |
-        |                          |            |            |          |
-        |                          v            v            v          |
-        |                     +---------+  +---------+  +---------+     |
-        |                     | Node B   |  | Node C   |  | Node A   |     |
-        |                     | Replica 1|  | Replica 2|  | Replica 3|     |
-        |                     +---------+  +---------+  +---------+     |
-        |                     (3 replicas for key "user:42", N=3)        |
-        +------------------------------------------------------------+
-                                       ^
-                                       |
-                          +------------+------------+
-                          |  Gossip Protocol         |
-                          |  (membership + failure   |
-                          |   detection, §4.5)        |
-                          +--------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Quorum read/write path (N=3, W=2, R=2):
-  put(key,val):  coordinator -> [B, C, A]  wait for >=2 ACKs -> return success
-  get(key):      coordinator -> [B, C, A]  wait for >=2 responses -> reconcile -> return
+    Clients(["Clients<br/>app servers, smart client lib"])
+    Coord("Coordinator Node<br/>any node, no special master")
+
+    subgraph Ring["Consistent Hash Ring<br/>virtual nodes, §4.1"]
+        HashOp{"hash(key)<br/>walk ring clockwise to N nodes"}
+        NodeB("Node B<br/>Replica 1")
+        NodeC("Node C<br/>Replica 2")
+        NodeA("Node A<br/>Replica 3")
+        HashOp --> NodeB
+        HashOp --> NodeC
+        HashOp --> NodeA
+    end
+
+    Gossip("Gossip Protocol<br/>membership + failure detection, §4.5")
+
+    Clients -->|"request"| Coord
+    Coord -->|"put / get key"| HashOp
+    Gossip -.-> Coord
+    Gossip -.-> NodeB
+    Gossip -.-> NodeC
+    Gossip -.-> NodeA
+
+    class Clients io
+    class Coord req
+    class HashOp mathOp
+    class NodeB,NodeC,NodeA base
+    class Gossip frozen
 ```
+
+Quorum read/write path (`N=3, W=2, R=2`): the coordinator fans a `put` or `get` for key `"user:42"` out to all three replicas (`[B, C, A]`) and returns as soon as `>=2` acknowledge (write) or respond (read), then reconciles — gossip (dotted edges, §4.5) keeps every node's membership view current independently of this request path.
 
 ### Request Flow
 
@@ -402,6 +401,37 @@ When sloppy quorums and partitions are in play, two different coordinators can b
 
 **Vector clocks** solve this by tracking, per key, a map of `{nodeId: counter}` — every time a node writes a value, it increments *its own* counter in the vector clock attached to that value. Comparing two vector clocks `(A, B)` can yield one of three outcomes: `A` **dominates** `B` (every entry in `A` is `>=` the corresponding entry in `B`, and at least one is strictly greater — `B` is stale and can be discarded), `B` dominates `A` (symmetric), or `A` and `B` are **concurrent** (neither dominates — both must be kept as **siblings** until the application or a subsequent write resolves them).
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["compare clock A<br/>to clock B"])
+    Check{"walk every node's<br/>counter pair"}
+    Equal(["EQUAL<br/>identical clocks"])
+    Before(["BEFORE<br/>A stale — B wins"])
+    After(["AFTER<br/>B stale — A wins"])
+    Concurrent(["CONCURRENT<br/>keep both as siblings"])
+
+    Start --> Check
+    Check -->|"same on every node"| Equal
+    Check -->|"A never ahead,<br/>behind on some node"| Before
+    Check -->|"B never ahead,<br/>behind on some node"| After
+    Check -->|"A ahead on one node,<br/>B ahead on another"| Concurrent
+
+    class Start io
+    class Check mathOp
+    class Equal,Before,After train
+    class Concurrent lossN
+```
+
+The `compare()` method below implements exactly this decision tree: `EQUAL`, `BEFORE`, and `AFTER` all resolve deterministically to a single winner (green), but `CONCURRENT` — the case vector clocks exist to catch — must surface both versions as siblings (red) rather than silently discarding one the way LWW would.
+
 ```java
 package com.rutik.systemdesign.hld.case_studies.kvstore;
 
@@ -513,18 +543,39 @@ Quorum reads (§4.2) only repair divergence for keys that are *actually read*. A
 
 **Merkle trees** make this efficient: each node builds a binary hash tree over the key range owned by one of its vnodes (§4.1) — leaves are hashes of individual key-value pairs (or small key ranges), and each internal node is the hash of its two children's hashes, up to a single root hash representing the entire range. Two replicas compare their Merkle trees for the same key range **top-down**: if the root hashes match, the entire range is identical and the comparison stops immediately (one hash comparison covers potentially millions of keys). If the roots differ, the comparison recurses into the children whose hashes differ, narrowing down to the specific divergent sub-ranges in `O(log n)` comparisons rather than transferring or hashing the entire range.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Root("H_root<br/>hash(H_L + H_R)")
+    HL("H_L<br/>hash of left subtree")
+    HR("H_R<br/>hash of right subtree")
+    HLL("H_LL<br/>match")
+    HLR("H_LR<br/>match")
+    HRL("H_RL<br/>DIFFERS")
+    HRR("H_RR<br/>match")
+    Stream(["stream the diverging<br/>key-value pairs"])
+
+    Root --> HL
+    Root --> HR
+    HL --> HLL
+    HL --> HLR
+    HR --> HRL
+    HR --> HRR
+    HRL -.->|"recurse into this<br/>subtree only"| Stream
+
+    class Root,HL,HR mathOp
+    class HLL,HLR,HRR train
+    class HRL,Stream lossN
 ```
-Replica A's Merkle tree for vnode range [0x4000..0x8000):
-                    H(root) = hash(H_L + H_R)
-                   /                        \
-            H_L = hash(...)            H_R = hash(...)
-           /            \              /            \
-      H_LL          H_LR          H_RL          H_RR     <- if H_RL differs
-     (match)       (match)       (DIFFERS)      (match)       from Replica B's
-                                       |                        H_RL, recurse only
-                                  recurse into                  into that subtree
-                                  this subtree
-```
+
+Replica A's Merkle tree for vnode range `0x4000`-`0x8000` (§4.1): three of the four leaf-level hashes match Replica B's (green), so the comparison stops there in a single hash check per subtree; only the differing `H_RL` subtree (red) is recursed into, narrowing an `O(log n)` comparison down to the actual divergent key-value pairs that need streaming.
 
 Once the divergent leaf-level key ranges are identified, the replica with the out-of-date data **streams the missing/differing key-value pairs** from its peer. This typically runs as a scheduled background job (e.g., every few hours per vnode pair) — at the scale from §2 (tens of thousands of vnode ranges), the per-range comparison cost is small, but the *aggregate* anti-entropy traffic across a 300-500 node cluster is a real capacity-planning input (§10) and the source of "repair storms" after extended outages (§8's runbook).
 
@@ -537,6 +588,39 @@ Once the divergent leaf-level key ranges are identified, the replica with the ou
 **Hinted handoff** is the write-side complement to sloppy quorum (§4.2): if one of a key's `N` designated replicas (say, node `C`) is down when a `put` arrives, the coordinator writes the value to a substitute node `D` (the next healthy node on the ring) **along with a "hint"** — metadata recording that this data actually belongs to `C` and should be forwarded once `C` recovers. `D` stores the hinted write in a separate local queue. When `D`'s gossip-based failure detector (below) observes that `C` is healthy again, `D` streams its queued hints to `C` and, once `C` acknowledges, removes them from its queue. This lets writes succeed during a transient node outage *without* waiting for anti-entropy's next scheduled pass to eventually notice and fix the gap — hinted handoff is fast (triggered the moment the failed node rejoins) while Merkle-tree anti-entropy is the slow, thorough backstop.
 
 **Gossip** is how every node learns the liveness state of every other node without a centralized membership service (no ZooKeeper-equivalent — contrast with §5's CP design). Each node periodically (e.g., once per second) picks one or a few random peers and exchanges a compact summary of its view of the cluster: `{nodeId: (heartbeatCounter, lastUpdateTimestamp, status)}`. If node `X` hasn't incremented its heartbeat counter (as observed transitively through gossip) for longer than a **suspicion threshold**, peers mark `X` as `SUSPECT`; if it remains silent past a **failure threshold**, peers mark it `DOWN` and route around it (sloppy quorum kicks in for its key ranges). Because gossip is **transitive** — `A` tells `B` what `A` heard from `C`, even if `B` and `C` never talk directly — information about a node's status (or a new node joining) propagates through an `N`-node cluster in roughly `O(log N)` gossip rounds, typically a few seconds even on a 300-500 node cluster. Many production systems (Cassandra) use a **Phi Accrual Failure Detector** instead of a fixed timeout: rather than a binary up/down threshold, it computes a continuous suspicion level `phi` based on the historical distribution of inter-arrival times for a node's heartbeats, adapting automatically to nodes (or network paths) that are simply slower rather than dead.
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Up
+    Up --> Suspect: silent past<br/>suspicion threshold
+    Suspect --> Up: heartbeat resumes
+    Suspect --> Down: silent past<br/>failure threshold
+    Down --> Up: node rejoins,<br/>hints drain (§4.5)
+
+    note right of Suspect
+        Phi Accrual Failure Detector: continuous
+        suspicion score, not a fixed timeout
+    end note
+
+    note right of Down
+        sloppy quorum (§4.2) routes around
+        this node's key ranges
+    end note
+
+    class Up train
+    class Suspect mathOp
+    class Down lossN
+```
+
+Every node's view of a peer's liveness moves through this lifecycle independently via gossip: `Suspect` is a continuous Phi-Accrual suspicion score rather than a fixed timeout, and only `Down` triggers sloppy quorum's routing-around for that node's key ranges.
 
 **Gossip overhead at scale**: each gossip round's message is small — a few hundred bytes to a few KB for a `{nodeId: (heartbeat, timestamp, status)}` summary across 500 nodes, well within a single UDP packet. At one round/second per node, a 500-node cluster generates roughly `500 x 1` = **500 gossip messages/sec** cluster-wide (each node gossiping with 1-3 peers) — three to four orders of magnitude below the cluster's 1,000,000+ writes/sec client-facing load (§2), which is why gossip overhead is essentially never a capacity-planning concern even at hundreds of nodes. The `O(log N)` propagation bound is what keeps this true as the cluster grows: doubling the cluster size from 500 to 1,000 nodes adds only one additional gossip round (roughly one extra second) to full-cluster propagation time, not a doubling of it.
 
@@ -552,15 +636,32 @@ A `delete(key)` cannot simply remove the key's rows from local storage on each r
 
 The fix is to make `delete` a **write**, not a removal: the coordinator writes a special **tombstone** value (with its own vector clock / timestamp, exactly like a normal `put`) to all `N` replicas via the same quorum path (§4.2). A tombstone participates in read repair and anti-entropy exactly like any other value — if `A` is missing the tombstone that `B` has, anti-entropy copies the tombstone *to* `A`, not the other way around, because the tombstone's vector clock/timestamp dominates the old value's. Only after a **grace period** (`gc_grace_seconds` in Cassandra terms — long enough that anti-entropy is statistically certain to have propagated the tombstone to every replica, commonly several days) is the tombstone itself eligible for physical removal during compaction (§4.6).
 
+```mermaid
+sequenceDiagram
+    participant Co as Coordinator
+    participant A as Replica A
+    participant B as Replica B
+    participant C as Replica C
+
+    Co->>A: put(session:abc) — clock V1
+    Co->>B: put(session:abc) — clock V1
+    Co->>C: put(session:abc) — clock V1
+    Note over A,C: A, B, C all hold the value at V1
+
+    Note over C: network partition isolates C
+    Co->>A: delete(session:abc) — tombstone V2
+    Co->>B: delete(session:abc) — tombstone V2
+    Note over C: C misses the tombstone,<br/>still holds the value at V1
+
+    Note over A,C: anti-entropy compares A/B (tombstone V2) against C (value V1)
+    A-->>C: stream tombstone V2 — V2 dominates V1
+    Note over C: tombstone copied TO C —<br/>the stale value is never copied FROM C
+
+    Note over A,C: after gc_grace_seconds elapses on A, B, and C
+    Note over A,C: compaction physically purges the tombstone
 ```
-put("session:abc", {...})           -> stored on replicas [A, B, C], clock V1
-delete("session:abc")                -> tombstone written to [A, B, C], clock V2 (dominates V1)
-  ... C was partitioned during the delete, still holds {..., V1} ...
-  anti-entropy compares A/B (tombstone, V2) vs C (value, V1)
-  V2 dominates V1 -> tombstone is copied TO C, not the value copied FROM C
-  ... after gc_grace_seconds on all three replicas ...
-compaction physically purges the tombstone from A, B, C
-```
+
+A `delete` writes a tombstone (clock V2, which dominates V1) instead of physically removing the row, so when anti-entropy later compares the partitioned `C` against `A`/`B`, the dominant tombstone streams to `C` — the correct direction — rather than `C`'s stale value being mistaken for missing data and resurrected onto `A`/`B`.
 
 The grace period creates a real operational constraint: a node that has been down **longer than `gc_grace_seconds`** and then rejoins may still hold pre-tombstone values for keys whose tombstones have *already been purged* elsewhere — anti-entropy can then resurrect deleted data from that node, because the tombstone that would have "won" no longer exists anywhere to compare against. This is why §8's node-failure runbook treats "down longer than the grace period" as a case requiring a full rebuild from a fresh replica stream (a `removeNode` + `addNode` round-trip) rather than a normal hinted-handoff drain.
 
@@ -577,32 +678,53 @@ Two consistency levels commonly distinguish "local quorum" from "global quorum" 
 | `LOCAL_QUORUM` | `W` or `R` replicas in the *local* datacenter only | None — purely intra-DC RTT | Default for latency-sensitive reads/writes |
 | `EACH_QUORUM` | `W` or `R` replicas in **every** datacenter | Full cross-region RTT, every request | Rare — only for data where every region must agree before acknowledging (e.g., a global uniqueness check) |
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["put user:42<br/>LOCAL_QUORUM"])
+    Ack(["ACK to client<br/>no cross-DC RTT"])
+
+    subgraph USEast["us-east, N=3"]
+        CoordE("coordinator")
+        RA("Replica A")
+        RB("Replica B")
+        RC("Replica C")
+    end
+
+    subgraph EUWest["eu-west, N=3"]
+        RD("Replica D")
+        RE("Replica E")
+        RF("Replica F")
+    end
+
+    StaleRead(["LOCAL_QUORUM read here<br/>misses user:42 until stream lands"])
+
+    Client --> CoordE
+    CoordE --> RA
+    CoordE --> RB
+    CoordE --> RC
+    RA -->|"ack"| Ack
+    RB -->|"ack, W=2 met"| Ack
+    RA -.->|"async stream, reconciled<br/>via §4.3 on arrival"| RD
+    RB -.-> RE
+    RC -.-> RF
+    RD -.-> StaleRead
+
+    class Client io
+    class Ack train
+    class CoordE req
+    class RA,RB,RC,RD,RE,RF base
+    class StaleRead lossN
 ```
-                         put("user:42", v, LOCAL_QUORUM)
-                                       |
-                                       v
-   +----------------------------------------------------------------+
-   |                         us-east (N=3)                           |
-   |   coordinator ---> [Replica A] [Replica B] [Replica C]          |
-   |                         |  ack     |  ack       (slow/unreached) |
-   |                         +----------+                             |
-   |                    W=2 satisfied -> ACK to client (no cross-DC   |
-   |                    RTT on the critical path)                     |
-   +----------------------------------------------------------------+
-                                       |
-                         async replication stream
-                          (queued, applied via §4.3
-                           reconciliation on arrival)
-                                       |
-                                       v
-   +----------------------------------------------------------------+
-   |                         eu-west (N=3)                           |
-   |             [Replica D] [Replica E] [Replica F]                 |
-   |   a LOCAL_QUORUM read here, issued before the async stream       |
-   |   arrives, will NOT see "user:42" yet -> additional eventual-     |
-   |   consistency window beyond intra-DC (§11)                       |
-   +----------------------------------------------------------------+
-```
+
+`LOCAL_QUORUM` satisfies `W=2` of `N=3` entirely inside us-east, so the client gets its ACK with no cross-DC RTT on the critical path; the async replication stream (dotted) then reconciles the write into eu-west (§4.3) typically within hundreds of milliseconds to a few seconds, and any `LOCAL_QUORUM` read that lands in eu-west before that stream arrives will not see `user:42` yet.
 
 The practical takeaway for capacity planning (§10): a multi-DC deployment roughly **multiplies storage and replica-write counts by the number of datacenters** (6 total copies for `N=3` x 2 DCs), but does **not** multiply client-facing latency, because `LOCAL_QUORUM` keeps the hot path entirely intra-region — the cross-DC replication traffic is a background cost, similar in spirit to anti-entropy's background streaming (§4.4, §10). Choosing `LOCAL_QUORUM` everywhere except for a small number of genuinely global invariants (and handling those few cases with a different mechanism entirely, e.g., a dedicated CP service for uniqueness checks) is the standard way multi-DC Dynamo-lineage deployments avoid paying cross-region RTT on their hot path while still offering disaster recovery and region-local latency.
 

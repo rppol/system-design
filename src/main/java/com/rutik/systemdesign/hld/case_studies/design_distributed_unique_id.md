@@ -70,20 +70,17 @@ Requirement #2 above — time-sortable IDs — is in direct tension with even wr
 
 The ID format isn't just a generation-time concern — it's stored in **every row of every table that uses it as a primary key, plus every foreign-key column referencing those rows, plus every index entry on those columns**. At the volumes this design targets, the difference between an 8-byte and a 16-byte (or larger) identifier compounds significantly:
 
+*Table with 10 billion rows, primary key + 2 foreign-key columns referencing it — 8 bytes x 3 columns x 10B rows = 240 GB (64-bit BIGINT); 16 bytes x 3 x 10B = 480 GB (128-bit UUID, native 16-byte type); 36 bytes x 3 x 10B = ~1,080 GB (128-bit UUID, 36-char string):*
+
+```mermaid
+xychart-beta
+    title "Storage for 10B rows, PK + 2 FKs"
+    x-axis ["64-bit BIGINT", "128-bit UUID (native)", "128-bit UUID (string)"]
+    y-axis "Raw column storage (GB)" 0 --> 1200
+    bar [240, 480, 1080]
 ```
-Table with 10 billion rows, primary key + 2 foreign-key columns referencing it:
 
-  64-bit (BIGINT, Snowflake/UUIDv7-as-bigint):  8 bytes x 3 columns x 10B rows
-                                                = 240 GB raw column storage
-
-  128-bit (UUID, stored as 36-char string):     36 bytes x 3 columns x 10B rows
-                                                = ~1,080 GB raw column storage
-                                                (4.5x larger)
-
-  128-bit (UUID, stored as native 16-byte type): 16 bytes x 3 columns x 10B rows
-                                                 = 480 GB raw column storage
-                                                 (2x larger)
-```
+*The 36-character string encoding is 4.5x the 64-bit integer's footprint; even a well-stored native 16-byte UUID type is still 2x.*
 
 This is a second, independent reason (beyond B-tree locality, §5) that a 64-bit Snowflake-style ID is attractive at scale: **every byte saved per ID is multiplied by every column that stores a copy of it** — primary keys, foreign keys, and every index entry on each. A 128-bit UUID stored as its canonical 36-character hyphenated string representation (a common mistake — cross-ref the companion file's Pitfall 3) is **4.5x** the raw storage of a 64-bit integer; even a well-stored native 16-byte UUID type is still 2x. At 10 billion rows with a handful of foreign-key references per row (a realistic shape for, e.g., a tweets-and-engagements schema), this difference is measured in **hundreds of gigabytes to terabytes** of additional storage and proportionally more I/O for every index scan that touches these columns.
 
@@ -93,101 +90,107 @@ This is a second, independent reason (beyond B-tree locality, §5) that a 64-bit
 
 Two deployment models solve this problem, and most real systems pick one (or, at larger scale, both for different ID types).
 
+**Model (a): Embedded Library — "true Snowflake"**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ZK(["ZooKeeper / etcd cluster<br/>/snowflake/workers/"])
+
+    subgraph S1["App Server 1"]
+        G1(["Snowflake Generator<br/>workerId=3"])
+        L1(business logic)
+        G1 --> L1
+    end
+    subgraph S2["App Server 2"]
+        G2(["Snowflake Generator<br/>workerId=7"])
+        L2(business logic)
+        G2 --> L2
+    end
+    subgraph S3["App Server N"]
+        G3(["Snowflake Generator<br/>workerId=K"])
+        L3(business logic)
+        G3 --> L3
+    end
+
+    G1 -.->|"startup: claim workerId"| ZK
+    G2 -.->|"startup: claim workerId"| ZK
+    G3 -.->|"startup: claim workerId"| ZK
+
+    class G1,G2,G3 mathOp
+    class L1,L2,L3 train
+    class ZK base
 ```
- MODEL (a): EMBEDDED LIBRARY — "true Snowflake"
- ===============================================
 
-   +------------------+   +------------------+   +------------------+
-   |  App Server #1   |   |  App Server #2   |   |  App Server #N   |
-   |  +------------+  |   |  +------------+  |   |  +------------+  |
-   |  | Snowflake  |  |   |  | Snowflake  |  |   |  | Snowflake  |  |
-   |  | Generator  |  |   |  | Generator  |  |   |  | Generator  |  |
-   |  | workerId=3 |  |   |  | workerId=7 |  |   |  | workerId=K |  |
-   |  +-----+------+  |   |  +-----+------+  |   |  +-----+------+  |
-   |        | local   |   |        | local   |   |        | local   |
-   |        | call    |   |        | call    |   |        | call    |
-   |        v         |   |        v         |   |        v         |
-   |  [business logic]|   |  [business logic]|   |  [business logic]|
-   +------------------+   +------------------+   +------------------+
-            ^                       ^                       ^
-            |  startup: claim       |  startup: claim       |  startup: claim
-            |  unique workerId      |  unique workerId      |  unique workerId
-            +-----------+-----------+-----------+-----------+
-                        |
-                        v
-            +-----------------------------+
-            |  ZooKeeper / etcd cluster     |
-            |  /snowflake/workers/          |
-            |    seq-0000000003 (ephemeral) |
-            |    seq-0000000007 (ephemeral) |
-            |    seq-...        (ephemeral) |
-            +-----------------------------+
+*ID generation is pure local computation with zero network calls; the coordination service (dotted edges) is touched only at startup and on reconnect, never on the per-ID hot path.*
 
-   ID generation = pure local computation, zero network calls.
-   Coordination service touched only at startup / reconnect.
+**Model (b): Dedicated ID-Generation Service — "ticket server"**
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
- MODEL (b): DEDICATED ID-GENERATION SERVICE — "ticket server"
- ==============================================================
+    A1(["App Server 1"])
+    A2(["App Server 2"])
+    A3(["App Server N"])
+    LB(Load Balancer)
+    I1("ID Service 1<br/>Snowflake or DB-segment")
+    I2("ID Service 2<br/>Snowflake or DB-segment")
+    I3("ID Service 3<br/>Snowflake or DB-segment")
+    COORD(["Shared coordination / DB<br/>worker IDs or segment range"])
 
-   +------------------+   +------------------+   +------------------+
-   |  App Server #1   |   |  App Server #2   |   |  App Server #N   |
-   +--------+---------+   +--------+---------+   +--------+---------+
-            |                       |                       |
-            |   GET /next-id        |   GET /next-id        |   GET /next-id
-            v                       v                       v
-   +---------------------------------------------------------------+
-   |                      Load Balancer                              |
-   +---------------------------------------------------------------+
-            |                       |                       |
-            v                       v                       v
-   +----------------+    +----------------+    +----------------+
-   | ID Service #1   |    | ID Service #2   |    | ID Service #3   |
-   | (Snowflake or    |    | (Snowflake or    |    | (Snowflake or    |
-   |  DB-segment-     |    |  DB-segment-     |    |  DB-segment-     |
-   |  based ticket    |    |  based ticket    |    |  based ticket    |
-   |  generator)      |    |  generator)      |    |  generator)      |
-   +--------+--------+    +--------+--------+    +--------+--------+
-            |                       |                       |
-            +-----------+-----------+-----------+-----------+
-                        |
-                        v
-            +-----------------------------+
-            |  Shared coordination/DB       |
-            |  (worker IDs OR DB segment     |
-            |   range allocation, §4.6)     |
-            +-----------------------------+
+    A1 -->|"GET /next-id"| LB
+    A2 -->|"GET /next-id"| LB
+    A3 -->|"GET /next-id"| LB
+    LB --> I1
+    LB --> I2
+    LB --> I3
+    I1 --> COORD
+    I2 --> COORD
+    I3 --> COORD
 
-   ID generation = one extra network round trip per ID (or per
-   batch, if the client pre-fetches a block of IDs at once).
+    class A1,A2,A3 io
+    class LB mathOp
+    class I1,I2,I3 train
+    class COORD base
 ```
+
+*ID generation now costs one extra network round trip per ID (or per batch, if the client pre-fetches a block of IDs at once) — the cost Model (a) exists to avoid.*
 
 ### Worker-ID Allocation Handshake (Model (a), Startup)
 
+```mermaid
+sequenceDiagram
+    participant A as App Server
+    participant Z as ZooKeeper / etcd
+
+    A->>Z: create ephemeral sequential znode<br/>under /snowflake/workers/
+    Z-->>A: znode name: seq-0000000007
+
+    Note over A: parse trailing integer to 7<br/>if 7 exceeds MAX_WORKER_ID (1023):<br/>fall back to datacenter-split<br/>scheme or raise capacity alarm (§10)
+
+    Note over A: workerId = 7<br/>construct SnowflakeIdGenerator(7)
+
+    A->>Z: maintain session (heartbeats)
+    Z-->>A: session active
+
+    Note over A,Z: on session expiry: stop serving requests,<br/>re-run this handshake from scratch (War Story 2, §9)
 ```
- App Server                         ZooKeeper / etcd
-     |                                     |
-     |--- create ephemeral sequential ---->|
-     |     znode under /snowflake/workers/ |
-     |                                     |
-     |<---- znode name: seq-0000000007 ----|
-     |                                     |
-     |  parse trailing integer -> 7        |
-     |  if 7 > MAX_WORKER_ID (1023):       |
-     |     fall back to datacenter-split    |
-     |     scheme or raise capacity alarm   |
-     |     (see §10)                        |
-     |                                     |
-     |  workerId = 7                       |
-     |  construct SnowflakeIdGenerator(7)  |
-     |                                     |
-     |--- maintain session (heartbeats) -->|
-     |<-- session active ------------------|
-     |                                     |
-     |   [on session expiry: STOP serving  |
-     |    requests, re-run this handshake  |
-     |    from scratch -- War Story 2, §9] |
-```
+
+*The coordination service is contacted once at startup (and again only on reconnect); every other `nextId()` call in between is a pure in-process computation.*
 
 ### Request Flow
 
@@ -456,6 +459,21 @@ public final class WorkerIdAllocator implements Watcher {
 
 **What happens on session expiry/reconnect** (the mechanism behind War Story 2, §9): ZooKeeper ties ephemeral znodes to a **session**, not a TCP connection — a client can briefly lose its TCP connection and reconnect within the session timeout (typically 4-40 seconds, configurable) without losing its ephemeral znode, because the server-side session is still alive. Only when the **session itself** expires (no successful heartbeat for the full session timeout) does the server delete the ephemeral znode. The danger window is the gap between "our session expired and our znode was deleted" and "we notice and stop serving IDs" — if another node claims the now-vacant sequence number (or, worse, if *our* znode is deleted but we haven't yet noticed and keep using the old `workerId`), two live nodes can end up believing they own the same `workerId`. The `fenced` flag and `verifySoleOwnership()` check above are the two halves of the fix.
 
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Unclaimed
+    Unclaimed --> Claiming: startup
+    Claiming --> Active: workerId assigned
+    Claiming --> Rejected: sequence exceeds<br/>MAX_WORKER_ID
+    Active --> Active: heartbeat OK
+    Active --> Fenced: session expired
+    Fenced --> Claiming: re-claim workerId
+    Rejected --> [*]: capacity alarm
+```
+
+*The node-identity lifecycle behind §4.2 and War Story 2: a node holds `Active` only while its ZooKeeper session is alive; the moment that session is reported `Expired`, `fenced` flips to true and the node must stop serving IDs before it re-claims a (possibly new) `workerId` — skipping straight from `Active` to a fresh claim without passing through `Fenced` is exactly the bug that let two nodes share `workerId = 412`.*
+
 ### 4.3 Clock Skew Handling and NTP
 
 Every Snowflake-family generator's correctness depends on one invariant: **`System.currentTimeMillis()` on a given node never produces a value smaller than a previously-observed value used to mint an ID, except by an amount the generator explicitly tolerates.** Real clocks violate this invariant in two distinct ways, and the operational response differs:
@@ -506,6 +524,25 @@ A 12-byte (96-bit) identifier with a fixed internal structure: **4-byte timestam
 | **DB auto-increment, multi-master (step/offset)** | 64 bits (typical) | Deterministic (per-master arithmetic progression) | Per-master sequential; weak cross-master ordering | Static config at cluster setup (fixed N) | Bound by DB write throughput per master | None — no clock dependency |
 | **Flickr-style ticket server** | 64 bits (typical) | Deterministic (DB auto-increment) | Sequential (single logical counter, or interleaved odd/even across 2 servers) | Per-ID network round trip (or batch) to ticket server(s) | Bound by ticket-server DB throughput; batching amortizes | None — no clock dependency |
 | **MongoDB ObjectId** | 96 bits (12 bytes) | Probabilistic (5-byte random) + deterministic counter | Coarse (1-second granularity) | None | Very high (counter increment) | None — clock only affects ordering granularity |
+
+```mermaid
+quadrantChart
+    title Unique-ID scheme design space
+    x-axis "Low coordination" --> "High coordination"
+    y-axis "Weak ordering" --> "Strong ordering"
+    quadrant-1 "High coordination, strong order"
+    quadrant-2 "Low coordination, strong order"
+    quadrant-3 "Low coordination, weak order"
+    quadrant-4 "High coordination, weak order"
+    "Snowflake": [0.35, 0.88]
+    "UUIDv4": [0.06, 0.08]
+    "UUIDv7 / ULID": [0.08, 0.62]
+    "DB auto-increment": [0.18, 0.42]
+    "Ticket server": [0.88, 0.8]
+    "MongoDB ObjectId": [0.08, 0.32]
+```
+
+*The same table, plotted as a design space: Snowflake and UUIDv7/ULID sit in the "strong order, low coordination" quadrant that makes them attractive defaults; the Flickr-style ticket server trades its way into "high coordination" to buy the strongest ordering; UUIDv4, MongoDB ObjectId, and multi-master auto-increment all avoid runtime coordination at the cost of weaker (or no) ordering — no scheme occupies "high coordination, weak order," which is why that combination is rarely chosen on purpose.*
 
 ### 4.6 Dedicated ID-Generation Microservice (Model (b)) and Database-Segment Allocation
 
@@ -822,16 +859,15 @@ The decision tree, summarized: **check current utilization against the 1024-node
 
 Suppose the fleet from §2 runs across **4 datacenters**, with the conventional 5-bit datacenter + 5-bit worker split (32 datacenters x 32 workers = 1024 total identities). Only 4 of the 32 possible datacenter slots are used, but each used datacenter is still capped at **32 workers** by the 5-bit worker field — so the *effective* usable address space is `4 x 32 = 128` identities, not 1024, even though the bit width nominally allows 1024.
 
+```mermaid
+xychart-beta
+    title "Worker-ID budget: nominal vs. effective (4 datacenters)"
+    x-axis ["Nominal 2^10", "Effective 5+5 split", "Effective 2+8 split"]
+    y-axis "Usable node identities" 0 --> 1024
+    bar [1024, 128, 1024]
 ```
-Nominal address space:        2^10 = 1024 (5-bit DC x 5-bit worker)
-Datacenters actually in use:  4 (of 32 possible)
-Effective usable identities:  4 x 32 = 128
 
-If the fleet needs 1,000 nodes spread across these 4 datacenters
-(250 nodes/datacenter average), the 32-worker-per-datacenter cap
-is exhausted at 32 nodes/datacenter -- a *much* tighter ceiling
-than the nominal 1024 suggests.
-```
+*Only 4 of the 32 possible datacenter slots are in use, so the conventional 5-bit-DC + 5-bit-worker split leaves just 128 of the nominal 1024 identities reachable (4 x 32) — if the fleet needs 1,000 nodes across these 4 datacenters (250/datacenter average), the 32-worker-per-datacenter cap bites at 32 nodes/datacenter, a much tighter ceiling than 1024 suggests. Re-splitting to 2-bit-DC + 8-bit-worker (rightmost bar) recovers the full budget for this topology.*
 
 This is precisely the scenario where **§10's "re-split the bits" option (option 1)** applies: re-splitting to **2-bit datacenter + 8-bit worker** (4 datacenters x 256 workers/datacenter = 1024 total, fully utilized) raises the effective ceiling from 128 to 1024 — an 8x improvement — without changing the total 10-bit budget or touching the timestamp/sequence fields at all. The lesson generalizes: **the binding constraint is rarely the raw bit width in isolation; it's the bit width *combined with* how the datacenter/worker split maps onto the fleet's actual topology.** Always compute the *effective* usable identity count for the actual number of datacenters in use, not the nominal `2^10`.
 

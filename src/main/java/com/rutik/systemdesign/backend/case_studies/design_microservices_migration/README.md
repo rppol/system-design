@@ -14,72 +14,67 @@ A mid-size e-commerce platform runs on a Spring Boot monolith (500K lines of Jav
 
 ## Architecture Overview
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph P0["Phase 0 · Monolith baseline"]
+        direction LR
+        client0([Client]) -->|all traffic| mono0(Monolith<br/>all endpoints + Postgres)
+    end
+
+    subgraph P1["Phase 1 · Gateway facade"]
+        direction LR
+        client1([Client]) -->|all traffic| gw1{Spring Cloud<br/>Gateway}
+        gw1 -->|all routes| mono1(Monolith)
+    end
+
+    subgraph P2["Phase 2 · Extract search"]
+        direction LR
+        client2([Client]) --> gw2{Gateway}
+        gw2 -->|/api/search/*| search2(Search Service<br/>Elasticsearch)
+        gw2 -->|all other| mono2(Monolith)
+    end
+
+    subgraph P4["Phase 4 · Extract inventory"]
+        direction LR
+        client4([Client]) --> gw4{Gateway}
+        gw4 -->|/api/search/*| search4(Search Service)
+        gw4 -->|/api/inventory/*| inv4(Inventory Service)
+        gw4 -->|all other| mono4(Monolith)
+        mono4 -.->|CDC sync| inv4
+    end
+
+    subgraph PN["Phase N · Monolith as stub"]
+        direction LR
+        clientN([Client]) --> gwN{Gateway}
+        gwN -->|/api/search/*| searchN(Search Service)
+        gwN -->|/api/products/*| prodN(Product Service)
+        gwN -->|/api/inventory/*| invN(Inventory Service)
+        gwN -->|/api/orders/*| ordN(Order Service)
+        gwN -->|/api/payments/*| payN(Payment Service)
+        gwN -->|/api/users/*| usrN(User Service)
+        gwN -->|legacy| stubN(Monolith stub)
+    end
+
+    P0 -.->|migrate| P1
+    P1 -.->|migrate| P2
+    P2 -.->|migrate| P4
+    P4 -.->|migrate| PN
+
+    class client0,client1,client2,client4,clientN io
+    class gw1,gw2,gw4,gwN mathOp
+    class mono0,mono1,mono2,mono4,stubN frozen
+    class search2,search4,searchN,inv4,invN,prodN,ordN,payN,usrN train
 ```
-Phase 0: Monolith (baseline)
-==============================
 
-[Client] --all traffic--> [Monolith]
-                            |--- /search
-                            |--- /products
-                            |--- /inventory
-                            |--- /orders
-                            |--- /payments
-                            |--- /users
-                            |--- PostgreSQL (all tables)
-
-
-Phase 1: Introduce Gateway Facade
-====================================
-
-[Client] --all traffic--> [Spring Cloud Gateway] --all routes--> [Monolith]
-(no user-visible change; gateway added as infrastructure)
-
-
-Phase 2: Extract Search Service
-==================================
-
-[Client]
-  |
-  v
-[Spring Cloud Gateway]
-  |--- /api/search/** ---> [Search Service]    (NEW — Elasticsearch)
-  |--- all other ------- > [Monolith]
-  |
-  Parallel run: both search endpoints active for 2 weeks
-  Traffic split: 10% → 50% → 100% via gateway weight filter
-
-
-Phase 4: Extract Inventory Service
-=====================================
-
-[Client]
-  |
-  v
-[Spring Cloud Gateway]
-  |--- /api/search/**     -> [Search Service]      (extracted)
-  |--- /api/inventory/**  -> [Inventory Service]   (extracting)
-  |--- all other -------> [Monolith]
-
-  Data migration: Debezium CDC syncs inventory table from monolith DB
-  to inventory DB during parallel run period
-  Cutover: stop CDC, monolith delegates to inventory service API
-
-
-Phase N: Monolith as Legacy Stub
-====================================
-
-[Client]
-  |
-  v
-[Spring Cloud Gateway]
-  |--- /api/search/**     -> [Search Service]
-  |--- /api/products/**   -> [Product Service]
-  |--- /api/inventory/**  -> [Inventory Service]
-  |--- /api/orders/**     -> [Order Service]
-  |--- /api/payments/**   -> [Payment Service]
-  |--- /api/users/**      -> [User Service]
-  |--- (legacy endpoints) -> [Monolith stub]
-```
+Each phase is independently rollbackable through the gateway's traffic weighting: Phase 2's search cutover runs both endpoints in parallel for 2 weeks while shifting weight 10% → 50% → 100%, and Phase 4's inventory cutover layers in Debezium CDC to replicate monolith writes throughout that parallel run, with cutover simply stopping CDC once the monolith starts delegating reads to the new service.
 
 ---
 
@@ -107,6 +102,19 @@ The monolith's shared PostgreSQL database cannot be split all at once. The patte
 4. New service is in "shadow mode" (receives writes via monolith delegation) while CDC syncs reads
 5. After 4+ weeks of consistency validation, the new service takes primary ownership
 6. CDC sync stopped, monolith table deprecated
+
+```mermaid
+stateDiagram-v2
+    [*] --> DB_PROVISIONED
+    DB_PROVISIONED --> CDC_SYNCING: Debezium streams monolith WAL
+    CDC_SYNCING --> SHADOW_MODE: writes still delegate to monolith
+    SHADOW_MODE --> VALIDATING: reads compared continuously
+    VALIDATING --> PRIMARY_OWNER: 4+ weeks validated
+    PRIMARY_OWNER --> DEPRECATED: CDC stopped, table dropped
+    DEPRECATED --> [*]
+```
+
+Data ownership never splits across two writers — every extracted service walks this exact lifecycle, and `VALIDATING` only advances to `PRIMARY_OWNER` once the consistency validator shows zero mismatches for 7 consecutive days.
 
 **4. Feature Flag for Traffic Cutover**
 

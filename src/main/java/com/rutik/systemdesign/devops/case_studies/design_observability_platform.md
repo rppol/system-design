@@ -148,68 +148,68 @@ The lesson: **compute (ingesters + collectors + queriers) is ~85% of the bill, o
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    svc(["~4000 services<br/>~50 K8s clusters"]) -->|"metrics + logs + traces<br/>(OTLP)"| agent("OTel Collector<br/>agent · DaemonSet<br/>k8sattributes + memory_limiter")
+    agent -->|"mTLS gRPC<br/>per-cluster egress"| gw("OTel Collector<br/>gateway pool<br/>keyed by trace_id, tail sampling")
+
+    subgraph metricslane["Metrics lane (Mimir)"]
+        mdist("distributor<br/>RF=3") --> ming("ingesters × 20<br/>TSDB head")
+        ming --> mcomp(("compactor"))
+    end
+    subgraph logslane["Logs lane (Loki)"]
+        ldist("distributor<br/>RF=3") --> ling("ingesters × 12<br/>chunk build")
+        ling --> lcomp(("compactor"))
+    end
+    subgraph traceslane["Traces lane (Tempo)"]
+        tdist("distributor<br/>RF=3") --> ting("ingesters × 8<br/>trace assembler")
+        ting --> tcomp(("compactor"))
+    end
+
+    gw -->|"metrics"| mdist
+    gw -->|"logs"| ldist
+    gw -->|"traces<br/>post tail-sample"| tdist
+
+    subgraph objstore["Object Store (S3)"]
+        s3m[("metrics blocks")]
+        s3l[("log chunks + index")]
+        s3t[("trace blocks")]
+    end
+
+    mcomp --> s3m
+    lcomp --> s3l
+    tcomp --> s3t
+
+    s3m --> mq("querier + store-gateway<br/>query-frontend")
+    s3l --> lq("querier +<br/>index-gateway")
+    s3t --> tq("query-frontend +<br/>tempo querier")
+
+    mq --> grafana(["Grafana<br/>dashboards / Explore / alerting"])
+    lq --> grafana
+    tq --> grafana
+
+    grafana -->|"exemplars + trace_id<br/>deep-links pillars"| am("Alertmanager<br/>HA gossip cluster")
+    am -->|"dedup / silence / route"| page(["PagerDuty / Slack"])
+
+    class svc io
+    class agent,gw mathOp
+    class mdist,ldist,tdist req
+    class ming,ling,ting train
+    class mcomp,lcomp,tcomp mathOp
+    class s3m,s3l,s3t base
+    class mq,lq,tq req
+    class grafana,am,page io
 ```
-                              ~4000 services across ~50 K8s clusters
-                  metrics (OTLP/remote_write)  logs (OTLP)   traces (OTLP)
-                              |                    |              |
-                              v                    v              v
-   ===================  PER-CLUSTER AGENT TIER (DaemonSet) ====================
-   |  OTel Collector (agent mode) — node-local, no buffering of full traces  |
-   |    receivers: otlp, prometheus, filelog                                 |
-   |    processors: resourcedetection, k8sattributes, batch, memory_limiter  |
-   |    exporters: otlp -> regional gateway (load-balancing exporter)        |
-   ===========================================================================
-                              |  (mTLS, gRPC, per-cluster egress)
-                              v
-   ==============  REGIONAL GATEWAY TIER (stateful for traces) ===============
-   |  OTel Collector (gateway mode) — HORIZONTAL POOL behind a headless svc  |
-   |    loadbalancing exporter keyed by trace_id  -> tailsampling processor  |
-   |    routing: metrics -> Mimir distributor                                |
-   |             logs    -> Loki distributor                                 |
-   |             traces  -> Tempo distributor (post tail-sampling)           |
-   ===========================================================================
-        |                         |                          |
-   metrics lane               logs lane                  traces lane
-        v                         v                          v
- +----------------+      +----------------+         +------------------+
- | Mimir          |      | Loki           |         | Tempo            |
- |  distributor   |      |  distributor   |         |  distributor     |
- |     |  RF=3    |      |     |  RF=3     |         |     |            |
- |     v          |      |     v          |         |     v            |
- |  ingesters[20] |      |  ingesters[12] |         |  ingesters[8]    |
- |   (TSDB head)  |      |  (chunk build) |         | (trace assembler)|
- |     |          |      |     |          |         |     |            |
- |     v  flush   |      |     v  flush   |         |     v  flush     |
- |  compactor     |      |  compactor     |         |  compactor       |
- +-----+----------+      +-----+----------+         +-----+------------+
-       |                       |                          |
-       +-----------+-----------+--------------+-----------+
-                   v                          v
-            =============== OBJECT STORE (S3) ================
-            | metrics blocks | log chunks+index | trace blocks |
-            ==================================================
-                   ^                          ^
-   metrics read    |    logs read             |   traces read
-        v          |        v                 |        v
- +----------------+|+----------------+        |+------------------+
- | querier +      || | querier +     |        || query-frontend + |
- | store-gateway  || | index-gateway |        || tempo querier    |
- | query-frontend || | (caches:      |        ||                  |
- | (results cache)|| |  chunk/index) |        |+------------------+
- +-------+--------+|+-------+--------+        +--------+-----------+
-         |         |        |                          |
-         +---------+--------+------------+-------------+
-                   v                     v
-             +-----------------------------------+
-             |             GRAFANA               |  <-- exemplars + trace_id
-             |   dashboards / Explore / alerting |       deep-links pillars
-             +-----------------+-----------------+
-                               |
-                    +----------v-----------+
-                    |    Alertmanager      | -> PagerDuty / Slack
-                    |  (HA gossip cluster) |    dedup / silence / route
-                    +----------------------+
-```
+
+*Telemetry flows agent to gateway to a per-pillar distributor/ingester/compactor stack, lands in S3, and is read back through queriers into Grafana, with Alertmanager routing alerts out to PagerDuty/Slack.*
 
 ### Component inventory
 
@@ -246,17 +246,31 @@ For multi-region trace-ID-consistent routing and cross-cluster mesh, see [`cross
 
 ### 4.1 OTel Collector pipeline + tail sampling
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    sdk(["spans (OTLP)<br/>from SDK"]) --> agent("AGENT (DaemonSet)<br/>otlp receiver, k8sattributes<br/>memory_limiter, batch")
+    agent -->|"lb by trace_id"| gw("GATEWAY POOL<br/>tailsampling<br/>waits ~30s for trace complete")
+    gw --> policy{"policy eval"}
+    policy -->|"errors / slow"| keep(["KEEP"])
+    policy -->|"ok + fast"| drop(["DROP"])
+
+    class sdk io
+    class agent mathOp
+    class gw mathOp
+    class policy mathOp
+    class keep train
+    class drop lossN
 ```
-   spans (OTLP)         AGENT (DaemonSet)              GATEWAY POOL
-   from SDK   ---->  +------------------+   lb by    +------------------+
-                     | otlp receiver    | trace_id   | tailsampling     |
-                     | k8sattributes    | ---------> | (waits ~30s for  |
-                     | memory_limiter   |            |  trace complete) |
-                     | batch            |            | -> policy eval   |
-                     +------------------+            +------------------+
-                                                       |          |
-                                          KEEP (errors/slow)   DROP (ok+fast)
-```
+
+*Agent batches spans and load-balances by `trace_id` so every span of one trace lands on the same gateway, where a ~30s decision window buffers the trace before the policy keeps errors/slow traces and drops the rest.*
 
 **Why tail over head:** Head sampling decides at the *first* span — before you know whether the request errored or was slow. So head sampling at 5% throws away 95% of your error traces, which are the only ones you want. Tail sampling buffers the whole trace and decides with full context.
 
@@ -331,21 +345,34 @@ Now **100% of error and >500ms traces are kept**, plus a 3% baseline of healthy 
 
 ### 4.2 Mimir: distributor → ingester → compactor → store-gateway
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    rw(["remote_write<br/>5M samples/s<br/>Snappy proto"]) --> dist("distributor<br/>validate + limits")
+    dist -->|"hash(tenant+labels)<br/>ring shard RF=3"| ing("ingester × 20<br/>TSDB head + WAL fsync")
+    ing -->|"flush block<br/>every 2h"| s3[("S3<br/>blocks")]
+    s3 -->|"read"| comp(("compactor<br/>merge / dedup /<br/>downsample"))
+    comp -->|"write back"| s3
+    s3 --> sg("store-gateway<br/>index-header cache")
+    sg --> q(["query"])
+
+    class rw io
+    class dist req
+    class ing train
+    class comp mathOp
+    class s3 base
+    class sg req
+    class q io
 ```
- remote_write     +-------------+  hash(tenant+labels)  +-------------+
- 5M samples/s ---> | distributor | --- ring shard RF3 ->| ingester x20|
- (Snappy proto)    | validate    |                      | TSDB head   |
-                   | limits      |                      | WAL fsync   |
-                   +-------------+                       +------+------+
-                                                                | every 2h
-                                                                v flush block
-                                                       +-----------------+
-                                                       |   S3 (blocks)   |
-                                                       +--------+--------+
-                                          compactor merges/dedups/downsamples
-                                                                |
-                              query <--- store-gateway (index-header cache) <--+
-```
+
+*Distributors hash `tenant+labels` onto the ring and replicate RF=3 to ingesters; the compactor merges, deduplicates, and downsamples blocks already sitting in S3 before store-gateways serve queries.*
 
 **The cardinality bomb (BROKEN):** A team adds a label `user_id` to an HTTP histogram. Each unique user creates a new series per bucket. With 2M users × 12 buckets = 24M *new* series from one metric. The ingesters' head RAM blows past the limit and they OOM-kill in a loop, taking the whole metrics write path down.
 
@@ -391,15 +418,33 @@ The compactor then runs **5m downsampling** on blocks older than the raw window 
 
 ### 4.3 Loki: label index vs log content
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    logs(["log lines (OTLP)<br/>20 TB/day"]) --> dist("distributor<br/>validate")
+    dist -->|"hash ring RF=3<br/>stream = label set"| ing("ingester<br/>build + compress chunk")
+    ing -->|"flush at 1.5MB"| s3[("S3<br/>chunks + TSDB index")]
+    s3 --> ig("index-gateway<br/>cache")
+    ig --> q("querier")
+    q --> lq(["query (LogQL)"])
+
+    class logs io
+    class dist req
+    class ing train
+    class s3 base
+    class ig req
+    class q req
+    class lq io
 ```
-   log lines (OTLP)    +-------------+   stream = unique label set
-   20 TB/day  -------> | distributor | --- hash ring RF3 --> ingester
-                       | validate    |                       | build chunk
-                       +-------------+                        | (compress)
-                                                              v flush at 1.5MB
-                                          +--------- S3: chunks + TSDB index
-                       query (LogQL) <-- querier <-- index-gateway (cache)
-```
+
+*Loki hashes each unique label set (a "stream") onto the ring, builds a compressed chunk per stream, and flushes to S3 once a chunk hits 1.5MB; reads flow back through the index-gateway cache to the querier.*
 
 Loki's trick: **it indexes only labels, never log content.** A query is `{labels} |= "pattern"` — the label matcher narrows to a few chunks via the index, then a brute-force grep runs over those decompressed chunks. This makes ingest cheap (no full-text index) but means a query with *no* label filter must scan everything.
 
@@ -440,15 +485,35 @@ A common Loki incident: a team sets `level` from a free-text field, and a malfor
 
 ### 4.4 Tempo: trace block store + service graphs
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    spans(["spans<br/>post tail-sample<br/>100K spans/s"]) --> dist("distributor")
+    dist --> ing("ingester")
+    ing -->|"per-tenant block"| s3[("S3 block<br/>trace_id index")]
+    ing -.->|"span stream"| mg("metrics-generator")
+    mg -.-> red(["RED metrics +<br/>service graph"])
+    s3 --> q("querier<br/>fetch block by id")
+    q --> lookup(["query by trace_id"])
+
+    class spans io
+    class dist req
+    class ing train
+    class s3 base
+    class mg mathOp
+    class red io
+    class q req
+    class lookup io
 ```
-   spans (post tail-sample)  +-------------+   per-tenant block
-   100K spans/s ----------->  | distributor | --> ingester --> S3 block
-                              +-------------+        |  (trace_id index)
-                                                     v
-                        metrics-generator: spans -> RED metrics + service graph
-                                                     |
-                              query by trace_id <-- querier (fetches block by id)
-```
+
+*The metrics-generator derives RED metrics and service-graph edges straight from the span stream, so every stored trace also feeds Grafana dashboards without extra instrumentation.*
 
 Tempo stores traces by `trace_id` with a minimal index (block-level bloom filters keyed on trace ID). Trace-by-ID lookup is O(blocks-with-matching-bloom). For *search by attribute*, Tempo uses TraceQL over a columnar block format (Parquet-like):
 
@@ -600,16 +665,32 @@ The platform must monitor *itself* with a **separate, smaller Prometheus** (the 
 
 OTel span hierarchy for a single query through the read path (used to debug slow dashboards):
 
-```
-trace: grafana.dashboard.render
-  span: query-frontend.split           (range split into shards)
-    span: query-frontend.cache.lookup  (results cache hit/miss)
-    span: querier.select               (per-shard)
-      span: ingester.query             (recent data)
-      span: store-gateway.series       (S3 blocks)
-        span: s3.getobject             (block chunk fetch)
-      span: store-gateway.merge
-    span: query-frontend.merge_results
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    root("trace<br/>grafana.dashboard.render") --> split("query-frontend.split<br/>range split into shards")
+    split --> cache("query-frontend.cache.lookup<br/>results cache hit/miss")
+    split --> select("querier.select<br/>per-shard")
+    split --> merge("query-frontend.merge_results")
+    select --> ingq("ingester.query<br/>recent data")
+    select --> sgs("store-gateway.series<br/>S3 blocks")
+    select --> sgm("store-gateway.merge")
+    sgs --> s3get("s3.getobject<br/>block chunk fetch")
+
+    class root io
+    class split,merge mathOp
+    class cache req
+    class select mathOp
+    class ingq train
+    class sgs,sgm req
+    class s3get base
 ```
 
 Golden signals to alarm on for the platform itself:
@@ -648,6 +729,30 @@ Detailed cardinality dashboards and per-metric cost attribution: [`cross_cutting
 - *Mitigation:* Do **not** try to repair the WAL live. Delete the corrupt ingester's PVC and let it re-join empty; the ring + RF=3 means no data loss (other replicas serve and re-replicate). Confirm the other 2 replicas are healthy *before* deleting.
 - *Resolution:* Add disk-full alerting (`< 15% free`) and ensure graceful shutdown (SIGTERM → flush → exit) via a long enough `terminationGracePeriodSeconds`. See [`cross_cutting/kubernetes_production_hardening.md`](cross_cutting/kubernetes_production_hardening.md).
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Healthy
+    Healthy --> CrashLoopBackOff: WAL corruption<br/>disk full mid-fsync or kill -9
+    CrashLoopBackOff --> Rejoining: confirm 2 replicas healthy,<br/>then delete PVC
+    Rejoining --> ReReplicating: joins ring empty
+    ReReplicating --> Healthy: RF=3 restored<br/>by peer replicas
+
+    class Healthy train
+    class CrashLoopBackOff lossN
+    class Rejoining mathOp
+    class ReReplicating req
+```
+
+*Because RF=3, a corrupt WAL is never repaired live — the ingester rejoins the ring empty and the other two replicas re-replicate it back to full redundancy, which is why confirming their health comes before deleting the PVC.*
+
 **Runbook 4 — Alertmanager split-brain (no pages firing)**
 - *Symptom:* An incident is clearly happening (dashboards red) but no page arrived; or duplicate pages.
 - *Diagnosis:* Alertmanager HA gossip mesh is partitioned — replicas can't reach each other, so dedup/notification-log isn't shared. Check `alertmanager_cluster_members` < expected and `alertmanager_cluster_failed_peers`.
@@ -659,6 +764,16 @@ Detailed cardinality dashboards and per-metric cost attribution: [`cross_cutting
 ## 9. Common Pitfalls & War Stories
 
 **1. The `user_id` cardinality bomb — 24M series, 18 minutes blind.** A checkout team shipped a histogram labeled by `user_id`. Within minutes, head series jumped from 8M to 32M; ingesters OOM-looped and the metrics write path was down for **18 minutes** across all 120 tenants before shuffle sharding + an emergency relabel drop contained it. Post-incident, a banned-label CI check was added. Quantified: 18 min × ~$3K/min revenue-impacting blindness on a Friday deploy, plus the entire org flying blind. Root cause and prevention dashboards: [`cross_cutting/prometheus_cardinality_and_scale.md`](cross_cutting/prometheus_cardinality_and_scale.md).
+
+```mermaid
+xychart-beta
+    title "Cardinality bomb vs. platform capacity (active series, millions)"
+    x-axis ["Baseline", "Bomb (18 min)", "Provisioned burst cap"]
+    y-axis "Active series (M)" 0 --> 35
+    bar [8, 32, 15]
+```
+
+*A single `user_id` label pushed head series from an 8M baseline to 32M within minutes — more than double the platform's provisioned 15M burst ceiling from §1 — which is exactly why ingesters OOM-looped across all 120 tenants until shuffle sharding and the emergency relabel drop contained it.*
 
 **2. Head sampling discarded every error trace.** A team used SDK probabilistic sampling at 5%. During a payment outage, the on-call searched Tempo for the failing trace and found **zero** error traces — all dropped. MTTR ballooned to ~90 minutes because they debugged from logs alone. Switching to gateway tail sampling (100% errors) cut subsequent similar-incident MTTR to ~15 minutes.
 

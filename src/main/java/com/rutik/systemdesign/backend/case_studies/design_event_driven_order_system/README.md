@@ -14,54 +14,100 @@ Design an order management system where the order lifecycle (Created → Invento
 
 ## Architecture Overview
 
+**Write Path — Commands to Events**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client<br/>POST /orders"]) --> orderSvc("Order Service<br/>validate + save")
+    orderSvc -->|"same @Transactional:<br/>save Order + OrderCreatedEvent"| outbox[("outbox_events")]
+    outbox -.-> relay("Outbox Relay<br/>Kafka txn producer")
+    relay -->|"partition key = orderId"| topic(["order-events topic"])
+
+    class client io
+    class orderSvc req
+    class outbox base
+    class relay mathOp
+    class topic req
 ```
-Event-Driven Order System
-===========================
 
-Write Path (Commands → Events):
-  Client POST /orders
-    |
-    v
-  [Order Service]
-    |--- Validate + save Order entity
-    |--- Save OrderCreatedEvent to outbox_events     (SAME @Transactional)
-    |
-    v
-  [Outbox Relay] (Kafka transactional producer)
-    |--- Publish to "order-events" topic
-    |--- Partition key = orderId (order per-aggregate ordering)
+The order write and its outbox insert commit in one local database transaction, so a Kafka outage never loses or fabricates an event; the Outbox Relay then publishes with `orderId` as the partition key so every event for one order lands in the same partition and stays in order.
 
+**Fan-out to Consumers**
 
-Fan-out to Consumers:
-  [order-events topic]
-    |
-    +---> [Inventory Service]   consumer-group: inventory-svc
-    |       Reserves stock, publishes StockReserved to "inventory-events"
-    |
-    +---> [Payment Service]     consumer-group: payment-svc
-    |       Waits for StockReserved, then charges payment
-    |
-    +---> [Order Query Service] consumer-group: order-query-svc
-    |       Updates CQRS read model: order_read_model table
-    |
-    +---> [Notification Service] consumer-group: notification-svc
-            Sends confirmation email (best-effort)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    topic(["order-events topic"]) --> inv("Inventory Service<br/>group: inventory-svc")
+    topic --> pay("Payment Service<br/>group: payment-svc")
+    topic --> query("Order Query Service<br/>group: order-query-svc")
+    topic -.->|"best-effort"| notify("Notification Service<br/>group: notification-svc")
+    inv -->|"publishes"| stockTopic(["inventory-events topic<br/>StockReserved"])
+    stockTopic -.-> pay
 
-Read Path (CQRS):
-  Client GET /orders/{id}
-    |
-    v
-  [Order Query Service]
-    |--- SELECT * FROM order_read_model WHERE order_id = ?
-    |--- Returns denormalized view: order + items + status + tracking info
-    |    (no JOINs, no calls to other services)
-
-
-DLQ Flow:
-  [order-events topic] -> 3 retries (1s backoff) -> [order-events.DLT topic]
-  [DLQ Consumer] -> log + alert + root cause analysis -> manual replay after fix
+    class topic,stockTopic req
+    class inv,pay,query,notify train
 ```
+
+Each service consumes `order-events` under its own consumer group so a slow consumer never blocks the others; Payment Service does not act on `order-events` alone — it also waits for the `StockReserved` event Inventory publishes to `inventory-events` — and Notification Service is wired as a non-blocking, best-effort path.
+
+**Read Path (CQRS)**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    clientGet(["Client<br/>GET /orders/id"]) --> queryR("Order Query Service")
+    queryR -->|"SELECT ... WHERE<br/>order_id = ?"| readModel[("order_read_model")]
+    readModel --> response(["Denormalized view:<br/>order + items + status<br/>+ tracking, no JOINs"])
+
+    class clientGet,response io
+    class queryR req
+    class readModel base
+```
+
+The read path never joins across tables or calls out to Inventory or Payment: `order_read_model` already holds the complete denormalized view, at the cost of the 100-500ms replication lag from the write side described below.
+
+**DLQ Flow**
+
+```mermaid
+stateDiagram-v2
+    state "Attempting Delivery" as Attempting
+    state "Exponential Backoff" as Backoff
+    state "Dead Letter Topic" as DLT
+    state "DLQ Consumer" as DLQConsumer
+
+    [*] --> Attempting
+    Attempting --> Delivered: ack success
+    Attempting --> Backoff: exception
+    Backoff --> Attempting: retry after 1s / 2s / 4s
+    Backoff --> DLT: 3 retries exhausted
+    DLT --> DLQConsumer: log + alert + RCA
+    DLQConsumer --> Attempting: manual replay after fix
+    Delivered --> [*]
+```
+
+A message escalates through 1s, 2s, then 4s of backoff before landing in the dead letter topic instead of blocking the partition; the DLQ Consumer's job is triage — log, alert, root cause — and only a manual replay re-publishes it back into the attempt cycle.
 
 ---
 
@@ -82,6 +128,17 @@ The Order Query Service subscribes to all order lifecycle events and maintains a
 **4. Schema Evolution with Avro + Schema Registry**
 
 All events use Avro schemas registered in Schema Registry. New optional fields are added with default values — this is BACKWARD compatible. Consumers that do not have the new schema version receive the field's default value. The Schema Registry enforces BACKWARD compatibility — attempts to register incompatible schema changes are rejected.
+
+```mermaid
+timeline
+    title OrderCreatedEvent Schema Evolution (Avro)
+    v1 : 6 required fields, no currency field
+    v2 registered : currency field added, nullable, default USD : BACKWARD compatible
+    Consumers deployed first : read v2 schema, default USD for old events
+    Producers deployed next : start writing the currency field
+```
+
+Schema Registry enforces BACKWARD compatibility, so consumers are always upgraded before producers — old events simply default `currency` to `USD` until the newly-deployed producers start populating it. Deploying in the wrong order (producers first) would not break anything here only because the new field is optional with a default; a non-optional field addition would be rejected as an incompatible change outright.
 
 **5. Per-Aggregate Partition Key**
 
@@ -343,6 +400,16 @@ The CQRS read model has a lag of 100-500ms between event publication and read mo
 
 **Kafka vs RabbitMQ**:
 Kafka was chosen for: replay capability (rebuild the read model by replaying all events from offset 0), high throughput (1M events/s vs ~50K for RabbitMQ), and retention-based storage (7 days). RabbitMQ would provide lower latency per message and complex routing, but no replay capability — the read model would be unrebuildable from events after a failure.
+
+```mermaid
+xychart-beta
+    title "Peak Throughput: Kafka vs RabbitMQ"
+    x-axis ["Kafka", "RabbitMQ"]
+    y-axis "Events / sec" 0 --> 1100000
+    bar [1000000, 50000]
+```
+
+Kafka's log-based design sustains roughly 20x RabbitMQ's peak throughput (1M events/sec vs ~50K), which is why it wins here despite RabbitMQ's lower per-message latency and richer routing — the gap becomes decisive once `order-events` needs to support full-history replay to rebuild the read model.
 
 ---
 

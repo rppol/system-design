@@ -92,45 +92,54 @@ The ~150x gap between top-N egress (~12 Gbps) and rank-lookup egress (~80 Mbps) 
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    clients(["Game Clients<br/>mobile / console / PC"])
+    writeAPI["Score Update API<br/>validation, idempotency"]
+    readAPI["Leaderboard Read API<br/>top-N, rank, nearby"]
+    hashNode{"hash(playerId)<br/>to shard N"}
+
+    subgraph store ["Sharded In-Memory Sorted-Set Store (ZSET-style)"]
+        shard0["Shard 0<br/>ZADD / ZRANK / ZRANGE"]
+        shard1["Shard 1<br/>ZADD / ZRANK / ZRANGE"]
+        shardN["Shard N<br/>ZADD / ZRANK / ZRANGE"]
+    end
+
+    merger[["Periodic k-way merge<br/>of shard top-K"]]
+    topNCache["Top-N Cache<br/>refreshed every 1-2s"]
+    durable[["Durable Score Store<br/>audit log + replay source"]]
+
+    clients -->|"score updates<br/>~50K/sec peak"| writeAPI
+    clients -->|"top-N / rank / nearby<br/>~560K/sec peak"| readAPI
+    writeAPI --> hashNode
+    hashNode --> shard0
+    hashNode --> shard1
+    hashNode --> shardN
+    readAPI -->|"cache hit<br/>over 99% for top-N"| topNCache
+    shard0 --> merger
+    shard1 --> merger
+    shardN --> merger
+    merger -->|"refresh"| topNCache
+    shard0 -.->|"write-behind"| durable
+    shard1 -.->|"write-behind"| durable
+    shardN -.->|"write-behind"| durable
+
+    class clients io
+    class writeAPI,readAPI req
+    class hashNode,merger mathOp
+    class shard0,shard1,shardN,topNCache base
+    class durable frozen
 ```
-                                    +------------------------+
-                                    |       Game Clients       |
-                                    | (mobile / console / PC)  |
-                                    +------+------------+-------+
-                                           |            |
-                          score updates    |            | top-N / rank / nearby reads
-                          (~50K/sec peak)  |            | (~560K/sec peak combined)
-                                           v            v
-                              +-------------------+  +----------------------+
-                              |  Score Update API  |  |   Leaderboard Read   |
-                              |  (validation,      |  |   API (top-N cache,  |
-                              |   idempotency)     |  |   rank, nearby)      |
-                              +---------+----------+  +-----------+----------+
-                                        |                          |
-                  hash(playerId) -> shard N                        | cache hit (>>99% for top-N)
-                                        v                          v
-        +-------------------------------------------------+  +----------------+
-        |          Sharded In-Memory Sorted-Set Store       |  |  Top-N Cache    |
-        |        (Redis ZSET-style, §4.1, §4.2)             |  |  (refreshed     |
-        |                                                    |  |   every 1-2s)   |
-        |   +--------+   +--------+   +--------+            |  +-------+--------+
-        |   | Shard 0 |   | Shard 1 |   | Shard N |  ...     |          ^
-        |   | ZADD/   |   | ZADD/   |   | ZADD/   |          |          |
-        |   | ZRANK/  |   | ZRANK/  |   | ZRANK/  |          |   periodic k-way
-        |   | ZRANGE  |   | ZRANGE  |   | ZRANGE  |          |   merge of each
-        |   +----+----+   +----+----+   +----+----+          |   shard's local
-        |        |             |             |               |   top-K (§4.2)
-        +--------+-------------+-------------+---------------+
-                 |             |             |
-                 |  async write-behind (batched, §4.4)
-                 v             v             v
-        +-------------------------------------------------+
-        |           Durable Score Store (DB)                |
-        |   - score history / audit log                     |
-        |   - source of truth for cache-restart replay      |
-        |   - per-leaderboard, per-season partitions         |
-        +-------------------------------------------------+
-```
+
+Writes hash by `playerId` into one of `N` shards while reads split between the Top-N Cache (over 99% hit rate) and the sharded store directly; a periodic k-way merge refreshes the cache and every shard write-behinds asynchronously to the durable store.
 
 ### Write Path
 
@@ -450,21 +459,30 @@ The in-memory sorted-set shards (§4.2) are the **performance layer** — they a
 
 **Write-behind**: when a score update is acknowledged to the client (immediately after the in-memory `ZADD`, §3), the update is also appended to an in-memory **write-behind queue**. A background process drains this queue in **batches** (e.g., every 100ms or every 1,000 entries, whichever comes first) and writes them to the durable store as a batch `INSERT`/`UPSERT`. This decouples client-perceived write latency (sub-millisecond, bounded by the in-memory `ZADD`) from durable-store write latency (tens of milliseconds for a batched disk write) — the client never waits for the disk write.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    update(["Score update arrives"]) --> zadd["ZADD shard<br/>sub-millisecond"]
+    zadd --> ack(["ACK to client<br/>success now"])
+    zadd --> queue["Write-behind queue<br/>in-memory, per-shard"]
+    queue --> trigger{"every 100ms or<br/>1,000 entries"}
+    trigger --> upsert[["Batch UPSERT to<br/>durable store, tens of ms"]]
+
+    class update,ack io
+    class zadd train
+    class queue req
+    class trigger mathOp
+    class upsert frozen
 ```
-Score update arrives
-       |
-       v
-  ZADD shard (sub-ms) -----> ACK to client (client sees success NOW)
-       |
-       v
-  append to write-behind queue (in-memory, per-shard)
-       |
-       v
-  [every 100ms or 1,000 entries]
-       |
-       v
-  batch UPSERT to durable store (tens of ms, doesn't block clients)
-```
+
+The in-memory `ZADD` acknowledges the client in sub-millisecond time; the durable write happens asynchronously off a write-behind queue that flushes every 100ms or 1,000 entries, whichever comes first, so disk latency never blocks the client.
 
 **Recovery on cache restart**: when a shard node restarts (planned maintenance or crash recovery), its in-memory sorted set is empty. The recovery process:
 
@@ -493,27 +511,34 @@ This means **the common case (player not near a shard boundary) never triggers c
 
 Each of the `N` shards from §4.2 is a **single point of failure** for the ~6.25M players hashed onto it (§10) unless it's replicated. The standard layout mirrors Redis's own primary/replica model: each shard is a **primary** instance handling all `ZADD` writes plus a small number of **read replicas** (typically 1-2) that asynchronously stream the primary's write stream and serve `ZRANK`/`ZRANGE`/`getRangeAroundPlayer` reads (§4.6).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    writeTraffic(["Write traffic<br/>~4,700 ZADD/sec"])
+
+    subgraph shard5 ["Shard 5 (one of N=16 shards)"]
+        primary["Primary<br/>ZADD writes only"]
+        replica1["Read Replica 1<br/>ZRANK / ZRANGE /<br/>getRangeAroundPlayer"]
+        replica2["Read Replica 2<br/>failover standby +<br/>read overflow"]
+    end
+
+    writeTraffic --> primary
+    primary -.->|"async replication"| replica1
+    primary -.->|"async replication"| replica2
+
+    class writeTraffic req
+    class primary train
+    class replica1,replica2 frozen
 ```
-                     Shard 5 (one of N=16 shards)
-        +------------------------------------------------+
-        |                                                  |
-        |   +-------------+        async replication      |
-        |   |   Primary    | ---------------------------+  |
-        |   | (ZADD writes |                             |  |
-        |   |  only)       |                             v  |
-        |   +-------------+               +--------------------+
-        |          ^                       |  Read Replica 1     |
-        |          |                       |  (ZRANK / ZRANGE /  |
-        |    write traffic                 |   getRangeAroundPlayer)|
-        |    ~4,700 ZADD/sec                +--------------------+
-        |    (§10)                                    |
-        |                                   +--------------------+
-        |                                   |  Read Replica 2     |
-        |                                   |  (failover standby  |
-        |                                   |   + read overflow)  |
-        |                                   +--------------------+
-        +------------------------------------------------+
-```
+
+All `ZADD` writes land on the primary alone to keep composite-key ordering consistent (§4.3); both read replicas stream the primary's write log asynchronously and absorb `ZRANK`/`ZRANGE` read traffic plus failover standby duty.
 
 **Why writes don't go to replicas**: routing `ZADD` only to the primary keeps the composite-key ordering (§4.3) and the skip-list structure (§4.1) consistent at a single source of truth — if writes could land on any replica, two replicas could independently reposition the same player's entry in slightly different orders relative to concurrent updates from other players, producing exactly the kind of cross-replica ordering divergence that caused War Story 2's flicker before the tiebreaker fix. Centralizing writes on the primary means **replication lag** (commonly single-digit milliseconds for same-region async replication) is the *only* source of read/write divergence, and it's bounded and monitored (§8).
 
@@ -527,21 +552,32 @@ A 100M-player game (§2) has players distributed across every major region — N
 
 The resolution mirrors §4.8's spirit but inverts which side is "local": **score-update ingestion is regional** (a player's score update is received by their nearest regional game-server cluster, minimizing the latency-sensitive gameplay-to-leaderboard round trip), but the **sharded sorted-set store itself is a single global deployment** — each of the 16 shards (§4.2) lives in one "leaderboard home region," and regional game-server clusters forward score updates to that home region asynchronously.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    na(["NA Game Servers"])
+    eu(["EU Game Servers"])
+    apac(["APAC Game Servers"])
+    shards["Global Leaderboard Shards<br/>16 shards, single home region"]
+    cache[["Top-N Cache<br/>replicated to every region"]]
+
+    na -->|"forward score updates<br/>async, under 100ms"| shards
+    eu -->|"forward score updates<br/>async, under 100ms"| shards
+    apac -->|"forward score updates<br/>async, under 100ms"| shards
+    shards -.->|"replicate top-N"| cache
+
+    class na,eu,apac req
+    class shards,cache base
 ```
-   NA Game Servers --\                          +----------------------+
-                       \                        |  Global Leaderboard   |
-   EU Game Servers ----- forward score          |  Shards (16, §4.2)     |
-                       /  updates (async,       |  - single home region  |
-   APAC Game Servers -/   <100ms typical)        |  - serves ZADD/ZRANK/  |
-                                                  |    ZRANGE for all      |
-                                                  |    regions             |
-                                                  +----------------------+
-                                                            |
-                                          Top-N Cache (§3) replicated to
-                                          read-only edge caches in EACH
-                                          region — top-N is read-mostly
-                                          and identical for all regions
-```
+
+Score-update ingestion stays regional (each cluster forwards asynchronously to the one home-region shard set), while the read-heavy Top-N Cache is replicated outward so the highest-volume query never crosses a region boundary.
 
 **Why this split is acceptable**: the score-update path (§3, §4.5) already tolerates the in-memory `ZADD` being asynchronous relative to durable-store persistence — adding "the `ZADD` itself is one extra inter-region hop away from the originating game server" is a **bounded, similar-magnitude latency addition** (commonly 20-100ms cross-region), which is well within the §1 "near-real-time, within 1-2 seconds" NFR for rank updates. In contrast, the **Top-N Cache** (§3, §4.2) — the highest-volume read (§2: 500K req/sec) — is **replicated to read-only caches in every region**, so the 89% of read traffic that's top-N reads never crosses a region boundary; only the comparatively rare cache-refresh queries (one per leaderboard type per 1-2 second cycle, §10) originate from the home region's merger and replicate outward.
 
@@ -551,26 +587,35 @@ The resolution mirrors §4.8's spirit but inverts which side is "local": **score
 
 §1's functional requirements describe a player participating in **multiple simultaneous leaderboards**: an all-time leaderboard, a current-season leaderboard, a daily leaderboard, and a weekly leaderboard — and potentially per-game-mode variants of each. A single `updateScore(playerId, +50)` event therefore isn't a single `ZADD`; it's a **small, fixed-size fan-out** of `ZADD` operations, one per leaderboard the player is a member of.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    event(["Score event<br/>player 42, +50 points"])
+    fanout[["Fan-out<br/>application-layer, on ingestion"]]
+    alltimeShards["Shard set<br/>all-time, 16 shards"]
+    seasonShards["Shard set<br/>season 12, 16 shards"]
+    dailyShards["Shard set<br/>daily, 16 shards<br/>short-lived, TTL 2 days"]
+    weeklyShards["Shard set<br/>weekly, 16 shards<br/>short-lived, TTL 9 days"]
+
+    event --> fanout
+    fanout -->|"ZADD alltime:global"| alltimeShards
+    fanout -->|"ZADD season12:global"| seasonShards
+    fanout -->|"ZADD daily:2026-06-12"| dailyShards
+    fanout -->|"ZADD weekly:2026-W24"| weeklyShards
+
+    class event io
+    class fanout mathOp
+    class alltimeShards,seasonShards,dailyShards,weeklyShards base
 ```
-  Score event: player 42 gains +50 points
-        |
-        v
-  +---------------------------------------------------------+
-  |  Fan-out (application-layer, on the ingestion path)       |
-  |                                                             |
-  |    ZADD alltime:global       <member 42, +50>             |
-  |    ZADD season12:global      <member 42, +50>             |
-  |    ZADD daily:2026-06-12     <member 42, +50>              |
-  |    ZADD weekly:2026-W24      <member 42, +50>              |
-  +---------------------------------------------------------+
-        |          |              |              |
-        v          v              v              v
-   Shard set    Shard set     Shard set      Shard set
-   (16 shards)  (16 shards)   (16 shards,    (16 shards,
-   §4.2         §4.2          short-lived,   short-lived,
-                               TTL=2 days)    TTL=9 days)
-                               §4.4           §4.4
-```
+
+One score event fans out into a small, constant number of `ZADD` calls (3-5 leaderboards), each landing on its own independently-keyed, independently-expiring shard set, so a failure in one leg never blocks or rolls back the others.
 
 This fan-out is **small and constant-factor** — typically 3-5 leaderboards per score event, each a single `ZADD` (`O(log M)`, §4.1) — so it multiplies the §2 write QPS (50K/sec peak) by a small constant (3-5x), landing well within the per-shard headroom established in §10's shard-count derivation (which already assumed some multiplier). The key design choice is **doing the fan-out once, at ingestion**, rather than letting each leaderboard type independently subscribe to a raw score-event stream — a single ingestion-tier service (stateless, horizontally scalable per [`../scalability/README.md`](../scalability/README.md)) knows "this player is in season 12, and today is 2026-06-12, and this week is 2026-W24" and issues exactly the right `ZADD` calls, rather than every downstream leaderboard re-deriving that membership independently.
 
@@ -740,6 +785,16 @@ The three incidents below share a common shape: each one passed code review and 
 
 **Fixed**: Sharded the leaderboard into **16 independent ZSETs** (`leaderboard:alltime:shard0` through `shard15`), partitioned by `hash(playerId) % 16` (§4.2). Each shard now handles `75,000 / 16` ~= **~4,700 updates/sec** — comfortably within a single Redis instance's single-threaded throughput, restoring p99 write latency to the original ~2ms range. The **global top-N** is no longer a single `ZRANGE` — it's the periodic 16-way merge from §4.2, run every 1-2 seconds and cached. **Global rank lookups** similarly became "local rank on owning shard, plus approximate cross-shard adjustment" (§4.2's `approximateGlobalRank`). The tradeoff explicitly accepted: the global top-N and global rank are now **up to 1-2 seconds stale** relative to the absolute latest writes — a small, imperceptible cost in exchange for a write path that no longer collapses under event-driven load spikes. Critically, **a player's own rank** (computed via their owning shard's `ZRANK`, §3) remained real-time throughout — the staleness is confined entirely to the *global, cross-shard* views.
 
+```mermaid
+xychart-beta
+    title "War Story 1: p99 write latency before, during, and after sharding"
+    x-axis ["Normal 33K updates/s", "Incident: 1 shard at 75K/s", "Fixed: 16 shards at 4.7K/s each"]
+    y-axis "p99 write latency (ms)" 0 --> 220
+    bar [2, 210, 2]
+```
+
+A single global ZSET holds its ~2ms p99 at the normal 33,000 updates/sec average, but the same node blows past 200ms once event-peak traffic hits 75,000 updates/sec on one instance; sharding into 16 shards (~4,700 updates/sec each) restores the original ~2ms without reducing total system throughput.
+
 ### War Story 2: Tie-Breaking Inconsistency Causes a Leaderboard "Flicker" — Broken, Then Fixed
 
 **Broken**: The initial leaderboard stored **only the raw score** as the `ZSET` member's score value — `ZADD leaderboard:alltime 10000 "player_alice"` and `ZADD leaderboard:alltime 10000 "player_bob"` for two players who both reached 10,000 points. Redis's documented behavior for `ZSET` members with **equal scores** is to order them **lexicographically by member name** — `"player_alice"` sorts before `"player_bob"` purely because `'a' < 'b'`, with no relationship to *when* either player reached 10,000 points.
@@ -753,6 +808,23 @@ The three incidents below share a common shape: each one passed code review and 
 **Broken**: The season-rollover process (§4.4) was implemented as a single coordinated step at the rollover instant: at `00:00:00` on the new season's first day, a scheduled job (a) archived `leaderboard:season:12`'s contents to the durable store, (b) deleted the in-memory `leaderboard:season:12` ZSETs across all 16 shards, and (c) signaled the Score Update API to begin writing to `leaderboard:season:13`. The job assumed these three steps were effectively instantaneous and atomic from the client's perspective.
 
 **Impact**: Step (c) — the signal telling the Score Update API to switch target keys — propagated to the API's fleet of instances via a configuration update that took **several seconds** to roll out across all instances (a standard rolling-config-reload, not a synchronized atomic switch). During that multi-second window, **some API instances were still writing score updates to `leaderboard:season:12`'s shard keys** — keys that step (b) had *already deleted* on those shards moments earlier. In Redis, `ZADD` on a deleted key **silently recreates it** — there is no error. The result: a handful of `leaderboard:season:12:shard*` keys were **resurrected**, each containing a small number of "Season 13" score updates that had been misrouted to the old season's now-archived key. Players who scored in the first few seconds of Season 13 saw their score **not appear on the new Season 13 leaderboard at all** (their write went to the resurrected old key, invisible to any Season 13 query), while the archived "Season 12 Final Standings" snapshot (taken in step (a), *before* these stray writes arrived) didn't include them either — the updates existed nowhere a player or query could find them. Support tickets described "my Season 13 score reset to zero even though I played a match right at midnight."
+
+```mermaid
+sequenceDiagram
+    participant Job as Rollout Job
+    participant API as Score API<br/>(stale config)
+    participant Redis as Season 12/13<br/>Shard Keys
+
+    Job->>Redis: archive season 12 to durable store
+    Job->>Redis: delete season 12 shard keys
+    Job->>API: broadcast "write to season 13" config
+    Note over API: config reload still rolling out<br/>across the fleet (several seconds)
+    API->>Redis: ZADD leaderboard:season12:shardX<br/>(still targeting the old season)
+    Redis-->>API: key silently recreated<br/>(ZADD on a deleted key raises no error)
+    Note over Redis: a stray season-13 score now sits in a<br/>"season 12" key, invisible to both leaderboards
+```
+
+The three rollover steps were assumed atomic, but the config broadcast telling the API fleet to target season 13 took several seconds to propagate; any instance still mid-rollout that received a score update during that window silently resurrected the just-deleted season-12 key, losing the update from both leaderboards.
 
 **Fixed**: Three changes, each addressing a different layer of the race:
 1. **Sequencing, not simultaneity**: the rollover now happens in a strict order with explicit completion gates — first, the Score Update API's config rollout to "write to season 13" completes and is **confirmed across 100% of instances** (via a readiness check, not a fire-and-forget broadcast); only *after* that confirmation does the archival-and-delete step for season 12 run. This guarantees no API instance is still targeting season 12 by the time season 12's keys are touched.

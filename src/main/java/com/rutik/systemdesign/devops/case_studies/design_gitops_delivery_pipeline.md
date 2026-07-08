@@ -12,22 +12,73 @@ A traditional CD pipeline is a *fire-and-forget* push: Jenkins runs `kubectl app
 
 GitOps fixes both problems with a single primitive: **a desired-state reconciliation loop running inside the cluster**, with Git as the single source of truth.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Push["Traditional push CD"]
+        direction LR
+        CI1([CI]) -->|"kubectl apply<br/>one-shot"| Clust1(Cluster)
+        Clust1 -.-> Risk(("no drift check<br/>creds live in CI"))
+    end
+
+    subgraph Pull["GitOps pull CD"]
+        direction LR
+        CI2([CI]) -->|git push| Repo[(Git repo)]
+        Agent{Cluster agent} -->|"pulls + reconciles<br/>every 180s"| Repo
+        Agent -.-> Win(("drift auto-corrected<br/>no creds in CI"))
+    end
+
+    class CI1,CI2 io
+    class Clust1 lossN
+    class Repo base
+    class Agent mathOp
+    class Win train
+    class Risk lossN
 ```
-   Traditional push CD                 GitOps pull CD
-   -------------------                 --------------
-   CI ──kubectl apply──► cluster       CI ──git push──► Git repo
-        (one-shot)                                       │
-        no drift detection             cluster agent ────┘ (pulls)
-        cluster creds in CI            reconcile loop every 180s
-                                       drift auto-corrected
-                                       no cluster creds in CI
-```
+
+*Same information flow, inverted: push CD hands cluster credentials to CI and never notices drift; pull CD keeps credentials in-cluster while an agent reconciles toward Git every 180s and self-corrects drift.*
 
 The mental model has three nested loops:
 
 1. **Outer loop (humans):** engineers open PRs that change YAML in Git. Merge = intent.
 2. **Middle loop (ArgoCD/Flux):** the controller diffs Git vs. live cluster state every reconcile interval, and `Synced`/`OutOfSync` is a first-class status.
 3. **Inner loop (Argo Rollouts/Flagger):** for one Deployment being updated, a rollout controller shifts 5% → 25% → 50% → 100% of traffic, pausing at each step to run *metric analysis*. A bad p99 or error-rate spike triggers automatic rollback in seconds.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Outer["Outer loop: humans"]
+        PR(PR merged = intent<br/>cadence: per merge)
+        subgraph Middle["Middle loop: ArgoCD/Flux"]
+            Diff{Synced or OutOfSync?<br/>cadence: per reconcile interval}
+            subgraph Inner["Inner loop: Argo Rollouts/Flagger"]
+                Shift(Shift traffic 5 to 25 to 50 to 100%<br/>cadence: per canary step)
+            end
+        end
+    end
+
+    PR --> Diff --> Shift
+
+    class PR io
+    class Diff mathOp
+    class Shift train
+```
+
+*A control loop nested inside a control loop inside a control loop: a human's PR merge (outer) triggers a Git-vs-cluster diff (middle), and a drifted Rollout resource kicks off a metric-gated traffic shift (inner) — each ring runs on its own cadence, from "per merge" down to "per canary step."*
 
 Why this system exists: at 50 clusters × 500 apps, no human can `kubectl apply` reliably, no human can detect drift across 25,000 live objects, and no human can babysit every one of the ~300 daily deployments. The pipeline must be **declarative** (auditable in Git), **convergent** (self-healing), and **safe-by-default** (metric-gated promotion with automatic rollback). This file designs exactly that, building on [`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/README.md) and [`../deployment_strategies/README.md`](../deployment_strategies/README.md).
 
@@ -138,51 +189,75 @@ Conclusion: **webhook is mandatory at this scale**; polling is the safety-net fa
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Dev([Developer<br/>PR + merge]) --> CI([CI / builder<br/>image tag])
+    CI -->|push| Git
+
+    subgraph Git["Git - source of truth"]
+        AppCfg(App configs<br/>Helm/Kustomize)
+        Overlays(Env overlays<br/>dev/stg/prod)
+        AppOfApps(App-of-apps<br/>root apps)
+    end
+
+    Git --> CP
+    CP -.-> Git
+
+    subgraph CP["ArgoCD control plane (management cluster, HA)"]
+        AppSetCtrl{ApplicationSet controller<br/>generates 2000 CRs}
+        RepoServer{repo-server<br/>renders Helm/Kustomize}
+        AppCtrl{application-controller<br/>10 shards - diff + sync}
+        Shared[(Redis cache<br/>+ Dex/SSO + API/UI<br/>+ notifications)]
+        AppSetCtrl --> RepoServer --> AppCtrl --> Shared
+    end
+
+    CP -->|kube-apiserver| ClusterUS
+    CP -->|kube-apiserver| ClusterEU
+    CP -->|kube-apiserver| ClusterMore
+
+    subgraph ClusterUS["Cluster prod-us (representative)"]
+        Rollout(Rollout CR<br/>canary)
+        RolloutCtrl{Argo Rollouts controller<br/>pauses + runs AnalysisRun}
+        StableRS([stable rs])
+        CanaryRS([canary rs])
+        TrafficSplit{Traffic split<br/>Istio/Gateway}
+        Prom[(Prometheus / Thanos<br/>error-rate, p99)]
+        Promote((pass to<br/>promote))
+        Abort((fail to<br/>abort+rollback))
+
+        Rollout -->|"shifts traffic<br/>5 to 25 to 50 to 100%"| RolloutCtrl
+        RolloutCtrl --> StableRS
+        RolloutCtrl --> CanaryRS
+        StableRS --> TrafficSplit
+        CanaryRS --> TrafficSplit
+        RolloutCtrl -->|query| Prom
+        Prom --> Promote
+        Prom -.-> Abort
+        Promote -.->|promote| TrafficSplit
+        Abort -.->|rollback| TrafficSplit
+    end
+
+    ClusterEU["Cluster prod-eu<br/>(same internals)"]
+    ClusterMore["... 48 more clusters"]
+
+    class Dev,CI io
+    class AppCfg,Overlays,AppOfApps,Shared,Prom base
+    class AppSetCtrl,RepoServer,AppCtrl,RolloutCtrl,TrafficSplit mathOp
+    class Rollout,CanaryRS req
+    class StableRS,Promote train
+    class Abort lossN
+    class ClusterEU,ClusterMore frozen
 ```
-                          ┌──────────────────────────────────────────────────┐
-   Developer              │                   GIT (source of truth)           │
-      │  PR + merge       │  ┌────────────┐  ┌────────────┐  ┌─────────────┐  │
-      ▼                   │  │ app configs│  │ env overlays│ │ app-of-apps │  │
-  ┌────────┐  image tag   │  │ (Helm/Kust)│  │ dev/stg/prod│ │ root apps   │  │
-  │  CI /   │──────push───▶│  └────────────┘  └────────────┘  └─────────────┘  │
-  │ builder │   (FR: OOS)  └───────────────┬──────────────────────────────────┘
-  └────────┘                               │  git webhook (<60s)   ▲ poll 300s fallback
-                                           ▼                       │
-              ┌────────────────────────────────────────────────────────────────┐
-              │             ArgoCD CONTROL PLANE (management cluster, HA)        │
-              │  ┌───────────────┐  ┌──────────────┐  ┌────────────────────┐    │
-              │  │ ApplicationSet │  │ repo-server  │  │ application-ctrl   │    │
-              │  │  controller    │  │ (render YAML)│  │  (10 shards)       │    │
-              │  │ generates 2000 │  │ cache+manifest│ │  diff + sync       │    │
-              │  │ Application CRs│  │ generation    │ │  drift detection   │    │
-              │  └───────┬────────┘  └──────┬───────┘  └─────────┬──────────┘    │
-              │          │                  │                    │               │
-              │  ┌───────▼──────────────────▼────────────────────▼──────────┐   │
-              │  │   Redis (cache)   +   Dex/SSO   +   API/UI   +  Notifications│ │
-              │  └────────────────────────────────────────────────────────────┘ │
-              └───────────────────────────┬────────────────────────────────────┘
-                                          │ kube-apiserver (per target cluster)
-            ┌─────────────────────────────┼─────────────────────────────┐
-            ▼                             ▼                             ▼
-   ┌────────────────┐            ┌────────────────┐            ┌────────────────┐
-   │ Cluster prod-us│            │ Cluster prod-eu│            │  ... 48 more   │
-   │ ┌────────────┐ │            │ ┌────────────┐ │            │                │
-   │ │ Rollout CR │ │            │ │ Rollout CR │ │            │                │
-   │ │ (canary)   │ │            │ └────────────┘ │            │                │
-   │ └─────┬──────┘ │            └────────────────┘            └────────────────┘
-   │       │ shifts traffic 5→25→50→100%                                        
-   │  ┌────▼─────────────────────────────────┐                                  
-   │  │ Argo Rollouts controller             │                                  
-   │  │  pauses & runs AnalysisRun           │──query──┐                        
-   │  └──────────────────────────────────────┘         ▼                        
-   │  ┌──────────┐   ┌──────────┐            ┌────────────────────┐             
-   │  │ stable rs│   │ canary rs│            │ Prometheus / Thanos │  ◄── SLI    
-   │  └──────────┘   └──────────┘            │  error-rate, p99    │   metrics   
-   │       ▲ traffic split (Istio/Gateway)   └─────────┬──────────┘             
-   │       └───────────────────────────────────────────┘ pass→promote          
-   │                                                     fail→abort+rollback     
-   └─────────────────────────────────────────────────────────────────────────┘
-```
+
+*CI pushes only an image tag into Git; ArgoCD's control plane renders and diffs against all 50 clusters via webhook (under 60s) or a 300s poll fallback, and inside each cluster the Argo Rollouts controller shifts canary traffic in steps gated by a Prometheus query — pass promotes, fail rolls back to the untouched stable ReplicaSet.*
 
 ### Component inventory
 
@@ -219,17 +294,28 @@ Multi-region topology and cross-cluster routing detail lives in [`cross_cutting/
 
 The naive approach is one hand-written `Application` per app per cluster — 2,000 files. That doesn't scale: onboarding a new region means 500 copy-paste PRs. Instead, an **app-of-apps root** points at a directory of `ApplicationSet`s, and each `ApplicationSet` uses generators to multiply across clusters.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Root(Root Application<br/>app-of-apps) -->|"syncs a directory of"| AppSet{"ApplicationSet<br/>payments"}
+    AppSet -->|"matrix generator:<br/>clusters × overlays"| Dev(Application<br/>payments-dev)
+    AppSet --> Staging(Application<br/>payments-staging)
+    AppSet --> ProdUS(Application<br/>payments-prod-us)
+    AppSet --> ProdEU(Application<br/>payments-prod-eu)
+
+    class Root req
+    class AppSet mathOp
+    class Dev,Staging,ProdUS,ProdEU train
 ```
-   root Application (app-of-apps)
-        │ syncs a directory of ApplicationSets
-        ▼
-   ApplicationSet "payments"
-        │  matrix generator: {clusters} × {git path overlays}
-        ├──► Application payments-dev
-        ├──► Application payments-staging
-        ├──► Application payments-prod-us
-        └──► Application payments-prod-eu
-```
+
+*One root Application fans out through the ApplicationSet's matrix generator (clusters × overlay paths) into one child Application per combination — the mechanism that avoids hand-writing 2,000 manifests.*
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -422,6 +508,42 @@ spec:
 
 Now the rollout is metric-gated: two consecutive measurements below 95% success **or** above 500ms p99 abort the rollout, scale the canary to 0, and route 100% back to stable — all without human action, satisfying NFR6 (< 2 min rollback). The `failureLimit: 2` prevents a single noisy scrape from aborting a healthy release.
 
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    [*] --> Weight5
+    state "5% canary + analyze" as Weight5
+    state "25% canary + analyze" as Weight25
+    state "50% canary + analyze" as Weight50
+    state "100% canary" as Weight100
+    state "Aborted<br/>scale to 0, restore stable" as Aborted
+    state "Healthy<br/>Synced" as Healthy
+
+    Weight5 --> Weight25: pass, 5m window
+    Weight5 --> Aborted: fail x2 running
+    Weight25 --> Weight50: pass, 5m window
+    Weight25 --> Aborted: fail x2 running
+    Weight50 --> Weight100: pass, 5m window
+    Weight50 --> Aborted: fail x2 running
+    Weight100 --> Healthy: promote
+
+    Healthy --> [*]
+    Aborted --> [*]
+
+    class Weight5,Weight25,Weight50,Weight100 mathOp
+    class Healthy train
+    class Aborted lossN
+```
+
+*The FIX turns each canary step into a gated state transition: two consecutive `failureCondition` breaches at any weight abort to the untouched stable ReplicaSet in under 2 minutes (NFR6), while the BROKEN version had no such gate and could only ever reach Healthy.*
+
 ### 4.4 Drift detection & self-heal — BROKEN → FIX (the PVC-deleting prune)
 
 Self-heal reverts manual changes; prune deletes objects no longer in Git. Combined carelessly they can **delete stateful data**.
@@ -609,12 +731,27 @@ threshold derived from: error_budget × burn_rate_multiplier
 
 Instrument three layers and expose them as Prometheus series the AnalysisTemplate can query:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Span(("analysis_run.start<br/>span")) --> Step(("payments<br/>canary step=5%"))
+    Step --> M1(success-rate<br/>sum 2xx/3xx / total)
+    Step --> M2(p99-latency<br/>histogram_quantile over le)
+    Step --> M3(rollout_phase<br/>Progressing/Paused/Degraded/Healthy)
+
+    class Span io
+    class Step mathOp
+    class M1,M2,M3 base
 ```
-analysis_run.start ── span ──► rollout.payments.canary.step=5%
-   ├─ metric: success-rate   (sum 2xx/3xx / total, per version label)
-   ├─ metric: p99-latency    (histogram_quantile over le buckets)
-   └─ metric: rollout_phase  (Progressing|Paused|Degraded|Healthy gauge)
-```
+
+*Each AnalysisRun step emits one span with three child metrics — success-rate and p99-latency gate promotion, while rollout_phase reports controller state for alerting.*
 
 Required labels: `app`, `version` (stable vs. canary — this is the dimension the query splits on), `cluster`, `rollout_step`. **Watch cardinality:** `version` is a per-release churning label; if you also add `pod`, `commit_sha`, and `replicaset`, the series count for one app explodes to thousands and Prometheus OOMs across 500 apps. Keep canary-comparison labels to `{app, version, cluster}` and drop high-churn ones at scrape time — the cardinality budget and relabeling rules are in [`cross_cutting/prometheus_cardinality_and_scale.md`](cross_cutting/prometheus_cardinality_and_scale.md).
 

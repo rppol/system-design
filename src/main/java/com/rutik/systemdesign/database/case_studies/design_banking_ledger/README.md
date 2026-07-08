@@ -19,40 +19,68 @@ Design a double-entry accounting ledger system for a global payments company pro
 
 ## Architecture Overview
 
-```
-Client (mobile/web)
-    │
-[API Gateway + Rate Limiter]
-    │
-[Payment API Service] ──── [Idempotency Key Store (Redis)]
-    │
-    ├──── [PostgreSQL Primary] (source of truth: accounts, ledger_entries)
-    │     │
-    │     ├── [PostgreSQL Replica 1] (read replicas for balance queries)
-    │     └── [PostgreSQL Replica 2]
-    │
-    ├──── [WAL-G → S3] (continuous WAL archiving, RPO ≈ seconds)
-    │
-    ├──── [Patroni + etcd] (automated HA failover, RTO ≈ 15-30s)
-    │
-    └──── [Kafka (outbox relay)] → [Notification Service]
-                                  → [Reporting Service (ClickHouse)]
-                                  → [Compliance Audit Stream (S3)]
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
+    Client(["Client<br/>(mobile/web)"]) --> Gateway("API Gateway<br/>+ Rate Limiter")
+    Gateway --> PaymentAPI("Payment API<br/>Service")
+    PaymentAPI <--> Idem("Idempotency Key Store<br/>(Redis)")
 
-Request flow (payment):
-  Client → API → Check idempotency key (Redis)
-             ↓ New request
-         → BEGIN SERIALIZABLE transaction
-         → Debit source account (verify sufficient balance)
-         → Credit destination account
-         → INSERT into ledger_entries (both sides: double-entry)
-         → INSERT into outbox (event for downstream)
-         → COMMIT
-             ↓
-         → Return payment confirmation
-         → [Async] Debezium publishes outbox events to Kafka
+    PaymentAPI --> Primary("PostgreSQL Primary<br/>(source of truth)")
+    Primary --> Replica1("PostgreSQL<br/>Replica 1")
+    Primary --> Replica2("PostgreSQL<br/>Replica 2")
+
+    PaymentAPI -.->|"continuous archiving"| WALG("WAL-G to S3<br/>(RPO ~ seconds)")
+    PaymentAPI -.->|"HA failover"| Patroni("Patroni + etcd<br/>(RTO ~ 15-30s)")
+    PaymentAPI -.->|"async outbox relay"| Kafka("Kafka<br/>(outbox relay)")
+
+    Kafka --> Notify(["Notification<br/>Service"])
+    Kafka --> Reporting(["Reporting Service<br/>(ClickHouse)"])
+    Kafka --> Compliance(["Compliance Audit<br/>Stream (S3)"])
+
+    class Client io
+    class Gateway,Kafka req
+    class PaymentAPI,Patroni mathOp
+    class Idem base
+    class Primary train
+    class Replica1,Replica2,WALG,Notify,Reporting,Compliance frozen
 ```
+
+*System topology: the synchronous request path (solid arrows) runs Client to Payment API to the PostgreSQL primary and the Redis idempotency store; WAL archiving, Patroni/etcd failover, and the Kafka outbox relay all sit off the hot path (dotted arrows) so they never add latency to a payment.*
+
+**Request flow (payment):**
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as Payment API
+    participant R as Redis (Idempotency)
+    participant D as PostgreSQL
+    participant K as Kafka
+
+    C->>A: Payment request
+    A->>R: Check idempotency key
+    R-->>A: Not found (new request)
+    A->>D: BEGIN SERIALIZABLE
+    A->>D: Debit source (verify balance)
+    A->>D: Credit destination
+    A->>D: INSERT ledger_entries (debit + credit)
+    A->>D: INSERT outbox event
+    A->>D: COMMIT
+    D-->>A: Commit OK
+    A-->>C: Payment confirmation
+    Note over D,K: Async - Debezium tails the WAL
+    D--)K: Publish outbox event
+```
+
+*The double-entry write and the idempotency check both happen inside one SERIALIZABLE transaction before the client gets a response; the outbox event reaches Kafka afterward and asynchronously, so a slow or down Kafka never blocks a payment.*
 
 ---
 
@@ -179,6 +207,28 @@ public class PaymentService {
     }
 }
 ```
+
+**Why SERIALIZABLE — the write-skew race it blocks:**
+
+```mermaid
+sequenceDiagram
+    participant A as Transaction A
+    participant B as Transaction B
+    participant D as PostgreSQL (SERIALIZABLE)
+
+    A->>D: SELECT balance (e.g. 100)
+    D-->>A: balance = 100
+    B->>D: SELECT balance (e.g. 100)
+    D-->>B: balance = 100
+    Note over A,B: Both see enough funds for an 80 debit
+    A->>D: Debit 80, COMMIT
+    D-->>A: Commit OK
+    B->>D: Debit 80, COMMIT
+    D-->>B: Serialization failure (write skew detected)
+    Note over B,D: Application retries the aborted transaction
+```
+
+*Under READ COMMITTED, both transactions would read the same starting balance and both debits would commit, driving the account negative. SERIALIZABLE detects that A and B read and wrote the same row and aborts B with a serialization failure, so the application-level retry is the only path forward — the 10-20% throughput cost from the first Q&A below buys this guarantee.*
 
 ### 3. Balance Calculation (Derived from Ledger)
 
@@ -339,6 +389,37 @@ public class IdempotencyService {
     }
 }
 ```
+
+**Idempotent execution — the decision tree behind `executeIdempotent`:**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Request(["Payment request<br/>+ idempotency key"]) --> CacheCheck{"Result<br/>cached?"}
+    CacheCheck -->|"hit"| CachedReturn("Return cached result")
+    CacheCheck -->|"miss"| LockAttempt{"Acquire lock<br/>(SETNX, 30s TTL)"}
+    LockAttempt -->|"already locked"| LockFailed(["Reject: duplicate<br/>in-flight request"])
+    LockAttempt -->|"acquired"| Execute("Execute payment<br/>(SERIALIZABLE tx)")
+    Execute --> StoreResult("Store result in Redis<br/>(24h TTL)")
+    StoreResult --> ReleaseLock("Release lock")
+    CachedReturn --> Return(["Return result<br/>to client"])
+    ReleaseLock --> Return
+
+    class Request,Return io
+    class CacheCheck,LockAttempt mathOp
+    class CachedReturn,Execute train
+    class LockFailed lossN
+    class StoreResult,ReleaseLock base
+```
+
+*The Redis result cache is the fast path (top); the distributed lock only guards the narrow window where two retries race before either has written a cached result — losing that race gets rejected outright rather than double-processing the payment.*
 
 ---
 

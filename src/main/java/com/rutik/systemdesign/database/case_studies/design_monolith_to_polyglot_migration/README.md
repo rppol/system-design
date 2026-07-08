@@ -26,37 +26,60 @@ Migrate a 5TB MySQL monolith to purpose-built databases without downtime:
 
 ## Architecture Overview
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph P0["Phase 0 · Wk 1-4<br/>Instrumentation"]
+        M0[("MySQL<br/>primary")] --> D0["Debezium"] --> K0(["Kafka"])
+        K0 -.->|"0% traffic"| SH{"Shadow read<br/>compare only"}
+    end
+
+    subgraph P1["Phase 1 · Wk 5-10<br/>New DBs Ready"]
+        D1["Debezium"] --> K1(["Kafka"])
+        K1 --> ES1["Elasticsearch<br/>product index"]
+        K1 --> CH1["ClickHouse<br/>events, activity"]
+        K1 --> PG1[("PostgreSQL<br/>orders, users")]
+    end
+
+    subgraph P2["Phase 2 · Wk 11-20<br/>Strangler-Fig Shift"]
+        RT2{"Router<br/>% by feature"}
+        RT2 -->|"search 0 to 100%"| ES2["Elasticsearch"]
+        RT2 -->|"analytics 100%"| CH2["ClickHouse"]
+        RT2 -->|"reads 0 to 100%"| PG2[("PostgreSQL")]
+        RT2 -.->|"dual-write"| MY2[("MySQL")]
+    end
+
+    subgraph P3["Phase 3 · Wk 21-24<br/>Cutover"]
+        APP3(["Application"]) --> PG3[("PostgreSQL<br/>writes")]
+        MY3[("MySQL<br/>read-only<br/>4wk rollback")]
+    end
+
+    subgraph FS["Final State"]
+        PGF[("PostgreSQL<br/>source of truth")]
+        ESF["Elasticsearch<br/>search"]
+        CHF["ClickHouse<br/>analytics"]
+        RF[("Redis<br/>sessions, cache")]
+    end
+
+    P0 --> P1 --> P2 --> P3 --> FS
+
+    class M0,MY2,MY3 frozen
+    class D0,D1 mathOp
+    class K0,K1 req
+    class SH,RT2 mathOp
+    class APP3 io
+    class ES1,ES2,ESF,CH1,CH2,CHF,RF base
+    class PG1,PG2,PG3,PGF train
 ```
-Migration Phases:
 
-Phase 0 (Weeks 1-4): Instrumentation & Baseline
-  MySQL primary → Enable binary logging → Debezium → Kafka
-  Shadow reading: compare MySQL vs new DB responses (0% traffic to new DBs)
-
-Phase 1 (Weeks 5-10): New Databases Ready
-  MySQL (source of truth)
-  │
-  ├── Debezium → Kafka → Elasticsearch (product index)
-  ├── Debezium → Kafka → ClickHouse (events, activity)
-  └── Debezium → Kafka → PostgreSQL (orders, users — in sync with MySQL)
-
-Phase 2 (Weeks 11-20): Traffic Shifting (Strangler Fig)
-  Products search: 0% → 10% → 50% → 100% Elasticsearch
-  Events/analytics: 0% → 100% ClickHouse (read-only analytics)
-  Orders reads: 0% → 10% → 100% PostgreSQL
-  Orders writes: dual-write MySQL + PostgreSQL → cutover to PostgreSQL primary
-
-Phase 3 (Weeks 21-24): Cutover & Cleanup
-  Application writes exclusively to PostgreSQL
-  MySQL kept read-only (rollback window = 4 weeks)
-  Verify parity; decommission MySQL after 4 weeks
-
-Final state:
-  PostgreSQL → source of truth (orders, users, products metadata)
-  Elasticsearch → product search read model (CDC sync from PG)
-  ClickHouse → events + analytics (CDC sync from PG)
-  Redis → sessions, cache (existing)
-```
+*Four phases over 24 weeks fan CDC out from MySQL to three purpose-built stores while the strangler-fig router shifts traffic percentage by percentage; MySQL ends as a 4-week, read-only rollback safety net before decommission.*
 
 ---
 
@@ -148,6 +171,35 @@ mysql -e "SELECT COUNT(*) FROM orders"  -- e.g., 500,123,456
 psql -c "SELECT COUNT(*) FROM orders"   -- must match ± Debezium lag
 ```
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    MY[("MySQL<br/>5TB, 500M rows")] --> DMP["mydumper<br/>8 threads, no lock<br/>~7h"]
+    DMP --> LD["pgloader<br/>concurrent load<br/>~100 min"]
+    LD --> IDX["CREATE INDEX<br/>CONCURRENTLY"]
+    IDX --> VER{"Row counts<br/>match?"}
+    VER -->|"yes"| DONE[("PostgreSQL<br/>validated")]
+    VER -.->|"no"| INVEST["Investigate<br/>discrepancy"]
+
+    MY -.->|"binlog, in parallel"| CDC["Debezium<br/>streams new changes"]
+    CDC -.-> LAG["Catch-up:<br/>8h lag to minutes"]
+    LAG -.-> DONE
+
+    class MY frozen
+    class DMP,LD,IDX,VER,CDC,LAG mathOp
+    class DONE train
+    class INVEST lossN
+```
+
+*The historical dump/load (~7h + ~100min) runs in parallel with live Debezium streaming, so PostgreSQL only has to close an 8-hour delta — a few minutes of catch-up — instead of replaying the full 5TB history.*
+
 ### 3. Dual-Write Period (Write to Both MySQL and PostgreSQL)
 
 ```java
@@ -195,6 +247,38 @@ public class OrderService {
     }
 }
 ```
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant OS as OrderService
+    participant MY as MySQL
+    participant PG as PostgreSQL
+
+    Note over C,PG: Write path — dual-write with fail-safe
+    C->>OS: createOrder(req)
+    OS->>MY: save(order)
+    MY-->>OS: order saved
+    alt dual-write enabled
+        OS->>PG: upsert(order)
+        PG-->>OS: ack or error
+        Note right of OS: error only logged + counted —<br/>MySQL write already succeeded
+    end
+    OS-->>C: return order
+
+    Note over C,PG: Read path — 1% shadow comparison
+    C->>OS: getOrder(orderId)
+    OS->>MY: findById(orderId)
+    MY-->>OS: mysqlOrder
+    opt shadow read sampled (1%)
+        OS->>PG: findById(orderId), async
+        PG-->>OS: pgOrder or null
+        Note right of OS: compare async —<br/>log discrepancy on mismatch
+    end
+    OS-->>C: return mysqlOrder
+```
+
+*MySQL stays authoritative on both paths: a PostgreSQL write failure is logged and counted but never fails the request, and the 1% shadow read compares asynchronously without blocking the response to the client.*
 
 ### 4. Traffic Cutover (Percentage-Based)
 
@@ -271,27 +355,43 @@ WHERE NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = o.id);
 
 ### 6. Rollback Triggers and Procedure
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T1{"PG error rate<br/>over 0.1% / 5min"}
+    T2{"Shadow discrepancy<br/>over 0.01%"}
+    T3{"P99 regression<br/>over 50%"}
+    OR((Any Trigger))
+    S1["Step 1<br/>read% = 0<br/>reads revert to MySQL"]
+    S2["Step 2<br/>dual-write off<br/>writes MySQL only"]
+    S3["Step 3<br/>alert on-call"]
+    S4["Step 4<br/>root-cause analysis"]
+    DONE(["Rollback complete<br/>under 30s"])
+    CLEAN{"Re-attempt<br/>migration later?"}
+    RESYNC["Re-sync from<br/>Debezium binlog position"]
+    KEEP[("Keep PostgreSQL data<br/>still valid at rollback point")]
+
+    T1 --> OR
+    T2 --> OR
+    T3 --> OR
+    OR --> S1 --> S2 --> S3 --> S4 --> DONE
+    DONE --> CLEAN
+    CLEAN -->|"yes"| RESYNC
+    CLEAN -.->|"no"| KEEP
+
+    class T1,T2,T3 lossN
+    class OR,S1,S2,S3,S4,CLEAN,RESYNC mathOp
+    class DONE,KEEP train
 ```
-Rollback criteria (automatic):
-  - PostgreSQL error rate > 0.1% for 5 consecutive minutes
-  - Shadow read discrepancy rate > 0.01%
-  - P99 latency regression > 50% compared to MySQL baseline
 
-Rollback procedure:
-  1. Feature flag: set migration.pg.read.percentage = 0 (instant)
-     → All reads revert to MySQL immediately
-  2. Feature flag: set migration.dual.write.enabled = false
-     → Writes go to MySQL only
-  3. Alert: notify on-call team of rollback
-  4. Root cause analysis before re-attempting migration
-
-Rollback timeline: < 30 seconds (feature flag propagation via Redis pubsub)
-
-Post-rollback cleanup:
-  PostgreSQL data may be slightly behind MySQL (due to dual-write failure)
-  If re-attempting migration: re-sync from Debezium binlog position
-  Do not delete PostgreSQL data — it is still valid as of the rollback point
-```
+*Any one of the three automated triggers fires the same four-step rollback, completing in under 30 seconds via Redis-propagated feature flags; PostgreSQL data is never deleted, only re-synced from the Debezium binlog position if migration resumes.*
 
 ---
 

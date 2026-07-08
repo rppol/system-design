@@ -140,46 +140,60 @@ The control plane ($73) is a rounding error; **nodes are 93% of spend**, so the 
 
 ## 3. High-Level Architecture
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    eng(["Platform and tenant<br/>engineers"])
+
+    subgraph MP["Management Plane<br/>HA EKS · 3 AZ · no tenant pods"]
+        capi("CAPI / CAPA<br/>controllers")
+        xplane("Crossplane<br/>cloud infra CRDs")
+        argocd("Argo CD<br/>App-of-Apps / AppSets")
+        catalog("Tenant Catalog<br/>Tenant CRD")
+        policy{"Kyverno /<br/>OPA Gatekeeper"}
+        backstage("Backstage IDP<br/>golden paths")
+        obs[("Fleet Observability<br/>Thanos/Mimir + Grafana")]
+    end
+
+    subgraph FLEET["Workload Fleet<br/>50 clusters · 4 regions"]
+        use1("us-east-1<br/>PROD cluster")
+        usw2("us-west-2<br/>PROD cluster")
+        euw1("eu-west-1<br/>PROD cluster")
+        rest("...47 more<br/>clusters")
+    end
+
+    mesh("Cilium ClusterMesh<br/>Submariner fallback")
+
+    eng -- "PR" --> capi
+    capi -- "provisions" --> catalog
+    xplane --> catalog
+    catalog --> policy
+    argocd -- "syncs" --> obs
+    catalog -.-> backstage
+    MP -- "CAPI + Argo CD<br/>push / pull" --> FLEET
+    use1 --- mesh
+    usw2 --- mesh
+    euw1 --- mesh
+    rest --- mesh
+    use1 -- "remote_write" --> obs
+    usw2 -- "remote_write" --> obs
+    euw1 -- "remote_write" --> obs
+
+    class eng,backstage io
+    class capi,argocd,policy,mesh mathOp
+    class xplane,obs base
+    class catalog req
+    class use1,usw2,euw1,rest train
 ```
-                         ┌──────────────────────────────────────────────────────┐
-                         │          PLATFORM CONTROL (Management Plane)           │
-                         │   HA EKS cluster, 3 AZ, no tenant workloads ever       │
-                         │                                                        │
-   Platform/Tenant       │  ┌───────────────┐  ┌────────────────┐  ┌──────────┐  │
-   engineers ──PR──────► │  │ Cluster API   │  │  Crossplane    │  │ Argo CD  │  │
-   (GitOps repos)        │  │ (CAPI/CAPA)   │  │ (cloud infra)  │  │ (App-of- │  │
-                         │  │ controllers   │  │ RDS/S3/IAM/VPC │  │  Apps,   │  │
-                         │  └──────┬────────┘  └───────┬────────┘  │ AppSets) │  │
-                         │         │ provisions        │           └────┬─────┘  │
-                         │  ┌──────┴─────────┐  ┌───────┴────────┐       │        │
-                         │  │ Tenant Catalog │  │ Policy: Kyverno │      │ syncs  │
-                         │  │ (CRD: Tenant)  │  │ /OPA Gatekeeper │      │        │
-                         │  └────────────────┘  └────────────────┘       │        │
-                         │  ┌────────────────┐  ┌────────────────────────┴─────┐  │
-                         │  │ Backstage IDP  │  │ Fleet Observability:         │  │
-                         │  │ (golden paths) │  │ Thanos/Mimir + Grafana +     │  │
-                         │  └────────────────┘  │ OTel Collector + Loki        │  │
-                         │                      └──────────────────────────────┘  │
-                         └───────────────┬────────────────────────────────────────┘
-                                         │ Cluster API + Argo CD push/pull
-        ┌────────────────────────────────┼─────────────────────────────────┬─────────────┐
-        ▼                                 ▼                                 ▼             ▼
- ┌──────────────┐                 ┌──────────────┐                  ┌──────────────┐  ┌────────┐
- │ us-east-1    │                 │ us-west-2    │                  │ eu-west-1    │  │ ...50  │
- │ PROD cluster │                 │ PROD cluster │                  │ PROD cluster │  │ total  │
- │ ┌──────────┐ │                 │              │                  │              │  │        │
- │ │tenant-A  │ │  Cilium Cluster │              │  Cilium ClusterMesh / Submariner │  │        │
- │ │ ns+quota │◄┼─────────────────┼──────────────┼──────────────────┼──────────────┼──┘        │
- │ │ +netpol  │ │                 │              │                  │              │            │
- │ ├──────────┤ │                 │ ┌──────────┐ │                  │ ┌──────────┐ │            │
- │ │tenant-B  │ │                 │ │vcluster-C│ │                  │ │tenant-D  │ │            │
- │ │ (vcluster)│ │                 │ │(hard iso)│ │                  │ └──────────┘ │            │
- │ └──────────┘ │                 │ └──────────┘ │                  │              │            │
- │ Karpenter    │                 │ Karpenter    │                  │ Karpenter    │            │
- │ + per-cluster│                 │              │                  │              │            │
- │ Prometheus   │── remote_write ─┼──────────────┼─► Thanos/Mimir ◄─┼──────────────┘            │
- └──────────────┘ (agent mode)    └──────────────┘  (global query)  └──────────────┘            │
-```
+
+The management plane never runs tenant workloads — it only provisions and observes the fleet. Each of the 50 workload clusters carries its own tenants and Karpenter autoscaler, meshes cross-cluster traffic through Cilium ClusterMesh, and remote_writes its Prometheus agent's metrics up to the shared Thanos/Mimir store.
 
 ### Component inventory
 
@@ -221,20 +235,41 @@ The control plane ($73) is a rounding error; **nodes are 93% of spend**, so the 
 
 Cluster API (CAPI) turns "a cluster" into a Kubernetes object the management cluster reconciles. For EKS we use the AWS provider's managed control plane so we are not babysitting etcd ourselves.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    git(["Git<br/>Cluster manifests"])
+
+    subgraph MC["Management cluster"]
+        capicore("CAPI core")
+        xplane2("Crossplane")
+        capa("CAPA · AWS provider<br/>AWSManagedControlPlane")
+        pool("AWSManagedMachinePool<br/>Karpenter NodePool")
+        capicore --> capa
+        xplane2 --> pool
+    end
+
+    eks[["EKS API<br/>CreateCluster / CreateNodegroup"]]
+    infra[["IAM · VPC · SGs<br/>via Crossplane"]]
+
+    git -- "Argo CD apply" --> MC
+    capa --> eks
+    pool --> infra
+
+    class git io
+    class capicore,capa,pool mathOp
+    class xplane2 base
+    class eks,infra frozen
 ```
-   Git (Cluster manifests)
-        │  Argo CD apply
-        ▼
- ┌─────────────────────────────────────────────┐
- │           Management cluster                 │
- │  ┌───────────┐    ┌──────────────────────┐   │
- │  │  CAPI core │──►│ CAPA (AWS provider)   │──┼──► EKS API: CreateCluster
- │  └───────────┘    │ AWSManagedControlPlane │  │    CreateNodegroup
- │  ┌───────────┐    │ AWSManagedMachinePool  │  │
- │  │ Crossplane │──►│ (Karpenter NodePool)   │  │
- │  └───────────┘    └──────────────────────┘   │──► IAM, VPC, SGs via Crossplane
- └─────────────────────────────────────────────┘
-```
+
+Argo CD applies the Cluster manifests once; inside the management cluster, CAPI/CAPA drives the EKS control plane while Crossplane drives the surrounding node-pool and cloud infrastructure — one GitOps reconciliation loop, two provisioning paths.
 
 ```yaml
 # cluster-prod-use1.yaml  — one cluster, fully declarative
@@ -418,16 +453,34 @@ Tradeoff: a vcluster adds ~150–300 MiB overhead and ~5–15 ms API latency per
 
 Three problems: pods in cluster A must reach a service in cluster B; the same service name should resolve to the nearest healthy cluster; and a cluster failure should fail traffic over. We use **Cilium ClusterMesh** (eBPF, global services) as primary; Submariner is the portable fallback when CNIs differ across regions.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph USE1["Cluster prod-use1 · Cilium"]
+        pod(["pod"])
+        svcA("svc:payments<br/>global · local-affinity")
+    end
+
+    subgraph EUW1["Cluster prod-euw1 · Cilium"]
+        svcB("svc:payments<br/>failover target")
+    end
+
+    pod --> svcA
+    svcA -- "ClusterMesh<br/>mTLS VXLAN over TGW" --> svcB
+
+    class pod io
+    class svcA train
+    class svcB frozen
 ```
- cluster prod-use1 (Cilium)            cluster prod-euw1 (Cilium)
- ┌─────────────────────┐               ┌─────────────────────┐
- │ pod ──► svc:payments │               │ svc:payments         │
- │   (global, annotated │◄──ClusterMesh─┤  (global endpoint)   │
- │    service.cilium.io/│   (mTLS VXLAN │                      │
- │    global: "true")   │    over TGW)  │  failover target     │
- └─────────────────────┘               └─────────────────────┘
-        │  topology-aware: prefer local endpoints, spill to remote on failure
-```
+
+Topology-aware `affinity: local` keeps same-cluster calls local and only spills to the remote cluster's endpoint when the local one fails — the mechanism behind the ~70% same-AZ traffic share used in the cost math (§2).
 
 ```yaml
 # A global service: same name in both clusters, Cilium load-balances with locality bias.
@@ -566,6 +619,22 @@ The p99 admission budget is 100 ms (§1). Kyverno background scans catch drift o
 | Operability at 200 tenants | Excellent | Good (~20 vclusters) | Untenable (200 control planes) |
 | Use when | Trusted internal team | Needs cluster-admin / CRDs | Regulated / compliance boundary |
 
+```mermaid
+quadrantChart
+    title Tenant isolation vs operational cost
+    x-axis Low operational cost --> High operational cost
+    y-axis Weak isolation --> Strong isolation
+    quadrant-1 Compliance boundary
+    quadrant-2 Rarely reached ideal
+    quadrant-3 Default fleet posture
+    quadrant-4 Wasted spend
+    "Namespace": [0.12, 0.18]
+    "vcluster": [0.5, 0.72]
+    "Cluster-per-tenant": [0.9, 0.93]
+```
+
+200 tenants land in the bottom-left by default — namespaces give near-zero overhead for soft isolation. Only the ~10% of tenants needing cluster-admin semantics pay the vcluster premium for strong isolation at moderate cost, and only regulated tenants justify a full cluster in the top-right corner: Decision 1's entire rationale in one picture.
+
 ---
 
 ## 6. Real-World Implementations
@@ -606,17 +675,47 @@ The p99 admission budget is 100 ms (§1). Kyverno background scans catch drift o
 
 Upgrades are the platform's heaviest recurring tax. The pipeline:
 
-```
-1. Renovate bot opens PR bumping AWSManagedControlPlane.spec.version 1.30 → 1.31
-2. CI gate runs:
-     - kube-no-trouble (kubent): scan fleet for removed/deprecated APIs in the target version
-     - Kyverno CLI: re-validate all org policies against the new API surface
-     - conformance smoke: spin an ephemeral CAPI cluster on 1.31, run a golden-path deploy,
-       assert tenant onboarding completes < 5 min and a sample cross-cluster call succeeds
-3. Canary: merge for ONE dev cluster first; bake 48h; watch SLOs (control-plane error rate,
-     scheduler latency, webhook p99). Error-budget burn gate halts further merges.
-4. Staged rollout: dev → staging → prod tiers, one region at a time, 1 cluster per region per day.
-5. Node pools surge-upgraded (Karpenter drains + replaces with PDBs respected).
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    pr(["Renovate PR<br/>1.30 to 1.31"])
+
+    subgraph GATE["CI gate"]
+        kubent("kubent scan<br/>deprecated APIs")
+        kyvcli("Kyverno CLI<br/>re-validate policies")
+        smoke("Conformance smoke<br/>golden-path deploy")
+    end
+
+    canary("Canary - 1 dev cluster<br/>bake 48h · watch SLOs")
+    burn{"Error-budget<br/>fast-burn?"}
+    halt(("Rollout paused<br/>+ page"))
+    staged("Staged rollout<br/>dev to staging to prod<br/>1 cluster/region/day")
+    surge("Node pools<br/>surge-upgraded")
+
+    pr --> kubent
+    pr --> kyvcli
+    pr --> smoke
+    kubent --> canary
+    kyvcli --> canary
+    smoke --> canary
+    canary --> burn
+    burn -- "yes" --> halt
+    burn -- "no" --> staged
+    staged --> surge
+
+    class pr io
+    class kubent,kyvcli,smoke mathOp
+    class canary train
+    class burn mathOp
+    class halt lossN
+    class staged,surge train
 ```
 
 The error-budget burn gate uses the math in [cross_cutting/slo_error_budget_math.md](cross_cutting/slo_error_budget_math.md): if a canary upgrade burns more than 2% of the monthly control-plane error budget in 1 hour (fast-burn), the rollout auto-pauses and pages.
@@ -715,6 +814,35 @@ max_nodes_per_cluster = min(
 ```
 
 In practice node_hard_limit (1,000) binds first, so we target **300 nodes/cluster steady, 1,000 hard**, and shard at ~700 to leave headroom for upgrades (surge adds 10–20%).
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    policy("Policy hard limit<br/>1,000 nodes")
+    etcdlim("etcd-budget ceiling<br/>8 GiB / ~2 MiB ≈ 4,000")
+    apilim("apiserver QPS ceiling<br/>control-plane sizing")
+    minop((min))
+    result(["max_nodes_per_cluster<br/>= 1,000 · binds first"])
+
+    policy --> minop
+    etcdlim --> minop
+    apilim --> minop
+    minop --> result
+
+    class policy lossN
+    class etcdlim,apilim frozen
+    class minop mathOp
+    class result io
+```
+
+All three constraints are evaluated, but the policy hard limit is the smallest today and always wins the `min()` — the picture makes explicit why raising the etcd quota alone would not lift the practical per-cluster ceiling.
 
 ### Worked example
 

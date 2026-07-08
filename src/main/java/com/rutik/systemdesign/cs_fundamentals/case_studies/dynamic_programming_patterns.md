@@ -173,6 +173,32 @@ A problem admits DP if and only if it has both:
 
 If the problem has optimal substructure but **not** overlapping subproblems, try divide-and-conquer. If it has optimal substructure and subproblems are *independent* with a greedy-exchange argument, use greedy.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    P(["New DP-shaped<br/>problem"]) --> OS{"Optimal<br/>substructure?"}
+    OS -->|"No"| Other("None of DP, greedy, or<br/>divide-and-conquer applies")
+    OS -->|"Yes"| OV{"Overlapping<br/>subproblems?"}
+    OV -->|"Yes"| DPN("Dynamic Programming<br/>memoise or tabulate")
+    OV -->|"No"| GE{"Greedy-exchange<br/>argument holds?"}
+    GE -->|"Yes"| Greedy("Greedy<br/>local choice is optimal")
+    GE -->|"No"| DC("Divide and Conquer<br/>independent subproblems")
+
+    class P io
+    class OS,OV,GE mathOp
+    class Other lossN
+    class DPN,Greedy,DC train
+```
+
+This decision tree makes the branching in the two rules above explicit: optimal substructure gates all three techniques, overlap routes you to DP, and independence splits further on whether a greedy-exchange argument holds. This exact recognition question opens the §11 interview Q&A list.
+
 ---
 
 ### Pattern 1 — Linear DP: Coin Change
@@ -542,6 +568,30 @@ Knapsack runs in O(n * W) time. This looks polynomial but is only **pseudo-polyn
 - If `dp[i][j]` depends only on `dp[i-1][j]` and `dp[i][j-1]` (diagonal or row-left), you can use a 1-D rolling array.
 - If `dp[i][j]` depends on `dp[i-1][j-1]` (diagonal only, like LCS when characters match), you need one extra variable to store the diagonal value before overwriting.
 - If you need to recover the actual solution (not just the optimal value), you must keep the full table for backtracking. Rolling-array space optimisation sacrifices the ability to reconstruct the path.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T(["2-D DP table<br/>dp(i, j)"]) --> R{"Need to recover the<br/>actual solution?"}
+    R -->|"Yes"| Full("Keep full 2-D table<br/>or parent-pointer array")
+    R -->|"No"| D{"Depends on diagonal<br/>dp(i-1, j-1)?"}
+    D -->|"Yes"| Diag("Roll to 1-D array,<br/>save diagonal in temp var")
+    D -->|"No"| Direct("Roll to 1-D array<br/>directly (e.g. Unique Paths)")
+
+    class T io
+    class R,D mathOp
+    class Full frozen
+    class Diag,Direct train
+```
+
+Every pattern in this file — LCS, Edit Distance, Knapsack, Unique Paths — hits this same fork when compressing its 2-D table to O(n): recovering the solution forces the full table, and only a diagonal dependency (LCS's matching case) needs an extra temp variable before the rolling array overwrites it.
 
 ---
 

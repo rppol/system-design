@@ -55,23 +55,34 @@ Grouped by primary engineering concern:
 
 ## Dependency Map
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    %% source case studies (teach a pattern reused elsewhere)
+    BL("Banking<br/>Ledger") -->|"SERIALIZABLE<br/>isolation"| MSDB(["Multi-Tenant<br/>SaaS DB"])
+    BL -.->|"idempotency pattern<br/>reused everywhere"| OTH(["All Other<br/>Case Studies"])
+    SMFS("Social Media<br/>Feed Storage") -->|"Redis patterns<br/>(inventory counters)"| ECOM("Ecommerce<br/>Catalog")
+    SMFS -->|"Cassandra<br/>wide-row model"| RTAP(["Realtime<br/>Analytics"])
+
+    %% hub case studies (both reuse and re-teach a pattern)
+    ECOM -->|"CDC / polyglot<br/>sync patterns"| MPM("Monolith to<br/>Polyglot Migration")
+    ECOM -->|"Kafka ingestion<br/>concepts"| RTAP
+    MPM -->|"migration techniques<br/>(tenant onboarding)"| MSDB
+
+    %% semantic coloring
+    class BL,SMFS base
+    class ECOM,MPM mathOp
+    class MSDB,RTAP,OTH frozen
 ```
-design_banking_ledger
-    └─ teaches SERIALIZABLE isolation used in design_multitenant_saas_database
-    └─ idempotency pattern reused across all case studies
 
-design_ecommerce_catalog
-    └─ polyglot sync patterns (CDC) reused in design_monolith_to_polyglot_migration
-       └─ design_monolith_to_polyglot_migration
-           └─ migration techniques apply to design_multitenant_saas_database (tenant onboarding)
-
-design_social_media_feed_storage
-    └─ Redis patterns reused in design_ecommerce_catalog (inventory counters)
-    └─ Cassandra wide-row model foundational for design_realtime_analytics_platform
-
-design_realtime_analytics_platform
-    └─ builds on Kafka ingestion concepts from design_ecommerce_catalog
-```
+*Arrows point from the case study that originates a pattern to the one that reuses it. The dotted edge marks the banking ledger's idempotency pattern threading through every other case study, while the solid chain from ecommerce_catalog through monolith_to_polyglot_migration into multitenant_saas_database shows how CDC and migration techniques compound.*
 
 ---
 

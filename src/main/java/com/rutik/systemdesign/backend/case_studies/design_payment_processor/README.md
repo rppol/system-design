@@ -15,54 +15,62 @@ The core challenge: a payment flow touches at least 4 services and 4 databases. 
 
 ## Architecture Overview
 
+The saga orchestrator drives a single payment through four services via command/event pairs — each hop is durable (outbox-backed) so a crash mid-flow can always resume from persisted state instead of losing the command.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as Payment API
+    participant ORCH as Saga Orchestrator
+    participant INV as Inventory Service
+    participant PAY as Payment Gateway Service
+    participant ORD as Order Service
+    participant NOTIF as Notification Service
+
+    C->>API: POST /api/payments<br/>Idempotency-Key: uuid-from-client
+    Note over API: Check idempotency table (return cached result if duplicate)<br/>Validate request, save saga status=PENDING
+    API->>ORCH: InitiatePaymentCommand
+    Note over ORCH,NOTIF: Every command is written to outbox_events<br/>in the same transaction as the saga state update
+
+    ORCH->>INV: Step 1 — ReserveInventoryCommand
+    INV-->>ORCH: InventoryReservedEvent
+    ORCH->>PAY: Step 2 — ChargePaymentCommand
+    PAY-->>ORCH: PaymentChargedEvent
+    ORCH->>ORD: Step 3 — ConfirmOrderCommand
+    ORD-->>ORCH: OrderConfirmedEvent
+    ORCH->>NOTIF: Step 4 — SendNotificationCommand
+    Note right of NOTIF: Best-effort only —<br/>failure does NOT trigger compensation
+
+    alt Any of steps 1-3 (Inventory, Payment, Order) fails
+        ORCH->>INV: ReleaseInventoryCommand
+        ORCH->>ORD: CancelOrderCommand
+        Note over ORCH: status = COMPENSATED
+    end
 ```
-Payment Flow — Saga Orchestration
-===================================
 
-Client
-  |
-  | POST /api/payments
-  | Idempotency-Key: uuid-from-client
-  v
-[Payment API]
-  |--- Check idempotency table (return cached result if duplicate)
-  |--- Validate request
-  |--- Save PaymentSaga with status=PENDING
-  |--- Publish command to Kafka: InitiatePaymentCommand
-  |
-  v
-[Payment Saga Orchestrator]
-  |
-  | State Machine:
-  | PENDING → INVENTORY_RESERVING → INVENTORY_RESERVED
-  |         → PAYMENT_CHARGING    → PAYMENT_CHARGED
-  |         → ORDER_CONFIRMING    → COMPLETED
-  |         → (any failure)       → COMPENSATING → COMPENSATED
-  |
-  +--- Step 1: ReserveInventoryCommand -----> [Inventory Service]
-  |             InventoryReservedEvent <-----
-  |
-  +--- Step 2: ChargePaymentCommand --------> [Payment Gateway Service]
-  |             PaymentChargedEvent <---------
-  |
-  +--- Step 3: ConfirmOrderCommand ---------> [Order Service]
-  |             OrderConfirmedEvent <---------
-  |
-  +--- Step 4: SendNotificationCommand -----> [Notification Service]
-               (best-effort — failure does NOT trigger compensation)
+The API returns `202 Accepted` right after saving the saga as `PENDING`; every subsequent command/event pair (Steps 1-3) is durably queued through the outbox before the orchestrator advances state, and the `alt` block shows the compensation branch — notification (Step 4) is intentionally outside it since it never triggers a rollback.
 
+**Saga State Machine:** the orchestrator's status column walks this exact lifecycle, and all three failure-prone steps converge on the same `COMPENSATING` state rather than each needing its own rollback path.
 
-Compensation Flow (on PaymentCharged failure):
-  [Orchestrator] --> ReleaseInventoryCommand --> [Inventory Service]
-  [Orchestrator] --> CancelOrderCommand -------> [Order Service]
-  [Orchestrator] --> status = COMPENSATED
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> INVENTORY_RESERVING
+    INVENTORY_RESERVING --> INVENTORY_RESERVED: reservation succeeded
+    INVENTORY_RESERVED --> PAYMENT_CHARGING
+    PAYMENT_CHARGING --> PAYMENT_CHARGED: charge succeeded
+    PAYMENT_CHARGED --> ORDER_CONFIRMING
+    ORDER_CONFIRMING --> COMPLETED: order confirmed
+    COMPLETED --> [*]
 
-
-Data Flow:
-  Each command saved to outbox_events table in SAME transaction as saga state update
-  Outbox relay publishes commands to Kafka
-  Responses arrive as events on reply topics
+    INVENTORY_RESERVING --> COMPENSATING: reservation failed
+    PAYMENT_CHARGING --> COMPENSATING: charge failed
+    ORDER_CONFIRMING --> COMPENSATING: confirmation failed
+    COMPENSATING --> COMPENSATED: compensation complete
+    COMPENSATED --> [*]
 ```
+
+`COMPENSATED` (not a reset back to `PENDING`) is the terminal failure state — like `COMPLETED`, it exits the lifecycle, so the crash-recovery job described in the Interview Discussion Points below only ever resubmits commands for sagas still stuck in one of the non-terminal states in between.
 
 ---
 

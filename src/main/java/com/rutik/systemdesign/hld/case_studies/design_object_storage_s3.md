@@ -82,52 +82,74 @@ The practical consequence: **roughly half of all objects are smaller than a sing
 
 ## 3. High-Level Architecture
 
-```
-                                +----------------------+
-                                |       Clients         |
-                                |  (SDKs, CLI, browsers |
-                                |   via REST/HTTPS)      |
-                                +-----------+-----------+
-                                            |
-                                            v
-                            +-------------------------------+
-                            |   API / Gateway Layer (S3 REST) |
-                            |  - AuthN/AuthZ (bucket policy,  |
-                            |    ACLs, sig v4) (§7, sec&auth)  |
-                            |  - request routing, throttling   |
-                            +---------------+-----------------+
-                                            |
-                  +--------------------------+--------------------------+
-                  |                                                      |
-                  v                                                      v
-   +-------------------------------+                    +-------------------------------+
-   |     Metadata Service            |                    |   Placement / Chunking Service |
-   |  (bucket,key,version) ->         |<------------------|   - splits object into chunks   |
-   |    {objectId, size, ETag,        |   register shard   |   - erasure-encodes each chunk  |
-   |     storageClass, shard          |   locations after   |     (6 data + 3 parity, §4.2)   |
-   |     locations, ACL ptr}           |   placement          |   - selects placement group    |
-   |  Sharded KV index (§4.1,          |                    |     across AZs/racks            |
-   |  cross-ref design_kv_store.md)    |                    +---------------+-----------------+
-   +---------------+-----------------+                                    |
-                   ^                                                      v
-                   | strong read-after-write              +-------------------------------+
-                   | (write metadata BEFORE ack, §4.4)     |     Storage Nodes               |
-                   |                                       |  organized into Placement       |
-                   +---------------------------------------+  Groups spanning 3 AZs;          |
-                                                            |  each shard on a distinct        |
-                                                            |  node/rack/AZ                    |
-                                                            +-------------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-PUT path:
-  client -> gateway (authz) -> chunk object -> erasure-encode each chunk (6+3) ->
-  write 9 shards to 9 storage nodes across 3 AZs (3 shards/AZ) -> on >= write-quorum
-  acks -> write metadata record (object -> shard locations) -> ack client
+    Clients(["Clients<br/>SDKs, CLI, browsers"]) -->|"REST / HTTPS"| GW("API / Gateway<br/>authz, routing, throttling")
+    GW -->|"GET / LIST lookup"| MD("Metadata Service<br/>sharded KV index, §4.1")
+    GW -->|"PUT: chunk object"| PL("Placement / Chunking<br/>erasure-encode 6+3, §4.2")
+    PL -.->|"register shard<br/>locations"| MD
+    PL -->|"write 9 shards"| SN("Storage Nodes<br/>placement groups, 3 AZs")
+    SN -.->|"write-quorum ack<br/>before client ack, §4.4"| MD
 
-GET path:
-  client -> gateway (authz) -> metadata lookup (bucket,key[,version]) -> shard
-  locations -> fetch >= 6 of 9 shards (any 6 data-or-parity shards suffice) ->
-  reconstruct chunk(s) -> stream to client
+    class Clients io
+    class GW req
+    class MD base
+    class PL mathOp
+    class SN frozen
 ```
+
+*Every read path (GET/LIST) resolves through the metadata index, and every write path (PUT) fans out to the placement/chunking service; the dotted edges are the two async confirmations that must land in the metadata index before the gateway ever acks the client (§4.4).*
+
+**PUT path:**
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GW as Gateway
+    participant PL as Chunking Svc
+    participant SN as Storage Nodes
+    participant MD as Metadata Svc
+
+    C->>GW: PUT object
+    Note over GW: authz (SigV4, bucket policy)
+    GW->>PL: chunk + erasure-encode (6+3)
+    PL->>SN: write 9 shards (3 per AZ)
+    SN-->>PL: write-quorum acks
+    PL->>MD: write metadata record
+    MD-->>GW: metadata committed
+    GW-->>C: ack (durable and visible)
+```
+
+*The client is acked only after the metadata record commits, not after the shard writes alone — that ordering is the entire mechanism behind strong read-after-write consistency (§4.4).*
+
+**GET path:**
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GW as Gateway
+    participant MD as Metadata Svc
+    participant SN as Storage Nodes
+
+    C->>GW: GET object
+    Note over GW: authz (SigV4, bucket policy)
+    GW->>MD: lookup (bucket, key, version)
+    MD-->>GW: shard locations
+    GW->>SN: fetch any 6 of 9 shards
+    SN-->>GW: shard bytes
+    Note over GW: reconstruct chunk(s)
+    GW-->>C: stream object bytes
+```
+
+*Any 6 of the 9 erasure-coded shards reconstruct a chunk, so a GET tolerates up to 3 simultaneous shard failures without the client ever seeing them (§4.2).*
 
 ### Request Flow
 
@@ -142,34 +164,52 @@ GET path:
 
 The diagram above shows the *service*-level path; this diagram shows what happens to **one object's bytes** as they flow from the gateway to storage, which is the picture worth drawing on a whiteboard when asked "where do the 9 shards actually live?":
 
-```
-Object bytes (e.g., a 200 MB file)
-        |
-        v
-+----------------------------------------------------------+
-|  Split into fixed-size CHUNKS (e.g., 64 MB each)           |
-|  200 MB -> chunk0 (64MB), chunk1 (64MB), chunk2 (64MB),    |
-|            chunk3 (8MB, final partial chunk)                |
-+----------------------------------------------------------+
-        |
-        v   (per chunk, independently)
-+----------------------------------------------------------+
-|  Reed-Solomon encode: split chunk into 6 DATA shards        |
-|  (~10.7MB each for a 64MB chunk) + compute 3 PARITY shards  |
-|  D1 D2 D3 D4 D5 D6  P1 P2 P3   <- 9 shards, ~10.7MB each     |
-+----------------------------------------------------------+
-        |
-        v   (placement group selects 9 storage nodes across 3 AZs)
-+-----------------------+  +-----------------------+  +-----------------------+
-|        AZ-1            |  |        AZ-2            |  |        AZ-3            |
-|  Rack A: D1             |  |  Rack D: D4             |  |  Rack G: P1             |
-|  Rack B: D2             |  |  Rack E: D5             |  |  Rack H: P2             |
-|  Rack C: D3             |  |  Rack F: D6             |  |  Rack I: P3             |
-+-----------------------+  +-----------------------+  +-----------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-A chunk survives the loss of ANY 3 of these 9 shards (e.g., all of AZ-3,
-or one rack from each AZ) - reconstruction reads any 6 survivors.
+    Obj(["Object bytes<br/>e.g. 200 MB"]) --> Split("Split into chunks<br/>64 MB each")
+    Split -->|"per chunk,<br/>independently"| EC("Reed-Solomon encode<br/>6 data + 3 parity")
+
+    subgraph AZ1["AZ-1"]
+        D1("Rack A<br/>D1")
+        D2("Rack B<br/>D2")
+        D3("Rack C<br/>D3")
+    end
+    subgraph AZ2["AZ-2"]
+        D4("Rack D<br/>D4")
+        D5("Rack E<br/>D5")
+        D6("Rack F<br/>D6")
+    end
+    subgraph AZ3["AZ-3"]
+        P1("Rack G<br/>P1")
+        P2("Rack H<br/>P2")
+        P3("Rack I<br/>P3")
+    end
+
+    EC --> D1
+    EC --> D2
+    EC --> D3
+    EC --> D4
+    EC --> D5
+    EC --> D6
+    EC --> P1
+    EC --> P2
+    EC --> P3
+
+    class Obj io
+    class Split,EC mathOp
+    class D1,D2,D3,D4,D5,D6 train
+    class P1,P2,P3 frozen
 ```
+
+*A chunk survives the loss of any 3 of these 9 shards — e.g., all of AZ-3, or one rack from each AZ — because reconstruction only needs any 6 of the 9 to succeed.*
 
 A 200 MB object thus produces **4 chunks x 9 shards = 36 shard-write RPCs** fanned out across the placement group — but these fan out in parallel, and the client only waits for the write-quorum (§4.4) across each chunk's 9 shards, not for all 36 sequentially. The metadata record (§4.1) stores, per chunk, a reference to which 9 (node, shard-index) pairs hold that chunk's shards — this `chunkLocations` list is exactly what the GET path's "shard locations" lookup in the diagram above resolves.
 
@@ -426,6 +466,31 @@ The durability math above assumes shard failures are **independent** — but 9 s
 
 Large objects (the multi-TB end of §1's size range) cannot be uploaded as a single HTTP request — connection failures mid-upload would require restarting from byte zero, and a single chunking/erasure-coding pipeline (§4.2) handling a multi-TB stream end-to-end has no natural checkpoints. **Multipart upload** solves both: the client splits the object into parts (5 MB - 5 GB each, up to 10,000 parts), uploads each part independently (in parallel, with independent retry), and finally sends an ordered manifest of part ETags that the service validates and assembles into one logical object.
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GW as Gateway
+    participant CS as Chunking Svc
+    participant MD as Metadata Svc
+
+    C->>GW: InitiateMultipartUpload
+    GW-->>C: uploadId
+
+    Note over C,GW: parts uploaded independently,<br/>any order, any parallelism
+    C->>GW: UploadPart(partNumber, bytes)
+    GW->>CS: encode + place shards (6+3, §4.2)
+    CS-->>GW: ETag for this part
+    GW-->>C: ETag for this part
+
+    C->>GW: CompleteMultipartUpload<br/>(ordered ETag manifest)
+    Note over GW: validate every part received,<br/>ETags match, only last part under 5MB
+    GW->>MD: write one object record<br/>referencing all part-chunks in order
+    MD-->>GW: committed
+    GW-->>C: 200 OK - object now visible
+```
+
+*Each `uploadPart` call is already durable the instant it returns — §4.2's chunking/erasure-coding runs per part, not at completion time; `CompleteMultipartUpload` only validates the client's ordered ETag manifest and stitches the already-placed chunks into one logical-object metadata record.*
+
 ```java
 package com.rutik.systemdesign.hld.case_studies.objectstore;
 
@@ -610,6 +675,27 @@ A **lifecycle policy** is a per-bucket (or per-prefix, or per-tag) rule like "tr
 
 The Archive tier's "minutes to hours" retrieval latency is the single biggest UX difference exposed to applications — a `GET` on an archived object doesn't return data; it either errors (object not yet restored) or the application must first call a `RestoreObject` API, wait for an asynchronous job to re-place the object's shards onto Standard/IA-tier storage, and then retry the `GET`. This asymmetry (instant write, slow read after archival) is unusual enough that it's a common source of application bugs when teams move cold data to Archive without updating their read paths to handle the restore workflow (cross-ref §11's edge-case discussion).
 
+```mermaid
+stateDiagram-v2
+    state "Infrequent Access" as IA
+    state "Archive (Glacier-class)" as Archive
+    state "Expired / Deleted" as Expired
+
+    [*] --> Standard
+    Standard --> IA: age over 30 days
+    IA --> Archive: age over 90 days
+    Archive --> Expired: age over 365 days
+    Expired --> [*]
+
+    note right of Archive
+        GET no longer returns data directly -
+        needs an explicit RestoreObject call,
+        then minutes to hours before retry
+    end note
+```
+
+*The same three age thresholds from this section's lifecycle-policy example — 30, 90, and 365 days — walk an object down through the tiers automatically; only the jump into Archive changes the read path itself, from a synchronous `GET` to an explicit restore-and-wait.*
+
 ### 4.6 Garbage Collection for Deleted and Overwritten Objects
 
 Because objects are immutable (§1) and `DELETE`/`PUT`-over-existing-key never *synchronously* free the old shards, every storage node accumulates **orphaned shards** — data belonging to object versions that are no longer the "current" version and (for unversioned buckets, or versioned buckets past their `noncurrent` retention) are no longer referenced by *any* metadata record. Garbage collection reclaims this space asynchronously:
@@ -618,6 +704,37 @@ Because objects are immutable (§1) and `DELETE`/`PUT`-over-existing-key never *
 2. **Versioned-bucket interaction**: with versioning enabled, a `DELETE` writes a delete marker as the new "latest" version (§4.1) — the *prior* version's shards are **not** GC-eligible at all (they remain a fully-addressable non-current version) unless a separate lifecycle rule (`NoncurrentVersionExpiration`) marks noncurrent versions older than N days as `pendingGc` too. This is a common source of "why is my bill so high" surprises: versioning without a noncurrent-expiration policy means **every overwrite and delete is purely additive** to storage consumption.
 3. **Async reclaim sweep**: a background job periodically scans the metadata index for `pendingGc=true` records, issues shard-delete RPCs to the 9 storage nodes referenced by each record's `chunkLocations`, and only removes the metadata record itself once all 9 (or a configurable quorum, e.g., 8/9 with the 9th retried) shard-deletes are confirmed. This two-phase approach (metadata-tombstone now, shard-reclaim later) means a crash mid-sweep leaves at most "shards that should be deleted but aren't yet" — a storage-efficiency problem, never a correctness/durability problem (an orphaned shard can never be mistaken for live data, because no metadata record points to it).
 4. **Reclaim throttling**: the sweep runs at a deliberately bounded rate (a fraction of normal write throughput) — an unthrottled GC sweep competing for the same storage-node disk I/O and network bandwidth as live PUT/GET traffic is exactly the kind of background-work-vs-foreground-latency conflict that War Story 1 (§9) describes for repair traffic, and the same prioritized-queue mitigation applies.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    TrigDel(["DELETE call<br/>or lifecycle expiry"]) --> VerCheck{"Versioning<br/>enabled?"}
+    VerCheck -->|"unversioned"| Tomb("Tombstone now<br/>pendingGc = true")
+    VerCheck -->|"versioned"| KeepVer("Delete marker written<br/>old version stays live")
+    KeepVer --> ExpCheck{"NoncurrentVersion<br/>Expiration rule?"}
+    ExpCheck -->|"expired"| Tomb
+    ExpCheck -.->|"not configured"| BillRisk("Storage keeps growing<br/>unbounded")
+    Tomb --> Sweep("Async reclaim sweep<br/>rate-limited")
+    Sweep --> ShardDel("Shard-delete RPCs<br/>to 9 storage nodes")
+    ShardDel --> QCheck{"Quorum of deletes<br/>confirmed?"}
+    QCheck -->|"8 of 9 ok"| Reclaimed(["Metadata record removed<br/>space reclaimed"])
+    QCheck -.->|"retry"| ShardDel
+
+    class TrigDel req
+    class VerCheck,ExpCheck,QCheck,Sweep mathOp
+    class Tomb,BillRisk lossN
+    class KeepVer,ShardDel frozen
+    class Reclaimed train
+```
+
+*Versioning forks the delete path: an unversioned bucket's `DELETE` is tombstone-eligible immediately, but a versioned bucket's prior version stays fully live until a `NoncurrentVersionExpiration` rule ages it out — skip that rule and every overwrite becomes pure, unbounded storage growth, the "why is my bill so high" surprise described above.*
 
 ### 4.7 Read-Path Caching and Hot-Object Serving
 
@@ -735,6 +852,29 @@ A tempting optimization: hash each chunk's content and store only one physical c
 | **Metadata-index hot-shard rate** | Requests/sec to the single busiest metadata partition vs. cluster average | Investigate if any shard exceeds ~5x the per-shard average — leading indicator of War Story 2 |
 | **Storage-tier transition lag** | Time between an object crossing a lifecycle-policy age threshold and its actual tier transition completing | Alert if lag exceeds 24 hours — customers are being billed for the wrong tier |
 | **Availability (5xx rate)** | Fraction of requests failing with server-side errors | Page if 5xx rate exceeds 0.1% sustained — threatens the 99.99% availability NFR (§1) |
+
+```mermaid
+stateDiagram-v2
+    state "Healthy (9 of 9 shards)" as Healthy
+    state "Degraded (6 to 8 of 9)" as Degraded
+    state "Critical (5 of 9)<br/>page immediately" as Critical
+    state "Data Loss (4+ shards down)" as Lost
+
+    [*] --> Healthy
+    Healthy --> Degraded: shard fails
+    Degraded --> Critical: another shard fails
+    Critical --> Lost: another shard fails
+    Degraded --> Healthy: repair completes
+    Critical --> Degraded: repair completes
+
+    note right of Critical
+        Repair queue is triaged by
+        surviving-shard count, not
+        arrival order (War Story 1, section 9)
+    end note
+```
+
+*The alerting threshold (page at 5 of 9, above) and the loss threshold (4+ of 9 gone, §4.2) are two points on the same spectrum a chunk moves through as shards fail — exactly the axis War Story 1's repair-queue triage sorts on, instead of arrival order (§9).*
 
 ### Runbook: Rack/AZ Failure and Erasure-Coding Repair Storm
 

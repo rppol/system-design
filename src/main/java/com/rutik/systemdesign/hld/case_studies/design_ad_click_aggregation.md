@@ -71,51 +71,43 @@
 
 This design uses a **Lambda architecture** — parallel batch and stream processing paths over the same raw event source, reconciled at the OLAP layer (justified in §5). The streaming path optimizes for the "fast, approximate" need; the batch path optimizes for the "slow, exact" need.
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    clients(["Clients / Ad Servers<br/>~1M/sec avg, 5M/sec peak"]) --> ingestion("Ingestion Layer<br/>Kafka topic ad_events<br/>partitioned by ad_id")
+
+    ingestion -->|"stream path"| streamProc("Stream Processor<br/>Flink-style - windowing,<br/>watermarks, dedup, HLL")
+    ingestion -->|"batch path"| dataLake[("Raw Event Sink<br/>Data Lake, Parquet/ORC<br/>~9-14 TB/day")]
+
+    streamProc --> rtOlap[("Real-Time OLAP Store<br/>Druid/Pinot/ClickHouse<br/>minute/hour rollups")]
+    dataLake -.->|"nightly batch job"| batchJob("Batch Reconciliation Job<br/>Spark-style, exact<br/>daily aggregate")
+
+    subgraph serving["Query / Serving Layer"]
+        pulse(["Pulse View<br/>live, approximate"])
+        corrected(["Corrected View<br/>advertiser-facing,<br/>near-final"])
+        billing(["Billing View<br/>final, source of truth"])
+    end
+
+    rtOlap --> pulse
+    rtOlap --> corrected
+    batchJob --> billing
+
+    class clients io
+    class ingestion req
+    class streamProc mathOp
+    class dataLake,rtOlap base
+    class batchJob,billing train
+    class pulse,corrected io
 ```
-                                CLIENTS / AD SERVERS
-                  (impression + click events, ~1M/sec avg, 5M/sec peak)
-                                       |
-                                       v
-                  +----------------------------------------------+
-                  |   Ingestion Layer (partitioned event log)      |
-                  |   Kafka-style topic "ad_events", partitioned   |
-                  |   by ad_id -> see ./design_distributed_message_queue.md |
-                  +----------------------------------------------+
-                          |                          |
-                          |                          |
-            (STREAM PATH)  v                          v  (BATCH PATH)
-        +----------------------------+   +-----------------------------------+
-        | Stream Processor             |   | Raw Event Sink -> Data Lake        |
-        | (Flink/Spark Streaming-style) |   | (object storage, Parquet/ORC,      |
-        | - windowed aggregation        |   |  partitioned by event date/hour,   |
-        |   (tumbling windows, §4.2)    |   |  ~9-14 TB/day compressed, §2)      |
-        | - watermarks for late data    |   +-----------------------------------+
-        |   (§4.3)                      |                  |
-        | - dedup via event_id (§4.1)   |                  |
-        | - HLL for unique counts (§4.5)|                  |
-        +----------------------------+                  |
-                          |                              v (nightly batch job)
-                          v                  +-----------------------------------+
-        +----------------------------+       | Batch Reconciliation Job           |
-        | Real-Time OLAP Store         |       | (Spark/MapReduce-style)            |
-        | (Druid/Pinot/ClickHouse-     |       | - re-aggregates raw events for     |
-        |  style columnar store)       |       |   the prior day, EXACT counts      |
-        | - minute/hour rollups        |       | - dedup by event_id, exact joins   |
-        | - "pulse" dashboards          |       | - merges late-arriving events      |
-        |   (short watermark, §9)      |       |   that missed the stream window    |
-        +----------------------------+       +-----------------------------------+
-                          |                                  |
-                          v                                  v
-        +-------------------------------------------------------------------+
-        |                  Query / Serving Layer                              |
-        |  - "Pulse" view: real-time, short-watermark counts (labeled         |
-        |    "approximate, updates live")                                     |
-        |  - "Corrected" view: longer-watermark stream counts (labeled        |
-        |    "advertiser-facing, near-final")                                  |
-        |  - "Billing" view: batch-reconciled exact daily counts (labeled     |
-        |    "final, source of truth for invoicing")                          |
-        +-------------------------------------------------------------------+
-```
+
+*Ingestion fans out into the stream path (fast, approximate) and the batch path (slow, exact); both converge at the Query/Serving Layer as three explicitly-labeled views — pulse, corrected, and billing (§4.3, §9 War Story 2).*
 
 ### Request / Data Flow
 
@@ -407,6 +399,21 @@ The watermark is the **single dial that trades real-time latency for completenes
 
 This is the core of the "tiered reporting" design that resolves War Story 2 (§9): a short-watermark "pulse" view for monitoring trends in real time, a longer-watermark "corrected" view (further refined by late-correction merges) for advertiser-facing near-final numbers, and the batch-reconciled view as the unconditional final source of truth.
 
+A single window's lifecycle makes the "closed does not mean immutable" subtlety explicit: a window keeps accumulating events while open, closes once the watermark passes its end, and can still be revised by a late-correction merge after closing — only the nightly batch job's exact reconciliation is truly final.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Open
+    Open --> Open: event arrives<br/>in window range
+    Open --> Closed: watermark passes<br/>window end (§4.3)
+    Closed --> LateCorrection: late event arrives<br/>side-output stream
+    LateCorrection --> Closed: correction merged<br/>into OLAP aggregate
+    Closed --> Reconciled: nightly batch job<br/>re-aggregates exact count (§4.4)
+    Reconciled --> [*]
+```
+
+*A window is mutable even after it "closes" — a late-correction merge (§4.3) can still revise its emitted aggregate; only the nightly batch job's reconciliation (§4.4) is the unconditional final state.*
+
 ### 4.4 Lambda vs. Kappa Architecture — Why This Design Uses Lambda
 
 **Lambda architecture** (this design, §3) runs two largely independent pipelines over the same raw event source: a **stream path** (§4.2-4.3, optimized for low latency, watermark-bounded, approximate) and a **batch path** (a nightly job re-reading raw events from the data lake, unbounded, exact). The two paths' outputs are reconciled at the serving layer — the stream path's output is "good enough for now," the batch path's output is "the eventually-correct answer."
@@ -415,25 +422,53 @@ This is the core of the "tiered reporting" design that resolves War Story 2 (§9
 
 **Why Lambda for this design**: billing-grade correctness has a hard, non-negotiable requirement — the daily aggregate must be **exactly reproducible** from raw data, independent of *any* streaming-layer approximation (watermark cutoffs, dedup-cache sizing, §4.1's bounded cache). A nightly batch job written with simple, unbounded, easy-to-audit logic (read all of yesterday's raw events, group by key, dedup by `event_id` with no cache-size limit, sum) is far easier to verify as "definitely correct" than asserting that a *replayed streaming job* — with its watermarks, bounded caches, and windowing semantics tuned for low latency — produces bit-identical results to a from-scratch exact computation. The operational cost of Lambda (maintaining two codepaths) is real (§5), but for the specific requirement "this number drives invoices," the *simplicity and auditability* of a separate exact batch path outweighs that cost. Kappa remains attractive for the "pulse"/"corrected" views alone, and in fact this design's stream path *is* essentially Kappa-shaped (replay-capable, since it reads from the same partitioned log) — Lambda specifically refers to the *addition* of the independent batch path for billing.
 
+The choice reduces to a single question asked of each consumer of the aggregate:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["New aggregate<br/>consumer"]) --> decide{"Must this number be<br/>audit-grade exact,<br/>e.g. billing"}
+    decide -->|"yes"| lambda("Lambda<br/>add an independent<br/>exact batch path")
+    decide -->|"no"| kappa("Kappa<br/>stream path alone,<br/>replay to correct")
+    lambda --> lambdaOut(["Billing view<br/>reproducible from<br/>raw data"])
+    kappa --> kappaOut(["Pulse / corrected view<br/>good enough,<br/>revisable"])
+
+    class start io
+    class decide mathOp
+    class lambda train
+    class kappa req
+    class lambdaOut,kappaOut io
+```
+
+*Billing answers "yes" and gets the separate, auditable batch path (§4.4); the "pulse"/"corrected" dashboards answer "no" and stay on the cheaper, Kappa-shaped stream path alone (§5).*
+
 ### 4.5 Pre-Aggregation, Rollups, and HyperLogLog for Unique Counts
 
 Raw per-event storage doesn't scale for dashboard queries — "show me clicks for `ad_id=X` over the last 30 days, by hour" against 86 billion raw events/day would require scanning an enormous amount of data per query. Instead, the system maintains a **rollup hierarchy**:
 
-```
-Raw events (data lake, §2: ~9-14 TB/day compressed, 90-day retention)
-        |
-        | minute-level aggregation (stream path, §4.2)
-        v
-Minute rollups (~2 GB/minute, §2, 7-14 day retention)
-        |
-        | hourly re-aggregation (sum 60 minute-rollups per hour)
-        v
-Hourly rollups (~60x smaller than minute rollups, retained months)
-        |
-        | daily re-aggregation (sum 24 hourly rollups, reconciled
-        | against the nightly batch job's exact daily aggregate, §4.4)
-        v
-Daily rollups (~1,440x smaller than minute rollups, retained years)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw[("Raw Events<br/>~9-14 TB/day, 90-day retention")] -->|"minute-level<br/>aggregation"| minuteR[("Minute Rollups<br/>~2 GB/min, 7-14 day retention")]
+    minuteR -->|"hourly re-aggregation<br/>sum 60 minute rollups"| hourlyR[("Hourly Rollups<br/>~60x smaller, retained months")]
+    hourlyR -->|"daily re-aggregation<br/>sum 24 hourly rollups"| dailyR[("Daily Rollups<br/>~1,440x smaller, retained years")]
+
+    class raw,minuteR,hourlyR base
+    class dailyR train
 ```
 
 Each level is a straightforward `SUM()` over the level below for additive metrics (click counts, impression counts) — this is the standard rollup pattern and is cheap. **Unique-user counts** (and unique-click counts, for reach/frequency metrics) are **not** additive in the same way: `unique_users(hour) != SUM(unique_users(minute) for each minute in hour)`, because the same user can click in multiple minutes within the hour, and naively summing would massively overcount.
@@ -475,29 +510,37 @@ A typical dashboard query — "clicks and CTR for `ad_id=a_001`, US, mobile, las
 
 A global ad platform doesn't route every click and impression through one region's ingestion topic — events are generated by users worldwide, and shipping raw events across an ocean before counting them adds latency the freshness NFR (§1) can't absorb, while raw events carrying IP addresses and device identifiers often must stay within the region where they were generated under data-residency rules (cross-ref [`../security_and_auth/README.md`](../security_and_auth/README.md)). This design runs a **full regional stack** — ingestion topic, stream processor, dedup cache, and regional OLAP store (§3-4.7) — independently in each of a handful of major regions (e.g., US-East, EU-West, AP-South), each serving locally-generated traffic end to end.
 
-```
-                  +-------------------------------------------+
-                  |        Global Rollup Aggregation Job       |
-                  |   SUM() additive metrics across regions    |
-                  |   merge() HLL sketches across regions      |
-                  +------+--------------+---------------+------+
-                         ^              ^               ^
-                   hourly rollup   hourly rollup   hourly rollup
-                         |              |               |
-       +-------------------+  +-------------------+  +-------------------+
-       |      US-EAST       |  |      EU-WEST       |  |      AP-SOUTH      |
-       |  Ingestion (Kafka)  |  |  Ingestion (Kafka)  |  |  Ingestion (Kafka)  |
-       |          |          |  |          |          |  |          |          |
-       |  Stream processor   |  |  Stream processor   |  |  Stream processor   |
-       |  dedup/window/      |  |  dedup/window/      |  |  dedup/window/      |
-       |  watermark (§4.1-3) |  |  watermark (§4.1-3) |  |  watermark (§4.1-3) |
-       |          |          |  |          |          |  |          |          |
-       |  Regional OLAP      |  |  Regional OLAP      |  |  Regional OLAP      |
-       |  pulse/corrected    |  |  pulse/corrected    |  |  pulse/corrected    |
-       +---------------------+  +---------------------+  +---------------------+
-                ^                        ^                        ^
-            local users              local users              local users
-                  (raw events never cross region boundaries)
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph useast["US-EAST"]
+        ueUsers(["local users"]) --> ueIngest("Ingestion<br/>Kafka") --> ueStream("Stream Processor<br/>dedup / window / watermark") --> ueOlap[("Regional OLAP<br/>pulse / corrected")]
+    end
+
+    subgraph euwest["EU-WEST"]
+        ewUsers(["local users"]) --> ewIngest("Ingestion<br/>Kafka") --> ewStream("Stream Processor<br/>dedup / window / watermark") --> ewOlap[("Regional OLAP<br/>pulse / corrected")]
+    end
+
+    subgraph apsouth["AP-SOUTH"]
+        asUsers(["local users"]) --> asIngest("Ingestion<br/>Kafka") --> asStream("Stream Processor<br/>dedup / window / watermark") --> asOlap[("Regional OLAP<br/>pulse / corrected")]
+    end
+
+    ueOlap -->|"hourly rollup"| global("Global Rollup<br/>Aggregation Job<br/>SUM + merge across regions")
+    ewOlap -->|"hourly rollup"| global
+    asOlap -->|"hourly rollup"| global
+
+    class ueUsers,ewUsers,asUsers io
+    class ueIngest,ewIngest,asIngest req
+    class ueStream,ewStream,asStream mathOp
+    class ueOlap,ewOlap,asOlap base
+    class global train
 ```
 
 **What crosses regions, and what doesn't**: raw events never cross regions — ingestion, dedup (§4.1), windowing (§4.2), and watermarking (§4.3) operate entirely on locally-generated traffic, so a region's own "pulse"/"corrected" dashboards (§4.3) are fully self-contained and immune to cross-region network issues. Only **rollup outputs** (§4.5 — minute/hour/day aggregates, already orders of magnitude smaller than raw events, §10) ship to a global rollup aggregation layer on a schedule (e.g., hourly) rather than per event.

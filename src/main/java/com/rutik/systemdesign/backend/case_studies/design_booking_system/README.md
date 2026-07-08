@@ -26,66 +26,68 @@ Scale targets:
 
 ## Architecture Overview
 
-```
-                        +-------------------+
-                        |   Load Balancer   |
-                        +--------+----------+
-                                 |
-               +-----------------+-----------------+
-               |                 |                 |
-        +------+------+   +------+------+   +------+------+
-        |  Booking    |   |  Booking    |   |  Booking    |
-        |  Service    |   |  Service    |   |  Service    |
-        |  (Node 1)   |   |  (Node 2)   |   |  (Node N)   |
-        +------+------+   +------+------+   +------+------+
-               |                 |                 |
-               +--------+--------+-----------------+
-                        |
-            +-----------+-----------+
-            |                       |
-     +------+------+         +------+------+
-     |  PostgreSQL |         |    Redis    |
-     |  (Primary)  |         |  Cluster    |
-     |             |         |             |
-     | seats       |         | dist locks  |
-     | bookings    |         | seat holds  |
-     | idempotency |         | inventory   |
-     | outbox      |         | counters    |
-     +------+------+         +------+------+
-            |                       |
-     +------+------+         +------+------+
-     |  PostgreSQL |         |   Kafka     |
-     |  (Replica)  |         |             |
-     |  (reads)    |         | booking-    |
-     +-------------+         | events      |
-                             +-------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-Two-Phase Booking State Machine:
+    lb(["Load Balancer"]) --> svc1("Booking Service<br/>Node 1")
+    lb --> svc2("Booking Service<br/>Node 2")
+    lb --> svc3("Booking Service<br/>Node N")
+    svc1 --> merge((" + "))
+    svc2 --> merge
+    svc3 --> merge
+    merge --> pgPrimary("PostgreSQL Primary<br/>seats · bookings ·<br/>idempotency · outbox")
+    merge --> redis("Redis Cluster<br/>dist locks · seat holds ·<br/>inventory counters")
+    pgPrimary --> pgReplica(["PostgreSQL Replica<br/>read-only"])
+    redis --> kafka(["Kafka<br/>booking-events"])
 
-  [Request] --> IDEMPOTENCY CHECK --> [Already exists? Return cached result]
-       |
-       v
-  ACQUIRE DISTRIBUTED LOCK (Redis SETNX on seat_id)
-       |
-       v
-  CHECK AVAILABILITY (SELECT ... FOR UPDATE on seat row)
-       |
-       +-- Seat unavailable --> 409 Conflict, release lock
-       |
-       v
-  DECREMENT INVENTORY + SET seat status=RESERVED + INSERT booking(PENDING)
-  INSERT outbox event
-       |
-       v
-  RELEASE LOCK
-       |
-       v
-  [10-minute hold timer via Redis TTL]
-       |
-       +-- Payment success --> CONFIRM booking, seat status=SOLD
-       |
-       +-- Timeout / Payment fail --> RELEASE: seat status=AVAILABLE, booking=EXPIRED
+    class lb mathOp
+    class svc1,svc2,svc3 req
+    class merge mathOp
+    class pgPrimary,redis base
+    class pgReplica frozen
+    class kafka req
 ```
+
+Stateless booking-service nodes scale horizontally behind the load balancer to absorb the 10,000 req/s peak, then converge on the same two stores — PostgreSQL for durable seat/booking/outbox rows and Redis for the distributed lock and hold TTLs — before PostgreSQL replicates to a read replica and the outbox flow lands on Kafka's `booking-events` topic.
+
+**Two-Phase Booking State Machine**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Booking Request"]) --> idemCheck{"Idempotency Check<br/>request seen before?"}
+    idemCheck -->|"exists"| cached(["Return cached result"])
+    idemCheck -->|"not found"| acquireLock("Acquire Distributed Lock<br/>Redis SETNX on seat_id")
+    acquireLock --> checkAvail{"Check Availability<br/>SELECT ... FOR UPDATE"}
+    checkAvail -->|"unavailable"| conflict(["409 Conflict<br/>release lock"])
+    checkAvail -->|"available"| reserve("Decrement inventory +<br/>seat = HELD +<br/>booking = PENDING +<br/>insert outbox event")
+    reserve --> releaseLock("Release Lock")
+    releaseLock --> holdTimer{"10-min Hold Timer<br/>Redis TTL"}
+    holdTimer -->|"payment success"| confirmed(["Confirm Booking<br/>seat = SOLD"])
+    holdTimer -->|"timeout or<br/>payment fail"| released(["Release Hold<br/>seat = AVAILABLE,<br/>booking = EXPIRED"])
+
+    class start io
+    class idemCheck,checkAvail,acquireLock,releaseLock mathOp
+    class cached,reserve,confirmed train
+    class conflict,released lossN
+    class holdTimer req
+```
+
+Every request passes through the idempotency check and the distributed lock before it ever reaches the pessimistic row lock in Postgres, and the 10-minute Redis-TTL hold resolves to exactly one of two terminal states — confirmed sale or a fully released, re-bookable seat.
 
 ---
 
@@ -113,6 +115,32 @@ A Redis SETNX (SET if Not eXists) with expiry acquires a named lock before the d
 ensuring only one node proceeds for a given seat at a time. This reduces database lock contention and
 provides a fast-fail path.
 
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["New booking request"]) --> contention{"Contention level?"}
+    contention -->|"low<br/>half-empty flight"| optimistic("Optimistic lock<br/>@Version, retry on<br/>OptimisticLockException")
+    contention -->|"high<br/>concert release"| pessimistic("Pessimistic lock<br/>SELECT ... FOR UPDATE")
+    optimistic --> multiNode{"Multiple JVM<br/>instances?"}
+    pessimistic --> multiNode
+    multiNode -->|"yes"| redisLock("Add Redis SETNX<br/>distributed lock<br/>before DB is touched")
+    multiNode -->|"no"| singleNode(["Row lock alone<br/>is sufficient"])
+
+    class start io
+    class contention,multiNode mathOp
+    class optimistic,singleNode train
+    class pessimistic,redisLock frozen
+```
+
+Contention level and node count are independent axes: contention alone picks `@Version` optimistic locking for the half-empty-flight case or `SELECT ... FOR UPDATE` pessimistic locking for the concert-release case, while a separate question — is more than one JVM instance running? — decides whether a Redis SETNX pre-check sits in front of either strategy.
+
 ### 2. Idempotency Key Table
 
 Every booking request carries a client-generated `bookingRequestId` (UUID). Before any business
@@ -121,6 +149,26 @@ is returned directly. If not found, the request is processed and the result is p
 idempotency key. The check-and-insert is inside the same transaction as the booking, so concurrent
 retries with the same key race to insert — only one wins; the loser gets a unique constraint
 violation and waits, then reads the winning result.
+
+```mermaid
+sequenceDiagram
+    participant O as Original Request
+    participant R as Retry<br/>same request ID
+    participant Svc as Booking Service
+    participant Tbl as idempotency_keys
+
+    O->>Svc: reserveSeat(key=X)
+    R->>Svc: reserveSeat(key=X)
+    Svc->>Tbl: check-and-INSERT key=X<br/>inside booking txn
+    Svc->>Tbl: check-and-INSERT key=X<br/>inside booking txn
+    Tbl-->>Svc: O's transaction<br/>commits first
+    Tbl-->>Svc: R's transaction:<br/>unique constraint violation
+    Note over Svc: R waits, then reads<br/>the row O's txn committed
+    Svc-->>O: 201 Created<br/>new booking result
+    Svc-->>R: 201 Created<br/>O's cached result
+```
+
+The unique index on `booking_request_id` is the actual arbiter: whichever transaction commits first wins the insert, and the loser's unique-constraint violation is the signal to fall back to reading that same row instead of treating the retry as sold-out or duplicate.
 
 ### 3. Two-Phase Booking
 

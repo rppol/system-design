@@ -64,58 +64,35 @@
 
 ## 3. High-Level Architecture
 
-```
-                                +-------------------------+
-                                |   Client (Browser)      |
-                                |  - Rich-text editor      |
-                                |  - Local op buffer        |
-                                |  - Renders local echo     |
-                                |    immediately (<100ms)   |
-                                +------------+-------------+
-                                             |
-                                  WebSocket  | (ops, acks, presence,
-                                             |  remote ops broadcast)
-                                             v
-                       +---------------------------------------------+
-                       |          Routing / Gateway Layer             |
-                       |  Consistent hashing on doc_id ->              |
-                       |  routes all clients of a doc to the SAME     |
-                       |  Collab Server shard                          |
-                       +---------------------+-------------------------+
-                                             |
-                                             v
-                       +---------------------------------------------+
-                       |            Collab Server (shard)              |
-                       |  - ONE logical "owner" per doc_id              |
-                       |  - Assigns global total order to incoming ops |
-                       |  - OT transform engine OR CRDT merge engine   |
-                       |  - Tracks per-client last-acked sequence #    |
-                       |  - Broadcasts transformed ops to all sessions |
-                       |  - Ephemeral presence broadcast (cursors)     |
-                       +-----+-----------------------+-----------------+
-                             |                        |
-                  (durable)  |                        | (ephemeral, NOT persisted)
-                             v                        v
-            +----------------------------+   +--------------------------+
-            |   Operation Log (event      |   |  Redis Pub/Sub           |
-            |   store / Kafka)            |   |  - Cross-shard presence  |
-            |   - Append-only, source     |   |    broadcast              |
-            |     of truth (event         |   |  - Cursor / selection     |
-            |     sourcing)                |   |    fan-out                |
-            |   - Partitioned by doc_id    |   +--------------------------+
-            +--------------+---------------+
-                             |
-                             | periodic snapshot
-                             v
-            +----------------------------+
-            |  Snapshot / Blob Storage     |
-            |  (S3-style)                   |
-            |  - Full document state every  |
-            |    N ops or T minutes         |
-            |  - Enables fast reload:       |
-            |    load snapshot + replay     |
-            |    only ops since snapshot    |
-            +----------------------------+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client(["Client Browser<br/>local echo under 100ms"])
+    Gateway{"Routing / Gateway<br/>consistent hash on doc_id"}
+    Collab("Collab Server shard<br/>single owner per doc_id<br/>OT or CRDT engine")
+    OpLog[("Operation Log<br/>Kafka, partitioned by doc_id")]
+    Snap[("Snapshot / Blob Storage<br/>S3-style, periodic")]
+    Redis("Redis Pub/Sub<br/>cross-shard presence fan-out")
+
+    Client -->|"ops, acks, presence<br/>over WebSocket"| Gateway
+    Gateway --> Collab
+    Collab -->|"append, durable"| OpLog
+    Collab -.->|"ephemeral, not persisted"| Redis
+    OpLog -->|"periodic snapshot"| Snap
+
+    class Client io
+    class Gateway mathOp
+    class Collab train
+    class OpLog base
+    class Snap frozen
+    class Redis req
 ```
 
 **Routing**: Consistent hashing on `doc_id` (see [Consistent Hashing](../consistent_hashing/README.md)) ensures every client editing the same document connects — directly or via gateway redirect — to the *same* collab-server shard. This single-writer-per-document property is what allows the collab server to assign a simple incrementing global sequence number to every operation without distributed consensus.
@@ -128,36 +105,29 @@
 
 The sequence below shows the end-to-end path for the divergence-prone scenario from §4.1: Client A and Client B both have the document at sequence 1000, and both generate an operation concurrently.
 
-```
-Client A                Collab Server                Client B
-  |                          |                           |
-  | opA (insert "!" @11)     |                           |
-  |------------------------->|                           |
-  | <-- local echo applied   |  opB (insert "Wonderful " |
-  | immediately (<100ms)     |        @6)                |
-  |                          |<--------------------------|
-  |                          |   <-- local echo applied  |
-  |                          |       immediately         |
-  |                          |                           |
-  |                  [opA arrives first; assigned        |
-  |                   seq=1001, applied as-is]           |
-  |                          |                           |
-  |                  [opB arrives second; transformed    |
-  |                   against opA via transform(),       |
-  |                   assigned seq=1002]                 |
-  |                          |                           |
-  | <--- ack(opA, seq=1001) -|                           |
-  |                          |--- ack(opB, seq=1002) --->|
-  |                          |                           |
-  | <--- broadcast(opB',     |--- broadcast(opA, ------->|
-  |       seq=1002) ---------|       seq=1001)           |
-  |                          |                           |
-  [Client A applies opB'    |          [Client B applies opA,
-   (transformed) to its     |           then re-derives its
-   local doc]                |           own opB as opB' via the
-                             |           same transform() — both
-                             |           replicas now hold the
-                             |           IDENTICAL final document]
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant S as Collab Server
+    participant B as Client B
+
+    A->>S: opA, insert at position 11
+    Note over A: local echo applied<br/>immediately, under 100ms
+    B->>S: opB, insert at position 6
+    Note over B: local echo applied<br/>immediately
+
+    Note over S: opA arrives first,<br/>seq=1001, applied as-is
+    Note over S: opB arrives second,<br/>transform(opB, opA),<br/>assigned seq=1002 as opB'
+
+    S-->>A: ack opA, seq=1001
+    S-->>B: ack opB, seq=1002
+    S-->>A: broadcast opB', seq=1002
+    S-->>B: broadcast opA, seq=1001
+
+    Note over A: applies opB',<br/>already transformed by server
+    Note over B: applies opA, then re-derives<br/>its own opB as opB'
+
+    Note over A,B: both replicas converge<br/>on the identical final document
 ```
 
 Two details matter here: (1) the collab server is the single point that decides **arrival order** (opA before opB in this example) and therefore which operation gets transformed against which — this is the "single total order" guarantee from §3; and (2) **both clients converge to the same result** because both apply `transform(opB, opA)` — Client A receives the already-transformed `opB'` from the server, while Client B (whose local echo already applied the *untransformed* `opB`) must reconcile by re-deriving `opB'` the same way, which is why the server's broadcast includes enough information (the transformed operation plus its dependency on `opA`'s sequence number) for every replica to arrive at the identical state.
@@ -329,6 +299,53 @@ public final class OperationalTransform {
     }
 }
 ```
+
+The four branches above collapse into one dispatch decision — the diagram below shows where two of them must mirror each other exactly:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Pair(["concurrent op<br/>and applied"])
+    Dispatch{"dispatch on<br/>op type vs applied type"}
+    InsIns("insert vs insert<br/>siteId tie-break<br/>at equal position")
+    InsDel("insert vs delete<br/>shift or clamp into<br/>deleted range")
+    DelIns("delete vs insert<br/>shift or widen range<br/>to cover new text")
+    DelDel("delete vs delete<br/>shrink to the part<br/>applied did not remove")
+    Mirror{"do the two mirror<br/>branches agree on the<br/>equal-position case?"}
+    Bug("silent divergence<br/>War Story 1")
+    Safe(["transformed op,<br/>safe to apply"])
+
+    Pair --> Dispatch
+    Dispatch -->|"insert, insert"| InsIns
+    Dispatch -->|"insert, delete"| InsDel
+    Dispatch -->|"delete, insert"| DelIns
+    Dispatch -->|"delete, delete"| DelDel
+    InsDel --> Mirror
+    DelIns --> Mirror
+    Mirror -->|"no"| Bug
+    Mirror -->|"yes"| Safe
+    InsIns --> Safe
+    DelDel --> Safe
+
+    class Pair io
+    class Dispatch mathOp
+    class InsIns train
+    class InsDel train
+    class DelIns train
+    class DelDel train
+    class Mirror mathOp
+    class Bug lossN
+    class Safe io
+```
+
+**Reading the diagram**: `insertInsert` and `deleteDelete` are internally self-consistent, but `insertDelete` and `deleteInsert` are *mirror* branches — each handles the same equal-position boundary from the opposite side, and if their tie-break rules disagree, replicas silently diverge. That is exactly the bug in War Story 1 below.
 
 **The same-position insert/insert tie-break is the single most important detail**: every replica must apply the *same* deterministic rule (e.g., compare `siteId` lexicographically) so that when both A and B insert at position 6 concurrently, *every* replica decides "A's text comes first, B's text comes after" — never the reverse on some replicas and the original on others. This is the root cause analyzed in War Story 1 (§9).
 
@@ -535,15 +552,19 @@ A subtlety worth calling out: the offline client's **local echo already shows th
 
 Presence updates are small, frequent messages — "user X's cursor is now at position N" or "user X has selected range [a, b]" — sent over the same WebSocket connection used for document operations, but tagged with a distinct message type so the collab server never confuses a presence update with a document-mutating operation.
 
-```
-Client -> Collab Server (over existing WebSocket):
-  { type: "presence", userId: "alice", docId: "doc-42",
-    cursorPos: 1532, selectionRange: [1532, 1540], color: "#E91E63" }
+```mermaid
+sequenceDiagram
+    participant C as Alice
+    participant S as Collab Server
+    participant O as Other Clients
 
-Collab Server -> all OTHER connected clients for doc-42:
-  { type: "presence", userId: "alice", cursorPos: 1532,
-    selectionRange: [1532, 1540], color: "#E91E63" }
+    C->>S: presence update,<br/>cursor 1532, selection 1532 to 1540
+    Note over C,S: same WebSocket as document ops,<br/>tagged type = presence
+    S->>O: broadcast presence,<br/>cursor 1532, selection 1532 to 1540
+    Note over O: renders Alice's live<br/>cursor and selection instantly
 ```
+
+*Presence rides the same WebSocket as document operations but is tagged separately, throttled client-side, and never durably logged.*
 
 Because presence messages are frequent (every cursor move or selection change can generate one) but cheap and disposable, they are typically:
 - **Throttled/debounced** client-side (e.g., at most one presence update per 50-100ms even if the user is dragging a selection rapidly) to avoid flooding the WebSocket with redundant updates.
@@ -588,6 +609,39 @@ Because the operation log is the system of record (§4.4), "version history" is 
 | Production maturity for rich text | Google Docs has run production OT for over a decade | Yjs and Automerge are mature, but rich-text CRDTs are a younger field than rich-text OT |
 
 **Choice for this design**: OT, with a single collab-server-per-document as the transform arbiter — primarily because (a) per-document throughput is low (§2: tens of ops/sec even at 50 concurrent editors), so the centralization cost is negligible, and (b) the smaller per-operation metadata matters when documents have years of revision history. **However**, note in interviews that CRDTs are the *better* choice when offline-first and peer-to-peer sync are first-class requirements (Figma, Notion's underlying primitives, and most local-first software libraries like Yjs and Automerge use CRDT-family approaches).
+
+The same reasoning collapses into a quick decision guide for this canonical interview question:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start(["choosing a<br/>convergence model"])
+    Q1{"offline-first or<br/>peer-to-peer sync<br/>a hard requirement?"}
+    Q2{"per-doc throughput low<br/>and revision history long?"}
+    CRDT("CRDT, e.g. RGA<br/>Yjs, Automerge<br/>no central arbiter")
+    OT("OT with single<br/>collab-server arbiter<br/>this design's choice")
+
+    Start --> Q1
+    Q1 -->|"yes"| CRDT
+    Q1 -->|"no"| Q2
+    Q2 -->|"yes"| OT
+    Q2 -->|"no, many hot docs"| CRDT
+
+    class Start io
+    class Q1 mathOp
+    class Q2 mathOp
+    class CRDT frozen
+    class OT train
+```
+
+**Reading the diagram**: this design lands on OT because per-document throughput stays low even at 50 editors (§2) and revision history is long — exactly the regime where OT's small per-operation overhead outweighs CRDT's per-character metadata tax (§4.2); flip either condition (offline-first, peer-to-peer, or a hot document that needs finer-grained ownership) and CRDT becomes the better default.
 
 ### Single Collab-Server-per-Document vs. Fully Peer-to-Peer CRDT Sync
 
@@ -729,17 +783,21 @@ The lasting fix was organizational, not just code: a **regression-test suite of 
 **What happened**: A routine deploy of the collab-server fleet caused every instance to restart within a tight rolling-deploy window (a few seconds apart). Every WebSocket connection to every restarting instance dropped simultaneously. Client code, on detecting a dropped connection, **reconnected immediately** with no delay.
 
 **Broken behavior**:
-```
-T+0s:   Collab server instance restarts, drops 40,000 connections
-T+0.1s: All 40,000 clients detect disconnect, immediately reconnect
-T+0.2s: New instance (still warming up: rebuilding routing tables,
-        reloading hot-document state) receives 40,000 simultaneous
-        connection attempts
-T+0.3s: New instance's accept queue overflows; many connections time
-        out; those clients ALSO retry immediately
-T+0.5s: Cascading retry storm spreads to adjacent shards as the
-        routing layer, overwhelmed, starts returning errors that
-        clients interpret as "try a different shard"
+```mermaid
+sequenceDiagram
+    participant Cl as 40k Clients
+    participant Old as Old Instance
+    participant New as New Instance
+    participant R as Routing Layer
+    participant Adj as Adjacent Shards
+
+    Old-xCl: restarts, drops all connections, T+0s
+    Cl->>New: immediate reconnect, no delay, T+0.1s
+    Note over New: still warming up,<br/>rebuilding routing tables,<br/>reloading hot-document state, T+0.2s
+    New-xCl: accept queue overflows,<br/>connections time out, T+0.3s
+    Cl->>New: clients retry immediately
+    New->>R: overwhelmed, returns errors
+    R->>Adj: cascading retry storm spreads, T+0.5s
 ```
 The result was a multi-minute period where the *deploy itself* (not any underlying capacity shortfall) caused widespread connection failures across the fleet — a self-inflicted thundering herd.
 
