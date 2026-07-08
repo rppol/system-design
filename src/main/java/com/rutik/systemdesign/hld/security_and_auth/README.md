@@ -97,122 +97,120 @@ OAuth2 is fundamentally an *authorization* framework — it says nothing about *
 
 ### 5.1 Session-Based vs. Token-Based Auth
 
+**Session-Based (stateful):**
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Auth as Auth Server
+    participant R as Redis
+    participant S as API Server
+
+    C->>Auth: login(user, pass)
+    Auth->>R: create session_id -> user_id, roles, expiry
+    Auth-->>C: Set-Cookie: session_id=abc123
+    Note over C,S: Every subsequent request
+    C->>S: GET /orders<br/>Cookie: session_id=abc123
+    S->>R: GET abc123
+    R-->>S: user_id=42, roles=user
+    S-->>C: 200 OK (orders)
 ```
-SESSION-BASED (stateful)
-  Client --login(user,pass)--> Auth Server
-                                   |
-                                   v
-                          Create session record
-                          session_id -> {user_id, roles, expiry}
-                          (stored in Redis)
-                                   |
-  Client <--Set-Cookie: session_id=abc123----+
 
-  Client --GET /orders, Cookie: session_id=abc123--> API Server
-                                                          |
-                                                          v
-                                                  Redis.get("abc123")
-                                                  -> {user_id: 42, roles: [...]}
-                                                          |
-                                                  Every request = 1 Redis lookup
+Every request costs one Redis lookup — the tradeoff for instant revocation (delete the session record).
 
+**Token-Based (stateless, JWT):**
 
-TOKEN-BASED (stateless, JWT)
-  Client --login(user,pass)--> Auth Server
-                                   |
-                                   v
-                          Sign JWT with private key:
-                          {sub: 42, roles: [...], exp: now+15m}
-                                   |
-  Client <--access_token=eyJhbGc...----------+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Auth as Auth Server
+    participant S as API Server
 
-  Client --GET /orders, Authorization: Bearer eyJhbGc...--> API Server
-                                                                |
-                                                                v
-                                                  Verify signature with
-                                                  public key (NO network call)
-                                                  Check exp, iss, aud claims
-                                                                |
-                                                  Any service with the public
-                                                  key can validate independently
+    C->>Auth: login(user, pass)
+    Auth->>Auth: sign JWT with private key<br/>sub=42, roles=user, exp=now+15m
+    Auth-->>C: access_token=eyJhbGc...
+    Note over C,S: Every subsequent request
+    C->>S: GET /orders<br/>Authorization: Bearer eyJhbGc...
+    S->>S: verify signature with public key<br/>no network call - check exp, iss, aud
+    S-->>C: 200 OK (orders)
 ```
+
+Any service holding the public key validates independently — no shared store, but no instant revocation either (§6.2).
 
 ### 5.2 OAuth2 Authorization Code Flow with PKCE
 
+```mermaid
+sequenceDiagram
+    participant U as User (Browser)
+    participant App as Client App
+    participant Auth as Authorization Server
+    participant RS as Resource Server
+
+    U->>App: 1. Click "Login"
+    App->>App: 2. Generate code_verifier (random)<br/>code_challenge = SHA256(code_verifier)
+    App-->>U: 3. Redirect to /authorize?code_challenge=...
+    U->>Auth: 4. Login + consent
+    Auth-->>U: 5. Redirect with one-time code
+    U->>App: 6. Pass code to app
+    App->>Auth: 7. POST /token: code + code_verifier
+    Auth->>Auth: checks SHA256(code_verifier)<br/>== code_challenge from step 3
+    Auth-->>App: 8. access_token + id_token + refresh_token
+    App->>RS: 9. GET /api/data<br/>Authorization: Bearer ...
+    RS->>RS: 10. validate token<br/>signature, exp, aud - no callback
+    RS-->>App: 200 OK (data)
 ```
-  User                 Client App              Authorization        Resource
- (browser)             (your web app)          Server (IdP)         Server (API)
-    |                        |                        |                   |
-    |  1. Click "Login"      |                        |                   |
-    |----------------------->|                        |                   |
-    |                        | 2. Generate code_verifier (random),        |
-    |                        |    code_challenge = SHA256(code_verifier)  |
-    |                        |                        |                   |
-    | 3. Redirect to /authorize?code_challenge=...    |                   |
-    |<-----------------------|                        |                   |
-    | 4. Login + consent     |                        |                   |
-    |----------------------------------------------->|                   |
-    |                        | 5. Redirect with one-time `code`           |
-    |<-------------------------------------------------|                  |
-    | 6. Pass `code` to app  |                        |                   |
-    |----------------------->|                        |                   |
-    |                        | 7. POST /token: code + code_verifier       |
-    |                        |----------------------->|                   |
-    |                        |   Server checks SHA256(code_verifier)      |
-    |                        |   == code_challenge from step 3            |
-    |                        | 8. access_token + id_token + refresh_token |
-    |                        |<------------------------|                  |
-    |                        |                        |                   |
-    |                        | 9. GET /api/data, Authorization: Bearer ...|
-    |                        |------------------------------------------->|
-    |                        | 10. Resource Server validates token        |
-    |                        |     (signature, exp, aud) -- no callback   |
-    |                        |<-------------------------------------------|
-```
+
+PKCE binds the token exchange (step 7) to whoever generated `code_verifier` in step 2 — see §6.3 for exactly what breaks without it.
 
 ### 5.3 Zero-Trust Service Mesh with mTLS
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Mesh["Kubernetes Cluster - Service Mesh (Istio / Linkerd)"]
+        direction LR
+        O("Order Svc<br/>+ sidecar proxy") <-- "mTLS<br/>cert: order" --> P("Payment Svc<br/>+ sidecar proxy")
+        P <-- "mTLS<br/>cert: payment" --> L("Ledger Svc<br/>+ sidecar proxy")
+    end
+
+    class O,P,L mathOp
 ```
-            +-------------------------------------------------------+
-            |  Kubernetes Cluster (Service Mesh: Istio/Linkerd)      |
-            |                                                         |
-            |  +-----------+  mTLS    +-----------+  mTLS  +--------+|
-            |  | Order Svc |<-------->| Payment   |<------>| Ledger ||
-            |  | + sidecar |  cert:   | Svc       |  cert: | Svc    ||
-            |  | proxy     |  order   | + sidecar |payment | +sidecar||
-            |  +-----------+          +-----------+        +--------+|
-            |                                                         |
-            |  Each sidecar proxy:                                    |
-            |   - presents its workload's X.509 cert (issued by       |
-            |     mesh CA, auto-rotated every ~24h)                   |
-            |   - verifies the peer's cert against the mesh CA        |
-            |   - encrypts ALL traffic, even within the cluster        |
-            |                                                         |
-            |  Result: even if an attacker gains network access to    |
-            |  the cluster (e.g., a misconfigured pod), they cannot   |
-            |  impersonate Order Svc without its private key, and     |
-            |  cannot read traffic between Payment and Ledger.        |
-            +-------------------------------------------------------+
-```
+
+Each sidecar proxy presents its workload's X.509 certificate (issued by the mesh CA, auto-rotated roughly every 24h) and verifies the peer's certificate before any bytes flow, encrypting all traffic even inside the cluster. Result: even if an attacker gains network access to the cluster (e.g., a misconfigured pod), they cannot impersonate Order Svc without its private key, and cannot read traffic between Payment and Ledger.
 
 ### 5.4 Token Lifecycle: Access Token + Refresh Token Rotation
 
-```
-  t=0:    Login -> access_token (exp: t+15m), refresh_token (exp: t+30d)
-  t=14m:  access_token still valid, used for API calls
-  t=15m:  access_token EXPIRED
-          Client -> POST /token/refresh {refresh_token}
-          Auth Server:
-            - validates refresh_token (check against revocation store)
-            - issues NEW access_token (exp: t+30m) AND new refresh_token
-            - REVOKES old refresh_token (rotation -- prevents replay)
-          Client now has: access_token (exp t+30m), refresh_token_v2
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant X as Attacker
+    participant Auth as Auth Server
 
-  If a stolen refresh_token is replayed AFTER rotation:
-            Auth Server detects reuse of a revoked refresh_token
-            -> treats as compromise -> revokes ENTIRE token family
-            -> user must re-authenticate
+    Note over C,Auth: t=0 - Login
+    Auth-->>C: access_token (exp t+15m)<br/>refresh_token (exp t+30d)
+    Note over C: t=14m - access_token still valid,<br/>used for API calls
+    Note over C: t=15m - access_token EXPIRED
+    C->>Auth: POST /token/refresh (refresh_token)
+    Auth->>Auth: validate refresh_token<br/>check revocation store
+    Auth->>Auth: revoke OLD refresh_token<br/>rotation prevents replay
+    Auth-->>C: NEW access_token (exp t+30m)<br/>+ refresh_token_v2
+
+    opt Stolen refresh_token replayed after rotation
+        X->>Auth: POST /token/refresh (stolen old refresh_token)
+        Auth->>Auth: detect reuse of a revoked token<br/>treat as compromise
+        Auth--xX: reject
+        Auth-->>C: revoke ENTIRE token family<br/>force re-authentication
+    end
 ```
+
+Rotation invalidates each refresh token after one use; replay of an already-used token is the compromise signal that revokes the whole token family, forcing re-authentication (§6.2).
 
 ---
 
@@ -251,9 +249,53 @@ SIGNATURE: RS256 (RSA + SHA256) signature over header+payload,
 4. `aud` (audience) includes THIS service — prevents a token issued for `payment-service` being replayed against `order-service` ("token confusion").
 5. `alg` in the header matches an EXPECTED algorithm — never accept `alg: none` (§10).
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    In([Incoming JWT]) --> C1{Signature valid?}
+    C1 -->|no| Reject((Reject))
+    C1 -->|yes| C2{Not expired?}
+    C2 -->|no| Reject
+    C2 -->|yes| C3{"iss matches<br/>expected server?"}
+    C3 -->|no| Reject
+    C3 -->|yes| C4{"aud includes<br/>this service?"}
+    C4 -->|no| Reject
+    C4 -->|yes| C5{"alg in allowlist<br/>never none?"}
+    C5 -->|no| Reject
+    C5 -->|yes| Accept([Accept request])
+
+    class In io
+    class C1,C2,C3,C4,C5 mathOp
+    class Reject lossN
+    class Accept train
+```
+
+All five checks are a single AND gate, not five independent options — skipping any one (accepting `alg: none`, War Story 1 in §10; forgetting `aud`, War Story 3) turns a signature check into a full authorization bypass.
+
 ### 6.2 The Stateless Revocation Problem and Refresh Token Rotation
 
 A signed JWT with `exp: t+15m` is valid for 15 minutes *no matter what happens server-side* — if a user's account is disabled at t+1m, their existing access token still works for 14 more minutes, because validation (§6.1) never queries a database.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Valid: login (t=0)<br/>exp = t+15m
+
+    state "Disabled but<br/>still accepted" as Zombie
+
+    Valid --> Expired: exp reached (t+15m)<br/>normal case, no disable
+    Valid --> Zombie: account disabled<br/>server-side (t+1m)
+    Zombie --> Expired: exp reached (t+15m)<br/>zombie window closes
+    Expired --> [*]
+```
+
+The "zombie window" made visible: disabling an account at t+1m does not move the token out of the accepted state — only reaching the original `exp` at t+15m does, leaving up to 14 minutes where a disabled user's token is still honored, because validation (§6.1) never re-checks account status.
 
 ```
 Tradeoff table:
@@ -270,78 +312,87 @@ The standard resolution: **short-lived access tokens (15 min) + longer-lived ref
 
 ### 6.3 PKCE — Why the Authorization Code Alone Isn't Enough
 
-```
-WITHOUT PKCE (vulnerable on mobile/SPA):
-  1. App redirects to /authorize?client_id=...&redirect_uri=myapp://callback
-  2. User logs in, Authorization Server redirects to myapp://callback?code=XYZ
-  3. PROBLEM: on mobile, a MALICIOUS app can also register the
-     myapp:// custom URL scheme and intercept this redirect,
-     stealing `code=XYZ`
-  4. Malicious app exchanges `code=XYZ` for tokens -- attacker now
-     has a valid access token for the victim's account
+**Without PKCE (vulnerable on mobile/SPA):**
 
-WITH PKCE:
-  1. Legitimate app generates a random `code_verifier` (kept secret,
-     in memory, never transmitted until step 4)
-  2. Sends SHA256(code_verifier) = `code_challenge` in the /authorize
-     redirect (step 1 above)
-  3. Even if malicious app intercepts `code=XYZ`, it does NOT have
-     `code_verifier`
-  4. Token exchange requires BOTH `code` AND `code_verifier`:
-       Authorization Server checks SHA256(code_verifier) == code_challenge
-       (the value it received in step 2)
-  5. Malicious app's exchange attempt FAILS -- it has the code but
-     not the verifier that produced the challenge
+```mermaid
+sequenceDiagram
+    participant App as Legit App
+    participant Auth as Authorization Server
+    participant Mal as Malicious App
+
+    App->>Auth: 1. Redirect to /authorize?redirect_uri=myapp://callback
+    Note over Auth,Mal: 2. Malicious app also registered<br/>the myapp:// custom scheme
+    Auth-->>Mal: 3. Redirect myapp://callback?code=XYZ<br/>intercepted, not the legit app
+    Mal->>Auth: 4. Exchange code=XYZ for tokens
+    Auth-->>Mal: 5. access_token issued -<br/>attacker now has victim's session
 ```
+
+Without PKCE, whoever intercepts the redirect's one-time code can redeem it for tokens — on mobile, a malicious app can register the same custom URL scheme as the legitimate app.
+
+**With PKCE:**
+
+```mermaid
+sequenceDiagram
+    participant App as Legit App
+    participant Auth as Authorization Server
+    participant Mal as Malicious App
+
+    App->>App: 1. Generate code_verifier<br/>secret, kept in memory
+    App->>Auth: 2. Redirect with<br/>code_challenge = SHA256(code_verifier)
+    Note over Auth,Mal: 3. Malicious app intercepts code=XYZ<br/>but does NOT have code_verifier
+    Mal->>Auth: 4. Exchange code=XYZ<br/>no code_verifier
+    Auth--xMal: 5. FAILS - code_verifier<br/>does not match code_challenge
+```
+
+PKCE binds the code exchange to whichever party generated the original `code_verifier` — the malicious app has the intercepted code but never the verifier, so its exchange is rejected.
 
 ### 6.4 Password Storage — Hashing, Not Encryption
 
 Passwords must NEVER be stored in plaintext or reversibly encrypted — they're stored as a **salted hash** using a deliberately slow algorithm (bcrypt, scrypt, or Argon2).
 
+`bcrypt(password, cost_factor)` produces a salted hash whose cost factor directly controls how slow each hash is:
+
+```mermaid
+xychart-beta
+    title "bcrypt Cost Factor vs. Hash Time"
+    x-axis ["cost 10", "cost 12 (default)", "cost 14"]
+    y-axis "ms per hash" 0 --> 1100
+    bar [65, 250, 1000]
 ```
-bcrypt(password, cost_factor)
 
-  cost_factor = 10  -> ~65ms per hash
-  cost_factor = 12  -> ~250ms per hash   <- common production default
-  cost_factor = 14  -> ~1000ms per hash
+Each +2 cost factor roughly quadruples the hash time; ~250ms (cost 12) is the common production default.
 
-Why "slow" is the FEATURE:
-  - Legitimate login: pays ~250ms once per login -- imperceptible to a user.
-  - Attacker with a stolen hash database, attempting to brute-force:
-      at cost 12 (~250ms/guess), 1 GPU tries ~4 guesses/sec
-      -- a dictionary of 100M common passwords takes ~290 days PER HASH
-      vs. an unsalted MD5 hash, crackable at billions of guesses/sec
-      (the same dictionary: seconds).
+**Why "slow" is the feature:** a legitimate login pays this cost once per login — imperceptible to a user. An attacker with a stolen hash database pays it per guess instead: at cost 12 (~250ms/guess), one GPU tries only ~4 guesses/sec, so a dictionary of 100M common passwords takes ~290 days PER HASH, versus seconds against an unsalted MD5 hash crackable at billions of guesses/sec.
 
-  Salt (random per-password value, stored alongside the hash) ensures
-  two users with the same password produce DIFFERENT hashes --
-  defeats precomputed "rainbow table" attacks.
-```
+Salt (a random per-password value, stored alongside the hash) ensures two users with the same password produce DIFFERENT hashes — defeating precomputed "rainbow table" attacks.
 
 ### 6.5 Encryption at Rest — Envelope Encryption with KMS
 
+The naive approach — encrypting every row/file directly with one master key — means rotating that key requires re-encrypting EVERYTHING. Envelope encryption (used by AWS KMS, GCP KMS, Vault) avoids this:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    App(["App"]) -->|"1 GenerateDataKey()"| KMS("KMS<br/>holds CMK, never leaves")
+    KMS -->|"2 plaintext DEK +<br/>encrypted DEK"| DEK("plaintext DEK<br/>ephemeral")
+    DEK -->|"3 encrypt locally<br/>AES-256, discard DEK"| Store[("encrypted_data<br/>+ encrypted_DEK")]
+    Store -.->|"4 decrypt: send<br/>encrypted_DEK"| KMS
+    KMS -.->|"5 CMK decrypts DEK<br/>-> plaintext DEK"| App
+
+    class App io
+    class KMS frozen
+    class DEK train
+    class Store base
 ```
-Naive: encrypt every row/file directly with one master key.
-  Problem: rotating the master key means re-encrypting EVERYTHING.
 
-Envelope encryption (used by AWS KMS, GCP KMS, Vault):
-
-  1. KMS holds a Customer Master Key (CMK) -- never leaves KMS.
-  2. To encrypt data: app calls KMS.GenerateDataKey()
-       -> KMS returns a plaintext Data Encryption Key (DEK) AND
-          the DEK encrypted by the CMK ("encrypted DEK")
-  3. App encrypts the actual data with the plaintext DEK (fast,
-     local AES-256), discards the plaintext DEK from memory,
-     stores [encrypted_data, encrypted_DEK] together.
-  4. To decrypt: app sends encrypted_DEK to KMS.Decrypt()
-       -> KMS uses CMK to return the plaintext DEK
-       -> app decrypts the data locally.
-
-  Benefit: rotating the CMK only requires re-encrypting the (small)
-  DEKs, not the (large) underlying data. Every decrypt is also an
-  auditable KMS API call -- "who decrypted what, when" is logged
-  centrally.
-```
+Only the small, per-object DEK ever travels to KMS (solid = encrypt path, dotted = decrypt path); rotating the CMK only requires re-encrypting the (small) DEKs, not the (large) underlying data, and every decrypt is an auditable KMS API call — "who decrypted what, when" is logged centrally.
 
 ---
 
@@ -391,6 +442,31 @@ Envelope encryption (used by AWS KMS, GCP KMS, Vault):
 ---
 
 ## 9. When to Use / When NOT to Use
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Start{"Who / what<br/>is calling?"} -->|"human, single<br/>domain web app"| Sess([Session + cookie])
+    Start -->|"human, mobile /<br/>multi-domain / SSO"| OAuth([OAuth2 Auth Code + PKCE])
+    Start -->|"input-constrained<br/>device: TV, CLI"| Device([OAuth2 Device Code])
+    Start -->|"another internal<br/>service"| Mesh{"10+ services /<br/>zero trust?"}
+    Start -->|"3rd-party developer,<br/>no end user"| Key([Scoped API key])
+
+    Mesh -->|yes| MTLS([mTLS / workload identity])
+    Mesh -->|no| CC([OAuth2 Client Credentials])
+
+    class Start,Mesh mathOp
+    class Sess,OAuth,Device,Key,MTLS,CC train
+```
+
+One picture across §4.1-§4.5: session cookies only fit a single-domain server-rendered app; a mobile client, a second domain, or SSO pushes you to OAuth2 Authorization Code + PKCE; service-to-service calls are their own decision — mTLS/workload identity once a system has 10+ internal services, Client Credentials below that.
 
 ### Use Session-Based Auth When
 - A traditional server-rendered web application, single domain, where the simplicity of instant revocation and small request overhead outweighs statelessness.
@@ -539,38 +615,39 @@ A B2B SaaS platform ("ProjectFlow") serves 800 enterprise customers (tenants), e
 
 ### Architecture
 
-```
-  Enterprise User (Tenant A, via Okta)        3rd-Party Integration (API key)
-         |                                              |
-         v                                              v
-  +----------------------------------------------------------------+
-  |                      API Gateway / Edge                          |
-  |  - OIDC: validates SSO token from Tenant A's Okta (federated)   |
-  |  - API Key: validates against billing-service's key registry    |
-  |  - Both paths -> mint internal JWT:                              |
-  |      { sub: user_id, tenant_id: "A", roles: [...], aud: "*" }   |
-  +----------------------------------------------------------------+
-                              |
-              mTLS (service mesh) + internal JWT on every call
-                              |
-        +---------------------+---------------------+
-        v                     v                     v
-  +-----------+        +-----------+         +-----------+
-  | projects  |        | tasks     |         | billing   |
-  | service   |        | service   |         | service   |
-  +-----------+        +-----------+         +-----------+
-        |                     |                     |
-        v                     v                     v
-   Postgres (RLS:       Postgres (RLS:        Postgres (RLS:
-   tenant_id filter     tenant_id filter      tenant_id filter
-   on every query,      on every query)       on every query)
-   enforced by DB,
-   not just app code)
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-   All databases: encryption at rest via envelope encryption (§6.5),
-   CMK per tenant for the largest enterprise customers (contractual
-   requirement for some).
+    User(["Enterprise User<br/>Tenant A, via Okta"]) --> OIDC("Validate OIDC<br/>SSO token")
+    ThirdParty(["3rd-Party Integration<br/>API key"]) --> APIKey("Validate API key<br/>vs billing registry")
+
+    subgraph Edge["API Gateway / Edge"]
+        OIDC --> Mint("Mint internal JWT<br/>sub, tenant_id, roles, aud")
+        APIKey --> Mint
+    end
+
+    Mint -->|"mTLS + internal JWT"| Projects("projects<br/>service")
+    Mint -->|"mTLS + internal JWT"| Tasks("tasks<br/>service")
+    Mint -->|"mTLS + internal JWT"| Billing("billing<br/>service")
+
+    Projects --> PDB[("Postgres<br/>RLS: tenant_id filter")]
+    Tasks --> TDB[("Postgres<br/>RLS: tenant_id filter")]
+    Billing --> BDB[("Postgres<br/>RLS: tenant_id filter")]
+
+    class User,ThirdParty io
+    class OIDC,APIKey,Mint mathOp
+    class Projects,Tasks,Billing train
+    class PDB,TDB,BDB base
 ```
+
+RLS enforcement happens at the database layer, not just in application code (Design Decision #2). All databases use envelope encryption at rest (§6.5), with a dedicated CMK per tenant for the largest enterprise customers (a contractual requirement) and shared, regularly-rotated CMKs for the remaining tenants.
 
 ### Key Design Decisions
 

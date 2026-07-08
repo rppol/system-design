@@ -39,6 +39,37 @@ Gorilla paper: 12x compression on real Facebook production metrics
 
 **LZ4 / ZSTD as final pass**: Apply general-purpose compression on top of column-specific encoding. ClickHouse default: LZ4. Better compression: ZSTD (slower but 2-3x smaller).
 
+These four encodings are not alternatives — a real column-store pipeline routes each column to the encoding that matches its behavior, then runs every result through the same general-purpose compressor:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    raw([Raw column values]) --> pick{Column<br/>behavior?}
+    pick -->|"slowly-changing<br/>number"| delta["Delta encoding"]
+    pick -->|"floating-point<br/>metric"| xor["XOR / Gorilla<br/>~1.37 bits/value"]
+    pick -->|"low-cardinality<br/>string"| dict["Dictionary encoding"]
+    pick -->|"long runs,<br/>same value"| rle["Run-length encoding"]
+    delta --> zstd(("LZ4 / ZSTD<br/>final pass"))
+    xor --> zstd
+    dict --> zstd
+    rle --> zstd
+    zstd --> out([Compressed bytes<br/>on disk])
+
+    class raw io
+    class pick,zstd mathOp
+    class delta,xor,dict,rle train
+    class out base
+```
+
+Each column takes exactly one branch based on its data behavior, and every branch still passes through a final LZ4/ZSTD stage — this layering is why ClickHouse reaches the 10-50GB-from-1TB ratio cited in the intuition above rather than relying on any single technique alone.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -194,38 +225,62 @@ expr: sum(rate(http_requests_total{status=~"5.."}[5m])) /
 for: 5m
 ```
 
-```
-Prometheus TSDB storage:
-  Default retention: 15 days
-  Storage format: 2-hour chunks (blocks), each a mini time-series DB
-  Block: contains index (series → sample mapping) + samples (compressed)
-  Compaction: blocks merged into larger blocks over time
+Prometheus's local TSDB stores data in 2-hour blocks (index + compressed samples, merged by compaction over time) and keeps only 15 days by default; production setups fan the same stream out to one of three long-term backends for durable, multi-cluster storage.
 
-Long-term storage: Prometheus natively short-term
-  → Thanos: multi-cluster Prometheus with object storage (S3/GCS) for long-term
-  → Cortex: multi-tenant horizontally scalable Prometheus
-  → VictoriaMetrics: high-performance drop-in replacement
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    prom(Prometheus TSDB<br/>2h blocks, 15-day retention) -->|remote_write| thanos(Thanos)
+    prom -->|remote_write| cortex(Cortex)
+    prom -->|remote_write| vm(VictoriaMetrics)
+    thanos --> store([S3 / GCS<br/>long-term storage])
+    cortex --> store
+    vm --> store
+
+    class prom base
+    class thanos,cortex,vm frozen
+    class store io
 ```
+
+All three backends solve the same gap — Prometheus's own storage is deliberately short-term, so the real choice is scale and multi-tenancy, not whether to add one of them at all.
 
 ---
 
 ## 5. Architecture Diagrams
 
+The write path fans in from many producers, buffers through Kafka, lands in the TSDB, and is pre-aggregated before it ever reaches a dashboard:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    src([IoT / Sensors / Apps]) -->|"write<br/>10M events/sec"| kafka(Kafka<br/>ingestion buffer)
+    kafka -->|consume| tsdb(ClickHouse / TimescaleDB<br/>/ InfluxDB)
+    tsdb -->|"real-time<br/>aggregation"| mv(Materialized Views /<br/>Continuous Aggregates)
+    mv -->|"query<br/>dashboards, alerts"| dash([Grafana / Kibana /<br/>dashboards])
+
+    class src,dash io
+    class kafka req
+    class tsdb base
+    class mv mathOp
 ```
-TIME-SERIES DATA FLOW:
 
-IoT/Sensors/Apps
-      ↓ (write: 10M events/second)
-Kafka (ingestion buffer)
-      ↓ (consume)
-ClickHouse / TimescaleDB / InfluxDB
-      ↓ (real-time aggregation)
-Materialized Views / Continuous Aggregates
-      ↓ (query: dashboards, alerts)
-Grafana / Kibana / Custom dashboards
+**ClickHouse granule structure (primary index)**: MergeTree's sparse primary index stores one index mark per granule (default 8192 rows), not per row — the layout below shows why a query with `ORDER BY (device_id, ts)` can binary-search straight to the matching marks and skip everything else.
 
-CLICKHOUSE GRANULE STRUCTURE (primary index):
-
+```
 MergeTree table: ORDER BY (device_id, ts)
 Primary key index (sparse): one entry per 8192 rows (default granule_size)
 
@@ -277,6 +332,16 @@ ORDER BY hour;
 -- Vectorized aggregation on temperature column only
 ```
 
+```mermaid
+xychart-beta
+    title "Hourly-Average Query Over 1B Rows"
+    x-axis ["PostgreSQL (row store)", "ClickHouse (column store)"]
+    y-axis "Query time (seconds)" 0 --> 320
+    bar [300, 3]
+```
+
+Reading only the 2 needed columns instead of every 100-byte row cuts I/O from ~100GB to ~6GB compressed, turning a ~300-second full-row scan into a ~3-second vectorized column scan — a roughly 100x gap that comes from the columnar layout itself, not from faster hardware.
+
 ### Downsampling and Retention
 
 ```sql
@@ -300,6 +365,37 @@ TTL ts + INTERVAL 30 DAY DELETE,            -- Delete raw data after 30 days
     ts + INTERVAL 7 DAY TO DISK 'ssd',     -- Move to SSD after 7 days
     ts + INTERVAL 24 HOUR TO VOLUME 'hot'; -- Move to hot tier within 24 hours
 ```
+
+Each TTL clause above fires independently on row age, so a single row cools through three tiers in sequence rather than jumping straight to deletion:
+
+```mermaid
+stateDiagram-v2
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    state "New row<br/>(active part)" as New
+    state "hot volume" as Hot
+    state "ssd disk" as Ssd
+    state "Deleted" as Gone
+
+    [*] --> New: insert
+    New --> Hot: age over 24 hours<br/>TO VOLUME 'hot'
+    Hot --> Ssd: age over 7 days<br/>TO DISK 'ssd'
+    Ssd --> Gone: age over 30 days<br/>TTL DELETE
+    Gone --> [*]
+
+    class New train
+    class Hot base
+    class Ssd frozen
+    class Gone lossN
+```
+
+Tracing one row through the multi-clause TTL statement makes the ordering concrete: active data cools into the hot volume at 24 hours, moves to SSD at 7 days, and is deleted at 30 days — the same age-based tiering that lets ClickHouse keep only what's still worth its storage tier.
 
 ---
 
@@ -349,6 +445,34 @@ TTL ts + INTERVAL 30 DAY DELETE,            -- Delete raw data after 30 days
 - Random access to individual records (not time-range)
 - Complex joins across many entity types (relational is better)
 - Primary key lookups (key-value store is faster)
+
+Collapsing all of the criteria above into one path shows why the four engines are not interchangeable — each wins a different branch of the same decision, not a generic "best TSDB" contest:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    wl([New workload]) --> gate{"Time-range queries,<br/>append-only,<br/>over 100K events/sec?"}
+    gate -->|"no - updates,<br/>key lookups, joins"| other([Relational or<br/>key-value store])
+    gate -->|yes| need{Primary need?}
+    need -->|"SQL + ACID<br/>+ joins"| tsdb([TimescaleDB])
+    need -->|"pull-based<br/>app metrics"| prom([Prometheus])
+    need -->|"billions of rows,<br/>HTAP analytics"| ch([ClickHouse])
+    need -->|"Telegraf agents,<br/>simple metrics model"| influx([InfluxDB])
+
+    class wl io
+    class gate,need mathOp
+    class tsdb,prom,ch,influx train
+    class other frozen
+```
+
+Every branch past the first gate still has to satisfy the same "use a TSDB" criteria stated above; the second gate is what actually separates TimescaleDB, Prometheus, ClickHouse, and InfluxDB from each other.
 
 ---
 

@@ -84,42 +84,84 @@ The non-obvious hard parts are (1) **the load generator is usually the bottlenec
 
 Distributed load generation against a K8s-hosted service:
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    orch(["k6-operator<br/>or Locust master"])
+    r1(["runner-1<br/>1/3 load"])
+    r2(["runner-2<br/>1/3 load"])
+    r3(["runner-3<br/>1/3 load"])
+    sut["System Under Test<br/>20x replicas + ALB + HPA"]
+    mon[("Prometheus /<br/>Grafana")]
+    resultsSink(["k6 Results<br/>remote write / CSV"])
+    gate{"CI Gate"}
+
+    orch -->|"split N VUs /<br/>arrival rate"| r1
+    orch --> r2
+    orch --> r3
+    r1 -->|"constant arrival<br/>rate (open model)"| sut
+    r2 --> sut
+    r3 --> sut
+    sut -->|"metrics"| mon
+    mon -->|"p50/p95/p99, error rate,<br/>saturation, autoscale events"| gate
+    r1 -.->|"local timings"| resultsSink
+    r2 -.-> resultsSink
+    r3 -.-> resultsSink
+    resultsSink -->|"threshold<br/>pass/fail"| gate
+
+    class orch,gate mathOp
+    class r1,r2,r3,resultsSink req
+    class sut frozen
+    class mon base
 ```
-        ┌──────────────────────────────────────────────────────────┐
-        │   k6-operator (or Locust master)  — orchestrates the run    │
-        └───────────────┬──────────────┬──────────────┬──────────────┘
-                        │              │              │  split N VUs / arrival rate
-                        v              v              v
-                 ┌───────────┐  ┌───────────┐  ┌───────────┐
-                 │ runner-1  │  │ runner-2  │  │ runner-3  │   (load generator pods,
-                 │ 1/3 load  │  │ 1/3 load  │  │ 1/3 load  │    each well under its
-                 └─────┬─────┘  └─────┬─────┘  └─────┬─────┘    own CPU/FD/port limits)
-                       └──────────────┼──────────────┘
-                                      │ constant arrival rate (open model)
-                                      v
-                        ┌──────────────────────────────┐
-                        │  System Under Test (SUT)       │
-                        │  20× app replicas behind ALB   │
-                        │  HPA scales on CPU/RPS          │
-                        │  prod-like instances + deps     │
-                        └───────────────┬────────────────┘
-                                        │ metrics
-                                        v
-                          Prometheus / Grafana  ── p50/p95/p99, error rate,
-                                                    saturation, autoscale events
-   Results (k6) ──> Prometheus remote write / CSV / threshold pass-fail ──> CI gate
-```
+Each runner pod stays well under its own CPU/FD/port limits while collectively driving an honest open-model arrival rate at the SUT; the CI gate fails the build if either the SUT's measured percentiles or k6's own thresholds breach the SLO.
 
 Closed vs open model under saturation (why it matters):
 
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Closed["Closed (VU) Model"]
+        direction TB
+        c1(["100 VUs:<br/>send → wait → send"])
+        c2("System slows<br/>to 2s/req")
+        c3("VUs send<br/>FEWER requests")
+        c4("Reported p99<br/>stays ~2s")
+        c5("Coordinated omission<br/>hides the tail")
+        c1 --> c2 --> c3 --> c4 --> c5
+    end
+
+    subgraph Open["Open (Arrival-Rate) Model"]
+        direction TB
+        o1(["5000 req/s sent,<br/>regardless of responses"])
+        o2("System slows<br/>to 2s/req")
+        o3("Requests PILE UP<br/>in the queue")
+        o4("Reported p99<br/>climbs to 30s")
+        o5("Real user experience<br/>captured — the truth")
+        o1 --> o2 --> o3 --> o4 --> o5
+    end
+
+    class c1,o1 io
+    class c2,o2 mathOp
+    class c3,c4,c5 lossN
+    class o3 req
+    class o4,o5 train
 ```
-  CLOSED (VU) model:                          OPEN (arrival-rate) model:
-  100 VUs, each: send -> wait -> send         5000 req/s sent regardless of responses
-  system slows to 2s/req                       system slows to 2s/req
-   -> VUs naturally send FEWER requests         -> requests PILE UP in the queue
-   -> reported p99 stays ~2s (looks fine!)      -> reported p99 climbs to 30s (the TRUTH)
-   -> COORDINATED OMISSION hides the tail        -> real user experience captured
-```
+Same 2-second slowdown, two different tools: the closed model's VUs quietly throttle themselves and hide the real tail, while the open model lets requests queue and reports the honest — and far worse — p99.
 
 ---
 
@@ -211,16 +253,14 @@ locust -f locustfile.py --worker --master-host=localhost   # x N workers
 
 Step-ramp and watch where p99 breaks the SLO; that step is your per-replica ceiling:
 
+```mermaid
+xychart-beta
+    title "Capacity Step-Ramp — p99 Latency vs Arrival Rate (1 replica, HPA disabled)"
+    x-axis "Arrival rate (RPS)" [200, 400, 600, 800]
+    y-axis "p99 latency (ms)" 0 --> 2000
+    bar [85, 140, 310, 1900]
 ```
-  Replicas pinned to 1 (HPA disabled), step the arrival rate:
-   step  arrival   p99      errors   verdict
-   1     200 RPS   85 ms    0%       ok
-   2     400 RPS   140 ms   0%       ok
-   3     600 RPS   310 ms   0.2%     near SLO edge (p99 SLO=300ms)
-   4     800 RPS   1.9 s    4%       BROKEN — knee of the curve
-  => sustainable ~550 RPS/replica. To serve 11k RPS peak: 11000/550 ≈ 20 replicas + headroom.
-  => set HPA target so a replica runs at ~70% of 550 ≈ 385 RPS before adding a pod.
-```
+The knee appears at step 4: p99 rockets from 310ms to 1.9s and errors jump to 4% (SLO is p99<300ms), so the safe ceiling is ~550 RPS/replica — serving an 11k RPS peak needs ≈20 replicas with headroom, and the HPA target should trigger at ~70% of 550 ≈ 385 RPS/replica.
 
 ### 6.5 Wiring the gate into CI
 
@@ -458,6 +498,28 @@ Fixes:
  - Tune DB connection pool + add read replicas; cap per-pod pool so 30 pods don't exceed DB max.
 ```
 
+The instant spike and the autoscaler's reaction time are racing — and the autoscaler loses:
+
+```mermaid
+sequenceDiagram
+    participant T as Traffic
+    participant P as Existing Pods
+    participant DB as Aurora DB Pool
+    participant H as HPA Autoscaler
+
+    Note over T: T+0s — 50x spike: 100 → 12,000 RPS
+    T->>P: 12,000 RPS (instant)
+    P->>DB: 30 pods × 50 conns = 1,500 requested
+    DB-->>P: refused — pool cap is 1,000
+    P-->>T: cascading 500s (70% errors)
+    P->>H: CPU/RPS breach detected
+    Note over H: T+15s — HPA sync loop completes
+    H->>P: schedules new pods
+    Note over H,P: T+55s — new pods finally serving
+    Note over T,DB: 18 minutes, ~$400k lost before capacity catches up
+```
+The spike is instantaneous but HPA's reaction is not — a 15s sync loop plus ~40s pod start means ~55s pass before new capacity arrives, and by then the connection pool is already exhausted and 70% of requests are failing.
+
 **Broken DB pool config (the actual root cause) and the fix:**
 ```yaml
 # BROKEN: each of 30 pods opens up to 50 DB connections = 1500, but Aurora
@@ -470,6 +532,18 @@ env:
 env:
   - { name: DB_POOL_MAX, value: "25" }   # 30 x 25 = 750 < 1000, with RDS Proxy pooling
 ```
+
+The arithmetic in those two configs is the entire root cause:
+
+```mermaid
+xychart-beta
+    title "DB Connections Requested vs Aurora Cap (30 pods)"
+    x-axis ["Broken (pool=50)", "Fixed (pool=25)"]
+    y-axis "Connections requested" 0 --> 1600
+    bar [1500, 750]
+    line [1000, 1000]
+```
+30 pods × 50 connections = 1,500 blows through Aurora's 1,000-connection cap (line), which is what actually triggered the cascading 500s; 30 × 25 = 750 stays safely under it, with RDS Proxy multiplexing added on top for further headroom.
 
 **Result:** The capacity test revealed the real per-replica ceiling (~550 RPS) and the DB-pool root cause that the old mocked test had completely hidden. With pre-scaling, a waiting-room admission gate to flatten the spike, RDS Proxy + a bounded connection pool, and an honest open-model test gating CI, the next on-sale handled the 50× spike with <0.5% errors and the latency SLO held throughout — versus 70% errors and $400k lost previously. The soak test added afterward also caught a connection leak that would have degraded the system after ~5 hours of sustained sale traffic.
 
