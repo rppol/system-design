@@ -20,6 +20,28 @@ const SECTION_LABELS = {
   llm: "LLM Engineering", ml: "Machine Learning", python: "Python", fastapi: "FastAPI", spring: "Spring",
 };
 
+// Per-section visual identity for the reader: a One-Dark-band accent (readable on
+// the pitch-black reader surface) + a short glyph monogram. Consumed as the
+// `--sec-accent` custom property set on #reader per opened path — every accent
+// consumer falls back to var(--accent), so unknown sections degrade cleanly.
+const SECTION_IDENTITY = {
+  lld:             { accent: "#c678dd", glyph: "{ }" },
+  hld:             { accent: "#61afef", glyph: "◇" },
+  backend:         { accent: "#56b6c2", glyph: "≋" },
+  database:        { accent: "#98c379", glyph: "▤" },
+  java:            { accent: "#e06c75", glyph: "J" },
+  spring:          { accent: "#7ee787", glyph: "S" },
+  python:          { accent: "#e5c07b", glyph: "λ" },
+  fastapi:         { accent: "#4ec9b0", glyph: "F" },
+  ml:              { accent: "#d19a66", glyph: "Σ" },
+  llm:             { accent: "#b180f0", glyph: "Ψ" },
+  devops:          { accent: "#6cb6ff", glyph: "∞" },
+  cuda:            { accent: "#9ece6a", glyph: "▦" },
+  cs_fundamentals: { accent: "#f2917e", glyph: "∴" },
+  book:            { accent: "#c0a36e", glyph: "¶" },
+};
+const sectionIdentity = (path) => SECTION_IDENTITY[(path || "").split("/")[0]] || null;
+
 // Phase-order for the Study browser. Derived from each section's README learning path.
 // Modules not listed here sort to the end (alphabetically by JS Map insertion order).
 const STUDY_ORDER = {
@@ -4936,6 +4958,7 @@ function openReaderTypeMenu(anchorBtn) {
   const font = localStorage.getItem("sd_reader_font") || "sans";
   const measure = localStorage.getItem("sd_reader_measure") || "default";
   const dropcap = localStorage.getItem("sd_reader_dropcap") !== "0";
+  const recall = localStorage.getItem("sd_reader_recall") !== "0";
   const seg = (k, opts, cur) => `<div class="rtp-seg" data-k="${k}">` +
     opts.map(([v, lbl]) => `<button data-v="${v}" class="${v === cur ? "on" : ""}">${lbl}</button>`).join("") + `</div>`;
   const pop = document.createElement("div");
@@ -4943,12 +4966,13 @@ function openReaderTypeMenu(anchorBtn) {
   pop.innerHTML =
     `<div class="rtp-row"><span class="rtp-lbl">Font</span>${seg("sd_reader_font", [["sans", "Sans"], ["serif", "Serif"]], font)}</div>` +
     `<div class="rtp-row"><span class="rtp-lbl">Width</span>${seg("sd_reader_measure", [["narrow", "Narrow"], ["cozy", "Cozy"], ["wide", "Wide"], ["default", "Auto"]], measure)}</div>` +
-    `<div class="rtp-row"><span class="rtp-lbl">Drop-cap</span>${seg("sd_reader_dropcap", [["1", "On"], ["0", "Off"]], dropcap ? "1" : "0")}</div>`;
+    `<div class="rtp-row"><span class="rtp-lbl">Drop-cap</span>${seg("sd_reader_dropcap", [["1", "On"], ["0", "Off"]], dropcap ? "1" : "0")}</div>` +
+    `<div class="rtp-row"><span class="rtp-lbl">Answers</span>${seg("sd_reader_recall", [["1", "Hidden"], ["0", "Shown"]], recall ? "1" : "0")}</div>`;
   panel.appendChild(pop);
   pop.querySelectorAll(".rtp-seg").forEach((s) => s.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
     localStorage.setItem(s.dataset.k, b.dataset.v);
     s.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-    applyReaderTypography();
+    if (s.dataset.k === "sd_reader_recall") applyRecallPref(); else applyReaderTypography();
   })));
   setTimeout(() => {
     const done = () => { pop.remove(); document.removeEventListener("mousedown", off); document.removeEventListener("keydown", esc, true); };
@@ -4976,16 +5000,30 @@ function buildToc(tocEl, main) {
   return heads.length;
 }
 
-// Reading-time chip: prepend "~N min read · M sections" to the content. Uses the
-// rendered text so code/diagram noise is included at roughly the right weight.
-function prependReadingMeta(main) {
+// Masthead: the designed opening of every page — section badge (glyph + label in
+// the section hue), the lead h1 (moved in, not cloned, so find/TOC keep the live
+// node), an ornament rule, and the "~N min read · M sections" meta (rendered text
+// at ~200wpm so code/diagram noise is included at roughly the right weight).
+function buildMasthead(main, path) {
   const words = (main.textContent.trim().match(/\S+/g) || []).length;
   const mins = Math.max(1, Math.round(words / 200));
   const secs = main.querySelectorAll("h2[id]").length;
-  const meta = document.createElement("div");
-  meta.className = "reading-meta";
-  meta.innerHTML = `<span>~${mins} min read</span>${secs ? `<span class="rm-dot">·</span><span>${secs} section${secs > 1 ? "s" : ""}</span>` : ""}`;
-  main.insertBefore(meta, main.firstChild);
+  const ident = sectionIdentity(path);
+  const label = SECTION_LABELS[(path || "").split("/")[0]];
+  let h1 = null;
+  for (const ch of main.children) {
+    if (ch.tagName === "H1") { h1 = ch; break; }
+    if (/^H[2-6]$/.test(ch.tagName)) break;           // body starts at a subheading — no lead h1
+  }
+  const head = document.createElement("header");
+  head.className = "rd-masthead";
+  head.innerHTML =
+    (ident && label ? `<div class="rd-mast-badge"><span class="rd-mast-glyph" aria-hidden="true">${esc(ident.glyph)}</span><span>${esc(label)}</span></div>` : "") +
+    (h1 ? "" : `<h1>${esc(reader.titleText)}</h1>`) +
+    `<div class="rd-mast-rule" aria-hidden="true"></div>
+    <div class="rd-mast-meta"><span>~${mins} min read</span>${secs ? `<span class="rm-dot">·</span><span>${secs} section${secs > 1 ? "s" : ""}</span>` : ""}</div>`;
+  if (h1) head.insertBefore(h1, head.querySelector(".rd-mast-rule"));
+  main.insertBefore(head, main.firstChild);
 }
 
 // Scroll-spy: highlight the section currently at the top of the viewport in the
@@ -5061,7 +5099,10 @@ function readerFindRun(main, q) {
         if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
         for (let p = node.parentElement; p && p !== main; p = p.parentElement) {
           const tag = (p.tagName || "").toLowerCase();
-          if (tag === "script" || tag === "style" || tag === "svg" || (p.classList && p.classList.contains("mermaid"))) return NodeFilter.FILTER_REJECT;
+          if (tag === "script" || tag === "style" || tag === "svg") return NodeFilter.FILTER_REJECT;
+          // skip injected chrome: mermaid SVG, recall/reveal buttons, heading anchors
+          if (p.classList && (p.classList.contains("mermaid") || p.classList.contains("recall-btn") ||
+              p.classList.contains("recall-all") || p.classList.contains("h-anchor"))) return NodeFilter.FILTER_REJECT;
         }
         return node.nodeValue.toLowerCase().includes(needle) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
       },
@@ -5083,6 +5124,13 @@ function readerFindRun(main, q) {
     }
     _find.matches = [...main.querySelectorAll("mark.rd-find")];
     _find.idx = _find.matches.length ? 0 : -1;
+    // Think-first answers: reveal any collapsed answer that contains a match, so
+    // the "k / N" counter stays honest and scrollIntoView can reach every match
+    // (mirrors the browser's hidden=until-found behavior). Stays revealed on clear.
+    main.querySelectorAll(".recall-body mark.rd-find").forEach((mk) => {
+      const r = mk.closest(".recall");
+      if (r && !r.classList.contains("open")) openRecall(r);
+    });
   }
   readerFindFocus();
 }
@@ -5264,6 +5312,89 @@ function wireReaderBody(body) {
   }));
 }
 
+// ---------- think-first recall (interview Q&As) ----------
+// Collapse each interview answer behind a "Show answer" button so §12 becomes
+// active recall instead of passive scanning. Scoped strictly to the interview-
+// questions h2 region (mirrors extract.py's heading regex) — bold paragraphs
+// elsewhere (§10 gotcha labels etc.) stay untouched. An answer is ALL siblings
+// between one .md-q and the next question/heading (.md-a only tags the first
+// paragraph), so multi-paragraph answers, lists, and code fences collapse whole.
+function openRecall(r, open = true) {
+  r.classList.toggle("open", open);
+  const b = r.querySelector(".recall-btn");
+  if (!b) return;
+  b.setAttribute("aria-expanded", open ? "true" : "false");
+  b.textContent = open ? "Hide answer" : "Show answer";
+}
+function wireRecallPrompts(main) {
+  const off = localStorage.getItem("sd_reader_recall") === "0";
+  const panel = el("#reader");
+  if (panel) panel.classList.toggle("recall-off", off);
+  const h2 = [...main.querySelectorAll("h2[id]")].find((h) => /interview\s+q/i.test(h.textContent));
+  if (!h2) return;
+  let n = 0;
+  for (let node = h2.nextElementSibling; node && node.tagName !== "H2";) {
+    if (!node.matches("p.md-q, p.md-qa")) { node = node.nextElementSibling; continue; }
+    const q = node, group = [];
+    // Inline form (.md-qa): question and answer share one paragraph — split the
+    // remainder after the bold question into its own answer paragraph.
+    if (q.matches("p.md-qa")) {
+      const strong = q.querySelector(":scope > strong:first-child");
+      if (strong) {
+        const rest = document.createElement("p");
+        rest.className = "md-a";
+        while (strong.nextSibling) rest.appendChild(strong.nextSibling);
+        if (rest.textContent.trim()) group.push(rest);
+      }
+    }
+    let cur = q.nextElementSibling;
+    while (cur && cur.tagName !== "H2" && cur.tagName !== "H3" && !cur.matches("p.md-q, p.md-qa")) {
+      group.push(cur); cur = cur.nextElementSibling;
+    }
+    node = cur;
+    if (!group.length) continue;
+    const wrap = document.createElement("div");
+    wrap.className = "recall";
+    const id = `recall-a-${++n}`;                    // page-local; regenerated per render
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = "recall-btn";
+    btn.setAttribute("aria-expanded", "false"); btn.setAttribute("aria-controls", id);
+    btn.textContent = "Show answer";
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "recall-body"; bodyEl.id = id;
+    group.forEach((g) => bodyEl.appendChild(g));
+    wrap.appendChild(btn); wrap.appendChild(bodyEl);
+    q.after(wrap);
+    if (off) openRecall(wrap, true);
+    btn.addEventListener("click", () => openRecall(wrap, !wrap.classList.contains("open")));
+  }
+  if (!n) return;
+  // "Reveal all" pill on the §12 heading. Safe to append here: buildToc has
+  // already read the heading labels, and find rejects .recall-all text.
+  const all = document.createElement("button");
+  all.type = "button"; all.className = "recall-all";
+  const sync = () => {
+    const rs = [...main.querySelectorAll(".recall")];
+    all.textContent = rs.every((r) => r.classList.contains("open")) ? "Hide all" : "Reveal all";
+  };
+  sync();
+  all.addEventListener("click", () => {
+    const rs = [...main.querySelectorAll(".recall")];
+    const open = !rs.every((r) => r.classList.contains("open"));
+    rs.forEach((r) => openRecall(r, open)); sync();
+  });
+  main.addEventListener("click", (e) => { if (e.target.closest(".recall-btn")) sync(); });
+  h2.appendChild(all);
+}
+// Applies the Aa-popover "Answers" pref live: Shown opens every answer and hides
+// the buttons via #reader.recall-off (no unwrap needed); Hidden re-collapses.
+function applyRecallPref() {
+  const off = localStorage.getItem("sd_reader_recall") === "0";
+  const panel = el("#reader"), main = el("#readerMain");
+  if (panel) panel.classList.toggle("recall-off", off);
+  if (main) main.querySelectorAll(".recall").forEach((r) => openRecall(r, off));
+}
+
 // "Evaluate me": every topic page ends with a one-click quiz scoped to its
 // module. Hidden mid-quiz (starting one would destroy the live deck) and on
 // pages that aren't a bank module (section roots, case studies).
@@ -5298,6 +5429,102 @@ function appendEvalBlock(main, path) {
       if (sub) sub.textContent = `${n} questions on ${name} — misses feed your review deck.`;
     }).catch(() => {});
   }
+}
+
+// "Continue your path": up to three cards at the end of every module page — the
+// next unread module in the study order, the strongest graph-related modules,
+// and a resume-last-read card — so reading flows into more reading without a
+// trip back to Study. Each card carries its TARGET's section hue (resume may be
+// cross-section). Quietly animated in the first time the page is read to the
+// end — see revealClosure().
+async function appendWhatNext(main, path) {
+  if (state.inQuiz) return;
+  const dir = path.replace(/\/[^/]+$/, "");
+  const files = (state.index && state.index.files) || {};
+  if (!files[dir] || !reader.nav) return;            // needs a module page + nav context
+  // sd_last_read still holds the PREVIOUS page here (this render pass overwrites
+  // it after us) — but read it before the graph await can lose that race.
+  let last = null;
+  try { last = JSON.parse(localStorage.getItem("sd_last_read") || "null"); } catch { /* corrupt */ }
+  const section = dir.split("/")[0];
+  const myPath = path;
+  const g = await loadGraph(section);                // cached; null offline / no graph file
+  if (reader.path !== myPath) return;                // user navigated away during the fetch
+  const cards = [], seen = new Set([dir]);
+  const push = (p, kind, title) => {
+    const d = p.replace(/\/[^/]+$/, "");
+    if (seen.has(d) || cards.length >= 3) return;
+    seen.add(d);
+    cards.push({ path: p, kind, title: title || d.split("/").pop().replace(/_/g, " ") });
+  };
+  const list = reader.nav.list || [];
+  for (let i = reader.nav.idx + 1; i < list.length; i++) {
+    if (!isModuleRead(list[i].path)) { push(list[i].path, "Up next", list[i].title); break; }
+  }
+  if (g && Array.isArray(g.pairs)) {
+    const rel = g.pairs.filter((pr) => pr.a === dir || pr.b === dir)
+      .sort((x, y) => (y.w || 0) - (x.w || 0))
+      .map((pr) => (pr.a === dir ? pr.b : pr.a));
+    const unread = rel.filter((m) => !isModuleRead(m + "/README.md"));
+    for (const m of unread.concat(rel.filter((m) => isModuleRead(m + "/README.md")))) {
+      if (cards.length >= 2) break;                  // related takes at most 2; leave room for resume
+      push(m + "/README.md", "Related");
+    }
+  }
+  if (last && last.path && last.path !== path) push(last.path, "Resume", last.title);
+  if (!cards.length) return;
+  const block = document.createElement("div");
+  block.className = "whatnext";
+  block.innerHTML = `<div class="wn-rule" aria-hidden="true"></div>
+    <div class="wn-h">Continue your path</div><div class="wn-cards"></div>`;
+  const wrap = block.querySelector(".wn-cards");
+  for (const c of cards) {
+    const tdir = c.path.replace(/\/[^/]+$/, "");
+    const tid = sectionIdentity(tdir);
+    const read = isModuleRead(c.path);
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "wn-card";
+    if (tid) b.style.setProperty("--sec-accent", tid.accent);
+    b.setAttribute("aria-label", `${c.kind}: ${c.title}${read ? " (read)" : ""}`);
+    b.innerHTML = `<span class="wn-kind">${esc(c.kind)}</span>
+      <span class="wn-title">${esc(c.title)}</span>
+      <span class="wn-sec"><span class="wn-glyph" aria-hidden="true">${esc(tid ? tid.glyph : "§")}</span>${esc(SECTION_LABELS[tdir.split("/")[0]] || tdir.split("/")[0])}${read ? `<span class="wn-read">✓ read</span>` : ""}</span>`;
+    b.addEventListener("click", () => {
+      reader.back.push({ path: reader.path, title: reader.titleText, nav: reader.nav });
+      openReaderPath(c.path, c.title, null);         // navFromIndex synthesizes the target's nav
+    });
+    wrap.appendChild(b);
+  }
+  main.appendChild(block);
+}
+
+// Heading anchors: hovering a section heading reveals a "#" that copies the
+// section's #/reader/<path>@<frag> deep link. Wired AFTER buildToc (which reads
+// heading textContent for labels); find's TreeWalker rejects .h-anchor text.
+function wireHeadingAnchors(main, path) {
+  main.querySelectorAll("h2[id], h3[id]").forEach((h) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "h-anchor";
+    b.setAttribute("aria-label", "Copy link to section");
+    b.textContent = "#";
+    b.addEventListener("click", () => {
+      const url = location.href.split("#")[0] + readerHash(path, h.id);
+      try { if (navigator.clipboard) navigator.clipboard.writeText(url); } catch { /* denied */ }
+      b.textContent = "✓"; b.classList.add("ok");
+      setTimeout(() => { b.textContent = "#"; b.classList.remove("ok"); }, 1200);
+    });
+    h.appendChild(b);
+  });
+}
+
+// Quiet end-of-read closure: the first time a page is read to the end, the
+// what-next rule draws itself and the cards rise in. Deliberately below the
+// moments-engine celebration bar — no confetti, no sound, one soft haptic.
+function revealClosure() {
+  const block = el("#readerBody .whatnext");
+  if (!block || block.classList.contains("wn-live")) return;
+  block.classList.add("wn-live");
+  haptic("correct");
 }
 
 // Open any repo content file by path. Pushing onto the back-stack is the caller's
@@ -5337,6 +5564,10 @@ async function openReaderPath(path, title, navCtx, frag) {
   reader.titleText = title || titleFromPath(path);
   let panel = el("#reader");
   if (!panel) { panel = document.createElement("aside"); panel.id = "reader"; document.body.appendChild(panel); }
+  // Section identity: one JS-set property scopes every accent consumer (progress
+  // bar, TOC, drop-cap, masthead, what-next cards) to the section's hue.
+  const ident = sectionIdentity(path);
+  panel.style.setProperty("--sec-accent", ident ? ident.accent : "var(--accent)");
   const nav = reader.nav;
   const backBtn = reader.back.length
     ? `<button class="reader-nav" id="readerBack" title="Back">&lsaquo; Back</button>` : "";
@@ -5381,6 +5612,7 @@ async function openReaderPath(path, title, navCtx, frag) {
       if (reader._spy) reader._spy();
       scheduleScrollSave(reader.path, body.scrollTop);
       maybeMarkRead(reader.path, body);              // reading feeds the game (Phase 6)
+      if (reader._read && !reader._closed) { reader._closed = true; revealClosure(); }
     }, { passive: true });
     top.addEventListener("click", () => body.scrollTo({ top: 0, behavior: REDUCED() ? "auto" : "smooth" }));
   }
@@ -5423,18 +5655,26 @@ async function openReaderPath(path, title, navCtx, frag) {
     buildModuleNav(el("#readerModules"), reader.nav, path);
     const headCount = buildToc(el("#readerToc"), main);
     el("#readerIdx").style.display = headCount >= 3 ? "" : "none";   // nothing to index -> hide toggle
-    prependReadingMeta(main);                      // "~N min read · M sections"
+    buildMasthead(main, path);                     // badge + title + rule + "~N min read"
     wireReaderBody(main);
+    wireRecallPrompts(main);                       // think-first: collapse §12 answers
     wireDiagramsAndCopy(main);                     // copy buttons + ASCII-diagram zoom
     renderMermaid(main);                           // no-op when page has no mermaid fences
+    wireHeadingAnchors(main, path);                // hover-to-copy section deep links
     appendEvalBlock(main, path);                   // "Evaluate me" quiz launcher
+    appendWhatNext(main, path);                    // "Continue your path" cards (async, appends when ready)
     wireScrollSpy(main, b);                        // active-section highlight + §X/M
     reader._read = false;                          // reset per-page read-completion latch (Phase 6)
+    reader._closed = false;                        // reset per-page closure-reveal latch
     // Restore scroll: an explicit #frag wins; else resume the saved offset; else top.
     if (frag) { b.scrollTop = 0; const t = main.querySelector("#" + CSS.escape(frag)); if (t) t.scrollIntoView({ block: "start" }); }
     else { b.scrollTop = savedScrollFor(path); if (reader._spy) reader._spy(); }
     // Pages that fit without scrolling still count as read after a short dwell.
-    setTimeout(() => { if (reader.path === path && !reader._read) maybeMarkRead(path, b); }, 1600);
+    setTimeout(() => {
+      if (reader.path !== path) return;
+      if (!reader._read) maybeMarkRead(path, b);
+      if (reader._read && !reader._closed) { reader._closed = true; revealClosure(); }
+    }, 1600);
     localStorage.setItem("sd_last_read", JSON.stringify({ path, title: reader.titleText }));   // Study's "Continue reading"
   } catch {
     // [E1] reader failure keeps its own in-panel error (not the full errorScreen

@@ -139,11 +139,22 @@ whole repo root to Pages.
   Authored diagrams follow four style rules — **colour every node**, **horizontal-first**
   (`LR`), **no spillover text**, **rounded corners** (see the authoring contract below).
 - **Evaluate me** — every module page ends with a "Quiz this topic" launcher.
+- **Section identity + masthead** — each section has an accent hue + glyph
+  (`SECTION_IDENTITY`, applied as `--sec-accent` on the panel); every page opens with a
+  designed masthead (badge, title, ornament rule, "~N min read · M sections") and the
+  hue tints the progress bar, TOC, drop-cap, `§ n` heading ornaments, and selection.
+- **Think-first recall** — §12 interview answers collapse behind "Show answer" buttons
+  (active recall while reading); "Reveal all" on the heading, an `Answers` toggle in the
+  Aa popover (`sd_reader_recall`), and in-page find auto-reveals answers containing a match.
+- **Continue your path** — module pages end with up to three cards (next unread in the
+  study order, graph-related modules, resume last read), each in its target section's hue;
+  they animate in quietly the first time the page is read to the end.
 - **Comfort + deep links** — drag-resize, fullscreen, collapsible index + module tree,
-  reading-progress bar, `A−`/`A+` font, back-to-top, working cross-links, an interactive
-  pan/zoom **diagram lightbox**, and `#/reader/<path>` deep links.
+  reading-progress bar, `A−`/`A+` font, Aa typography popover, back-to-top, working
+  cross-links, hover-to-copy heading anchors, an interactive pan/zoom **diagram
+  lightbox**, and `#/reader/<path>` deep links.
 - **Hard limit (see `CLAUDE.md`):** the reader surface is pitch-black `#000000` with
-  `#e6e6e6` prose in **every** theme — only the app chrome re-themes.
+  `#ffffff` prose in **every** theme — only the app chrome re-themes.
 
 ### Insights (Progress screen)
 
@@ -206,6 +217,7 @@ focus management, no emojis, tabular numerals throughout.
 | `sd_prime_opt` | Count of "just read" opt-outs; 3 stops the prime offer. |
 | `sd_cm_<id>` | First-run coach marks seen (`first_question`/`first_combo`/`first_results`/`first_cards`). |
 | `sd_reader_fs` / `sd_reader_full` / `sd_reader_toc` / `sd_reader_modules` / `sd_reader_w` / `sd_modules_w` / `sd_toc_w` | Reader font size, fullscreen, TOC/module-tree open state, pane/sidebar widths. |
+| `sd_reader_font` / `sd_reader_measure` / `sd_reader_dropcap` / `sd_reader_recall` / `sd_reader_scroll` | Reader typography (serif, measure, drop-cap), think-first answers pref (`"1"` hidden = default), per-path scroll-resume map. |
 | `sd_last_export` | Date of the last backup export (for the backup nudge). |
 
 ---

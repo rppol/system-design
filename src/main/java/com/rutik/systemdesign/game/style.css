@@ -942,8 +942,10 @@ mark.rd-find-cur { background: var(--accent); color: #05070d; }
 .rd-serif .md-body { font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif; }
 .rd-dropcap .md-body > p:first-of-type::first-letter {
   float: left; font-size: 2.9em; line-height: 0.82; font-weight: 700;
-  padding: 4px 8px 0 0; color: var(--od-text);
+  padding: 4px 8px 0 0; color: var(--sec-accent, var(--od-text));
 }
+/* text selection inside the reader carries the section hue (prose stays white) */
+#reader ::selection { background: color-mix(in srgb, var(--sec-accent, var(--accent)) 30%, transparent); }
 .reader-typepop {
   position: absolute; top: 50px; right: 14px; z-index: 44;
   min-width: 200px; padding: 10px 12px; display: grid; gap: 9px;
@@ -981,7 +983,7 @@ a.mod-item {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize;
 }
 a.mod-item:hover { color: var(--od-text); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-a.mod-item.active { color: var(--od-text); border-right-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
+a.mod-item.active { color: var(--od-text); border-right-color: var(--sec-accent, var(--accent)); background: color-mix(in srgb, var(--sec-accent, var(--accent)) 12%, transparent); font-weight: 600; }
 /* read-completion tick on module-tree entries (reading feeds the game) */
 a.mod-item.read::before, a.mod-file.read::before { content: "\2713 "; color: var(--good); font-weight: 700; }
 
@@ -1000,7 +1002,7 @@ a.mod-file {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize;
 }
 a.mod-file:hover { color: var(--od-text); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-a.mod-file.active { color: var(--od-text); border-right-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
+a.mod-file.active { color: var(--od-text); border-right-color: var(--sec-accent, var(--accent)); background: color-mix(in srgb, var(--sec-accent, var(--accent)) 12%, transparent); font-weight: 600; }
 
 .modules-grip, .toc-grip { display: none; flex-shrink: 0; width: 8px; cursor: col-resize; position: relative; z-index: 1; }
 #reader.modules-open .modules-grip { display: block; }
@@ -1019,9 +1021,9 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   text-decoration: none; border-left: 2px solid transparent; border-radius: 0 6px 6px 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.reader-toc a:hover { color: var(--od-text); border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.reader-toc a.toc-active { color: var(--od-text); border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
-.reader-toc .toc-pos { float: right; font-weight: 400; color: var(--accent); letter-spacing: 0.02em; }
+.reader-toc a:hover { color: var(--od-text); border-left-color: var(--sec-accent, var(--accent)); background: color-mix(in srgb, var(--sec-accent, var(--accent)) 8%, transparent); }
+.reader-toc a.toc-active { color: var(--od-text); border-left-color: var(--sec-accent, var(--accent)); background: color-mix(in srgb, var(--sec-accent, var(--accent)) 12%, transparent); font-weight: 600; }
+.reader-toc .toc-pos { float: right; font-weight: 400; color: var(--sec-accent, var(--accent)); letter-spacing: 0.02em; }
 
 /* ---------- 12. Markdown & code -------------------------------------------- */
 /* Prose follows the theme; code, ASCII diagrams, and Mermaid stay dark islands
@@ -1030,7 +1032,28 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body { color: var(--od-text); font-size: var(--rd-fs, 14.5px); line-height: 1.65; }
 .md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 { line-height: 1.3; margin: 18px 0 8px; letter-spacing: -0.01em; }
 .md-body h1 { font-size: 24px; color: var(--md-h1); }
-.md-body h2 { font-size: 20px; color: var(--md-h2); border-bottom: 1px solid var(--od-line); padding-bottom: 5px; }
+.md-body h2 { font-size: 20px; color: var(--md-h2); border-bottom: 1px solid color-mix(in srgb, var(--sec-accent, var(--accent)) 30%, transparent); padding-bottom: 5px; }
+/* section ornament: a right-aligned "§ n" marker in the section hue. Pure CSS
+   counter — ::after text never enters textContent, so TOC/find/spy see nothing. */
+.md-body { counter-reset: rdh2; }
+.md-body h2 { counter-increment: rdh2; }
+.md-body h2::after {
+  content: "\00A7 " counter(rdh2); float: right;
+  font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+  color: color-mix(in srgb, var(--sec-accent, var(--accent)) 70%, transparent); margin-top: 0.5em;
+}
+/* hover-to-copy section deep links (wired by wireHeadingAnchors) */
+.md-body h2 .h-anchor, .md-body h3 .h-anchor {
+  margin-left: 8px; padding: 0 6px; vertical-align: middle; cursor: pointer;
+  font-family: var(--mono); font-size: 0.65em; font-weight: 400; line-height: 1.6;
+  color: var(--sec-accent, var(--accent)); background: transparent;
+  border: 1px solid transparent; border-radius: 6px;
+  opacity: 0; transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+.md-body h2:hover .h-anchor, .md-body h3:hover .h-anchor, .md-body .h-anchor:focus-visible { opacity: 1; }
+.md-body .h-anchor:hover { border-color: color-mix(in srgb, var(--sec-accent, var(--accent)) 45%, transparent); }
+.md-body .h-anchor.ok { color: var(--good); opacity: 1; }
+@media (hover: none) { .md-body .h-anchor { opacity: 0.45; } }
 .md-body h3 { font-size: 17px; color: var(--md-h3); }
 .md-body h4 { font-size: 15px; color: var(--md-h4); }
 .md-body h5, .md-body h6 { font-size: 14px; color: var(--od-muted); }
@@ -1045,8 +1068,12 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body ul, .md-body ol { margin: 8px 0; padding-left: 22px; }
 .md-body li { margin: 3px 0; }
 .md-body li::marker { color: var(--od-muted); }
-.md-body a { color: var(--md-link); text-decoration: none; }
-.md-body a:hover { text-decoration: underline; }
+.md-body a {
+  color: var(--md-link); text-decoration: none;
+  background: linear-gradient(currentColor, currentColor) 0 100% / 0% 1px no-repeat;
+  transition: background-size 0.25s var(--ease-out);
+}
+.md-body a:hover { background-size: 100% 1px; }
 .md-body a.md-link { border-bottom: 1px dotted color-mix(in srgb, var(--md-link) 50%, transparent); }
 
 /* Callout / admonition blocks (promoted from blockquotes by calloutOf() in app.js).
@@ -1077,14 +1104,111 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body .callout-warstory  { --co: var(--bad); }
 .md-body .callout-example   { --co: var(--md-h3); }
 
-/* reading-time chip at the top of the content ("~7 min read · 11 sections") */
-.md-body .reading-meta {
-  display: flex; align-items: center; gap: 8px; margin: 0 0 16px; padding-bottom: 12px;
-  border-bottom: 1px solid var(--od-line);
+/* masthead: the designed opening of every reader page — section badge, lead
+   title, ornament rule, and the "~7 min read · 11 sections" meta. The glow is
+   decoration over the opaque black surface (the surface itself never changes).
+   Negative offsets only extend up/left, which never creates scrollbars in LTR. */
+.md-body .rd-masthead { position: relative; margin: 0 0 22px; padding: 14px 0 0; animation: rd-mast-in 0.45s var(--ease-out) both; }
+@keyframes rd-mast-in { from { opacity: 0; transform: translateY(8px); } }
+.md-body .rd-masthead::before {
+  content: ""; position: absolute; inset: -46px 0 auto -46px; height: 190px; pointer-events: none;
+  background: radial-gradient(ellipse 75% 90% at 16% 0%, color-mix(in srgb, var(--sec-accent, var(--accent)) 10%, transparent), transparent 70%);
+}
+.md-body .rd-mast-badge {
+  position: relative; display: inline-flex; align-items: center; gap: 8px; margin-bottom: 10px;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.12em; color: var(--sec-accent, var(--accent));
+}
+.md-body .rd-mast-glyph {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px;
+  padding: 0 5px; border-radius: 6px; font-size: 11px; letter-spacing: 0;
+  border: 1px solid color-mix(in srgb, var(--sec-accent, var(--accent)) 45%, transparent);
+  background: color-mix(in srgb, var(--sec-accent, var(--accent)) 10%, transparent);
+}
+.md-body .rd-masthead h1 { position: relative; margin: 0 0 10px; }
+.md-body .rd-mast-rule {
+  height: 1px; margin: 2px 0 10px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--sec-accent, var(--accent)) 55%, transparent), transparent 72%);
+}
+.md-body .rd-mast-meta {
+  display: flex; align-items: center; gap: 8px;
   font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em;
   color: var(--od-muted); text-transform: uppercase;
 }
-.md-body .reading-meta .rm-dot { opacity: 0.5; }
+.md-body .rd-mast-meta .rm-dot { opacity: 0.5; }
+
+/* think-first recall: §12 interview answers collapse behind a reveal button
+   (wired by wireRecallPrompts). Answer prose stays pure white — only the
+   affordance carries the section hue. #reader.recall-off = "Shown" pref. */
+.md-body .recall { margin: 2px 0 12px; }
+.md-body .recall-btn {
+  display: block; width: 100%; text-align: left; padding: 8px 12px; cursor: pointer;
+  font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: color-mix(in srgb, var(--sec-accent, var(--accent)) 80%, #fff);
+  background: color-mix(in srgb, var(--sec-accent, var(--accent)) 6%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--sec-accent, var(--accent)) 40%, transparent);
+  border-radius: 8px; transition: border-color 0.15s ease, background 0.15s ease;
+}
+.md-body .recall-btn::before { content: "? "; font-weight: 700; }
+.md-body .recall-btn:hover {
+  border-color: var(--sec-accent, var(--accent));
+  background: color-mix(in srgb, var(--sec-accent, var(--accent)) 12%, transparent);
+}
+.md-body .recall.open .recall-btn { border-style: solid; opacity: 0.55; }
+.md-body .recall-body { display: none; }
+.md-body .recall.open .recall-body { display: block; animation: recall-in 0.25s var(--ease-out); }
+@keyframes recall-in { from { opacity: 0; transform: translateY(-3px); } }
+.md-body h2 .recall-all {
+  float: right; margin-top: 2px; padding: 3px 10px; cursor: pointer;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 400; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--od-muted); background: transparent; border: 1px solid var(--od-line); border-radius: 999px;
+}
+.md-body h2 .recall-all:hover { color: var(--od-text); border-color: var(--sec-accent, var(--accent)); }
+#reader.recall-off .recall-btn, #reader.recall-off .recall-all { display: none; }
+@media print {
+  .recall-body { display: block !important; }
+  .recall-btn, .recall-all { display: none !important; }
+}
+
+/* "Continue your path" cards + end-of-read closure reveal. Each card carries its
+   TARGET's --sec-accent inline (cross-section resume gets its own hue). Fully
+   visible by default; .wn-live only plays the one-time reveal animation. */
+.md-body .whatnext { margin: 26px 0 8px; }
+.md-body .wn-rule {
+  height: 1px; margin: 0 0 14px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--sec-accent, var(--accent)) 55%, transparent), transparent);
+}
+.md-body .wn-h {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.12em; color: var(--od-muted); margin-bottom: 10px;
+}
+.md-body .wn-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.md-body .wn-card {
+  display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 12px 14px; cursor: pointer;
+  background: color-mix(in srgb, var(--sec-accent, var(--accent)) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sec-accent, var(--accent)) 22%, transparent);
+  border-radius: 12px; color: var(--od-text); font: inherit;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+.md-body .wn-card:hover {
+  border-color: color-mix(in srgb, var(--sec-accent, var(--accent)) 55%, transparent);
+  background: color-mix(in srgb, var(--sec-accent, var(--accent)) 12%, transparent);
+  transform: translateY(-1px);
+}
+.md-body .wn-kind { font-family: var(--mono); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--sec-accent, var(--accent)); }
+.md-body .wn-title { font-weight: 600; font-size: 13.5px; text-transform: capitalize; line-height: 1.35; }
+.md-body .wn-sec {
+  display: flex; align-items: center; gap: 6px; margin-top: auto;
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--od-muted);
+}
+.md-body .wn-glyph { color: var(--sec-accent, var(--accent)); }
+.md-body .wn-read { color: var(--good); margin-left: auto; }
+.md-body .whatnext.wn-live .wn-rule { animation: wn-rule-in 0.6s var(--ease-out) both; }
+@keyframes wn-rule-in { from { transform: scaleX(0); } }
+.md-body .whatnext.wn-live .wn-h { animation: rd-mast-in 0.4s var(--ease-out) 0.15s both; }
+.md-body .whatnext.wn-live .wn-card { animation: rd-mast-in 0.45s var(--ease-out) both; }
+.md-body .whatnext.wn-live .wn-card:nth-child(2) { animation-delay: 0.08s; }
+.md-body .whatnext.wn-live .wn-card:nth-child(3) { animation-delay: 0.16s; }
 .md-body code {
   background: var(--md-code-bg); border: 1px solid var(--md-code-brd); border-radius: 4px;
   padding: 1px 5px; font-size: 12.5px; font-family: var(--mono); color: var(--md-code-fg);
@@ -1122,7 +1246,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   border-radius: 6px; opacity: 0; transition: opacity 0.15s ease, color 0.15s ease;
 }
 .md-body pre:hover .codecopy { opacity: 1; }
-.codecopy:hover { color: #e6e9f0; border-color: rgba(255, 255, 255, 0.28); }
+.codecopy:hover { color: #e6e9f0; border-color: color-mix(in srgb, var(--sec-accent, var(--accent)) 45%, transparent); }
 .codecopy.ok { color: #98c379; border-color: rgba(152, 195, 121, 0.5); opacity: 1; }
 /* Touch devices never fire :hover, so the copy button would be permanently
    invisible — keep it faintly visible so it stays tappable on phones/tablets. */
@@ -1339,8 +1463,9 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 }
 
 @media (pointer: coarse) {
-  .ghost, .skip, .next, .grade, .opt, .reader-nav, .eval-btn, .tab { min-height: 44px; }
+  .ghost, .skip, .next, .grade, .opt, .reader-nav, .eval-btn, .tab, .recall-btn, .wn-card { min-height: 44px; }
   .reader-icon { min-width: 44px; }
+  .md-body .h-anchor { min-width: 28px; min-height: 28px; }   /* inline in headings — 44px would break line rhythm */
   .lp-chords { display: none; }   /* [E2] prerequisite chords are a hover affordance — off on touch */
 }
 
@@ -1540,7 +1665,7 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 
 /* reader: reading-progress bar, font buttons, back-to-top */
 .reader-progress { height: 2px; background: transparent; flex: 0 0 auto; }
-.reader-progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.15s linear; }
+.reader-progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--sec-accent, var(--accent)), color-mix(in srgb, var(--sec-accent, var(--accent)) 55%, var(--accent-2))); transition: width 0.15s linear; }
 .reader-nav.rfs { font-size: 11px; padding: 6px 7px; }
 .reader-top {
   position: absolute; right: 18px; bottom: 18px; z-index: 42;
