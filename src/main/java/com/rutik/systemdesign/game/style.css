@@ -886,6 +886,8 @@ body.native-fs #reader { box-shadow: none; border-left: none; }
   background: color-mix(in srgb, var(--rd-bg) 82%, transparent);
   -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
   padding-top: calc(11px + env(safe-area-inset-top));
+  /* reserve the floating Exit pill's corner (same clearance as the find bar) */
+  padding-right: calc(92px + env(safe-area-inset-right));
   transform: translateY(-100%); opacity: 0;
   transition: transform 0.22s var(--ease-out), opacity 0.22s var(--ease-out);
 }
