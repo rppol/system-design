@@ -9,6 +9,7 @@
 | [training_pipeline_design.md](training_pipeline_design.md) | ML Training Pipeline Design | 15+ |
 | [ab_testing_for_ml.md](ab_testing_for_ml.md) | A/B Testing for ML Models | 15+ |
 | [latency_and_throughput_optimization.md](latency_and_throughput_optimization.md) | ML Inference Latency and Throughput Optimization | 15+ |
+| [classical_ml_vs_llm.md](classical_ml_vs_llm.md) | Classical ML vs LLM — the build-decision framework | 15+ |
 
 ---
 

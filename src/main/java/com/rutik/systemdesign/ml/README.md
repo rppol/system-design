@@ -18,7 +18,7 @@ Key insight: the majority of ML failures are not algorithm failures — they are
 
 ## What This Section Covers
 
-Forty modules organized across eight learning phases take you from linear algebra through production MLOps. Nine topics contain deep-dive sub-files (36 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-two end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
+Forty modules organized across eight learning phases take you from linear algebra through production MLOps. Nine topics contain deep-dive sub-files (37 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-four end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
 
 ---
 
@@ -175,9 +175,9 @@ See [`case_studies/cross_cutting/README.md`](case_studies/cross_cutting/README.m
 
 ---
 
-## Case Studies (22)
+## Case Studies (24)
 
-All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-section template. Studies #11–22 use the 11-section principal template (same format as LLM case studies). See [`case_studies/README.md`](case_studies/README.md) for the full learning-path index with dependency map and interview prep shortcuts.
+All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-section template. Studies #11–24 use the 11-section principal template (same format as LLM case studies). See [`case_studies/README.md`](case_studies/README.md) for the full learning-path index with dependency map and interview prep shortcuts.
 
 | # | Case Study | Core ML Concepts | Template | Link |
 |---|-----------|-----------------|----------|------|
@@ -203,6 +203,8 @@ All case studies are in `case_studies/`. Studies #1–10 use the legacy 12-secti
 | 20 | Design a Semantic Search Engine | Bi-encoder (SBERT), FAISS IVF, RRF hybrid merge, cross-encoder reranking, hard negative mining, Matryoshka | Principal | [design_semantic_search_engine](case_studies/design_semantic_search_engine.md) |
 | 21 | Design a Named Entity Recognition Pipeline | BERT-CRF, BIO tagging, span extraction, subword alignment, domain fine-tuning, active learning | Principal | [design_ner_pipeline](case_studies/design_ner_pipeline.md) |
 | 22 | Design a Question Answering System | DPR dual-encoder, BERT-large extractive reader, SQuAD 2.0 null-score, multi-hop retrieval, hybrid RRF | Principal | [design_question_answering_system](case_studies/design_question_answering_system.md) |
+| 23 | Design a Video Recommendation System | Two-tower candidate generation, watch-time-weighted logistic ranking, MMoE multitask, position/selection-bias tower, freshness | Principal | [design_video_recommendation](case_studies/design_video_recommendation.md) |
+| 24 | Design a Harmful Content Detection System | Policy taxonomy, classifier cascade, per-policy cost-and-capacity thresholds, human-in-the-loop review queue, adversarial evasion | Principal | [design_harmful_content_detection](case_studies/design_harmful_content_detection.md) |
 
 ---
 
@@ -249,7 +251,7 @@ Phase 4 — Domain Specializations
         v
 Phase 5 — ML Systems & Infrastructure
   ml_system_design     -->  [sub-files: design_framework, feature_store_design, training_pipeline_design,
-                             ab_testing_for_ml, latency_and_throughput_optimization]
+                             ab_testing_for_ml, latency_and_throughput_optimization, classical_ml_vs_llm]
   data_pipelines_and_processing
   distributed_training
   experiment_tracking_and_versioning

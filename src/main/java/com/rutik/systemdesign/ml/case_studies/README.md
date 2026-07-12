@@ -1,6 +1,6 @@
 # ML Case Studies — Learning Path
 
-Twenty-two end-to-end case studies covering the full spectrum of senior ML engineer and senior data scientist interview scenarios. Ten use the legacy 12-section template (rich, detailed). Twelve use the 11-section principal template (requirements → scale → architecture → deep dives → design decisions → real world → tools → playbook → pitfalls → capacity → interview). Five cross-cutting shared-primitive files in `cross_cutting/` cover infrastructure patterns referenced by multiple case studies.
+Twenty-four end-to-end case studies covering the full spectrum of senior ML engineer and senior data scientist interview scenarios. Ten use the legacy 12-section template (rich, detailed). Fourteen use the 11-section principal template (requirements → scale → architecture → deep dives → design decisions → real world → tools → playbook → pitfalls → capacity → interview). Five cross-cutting shared-primitive files in `cross_cutting/` cover infrastructure patterns referenced by multiple case studies.
 
 ---
 
@@ -36,6 +36,7 @@ Studies are grouped by primary engineering concern, not product category.
 | [Real-Time Personalization](design_real_time_personalization.md) | Session context + online serving | Two-tower with session encoder, GRU session model, FAISS at 50k req/s, epsilon-greedy exploration, cold-start |
 | [Content Feed Ranking](design_content_feed_ranking.md) | Multi-objective ranking | Engagement prediction, exploration-exploitation, position bias correction, OEC design |
 | [Ads Click Prediction](design_ads_click_prediction.md) | Sparse features, low-latency | Logistic regression, GBDT, DLRM, embedding tables, calibration at 1ms SLO |
+| [Video Recommendation](design_video_recommendation.md) | Watch-time objective, multitask ranking | Two-tower candidate generation, watch-time-weighted logistic regression, MMoE, position/selection-bias tower, freshness/cold-start |
 
 ### Group 3: Regression and Forecasting
 
@@ -45,12 +46,13 @@ Studies are grouped by primary engineering concern, not product category.
 | [Demand Forecasting](design_demand_forecasting.md) | Time series at scale | ARIMA vs LightGBM vs TFT, hierarchical forecasting, uncertainty quantification |
 | [Marketplace Matching](design_marketplace_matching.md) | Multi-model composition | Demand/supply forecasting + LambdaRank + combinatorial optimization, switchback experiments |
 
-### Group 4: Anomaly Detection and Fraud
+### Group 4: Anomaly Detection, Fraud, and Integrity
 
 | Study | Primary Concern | What It Teaches |
 |---|---|---|
 | [Fraud Detection](design_fraud_detection.md) | Imbalanced classification, streaming | Real-time inference, class imbalance, concept drift, graph features, velocity counters |
 | [Anomaly Detection](design_anomaly_detection.md) | Unsupervised + hybrid | Isolation forest, autoencoders, streaming detection, alert calibration |
+| [Harmful Content Detection](design_harmful_content_detection.md) | Trust & Safety, rare-positive, adversarial | Policy taxonomy, classifier cascade, per-policy cost-and-capacity thresholds, human-in-the-loop review queue, adversarial evasion, prevalence audits |
 
 ### Group 5: Computer Vision and Perception
 
@@ -89,11 +91,11 @@ Five infrastructure patterns appear across multiple studies. Read a cross-cuttin
 
 | File | Topic | Recommended read timing |
 |---|---|---|
-| [Feature Store and PIT Correctness](cross_cutting/feature_store_and_point_in_time_correctness.md) | Online/offline stores, PIT joins, training-serving skew | Before Churn, Credit Risk, ETA, Marketplace |
-| [Model Calibration and Thresholding](cross_cutting/model_calibration_and_thresholding.md) | Platt/isotonic, ECE, cost-sensitive threshold, calibration monitoring | Before Churn, Credit Risk, Fraud, Ads |
-| [Responsible AI, Fairness, and Explainability](cross_cutting/responsible_ai_fairness_and_explainability.md) | Demographic parity, equalized odds, SHAP, GDPR | Before Credit Risk, Churn, Marketplace |
-| [Experimentation and Online Evaluation](cross_cutting/experimentation_and_online_evaluation.md) | OEC/metric design, A/B testing, CUPED, switchback | Before any study with an A/B component |
-| [Drift Monitoring and Retraining](cross_cutting/drift_monitoring_and_retraining.md) | PSI, KS test, champion/challenger, label latency | Before Fraud, Churn, ETA, Marketplace |
+| [Feature Store and PIT Correctness](cross_cutting/feature_store_and_point_in_time_correctness.md) | Online/offline stores, PIT joins, training-serving skew | Before Churn, Credit Risk, ETA, Marketplace, Video Recommendation |
+| [Model Calibration and Thresholding](cross_cutting/model_calibration_and_thresholding.md) | Platt/isotonic, ECE, cost-sensitive threshold, calibration monitoring | Before Churn, Credit Risk, Fraud, Ads, Video Recommendation, Harmful Content |
+| [Responsible AI, Fairness, and Explainability](cross_cutting/responsible_ai_fairness_and_explainability.md) | Demographic parity, equalized odds, SHAP, GDPR | Before Credit Risk, Churn, Marketplace, Harmful Content |
+| [Experimentation and Online Evaluation](cross_cutting/experimentation_and_online_evaluation.md) | OEC/metric design, A/B testing, CUPED, switchback | Before any study with an A/B component (incl. Video Recommendation) |
+| [Drift Monitoring and Retraining](cross_cutting/drift_monitoring_and_retraining.md) | PSI, KS test, champion/challenger, label latency | Before Fraud, Churn, ETA, Marketplace, Video Recommendation, Harmful Content |
 
 ---
 
@@ -112,12 +114,13 @@ Studies that build on patterns from others — read prerequisites first.
    +----+----+
    |         |
    v         v
-[Ranking &  [Anomaly &
- Retrieval]   Fraud]
+[Ranking &  [Anomaly, Fraud
+ Retrieval]  & Integrity]
  search_ranking         fraud_detection
  recommendation_engine  anomaly_detection
- content_feed_ranking
+ content_feed_ranking   harmful_content_detection
  ads_click_prediction
+ video_recommendation
    |
    v
 [Multi-model Composition]
@@ -167,6 +170,8 @@ Map from common "design X" interview question to the best case study.
 | Demand forecasting | [Demand Forecasting](design_demand_forecasting.md) | ARIMA, LightGBM, hierarchical, uncertainty |
 | Anomaly detection | [Anomaly Detection](design_anomaly_detection.md) | Isolation forest, autoencoders, streaming, alerting |
 | Content feed ranking | [Content Feed Ranking](design_content_feed_ranking.md) | Multi-objective, explore-exploit, position bias |
+| Video recommendation (YouTube/Reels) | [Video Recommendation](design_video_recommendation.md) | Two-tower candidate generation, watch-time-weighted logistic, MMoE multitask, position-bias tower |
+| Content moderation / Trust & Safety | [Harmful Content Detection](design_harmful_content_detection.md) | Policy taxonomy, classifier cascade, cost-and-capacity thresholds, human-in-the-loop, adversarial evasion |
 | Image classifier pipeline | [Image Classification Pipeline](design_image_classification_pipeline.md) | Transfer learning, distributed training, serving |
 | Self-driving perception | [Autonomous Driving Perception](design_autonomous_driving_perception.md) | Sensor fusion, object detection, safety constraints |
 | ML platform | [ML Platform](design_ml_platform.md) | Feature store, training DAG, model registry, A/B infra |
@@ -206,3 +211,5 @@ Track completion status across sessions.
 | `design_semantic_search_engine.md` | done | 11-section principal template, 10 Q&As |
 | `design_ner_pipeline.md` | done | 11-section principal template, 10 Q&As |
 | `design_question_answering_system.md` | done | 11-section principal template, 10 Q&As |
+| `design_video_recommendation.md` | done | 11-section principal template, 13 Q&As |
+| `design_harmful_content_detection.md` | done | 11-section principal template, 13 Q&As |

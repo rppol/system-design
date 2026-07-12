@@ -28,7 +28,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `recommender_systems/` | 4 | Two-tower, collaborative filtering, LTR, bandits | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits |
 | `time_series_forecasting/` | 4 | ARIMA, Prophet, DeepAR, Temporal Fusion Transformer | — |
 | `reinforcement_learning/` | 4 | MDP, Q-learning, DQN, PPO, actor-critic, RLHF | — |
-| `ml_system_design/` | 5 | 6-step framework, feature stores, A/B testing, latency | design_framework, feature_store_design, training_pipeline_design, ab_testing_for_ml, latency_and_throughput_optimization |
+| `ml_system_design/` | 5 | 6-step framework, feature stores, A/B testing, latency | design_framework, feature_store_design, training_pipeline_design, ab_testing_for_ml, latency_and_throughput_optimization, classical_ml_vs_llm |
 | `data_pipelines_and_processing/` | 5 | PySpark, Great Expectations, DVC, schema evolution | — |
 | `distributed_training/` | 5 | DDP, FSDP, DeepSpeed ZeRO, gradient accumulation | — |
 | `experiment_tracking_and_versioning/` | 5 | MLflow, W&B, Optuna, DVC, reproducibility | — |
@@ -57,7 +57,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Sub-Files — 36 Topic Sub-Files
+## Sub-Files — 37 Topic Sub-Files
 
 | Module | Sub-files |
 |--------|-----------|
@@ -66,7 +66,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `computer_vision/` | object_detection, image_segmentation, vision_transformers, self_supervised_vision |
 | `natural_language_processing/` | bert_and_pretrained_models, attention_and_seq2seq, text_representation_and_retrieval, nlp_evaluation_and_metrics, tokenization_deep_dive, word_embeddings, sequence_labeling_and_crf, text_classification, topic_modeling, language_modeling, syntactic_parsing |
 | `recommender_systems/` | collaborative_filtering, deep_learning_recommenders, retrieval_and_ranking, content_and_hybrid, online_learning_and_bandits |
-| `ml_system_design/` | design_framework, feature_store_design, training_pipeline_design, ab_testing_for_ml, latency_and_throughput_optimization |
+| `ml_system_design/` | design_framework, feature_store_design, training_pipeline_design, ab_testing_for_ml, latency_and_throughput_optimization, classical_ml_vs_llm |
 | `unsupervised_learning/` | gaussian_mixtures_and_em |
 | `model_evaluation_and_selection/` | automl_and_nas |
 | `active_learning_and_weak_supervision/` | semi_supervised_learning |
@@ -100,13 +100,13 @@ on explicit request (each needs the full "Adding a New ML Module" procedure + ST
 
 ---
 
-## Case Studies — 22 Total
+## Case Studies — 24 Total
 
 `case_studies/` directory. Learning-path index: `case_studies/README.md` (mandatory; update with every new case study).
 
 **Legacy 12-section (10):** design_recommendation_engine, design_fraud_detection, design_search_ranking, design_image_classification_pipeline, design_ads_click_prediction, design_anomaly_detection, design_demand_forecasting, design_content_feed_ranking, design_autonomous_driving_perception, design_ml_platform
 
-**Principal 11-section (12):** design_churn_prediction, design_credit_risk_scoring, design_eta_prediction, design_marketplace_matching, design_customer_ltv_prediction, design_multi_touch_attribution, design_dynamic_pricing, design_nlp_classification_pipeline, design_real_time_personalization, design_semantic_search_engine, design_ner_pipeline, design_question_answering_system
+**Principal 11-section (14):** design_churn_prediction, design_credit_risk_scoring, design_eta_prediction, design_marketplace_matching, design_customer_ltv_prediction, design_multi_touch_attribution, design_dynamic_pricing, design_nlp_classification_pipeline, design_real_time_personalization, design_semantic_search_engine, design_ner_pipeline, design_question_answering_system, design_video_recommendation, design_harmful_content_detection
 
 ---
 
