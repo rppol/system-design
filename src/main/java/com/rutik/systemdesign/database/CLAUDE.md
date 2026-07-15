@@ -12,7 +12,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
 | `database_fundamentals/` | Intermediate | 15 | ACID, BASE, CAP, PACELC, isolation levels, MVCC |
-| `storage_engines_internals/` | Expert | 18 | B+tree, LSM-tree, WAL, buffer pool, row vs columnar |
+| `storage_engines_internals/` | Expert | 17 | B+tree, LSM-tree, WAL, buffer pool, row vs columnar |
 | `indexing_deep_dive/` | Advanced | 18 | B+tree, GIN, BRIN, covering, partial, composite, index bloat |
 | `concurrency_control_and_locking/` | Advanced | 15 | MVCC, deadlocks, gap locks, SELECT FOR UPDATE, advisory locks |
 
@@ -20,47 +20,47 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `postgresql_internals/` | Expert | 18 | VACUUM, autovacuum, EXPLAIN, TOAST, replication slots, partitioning |
+| `postgresql_internals/` | Expert | 17 | VACUUM, autovacuum, EXPLAIN, TOAST, replication slots, partitioning |
 | `mysql_innodb_internals/` | Advanced | 15 | Clustered index, redo/undo log, binary log, online DDL, GTID |
-| `sql_query_optimization/` | Advanced | 18 | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
-| `schema_design_and_normalization/` | Intermediate | 15 | Normal forms, temporal data, audit trails, multi-tenancy, JSONB |
-| `database_migrations_zero_downtime/` | Intermediate | 12 | Flyway, Liquibase, expand-contract, gh-ost, ADD INDEX CONCURRENTLY |
+| `sql_query_optimization/` | Advanced | 15 | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
+| `schema_design_and_normalization/` | Intermediate | 16 | Normal forms, temporal data, audit trails, multi-tenancy, JSONB |
+| `database_migrations_zero_downtime/` | Intermediate | 16 | Flyway, Liquibase, expand-contract, gh-ost, ADD INDEX CONCURRENTLY |
 
 ### Phase 3 — NoSQL Databases
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `document_databases/` | Advanced | 15 | MongoDB WiredTiger, embedding vs referencing, aggregation, sharding, change streams |
-| `key_value_stores/` | Expert | 18 | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock |
-| `wide_column_databases/` | Advanced | 15 | Cassandra ring, partition key, compaction, consistency levels, tombstones |
-| `search_engines/` | Advanced | 15 | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
-| `graph_databases/` | Intermediate | 12 | Property graph, Neo4j index-free adjacency, Cypher, fraud detection |
+| `document_databases/` | Advanced | 16 | MongoDB WiredTiger, embedding vs referencing, aggregation, sharding, change streams |
+| `key_value_stores/` | Expert | 16 | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock |
+| `wide_column_databases/` | Advanced | 13 | Cassandra ring, partition key, compaction, consistency levels, tombstones |
+| `search_engines/` | Advanced | 13 | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
+| `graph_databases/` | Intermediate | 11 | Property graph, Neo4j index-free adjacency, Cypher, fraud detection |
 | `time_series_databases/` | Intermediate | 12 | TimescaleDB, InfluxDB, ClickHouse, Prometheus, Gorilla compression |
 
 ### Phase 4 — Emerging Databases
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `vector_databases/` | Advanced | 15 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
+| `vector_databases/` | Advanced | 16 | HNSW, IVF, PQ, pgvector, hybrid search, multi-tenancy, RAG integration |
 | `newsql_and_distributed_sql/` | Expert | 15 | Spanner TrueTime, CockroachDB Raft, TiDB, YugabyteDB, global ACID |
-| `in_memory_databases/` | Intermediate | 10 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
+| `in_memory_databases/` | Intermediate | 16 | Redis vs Memcached, VoltDB, Ignite, eviction, durability modes |
 
 ### Phase 5 — Distributed Database Concepts
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `replication_and_high_availability/` | Expert | 18 | Sync vs async, Patroni, split-brain, replication slots, multi-region |
-| `sharding_and_partitioning/` | Expert | 18 | Consistent hashing, shard key selection, Vitess, hotspot, resharding |
-| `distributed_transactions/` | Expert | 18 | 2PC, Saga, outbox pattern, idempotency, XA, distributed locks |
+| `replication_and_high_availability/` | Expert | 16 | Sync vs async, Patroni, split-brain, replication slots, multi-region |
+| `sharding_and_partitioning/` | Expert | 16 | Consistent hashing, shard key selection, Vitess, hotspot, resharding |
+| `distributed_transactions/` | Expert | 17 | 2PC, Saga, outbox pattern, idempotency, XA, distributed locks |
 | `consistency_models_and_consensus/` | Expert | 15 | Linearizability, Raft, Paxos, CRDTs, vector clocks, fencing tokens |
-| `database_caching_patterns/` | Advanced | 15 | Cache-aside, write-through, write-behind, stampede, hot key, invalidation |
+| `database_caching_patterns/` | Advanced | 16 | Cache-aside, write-through, write-behind, stampede, hot key, invalidation |
 
 ### Phase 6 — Production Operations
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `connection_pool_management/` | Advanced | 15 | HikariCP internals, pool sizing, PgBouncer, ProxySQL, K8s connection storm |
-| `database_performance_tuning/` | Expert | 18 | shared_buffers, work_mem, checkpoint tuning, lock monitoring, slow queries |
+| `connection_pool_management/` | Advanced | 12 | HikariCP internals, pool sizing, PgBouncer, ProxySQL, K8s connection storm |
+| `database_performance_tuning/` | Expert | 14 | shared_buffers, work_mem, checkpoint tuning, lock monitoring, slow queries |
 | `backup_recovery_and_disaster_recovery/` | Intermediate | 12 | PITR, WAL-G, pg_basebackup, RPO/RTO, restore drills |
 | `database_security_and_compliance/` | Intermediate | 12 | RLS, scram-sha-256, pgAudit, Vault, GDPR erasure, TDE |
 
@@ -68,8 +68,8 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
-| `database_selection_framework/` | Expert | 18 | Selection matrix, benchmark traps, TCO, migration risk, vertical vs horizontal |
-| `polyglot_persistence_patterns/` | Advanced | 15 | CQRS, CDC (Debezium), dual-write, event sourcing, data mesh |
+| `database_selection_framework/` | Expert | 16 | Selection matrix, benchmark traps, TCO, migration risk, vertical vs horizontal |
+| `polyglot_persistence_patterns/` | Advanced | 13 | CQRS, CDC (Debezium), dual-write, event sourcing, data mesh |
 
 ---
 

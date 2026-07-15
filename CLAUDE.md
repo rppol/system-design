@@ -15,7 +15,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **Python** | Pure Python senior-engineer guide — 21 modules, 0 case studies | [python/CLAUDE.md](src/main/java/com/rutik/systemdesign/python/CLAUDE.md) |
 | **FastAPI** | FastAPI + ASGI production guide — 19 modules, 6 case studies | [fastapi/CLAUDE.md](src/main/java/com/rutik/systemdesign/fastapi/CLAUDE.md) |
 | **ML** | Machine Learning guide — 45 modules, 24 case studies | [ml/CLAUDE.md](src/main/java/com/rutik/systemdesign/ml/CLAUDE.md) |
-| **LLM** | LLM engineering guide — 52 modules, 29 case studies, 82 deep-dive sub-files | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
+| **LLM** | LLM engineering guide — 52 modules, 29 case studies, 74 deep-dive sub-files | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
 | **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 13 case studies | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
 | **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 6 case studies | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
 | **CS Fundamentals** | Language-agnostic CS spine — 24 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
@@ -274,7 +274,7 @@ game in two ways: (1) `game/extract.py` parses its interview Q&As into the MCQ
 question bank, and (2) the game's reader renders its Markdown (including Mermaid)
 for the "dive deeper" content view. Content that violates this contract is
 silently dropped from the game or renders wrong. These rules are derived from
-`game/extract.py`, `game/app.js` (`renderMermaid`), `game/server.py`, and
+`game/extract.py`, `game/app.js` (`renderMermaid`), and
 `game/CLAUDE.md` — do not contradict them.
 
 ### What gets scanned

@@ -328,7 +328,7 @@ The 6 case studies in [case_studies/](case_studies/) are the **worked-example co
 
 > **Original 20 modules + 6 case studies: COMPLETE.** DSA Pattern Playbooks sub-section: Chunks P0–P6 COMPLETE — master README + 25 pattern files + 2 guides (`interview_execution_playbook.md`, `study_plans.md`) + 100 bidirectional "See Also" links across the 12 Phase 1–3 concept modules. P6 (2026-06-10): all problem banks expanded to ≥15, `matrix_traversal.md` added as pattern #25. **2026-07-07**: `character_encoding_deep_dive/` built as module 21 (see §3), plus the Interview-Specific learning path (see "Learning Paths", directly below §4).
 >
-> **NEXT UP**: None queued for `cs_fundamentals/`. See `CLAUDE.md` "Planned Topics" (`theory_of_computation/`, `how_code_runs_compilers_and_interpreters/`, `discrete_math_for_engineers/`) for candidate future modules if this section is revisited.
+> **NEXT UP**: None queued for `cs_fundamentals/`. The prior candidate list (`theory_of_computation/`, `how_code_runs_compilers_and_interpreters/`, `discrete_math_for_engineers/`, `character_encoding_deep_dive/`) is now fully built — modules 21-24 in the table above — leaving no queued candidates if this section is revisited.
 
 ### Chunk Plan — Original Modules
 

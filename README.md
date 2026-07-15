@@ -6,7 +6,7 @@ A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **
 
 ## Learn it daily — the `game/` section
 
-Reading 749 files is not the hard part; showing up every day is. The **[Daily Learning Game](https://rppol.github.io/system-design/src/main/java/com/rutik/systemdesign/game)** turns this repo's ~5,600 interview Q&As (every module README and its deep-dive sub-files; case studies excluded) into a one-click, 5-minute multiple-choice blitz with streaks, XP, and per-section mastery. Pick the coach's suggested topic or choose a section and drill specific sub-topics; skip hard questions to have them taught back at the end. An in-app coach picks the day's topic, and spaced-repetition reviews protect what you already learned.
+Reading 820 files is not the hard part; showing up every day is. The **[Daily Learning Game](https://rppol.github.io/system-design/src/main/java/com/rutik/systemdesign/game)** turns this repo's ~8,800 interview Q&As (every module README and its deep-dive sub-files; case studies excluded) into a one-click, 5-minute multiple-choice blitz with streaks, XP, and per-section mastery. Pick the coach's suggested topic or choose a section and drill specific sub-topics; skip hard questions to have them taught back at the end. An in-app coach picks the day's topic, and spaced-repetition reviews protect what you already learned.
 
 ```bash
 python3 -m http.server 8901        # from the repo ROOT (stdlib only — no build, no install)

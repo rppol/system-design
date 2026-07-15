@@ -18,7 +18,7 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 | Module | Topic | Q&As |
 |--------|-------|------|
 | `osi_model_and_networking/` | 7 layers, TCP/IP mapping, packet encapsulation, ARP, NAT, MTU | 15 |
-| `tcp_ip_deep_dive/` | 3-way handshake, congestion control, TIME_WAIT, socket tuning | 18 |
+| `tcp_ip_deep_dive/` | 3-way handshake, congestion control, TIME_WAIT, socket tuning | 19 |
 | `udp_and_quic/` | UDP characteristics, QUIC 0-RTT, HTTP/3, DTLS | 12 |
 | `http_protocols/` | HTTP/1.1 vs /2 vs /3, TLS 1.3, ALPN, SNI, HSTS | 15 |
 
@@ -29,26 +29,26 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 | `rest_api_design/` | REST constraints, versioning, idempotency, pagination, ETag, RFC 7807 | 15 |
 | `grpc_and_protobuf/` | Protobuf wire format, 4 RPC modes, interceptors, deadlines | 15 |
 | `graphql/` | Schema design, DataLoader N+1, subscriptions, depth limiting | 12 |
-| `websockets_and_sse/` | WS upgrade, frame structure, SSE, long polling, scaling WS | 12 |
+| `websockets_and_sse/` | WS upgrade, frame structure, SSE, long polling, scaling WS | 13 |
 
 ### Phase 3 — Performance Engineering
 
 | Module | Topic | Q&As |
 |--------|-------|------|
-| `performance_profiling/` | async-profiler, JFR, flamegraphs, heap/thread dumps, GC analysis | 15 |
-| `connection_pooling_deep_dive/` | HikariCP internals, pool sizing formula, leak detection, PgBouncer | 15 |
-| `caching_strategies_deep_dive/` | Cache-aside/read-through/write-behind, stampede, Redis structures | 15 |
+| `performance_profiling/` | async-profiler, JFR, flamegraphs, heap/thread dumps, GC analysis | 14 |
+| `connection_pooling_deep_dive/` | HikariCP internals, pool sizing formula, leak detection, PgBouncer | 16 |
+| `caching_strategies_deep_dive/` | Cache-aside/read-through/write-behind, stampede, Redis structures | 16 |
 | `async_and_concurrency_patterns/` | Thread pool sizing, CompletableFuture pitfalls, virtual threads, bulkhead | 15 |
 
 ### Phase 4 — Database Engineering (overview; `database/` has the deep-dives)
 
 | Module | Topic | Q&As |
 |--------|-------|------|
-| `database_internals_and_indexing/` | B+tree, WAL, MVCC, index types, VACUUM, query planner | 15 |
-| `query_optimization/` | EXPLAIN ANALYZE, N+1 detection, pagination, batch inserts | 15 |
+| `database_internals_and_indexing/` | B+tree, WAL, MVCC, index types, VACUUM, query planner | 16 |
+| `query_optimization/` | EXPLAIN ANALYZE, N+1 detection, pagination, batch inserts | 16 |
 | `database_migrations/` | Flyway vs Liquibase, zero-downtime patterns, expand-contract | 12 |
 | `distributed_transactions_and_consistency/` | 2PC problems, Saga, outbox pattern, idempotency keys | 15 |
-| `database_types_deep_dive/` | Relational, Document, Key-Value, Wide-Column, Time-Series, Search, Graph, NewSQL | 18 |
+| `database_types_deep_dive/` | Relational, Document, Key-Value, Wide-Column, Time-Series, Search, Graph, NewSQL | 15 |
 
 > For deeper coverage: see [`../database/README.md`](../database/README.md) — 29 modules, 7 phases, principal-engineer level.
 
@@ -57,23 +57,23 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 | Module | Topic | Q&As |
 |--------|-------|------|
 | `fault_tolerance_patterns/` | Circuit breaker states, Resilience4j, retry with jitter, bulkhead | 15 |
-| `rate_limiting_in_depth/` | Token bucket, sliding window, Redis Lua, adaptive throttling | 12 |
-| `observability_and_monitoring/` | Metrics/logs/traces, Micrometer, MDC, OpenTelemetry, SLO/SLI | 15 |
+| `rate_limiting_in_depth/` | Token bucket, sliding window, Redis Lua, adaptive throttling | 16 |
+| `observability_and_monitoring/` | Metrics/logs/traces, Micrometer, MDC, OpenTelemetry, SLO/SLI | 16 |
 
 ### Phase 6 — Security
 
 | Module | Topic | Q&As |
 |--------|-------|------|
 | `backend_security_owasp/` | OWASP Top 10 2021, SQL injection, CSRF, SSRF, secret management | 15 |
-| `auth_and_authorization_systems/` | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation | 15 |
+| `auth_and_authorization_systems/` | JWT internals, OAuth2 flows, OIDC, RBAC vs ABAC, token revocation | 16 |
 
 ### Phase 7 — Testing & Quality
 
 | Module | Topic | Q&As |
 |--------|-------|------|
 | `backend_testing_strategies/` | Testing pyramid, test doubles, contract testing, mutation testing | 12 |
-| `load_and_performance_testing/` | k6, Gatling, JMeter, percentile analysis, coordinated omission | 12 |
-| `chaos_engineering/` | Steady-state hypothesis, fault injection, blast radius, GameDay | 10 |
+| `load_and_performance_testing/` | k6, Gatling, JMeter, percentile analysis, coordinated omission | 16 |
+| `chaos_engineering/` | Steady-state hypothesis, fault injection, blast radius, GameDay | 16 |
 
 ### Phase 8 — Event-Driven Architecture
 
@@ -81,8 +81,8 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 |--------|-------|------|
 | `event_driven_fundamentals/` | Events vs commands, choreography vs orchestration, event storming | 15 |
 | `kafka_deep_dive/` | Producer/consumer internals, EOS, Kafka Streams, Schema Registry | 18 |
-| `event_sourcing_and_cqrs/` | Event store, aggregates, snapshots, CQRS read models, Axon | 15 |
-| `messaging_patterns/` | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 15 |
+| `event_sourcing_and_cqrs/` | Event store, aggregates, snapshots, CQRS read models, Axon | 11 |
+| `messaging_patterns/` | Outbox, inbox, DLQ, poison pill, schema evolution, RabbitMQ vs Kafka | 16 |
 
 ### Phase 9 — Microservices Architecture
 
@@ -90,9 +90,9 @@ Java and Spring cover language/framework mechanics. This section covers the **en
 |--------|-------|------|
 | `microservices_fundamentals/` | Decomposition, bounded contexts, data ownership, strangler fig | 15 |
 | `api_gateway_patterns/` | Gateway responsibilities, BFF, Spring Cloud Gateway, Kong | 15 |
-| `service_mesh_and_service_discovery/` | Istio/Envoy, mTLS, service discovery mechanisms, health probes | 15 |
-| `distributed_system_operational_patterns/` | Bulkhead, sidecar, ACL, correlation ID, feature flags, graceful shutdown | 15 |
-| `container_and_deployment_patterns/` | 12-factor, Docker multi-stage, Kubernetes strategies, HPA, PDB | 15 |
+| `service_mesh_and_service_discovery/` | Istio/Envoy, mTLS, service discovery mechanisms, health probes | 16 |
+| `distributed_system_operational_patterns/` | Bulkhead, sidecar, ACL, correlation ID, feature flags, graceful shutdown | 16 |
+| `container_and_deployment_patterns/` | 12-factor, Docker multi-stage, Kubernetes strategies, HPA, PDB | 16 |
 
 ---
 

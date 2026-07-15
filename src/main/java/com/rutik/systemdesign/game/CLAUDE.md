@@ -19,9 +19,13 @@ The `game/` directory is an application, not study content — see
   mermaid CDN import is the only exception).
 - **Pages-only (2026-07-03): `localStorage` `sd_progress` is the single source of
   truth and the single write path for all progress.** There is no server, no
-  `/api`, no database, and no local scheduling stack. Every write goes through
-  `saveSessionLocal()`; the reader fetches content at `../<path>`; **export/import
-  from the Progress screen is the only backup path** between browsers.
+  `/api`, no database, and no local scheduling stack. Every `localStorage` write —
+  progress and UI prefs alike — goes through the quota-safe `safeSet()` wrapper
+  (wraps `localStorage.setItem`, never throws, shows a one-time toast nudging
+  export on first failure); `saveSessionLocal()` remains the session-aggregate path
+  (streak, XP, history, reviews) and persists via `safeSet()` underneath. The reader fetches
+  content at `../<path>`; **export/import from the Progress screen is the only
+  backup path** between browsers.
 - **The mirror-seam rule is DEAD** — there is no server to sync to, so there is no
   round-trip and no `POST`. A finished session writes straight to `localStorage`.
 - **All persisted fields are additive** — never rename, repurpose, or drop an
@@ -54,5 +58,8 @@ The `game/` directory is an application, not study content — see
   Paths" list (same hand-maintained discipline as `STUDY_ORDER`). Sections absent
   from `STUDY_PATHS` show no toggle (Full only). Choice persists in `sd_study_path`
   (JSON map keyed by section). **All game sections have interview paths** — every
-  section except `book` (which has no `STUDY_ORDER` entry / no game presence). Each
-  is added the same way (a subset array here + a README "Learning Paths" block).
+  section except `book`. `book` IS a bank section (its chapter Q&As extract into
+  the MCQ bank like any module) and has a `STUDY_ORDER` entry pinning chapter order
+  00 -> 12, but no `interview` array — it is Full-only, and the toggle auto-hides
+  when a section is absent from `STUDY_PATHS`. Each interview path is added the
+  same way (a subset array here + a README "Learning Paths" block).

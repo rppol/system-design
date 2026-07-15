@@ -1,7 +1,7 @@
 # Game — System Design Daily
 
 A browser-based daily learning game built **from this repo's own content**. It turns
-the ~5,600 interview Q&As scattered across all 12 sections (every module README **and
+the ~8,800 interview Q&As scattered across all 14 sections (every module README **and
 its deep-dive sub-files**; case studies excluded) into a one-click, 5-minute
 multiple-choice blitz with streaks, XP, spaced repetition, per-section mastery, and an
 in-app coach that curates the day's topic and reports weekly.
@@ -71,6 +71,9 @@ whole repo root to Pages.
   multi-select exactly which sub-topics to drill (select-all/clear, live count, a
   5/10/20 session-length control). Questions interleave so no two consecutive share a
   module; a graph decides which topics sit adjacent for contrast.
+- **Ghost rematch** — full-section results compare against your previous best run of
+  that section ("vs you, <date>"); review/drill/gauntlet runs are excluded as not
+  apples-to-apples.
 - **Gauntlet** — a daily **sealed** run: a deterministic 10-question recipe (oldest due →
   suggested section → weakest section → one advanced "final question"), one scored
   attempt per day, then unscored practice. Sealed days show a gold dot on the heatmap.
@@ -107,6 +110,8 @@ whole repo root to Pages.
 
 - **XP + career ladder** — correct = 10 XP × combo × boss × recall multipliers; a top-bar
   `Lv` ring derives level and title from total XP.
+- **Reading streak** — the Home streak line carries a chip with modules read today and
+  the consecutive-day reading streak, tracked separately from the quiz streak.
 - **Mastery tiers** — sections earn Bronze/Silver/Gold from combined volume + accuracy.
 - **The Codex** — a collection view of every module, unlocked as you practise.
 - **The Skyline** — a home-screen city that grows with your sections.
@@ -175,7 +180,7 @@ how-am-I-doing:
 ### Command palette (Cmd/Ctrl+K, or `/`)
 
 A centred glass modal with fuzzy (subsequence) search over: every section blitz, every
-module's Read/Quiz command (~340 modules), and verbs (resume, start review + due count,
+module's Read/Quiz command (~426 modules), and verbs (resume, start review + due count,
 weak spots, gauntlet, codex, insights, debrief, quiz/flashcards toggle, theme switch,
 export). Arrow keys + Enter, Esc closes. When a section's bank is already cached, a final
 row runs full-text question search (top 8, each opens its reader source).
@@ -274,7 +279,7 @@ python3 extract.py     # re-run after editing ANY module's Q&A, then reload the 
 | `manifest.webmanifest` | PWA manifest. |
 | `extract.py` | Builds `questions/<section>.json` + `index.json` from all module READMEs + sub-files. |
 | `build_graph.py` | Builds `graph/<section>.json` (prerequisite edges) for the Learning Path. |
-| `questions/`, `graph/` | Generated data (committed so the game runs with no build). |
+| `questions/`, `graph/` | Generated data — gitignored; Pages CI rebuilds both on every deploy (locally: `python3 extract.py`, then `python3 build_graph.py <section>` per section). |
 
 ---
 
