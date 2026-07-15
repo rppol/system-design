@@ -22,7 +22,9 @@ The `game/` directory is an application, not study content — see
   `/api`, no database, and no local scheduling stack. Every `localStorage` write —
   progress and UI prefs alike — goes through the quota-safe `safeSet()` wrapper
   (wraps `localStorage.setItem`, never throws, shows a one-time toast nudging
-  export on first failure); `saveSessionLocal()` remains the session-aggregate path
+  export on first failure), except the one-shot backup-import path, which
+  deliberately writes `BACKUP_KEYS` raw inside its own try/catch so a failed
+  restore is loud; `saveSessionLocal()` remains the session-aggregate path
   (streak, XP, history, reviews) and persists via `safeSet()` underneath. The reader fetches
   content at `../<path>`; **export/import from the Progress screen is the only
   backup path** between browsers.
