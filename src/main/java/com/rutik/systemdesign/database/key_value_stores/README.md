@@ -543,6 +543,12 @@ Redis Sentinel: HA solution for a single-primary/multi-replica setup. Sentinel p
 **Q: How do you monitor Redis for production issues?**
 Key metrics: `INFO memory` → `used_memory` (current usage), `mem_fragmentation_ratio` (> 1.5 indicates fragmentation — consider MEMORY PURGE or restart), `maxmemory` vs `used_memory`. `INFO stats` → `evicted_keys` (should be 0 or very low), `keyspace_hits/misses` (hit rate = hits/(hits+misses), target > 99%), `total_commands_processed`. `INFO replication` → `master_repl_offset` vs replica's `slave_repl_offset` — difference = replication lag in bytes. `INFO clients` → `connected_clients`, `blocked_clients`. `SLOWLOG GET 10` → commands that took > `slowlog-log-slower-than` microseconds. `LATENCY HISTORY event` → latency spikes for fork, AOF, networking events.
 
+**Q: Why is the KEYS command dangerous to run against a production Redis instance?**
+KEYS scans the entire keyspace in O(N) time on Redis's single command-processing thread, so it blocks every other client for as long as the scan takes. Against a 10-million-key instance, `KEYS user:*` can block Redis for 100ms or more, and because Redis processes commands on a single thread, every other request queues up behind that one scan for its full duration. There is no partial-progress option with KEYS — it either completes and returns everything or blocks until it does. Use `SCAN 0 MATCH user:* COUNT 100` instead, which iterates the keyspace incrementally and yields control between batches so it never blocks the event loop; reserve KEYS for local development against small datasets only.
+
+**Q: Why can't you read a value inside a MULTI/EXEC block and use it to compute the value you write?**
+MULTI queues every command without executing it, so a GET inside the block returns nothing to application code until EXEC runs the whole batch atomically afterward. A sequence like `MULTI; GET balance; SET balance <computed_from_get>; EXEC` cannot work as written, because the SET's value has to be computed in application code before EXEC ever runs, but the GET's result isn't available until EXEC has already completed. This trips up engineers who assume MULTI/EXEC behaves like a database transaction that lets you read-then-decide mid-block, when it actually just batches pre-determined commands for atomic execution. Use a Lua script, which can read and write within a single atomic server-side execution, or WATCH-based optimistic locking — read first, then MULTI/EXEC the write, retrying if WATCH detects a concurrent change.
+
 ---
 
 ## 13. Best Practices

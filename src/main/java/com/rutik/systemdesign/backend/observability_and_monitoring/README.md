@@ -486,6 +486,12 @@ OpenTelemetry (OTel) is a vendor-neutral CNCF project providing a single SDK for
 **Q: How do you monitor JVM health in production?**
 Key JVM metrics via Micrometer: `jvm.memory.used` / `jvm.memory.max` per pool (heap, non-heap, G1 Eden, G1 Old Gen), `jvm.gc.pause` (duration and count per GC cause), `jvm.threads.live` / `jvm.threads.daemon` / `jvm.threads.states` (BLOCKED count indicates contention), `jvm.classes.loaded`. Alert on: heap usage > 80% of max (GC pressure), GC pause time increasing trend, BLOCKED thread count > 0 (deadlock risk), metaspace > 90% (class loading leak). Correlate GC pauses with latency spikes in Grafana by overlaying JVM metrics on API latency panels.
 
+**Q: What happens if you forget to clear MDC after a request finishes?**
+MDC is backed by a ThreadLocal, so an uncleared value leaks into whichever request the same pooled thread handles next, not just the one that set it. Application servers reuse a fixed-size thread pool across requests rather than spawning a new thread per request, so a filter that populates MDC but skips the cleanup leaves stale correlation IDs sitting on that thread for the next unrelated request to inherit. In production this shows up as request B's logs carrying request A's correlation ID or trace ID, making log-based incident investigation actively misleading rather than just incomplete. Always populate MDC inside a try block and clear it in a matching finally block — `MDC.clear()` must run regardless of whether the request succeeded, failed, or threw.
+
+**Q: What happens if you enable OpenTelemetry auto-instrumentation without configuring a sampler?**
+Without an explicit sampler, OpenTelemetry records every single span by default, and at high request volume the exporter itself can become the bottleneck. A service handling 50,000 requests per second with 20 spans per request produces roughly 1 million spans per second, and one team saw their OTLP exporter saturate under that load, adding 100ms of latency across the entire service. The overhead is easy to miss in staging because it only appears at production traffic volume, by which point every request is paying the tracing tax. Always set `OTEL_TRACES_SAMPLER=parentbased_traceidratio` with a rate such as 0.01 to 0.1 in production, and confirm the sampling decision propagates consistently downstream so a trace isn't fragmented across services.
+
 ---
 
 ## 13. Best Practices
