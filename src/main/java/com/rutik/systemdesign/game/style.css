@@ -1304,6 +1304,9 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 .md-body .mermaid.h-scroll::after { content: "⇢ scroll · ⤢ zoom"; opacity: 0.75; }
 .md-body .mermaid svg { height: auto; }   /* width set in px by renderMermaid (drag-resizable) */
 
+/* [W6] fallback chip above a diagram's raw source when render / CDN load fails */
+.mm-fail { font-family: var(--mono); font-size: 10.5px; color: var(--rd-muted); margin: 14px 0 -8px; }
+
 /* drag-resize grip — bottom-right corner, fades in on hover */
 .mm-grip {
   position: absolute; right: 3px; bottom: 3px; width: 20px; height: 20px;
@@ -1513,8 +1516,12 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 /* [W3] the mermaid resize grip only appears on :hover — keep it visible on touch. */
 @media (hover: none) { .md-body .mermaid .mm-grip { opacity: 0.5; } }
 /* [W3] keyboard hints are noise on touch devices with no physical keyboard. */
+/* [W6] .touch-hint is the inverse gate: hidden on desktop, shown only on coarse
+   pointers (where the More sheet replaces the desktop-only controls). */
+.touch-hint { display: none; }
 @media (hover: none) and (pointer: coarse) {
   .opt kbd, .grade kbd, .conf-btn kbd, .dd-yes kbd, .showopts kbd, .key-hint { display: none; }
+  .touch-hint { display: inline; }
 }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {

@@ -679,8 +679,9 @@ function toggleHelp() {
       <div><h3>Cards</h3>${row("Space", "Reveal")}${row("1", "Missed it")}${row("2", "Got it")}</div>
       <div><h3>Reader</h3>${row("F", "Fullscreen")}${row("Esc", "Exit / close")}</div>
       <div><h3>Diagram zoom</h3>${row("+ −", "Zoom")}${row("0", "Fit")}${row("← →", "Pan")}</div>
+      <div><h3>Everywhere</h3>${row("Cmd/Ctrl+K /", "Search everything")}${row("?", "This help")}</div>
     </div>
-    <p class="help-hint">Press <kbd>?</kbd> anytime &middot; mouse back/forward buttons navigate too</p>
+    <p class="help-hint">Press <kbd>?</kbd> anytime &middot; mouse back/forward buttons navigate too<span class="touch-hint"> &middot; more options live behind the &#8943; button on phones</span></p>
     <button class="ghost" id="helpClose">Close <span class="key-hint">(Esc)</span></button>
   </div>`;
   document.body.appendChild(o);
@@ -1751,10 +1752,10 @@ async function startReview() {
   const bySec = {};
   due.forEach(([id, r]) => (bySec[r.section] = bySec[r.section] || []).push(id));
   const items = [];
-  let orphaned = 0;
+  let orphaned = 0, loadFailed = false;
   for (const sec of Object.keys(bySec)) {
     const bank = await loadBank(sec);
-    if (!bank) continue;
+    if (!bank) { loadFailed = true; continue; }
     const byId = new Map(bank.map((q) => [q.id, q]));
     for (const id of bySec[sec]) {
       const q = byId.get(id);
@@ -1773,7 +1774,10 @@ async function startReview() {
       showToast(`${orphaned} retired question${orphaned === 1 ? "" : "s"} removed from your queue.`);
     }
   }
-  if (!items.length) { renderHome(); return; }
+  if (!items.length) {
+    showToast(loadFailed ? "Couldn't load questions — check your connection." : "Nothing due right now.");
+    renderHome(); return;
+  }
   state.section = "review"; state.modules = null;
   const deck = items.slice(0, deckLen());
   // [A2] flip rounds: ~30% of review items (deterministic per day+qid) whose 3
@@ -1803,12 +1807,17 @@ async function startWeakSpots() {
   app.innerHTML = skeletonHTML("quiz");
   const weak = weakSections().filter((x) => x.acc < 0.7).slice(0, 4);
   const pool = (weak.length ? weak : weakSections().slice(0, 3));
-  if (!pool.length) { renderHome(); return; }
+  if (!pool.length) {
+    showToast("Not enough data for weak spots yet — play a few rounds first.");
+    renderHome(); return;
+  }
   const reviews = state.progress.reviews || {};
   const banks = {}, byId = {};
+  let loadFailed = false;
   for (const p of pool) {
     const b = await loadBank(p.s);
     if (b) { banks[p.s] = b; byId[p.s] = new Map(b.map((q) => [q.id, q])); }
+    else loadFailed = true;
   }
   const items = [], seen = new Set();
   const add = (q) => { if (q && !seen.has(q.id)) { items.push(q); seen.add(q.id); } };
@@ -1821,7 +1830,10 @@ async function startWeakSpots() {
   const filler = [];
   for (const p of pool) if (banks[p.s]) filler.push(...banks[p.s]);
   shuffle(filler).forEach((q) => { if (items.length < deckLen()) add(q); });
-  if (!items.length) { renderHome(); return; }
+  if (!items.length) {
+    showToast(loadFailed ? "Couldn't load questions — check your connection." : "Not enough data for weak spots yet — play a few rounds first.");
+    renderHome(); return;
+  }
   state.section = "weakspots"; state.modules = null;
   startDeck(items.slice(0, deckLen()), startWeakSpots, { hard: true });
 }
@@ -1833,11 +1845,16 @@ async function startWeakSpots() {
 async function startConfusionDrill(key) {
   app.innerHTML = skeletonHTML("quiz");
   const items = [];
+  let loadFailed = false;
   for (const mod of key.split("|")) {
     const bank = await loadBank(mod.split("/")[0]);
     if (bank) items.push(...bank.filter((q) => q.module === mod));
+    else loadFailed = true;
   }
-  if (!items.length) { renderHome(); return; }
+  if (!items.length) {
+    showToast(loadFailed ? "Couldn't load questions — check your connection." : "No confusion pairs tracked yet.");
+    renderHome(); return;
+  }
   const picked = shuffle(items).slice(0, deckLen());
   state.section = "drill"; state.modules = null;
   startDeck(picked, () => startConfusionDrill(key), { interleave: [] });
@@ -1852,13 +1869,17 @@ async function startRefresh(ids) {
     if (rv && rv.section) (bySec[rv.section] = bySec[rv.section] || []).push(id);
   }
   const items = [];
+  let loadFailed = false;
   for (const sec of Object.keys(bySec)) {
     const bank = await loadBank(sec);
-    if (!bank) continue;
+    if (!bank) { loadFailed = true; continue; }
     const byId = bankById(sec);
     for (const id of bySec[sec]) { const q = byId.get(id); if (q) items.push(q); }
   }
-  if (!items.length) { renderHome(); return; }
+  if (!items.length) {
+    showToast(loadFailed ? "Couldn't load questions — check your connection." : "Nothing is fading right now.");
+    renderHome(); return;
+  }
   state.section = "refresh"; state.modules = null;
   startDeck(items.slice(0, deckLen()), () => startRefresh(ids), { interleave: [] });
 }
@@ -4535,6 +4556,7 @@ async function mmRenderNode(n, src) {
   } catch (err) {
     document.getElementById("dmm" + _mmSeq)?.remove();   // mermaid's temp scratch div
     console.warn("Mermaid render failed:", err);         // raw source stays visible
+    if (!n.querySelector(".mm-fail")) n.insertAdjacentHTML("afterbegin", `<div class="mm-fail">Diagram couldn't render — showing its source instead.</div>`);
     return;
   }
   n.innerHTML = svg;                                     // replaces old svg + grip
@@ -4792,6 +4814,7 @@ async function renderMermaid(root) {
     // rejected promise would otherwise disable diagrams for the whole session).
     _mermaidReady = null;
     console.warn("Mermaid load failed:", err);
+    if (nodes[0] && !document.querySelector(".mm-fail")) nodes[0].insertAdjacentHTML("afterbegin", `<div class="mm-fail">Diagrams need a network connection — showing source.</div>`);
     return;
   }
   if (_mmRO) _mmRO.disconnect();                   // observe only the live page's diagrams
@@ -5916,7 +5939,7 @@ async function openReaderPath(path, title, navCtx, frag) {
   try {
     if (readerCache[path] == null) {
       const r = await fetch(`../${path}`, { cache: "no-store" });
-      if (!r.ok) throw 0;
+      if (!r.ok) throw { missing: r.status === 404 };
       readerCache[path] = await r.text();
     }
     if (reader.path !== path) return;              // user navigated away during the fetch
@@ -5949,11 +5972,25 @@ async function openReaderPath(path, title, navCtx, frag) {
       if (reader._read && !reader._closed) { reader._closed = true; revealClosure(); }
     }, 1600);
     safeSet("sd_last_read", JSON.stringify({ path, title: reader.titleText }));   // Study's "Continue reading"
-  } catch {
+  } catch (e) {
     // [E1] reader failure keeps its own in-panel error (not the full errorScreen
-    // — the underlying screen is still live behind the pane) but gains a retry.
+    // — the underlying screen is still live behind the pane). A 404 is a moved/
+    // missing page (offer the module home); anything else is treated as an
+    // offline/transport failure and keeps the retry.
     const b = el("#readerBody");
-    if (b) {
+    if (b && e && e.missing) {
+      const home = path.replace(/\/[^/]+$/, "") + "/README.md";
+      const isReadme = /README\.md$/i.test(path);
+      b.innerHTML = `<div class="error">This page isn't in the repo — it may have moved.
+          <div class="row" style="margin-top:10px">
+            ${isReadme ? "" : `<button class="ghost" id="readerHome">Open module home</button>`}
+            <button class="ghost" id="readerCloseErr">Close</button>
+          </div>
+        </div>`;
+      const hb = el("#readerHome");
+      if (hb) hb.addEventListener("click", () => openReaderPath(home, null, null));
+      el("#readerCloseErr").addEventListener("click", closeReader);
+    } else if (b) {
       b.innerHTML = `<div class="error">Couldn't load this page. Check your connection and try again.
           <div class="row" style="margin-top:10px"><button class="ghost" id="readerRetry">Try again</button></div>
         </div>`;
@@ -7180,7 +7217,10 @@ function renderInterviewIntro(section, panel, deckQ) {
 // panel: undefined -> derived from tier (Gold runs the all-advanced Panel).
 async function startInterview(section, panel) {
   const tier = tierOf(section);
-  if (tier !== "silver" && tier !== "gold") { redirect("#/study/" + section); return; }   // locked: path header shows the chip
+  if (tier !== "silver" && tier !== "gold") {   // locked: path header shows the chip
+    showToast(`Interview unlocks at Silver tier for ${label(section)}.`);
+    redirect("#/study/" + section); return;
+  }
   if (panel === undefined) panel = tier === "gold";
   app.innerHTML = `<div class="loading">Preparing the interview&hellip;</div>`;
   const bank = (await loadBank(section)) || [];
@@ -7338,6 +7378,7 @@ function syncModeBtn() {
   const flash = deckMode() === "flash";
   b.textContent = flash ? "Cards" : "Quiz";
   b.title = flash ? "Flashcards mode (click for multiple-choice)" : "Multiple-choice mode (click for flashcards)";
+  b.setAttribute("aria-label", flash ? "Switch to multiple-choice mode" : "Switch to flashcards mode");
   b.setAttribute("aria-pressed", flash ? "true" : "false");
   b.classList.toggle("on", flash);
 }
