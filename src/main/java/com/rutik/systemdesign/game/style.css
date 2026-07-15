@@ -701,6 +701,7 @@ button:active { transform: scale(0.98); }
 .hm-future { visibility: hidden; }
 .hmlegend { display: flex; align-items: center; gap: 4px; color: var(--muted); font-family: var(--mono); font-size: 11px; margin-bottom: 6px; }
 .hmlegend .hmcell { width: 11px; height: 11px; }
+.hmlegend-gaunt { display: inline-flex; align-items: center; gap: 4px; margin-left: 10px; }
 .hm-empty { color: var(--faint); font-size: 13.5px; margin: 6px 0 0; }
 
 /* ---------- 9. Study & topic picker --------------------------------------- */
@@ -888,12 +889,13 @@ body.native-fs #reader { box-shadow: none; border-left: none; }
   padding-top: calc(11px + env(safe-area-inset-top));
   /* reserve the floating Exit pill's corner (same clearance as the find bar) */
   padding-right: calc(92px + env(safe-area-inset-right));
-  transform: translateY(-100%); opacity: 0;
-  transition: transform 0.22s var(--ease-out), opacity 0.22s var(--ease-out);
+  transform: translateY(-100%); opacity: 0; visibility: hidden;
+  transition: transform 0.22s var(--ease-out), opacity 0.22s var(--ease-out), visibility 0s linear 0.22s;
 }
 #reader.full .reader-peek:hover + .reader-head,
 #reader.full .reader-head:hover,
-#reader.full.head-peek .reader-head { transform: none; opacity: 1; }
+#reader.full .reader-head:focus-within,
+#reader.full.head-peek .reader-head { transform: none; opacity: 1; visibility: visible; transition-delay: 0s; }
 
 /* floating Exit pill — the reliable cross-device control (touch has no hover) */
 .reader-exit { display: none; }
@@ -989,7 +991,7 @@ a.mod-item.active { color: var(--od-text); border-right-color: var(--sec-accent,
 /* read-completion tick on module-tree entries (reading feeds the game) */
 a.mod-item.read::before, a.mod-file.read::before { content: "\2713 "; color: var(--good); font-weight: 700; }
 
-.mod-folder { display: flex; align-items: center; gap: 5px; padding: 4px 8px; cursor: pointer; border-radius: 6px 0 0 6px; user-select: none; }
+.mod-folder { display: flex; align-items: center; gap: 5px; padding: 4px 8px; cursor: pointer; border-radius: 6px 0 0 6px; user-select: none; width: 100%; text-align: left; background: none; border: none; font: inherit; }
 .mod-folder:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .mod-arrow { font-size: 8px; color: var(--od-muted); transition: transform 0.15s; flex-shrink: 0; line-height: 1; }
 .mod-group.open > .mod-folder .mod-arrow { transform: rotate(90deg); }
@@ -1236,7 +1238,8 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 }
 .md-body hr { border: none; border-top: 1px solid var(--od-line); margin: 16px 0; }
 .md-body blockquote { border-left: 3px solid var(--md-quote); margin: 10px 0; padding: 4px 14px; color: var(--od-muted); }
-.md-body table { border-collapse: collapse; margin: 12px 0; font-size: 13px; display: block; overflow-x: auto; }
+.md-tablewrap { overflow-x: auto; margin: 12px 0; }
+.md-body table { border-collapse: collapse; margin: 0; font-size: 13px; display: table; }
 .md-body th, .md-body td { border: 1px solid var(--od-line); padding: 6px 10px; text-align: left; vertical-align: top; }
 .md-body th { background: var(--od-bg2); color: var(--od-text); }
 
@@ -1257,6 +1260,8 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 /* clickable ASCII diagrams */
 .md-body pre:has(code.diagram) { cursor: zoom-in; }
 .md-body pre:has(code.diagram):hover { border-color: rgba(97, 175, 239, 0.45); }
+/* keyboard focus ring for zoomable diagram triggers — One-Dark token so it reads on the black reader canvas */
+.md-body .mermaid:focus-visible, .md-body pre:has(code.diagram):focus-visible { outline: 2px solid var(--md-h2); outline-offset: 2px; }
 
 /* Mermaid diagrams: dark canvas in all themes; click to open the lightbox */
 .md-body .mermaid {
@@ -2234,6 +2239,14 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
 .cx-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--glass-2); border: 1px solid var(--glass-brd); }
 .cx-dot.on { background: var(--accent); border-color: transparent; }
 .cx-card.foil .cx-dot.on { background: #fbbf24; }
+/* Codex legend: one muted key row under the hero, colours reused from the card states */
+.cx-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.cx-legkey { display: inline-flex; align-items: center; gap: 5px; }
+.cx-legdot { width: 9px; height: 9px; border-radius: 3px; background: var(--glass-2); border: 1px solid var(--glass-brd); }
+.cx-legkey.captured .cx-legdot { background: color-mix(in srgb, var(--accent) 60%, transparent); border-color: transparent; }
+.cx-legkey.foil .cx-legdot { background: #fbbf24; border-color: transparent; }
+.cx-legkey.tarnished .cx-legdot { background: var(--muted); filter: grayscale(1); border-color: transparent; }
+.cx-legkey.dim .cx-legdot { opacity: 0.5; }
 
 /* ---- [C] ledger ---- */
 .ledger-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }

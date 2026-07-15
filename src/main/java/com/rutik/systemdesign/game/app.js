@@ -330,7 +330,7 @@ function applyTheme(id, save = true) {
 
 function closeThemePop() {
   const pop = document.getElementById("themePop");
-  if (pop) pop.remove();
+  if (pop) { pop._release?.(); pop.remove(); }
   const tb = document.getElementById("themeBtn");
   if (tb) tb.setAttribute("aria-expanded", "false");
 }
@@ -348,6 +348,8 @@ function toggleThemePop() {
   const tb = document.getElementById("themeBtn");
   if (tb) tb.setAttribute("aria-expanded", "true");
   pop.querySelectorAll(".theme-opt").forEach((b) => b.addEventListener("click", () => applyTheme(b.dataset.theme)));
+  wireRadioGroup(pop);
+  pop._release = trapFocus(pop, { initial: '[aria-checked="true"]', restoreTo: tb });
   const dismiss = (e) => {
     if (e.type === "keydown") {
       if (e.key !== "Escape") return;
@@ -367,7 +369,7 @@ function toggleThemePop() {
 // every layout width).
 function closeStreakPop() {
   const pop = document.getElementById("streakPop");
-  if (pop) pop.remove();
+  if (pop) { pop._release?.(); pop.remove(); }
   const chip = document.getElementById("streakChip");
   if (chip) chip.setAttribute("aria-expanded", "false");
 }
@@ -393,6 +395,8 @@ function toggleStreakPop() {
   const r = anchor.getBoundingClientRect();
   pop.style.top = (r.bottom + 8) + "px";
   pop.style.left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 12) + "px";
+  pop.tabIndex = -1;
+  pop._release = trapFocus(pop, { restoreTo: anchor });
   const dismiss = (e) => {
     if (e.type === "keydown") { if (e.key !== "Escape") return; }
     else if (pop.contains(e.target) || e.target.closest?.("#streakChip")) return;
@@ -567,6 +571,9 @@ function wireReveals() {
     n.classList.add("rise");
     n.style.transitionDelay = (i % 8) * 30 + "ms";
     _revealObs.observe(n);
+    // Safety net: if the observer never fires (never scrolled into view, or a
+    // browser quirk), reveal anyway so content is never stuck invisible. Idempotent.
+    setTimeout(() => n.classList.add("in"), 1400 + (i % 8) * 30);
   });
 }
 
@@ -590,7 +597,7 @@ function floatXP(amount, anchor) {
 function showToast(msg, ms = 3600) {
   document.querySelectorAll(".toast").forEach((t) => t.remove());
   const o = document.createElement("div");
-  o.className = "toast"; o.setAttribute("role", "status"); o.textContent = msg;
+  o.className = "toast"; o.textContent = msg;
   document.body.appendChild(o);
   announce(msg);
   setTimeout(() => {
@@ -621,7 +628,6 @@ function coachMark(anchorSel, text, id) {
   safeSet(key, "1");                    // mark seen immediately — no re-show race
   const tip = document.createElement("div");
   tip.className = "coach-mark" + (REDUCED() ? " reduced" : "");
-  tip.setAttribute("role", "status");
   tip.innerHTML = `<div class="cm-arrow"></div><div class="cm-body">${esc(text)}</div>`;
   document.body.appendChild(tip);
   const r = anchor.getBoundingClientRect();
@@ -648,11 +654,11 @@ function coachMark(anchorSel, text, id) {
 /* ---------- keyboard-shortcuts overlay ---------- */
 function toggleHelp() {
   const ex = el("#helpOverlay");
-  if (ex) { ex.remove(); return; }
+  if (ex) { ex._close(); return; }
   const row = (k, d) => `<div class="hk"><span>${d}</span><span class="keys">${k.split(" ").map((x) => `<kbd>${x}</kbd>`).join("")}</span></div>`;
   const o = document.createElement("div");
   o.className = "help-overlay"; o.id = "helpOverlay";
-  o.setAttribute("role", "dialog"); o.setAttribute("aria-label", "Keyboard shortcuts");
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", "Keyboard shortcuts");
   o.innerHTML = `<div class="help-card">
     <h2>Keyboard shortcuts</h2>
     <div class="help-cols">
@@ -665,8 +671,11 @@ function toggleHelp() {
     <button class="ghost" id="helpClose">Close (Esc)</button>
   </div>`;
   document.body.appendChild(o);
-  el("#helpClose").addEventListener("click", () => o.remove());
-  o.addEventListener("click", (e) => { if (e.target === o) o.remove(); });
+  const release = trapFocus(o, { initial: "#helpClose" });
+  const close = () => { release(); o.remove(); };
+  o._close = close;
+  el("#helpClose").addEventListener("click", close);
+  o.addEventListener("click", (e) => { if (e.target === o) close(); });
 }
 
 /* ---------- mouse back/forward buttons ---------- */
@@ -937,6 +946,7 @@ function ripple(anchor) {
 }
 
 function countUp(node, to) {
+  if (REDUCED()) { node.textContent = "+" + Math.round(to); return; }   // no tween — land on the final value
   const dur = 600, start = performance.now();
   function step(now) {
     const k = Math.min(1, (now - start) / dur);
@@ -1187,6 +1197,13 @@ function updateLevelRing() {
   const r = 9, circ = 2 * Math.PI * r;
   ring.setAttribute("stroke-dasharray", circ.toFixed(1));
   ring.setAttribute("stroke-dashoffset", (circ * (1 - pct)).toFixed(1));
+  // Give the chip a spoken meaning: the ring's fill is otherwise tooltip-only.
+  const chip = el("#lvlChip");
+  if (chip) {
+    const lvl = levelFromXP(state.progress.totalXP);
+    chip.setAttribute("role", "img");
+    chip.setAttribute("aria-label", `Level ${lvl} — ${titleForLevel(lvl)}. ${Math.round(pct * 100)}% to next level`);
+  }
 }
 
 // Most-invested section not practiced in a week, to nudge a refresh.
@@ -1577,8 +1594,10 @@ async function openTopics(section) {
   document.querySelectorAll(".lenopt").forEach((b) => b.addEventListener("click", () => {
     safeSet("sd_deck_len", b.dataset.len);
     document.querySelectorAll(".lenopt").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-checked", x === b ? "true" : "false"); });
+    wireRadioGroup(el(".lenbar"));   // re-sync roving tabindex to the new checked option
     announce(`Session length set to ${b.dataset.len} questions.`);
   }));
+  wireRadioGroup(el(".lenbar"));
   el("#backBtn").addEventListener("click", () => go("#/home"));
   el("#startSel").addEventListener("click", () => startBlitz(section, selected()));
   updateCount();
@@ -1848,7 +1867,7 @@ function showPrimeSheet(section, m, justRead) {
   if (el("#primeSheet")) return;
   const o = document.createElement("div");
   o.className = "pause-sheet"; o.id = "primeSheet";  // same glass-confirm pattern as the pause sheet
-  o.setAttribute("role", "dialog"); o.setAttribute("aria-label", "Prime your brain");
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", "Prime your brain");
   o.innerHTML = `<div class="pause-card">
       <h2>Prime your brain</h2>
       <p>3 quick guesses before you read. Nothing counts.</p>
@@ -1858,7 +1877,8 @@ function showPrimeSheet(section, m, justRead) {
       </div>
     </div>`;
   document.body.appendChild(o);
-  const close = () => o.remove();
+  const release = trapFocus(o, { initial: "#primeGo" });
+  const close = () => { release(false); o.remove(); };   // every prime close path navigates away
   el("#primeGo").addEventListener("click", () => {
     safeSet("sd_prime_opt", "0");   // engagement resets the opt-out
     close(); startPrime(section, m.module, m.name);
@@ -1869,7 +1889,6 @@ function showPrimeSheet(section, m, justRead) {
     close(); justRead();
   });
   o.addEventListener("click", (e) => { if (e.target === o) { close(); justRead(); } });   // backdrop = just read
-  el("#primeGo").focus();
 }
 async function startPrime(section, module, moduleName) {
   const bank = await loadBank(section);
@@ -2822,7 +2841,6 @@ function moment({ tier = "", title, sub = "", icon = "" }) {
     if (HAP[tier]) haptic(HAP[tier]);
     const o = document.createElement("div");
     o.className = "moment" + (tier ? " m-" + tier : "") + (reduced ? " reduced" : "");
-    o.setAttribute("role", "status");
     o.innerHTML = `${reduced ? "" : `<span class="moment-burst"></span>`}
       <div class="moment-card">
         ${icon ? `<div class="moment-icon">${icon}</div>` : ""}
@@ -3002,7 +3020,7 @@ function openPauseSheet(pending) {
   const done = answeredCount(), total = state.deck.length;
   const o = document.createElement("div");
   o.className = "pause-sheet"; o.id = "pauseSheet";
-  o.setAttribute("role", "dialog"); o.setAttribute("aria-label", "Pause this blitz");
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", "Pause this blitz");
   o.innerHTML = `<div class="pause-card">
       <h2>Pause this blitz?</h2>
       <p>Your progress is saved &mdash; resume from Home. ${done}/${total} answered.</p>
@@ -3013,12 +3031,13 @@ function openPauseSheet(pending) {
       </div>
     </div>`;
   document.body.appendChild(o);
-  const closeSheet = () => { o.remove(); };
-  el("#pauseKeep").addEventListener("click", closeSheet);
-  el("#pauseLeave").addEventListener("click", () => { saveDeckSnapshot(); state.inQuiz = false; closeSheet(); leave(); });
-  el("#pauseFinish").addEventListener("click", () => { closeSheet(); finish({ early: true }); });
+  const release = trapFocus(o, { initial: "#pauseKeep" });
+  const closeSheet = (restore = true) => { release(restore); o.remove(); };
+  o._close = closeSheet;
+  el("#pauseKeep").addEventListener("click", () => closeSheet());
+  el("#pauseLeave").addEventListener("click", () => { saveDeckSnapshot(); state.inQuiz = false; closeSheet(false); leave(); });
+  el("#pauseFinish").addEventListener("click", () => { closeSheet(false); finish({ early: true }); });
   o.addEventListener("click", (e) => { if (e.target === o) closeSheet(); });
-  el("#pauseKeep").focus();
 }
 
 /* ---------- progress ---------- */
@@ -3033,22 +3052,25 @@ function heatmapHTML(history) {
   const end = new Date(today); end.setDate(end.getDate() + (6 - today.getDay())); // Sat of this week
   const start = new Date(end); start.setDate(start.getDate() - (WEEKS * 7 - 1));   // a Sunday
   let cells = "";
+  let activeDays = 0, totalXp = 0;
   for (let i = 0; i < WEEKS * 7; i++) {
     const d = new Date(start); d.setDate(d.getDate() + i);   // setDate is DST-safe; raw ms math is not
     const iso = d.toLocaleDateString("en-CA");
     const xp = xpByDay.get(iso) || 0;
-    if (d > today) { cells += `<span class="hmcell hm-future"></span>`; continue; }
+    if (d > today) { cells += `<span class="hmcell hm-future" aria-hidden="true"></span>`; continue; }
+    if (xp > 0) { activeDays++; totalXp += xp; }
     const lvl = xp === 0 ? 0 : xp < 30 ? 1 : xp < 70 ? 2 : xp < 120 ? 3 : 4;
     const gaunt = gauntDays.has(iso) ? " hm-gaunt" : "";                       // [C] gold-dot overlay
-    cells += `<span class="hmcell hm-l${lvl}${gaunt}" style="animation-delay:${i * 3}ms" title="${iso}: ${xp} XP${gaunt ? " · gauntlet" : ""}"></span>`;
+    cells += `<span class="hmcell hm-l${lvl}${gaunt}" style="animation-delay:${i * 3}ms" title="${iso}: ${xp} XP${gaunt ? " · gauntlet" : ""}" aria-hidden="true"></span>`;
   }
   const empty = !(history || []).length
     ? `<p class="hm-empty">No activity yet &mdash; your first blitz lights up this grid.</p>` : "";
+  const summary = `Activity, last ${WEEKS} weeks: ${activeDays} active day${activeDays === 1 ? "" : "s"}, ${totalXp} XP`;
   return `<h2 class="section-h">Activity</h2>
-    <div class="heatmap-scroll"><div class="heatmap">${cells}</div></div>
+    <div class="heatmap-scroll"><div class="heatmap" role="img" aria-label="${esc(summary)}">${cells}</div></div>
     <div class="hmlegend">Less
-      <span class="hmcell hm-l0"></span><span class="hmcell hm-l1"></span><span class="hmcell hm-l2"></span><span class="hmcell hm-l3"></span><span class="hmcell hm-l4"></span>
-      More</div>${empty}`;
+      <span class="hmcell hm-l0" aria-hidden="true"></span><span class="hmcell hm-l1" aria-hidden="true"></span><span class="hmcell hm-l2" aria-hidden="true"></span><span class="hmcell hm-l3" aria-hidden="true"></span><span class="hmcell hm-l4" aria-hidden="true"></span>
+      More<span class="hmlegend-gaunt"><span class="hmcell hm-l2 hm-gaunt" aria-hidden="true"></span> gauntlet</span></div>${empty}`;
 }
 
 /* ============================================================================
@@ -3331,6 +3353,7 @@ function palSearchSection(query) {
 let _palette = null, _palKey = null;
 function closePalette() {
   if (!_palette) return;
+  _palette._release?.();
   _palette.remove();
   _palette = null;
   if (_palKey) { document.removeEventListener("keydown", _palKey, true); _palKey = null; }
@@ -3340,7 +3363,7 @@ function openPalette() {
   const o = document.createElement("div");
   o.className = "palette-overlay"; o.id = "paletteOverlay";
   o.innerHTML = `<div class="palette" role="dialog" aria-label="Command palette" aria-modal="true">
-      <input type="text" class="pal-input" id="palInput" placeholder="Jump to a section, module, or command…" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Command palette search" aria-controls="palList" />
+      <input type="text" class="pal-input" id="palInput" placeholder="Jump to a section, module, or command…" autocomplete="off" autocapitalize="off" spellcheck="false" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-label="Command palette search" aria-controls="palList" />
       <ul class="pal-list" id="palList" role="listbox"></ul></div>`;
   document.body.appendChild(o);
   _palette = o;
@@ -3372,21 +3395,24 @@ function openPalette() {
     input.value = query;
     render();
   }
+  const setActiveDesc = () => input.setAttribute("aria-activedescendant", results.length ? "pal-opt-" + sel : "");
   function render() {
     results = search ? questionResults(input.value.trim()) : topResults(input.value.trim());
     if (sel >= results.length) sel = Math.max(0, results.length - 1);
     list.innerHTML = results.length
-      ? results.map((r, i) => `<li class="pal-item${i === sel ? " sel" : ""}" role="option" aria-selected="${i === sel}" data-i="${i}">
+      ? results.map((r, i) => `<li class="pal-item${i === sel ? " sel" : ""}" id="pal-opt-${i}" role="option" aria-selected="${i === sel}" data-i="${i}">
           <span class="pal-label">${esc(r.label)}</span>${r.hint ? `<span class="pal-hint">${esc(r.hint)}</span>` : ""}</li>`).join("")
       : `<li class="pal-empty">${search ? "No questions match." : "No matches."}</li>`;
     list.querySelectorAll(".pal-item").forEach((li) => {
       li.addEventListener("mousemove", () => { sel = +li.dataset.i; markSel(); });
       li.addEventListener("click", () => activate(+li.dataset.i));
     });
+    setActiveDesc();
   }
   function markSel() {
     list.querySelectorAll(".pal-item").forEach((li, i) => { const on = i === sel; li.classList.toggle("sel", on); li.setAttribute("aria-selected", on); });
     list.querySelector(".pal-item.sel")?.scrollIntoView({ block: "nearest" });
+    setActiveDesc();
   }
   function activate(i) {
     const r = results[i];
@@ -3407,7 +3433,7 @@ function openPalette() {
   document.addEventListener("keydown", _palKey, true);
   o.addEventListener("pointerdown", (e) => { if (e.target === o) closePalette(); });
   render();
-  input.focus();
+  _palette._release = trapFocus(o, { initial: "#palInput" });
 }
 
 function renderProgress() {
@@ -3918,6 +3944,7 @@ async function openStudySection(section) {
     announce(b.dataset.path === "interview" ? "Interview-specific path" : "Full path");
     openStudySection(section);                         // re-render with the new subset
   }));
+  wireRadioGroup(el(".pathswitch"));
   let rzT = 0;
   const onResize = () => {                         // debounced; self-removes once the screen is gone
     if (!document.body.contains(wrap)) { window.removeEventListener("resize", onResize); return; }
@@ -4489,7 +4516,13 @@ async function mmRenderNode(n, src) {
   mmTintPlain(n);
   if (!n.dataset.mmWired) {                              // once per container, not per render
     n.dataset.mmWired = "1";
+    n.tabIndex = 0;
+    n.setAttribute("role", "button");
+    n.setAttribute("aria-label", "Diagram — open zoom view");
     n.addEventListener("click", () => openMermaidZoom(n));
+    n.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openMermaidZoom(n); }
+    });
   }
 }
 
@@ -4700,13 +4733,17 @@ function openDiagramZoom(contentEl) {
 
   const ctrl = document.createElement("div");
   ctrl.className = "mermaid-zoom-ctrl";
-  ctrl.innerHTML = `<button class="mz-out" title="Zoom out (−)">−</button><span class="mz-pct">100%</span><button class="mz-in" title="Zoom in (+)">+</button><button class="mz-reset" title="Fit (0)">↺</button><span class="mz-hint">drag to pan · scroll to zoom · esc closes</span><button class="mz-close" title="Close (Esc)">✕</button>`;
+  ctrl.innerHTML = `<button class="mz-out" title="Zoom out (−)" aria-label="Zoom out">−</button><span class="mz-pct">100%</span><button class="mz-in" title="Zoom in (+)" aria-label="Zoom in">+</button><button class="mz-reset" title="Fit (0)" aria-label="Fit to view">↺</button><span class="mz-hint">drag to pan · scroll to zoom · esc closes</span><button class="mz-close" title="Close (Esc)" aria-label="Close diagram viewer">✕</button>`;
 
   const overlay = document.createElement("div");
   overlay.className = "mermaid-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "Diagram viewer");
   overlay.appendChild(ctrl);
   overlay.appendChild(box);
   document.body.appendChild(overlay);
+  const release = trapFocus(overlay, { initial: ".mz-close" });
 
   const apply = () => {
     inner.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
@@ -4731,7 +4768,7 @@ function openDiagramZoom(contentEl) {
   };
   requestAnimationFrame(fit);
 
-  const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey, true); };
+  const close = () => { release(); overlay.remove(); document.removeEventListener("keydown", onKey, true); };
   const onKey = (e) => {
     if (e.key === "Escape") { e.stopPropagation(); close(); return; }   // don't also close the reader
     const r = box.getBoundingClientRect();
@@ -4815,13 +4852,31 @@ function wireDiagramsAndCopy(root) {
     pre.appendChild(btn);
     if (code.classList.contains("diagram")) {
       pre.title = "Click to zoom";
+      pre.tabIndex = 0;
+      pre.setAttribute("role", "button");
+      pre.setAttribute("aria-label", "ASCII diagram — open zoom view");
+      const openAscii = () => { const p = document.createElement("pre"); p.innerHTML = code.innerHTML; openDiagramZoom(p); };
       pre.addEventListener("click", (e) => {
         if (e.target.closest(".codecopy")) return;
-        const p = document.createElement("pre");
-        p.innerHTML = code.innerHTML;
-        openDiagramZoom(p);
+        openAscii();
+      });
+      pre.addEventListener("keydown", (e) => {
+        if (e.target.closest(".codecopy")) return;
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openAscii(); }
       });
     }
+  });
+}
+
+// Wrap each rendered table in a horizontal-scroll container so wide tables
+// scroll inside their own box instead of forcing the whole reader body sideways.
+function wireTables(main) {
+  main.querySelectorAll("table").forEach((t) => {
+    if (t.parentElement && t.parentElement.classList.contains("md-tablewrap")) return;   // already wrapped
+    const wrap = document.createElement("div");
+    wrap.className = "md-tablewrap";
+    t.parentNode.insertBefore(wrap, t);
+    wrap.appendChild(t);
   });
 }
 
@@ -4959,6 +5014,7 @@ function mdRender(src) {
 const readerCache = {};                            // content path -> raw markdown
 const reader = { path: null, titleText: "", back: [], nav: null, full: false, toc: false, modules: false };
 const readerExpanded = new Set();   // module keys expanded in the left sidebar (session-persistent)
+let _readerInvoker = null;          // element focused when the reader was opened; focus returns here on close
 
 // Normalise a relative link (../x/y.md) against the directory of the current file.
 function resolvePath(baseFile, rel) {
@@ -5071,7 +5127,7 @@ function applyReaderTypography() {
 function openReaderTypeMenu(anchorBtn) {
   const panel = el("#reader"); if (!panel) return;
   const existing = el("#readerTypePop");
-  if (existing) { existing.remove(); return; }
+  if (existing) { existing._release?.(); existing.remove(); return; }
   const font = localStorage.getItem("sd_reader_font") || "sans";
   const measure = localStorage.getItem("sd_reader_measure") || "default";
   const dropcap = localStorage.getItem("sd_reader_dropcap") !== "0";
@@ -5091,8 +5147,10 @@ function openReaderTypeMenu(anchorBtn) {
     s.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
     if (s.dataset.k === "sd_reader_recall") applyRecallPref(); else applyReaderTypography();
   })));
+  const release = trapFocus(pop, { restoreTo: anchorBtn });
+  pop._release = release;
   setTimeout(() => {
-    const done = () => { pop.remove(); document.removeEventListener("mousedown", off); document.removeEventListener("keydown", esc, true); };
+    const done = () => { release(); pop.remove(); document.removeEventListener("mousedown", off); document.removeEventListener("keydown", esc, true); };
     const off = (ev) => { if (!pop.contains(ev.target) && ev.target !== anchorBtn) done(); };
     // capture + stopPropagation so Esc closes only the menu, not the reader behind it
     const esc = (ev) => { if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); done(); } };
@@ -5112,7 +5170,7 @@ function buildToc(tocEl, main) {
   tocEl.querySelectorAll("a[data-tid]").forEach((a) => a.addEventListener("click", (e) => {
     e.preventDefault();
     const t = main.querySelector("#" + CSS.escape(a.dataset.tid));
-    if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (t) t.scrollIntoView({ behavior: REDUCED() ? "auto" : "smooth", block: "start" });
   }));
   return heads.length;
 }
@@ -5331,8 +5389,8 @@ function buildModuleNav(modEl, navCtx, currentPath) {
     }).join("");
 
     return `<li class="mod-group${isOpen ? " open" : ""}">
-      <div class="mod-folder" data-midx="${i}" title="${esc(m.title)}"><span class="mod-arrow">&#9654;</span><span class="mod-fname">${esc(m.title)}</span></div>
-      <ul class="mod-subfiles">${subItems}</ul>
+      <button class="mod-folder" data-midx="${i}" title="${esc(m.title)}" aria-expanded="${isOpen}" aria-controls="modsub-${i}"><span class="mod-arrow">&#9654;</span><span class="mod-fname">${esc(m.title)}</span></button>
+      <ul class="mod-subfiles" id="modsub-${i}">${subItems}</ul>
     </li>`;
   }).join("");
 
@@ -5350,6 +5408,7 @@ function buildModuleNav(modEl, navCtx, currentPath) {
       const mKey = navCtx.list[+folder.dataset.midx].path.replace("/README.md", "");
       const willOpen = !li.classList.contains("open");
       li.classList.toggle("open", willOpen);
+      folder.setAttribute("aria-expanded", String(willOpen));
       if (willOpen) readerExpanded.add(mKey); else readerExpanded.delete(mKey);
     });
   });
@@ -5425,7 +5484,7 @@ function wireReaderBody(body) {
   body.querySelectorAll("a.md-anchor").forEach((a) => a.addEventListener("click", (e) => {
     e.preventDefault();
     const t = body.querySelector("#" + CSS.escape(a.dataset.frag || ""));
-    if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (t) t.scrollIntoView({ behavior: REDUCED() ? "auto" : "smooth", block: "start" });
   }));
 }
 
@@ -5679,6 +5738,10 @@ async function openReaderPath(path, title, navCtx, frag) {
   // are always available, not only when entered through Study.
   reader.nav = navCtx || navFromIndex(path);
   reader.titleText = title || titleFromPath(path);
+  // Soft-focus: remember who opened the reader so focus can return on close.
+  // In-reader nav (Prev/Next) keeps the reader-open class, so the invoker is
+  // captured only on the first open, never overwritten while browsing.
+  if (!document.body.classList.contains("reader-open")) _readerInvoker = document.activeElement;
   let panel = el("#reader");
   if (!panel) { panel = document.createElement("aside"); panel.id = "reader"; document.body.appendChild(panel); }
   // Section identity: one JS-set property scopes every accent consumer (progress
@@ -5712,6 +5775,8 @@ async function openReaderPath(path, title, navCtx, frag) {
     <div class="reader-body" id="readerBody"><div class="loading">Loading&hellip;</div></div>
     <button class="reader-top" id="readerTop" title="Back to top" aria-label="Back to top">&uarr;</button>`;
   document.body.classList.add("reader-open");
+  panel.tabIndex = -1;
+  panel.focus({ preventScroll: true });          // soft-focus the panel (page behind stays interactive ≥900px)
   applyReaderModes();
   wireGrips();
   el("#readerClose").addEventListener("click", closeReader);
@@ -5776,6 +5841,7 @@ async function openReaderPath(path, title, navCtx, frag) {
     wireReaderBody(main);
     wireRecallPrompts(main);                       // think-first: collapse §12 answers
     wireDiagramsAndCopy(main);                     // copy buttons + ASCII-diagram zoom
+    wireTables(main);                              // wrap wide tables in a horizontal-scroll box
     renderMermaid(main);                           // no-op when page has no mermaid fences
     wireHeadingAnchors(main, path);                // hover-to-copy section deep links
     appendEvalBlock(main, path);                   // "Evaluate me" quiz launcher
@@ -5817,6 +5883,8 @@ function closeReaderDom() {
   document.body.classList.remove("reader-open", "reader-full");
   const p = el("#reader"); if (p) p.remove();
   reader.path = null; reader.back = []; reader.nav = null;
+  if (_readerInvoker && _readerInvoker.isConnected) _readerInvoker.focus({ preventScroll: true });
+  _readerInvoker = null;
 }
 
 // User-initiated close (X / Esc): drop the overlay and restore the underlying
@@ -6472,8 +6540,8 @@ document.addEventListener("keydown", (e) => {
   const typing = tag === "input" || tag === "textarea";   // [A2] textarea: explain-back input
   // [A2] toggle explain-back with E (guarded against typing into its own textarea)
   const toggleEB = () => { const det = el(".explain-back"); if (det) { det.open = !det.open; if (det.open) det.querySelector(".eb-input")?.focus(); } };
-  if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay").remove(); return; }
-  if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet").remove(); return; }
+  if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay")._close(); return; }
+  if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet")._close(); return; }
   // Any other key while a modal sheet is up must not fall through to the quiz
   // handler below — it would lock/grade the question hidden behind the overlay.
   if (el("#helpOverlay") || el("#pauseSheet")) return;
@@ -6785,7 +6853,8 @@ function renderCodex() {
       const cls = [v.captured ? "captured" : "", v.foil ? "foil" : "", v.tarnished ? "tarnished" : "",
         (!v.captured && !v.tarnished) ? "dim" : ""].filter(Boolean).join(" ");
       const dots = Array.from({ length: v.needed }, (_, i) => `<span class="cx-dot ${i < v.held ? "on" : ""}"></span>`).join("");
-      return `<button class="cx-card ${cls}" data-mod="${esc(mod)}" title="${esc(prettyMod(mod))} — ${v.held}/${v.needed} held${v.foil ? " · foil" : ""}${v.tarnished ? " · fading" : ""}">
+      const cardLbl = `${esc(prettyMod(mod))} — ${v.held}/${v.needed} held${v.foil ? " · foil" : ""}${v.tarnished ? " · fading" : ""}`;
+      return `<button class="cx-card ${cls}" data-mod="${esc(mod)}" title="${cardLbl}" aria-label="${cardLbl}">
           <span class="cx-name">${esc(prettyMod(mod))}</span>
           <span class="cx-dots">${dots}</span>
         </button>`;
@@ -6794,7 +6863,13 @@ function renderCodex() {
   }).join("");
   app.innerHTML = `
     <div class="hero"><h1>The Codex</h1>
-      <p><b>${captured}</b>/${cs.size} captured &middot; <b>${foil}</b> foil</p></div>
+      <p><b>${captured}</b>/${cs.size} captured &middot; <b>${foil}</b> foil</p>
+      <div class="cx-legend">
+        <span class="cx-legkey captured"><span class="cx-legdot"></span>captured</span>
+        <span class="cx-legkey foil"><span class="cx-legdot"></span>foil</span>
+        <span class="cx-legkey tarnished"><span class="cx-legdot"></span>fading</span>
+        <span class="cx-legkey dim"><span class="cx-legdot"></span>unexplored</span>
+      </div></div>
     ${shelves}
     <div class="row" style="margin-top:18px"><button class="ghost" id="cxHome">&larr; Home</button></div>`;
   el("#cxHome").addEventListener("click", () => go("#/home"));
@@ -6842,7 +6917,8 @@ function skylineSVG(p) {
     x += BW;
   }
   return `<div class="skyline" aria-label="Retention skyline: ${captured.length} captured modules">` +
-    `<svg viewBox="0 0 ${x + PAD} ${H}" width="100%" height="${H}" preserveAspectRatio="xMinYMax meet" role="img">${buildings}</svg></div>`;
+    `<svg viewBox="0 0 ${x + PAD} ${H}" width="100%" height="${H}" preserveAspectRatio="xMinYMax meet" role="img" aria-hidden="true">${buildings}</svg>` +
+    `<p class="ins-cap">Skyline — one building per captured module; lit windows show current retention.</p></div>`;
 }
 
 /* ---------- [C] 4. THE LEDGER — achievements certifying learning events ---------- */
