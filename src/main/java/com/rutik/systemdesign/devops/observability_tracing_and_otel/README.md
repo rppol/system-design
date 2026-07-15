@@ -406,6 +406,18 @@ Jaeger is a mature CNCF backend that indexes traces in Cassandra or Elasticsearc
 **Q12: What overhead does tracing add and how do you keep it low?**
 Instrumentation adds per-span CPU/memory and the network cost of exporting spans, plus storage on the backend — all scaling with request volume. Keep it low by sampling (tail sampling keeps errors/slow but discards most successes), batching exports in the Collector, running an agent tier to offload export work from the app, and avoiding excessive manual spans on hot loops. Done right, overhead is a small single-digit percentage while you still keep 100% of the diagnostically valuable traces.
 
+**Q13: What are the Collector's three deployment patterns, and which is the standard production layout?**
+The three patterns are agent (sidecar/DaemonSet), gateway (central deployment), and agent-to-gateway two-tier, which is the standard production layout. Agents run next to each app or node for local batching and low-latency resource-attribute tagging; the gateway is a standalone deployment that owns tail sampling, fan-out, and central policy. Production systems combine both: agents forward everything to a gateway tier via a load-balancing exporter keyed on `trace_id`, because only a component that receives all of a trace's spans can tail-sample correctly. Running agents alone forces you into head sampling, since no single per-node agent ever sees a complete trace.
+
+**Q14: What do the `memory_limiter` and `batch` processors do in a Collector pipeline, and why does their order matter?**
+`memory_limiter` protects the Collector from OOM by shedding data once memory exceeds a threshold, while `batch` groups spans into larger exports to cut the number of RPCs. In the example config, `memory_limiter` runs first with a 4096 MiB limit, a 1024 MiB spike allowance, and a 1s check interval, so it can shed load before any expensive processor spends CPU on spans; `batch` runs last with a 5s timeout and 1024-span batches, right before the exporter. Placing `memory_limiter` first is deliberate — it must gate incoming data before `attributes`/redact or `tail_sampling` process spans that would be dropped anyway. Getting the order wrong lets a traffic spike OOM the Collector before the safety valve engages.
+
+**Q15: How do you prevent PII from leaking into trace spans?**
+Strip sensitive fields in the Collector's `attributes` processor before export, since spans land in a long-retained, widely-readable trace store. The example pipeline deletes `http.request.header.authorization` and `user.email` via `action: delete` in an `attributes/redact` stage that runs before sampling and export. This redaction is a backstop, not a substitute for careful instrumentation — apps should never attach raw request bodies, auth headers, or literal SQL values as span attributes in the first place. Follow OTel semantic conventions for what's safe to capture so redaction rules stay predictable across services.
+
+**Q16: How does AWS X-Ray fit into an OpenTelemetry-based tracing setup?**
+AWS X-Ray is a managed, OTLP-compatible tracing backend, so apps can export standard OTel spans to it through the Collector without vendor-specific SDKs. You add an X-Ray exporter to the same Collector pipeline used for Jaeger or Tempo, so adding or switching to X-Ray is an exporter-config change, not a re-instrumentation effort. X-Ray also integrates natively with Lambda, API Gateway, and ECS/EKS, auto-adding trace headers at the platform level, which can fill gaps in manual instrumentation for AWS-managed compute. Choose X-Ray for tight AWS-service integration with no backend to operate yourself, and Tempo/Jaeger when you need the same OSS backend across clouds or on-prem.
+
 ---
 
 ## 13. Best Practices

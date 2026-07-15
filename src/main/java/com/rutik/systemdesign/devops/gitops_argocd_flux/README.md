@@ -351,6 +351,18 @@ Because the entire desired state lives in Git, recovering a cluster is "deploy a
 **Q12: How does GitOps relate to progressive delivery?**
 GitOps provides the source of truth and reconciliation; progressive delivery (Argo Rollouts/Flagger) provides metric-gated canary/blue-green. They compose: you declare a Rollout CR in Git, ArgoCD/Flux reconciles it, and the Rollouts controller executes the canary with automated analysis and rollback. The release strategy is declarative and audited in Git, and an auto-abort is reflected as the controller reverting to the stable version (see [deployment_strategies](../deployment_strategies/)).
 
+**Q13: How do ApplicationSets scale GitOps to many clusters without per-cluster copy-paste?**
+An ApplicationSet uses a generator, such as `clusters: {}`, to template one `Application` per matching cluster instead of hand-writing each one. Each generated Application substitutes variables like `{{name}}` and `{{server}}` into the template, so a single ApplicationSet with a `clusters/{{name}}` path can fan out to 25 per-cluster Applications from one repo, as in this module's fleet case study. Adding a cluster to the fleet means registering it and letting the generator produce its Application automatically, rather than writing new YAML by hand. Use ApplicationSets instead of manually maintained Applications once you're managing more than a handful of clusters or environments from one repo.
+
+**Q14: Why do teams keep the config repo separate from the application code repo?**
+Separating them decouples the deploy concern (what version runs where) from the code-change concern (what the app does). CI owns the app repo and only pushes a built image plus a tag-bump commit into the config repo; CD (ArgoCD/Flux) watches only the config repo, so it never needs read access to application source at all. This also lets one config repo hold per-environment or per-cluster overlays, and lets platform teams gate config changes (CODEOWNERS, required reviews) independently of the app repo's own review rules. Split app and config repos once you have more than one environment, or want the CD agent to have zero visibility into application source.
+
+**Q15: Does the GitOps agent see a Git push instantly, or does it poll?**
+By default it polls Git on an interval rather than reacting instantly, though a webhook can shorten the delay. Flux's `GitRepository` source polls every `interval: 1m` and its `Kustomization` reconciles every `interval: 5m` in this module's example, so a commit can take minutes to reach the cluster without a webhook configured. ArgoCD works the same way — periodic polling plus an optional webhook — so "pull-based" means the agent decides when to check, not that it's notified the instant you `git push`. Configure a Git webhook to the agent's endpoint if you need near-instant reconciliation instead of relying on the polling interval alone.
+
+**Q16: What does the `retry`/`backoff` block in an ArgoCD Application spec do?**
+It controls how ArgoCD retries a failed sync instead of giving up after one attempt, spacing retries with exponential backoff. With `limit: 5` and `backoff: {duration: 5s, factor: 2}`, retries land at 5s, 10s, 20s, 40s, then 80s apart — about 2.5 minutes of total retry window — before ArgoCD gives up and marks the Application degraded. This absorbs transient failures, like a momentarily unreachable admission webhook or a CRD that hasn't registered yet, without a human needing to manually re-trigger sync. Raise `limit` and `backoff` for Applications with known-flaky dependencies rather than leaving every app on the same default.
+
 ---
 
 ## 13. Best Practices

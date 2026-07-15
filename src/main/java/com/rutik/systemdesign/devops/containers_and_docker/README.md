@@ -349,6 +349,18 @@ An image is the immutable, layered template (build artifact); a container is a r
 **Q12: How do you reduce a 1.2 GB image to under 100 MB?**
 Use a multi-stage build (drop the toolchain and source), choose a minimal runtime base (distroless/slim/scratch), order layers for caching, add a `.dockerignore`, combine and clean `RUN` steps (remove apt caches in the same layer), and avoid installing unnecessary packages. The biggest win is usually multi-stage + a minimal base.
 
+**Q13: Why might a container ignore `docker stop` and hang until it's force-killed?**
+Shell-form `CMD`/`ENTRYPOINT` makes `/bin/sh` PID 1 instead of your app, so it never forwards the SIGTERM that `docker stop` sends. Exec-form (`CMD ["node", "server.js"]`) runs your process directly as PID 1 so it receives signals itself and can shut down cleanly. Kubernetes sends SIGTERM then waits `terminationGracePeriodSeconds` (30s by default) before SIGKILL, so a process that never sees SIGTERM always takes the hard, ungraceful path out. Always use exec-form `CMD`/`ENTRYPOINT` (per this module's Best Practices) and handle SIGTERM in your application code.
+
+**Q14: Why do CI pipelines prefer Kaniko or rootless builds over Docker-in-Docker (DinD)?**
+Docker-in-Docker needs a privileged container with access to a Docker daemon socket, which is a serious CI security risk. A compromised build step — say, a malicious `npm ci` postinstall script — can use that socket or `--privileged` access to escape to the host, since privileged mode disables most container isolation. Kaniko and rootless BuildKit/Buildx build OCI images from a Dockerfile entirely in userspace without a daemon or elevated privileges, so a compromised build stays contained (Podman/Buildah offer the same daemonless model outside CI). Prefer Kaniko or rootless builds over DinD for any pipeline that builds untrusted or dependency-heavy code.
+
+**Q15: How does a BuildKit cache mount differ from the normal image layer cache?**
+A cache mount persists a directory like `/root/.npm` across builds without ever becoming part of an image layer. The normal layer cache is invalidated the instant `COPY . .`'s input changes, forcing `RUN npm ci` to reinstall from scratch on every code edit; a cache mount survives that invalidation because it lives outside the layer entirely, so npm/pip/apt still reuse already-downloaded packages. This is why `RUN --mount=type=cache,target=/root/.npm npm ci` in the case study's fixed Dockerfile cut code-only rebuilds from a 6-minute cold build down to about 40 seconds. Add a cache mount for your package manager's cache directory whenever dependency installs rerun needlessly on code-only changes.
+
+**Q16: How do you find out which layer is actually bloating a large image?**
+Run `docker history` to list each layer's size and the instruction that created it, or `dive` for an interactive explorer that also flags wasted space. `dive myimg:latest` surfaces cases the size number alone hides, like a file added in one layer and deleted in a later one — it still costs space permanently because layers are immutable and additive. This turns "why is my image 1.2 GB" from guesswork into a targeted fix: reorder an instruction, add a `.dockerignore` entry, or move a step into the discarded stage of a multi-stage build. Run `dive` before optimizing an image so you fix the layer that's actually heavy instead of guessing.
+
 ---
 
 ## 13. Best Practices
