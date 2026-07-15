@@ -21,7 +21,9 @@ AWS is the default cloud in worked examples; GCP/Azure appear in comparison tabl
 | 7 — DevSecOps & Reliability | devsecops_and_supply_chain_security, policy_as_code_and_compliance, disaster_recovery_and_resilience, platform_engineering_and_idp |
 | 8 — Specialized Platforms & Performance | ml_platform_and_gpu_infrastructure, event_streaming_operations, performance_and_load_testing |
 
-**Deep modules requiring 15 Q&As:** kubernetes_architecture, kubernetes_networking, kubernetes_security, infrastructure_as_code_terraform, observability_metrics_prometheus, sre_principles_and_slos, ml_platform_and_gpu_infrastructure
+**Q&A floor:** 15 per module (root CLAUDE.md hard floor). Deep modules aim higher (18+): kubernetes_architecture, kubernetes_networking, kubernetes_security, infrastructure_as_code_terraform, observability_metrics_prometheus, sre_principles_and_slos, ml_platform_and_gpu_infrastructure
+
+Backfill status (2026-07-15): all devops modules at or below 10 Q&As were raised to 16, and every interview-path module now meets the floor; 9 devops modules (non-interview-path) remain at 11-14 as deferred backlog (43 repo-wide).
 
 ---
 
@@ -92,7 +94,7 @@ On finishing a module/chunk:
 
 ## Adding a New DevOps Module
 
-1. Create `<module_name>/README.md` — 14-section template; 10 Q&As minimum (15 for deep modules listed above)
+1. Create `<module_name>/README.md` — 14-section template; 15 Q&As minimum (root CLAUDE.md hard floor; 18+ for deep modules listed above)
 2. Follow DevOps-specific content rules above
 3. Update `README.md` module table AND flip the file's status in the §8 build manifest
 4. Update root `README.md` DevOps phase table
