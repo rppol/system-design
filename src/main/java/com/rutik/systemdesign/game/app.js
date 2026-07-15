@@ -45,6 +45,9 @@ const sectionIdentity = (path) => SECTION_IDENTITY[(path || "").split("/")[0]] |
 // Phase-order for the Study browser. Derived from each section's README learning path.
 // Modules not listed here sort to the end (alphabetically by JS Map insertion order).
 // extract.py --strict parses this literal (and STUDY_PATHS) — keep the "const STUDY_ORDER = {" ... "};" shape.
+// NOTE: the guard unions EVERY slug array inside a STUDY_PATHS section — adding a second array
+// (e.g. `full:`) beside `interview:` would false-fail the ordered-subset check and block deploys;
+// generalize extract.py's check_wiring first.
 const STUDY_ORDER = {
   backend: [
     "backend/osi_model_and_networking","backend/tcp_ip_deep_dive","backend/udp_and_quic","backend/http_protocols",
@@ -6672,7 +6675,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet")._close(); return; }
   // Any other key while a modal sheet is up must not fall through to the quiz
   // handler below — it would lock/grade the question hidden behind the overlay.
-  if (el("#helpOverlay") || el("#pauseSheet") || el("#moreSheet")) return;
+  if (el("#helpOverlay") || el("#pauseSheet") || el("#moreSheet") || el("#primeSheet")) return;
   // [E2] command palette: Cmd/Ctrl+K toggles anywhere; "/" opens when not typing.
   if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); _palette ? closePalette() : openPalette(); return; }
   if (e.key === "/" && !typing && !_palette) { e.preventDefault(); openPalette(); return; }
