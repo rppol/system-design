@@ -926,7 +926,7 @@ function confetti() {
   if (REDUCED()) return;
   const cs = getComputedStyle(document.documentElement);
   const colors = ["--accent", "--accent-2", "--good", "--warn", "--bad"]
-    .map((v) => cs.getPropertyValue(v).trim() || "#6ea8fe");
+    .map((v) => cs.getPropertyValue(v).trim() || "#7cabff");
   const c = document.createElement("div");
   c.className = "confetti";
   for (let i = 0; i < 110; i++) {
