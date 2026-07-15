@@ -846,6 +846,22 @@ A: Rate limiting rejects excess requests (hard cap — 429 response). Throttling
 
 A: Use a circuit breaker around the Redis call. Options: (1) fail open — allow all traffic when Redis is unavailable (risky but maintains availability), (2) fail closed — reject all traffic (too strict), (3) fall back to local in-memory rate limiting with conservative limits. Option 3 is usually best — each server enforces limit/N where N is server count.
 
+**Q13: Why does clock skew across API servers silently inflate a distributed token bucket's effective limit?**
+
+A: When each server computes bucket refill from its own local clock, a lagging node calculates a refill "from the past" and grants tokens the bucket shouldn't have yet. Common Pitfall 3 and the Stripe case study both quantify it: roughly 500ms of drift across nodes inflated a 1000/min bucket to an effective ~1100/min — about 10% of free extra quota, invisible in any single node's logs because each node's math is locally correct. The fix is to make the rate-limit store the single source of time truth — the Stripe implementation passes `redis.call('TIME')` into the Lua script instead of the caller's wall clock, so every refill calculation uses the same clock regardless of which datacenter the request landed in. Never mix caller-side timestamps into shared rate-limit state; time must come from the same place the counters live.
+
+**Q14: Why did Stripe move its rate-limit check from the Java application layer to the NGINX edge?**
+
+A: An application-layer check means abusive traffic still consumes the very resources the limiter exists to protect — connections, threads, and CPU on the app servers, plus a Redis round trip per malicious request. The Stripe case study's first pitfall shows the consequence: a 100k req/sec DDoS drove app-server CPU to 100% even though every request was being correctly rejected, because rejection happened after the request had already traversed the expensive part of the stack. Moving the check into NGINX/OpenResty at the edge meant bad traffic received its 429 before touching an app server, cutting app CPU during attacks by 95%. Enforce volume limits as early in the request path as the needed context allows — the module's request-path diagram (§5) shows each layer can reject early, and cheap rejection is the entire point.
+
+**Q15: How would you rate limit a GraphQL API where one query can cost 100x more than another?**
+
+A: Count query cost instead of request count — assign each query a complexity score and charge it against a points budget per window. A request-count limiter is blind to the fact that one deeply nested query fanning into hundreds of resolver calls consumes vastly more backend resources than a single-field lookup, so an attacker stays under the request limit while doing the damage of thousands of requests. The mechanics mirror GitHub's GraphQL API (5,000 points/hour, complexity-weighted, per §7): score the parsed query before executing it — list sizes and nested relations add points — track `used_points` in Redis rather than a request counter, and reject any query whose cost would exceed the remaining budget. Apply the same cost-based thinking to any API with heterogeneous request costs, like the per-endpoint split in the Stripe case study where POST /charges gets 100/min while cheap GETs get 1000/min.
+
+**Q16: A parent account has 1,000 sub-merchants sharing one rate-limit bucket — what goes wrong, and what's the right keying?**
+
+A: One misbehaving sub-merchant exhausts the shared bucket and blocks all 999 innocent siblings, because the limiter's unit of isolation doesn't match the actual unit of independent behavior. Common Pitfall 5 describes the general failure and the Stripe case study hit it concretely: Shopify generates an API key per merchant, and a single merchant's runaway integration consumed the parent account's shared quota, throttling every other merchant under that account. The fix is to key the rate limiter at the real unit of isolation — per sub-merchant or per integration — while keeping an optional higher-level aggregate limit for billing visibility only, never for throttling. When designing rate-limit keys, ask "whose bad behavior should be able to affect whom?" — the answer defines the key granularity, and it's usually finer than the billing relationship.
+
 ---
 
 ## Cross-Perspective: LLD Connections

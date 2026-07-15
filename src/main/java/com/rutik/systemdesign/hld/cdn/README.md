@@ -775,6 +775,22 @@ A: CDN terminates TLS at the edge. Modern CDNs handle: (1) Automatic certificate
 
 A: `stale-while-revalidate` is a Cache-Control directive: `Cache-Control: max-age=60, stale-while-revalidate=300`. It means: serve the cached version immediately (even if up to 5 minutes stale) while asynchronously fetching a fresh copy in the background. This eliminates cache-miss latency from the user's perspective — they always get an instant response. The background revalidation updates the cache for the next request. Ideal for content that changes infrequently and where slight staleness is acceptable.
 
+**Q13: What is the difference between `max-age` and `s-maxage` in a `Cache-Control` header?**
+
+A: `max-age` applies to every cache in the chain, including the browser, while `s-maxage` applies only to shared caches like the CDN and is ignored by browsers. A header like `Cache-Control: s-maxage=86400, max-age=3600` lets the CDN hold an object for 24 hours while the browser only trusts it for 1 hour, so you can push an update via a CDN purge without waiting for millions of individual browser caches to expire. This split matters most for content that changes occasionally but should still be cached aggressively at the edge — pair it with `stale-while-revalidate` from the "Caching at CDN" section for a complete freshness policy. When no `s-maxage` is present, the CDN falls back to `max-age`, so omitting it is not an error, just a missed optimization.
+
+**Q14: How do you cache dynamic content that changes every second without hammering the origin on every request?**
+
+A: Use micro-caching — cache the dynamic response at the edge for just 1-5 seconds instead of not caching it at all. The "Dynamic Caching Strategies" section gives the concrete payoff: a page generating 10,000 requests/second with a 1-second micro-cache TTL sends only 1 request/second to origin, a 9,999x reduction in origin load, at the cost of at most 1 second of staleness. This works because most "dynamic" pages (news homepages, trending lists, stock summaries) don't actually need per-request freshness — the perceived staleness window is invisible to users but the origin-load reduction is massive. Combine micro-caching with `stale-while-revalidate` so the very first request after expiry is also served instantly while a background fetch refreshes the cache.
+
+**Q15: What went wrong when an engineer ran a blanket "purge everything" to clear one stale CSS file, and how do you prevent it?**
+
+A: A cache-wide purge clears every cached object, not just the one file you intended to invalidate, so a routine CSS fix can accidentally evict your entire image cache along with it. In the media-platform case study's second lessons-learned pitfall, `cf purge --everything` to clear stale CSS also wiped 200TB of cached images; the next hour saw 500k requests/sec hit origin — exceeding the 500k/sec budget the whole architecture was sized around — and end-user p99 latency rose to 4 seconds. The fix was tag-based purging (`cf purge --tag css:v423`), which clears only the ~200MB of objects carrying that surrogate key and leaves unrelated content untouched. Always scope a purge to a cache tag or URL pattern in production, and reserve "purge everything" for a true full-cache emergency, since its blast radius is every cached byte you have.
+
+**Q16: Why would a company run multiple CDN providers simultaneously instead of picking one?**
+
+A: A multi-CDN strategy protects against a single provider's outage and lets you route each region to whichever CDN performs best there. Best Practices item 4 notes that Fastly, Cloudflare, and Akamai have all had major outages — if your entire traffic depends on one vendor, their bad day becomes your outage. Beyond resilience, running multiple providers creates pricing leverage in contract negotiations and lets you compare actual measured latency per region rather than trusting a single vendor's PoP map. The hard part is operational: DNS-based traffic steering (Route 53, NS1) picks the active CDN per request, but cache invalidation must now be synchronized across every provider, multiplying the purge-coordination work.
+
 ---
 
 ## Cross-Perspective: LLD Connections
