@@ -346,3 +346,39 @@ When a base class is modified, subclasses break even though they didn't change �
 DRY applies to knowledge, not just code. A database schema that stores the same customer address in three tables violates DRY (update one, get inconsistency). A configuration file that hard-codes port 8080 in 12 places violates DRY. A validation rule that exists in the UI, the service layer, AND the database trigger violates DRY. The fix: single source of truth. For config: a single constants class or environment variable. For validation: server-side as the authoritative source; client-side as a UX convenience only.
 
 ---
+
+**Q: How does Separation of Concerns differ from the Single Responsibility Principle?**
+
+Separation of Concerns is the architecture-level rule that different concerns live in different modules or layers; SRP is its class-level refinement — one reason to change per class. SoC decides the coarse partitions (presentation vs business logic vs persistence); SRP then judges each class inside a partition by asking how many distinct change drivers it has. The two can diverge: a codebase with a clean Controller-Service-Repository layering honors SoC, yet a 2,000-line service class inside the business layer still violates SRP. When designing, draw the SoC boundaries first, then apply SRP to keep each class within its layer focused on a single responsibility.
+
+---
+
+**Q: Why are private fields with getters and setters for everything not real encapsulation?**
+
+Encapsulation means information hiding — concealing the design decisions likely to change — not merely marking fields private and exposing every one through a getter and setter pair. A class with accessors for all its fields leaks its entire internal representation: callers read and mutate state as if the fields were public, so changing the representation still breaks them. Real encapsulation exposes behavior and hides data — `order.cancel()` instead of `order.setStatus("CANCELLED")` — so the object enforces its own invariants and the representation can change freely. The test: "can I change how this class stores its state without touching any caller?" Default to no accessors, and add behavior methods instead of setter pairs.
+
+---
+
+**Q: DRY, YAGNI, and KISS pull in different directions — what tiebreaker decides which one wins?**
+
+Reversibility is the tiebreaker: when principles conflict, choose the option that is cheapest to change later. Concretely, duplication (tolerated by YAGNI/KISS) is reversible — you can extract an abstraction when the third occurrence arrives — while a premature shared abstraction (pushed by eager DRY) is hard to dismantle once it becomes load-bearing. That is why the Rule of Three lets YAGNI win at the first duplication and DRY win at the third. The exception is genuinely irreversible decisions — public API contracts and database schemas — where forward-thinking design is justified because changing later is extremely expensive. In a design debate, argue from the cost of undoing each option, not from principle names.
+
+---
+
+**Q: How do Law of Demeter violations show up in unit tests as mock chains?**
+
+A test that stubs nested mocks — `when(a.getB()).thenReturn(b)` followed by `when(b.getC()).thenReturn(c)` — is the test-side symptom of a Law of Demeter violation in the production code. Every level of mock nesting mirrors one `.get()` in a train wreck like `user.getAddress().getCity().getName()`: the test must reconstruct the whole object graph the code reaches through, so it breaks whenever any intermediate type changes. After adding a delegation method (`user.getCityName()`), the same test needs exactly one mock with one stubbed call. Treat multi-level mock setup as a design signal to add delegation, not as a mocking-library problem to work around.
+
+---
+
+**Q: How does program-to-interface apply at public API and versioning boundaries?**
+
+At a public API boundary, program-to-interface stops being optional, because a published contract is effectively irreversible once external callers depend on it. Returning a concrete type like `ArrayList` or `MySQLDatabase` in a public signature freezes that implementation choice into the contract — swapping it later is a breaking change for every consumer. Exposing an interface or a dedicated DTO instead lets the internals evolve behind a stable contract across versions. This is also the YAGNI exception in action: forward-thinking abstraction is justified exactly where change is most expensive. Expose abstractions at module and API edges; keep concrete types for internals where the "one implementation, no interface" rule still applies.
+
+---
+
+**Q: How do Java records and sealed interfaces support composition over inheritance?**
+
+Records cannot extend any class, which makes composition the only reuse mechanism available to them, and sealed interfaces close a hierarchy to a fixed set of implementations you control. A record that composes an interface-typed component (`record Checkout(PaymentMethod payment) {}`) is the canonical CoI unit with immutability for free. Sealing eliminates the fragile-base-class risk of open-ended subclassing: `sealed interface Shape permits Circle, Square` means no unknown third party can extend the hierarchy and break assumptions, and `switch` pattern matching over the permitted types is exhaustively checked by the compiler. Model new data-carrying hierarchies as sealed interfaces plus records, and reserve class inheritance for genuine is-a frameworks.
+
+---
