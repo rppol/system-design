@@ -335,15 +335,21 @@ function closeThemePop() {
   if (tb) tb.setAttribute("aria-expanded", "false");
 }
 
+// Shared theme-radio option markup — single source used by both the topbar
+// popover and the <=640px More sheet, so the two stay identical.
+function themeOptionsHTML() {
+  return THEMES.map((t) =>
+    `<button class="theme-opt" role="radio" data-theme="${t.id}" aria-checked="${curTheme() === t.id}">
+       <span class="swatch sw-${t.id}" aria-hidden="true"></span>${t.name}<span class="tcheck">✓</span>
+     </button>`).join("");
+}
+
 function toggleThemePop() {
   if (document.getElementById("themePop")) { closeThemePop(); return; }
   const pop = document.createElement("div");
   pop.className = "theme-pop"; pop.id = "themePop";
   pop.setAttribute("role", "radiogroup"); pop.setAttribute("aria-label", "Theme");
-  pop.innerHTML = `<div class="tp-h">Theme</div>` + THEMES.map((t) =>
-    `<button class="theme-opt" role="radio" data-theme="${t.id}" aria-checked="${curTheme() === t.id}">
-       <span class="swatch sw-${t.id}" aria-hidden="true"></span>${t.name}<span class="tcheck">✓</span>
-     </button>`).join("");
+  pop.innerHTML = `<div class="tp-h">Theme</div>` + themeOptionsHTML();
   document.body.appendChild(pop);
   const tb = document.getElementById("themeBtn");
   if (tb) tb.setAttribute("aria-expanded", "true");
@@ -675,7 +681,7 @@ function toggleHelp() {
       <div><h3>Diagram zoom</h3>${row("+ −", "Zoom")}${row("0", "Fit")}${row("← →", "Pan")}</div>
     </div>
     <p class="help-hint">Press <kbd>?</kbd> anytime &middot; mouse back/forward buttons navigate too</p>
-    <button class="ghost" id="helpClose">Close (Esc)</button>
+    <button class="ghost" id="helpClose">Close <span class="key-hint">(Esc)</span></button>
   </div>`;
   document.body.appendChild(o);
   const release = trapFocus(o, { initial: "#helpClose" });
@@ -2586,7 +2592,7 @@ function renderCard() {
     <div class="reveal" id="reveal"></div>
     <div class="qactions" id="cardActions">
       <span></span>
-      <button class="next show" id="revealBtn">Reveal answer (Space)</button>
+      <button class="next show" id="revealBtn">Reveal answer <span class="key-hint">(Space)</span></button>
     </div>`;
   el("#revealBtn").addEventListener("click", revealCard);
   el("#qpauseBtn").addEventListener("click", () => openPauseSheet(null));
@@ -3044,6 +3050,74 @@ function openPauseSheet(pending) {
   el("#pauseLeave").addEventListener("click", () => { saveDeckSnapshot(); state.inQuiz = false; closeSheet(false); leave(); });
   el("#pauseFinish").addEventListener("click", () => { closeSheet(false); finish({ early: true }); });
   o.addEventListener("click", (e) => { if (e.target === o) closeSheet(); });
+}
+
+/* ---------- [W3] mobile "More" options sheet (<=640px topbar overflow) ---------- */
+// The <=640px topbar hides mode/theme/mute; this glass sheet (same pattern as the
+// pause sheet) surfaces them plus Search + Help. Reuses trapFocus + wireRadioGroup.
+function openMoreSheet() {
+  if (el("#moreSheet")) return;
+  const flash = deckMode() === "flash";
+  const o = document.createElement("div");
+  o.className = "pause-sheet"; o.id = "moreSheet";
+  o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true"); o.setAttribute("aria-label", "Options");
+  o.innerHTML = `<div class="pause-card more-card">
+      <h2>Options</h2>
+      <div class="more-row">
+        <span class="more-lbl">Mode</span>
+        <div class="more-seg" id="moreMode" role="radiogroup" aria-label="Deck mode">
+          <button role="radio" data-mode="quiz" aria-checked="${!flash}">Quiz</button>
+          <button role="radio" data-mode="flash" aria-checked="${flash}">Cards</button>
+        </div>
+      </div>
+      <div class="more-row more-row-col">
+        <span class="more-lbl">Theme</span>
+        <div class="more-theme" id="moreTheme" role="radiogroup" aria-label="Theme">${themeOptionsHTML()}</div>
+      </div>
+      <div class="more-row">
+        <span class="more-lbl">Sound</span>
+        <button class="ghost" id="moreSound"></button>
+      </div>
+      <div class="more-actions">
+        <button class="ghost" id="moreSearch">Search&hellip;</button>
+        <button class="ghost" id="moreHelp">Keyboard shortcuts</button>
+        <button class="primary" id="moreClose">Done</button>
+      </div>
+    </div>`;
+  document.body.appendChild(o);
+  const release = trapFocus(o, { initial: "#moreClose", restoreTo: el("#moreBtn") });
+  const close = (restore = true) => { release(restore); o.remove(); };
+  o._close = close;
+
+  // Mode: segmented Quiz|Cards radiogroup — same effect as the #modeBtn handler.
+  const modeGrp = el("#moreMode");
+  modeGrp.querySelectorAll("[role=radio]").forEach((b) => b.addEventListener("click", () => {
+    safeSet("sd_mode", b.dataset.mode === "flash" ? "flash" : "quiz");
+    syncModeBtn();
+    modeGrp.querySelectorAll("[role=radio]").forEach((r) => r.setAttribute("aria-checked", r === b ? "true" : "false"));
+    modeGrp._radioSync?.();
+    if (!state.inQuiz) renderHome();
+  }));
+  wireRadioGroup(modeGrp);
+
+  // Theme: the shared theme-radio markup + the same click handler as the popover.
+  const themeGrp = el("#moreTheme");
+  themeGrp.querySelectorAll(".theme-opt").forEach((b) => b.addEventListener("click", () => {
+    applyTheme(b.dataset.theme);
+    themeGrp._radioSync?.();
+  }));
+  wireRadioGroup(themeGrp);
+
+  // Sound: mirrors #muteBtn.
+  const snd = el("#moreSound");
+  const syncSnd = () => { snd.textContent = sfx.isOn() ? "Sound on" : "Sound off"; snd.setAttribute("aria-pressed", sfx.isOn() ? "true" : "false"); };
+  syncSnd();
+  snd.addEventListener("click", () => { sfx.toggle(); syncMuteBtn(); syncSnd(); });
+
+  el("#moreSearch").addEventListener("click", () => { close(false); openPalette(); });
+  el("#moreHelp").addEventListener("click", () => { close(false); toggleHelp(); });
+  el("#moreClose").addEventListener("click", () => close());
+  o.addEventListener("click", (e) => { if (e.target === o) close(); });
 }
 
 /* ---------- progress ---------- */
@@ -3508,12 +3582,14 @@ function renderStudy() {
      </button>`).join("");
   app.innerHTML = `
     <div class="hero"><h1>Study</h1><p>Read your notes in a focused reader &mdash; no quiz, no clock.</p></div>
+    <div class="study-head"><button class="ghost" id="studySearch" aria-label="Search or jump to a topic" title="Search (press /)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Search</span></button></div>
     ${contCard}
     <h2 class="section-h">Pick a section to browse its topics</h2>
     <div class="grid">${tiles}</div>
     <div class="row" style="margin-top:18px"><button class="ghost" id="studyHome">&larr; Home</button></div>`;
   document.querySelectorAll(".tile").forEach((b) => b.addEventListener("click", () => go("#/study/" + b.dataset.section)));
   if (contCard) el("#contBtn").addEventListener("click", () => { reader.back = []; openReaderPath(lastRead.path, lastRead.title, null); });
+  el("#studySearch").addEventListener("click", () => openPalette());
   el("#studyHome").addEventListener("click", () => go("#/home"));
   wireReveals();
 }
@@ -6547,6 +6623,7 @@ document.addEventListener("keydown", (e) => {
   // [A2] toggle explain-back with E (guarded against typing into its own textarea)
   const toggleEB = () => { const det = el(".explain-back"); if (det) { det.open = !det.open; if (det.open) det.querySelector(".eb-input")?.focus(); } };
   if (e.key === "Escape" && el("#helpOverlay")) { el("#helpOverlay")._close(); return; }
+  if (e.key === "Escape" && el("#moreSheet")) { el("#moreSheet")._close(); return; }
   if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet")._close(); return; }
   // Any other key while a modal sheet is up must not fall through to the quiz
   // handler below — it would lock/grade the question hidden behind the overlay.
@@ -7307,6 +7384,8 @@ async function boot() {
   const mb = el("#muteBtn");
   if (mb) mb.addEventListener("click", () => { sfx.toggle(); syncMuteBtn(); });
   syncMuteBtn();
+  const moreB = el("#moreBtn");                     // [W3] <=640px topbar overflow sheet
+  if (moreB) moreB.addEventListener("click", openMoreSheet);
   const modeB = el("#modeBtn");
   if (modeB) {
     modeB.addEventListener("click", () => {

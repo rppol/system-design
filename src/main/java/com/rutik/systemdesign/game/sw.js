@@ -11,6 +11,7 @@ const CACHE = "sd-daily-v1-" + BUILD;
 const SHELL = [
   "./", "index.html", "app.js", "style.css",
   "manifest.webmanifest", "questions/index.json",
+  "apple-touch-icon.png", "icon-512.png", "icon-512-maskable.png",
 ];
 
 self.addEventListener("install", (e) => {

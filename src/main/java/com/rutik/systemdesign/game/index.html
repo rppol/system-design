@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>System Design Daily — 5-min Blitz</title>
   <script>
     // Apply the saved theme before first paint so there is no color flash.
@@ -14,6 +14,7 @@
   </script>
   <link rel="stylesheet" href="style.css" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2306070d'/%3E%3Ctext x='32' y='42' font-family='SF Mono,Menlo,monospace' font-size='26' font-weight='700' fill='%237c9eff' text-anchor='middle'%3ESD%3C/text%3E%3C/svg%3E" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
   <link rel="manifest" href="manifest.webmanifest" />
   <meta name="theme-color" content="#06070d" />
 </head>
@@ -37,6 +38,7 @@
       <button id="modeBtn" class="ghost" title="Quiz vs flashcards">Quiz</button>
       <button id="themeBtn" class="ghost icon" title="Theme" aria-haspopup="true" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none"/></svg></button>
       <button id="muteBtn" class="ghost icon" title="Toggle sound">&#128266;</button>
+      <button id="moreBtn" class="ghost icon" aria-label="More options" aria-haspopup="dialog" title="More options"><svg class="icon" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
       <button id="navStudy" class="ghost" title="Read your notes (no quiz)">Study</button>
       <button id="navProgress" class="ghost">Progress</button>
     </div>
