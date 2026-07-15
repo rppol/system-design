@@ -347,7 +347,10 @@ function toggleThemePop() {
   document.body.appendChild(pop);
   const tb = document.getElementById("themeBtn");
   if (tb) tb.setAttribute("aria-expanded", "true");
-  pop.querySelectorAll(".theme-opt").forEach((b) => b.addEventListener("click", () => applyTheme(b.dataset.theme)));
+  pop.querySelectorAll(".theme-opt").forEach((b) => b.addEventListener("click", () => {
+    applyTheme(b.dataset.theme);
+    pop._radioSync?.();
+  }));
   wireRadioGroup(pop);
   pop._release = trapFocus(pop, { initial: '[aria-checked="true"]', restoreTo: tb });
   const dismiss = (e) => {
@@ -492,20 +495,24 @@ function wireRadioGroup(container) {
     const checked = r.find((n) => n.getAttribute("aria-checked") === "true") || r[0];
     r.forEach((n) => n.setAttribute("tabindex", n === checked ? "0" : "-1"));
   };
+  container._radioSync = sync;
   sync();
-  container.addEventListener("keydown", (e) => {
-    const r = radios();
-    if (!r.length) return;
-    const i = r.indexOf(document.activeElement);
-    let j;
-    if (e.key === "ArrowRight" || e.key === "ArrowDown") j = (i + 1) % r.length;
-    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") j = (i - 1 + r.length) % r.length;
-    else if (e.key === "Home") j = 0;
-    else if (e.key === "End") j = r.length - 1;
-    else return;
-    e.preventDefault();
-    r[j].focus(); r[j].click(); sync();
-  });
+  if (!container.dataset.radioWired) {
+    container.dataset.radioWired = "1";
+    container.addEventListener("keydown", (e) => {
+      const r = radios();
+      if (!r.length) return;
+      const i = r.indexOf(document.activeElement);
+      let j;
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") j = (i + 1) % r.length;
+      else if (e.key === "ArrowLeft" || e.key === "ArrowUp") j = (i - 1 + r.length) % r.length;
+      else if (e.key === "Home") j = 0;
+      else if (e.key === "End") j = r.length - 1;
+      else return;
+      e.preventDefault();
+      r[j].focus(); r[j].click(); sync();
+    });
+  }
 }
 
 const REDUCED = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -1594,7 +1601,7 @@ async function openTopics(section) {
   document.querySelectorAll(".lenopt").forEach((b) => b.addEventListener("click", () => {
     safeSet("sd_deck_len", b.dataset.len);
     document.querySelectorAll(".lenopt").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-checked", x === b ? "true" : "false"); });
-    wireRadioGroup(el(".lenbar"));   // re-sync roving tabindex to the new checked option
+    el(".lenbar")?._radioSync?.();   // re-sync roving tabindex to the new checked option
     announce(`Session length set to ${b.dataset.len} questions.`);
   }));
   wireRadioGroup(el(".lenbar"));
@@ -2151,7 +2158,6 @@ function renderBossIntro(bossCount, cb) {
   // (ID beats classes) would silently mask anything this overlay declares.
   const o = document.createElement("div");
   o.className = "boss-intro"; o.id = "bossIntro";
-  o.setAttribute("role", "status");
   o.innerHTML = `<div class="boss-intro-card">
       <div class="boss-intro-title">${ICON("bolt")} BOSS ROUND</div>
       <div class="boss-intro-sub">${bossCount} question${bossCount === 1 ? "" : "s"} &middot; 2&times; XP</div>
