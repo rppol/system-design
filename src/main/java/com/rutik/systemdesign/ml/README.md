@@ -18,7 +18,7 @@ Key insight: the majority of ML failures are not algorithm failures — they are
 
 ## What This Section Covers
 
-Forty modules organized across eight learning phases take you from linear algebra through production MLOps. Nine topics contain deep-dive sub-files (37 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-four end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
+Forty-five modules organized across eight learning phases take you from linear algebra through production MLOps. Nine topics contain deep-dive sub-files (37 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-four end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
 
 ---
 

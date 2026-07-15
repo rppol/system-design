@@ -336,7 +336,7 @@ specialized agent type. Nothing is dropped.
 ### Interview-Specific Path (30 modules)
 
 A ruthless cut to what a **senior AI engineer interview** actually probes, curated from this section's own
-[Knowledge-Question Map](#knowledge-question-map) and [8-Week Study Plan](#8-week-zero-to-hero-study-plan)
+[Knowledge-Question Map](#knowledge-question-map) and [Study Plan](#study-plan)
 (both already encode interview priority). Same learning order, ~40% fewer modules. Each group below says
 why it earns interview time.
 
@@ -394,13 +394,9 @@ Step 5: Evaluate and Iterate
 
 ---
 
-## Senior AI Engineer Interview Readiness
+## Knowledge-Question Map
 
-Two tools for interview preparation: a map from the highest-frequency *knowledge* questions to the
-exact file that answers them, and an 8-week zero-to-hero study plan. For *system design* questions
-("design X"), use the interview prep shortcuts table in [case_studies/README.md](case_studies/README.md).
-
-### Knowledge-Question Map
+The highest-frequency LLM *knowledge* questions mapped to the exact file that answers them. For *system design* ("design X") questions, use the interview prep shortcuts table in [case_studies/README.md](case_studies/README.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
@@ -436,7 +432,11 @@ exact file that answers them, and an 8-week zero-to-hero study plan. For *system
 | How do AI agents pay for things autonomously — what protocols enforce spend limits? | [agentic_commerce_and_payments.md](multi_agent_systems/agentic_commerce_and_payments.md) |
 | How do you secure a multi-agent system against a compromised or colluding peer agent? | [multi_agent_security.md](multi_agent_systems/multi_agent_security.md) |
 
-### 8-Week Zero-to-Hero Study Plan
+---
+
+## Study Plan
+
+An 8-week zero-to-hero plan. Each week pairs modules with must-read deep dives and one case study.
 
 | Week | Focus | Modules | Must-read deep dives | Case study |
 |------|-------|---------|---------------------|------------|

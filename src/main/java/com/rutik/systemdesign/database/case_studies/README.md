@@ -53,6 +53,25 @@ Grouped by primary engineering concern:
 
 ---
 
+## Cross-Cutting / Shared Primitives
+
+No `cross_cutting/` directory here — the shared primitives live as deep-dive modules in the section itself. The same primitives recur across these case studies; read the deep dive once, then recognize it everywhere:
+
+| Primitive | Used By | Deep Dive | Phase |
+|---|---|---|---|
+| SERIALIZABLE isolation + advisory locks | Banking Ledger | `../concurrency_control_and_locking/README.md` | 1 — Foundations |
+| Idempotency (request + consumer) | all six | `../distributed_transactions/README.md` | 5 — Distributed |
+| Immutable event log / double-entry | Banking Ledger | `../schema_design_and_normalization/README.md` | 2 — Relational |
+| RLS + `SET app.tenant_id` | Multi-Tenant SaaS | `../database_security_and_compliance/README.md` | 6 — Production Ops |
+| PgBouncer pooling at scale | Multi-Tenant SaaS | `../connection_pool_management/README.md` | 6 |
+| CDC (Debezium) + dual-write validation | Migration, E-Commerce Catalog | `../polyglot_persistence_patterns/README.md` | 7 — Architecture |
+| Redis counters / leaderboards / HyperLogLog | E-Commerce, Feed Storage, Analytics | `../key_value_stores/README.md` | 3 — NoSQL |
+| Cassandra wide rows + TWCS | Feed Storage | `../wide_column_databases/README.md` | 3 |
+| Columnar storage + materialized views | Real-Time Analytics | `../time_series_databases/README.md`, `../storage_engines_internals/README.md` | 3 / 1 |
+| Replication + RPO=0 failover (Patroni) | Banking Ledger, Migration | `../replication_and_high_availability/README.md` | 5 |
+
+---
+
 ## Dependency Map
 
 ```mermaid

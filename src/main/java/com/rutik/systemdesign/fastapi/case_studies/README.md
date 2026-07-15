@@ -44,6 +44,24 @@ If you only have time for three case studies, read these in order:
 
 ---
 
+## Cross-Cutting / Shared Primitives
+
+No `cross_cutting/` directory here — the shared primitives live as deep-dive modules in the section itself. The same primitives recur across these case studies; read the deep dive once, then recognize it everywhere:
+
+| Primitive | Used By | Deep Dive | Phase |
+|---|---|---|---|
+| `Depends`-injected service layer | all six (established by Rate-Limited API) | `../dependency_injection_in_fastapi/README.md` | 1 — Core Framework |
+| Redis Lua atomicity (TOCTOU-free counters) | Rate-Limited API | `../caching_and_performance/README.md` | 3 — Production |
+| `lifespan` startup loading | ML Inference, Rate-Limited API | `../fastapi_fundamentals_asgi/README.md` | 1 |
+| Async SQLAlchemy session-per-request | Multi-Tenant SaaS | `../async_database_sqlalchemy/README.md` | 2 — Data & Integration |
+| JWT + scope RBAC | Multi-Tenant SaaS | `../authentication_and_security/README.md` | 2 |
+| WebSocket lifecycle + Redis pub/sub fan-out | Real-Time Chat, ML Inference (SSE) | `../websockets_sse_and_streaming/README.md` | 2 |
+| Idempotency keys, retries, DLQ | Async Task Queue | `../background_jobs_and_task_queues/README.md` | 2 |
+| `asyncio.Semaphore` / `asyncio.Queue` producer-consumer | Async Web Scraper | `../../python/asyncio_and_event_loop/README.md` (cross-section) | 2 |
+| Rate limiting + `Retry-After` shaping | Rate-Limited API | `../api_design_and_versioning/README.md` | 3 |
+
+---
+
 ## Dependency Map
 
 ```mermaid

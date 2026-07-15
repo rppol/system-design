@@ -72,6 +72,8 @@ The interview subset is a **dual-source list** — it lives in both `README.md`
 ("## Learning Paths") and `game/app.js` (`STUDY_PATHS.llm.interview`, which drives the
 game's Study Full/Interview toggle). **If you change one, change the other** — they must
 list the same modules in the same order. Non-Q&A narrative only; no `extract.py` re-run needed.
+The README also carries a Knowledge-Question Map and an 8-week Study Plan (interview-readiness
+prose; no toggle impact).
 
 ---
 
