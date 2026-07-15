@@ -6627,7 +6627,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && el("#pauseSheet")) { el("#pauseSheet")._close(); return; }
   // Any other key while a modal sheet is up must not fall through to the quiz
   // handler below — it would lock/grade the question hidden behind the overlay.
-  if (el("#helpOverlay") || el("#pauseSheet")) return;
+  if (el("#helpOverlay") || el("#pauseSheet") || el("#moreSheet")) return;
   // [E2] command palette: Cmd/Ctrl+K toggles anywhere; "/" opens when not typing.
   if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); _palette ? closePalette() : openPalette(); return; }
   if (e.key === "/" && !typing && !_palette) { e.preventDefault(); openPalette(); return; }
