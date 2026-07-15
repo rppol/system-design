@@ -3627,6 +3627,9 @@ function orthPath(raw, r = 10) {
   return d;
 }
 
+// [W5] the study path's resize listener, tracked module-level so re-entering the
+// screen removes the prior one instead of stacking a new listener each visit.
+let _pathResize = null;
 async function openStudySection(section) {
   app.innerHTML = skeletonHTML("study");
   const bank = await loadBank(section);
@@ -4033,6 +4036,8 @@ async function openStudySection(section) {
     clearTimeout(rzT);
     rzT = setTimeout(layoutPath, 160);
   };
+  if (_pathResize) window.removeEventListener("resize", _pathResize);  // [W5] don't stack across visits
+  _pathResize = onResize;
   window.addEventListener("resize", onResize);
 
   layoutPath();
@@ -4665,7 +4670,10 @@ async function renderMermaid(root) {
   let mermaid;
   try {
     if (!_mermaidReady) {
-      _mermaidReady = import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs")
+      // [W5] pinned to the exact latest 11.x (11.16.0, via `npm view mermaid version`)
+      // instead of the floating mermaid@11 tag, so a CDN-side minor bump can't change
+      // rendering under us; bump deliberately when validating a newer release.
+      _mermaidReady = import("https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.esm.min.mjs")
         .then(m => {
           // One stack for BOTH measurement and display. themeVariables.fontFamily
           // only styles the rendered SVG via CSS; the sequence renderer sizes its
@@ -7346,6 +7354,10 @@ if (new URLSearchParams(location.search).get("qa") === "1") {
 }
 
 async function boot() {
+  // [W5] perf: on Save-Data / data-saver connections, mark the root .low-power so
+  // CSS drops the aurora drift animation (mesh visuals stay). Mirrors the other
+  // navigator.connection.saveData guards below.
+  if (navigator.connection && navigator.connection.saveData) document.documentElement.classList.add("low-power");
   state.index = await fetchJSON("questions/index.json", null);
   if (!state.index) {
     errorScreen("No question bank found", `Check your connection, or the question bank hasn't been built yet.${devDetail(`Run <code>python3 extract.py</code> then reload.`)}`, () => location.reload());

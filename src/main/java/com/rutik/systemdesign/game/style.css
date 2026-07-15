@@ -443,8 +443,6 @@ button:active { transform: scale(0.98); }
 .opt {
   text-align: left; padding: 14px 16px;
   background: var(--glass); border: 1px solid var(--glass-brd); border-radius: var(--radius-sm);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
   color: var(--text); font-size: 15px; box-shadow: var(--glass-hilite);
 }
 .opt:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: var(--glass-2); transform: translateX(2px); }
@@ -1530,6 +1528,12 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   #app > * { animation: none; }
   html { scroll-behavior: auto; }
 }
+
+/* [W5] perf: drop the aurora drift where it costs the most — narrow viewports
+   (mobile GPUs) and Save-Data / data-saver connections (.low-power set in boot()).
+   The mesh visuals (colour, blur, opacity) stay; only the infinite drift stops. */
+@media (max-width: 640px) { .mesh { animation: none; } }
+.low-power .mesh { animation: none; }
 
 /* ---------- 16. Graphics & delight (round 2) ------------------------------- */
 
