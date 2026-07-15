@@ -300,7 +300,7 @@ don't over-commit and pay for unused commitment. Track utilization & coverage mo
 ### Scheduled shutdown of non-prod (free savings)
 
 ```bash
-# Stop dev/staging instances nights + weekends: ~128 of 168 weekly hours off = ~76% savings
+# Stop dev/staging instances nights + weekends: ~108 of 168 weekly hours off = ~64% savings
 # EventBridge cron -> Lambda -> stop tagged env=dev instances at 19:00, start at 07:00 weekdays
 aws ec2 stop-instances --instance-ids $(aws ec2 describe-instances \
   --filters "Name=tag:env,Values=dev" "Name=instance-state-name,Values=running" \
@@ -457,7 +457,7 @@ Coverage measures what percentage of your actual usage is covered by a commitmen
 Unit economics ties cloud spend to a business metric — cost per request, per transaction, or per active customer — instead of tracking the raw bill in isolation. A raw bill going from $100k to $150k a month looks alarming, but if it happened because the customer base tripled, the cost per customer actually dropped, meaning the platform got more efficient even as total spend rose; without a unit metric that story is invisible and the raw number alone drives the wrong conversation. Computing it requires the same tag-driven cost allocation this module uses for showback, joined against a business metric (requests served, orders processed, active users) from application telemetry. Unit economics is what turns "our bill grew" into "our bill grew slower than our business," which is the practical definition of FinOps efficiency.
 
 **Q16: If you run non-prod on a 12-hours-a-day, 5-days-a-week schedule instead of nights-plus-weekends, what's the savings?**
-A 12x5 schedule (on 12 hours a day, weekdays only) leaves the instance running 60 of the week's 168 hours, which works out to roughly 65% savings versus running it around the clock. That's a different number from the nights-and-weekends schedule elsewhere in this module, which uses a narrower business-hours window and saves closer to 76% — the savings percentage is entirely a function of how many "on" hours you choose, following `(168 - on_hours) / 168`. This is why sizing a shutdown schedule is a deliberate tradeoff and not a fixed number: a wider on-window (12x5) costs more but tolerates people working odd hours, while a narrower one (nights+weekends) saves more but risks blocking someone's early start or late fix. Either way, the mechanism is the same EventBridge-cron-to-Lambda pattern already used for stopping and starting tagged instances.
+A 12x5 schedule (on 12 hours a day, weekdays only) leaves the instance running 60 of the week's 168 hours, which works out to roughly 64% savings versus running it around the clock. That figure comes straight from `(168 - on_hours) / 168`: to push savings past ~70%, shrink the on-window further — an 8x5 schedule (8 hours a day, weekdays only) cuts on-hours to 40 and off-hours to 128, for roughly 76% savings — or keep a 12-hour weekday window but add full weekend-and-holiday stops on top of it. This is why sizing a shutdown schedule is a deliberate tradeoff and not a fixed number: a wider on-window saves less but tolerates people working odd hours, while a narrower one saves more but risks blocking someone's early start or late fix. Either way, the mechanism is the same EventBridge-cron-to-Lambda pattern used for stopping and starting tagged instances — pick the on-window to match your team's actual working hours, then verify the resulting percentage with the formula instead of assuming a round number.
 
 ---
 
