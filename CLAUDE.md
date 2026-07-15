@@ -18,7 +18,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **LLM** | LLM engineering guide — 52 modules, 29 case studies, 82 deep-dive sub-files | [llm/CLAUDE.md](src/main/java/com/rutik/systemdesign/llm/CLAUDE.md) |
 | **DevOps** | DevOps / Cloud / Platform guide — 41 modules, 13 case studies | [devops/CLAUDE.md](src/main/java/com/rutik/systemdesign/devops/CLAUDE.md) |
 | **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 6 case studies | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
-| **CS Fundamentals** | Language-agnostic CS spine — 24 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
+| **CS Fundamentals** | Language-agnostic CS spine — 24 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
 | **Book** | Chapter-by-chapter book summaries (book-faithful chapter template, not the 14-section module template) — Designing Data-Intensive Applications (Kleppmann): 12 chapters + preface | [book/CLAUDE.md](src/main/java/com/rutik/systemdesign/book/CLAUDE.md) |
 | **Game** | Pages-deployed daily learning game (a static SPA, NOT 14-section content — template-exempt). 5-min MCQ blitz auto-built from all sections' Q&As via `extract.py`; SM-2 spaced-repetition review, daily sealed Gauntlet, and an in-app coach; `localStorage` is the single source of truth (no server). | [game/CLAUDE.md](src/main/java/com/rutik/systemdesign/game/CLAUDE.md) |
 
@@ -287,17 +287,20 @@ silently dropped from the game or renders wrong. These rules are derived from
   `CLAUDE.md` files. Case studies are still **reachable in the reader** via
   relative `.md` links (the `/content/` route serves any file) — so linking to a
   case study from a module is fine; its Q&As just never enter the quiz bank.
-- The bank (`game/questions/*.json`) is **generated, not committed** — it is
-  gitignored; the Pages CI regenerates it fresh on every push (see
+- The bank (`game/questions/*.json`) and the module-relatedness graphs
+  (`game/graph/*.json`) are **generated, not committed** — they are
+  gitignored; the Pages CI regenerates them fresh on every push (see
   `.github/workflows/pages.yml`). For local play/testing, run
   `python3 game/extract.py` after editing ANY Q&A or adding content, then reload
   the reader (`readerCache` is per-session). **Every new module directory MUST be
   added to
   `STUDY_ORDER["<section>"]` in `game/app.js`** at its correct learning-path
   position — a module absent from the array falls through the `indexOf === -1 →
-  9999` fallback and sorts to the very end, breaking the learning order. (New
-  deep-dive **sub-files** need no `STUDY_ORDER` entry — they group under their
-  parent module's existing position.)
+  9999` fallback and sorts to the very end, breaking the learning order.
+  `extract.py --strict` (run by Pages CI) fails the deploy when a bank module is
+  missing from `STUDY_ORDER` or a `STUDY_PATHS` array stops being an ordered
+  subset. (New deep-dive **sub-files** need no `STUDY_ORDER` entry — they group
+  under their parent module's existing position.)
 
 ### Q&A format required for extraction (Section 12)
 

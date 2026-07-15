@@ -15,10 +15,11 @@ Q&A format handled (all four variants seen in the repo):
     **Q1:** full question text?          <- numbered, only the label is bold
     **Q: full question text?**           <- unnumbered "Q:" label (ml/)
     **full question text?**              <- no Q marker, whole question bold (database/, backend/, llm/)
-Strategy: scope to the "## 12. Interview Questions" section, then treat any
-fully-bold line (or **Q...:** line) as a question and the plain paragraph(s)
-beneath it as the answer. This keys on the template's structure, not on the
-inconsistent surface "Q" convention.
+Strategy: scope to the interview-questions section(s) (every heading matching
+INTERVIEW_HDR is unioned in file order), then treat any fully-bold line (or
+**Q...:** line) as a question and the plain paragraph(s) beneath it as the
+answer. This keys on the template's structure, not on the inconsistent
+surface "Q" convention.
 
 MCQ construction:
     correct option   = first sentence of the answer (CLAUDE.md guarantees the
@@ -42,7 +43,7 @@ GAME_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(GAME_DIR)  # .../systemdesign/
 OUT_DIR = os.path.join(GAME_DIR, "questions")  # per-section files + index.json
 
-# Sections to skip entirely (the game itself; book uses a different template).
+# Sections to skip entirely (the game app; book IS extracted).
 SKIP_SECTIONS = {"game"}
 
 # Path components that exclude a README from the bank (e.g. case studies).
@@ -181,85 +182,93 @@ def parse_md(path, section, module):
         lines = fh.readlines()
     n = len(lines)
 
-    # Scope to the interview-questions section: from its header to the next "## ".
-    start = None
-    for idx, ln in enumerate(lines):
-        if INTERVIEW_HDR.match(ln):
+    # Scope to the interview-questions section(s): a file may contain more than
+    # one heading matching INTERVIEW_HDR (e.g. an answer-less "Common Interview
+    # Questions" list before the real "## 12. Interview Q&As") -- collect Q&As
+    # from ALL of them, in order. Sections with no bold Q lines contribute nothing.
+    spans = []
+    idx = 0
+    while idx < n:
+        if INTERVIEW_HDR.match(lines[idx]):
             start = idx + 1
-            break
-    if start is None:
+            end = n
+            for j in range(start, n):
+                if lines[j].startswith("## "):
+                    end = j
+                    break
+            spans.append((start, end))
+            idx = end          # a matching "## " terminator is re-tested as a new span
+        else:
+            idx += 1
+    if not spans:
         return []
-    end = n
-    for idx in range(start, n):
-        if lines[idx].startswith("## "):
-            end = idx
-            break
 
     results = []
     running = 0
-    i = start
-    while i < end:
-        stripped = lines[i].strip()
-        if not is_question_line(stripped):
-            i += 1
-            continue
-        running += 1
-        m = Q_LABEL.match(stripped)
-        q_index = int(m.group(1)) if (m and m.group(1)) else running
+    for start, end in spans:
+        i = start
+        while i < end:
+            stripped = lines[i].strip()
+            if not is_question_line(stripped):
+                i += 1
+                continue
+            running += 1
+            m = Q_LABEL.match(stripped)
+            q_index = int(m.group(1)) if (m and m.group(1)) else running
 
-        # Gather the question text, joining lines if the bold question wraps.
-        q_parts = [stripped]
-        answer_first = ""        # any answer text trailing the closing ** on its line
-        k = i                    # last line consumed by the question
-        if stripped.count("**") < 2:   # opening ** not closed on this line -> wraps
-            k = i + 1
-            while k < end:
-                ln = lines[k].rstrip("\n")
-                if "**" in ln:           # this line closes the bold question
-                    cut = ln.rfind("**")
-                    q_parts.append(ln[:cut])
-                    answer_first = ln[cut + 2:].strip()
+            # Gather the question text, joining lines if the bold question wraps.
+            q_parts = [stripped]
+            answer_first = ""        # any answer text trailing the closing ** on its line
+            k = i                    # last line consumed by the question
+            if stripped.count("**") < 2:   # opening ** not closed on this line -> wraps
+                k = i + 1
+                while k < end:
+                    ln = lines[k].rstrip("\n")
+                    if "**" in ln:           # this line closes the bold question
+                        cut = ln.rfind("**")
+                        q_parts.append(ln[:cut])
+                        answer_first = ln[cut + 2:].strip()
+                        break
+                    q_parts.append(ln.strip())
+                    k += 1
+            q_joined = " ".join(p.strip() for p in q_parts)
+            question = clean_question(q_joined)
+            question_md = clean_question_md(q_joined)
+
+            # Collect answer lines (after the question's closing line) until the next boundary.
+            j = k + 1
+            answer_lines = [answer_first] if answer_first else []
+            while j < end:
+                if is_question_line(lines[j].strip()) or lines[j].strip() == "---":
                     break
-                q_parts.append(ln.strip())
-                k += 1
-        q_joined = " ".join(p.strip() for p in q_parts)
-        question = clean_question(q_joined)
-        question_md = clean_question_md(q_joined)
+                answer_lines.append(lines[j])
+                j += 1
+            answer_raw = " ".join(answer_lines)
+            answer_full = re.sub(r"^A\s*[:.]\s*", "", strip_markdown(answer_raw))  # drop a leading "A:" label
+            answer_full_md = re.sub(r"^\*{0,2}A\s*[:.]\*{0,2}\s*", "", md_inline(answer_raw, keep_bold=True))
+            i = j
 
-        # Collect answer lines (after the question's closing line) until the next boundary.
-        j = k + 1
-        answer_lines = [answer_first] if answer_first else []
-        while j < end:
-            if is_question_line(lines[j].strip()) or lines[j].strip() == "---":
-                break
-            answer_lines.append(lines[j])
-            j += 1
-        answer_raw = " ".join(answer_lines)
-        answer_full = re.sub(r"^A\s*[:.]\s*", "", strip_markdown(answer_raw))  # drop a leading "A:" label
-        answer_full_md = re.sub(r"^\*{0,2}A\s*[:.]\*{0,2}\s*", "", md_inline(answer_raw, keep_bold=True))
-        i = j
-
-        if not question or not answer_full:
-            continue
-        short = make_short(answer_full)
-        if not short:
-            continue
-        # Display variants: emitted only when they differ from the stripped text.
-        short_md = first_sentence(answer_full_md)
-        if strip_markdown(short_md) != short:        # sentence split disagreed -> can't align
-            short_md = None
-        results.append({
-            "section": section,
-            "module": module,
-            "sourceFile": source_file,
-            "qIndex": q_index,
-            "question": question,
-            "questionMd": question_md if question_md != question else None,
-            "answerFull": answer_full,
-            "answerFullMd": answer_full_md if answer_full_md != answer_full else None,
-            "answerShort": short,
-            "answerShortMd": short_md if (short_md is not None and short_md != short) else None,
-        })
+            if not question or not answer_full:
+                continue
+            short = make_short(answer_full)
+            if not short:
+                continue
+            # Display variants: emitted only when they differ from the stripped text.
+            short_md = first_sentence(answer_full_md)
+            if strip_markdown(short_md) != short:        # sentence split disagreed -> can't align
+                short_md = None
+            results.append({
+                "section": section,
+                "module": module,
+                "sourceFile": source_file,
+                "qIndex": q_index,
+                "question": question,
+                "questionMd": question_md if question_md != question else None,
+                "answerFull": answer_full,
+                "answerFullMd": answer_full_md if answer_full_md != answer_full else None,
+                "answerShort": short,
+                "answerShortMd": short_md if (short_md is not None and short_md != short) else None,
+            })
     return results
 
 
@@ -277,6 +286,64 @@ def qid(module, question):
     both a question's own id and the distractorIds pointing back to source questions."""
     h = hashlib.md5(f"{module}|{question}".encode("utf-8")).hexdigest()[:12]
     return f"{module}#{h}"
+
+
+# --- wiring guard: STUDY_ORDER / STUDY_PATHS in app.js must cover the bank ---
+STUDY_ORDER_RE = re.compile(r"const STUDY_ORDER = \{(.*?)\n\};", re.S)
+STUDY_PATHS_RE = re.compile(r"const STUDY_PATHS = \{(.*?)\n\};", re.S)
+SLUG_RE = re.compile(r'"([a-z0-9_]+(?:/[a-z0-9_]+)+)"')
+
+
+def _section_arrays(body):
+    """{'cuda': [slug, ...]} from a STUDY_ORDER/STUDY_PATHS object body.
+    Section keys sit at 2-space indent ('  cuda: [' / '  cuda: {')."""
+    out = {}
+    for m in re.finditer(r"\n  ([a-z_]+): ([\[{])", body):
+        open_ch, close_ch = m.group(2), ("]" if m.group(2) == "[" else "}")
+        depth, i = 1, m.end()
+        while depth and i < len(body):
+            if body[i] == open_ch: depth += 1
+            elif body[i] == close_ch: depth -= 1
+            i += 1
+        out[m.group(1)] = SLUG_RE.findall(body[m.end():i])
+    return out
+
+
+def check_wiring(questions, strict):
+    """Fail (under --strict) if a bank module is missing from STUDY_ORDER, or a
+    STUDY_PATHS array stops being an ordered subset of its section's STUDY_ORDER.
+    Warn-only without --strict. Reads app.js as text (stdlib only)."""
+    app = open(os.path.join(GAME_DIR, "app.js"), encoding="utf-8").read()
+    errors, warns = [], []
+    mo = STUDY_ORDER_RE.search(app)
+    if not mo:
+        errors.append("cannot locate the STUDY_ORDER literal in app.js -- guard cannot run")
+    else:
+        order = _section_arrays(mo.group(1))
+        wired = {s for arr in order.values() for s in arr}
+        counts = {}
+        for q in questions:
+            counts[q["module"]] = counts.get(q["module"], 0) + 1
+        for mod in sorted(counts):
+            if mod not in wired:
+                errors.append(f"STUDY_ORDER gap: {mod} has {counts[mod]} questions but no entry (falls to the 9999 sort -- dead-last in Study)")
+        for slug in sorted(wired):
+            if counts.get(slug, 0) == 0:
+                warns.append(f"STUDY_ORDER dead entry: {slug} extracted 0 questions (Q&A format broken?)")
+        mp = STUDY_PATHS_RE.search(app)
+        if mp:
+            for sec, arr in _section_arrays(mp.group(1)).items():
+                o = order.get(sec, [])
+                idxs = [o.index(x) if x in o else -1 for x in arr]
+                missing = [x for x, i in zip(arr, idxs) if i < 0]
+                if missing:
+                    errors.append(f"STUDY_PATHS.{sec} not a subset of STUDY_ORDER: {missing}")
+                elif idxs != sorted(idxs):
+                    errors.append(f"STUDY_PATHS.{sec} order deviates from STUDY_ORDER")
+    for w in warns:  print(f"WIRING WARNING: {w}", file=sys.stderr)
+    for e in errors: print(f"WIRING ERROR: {e}", file=sys.stderr)
+    if errors and strict: sys.exit(1)
+    if not errors: print("wiring check: OK")
 
 
 def main():
@@ -454,11 +521,17 @@ def main():
         with open(os.path.join(OUT_DIR, f"{sec}.json"), "w", encoding="utf-8") as fh:
             json.dump(qlist, fh, ensure_ascii=False, separators=(",", ":"))
 
+    mod_counts = {}
+    for q in questions:
+        mod_counts[q["module"]] = mod_counts.get(q["module"], 0) + 1
     index = {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "total": len(questions),
         "sections": {s: len(per_section[s]) for s in sorted(per_section)},
         "files": file_tree,
+        # additive: per-module bank counts (0 for reader-only dirs); consumed by the
+        # game to scope the Codex/quests to capturable modules only.
+        "moduleCounts": {m: mod_counts.get(m, 0) for m in sorted(set(file_tree) | set(mod_counts))},
     }
     with open(os.path.join(OUT_DIR, "index.json"), "w", encoding="utf-8") as fh:
         json.dump(index, fh, ensure_ascii=False, indent=2)
@@ -467,6 +540,7 @@ def main():
     print("Per-section counts:")
     for sec, cnt in index["sections"].items():
         print(f"  {sec:16s} {cnt}")
+    check_wiring(questions, "--strict" in sys.argv[1:])
 
 
 if __name__ == "__main__":

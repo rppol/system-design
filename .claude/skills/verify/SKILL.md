@@ -18,8 +18,9 @@ python3 -m http.server 8901   # background it
 # open http://localhost:8901/src/main/java/com/rutik/systemdesign/game/index.html
 ```
 
-Question banks/graphs are gitignored but usually present locally (`game/questions/index.json`,
-`game/graph/*.json`). If missing: `python3 game/extract.py && python3 game/build_graph.py`.
+Question banks and per-section relatedness graphs are both gitignored (Pages CI rebuilds them on
+every push) but usually present locally (`game/questions/index.json`, `game/graph/*.json`). If
+missing: `python3 game/extract.py` and, per section, `python3 game/build_graph.py <sec>`.
 
 ## Gotchas
 
@@ -35,8 +36,8 @@ Question banks/graphs are gitignored but usually present locally (`game/question
 - Theme preview without persisting: `?theme=daylight` (or orchid/ember) in the URL.
 - Reader invariants to re-check after any reader change: `#reader` computed background
   `rgb(0,0,0)` and `#readerMain` color `rgb(255,255,255)` in every theme.
-- `graph/fastapi.json` does not exist — graph consumers must tolerate null; use fastapi to
-  test that path.
+- Graphs are gitignored — any section whose graph you haven't built locally exercises the
+  null-tolerant path; build it with `python3 game/build_graph.py <sec>` to test the populated path.
 
 ## Flows worth driving
 

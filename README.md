@@ -896,7 +896,7 @@ See the [CUDA Master Index](src/main/java/com/rutik/systemdesign/cuda/README.md)
 
 ### CS Fundamentals — Senior Engineer & Interview Prep Guide
 
-The language-agnostic computer-science spine: 24 modules across 6 phases + 6 interview-problem walkthrough case studies. Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
+The language-agnostic computer-science spine: 24 modules across 6 phases + 6 interview-problem walkthrough case studies + the DSA pattern playbooks topic (25 Study topics in the game). Teaches DS&A, operating systems, computer architecture, systems foundations, and cryptography at the CS-theory level, with explicit crosslinks to the deep applied treatments in `java/`, `python/`, `backend/`, `database/`, and `devops/`.
 
 #### Phase 1 — Complexity & Computation
 

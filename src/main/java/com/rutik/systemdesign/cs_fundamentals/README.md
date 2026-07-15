@@ -160,13 +160,13 @@ Phase 4 — Operating Systems        Phase 5 — Systems & Security Foundations
 
 This section is exhaustive by design — 24 modules from asymptotic foundations through operating-system internals to systems/security/theory depth. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
 
-### Full Path (24 modules)
+### Full Path (24 modules + DSA pattern playbooks)
 
-The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-phase-learning-path). Use it for genuine mastery: every data-structure and algorithm family, the full operating-systems core, and the systems/security/theory foundations (computer architecture, networking, database storage, cryptography, character encoding). Nothing is dropped.
+The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-phase-learning-path). Use it for genuine mastery: every data-structure and algorithm family, the full operating-systems core, and the systems/security/theory foundations (computer architecture, networking, database storage, cryptography, character encoding). Nothing is dropped. In the game's Study path the DSA pattern playbooks topic (`dsa_patterns`) follows Phase 3 (right after Graph & String Algorithms), where the recognition engine over Phases 1–3 becomes useful.
 
-### Interview-Specific Path (16 modules)
+### Interview-Specific Path (17 modules)
 
-A ruthless cut to what a **senior software engineering interview** actually probes: the coding-round spine plus the OS core that comes up in systems questions. Same learning order, 16 of the 24 modules. Each group below says why it earns interview time.
+A ruthless cut to what a **senior software engineering interview** actually probes: the coding-round spine plus the OS core that comes up in systems questions. Same learning order, 17 of the 25 modules. Each group below says why it earns interview time.
 
 | Group | Modules | Why it's tested |
 |-------|---------|-----------------|
@@ -175,6 +175,7 @@ A ruthless cut to what a **senior software engineering interview** actually prob
 | Trees, Heaps & Graph Structures | [trees_and_binary_search_trees](trees_and_binary_search_trees/), [heaps_and_priority_queues](heaps_and_priority_queues/), [graphs_tries_and_advanced_structures](graphs_tries_and_advanced_structures/) | BST invariants, heap extract-min/max, and graph representation tradeoffs are the second-most-probed structure family; trie and union-find variants separate senior from mid candidates |
 | Core Algorithms | [sorting_and_searching](sorting_and_searching/), [dynamic_programming](dynamic_programming/), [greedy_and_divide_and_conquer](greedy_and_divide_and_conquer/) | Sorting/searching complexity and the DP-vs-greedy fork are asked directly ("why quicksort over merge sort", "DP or greedy here") more than almost any other algorithmic decision |
 | Graph & String Algorithms | [graph_and_string_algorithms](graph_and_string_algorithms/) | BFS/Dijkstra/topological sort anchor "design a route or dependency system" prompts; KMP/Rabin-Karp separate candidates who can only brute-force string matching from those who know the O(n+m) trick |
+| DSA Pattern Recognition | [dsa_patterns](dsa_patterns/) | The recognition engine over Phases 1–3: cue→pattern tables and 25 playbooks are the coding-round strategy layer |
 | Operating Systems Core | [processes_threads_and_context_switching](processes_threads_and_context_switching/), [cpu_scheduling_algorithms](cpu_scheduling_algorithms/), [memory_management_and_virtual_memory](memory_management_and_virtual_memory/), [deadlocks_and_synchronization](deadlocks_and_synchronization/) | Context-switch cost, scheduling starvation, virtual-memory paging, and the four Coffman conditions are the standard OS-fundamentals gate at senior-level onsite loops |
 
 **Deliberately deferred to the Full Path** (valuable, lower interview yield): the systems/theory depth that rounds out mastery — computer architecture & memory hierarchy, networking fundamentals, database & storage fundamentals, cryptography fundamentals, and character encoding deep dive — plus the foundational theory modules still being written (theory of computation, how code runs: compilers & interpreters, discrete math for engineers). A niche flagged in an interview (e.g. "how does TLS actually work?") is a bonus, not a gate — reach for these once the 16 above are solid.

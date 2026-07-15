@@ -110,7 +110,7 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 
 Path: `dsa_patterns/` (inside this section root).
 
-This is the **pattern-recognition and strategy-selection layer** — the "fairly certain guess" engine. It sits *on top of* the 12 DSA concept modules (Phases 1–3) and does NOT re-teach data structures. It answers: given an unseen problem, what pattern do I apply?
+This is the **pattern-recognition and strategy-selection layer** — the "fairly certain guess" engine. It sits *on top of* the 12 DSA concept modules (Phases 1–3) and does NOT re-teach data structures. It answers: given an unseen problem, what pattern do I apply? In the game it is wired as its own Study topic — STUDY_ORDER/STUDY_PATHS entry `cs_fundamentals/dsa_patterns`, placed after Phase 3.
 
 Files:
 - `dsa_patterns/README.md` — master recognition engine (decision tree, cue→pattern table, constraints→complexity table, complexity cheat sheet, pattern index)
@@ -169,7 +169,7 @@ This is an intentional exception to the rest of the repo's plain-text `LeetCode 
 
 ## Learning Paths (Full + Interview-Specific)
 
-`README.md` documents two routes: the **Full Path** (all 21 modules = "5-Phase Learning Path", README §4) and a curated **Interview-Specific Path** (16 modules). The interview subset is a **dual-source list** — it lives in both `README.md` ("## Learning Paths") and `game/app.js` (`STUDY_PATHS.cs_fundamentals.interview`, which drives the game's Study Full/Interview toggle). **Change one, change the other** — same modules, same order. Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle impact).
+`README.md` documents two routes: the **Full Path** (all 24 modules + the dsa_patterns topic = "5-Phase Learning Path", README §4) and a curated **Interview-Specific Path** (17 modules). The interview subset is a **dual-source list** — it lives in both `README.md` ("## Learning Paths") and `game/app.js` (`STUDY_PATHS.cs_fundamentals.interview`, which drives the game's Study Full/Interview toggle). **Change one, change the other** — same modules, same order. Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle impact).
 
 ---
 

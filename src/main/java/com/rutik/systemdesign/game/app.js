@@ -44,6 +44,7 @@ const sectionIdentity = (path) => SECTION_IDENTITY[(path || "").split("/")[0]] |
 
 // Phase-order for the Study browser. Derived from each section's README learning path.
 // Modules not listed here sort to the end (alphabetically by JS Map insertion order).
+// extract.py --strict parses this literal (and STUDY_PATHS) — keep the "const STUDY_ORDER = {" ... "};" shape.
 const STUDY_ORDER = {
   backend: [
     "backend/osi_model_and_networking","backend/tcp_ip_deep_dive","backend/udp_and_quic","backend/http_protocols",
@@ -56,10 +57,25 @@ const STUDY_ORDER = {
     "backend/event_driven_fundamentals","backend/kafka_deep_dive","backend/event_sourcing_and_cqrs","backend/messaging_patterns",
     "backend/microservices_fundamentals","backend/api_gateway_patterns","backend/service_mesh_and_service_discovery","backend/distributed_system_operational_patterns","backend/container_and_deployment_patterns",
   ],
+  book: [
+    "book/designing_data_intensive_applications/00_preface_and_book_map",
+    "book/designing_data_intensive_applications/01_reliable_scalable_maintainable",
+    "book/designing_data_intensive_applications/02_data_models_and_query_languages",
+    "book/designing_data_intensive_applications/03_storage_and_retrieval",
+    "book/designing_data_intensive_applications/04_encoding_and_evolution",
+    "book/designing_data_intensive_applications/05_replication",
+    "book/designing_data_intensive_applications/06_partitioning",
+    "book/designing_data_intensive_applications/07_transactions",
+    "book/designing_data_intensive_applications/08_trouble_with_distributed_systems",
+    "book/designing_data_intensive_applications/09_consistency_and_consensus",
+    "book/designing_data_intensive_applications/10_batch_processing",
+    "book/designing_data_intensive_applications/11_stream_processing",
+    "book/designing_data_intensive_applications/12_future_of_data_systems",
+  ],
   cs_fundamentals: [
     "cs_fundamentals/complexity_analysis_and_big_o","cs_fundamentals/discrete_math_for_engineers","cs_fundamentals/number_systems_and_bit_manipulation","cs_fundamentals/character_encoding_deep_dive","cs_fundamentals/recursion_and_problem_solving_patterns",
     "cs_fundamentals/arrays_strings_and_hashing","cs_fundamentals/linked_lists_stacks_and_queues","cs_fundamentals/trees_and_binary_search_trees","cs_fundamentals/heaps_and_priority_queues","cs_fundamentals/graphs_tries_and_advanced_structures",
-    "cs_fundamentals/sorting_and_searching","cs_fundamentals/dynamic_programming","cs_fundamentals/greedy_and_divide_and_conquer","cs_fundamentals/graph_and_string_algorithms",
+    "cs_fundamentals/sorting_and_searching","cs_fundamentals/dynamic_programming","cs_fundamentals/greedy_and_divide_and_conquer","cs_fundamentals/graph_and_string_algorithms","cs_fundamentals/dsa_patterns",
     "cs_fundamentals/processes_threads_and_context_switching","cs_fundamentals/cpu_scheduling_algorithms","cs_fundamentals/memory_management_and_virtual_memory","cs_fundamentals/deadlocks_and_synchronization",
     "cs_fundamentals/computer_architecture_and_memory_hierarchy","cs_fundamentals/networking_fundamentals","cs_fundamentals/database_and_storage_fundamentals","cs_fundamentals/cryptography_fundamentals","cs_fundamentals/theory_of_computation","cs_fundamentals/how_code_runs_compilers_and_interpreters",
   ],
@@ -269,7 +285,7 @@ const STUDY_PATHS = {
     interview: [
       "cs_fundamentals/complexity_analysis_and_big_o","cs_fundamentals/number_systems_and_bit_manipulation","cs_fundamentals/recursion_and_problem_solving_patterns",
       "cs_fundamentals/arrays_strings_and_hashing","cs_fundamentals/linked_lists_stacks_and_queues","cs_fundamentals/trees_and_binary_search_trees","cs_fundamentals/heaps_and_priority_queues","cs_fundamentals/graphs_tries_and_advanced_structures",
-      "cs_fundamentals/sorting_and_searching","cs_fundamentals/dynamic_programming","cs_fundamentals/greedy_and_divide_and_conquer","cs_fundamentals/graph_and_string_algorithms",
+      "cs_fundamentals/sorting_and_searching","cs_fundamentals/dynamic_programming","cs_fundamentals/greedy_and_divide_and_conquer","cs_fundamentals/graph_and_string_algorithms","cs_fundamentals/dsa_patterns",
       "cs_fundamentals/processes_threads_and_context_switching","cs_fundamentals/cpu_scheduling_algorithms","cs_fundamentals/memory_management_and_virtual_memory","cs_fundamentals/deadlocks_and_synchronization",
     ],
   },
@@ -6041,7 +6057,7 @@ function generateQuests(friKey) {
     });
   }
   const touched = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
-  const untouched = Object.keys((state.index && state.index.files) || {}).filter((m) => !touched.has(m));
+  const untouched = capturableModules().filter((m) => !touched.has(m));
   if (untouched.length) {
     const n = Math.min(3, untouched.length);
     const modules = seededShuffle(untouched, rng).slice(0, n);
@@ -6447,6 +6463,15 @@ function moduleNeeded(mod) {
   if (bank) { const n = bank.filter((q) => q.module === mod).length; if (n && n < 5) return n; }
   return 5;
 }
+// Modules that can actually be captured: >=1 bank question. Reader-only dirs
+// (nested lld pattern folders, the DDIA master index) are excluded. Falls back
+// to "every file_tree module" when a cached index.json predates moduleCounts.
+function capturableModules() {
+  const files = (state.index && state.index.files) || {};
+  const mc = state.index && state.index.moduleCounts;
+  const all = Object.keys(files);
+  return mc ? all.filter((m) => (mc[m] || 0) > 0) : all;
+}
 // held = review records with reps >= 1 AND not overdue; captured = held >= needed;
 // foil = any record proven over a 21-day interval; tarnished = would still be
 // captured ignoring overdue, but decay dropped it below the bar.
@@ -6612,15 +6637,14 @@ function codexOrderedSections() {
   return [...secOrder.filter((s) => all.includes(s)), ...all.filter((s) => !secOrder.includes(s))];
 }
 function codexModulesOf(sec) {
-  const files = (state.index && state.index.files) || {};
   const order = STUDY_ORDER[sec] || [];
-  return Object.keys(files).filter((k) => k.split("/")[0] === sec)
+  return capturableModules().filter((k) => k.split("/")[0] === sec)
     .sort((a, b) => (order.indexOf(a) === -1 ? 9999 : order.indexOf(a)) - (order.indexOf(b) === -1 ? 9999 : order.indexOf(b)));
 }
 function renderCodex() {
   state.inQuiz = false;
   refreshStats();
-  const cs = codexState(state.progress);
+  const cs = codexState(state.progress, capturableModules());
   let captured = 0, foil = 0;
   cs.forEach((v) => { if (v.captured) captured++; if (v.foil) foil++; });
   const shelves = codexOrderedSections().map((sec) => {
@@ -6730,9 +6754,8 @@ function checkAwards(ctx, stats) {
   if ((p.deepReads || 0) >= 10) grant("deep_habit");
   const golds = Object.keys(p.sections || {}).filter((s) => sectionTier(p.sections[s]) === "Gold").length;
   if (golds >= 3) grant("triple_gold");
-  const files = (state.index && state.index.files) || {};
   for (const sec of new Set(ctx.mods.map((m) => m.split("/")[0]))) {
-    const secMods = Object.keys(files).filter((k) => k.split("/")[0] === sec);
+    const secMods = capturableModules().filter((k) => k.split("/")[0] === sec);
     if (!secMods.length) continue;
     const haveRec = new Set(Object.values(reviews).filter((r) => r.section === sec && r.module).map((r) => r.module));
     if (secMods.every((m) => haveRec.has(m))) grant("cartographer");

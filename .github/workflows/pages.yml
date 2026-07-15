@@ -31,7 +31,7 @@ jobs:
         # No need to commit questions/*.json or graph/*.json — the artifact carries them.
         run: |
           cd src/main/java/com/rutik/systemdesign/game
-          python3 extract.py
+          python3 extract.py --strict
           for sec in $(python3 -c "import json;print(' '.join(json.load(open('questions/index.json'))['sections']))"); do
             python3 build_graph.py "$sec"
           done
