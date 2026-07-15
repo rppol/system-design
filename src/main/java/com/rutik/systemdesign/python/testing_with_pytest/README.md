@@ -815,6 +815,22 @@ Three approaches in order of preference: (1) `monkeypatch.setattr("app.module.ti
 
 Module-scoped fixtures are shared across all tests in a file. Pollution occurs when one test mutates the fixture's state. Mitigation strategies: (1) design module-scoped fixtures to return read-only objects or frozen dataclasses; (2) if the resource must be mutable, use `copy.deepcopy` inside the test to get a private copy; (3) document the fixture's contract — "this fixture is read-only" — and enforce it with a `@property`-based wrapper that raises `AttributeError` on assignment. The safest long-term choice is to prefer function scope and widen to module scope only after measuring a real performance cost.
 
+**Q13: What is a "Fake" test double, and why does the case study use `fakeredis.FakeRedis()` instead of a `Mock`?**
+
+A Fake is a working, simplified implementation of a real dependency — it actually executes the logic (increment a counter, apply a TTL) rather than returning pre-programmed canned values like a Stub or recording calls like a Mock. `fakeredis.FakeRedis()` implements Redis's real command semantics in memory, so `incr()` and `expire()` behave identically to production Redis, which lets the rate-limiter test suite catch real off-by-one bugs in the sliding-window logic that a `Mock` would simply never notice because a `Mock` has no actual counting behavior. The trade-off is that a Fake must be maintained to track the real dependency's behavior as it evolves, while a `Mock` requires no such upkeep. Prefer a Fake over a Mock for any dependency with meaningful internal logic — persistence layers, caches, message queues — and reserve `Mock`/`MagicMock` for verifying that a call happened with the right arguments.
+
+**Q14: What happens when you stack two `@pytest.mark.parametrize` decorators on the same test function?**
+
+Stacking two `@parametrize` decorators produces the Cartesian product of both parameter sets, so `@parametrize("fmt", ["json", "csv"])` combined with `@parametrize("rows", [0, 100, 10_000])` runs the test body 2 × 3 = 6 times, once for every `(fmt, rows)` combination. This is a fast way to cover a full matrix of boundary conditions — output formats crossed with input sizes — without writing the combinations out by hand or nesting loops inside the test. The order the decorators are applied controls the order test IDs are generated in pytest's output, which matters when reading a failure report but not for correctness. Use stacked parametrize sparingly: a matrix of 3+ decorators can produce dozens of cases that are slow to run and hard to debug individually.
+
+**Q15: What does `filterwarnings = ["error"]` do in a pytest CI configuration, and why is it valuable?**
+
+Setting `filterwarnings = ["error"]` in `pyproject.toml` converts every Python warning raised during a test run into a test failure instead of a silently-printed message, so deprecation notices from dependencies stop the build immediately rather than scrolling past in CI logs. This catches deprecated API usage — a library function slated for removal, an implicit type coercion — while it is still a warning, giving the team time to fix it before the next dependency upgrade turns it into a hard breaking change. Without this setting, warnings accumulate silently for months and then surface all at once as a wall of failures during a routine dependency upgrade. Combine it with narrower `filterwarnings` entries (ignoring one known third-party warning by module) when a specific dependency cannot be fixed immediately.
+
+**Q16: In the rate-limiter case study, why does `test_limit_five_broken` pollute later tests, and how does `monkeypatch.setattr` fix it?**
+
+`test_limit_five_broken` sets `limiter.LIMIT = 5` directly on the module object with a plain assignment, and because Python modules are singletons shared across the whole test session, that change persists for every test that runs afterward — including `test_rate_limit_boundary`, which then silently checks against the wrong limit. `monkeypatch.setattr("app.limiter.LIMIT", 5)` makes the same change but records the original value first, and pytest automatically restores it when the test function returns, regardless of whether the test passed or failed. This is the same automatic-teardown guarantee that makes `monkeypatch.setenv` and `monkeypatch.setattr` on object methods safe to use freely. Never mutate a module-level constant or global directly in a test; always route the change through `monkeypatch` so cleanup is guaranteed.
+
 ---
 
 ## 13. Best Practices

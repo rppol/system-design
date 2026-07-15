@@ -736,6 +736,22 @@ Python calls `__bool__` first; if that is not defined, it calls `__len__` and tr
 
 In assignment (`first, *rest = items`), the starred variable collects zero or more elements from the iterable as a `list`. It can appear in any position but only once per assignment target. In function calls (`func(*args)`), the star unpacks an iterable into positional arguments. `**kwargs` in a call unpacks a mapping into keyword arguments. Both use the same `*` syntax but operate in different contexts — the assignment form is a language feature; the call form is an operator on the argument list.
 
+**Q13:** What makes a string literal eligible for compile-time interning in CPython, and why is relying on it dangerous?
+
+CPython interns string literals at compile time only when they look like identifiers — no spaces, no special characters, matching what could be a variable or attribute name — so `"hello"` is commonly interned but `"hello world"` is not. This is a CPython implementation detail, not a language guarantee: other implementations may intern differently or not at all, and even CPython's exact interning rules have changed across versions. Code that writes `if name is "Alice":` works by accident in a REPL where short literals get folded, then fails silently in production once `name` is built at runtime by concatenation or `.format()`. Always compare strings with `==`; reserve `is` for singletons and objects you explicitly interned yourself with `sys.intern()`.
+
+**Q14:** When should you prefer a `dict` dispatch table over `match`/`case` [3.10], even though both can route on a value?
+
+Prefer a `dict` of callables when you are dispatching on a single scalar key with no need to destructure — a `dict` lookup is O(1) and reads as plain function-call syntax, while `match`/`case` compiles to a sequence of pattern tests that is not guaranteed O(1). `match`/`case` earns its keep when the routing decision depends on *structure* — nested tuples, dataclass attributes, sequence length — because a `dict` key cannot express "any 2-tuple whose second element is zero" the way a sequence pattern can. Guard clauses (`case n if n > 0:`) and OR patterns (`case 200 | 201:`) let a single `match` block layer extra conditions that a plain dict dispatch cannot express without wrapping each value in a function. Reach for `match`/`case` when you need destructuring, and a `dict` when you only need name-to-function routing.
+
+**Q15:** Why can't you use the walrus operator `:=` directly inside a `lambda` body?
+
+The walrus operator `:=` [3.8] is restricted from appearing directly inside the body of a `lambda` because assignment expressions require a clear enclosing scope to bind the name into, and a bare `lambda` body is a single expression with ambiguous scoping rules for a new binding. In practice this rarely matters because a `lambda` that needs to assign-and-reuse a value is a sign the logic should be a named function instead, where a walrus can be used freely. If you encounter this restriction, the fix is almost always to extract the lambda's body into a small named function rather than to work around the syntax. This is a narrow, low-frequency gotcha, but it explains why some walrus refactors that work at module level fail when moved into a `sorted(key=lambda x: ...)` call.
+
+**Q16:** What is `sys.intern()` and when would you use it explicitly?
+
+`sys.intern(string)` forces a string into CPython's intern table and returns the canonical interned copy, guaranteeing that all future calls with an equal string return the identical object. The main use case is a micro-optimization for large symbol tables or parsers that compare the same strings millions of times — once interned, comparisons can safely use `is` instead of `==`, and duplicate strings share one object in memory instead of many. This differs from the automatic compile-time interning of identifier-like literals (see Q13): `sys.intern()` works on any string, including ones built at runtime, and the guarantee is explicit rather than an implementation accident. Only reach for it after profiling shows string comparison or memory duplication is an actual bottleneck — for typical application code, `==` on regular strings is already fast enough.
+
 ---
 
 ## 13. Best Practices

@@ -833,6 +833,22 @@ When an exception is raised inside a stage of a `toolz.pipe` call, the traceback
 
 In Python 3.9+, `functools.cache` is equivalent to `lru_cache(maxsize=None)` but is implemented without the LRU overhead (no doubly-linked list maintenance, no lock per access in CPython). This makes `cache` slightly faster per call for pure memoization when you do not need eviction. The tradeoff is unbounded memory growth — `cache` never evicts entries. Use `cache` for functions with a small, finite input space (e.g., a few dozen distinct values); use `lru_cache(maxsize=N)` when the input space is large and you need to bound memory usage.
 
+**Q13: Does wrapping a function with `functools.partial` avoid the mutable-default-argument trap?**
+
+No — `functools.partial` does not fix the mutable-default-argument trap because the default value is still evaluated once when the wrapped function's `def` statement executes, and `partial` simply calls that same function object on every invocation. `add_item = partial(append_to)` on a function defined as `def append_to(item, collection=[]):` still shares one `[]` list across every call made through `add_item`, exactly as it would through the original function. The fix is unchanged from the non-`partial` case: give the wrapped function a `None` default and construct a fresh mutable object inside its body before `partial` ever touches it. Always fix mutable defaults at the function definition, not at the call site, because every wrapper — `partial`, decorators, or plain aliasing — inherits the same shared object.
+
+**Q14: What does `operator.methodcaller` do, and when is it preferable to a lambda that calls a method?**
+
+`operator.methodcaller(name, *args)` returns a callable that invokes `obj.name(*args)` on whatever object it is later called with, giving you a picklable, introspectable stand-in for `lambda obj: obj.name(*args)`. It is most useful inside `map()` or as a `sorted(key=...)` argument when the transformation is "call this one method on every element" — `list(map(methodcaller("lower"), words))` reads as intent rather than mechanism. Unlike a lambda, a `methodcaller` object can be pickled and sent across `multiprocessing` process boundaries, and its `repr()` shows the method name for debugging. Reach for it whenever the transformation is a bare method call with fixed arguments; fall back to a lambda only when you need arbitrary expressions around the call.
+
+**Q15: What does `toolz.curry` automate that `functools.partial` requires you to do manually?**
+
+`toolz.curry` automatically returns a partially-applied function whenever you call a curried function with fewer arguments than it needs, without you having to call `partial` explicitly at each call site. Decorating `multiply(x, y)` with `@curry` lets you write `double = multiply(2)` directly — the curry machinery detects that one argument is missing and hands back a new callable waiting for the rest, whereas the same effect with plain `functools.partial` requires writing `partial(multiply, 2)` every time. This makes curried functions compose more naturally in a `toolz.pipe`/`compose` chain, since each stage can be built by simple application rather than explicit `partial` calls. The trade-off is an extra dependency and a style that is unfamiliar to engineers who have not used a curry-based functional library before.
+
+**Q16: What is the practical difference between `toolz` and `cytoolz` in a production pipeline?**
+
+`cytoolz` is a Cython-compiled reimplementation of `toolz` with an API-identical surface, so switching from `import toolz` to `import cytoolz as toolz` requires no code changes but yields roughly a 10x speedup for pipeline-heavy workloads. `toolz` is pure Python, which makes it trivially installable anywhere CPython runs but leaves its `pipe`/`compose`/`curry` machinery subject to normal Python function-call overhead at every stage. The module's guidance is concrete: switch to `cytoolz` once any pipeline processes more than 10,000 records per request. Use plain `toolz` during local development for simpler installation, and `cytoolz` in any production path where per-request throughput matters.
+
 ---
 
 ## 13. Best Practices
