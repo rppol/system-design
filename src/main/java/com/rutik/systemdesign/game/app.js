@@ -301,7 +301,7 @@ function setStudyPath(section, path) {
   let m = {};
   try { m = JSON.parse(localStorage.getItem("sd_study_path") || "{}"); } catch { }
   m[section] = path;
-  localStorage.setItem("sd_study_path", JSON.stringify(m));
+  safeSet("sd_study_path", JSON.stringify(m));
 }
 
 /* ---------- themes ---------- */
@@ -323,7 +323,7 @@ const curTheme = () => {
 
 function applyTheme(id, save = true) {
   document.documentElement.dataset.theme = id;
-  if (save) localStorage.setItem("sd_theme", id);
+  if (save) safeSet("sd_theme", id);
   document.querySelectorAll(".theme-opt").forEach((b) =>
     b.setAttribute("aria-checked", b.dataset.theme === id ? "true" : "false"));
 }
@@ -449,6 +449,61 @@ const ICON = (name, cls = "") => {
 // Screen-reader announcements (aria-live region in index.html).
 const announce = (msg) => { const n = el("#live"); if (n) n.textContent = msg; };
 
+// Focus containment for modal overlays. Focuses opts.initial (selector or
+// element; default first focusable), cycles Tab/Shift+Tab inside `container`,
+// and on release() restores focus to opts.restoreTo (default: the element
+// focused when the trap was armed). Esc/close semantics stay with the caller.
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+function trapFocus(container, opts = {}) {
+  const prev = opts.restoreTo || document.activeElement;
+  const focusables = () => [...container.querySelectorAll(FOCUSABLE)].filter((n) => n.offsetParent !== null || n === document.activeElement);
+  const first = opts.initial
+    ? (typeof opts.initial === "string" ? container.querySelector(opts.initial) : opts.initial)
+    : focusables()[0];
+  (first || container).focus({ preventScroll: true });
+  const onKey = (e) => {
+    if (e.key !== "Tab") return;
+    const f = focusables();
+    if (!f.length) { e.preventDefault(); return; }
+    const i = f.indexOf(document.activeElement);
+    if (e.shiftKey && (i <= 0)) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && (i === -1 || i === f.length - 1)) { e.preventDefault(); f[0].focus(); }
+  };
+  document.addEventListener("keydown", onKey, true);
+  return function release(restore = true) {
+    document.removeEventListener("keydown", onKey, true);
+    if (restore && prev && prev.isConnected) prev.focus({ preventScroll: true });
+  };
+}
+
+// Roving-tabindex keyboard nav for an ARIA radio group: tabindex 0 on the
+// aria-checked radio (else the first), -1 on the rest; Arrow keys move+click()
+// the neighbor (wrapping), Home/End jump to the ends. click() lets the caller's
+// existing handler drive the state change. (Wired into call sites in a later wave.)
+function wireRadioGroup(container) {
+  if (!container) return;
+  const radios = () => [...container.querySelectorAll('[role=radio]')];
+  const sync = () => {
+    const r = radios();
+    const checked = r.find((n) => n.getAttribute("aria-checked") === "true") || r[0];
+    r.forEach((n) => n.setAttribute("tabindex", n === checked ? "0" : "-1"));
+  };
+  sync();
+  container.addEventListener("keydown", (e) => {
+    const r = radios();
+    if (!r.length) return;
+    const i = r.indexOf(document.activeElement);
+    let j;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") j = (i + 1) % r.length;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") j = (i - 1 + r.length) % r.length;
+    else if (e.key === "Home") j = 0;
+    else if (e.key === "End") j = r.length - 1;
+    else return;
+    e.preventDefault();
+    r[j].focus(); r[j].click(); sync();
+  });
+}
+
 const REDUCED = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 // Cross-fade between screens via the View Transitions API where available.
@@ -555,7 +610,7 @@ function seedCoachMarksIfVeteran() {
   if ((state.progress.history || []).length === 0) return;   // this IS a first-run: let marks fire
   for (const id of COACH_MARK_IDS) {
     const k = "sd_cm_" + id;
-    if (!localStorage.getItem(k)) localStorage.setItem(k, "1");
+    if (!localStorage.getItem(k)) safeSet(k, "1");
   }
 }
 function coachMark(anchorSel, text, id) {
@@ -563,7 +618,7 @@ function coachMark(anchorSel, text, id) {
   if (localStorage.getItem(key) === "1") return;
   const anchor = el(anchorSel);
   if (!anchor || el(".coach-mark")) return;
-  localStorage.setItem(key, "1");                    // mark seen immediately — no re-show race
+  safeSet(key, "1");                    // mark seen immediately — no re-show race
   const tip = document.createElement("div");
   tip.className = "coach-mark" + (REDUCED() ? " reduced" : "");
   tip.setAttribute("role", "status");
@@ -686,8 +741,11 @@ function mulberry32(seed) {
 // on any error. Pages serves these with normal caching; "default" lets a 304
 // revalidate the multi-MB banks instead of re-downloading them every boot.
 async function fetchJSON(path, fallback, cache = "no-store") {
-  try { const r = await fetch(path, { cache }); if (!r.ok) throw 0; return await r.json(); }
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 20000);
+  try { const r = await fetch(path, { cache, signal: ctl.signal }); if (!r.ok) throw 0; return await r.json(); }
   catch { return fallback; }
+  finally { clearTimeout(t); }
 }
 
 /* ---------- [A2] shared learning helpers ---------- */
@@ -826,7 +884,7 @@ const sfx = (() => {
     bossSting() { tone(110, 0.4, "sawtooth", 0.05); tone(165, 0.4, "sawtooth", 0.04, 0.05); },
     recovered() { tone(440, 0.14, "sine", 0.055); tone(660, 0.16, "sine", 0.05, 0.08); },
     isOn: on,
-    toggle() { const wasOn = on(); localStorage.setItem("sd_mute", wasOn ? "1" : "0"); return !wasOn; },
+    toggle() { const wasOn = on(); safeSet("sd_mute", wasOn ? "1" : "0"); return !wasOn; },
   };
 })();
 
@@ -889,11 +947,30 @@ function countUp(node, to) {
 }
 
 /* ---------- persistence ---------- */
+// Quota-safe localStorage write. Never throws. Returns true on success.
+// One toast per session on first failure, nudging the export path
+// (Progress screen is the only backup path — game/CLAUDE.md).
+let _quotaWarned = false;
+function safeSet(key, val) {
+  try { localStorage.setItem(key, val); return true; }
+  catch {
+    if (!_quotaWarned) {
+      _quotaWarned = true;
+      showToast("Storage is full — progress may not save. Export a backup from Progress.", 6000);
+    }
+    return false;
+  }
+}
+
 // localStorage sd_progress is the single source of truth (Pages-only).
 function loadProgress() {
   const fill = (p) => { if (!p.reviews) p.reviews = {}; if (p.freezes == null) p.freezes = 2; if (!p.freezeUsedOn) p.freezeUsedOn = []; if (!p.awards) p.awards = {}; if (p.deepReads == null) p.deepReads = 0; if (!p.readModules) p.readModules = {}; if (!p.reading) p.reading = { day: null, count: 0, streak: 0, longest: 0, todayKeys: {} }; return p; };  /* [C] awards + deepReads; reading-tracker backfill */
-  let ls = null;
-  try { ls = JSON.parse(localStorage.getItem("sd_progress")); } catch { /* corrupt -> reseed */ }
+  // Corrupt sd_progress: keep the raw copy (recoverable via export/import) and
+  // flag so boot() can surface a one-time toast, instead of silently reseeding.
+  let ls = null, corrupt = false;
+  const raw = localStorage.getItem("sd_progress");
+  try { ls = raw == null ? null : JSON.parse(raw); } catch { corrupt = true; }
+  if (corrupt && raw) { safeSet("sd_progress_corrupt", raw); state._progressCorrupt = true; }
   return ls ? fill(ls)
     : { streak: 0, longestStreak: 0, lastPlayed: null, totalXP: 0, sections: {}, history: [], reviews: {}, freezes: 2, freezeUsedOn: [], awards: {}, deepReads: 0 };
 }
@@ -918,7 +995,7 @@ function markModuleRead(path) {
   if (firstEver) p.readModules[path] = t;
   if (!r.todayKeys) r.todayKeys = {};
   if (!r.todayKeys[path]) { r.todayKeys[path] = 1; r.count = (r.count || 0) + 1; }
-  try { localStorage.setItem("sd_progress", JSON.stringify(p)); } catch { /* quota — non-critical */ }
+  safeSet("sd_progress", JSON.stringify(p));
   return firstEver;
 }
 // Called from the reader-body scroll handler (and once after render for pages
@@ -1000,19 +1077,28 @@ function saveSessionLocal(session, opts = {}) {
       else if (res.conf === "low") { sec.unsureSeen = (sec.unsureSeen || 0) + 1; if (res.status === "correct") sec.unsureCorrect = (sec.unsureCorrect || 0) + 1; }
     }
     if (res.id) {
-      const rv = reviews[res.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
+      // [W1] quest fix: capture due-state BEFORE scheduleReview rewrites rv.due.
+      const prior = reviews[res.id];
+      const wasDue = !opts.quiet && prior && prior.due && prior.due <= session.date;
+      const rv = prior || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
       rv.section = res.section; rv.module = res.module;
       // Slow correct -> schedule like low confidence; never double-shrink.
       let eff = res.conf;
       if (res.status === "correct" && medCorrect && res.ms > 2 * medCorrect) eff = "low";
       scheduleReview(rv, res.status, session.date, res.ms, eff);
       reviews[res.id] = rv;
+      // A due review answered correctly counts toward this week's reviews quest.
+      if (wasDue && res.status === "correct") {
+        const wk = mostRecentFriday(session.date);
+        if (!p.questClears || p.questClears.week !== wk) p.questClears = { week: wk, count: 0 };
+        p.questClears.count++;
+      }
     }
     if (res.confusion) tallyConfusion(p, res.confusion);   // [A2] confusion-pair tally (cap 50)
   }
   if (opts.quiet) {                                        // [A2] side-effect-free save (prime)
-    localStorage.setItem("sd_progress", JSON.stringify(p));
-    return { xp: 0, freezeUsed: false };
+    const saved = safeSet("sd_progress", JSON.stringify(p));
+    return { xp: 0, freezeUsed: false, saved };
   }
   const dayMs = 86400000, atMidnight = (iso) => new Date(iso + "T00:00:00");
   let freezeUsed = false, advanced = false;
@@ -1039,8 +1125,8 @@ function saveSessionLocal(session, opts = {}) {
     comeback: !!session.comeback,                  // [B] comeback engine — see queueMoments/finish()
   });
   p.history = p.history.slice(-365);               // rolling one-year history cap
-  localStorage.setItem("sd_progress", JSON.stringify(p));
-  return { xp, freezeUsed };
+  const saved = safeSet("sd_progress", JSON.stringify(p));
+  return { xp, freezeUsed, saved };
 }
 
 /* ---------- selection ---------- */
@@ -1268,7 +1354,7 @@ function renderHome() {
         ${bar}
       </button>`;
   }).join("");
-  try { localStorage.setItem("sd_last_mastery", JSON.stringify(curMastery)); } catch { /* quota */ }
+  safeSet("sd_last_mastery", JSON.stringify(curMastery));
   const dateLine = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
   /* [D] coach: the suggested card becomes either the reboarding card (calm,
      non-red — "the reviews kept your place") or the normal coach-voice card
@@ -1396,7 +1482,7 @@ function loadRecent(section) {
 }
 function pushRecent(section, ids) {
   const next = [...loadRecent(section), ...ids].slice(-30);
-  try { localStorage.setItem(recentKey(section), JSON.stringify(next)); } catch { /* quota */ }
+  safeSet(recentKey(section), JSON.stringify(next));
 }
 
 /* ---------- bank loading / sub-topic picker ---------- */
@@ -1489,7 +1575,7 @@ async function openTopics(section) {
       (r.style.display = r.querySelector(".mname").textContent.toLowerCase().includes(f) ? "" : "none"));
   });
   document.querySelectorAll(".lenopt").forEach((b) => b.addEventListener("click", () => {
-    localStorage.setItem("sd_deck_len", b.dataset.len);
+    safeSet("sd_deck_len", b.dataset.len);
     document.querySelectorAll(".lenopt").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-checked", x === b ? "true" : "false"); });
     announce(`Session length set to ${b.dataset.len} questions.`);
   }));
@@ -1649,7 +1735,7 @@ async function startReview() {
   // [E1] the self-heal above used to delete silently — persist it and surface a
   // one-time-per-session toast so the count isn't a mystery drop.
   if (orphaned) {
-    try { localStorage.setItem("sd_progress", JSON.stringify(state.progress)); } catch { /* quota */ }
+    safeSet("sd_progress", JSON.stringify(state.progress));
     if (!state._orphanToastShown) {
       state._orphanToastShown = true;
       showToast(`${orphaned} retired question${orphaned === 1 ? "" : "s"} removed from your queue.`);
@@ -1774,12 +1860,12 @@ function showPrimeSheet(section, m, justRead) {
   document.body.appendChild(o);
   const close = () => o.remove();
   el("#primeGo").addEventListener("click", () => {
-    try { localStorage.setItem("sd_prime_opt", "0"); } catch { }   // engagement resets the opt-out
+    safeSet("sd_prime_opt", "0");   // engagement resets the opt-out
     close(); startPrime(section, m.module, m.name);
   });
   el("#primeSkip").addEventListener("click", () => {
     let opt = 0; try { opt = +localStorage.getItem("sd_prime_opt") || 0; } catch { }
-    try { localStorage.setItem("sd_prime_opt", String(opt + 1)); } catch { }
+    safeSet("sd_prime_opt", String(opt + 1));
     close(); justRead();
   });
   o.addEventListener("click", (e) => { if (e.target === o) { close(); justRead(); } });   // backdrop = just read
@@ -1882,7 +1968,7 @@ function flagForReview(item, btn) {
   const rv = reviews[item.q.id] || { ease: 2.5, interval: 0, reps: 0, lapses: 0 };
   rv.due = todayISO(); rv.flagged = 1; rv.section = item.q.section; rv.module = item.q.module;
   reviews[item.q.id] = rv;
-  try { localStorage.setItem("sd_progress", JSON.stringify(p)); } catch { /* quota */ }
+  safeSet("sd_progress", JSON.stringify(p));
   btn.classList.add("on"); btn.disabled = true; btn.title = "Flagged for review";
   announce("Flagged — it'll appear in your next review.");
 }
@@ -1912,7 +1998,7 @@ function saveDeckSnapshot() {
     combo: state.combo, maxCombo: state.maxCombo, sessionXp: state.sessionXp,
     startedAt: state.startedAt,
   };
-  try { localStorage.setItem("sd_active_deck", JSON.stringify(snap)); } catch { /* quota */ }
+  safeSet("sd_active_deck", JSON.stringify(snap));
 }
 
 function readDeckSnapshot() {
@@ -2544,7 +2630,6 @@ function gradeCard(got, conf) {
 async function finish(opts = {}) {
   state.inQuiz = false;
   document.body.classList.remove("boss-mode");     // [B] the deck is ending; drop the boss dim
-  clearDeckSnapshot();                             // the deck is resolved; no resume
   app.innerHTML = `<div class="loading">Saving your progress&hellip;</div>`;
   const DONE = ["correct", "wrong", "learned"];
   // Early finish ("Finish now") records only attempted cards; a normal finish
@@ -2573,7 +2658,11 @@ async function finish(opts = {}) {
       if (!ghostBest || h.correct > ghostBest.correct || (h.correct === ghostBest.correct && h.durationSec < ghostBest.durationSec)) ghostBest = h;
     }
   }
-  const { xp, freezeUsed } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec, comeback });
+  const { xp, freezeUsed, saved } = saveSessionLocal({ date: todayISO(), section: state.section, results, bonusXp, durationSec, comeback });
+  // Only drop the resume snapshot once the save is confirmed — a quota failure
+  // keeps the run resumable instead of losing it silently.
+  if (saved !== false) clearDeckSnapshot();
+  else showToast("Couldn't save this session — storage is full. Your run is kept for resume; export a backup.", 8000);
   const cExtra = cAfterSave(cCtx, { correct, total });   // [C] seal gauntlet · resolve interview · detect ledger awards
   const post = progressSnapshot();                 // (after the save)
   // [B] time-capsule returns: correct answers on questions whose 60-day capsule
@@ -2831,7 +2920,7 @@ function maybeBuryCapsule() {
   rv.capsule = today;
   reviews[pick.id] = rv;
   state.progress.reviews = reviews;
-  localStorage.setItem("sd_progress", JSON.stringify(state.progress));
+  safeSet("sd_progress", JSON.stringify(state.progress));
   state._capsuleBuried = { moduleName: pick.moduleName, due: rv.due };
 }
 
@@ -2847,18 +2936,28 @@ function backupNudgeHTML() {
   return `<div class="backup-note">Your progress lives in this browser. Export a backup from Progress.</div>`;
 }
 
-// Keys that make up a full save (future gauntlet/codex keys join this list).
-const BACKUP_KEYS = ["sd_progress", "sd_gauntlet"];
+// Keys that make up a full save. Excludes transient/derived state: sd_active_deck
+// (same-day resume snapshot), sd_recent_* (no-repeat ring), sd_progress_corrupt
+// (recovery artifact — never re-imported).
+const BACKUP_KEYS = [
+  "sd_progress", "sd_gauntlet", "sd_coach", "sd_study_path",
+  "sd_theme", "sd_mode", "sd_mute", "sd_deck_len", "sd_prime_opt",
+  "sd_reader_w", "sd_modules_w", "sd_toc_w", "sd_reader_fs", "sd_reader_full",
+  "sd_reader_toc", "sd_reader_modules", "sd_reader_scroll", "sd_last_read",
+  "sd_reader_font", "sd_reader_measure", "sd_reader_dropcap", "sd_reader_recall",
+  "sd_last_mastery", "sd_last_export",
+  "sd_cm_first_question", "sd_cm_first_combo", "sd_cm_first_results", "sd_cm_first_cards",
+];
 
 function exportProgress() {
-  const blob = { version: 1, exportedAt: new Date().toISOString(), data: {} };
+  const blob = { version: 2, exportedAt: new Date().toISOString(), data: {} };
   for (const k of BACKUP_KEYS) { const v = localStorage.getItem(k); if (v != null) blob.data[k] = v; }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([JSON.stringify(blob, null, 2)], { type: "application/json" }));
   a.download = `sysdesign-daily-backup-${todayISO()}.json`;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  localStorage.setItem("sd_last_export", todayISO());
+  safeSet("sd_last_export", todayISO());
   announce("Backup exported.");
 }
 
@@ -2871,7 +2970,9 @@ function importProgress(file) {
       alert("That file isn't a valid System Design Daily backup."); return;
     }
     if (!confirm("Import this backup? It replaces all current progress in this browser.")) return;
-    for (const k of BACKUP_KEYS) { if (blob.data[k] != null) localStorage.setItem(k, blob.data[k]); }
+    try {
+      for (const k of BACKUP_KEYS) { if (blob.data[k] != null) localStorage.setItem(k, blob.data[k]); }
+    } catch { alert("Import failed — your browser storage may be full. Free up space and try again."); return; }
     location.reload();
   };
   reader.readAsText(file);
@@ -3213,7 +3314,7 @@ function palVerbs() {
   out.push({ label: "Debrief", hint: "verb", run: () => go("#/debrief") });
   const flash = deckMode() === "flash";
   out.push({ label: flash ? "Quiz mode (from flashcards)" : "Flashcards mode (from quiz)", hint: "verb",
-    run: () => { localStorage.setItem("sd_mode", flash ? "quiz" : "flash"); syncModeBtn(); if (!state.inQuiz) renderHome(); } });
+    run: () => { safeSet("sd_mode", flash ? "quiz" : "flash"); syncModeBtn(); if (!state.inQuiz) renderHome(); } });
   for (const t of ["midnight", "orchid", "ember", "daylight"]) out.push({ label: `Theme: ${t}`, hint: "theme", run: () => applyTheme(t) });
   out.push({ label: "Export progress", hint: "verb", run: () => exportProgress() });
   return out;
@@ -4903,7 +5004,7 @@ function wireGrips() {
   // Main reader pane grip (outer shell, wired on every openReaderPath call)
   attachGrip(el("#readerGrip"),
     ev => css.setProperty("--reader-w", Math.round(Math.min(window.innerWidth * 0.92, Math.max(360, window.innerWidth - ev.clientX))) + "px"),
-    () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--reader-w").trim(); if (v.endsWith("px")) localStorage.setItem("sd_reader_w", v); }
+    () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--reader-w").trim(); if (v.endsWith("px")) safeSet("sd_reader_w", v); }
   );
 }
 
@@ -4915,7 +5016,7 @@ function wireSidebarGrips() {
       const left = el("#reader").getBoundingClientRect().left;
       css.setProperty("--modules-w", Math.round(Math.min(320, Math.max(100, ev.clientX - left))) + "px");
     },
-    () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--modules-w").trim(); if (v.endsWith("px")) localStorage.setItem("sd_modules_w", v); }
+    () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--modules-w").trim(); if (v.endsWith("px")) safeSet("sd_modules_w", v); }
   );
   // Right TOC sidebar grip
   attachGrip(el("#tocGrip"),
@@ -4923,7 +5024,7 @@ function wireSidebarGrips() {
       const right = el("#reader").getBoundingClientRect().right;
       css.setProperty("--toc-w", Math.round(Math.min(360, Math.max(120, right - ev.clientX))) + "px");
     },
-    () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--toc-w").trim(); if (v.endsWith("px")) localStorage.setItem("sd_toc_w", v); }
+    () => { const v = getComputedStyle(document.documentElement).getPropertyValue("--toc-w").trim(); if (v.endsWith("px")) safeSet("sd_toc_w", v); }
   );
 }
 
@@ -4948,7 +5049,7 @@ function restoreReaderWidth() {
 function applyReaderFont(delta = 0) {
   let fs = +(localStorage.getItem("sd_reader_fs") || 14.5) + delta;
   fs = Math.min(19, Math.max(12, fs));
-  localStorage.setItem("sd_reader_fs", fs);
+  safeSet("sd_reader_fs", fs);
   document.documentElement.style.setProperty("--rd-fs", fs + "px");
 }
 
@@ -4986,7 +5087,7 @@ function openReaderTypeMenu(anchorBtn) {
     `<div class="rtp-row"><span class="rtp-lbl">Answers</span>${seg("sd_reader_recall", [["1", "Hidden"], ["0", "Shown"]], recall ? "1" : "0")}</div>`;
   panel.appendChild(pop);
   pop.querySelectorAll(".rtp-seg").forEach((s) => s.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
-    localStorage.setItem(s.dataset.k, b.dataset.v);
+    safeSet(s.dataset.k, b.dataset.v);
     s.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
     if (s.dataset.k === "sd_reader_recall") applyRecallPref(); else applyReaderTypography();
   })));
@@ -5086,7 +5187,7 @@ function scheduleScrollSave(path, offset) {
       if (offset > 40) m[path] = Math.round(offset); else delete m[path];
       const keys = Object.keys(m);
       if (keys.length > 60) delete m[keys[0]];          // cap the map
-      localStorage.setItem("sd_reader_scroll", JSON.stringify(m));
+      safeSet("sd_reader_scroll", JSON.stringify(m));
     } catch { /* quota / parse — non-critical */ }
   }, 400);
 }
@@ -5300,7 +5401,7 @@ function exitNativeFS() {
 // at boot); native FS is ephemeral (browsers require a fresh gesture to re-enter).
 function setReaderFull(on) {
   reader.full = on;
-  localStorage.setItem("sd_reader_full", on ? "1" : "0");
+  safeSet("sd_reader_full", on ? "1" : "0");
   applyReaderModes();
   if (on) enterNativeFS(); else exitNativeFS();
 }
@@ -5635,12 +5736,12 @@ async function openReaderPath(path, title, navCtx, frag) {
   if (nav) {
     el("#readerMod").addEventListener("click", () => {
       reader.modules = !reader.modules;
-      localStorage.setItem("sd_reader_modules", reader.modules ? "1" : "0");
+      safeSet("sd_reader_modules", reader.modules ? "1" : "0");
       applyReaderModes();
     });
   }
   el("#readerIdx").addEventListener("click", () => {
-    reader.toc = !reader.toc; localStorage.setItem("sd_reader_toc", reader.toc ? "1" : "0"); applyReaderModes();
+    reader.toc = !reader.toc; safeSet("sd_reader_toc", reader.toc ? "1" : "0"); applyReaderModes();
   });
   el("#readerFull").addEventListener("click", () => setReaderFull(!reader.full));
   el("#readerExit").addEventListener("click", () => setReaderFull(false));
@@ -5691,7 +5792,7 @@ async function openReaderPath(path, title, navCtx, frag) {
       if (!reader._read) maybeMarkRead(path, b);
       if (reader._read && !reader._closed) { reader._closed = true; revealClosure(); }
     }, 1600);
-    localStorage.setItem("sd_last_read", JSON.stringify({ path, title: reader.titleText }));   // Study's "Continue reading"
+    safeSet("sd_last_read", JSON.stringify({ path, title: reader.titleText }));   // Study's "Continue reading"
   } catch {
     // [E1] reader failure keeps its own in-panel error (not the full errorScreen
     // — the underlying screen is still live behind the pane) but gains a retry.
@@ -5785,7 +5886,7 @@ function loadCoach() {
     todayTemplate: null, lastDebrief: null, quests: [], nudgedOn: null,
   };
 }
-function saveCoach(c) { localStorage.setItem("sd_coach", JSON.stringify(c)); }
+function saveCoach(c) { safeSet("sd_coach", JSON.stringify(c)); }
 function pushObservation(coach, note) {
   coach.observations = [{ date: todayISO(), note }, ...(coach.observations || [])].slice(0, 12);
 }
@@ -6044,10 +6145,15 @@ function pickTierQuestSection() {
 function generateQuests(friKey) {
   const rng = mulberry32(cyrb53("quests-" + friKey));
   const due = dueReviews().length;
-  const reviewsTarget = due > 0 ? due : 5;
-  const quests = [{
-    id: "q-reviews-" + friKey, type: "reviews", target: reviewsTarget, weekKey: friKey,
-    text: `Clear ${reviewsTarget} review${reviewsTarget === 1 ? "" : "s"}`,
+  // Fresh profile (nothing due) can't "clear reviews" — its progress would read
+  // pre-completed. Offer a first-run answering quest instead; keep the reviews
+  // quest (at the real due count) only when there is actually something due.
+  const quests = [due > 0 ? {
+    id: "q-reviews-" + friKey, type: "reviews", target: due, weekKey: friKey,
+    text: `Clear ${due} review${due === 1 ? "" : "s"}`,
+  } : {
+    id: "q-answers-" + friKey, type: "answers", target: 15, weekKey: friKey,
+    text: "Answer 15 fresh questions",
   }];
   const tierPick = pickTierQuestSection();
   if (tierPick) {
@@ -6076,14 +6182,26 @@ function ensureQuests() {
     coach.quests = generateQuests(friKey);
     saveCoach(coach);
   }
+  // One-time migration: a this-week reviews quest minted before the answers-quest
+  // fix regenerates once (deterministic seed -> tier/module quests are identical).
+  const rq = coach.quests.find((q) => q.type === "reviews" && q.weekKey === friKey);
+  if (rq && !coach.questsV2) { coach.quests = generateQuests(friKey); coach.questsV2 = friKey; saveCoach(coach); }
   return coach.quests;
 }
 // Progress is always recomputed live from current state — quests store only
 // {type, target, section?, modules?}, never a serialized function.
 function questProgress(q) {
   if (q.type === "reviews") {
-    const current = dueReviews().length;
-    return { done: Math.max(0, Math.min(q.target, q.target - current)), target: q.target };
+    // Count real clears this week (due-review-answered-correctly), not the
+    // target-minus-current heuristic that read 5/5 on a fresh profile.
+    const qc = state.progress.questClears;
+    const done = (qc && qc.week === q.weekKey) ? Math.min(q.target, qc.count) : 0;
+    return { done, target: q.target };
+  }
+  if (q.type === "answers") {
+    const done = (state.progress.history || []).reduce((s, h) =>
+      (h.date >= q.weekKey && daysBetweenISO(q.weekKey, h.date) <= 6) ? s + (h.answered || 0) : s, 0);
+    return { done: Math.min(q.target, done), target: q.target };
   }
   if (q.type === "tier") {
     const st = (state.progress.sections && state.progress.sections[q.section]) || { seen: 0, correct: 0 };
@@ -6453,7 +6571,7 @@ function tierOf(section) {
 function bumpDeepReads() {
   const p = state.progress;
   p.deepReads = (p.deepReads || 0) + 1;
-  localStorage.setItem("sd_progress", JSON.stringify(p));   // persist now; deep_habit is detected at the next finish()
+  safeSet("sd_progress", JSON.stringify(p));   // persist now; deep_habit is detected at the next finish()
 }
 
 /* ---------- [C] codex model (100% derived from review records) ---------- */
@@ -6519,7 +6637,7 @@ function loadGauntlet() {
   try { g = JSON.parse(localStorage.getItem("sd_gauntlet")); } catch { /* corrupt */ }
   return (g && g.date === todayISO()) ? g : null;
 }
-function saveGauntlet(g) { localStorage.setItem("sd_gauntlet", JSON.stringify(g)); }
+function saveGauntlet(g) { safeSet("sd_gauntlet", JSON.stringify(g)); }
 
 async function questionsByIds(ids) {
   const secs = new Set(ids.map((id) => id.split("/")[0]));
@@ -6580,14 +6698,26 @@ async function buildGauntletDeck() {
 async function startGauntlet() {
   app.innerHTML = `<div class="loading">Sealing today's gauntlet&hellip;</div>`;
   let g = loadGauntlet(), questions;
-  if (g && g.qids && g.qids.length) {
-    questions = await questionsByIds(g.qids);      // frozen at first open: same qids all day
-  } else {
-    questions = await buildGauntletDeck();
-    g = { date: todayISO(), qids: questions.map((q) => q.id), sealed: false, score: null, attempt: [] };
-    saveGauntlet(g);
+  try {
+    if (g && g.qids && g.qids.length) {
+      questions = await questionsByIds(g.qids);    // frozen at first open: same qids all day
+      // Some frozen qids failed to load (bank churn / partial fetch): run short
+      // rather than bailing — the seal's identity is the day, not the count.
+      if (questions.length && questions.length < g.qids.length)
+        showToast("Some questions couldn't load — running a short gauntlet.");
+    } else {
+      questions = await buildGauntletDeck();
+      g = { date: todayISO(), qids: questions.map((q) => q.id), sealed: false, score: null, attempt: [] };
+      saveGauntlet(g);
+    }
+  } catch {
+    errorScreen("Couldn't seal today's gauntlet", "The question banks didn't load. Check your connection and try again.", startGauntlet);
+    return;
   }
-  if (!questions.length) { redirect("#/home"); return; }
+  if (!questions.length) {
+    errorScreen("Couldn't seal today's gauntlet", "The question banks didn't load. Check your connection and try again.", startGauntlet);
+    return;
+  }
   const practice = !!g.sealed;                     // one scored attempt/day; then unscored practice
   state.section = practice ? "gauntlet-practice" : "gauntlet";
   state.modules = null;
@@ -6969,7 +7099,7 @@ function cAfterSave(ctx, stats) {
   }
   for (const a of checkAwards(ctx, stats))
     extra.push({ tier: "ledger", icon: `<span class="moment-tier">Ledger</span>`, title: `Ledger: ${a.title}`, sub: a.hint, play: () => sfx.chime() });
-  localStorage.setItem("sd_progress", JSON.stringify(p));   // persist awards written above
+  safeSet("sd_progress", JSON.stringify(p));   // persist awards written above
   return extra;
 }
 // Results-screen banners for the two special decks (called at the end of finish).
@@ -7098,7 +7228,7 @@ async function boot() {
   const modeB = el("#modeBtn");
   if (modeB) {
     modeB.addEventListener("click", () => {
-      localStorage.setItem("sd_mode", deckMode() === "flash" ? "quiz" : "flash");
+      safeSet("sd_mode", deckMode() === "flash" ? "quiz" : "flash");
       syncModeBtn();
       if (!state.inQuiz) renderHome();        // refresh the CTA caption
       // [E1] first-run coach mark (d): only on the switch INTO flashcards.
@@ -7122,6 +7252,9 @@ async function boot() {
   // history entry carries a real route and Back never lands on a hashless URL.
   if (!location.hash) history.replaceState(null, "", "#/home");
   onHashChange();                                  // dispatch the initial route
+  // [W1] corrupt sd_progress detected at loadProgress: the raw copy was kept
+  // under sd_progress_corrupt — tell the user once, after the first render.
+  if (state._progressCorrupt) showToast("Saved progress couldn't be read — a copy was kept. Import a backup from Progress.", 9000);
   /* [D] coach: same-day streak nudge — check now (tab already visible at load)
      and again whenever the tab regains visibility (no OS scheduler on Pages). */
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") maybeShowNudge(); });
