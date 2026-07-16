@@ -620,10 +620,10 @@ quadrantChart
     title Prediction service design space
     x-axis Cloud --> Edge
     y-axis Batch precompute --> Online per-request
-    quadrant-1 Online on-device (fresh, offline, private)
-    quadrant-2 Online in cloud (fresh, elastic, costly)
-    quadrant-3 Batch in cloud (cheap, stale)
-    quadrant-4 Batch on-device (rare)
+    quadrant-1 Online on-device — fresh and private
+    quadrant-2 Online in cloud — fresh but costly
+    quadrant-3 Batch in cloud — cheap but stale
+    quadrant-4 Batch on-device — rare
     Netflix recs: [0.18, 0.15]
     Fraud scoring API: [0.30, 0.82]
     DoorDash ETA streaming: [0.35, 0.90]

@@ -38,7 +38,7 @@ former.
 | System Design Interview — Vol 2 | Alex Xu & Sahn Lam | [system_design_interview_vol_2/](system_design_interview_vol_2/README.md) | 13 | Complete |
 | Machine Learning System Design Interview | Ali Aminian & Alex Xu | [machine_learning_system_design_interview/](machine_learning_system_design_interview/README.md) | 11 | Complete |
 | Designing Machine Learning Systems | Chip Huyen | [designing_machine_learning_systems/](designing_machine_learning_systems/README.md) | 11 | Complete |
-| Understanding Distributed Systems | Roberto Vitillo | [understanding_distributed_systems/](understanding_distributed_systems/README.md) | 33 (as 5 parts) | In progress |
+| Understanding Distributed Systems | Roberto Vitillo | [understanding_distributed_systems/](understanding_distributed_systems/README.md) | 33 (as 5 parts) | Complete |
 
 The two *System Design Interview* volumes are one series split across two folders (each
 volume numbers its chapters independently); with DDIA, MLSDI, DMLS, and UDS the section

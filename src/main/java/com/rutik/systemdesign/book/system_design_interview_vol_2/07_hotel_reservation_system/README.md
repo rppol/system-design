@@ -313,7 +313,7 @@ flowchart LR
     GW --> PS(["Payment Service"])
     GW --> HMS(["Hotel Mgmt Service"])
     RES -->|"gRPC"| PS
-    HS --> CACHE([("Redis cache")])
+    HS --> CACHE[("Redis cache")]
     RS --> CACHE
     HS --> DB[("Reservation DB<br/>RDBMS")]
     RS --> DB

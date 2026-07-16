@@ -160,7 +160,7 @@ sequenceDiagram
     Note over C,P: Phase 2 — COMMIT
     alt all voted YES
         C->>C: log "commit"<br/>(the point of no return)
-        C->>P: COMMIT<br/>(must obey; retries forever)
+        C->>P: COMMIT<br/>(must obey — retries forever)
     else any voted NO
         C->>P: ABORT
     end

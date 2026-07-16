@@ -362,6 +362,12 @@ above adds belt-and-suspenders to also nullify the SVG rect fill.
 - **Colon in a `quadrantChart` quadrant label breaks the parser** — `quadrant-4 Sweet
   spot: fast and cheap` errors on the `:` (the `title` line *does* allow a colon, the
   `quadrant-N` labels do not). Drop the colon or replace with an em dash.
+- **Parentheses (and the commas inside them) in `quadrantChart` labels break the lexer
+  too** — both in `quadrant-N` labels (`quadrant-1 Online on-device (fresh, offline)`)
+  AND in data-point labels (`Spanner (2PC over Paxos): [0.55, 0.92]`). "Unrecognized
+  text" lexical error. Replace with an em dash or drop the qualifier; the em dash `—`
+  and `/` are safe. Confirmed in v11.16.0 (2026-07-16 render sweep: 3 of the 4 real
+  parse errors across 435 book fences were this one family).
 - **classDiagram generics use tildes, not angle brackets** — write `class Node~K,V~`
   (renders as `Node<K,V>`) and `+get(key K) V`; a raw `<`/`>` misparses as HTML. And
   do NOT put the flowchart `classDef` palette on a `classDiagram`/`sequenceDiagram`/
