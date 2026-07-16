@@ -3035,7 +3035,7 @@ function importProgress(file) {
     let blob;
     try { blob = JSON.parse(reader.result); } catch { alert("That file isn't a valid backup."); return; }
     if (!blob || typeof blob !== "object" || !blob.data || typeof blob.data !== "object" || blob.data.sd_progress == null) {
-      alert("That file isn't a valid System Design Daily backup."); return;
+      alert("That file isn't a valid LORA backup."); return;
     }
     if (!confirm("Import this backup? It replaces all current progress in this browser.")) return;
     try {

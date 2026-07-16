@@ -242,6 +242,7 @@ main { flex: 1; width: 100%; max-width: 780px; margin: 0 auto; padding: 30px 22p
 .brand { font-weight: 800; letter-spacing: -0.02em; font-size: 19px; white-space: nowrap; cursor: pointer; }
 .brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
 .brand span { color: var(--accent); }
+.brand .byline { color: var(--muted); font-family: var(--mono); font-weight: 500; font-size: 11px; letter-spacing: 0; margin-left: 8px; }
 .stats { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
 .stats > * { min-width: 0; }
 .stat { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); }
@@ -1471,6 +1472,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   main { padding: 22px 16px calc(40px + var(--tabbar-h)); }   /* [E2] clear the bottom tab bar */
   .topbar { padding: 10px 14px; padding-top: calc(10px + env(safe-area-inset-top)); }
   .brand { font-size: 17px; }
+  .brand .byline { display: none; }   /* [rebrand] byline yields space on narrow viewports */
   /* [W3] collapse the icon topbar controls behind a single More button. */
   #modeBtn, #themeBtn, #muteBtn { display: none; }
   #moreBtn { display: inline-flex; }

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="LORA">
+  <defs>
+    <linearGradient id="aur" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7cabff"/><stop offset="1" stop-color="#9d8cff"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <filter id="glowG" x="-60%" y="-60%" width="220%" height="220%">
+      <feDropShadow dx="0" dy="0" stdDeviation="9" flood-color="#fbbf24" flood-opacity="0.8"/>
+    </filter>
+    <filter id="glowB" x="-60%" y="-60%" width="220%" height="220%">
+      <feDropShadow dx="0" dy="0" stdDeviation="8" flood-color="#7cabff" flood-opacity="0.55"/>
+    </filter>
+  </defs>
+
+  <!-- midnight base -->
+  <rect width="512" height="512" rx="112" fill="#06070d"/>
+
+  <!-- fan-out routes: three dim, one gold-gated -->
+  <g fill="none" stroke-linecap="round">
+    <line x1="296" y1="256" x2="392" y2="148" stroke="#2a3148" stroke-width="11"/>
+    <line x1="296" y1="256" x2="392" y2="292" stroke="#2a3148" stroke-width="11"/>
+    <line x1="296" y1="256" x2="392" y2="364" stroke="#2a3148" stroke-width="11"/>
+    <line x1="296" y1="256" x2="392" y2="220" stroke="url(#gold)" stroke-width="15"/>
+  </g>
+
+  <!-- input route into the router -->
+  <line x1="142" y1="256" x2="200" y2="256" stroke="url(#aur)" stroke-width="15" stroke-linecap="round"/>
+
+  <!-- router diamond (mixture-of-experts gate) -->
+  <polygon points="244,204 296,256 244,308 192,256" fill="#0c101f" stroke="url(#aur)" stroke-width="15" stroke-linejoin="round" filter="url(#glowB)"/>
+
+  <!-- input node -->
+  <circle cx="120" cy="256" r="25" fill="url(#aur)"/>
+
+  <!-- expert nodes: three inactive, the gated one gold -->
+  <circle cx="392" cy="148" r="23" fill="#06070d" stroke="#4a5470" stroke-width="11"/>
+  <circle cx="392" cy="292" r="23" fill="#06070d" stroke="#4a5470" stroke-width="11"/>
+  <circle cx="392" cy="364" r="23" fill="#06070d" stroke="#4a5470" stroke-width="11"/>
+  <circle cx="392" cy="220" r="27" fill="url(#gold)" filter="url(#glowG)"/>
+</svg>
