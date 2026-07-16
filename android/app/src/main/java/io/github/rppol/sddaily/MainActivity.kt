@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Message
 import android.provider.MediaStore
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
@@ -67,6 +68,11 @@ class MainActivity : ComponentActivity() {
             // The bundle is self-contained; deny file:// and content:// reach-out.
             allowFileAccess = false
             allowContentAccess = false
+            // Required for onCreateWindow (below) to fire at all: without this,
+            // target="_blank" anchors are dropped silently before
+            // shouldOverrideUrlLoading ever sees them. Must be set before the
+            // initial loadUrl() call.
+            setSupportMultipleWindows(true)
         }
 
         webView.webViewClient = object : WebViewClient() {
@@ -111,13 +117,62 @@ class MainActivity : ComponentActivity() {
                 filePathCallback?.onReceiveValue(null)
                 filePathCallback = callback
                 return try {
-                    // Import expects a single progress-backup JSON.
-                    fileChooserLauncher.launch(arrayOf("application/json"))
+                    // Import expects a single progress-backup JSON, but some file
+                    // managers mistag the exported backup as a generic/binary or
+                    // text type -> accept those too so the picker doesn't grey
+                    // the file out.
+                    fileChooserLauncher.launch(
+                        arrayOf("application/json", "application/octet-stream", "text/plain")
+                    )
                     true
                 } catch (e: Exception) {
                     filePathCallback = null
                     false
                 }
+            }
+
+            // The reader renders external links with target="_blank" (e.g. GitHub
+            // source links, external references), which never reach
+            // shouldOverrideUrlLoading -- WebView instead asks for a new window
+            // via this callback. With setSupportMultipleWindows(true) above, we
+            // must handle it or the request is dropped and the tap does nothing.
+            //
+            // Per the WebChromeClient.onCreateWindow contract, returning true
+            // obligates us to supply a WebView through the WebViewTransport and
+            // call resultMsg.sendToTarget() -- skipping that reply (or returning
+            // false without ever populating the transport) leaves the page's
+            // window-open request unresolved and can hang the calling JS. So we
+            // satisfy the contract with a throwaway, never-attached WebView: its
+            // WebViewClient captures the first navigation (the actual target
+            // URL, which onCreateWindow itself is never given directly), hands
+            // it to the same ACTION_VIEW path used above, then destroys itself
+            // without ever rendering a second browsing surface.
+            override fun onCreateWindow(
+                view: WebView,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message
+            ): Boolean {
+                val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
+                val tempWebView = WebView(view.context)
+                tempWebView.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        childView: WebView,
+                        request: WebResourceRequest
+                    ): Boolean {
+                        val url = request.url
+                        try {
+                            startActivity(Intent(Intent.ACTION_VIEW, url))
+                        } catch (e: Exception) {
+                            // No app can handle it -> swallow the navigation.
+                        }
+                        tempWebView.destroy()
+                        return true
+                    }
+                }
+                transport.webView = tempWebView
+                resultMsg.sendToTarget()
+                return true
             }
         }
 

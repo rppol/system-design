@@ -23,6 +23,16 @@ gh release download --pattern systemdesign-daily.apk   # grab the latest APK
 
 (Or use the web UI: Actions -> "Build Android APK", or the Releases page.)
 
+## Build locally
+
+No Gradle wrapper is committed to this repo (CI uses `gradle/actions/setup-gradle`,
+which needs nothing extra). To build locally, install Gradle 8.10+ yourself (or
+run `gradle wrapper` once inside `android/` to generate one), then:
+
+```bash
+gradle -p android :app:assembleDebug
+```
+
 ## Install
 
 1. Copy `systemdesign-daily.apk` to the phone (or open the URL in its browser).

@@ -18,7 +18,7 @@ android {
     }
 
     // Release signing is driven entirely by environment variables so that CI can
-    // supply a keystore while a local `./gradlew assembleDebug` needs nothing.
+    // supply a keystore while a local `gradle -p android :app:assembleDebug` needs nothing.
     // The config is only wired onto the release build type when KEYSTORE_PATH is
     // present; otherwise assembleRelease would demand a keystore that isn't there.
     signingConfigs {
