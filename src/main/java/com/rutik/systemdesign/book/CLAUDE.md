@@ -15,7 +15,17 @@ a sub-folder containing a `README.md` that follows the book's own section order.
 | Designing Data-Intensive Applications (Kleppmann) | `designing_data_intensive_applications/` | preface + Ch 1–12 |
 | System Design Interview Vol 1 (Xu) | `system_design_interview_vol_1/` | Ch 1–16 |
 | System Design Interview Vol 2 (Xu & Lam) | `system_design_interview_vol_2/` | Ch 1–13 |
+| Machine Learning System Design Interview (Aminian & Xu) | `machine_learning_system_design_interview/` | Ch 1–11 |
 | Designing Machine Learning Systems (Huyen) | `designing_machine_learning_systems/` | Ch 1–11 |
+| Understanding Distributed Systems (Vitillo) | `understanding_distributed_systems/` | Ch 1–33 as **5 part-folders** (sanctioned exception: UDS chapters are 3–8 pages, so one folder per PART — one `## N.x` per book chapter inside; do NOT "fix" it back to 33 folders) |
+
+**Game navigation (wired in `game/app.js`):** the book section nests one level deeper than
+every other section (module ids are `book/<book_slug>/<chapter>`), so the Study view shows
+**one node per book** (`#/study/book` → per-book chapter graph at `#/study/book/<slug>`)
+and the reader sidebar groups chapters under collapsible book headers. **Adding a book
+therefore requires a `BOOK_LABELS` entry in `game/app.js`** (name, author, short label)
+alongside its `STUDY_ORDER.book` entries — an unlisted book still renders (slug is
+title-cased as a fallback) but loses its author/short labels.
 
 Per-chapter build status lives in each book's `README.md` **Build Manifest** table.
 
@@ -82,7 +92,11 @@ completeness guarantee: a missing topic is structurally visible.
    build manifest).
 2. Add a row to the **Books** table in `book/README.md` and in this file.
 3. Add a row to the root `README.md` Book Summaries section and the root `CLAUDE.md` table.
-4. Build chapters per "Adding a New Chapter".
+4. Wire the game (`game/app.js`): append the chapter folders to `STUDY_ORDER.book` in
+   learning order AND add a `BOOK_LABELS` entry (`{ name, author, short }`) — the labels
+   drive the per-book Study picker and the reader sidebar's book groups. Re-run
+   `python3 game/extract.py` locally to verify.
+5. Build chapters per "Adding a New Chapter".
 
 ---
 

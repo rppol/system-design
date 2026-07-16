@@ -36,12 +36,23 @@ former.
 | Designing Data-Intensive Applications | Martin Kleppmann | [designing_data_intensive_applications/](designing_data_intensive_applications/README.md) | 12 (+ preface) | Complete |
 | System Design Interview — Vol 1 | Alex Xu | [system_design_interview_vol_1/](system_design_interview_vol_1/README.md) | 16 | Complete |
 | System Design Interview — Vol 2 | Alex Xu & Sahn Lam | [system_design_interview_vol_2/](system_design_interview_vol_2/README.md) | 13 | Complete |
+| Machine Learning System Design Interview | Ali Aminian & Alex Xu | [machine_learning_system_design_interview/](machine_learning_system_design_interview/README.md) | 11 | Complete |
 | Designing Machine Learning Systems | Chip Huyen | [designing_machine_learning_systems/](designing_machine_learning_systems/README.md) | 11 | Complete |
+| Understanding Distributed Systems | Roberto Vitillo | [understanding_distributed_systems/](understanding_distributed_systems/README.md) | 33 (as 5 parts) | In progress |
 
 The two *System Design Interview* volumes are one series split across two folders (each
-volume numbers its chapters independently); together with DDIA and DMLS the section covers
-three books. More may be added over time (e.g. *Database Internals*, *Streaming Systems*).
-Each new book follows the same folder-per-chapter convention — see [CLAUDE.md](CLAUDE.md).
+volume numbers its chapters independently); with DDIA, MLSDI, DMLS, and UDS the section
+covers five books across six folders. More may be added over time (e.g. *Database
+Internals*, *Streaming Systems*). New books follow the folder-per-chapter convention —
+with one sanctioned exception: **UDS uses folder-per-PART** (its ~33 chapters are 3–8
+pages each; a part is the multi-concept narrative the chapter template was designed for) —
+see [CLAUDE.md](CLAUDE.md).
+
+**In the learning game**, the book section gets an extra navigation level: the Study view
+shows **one node per book** (`#/study/book`), and clicking a book opens that book's own
+chapter path; the reader's module sidebar likewise groups chapters under collapsible
+per-book headers. Adding a book = a `BOOK_LABELS` entry + `STUDY_ORDER.book` entries in
+`game/app.js` (see [game/CLAUDE.md](../game/CLAUDE.md)).
 
 ---
 
@@ -70,6 +81,10 @@ prose priorities:
 - **SDI Vol 2:** pick the track matching the role — geo (Ch 1–3), data infra (Ch 4–6, 9),
   or fintech (Ch 7, 11–13).
 - **DMLS:** Ch 2, 4, 5, 7, 8, 9 map 1:1 onto ML system design interview rounds.
+- **MLSDI:** Ch 1 (framework) + Ch 6 (two-stage recsys) + Ch 8 (CTR) are the three
+  most-asked ML design questions; the recsys arc (6 → 8 → 10 → 7 → 9 → 11) covers the rest.
+- **UDS:** Parts II–IV (coordination, scalability, resiliency) are the interview core;
+  Part I is the networking on-ramp, Part V the ops/SRE closer.
 
 ---
 

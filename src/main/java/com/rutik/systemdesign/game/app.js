@@ -48,6 +48,26 @@ const SECTION_IDENTITY = {
 };
 const sectionIdentity = (path) => SECTION_IDENTITY[(path || "").split("/")[0]] || null;
 
+// The book section nests one level deeper than every other section: module ids are
+// book/<book_slug>/<chapter>. These labels drive the per-book Study picker
+// (#/study/book -> one node per book -> that book's own chapter graph) and the
+// book group headers in the reader's module sidebar.
+const BOOK_LABELS = {
+  designing_data_intensive_applications: { name: "Designing Data-Intensive Applications", author: "Kleppmann", short: "DDIA" },
+  system_design_interview_vol_1: { name: "System Design Interview — Vol 1", author: "Xu", short: "SDI Vol 1" },
+  system_design_interview_vol_2: { name: "System Design Interview — Vol 2", author: "Xu & Lam", short: "SDI Vol 2" },
+  machine_learning_system_design_interview: { name: "ML System Design Interview", author: "Aminian & Xu", short: "ML SDI" },
+  designing_machine_learning_systems: { name: "Designing Machine Learning Systems", author: "Huyen", short: "DMLS" },
+  understanding_distributed_systems: { name: "Understanding Distributed Systems", author: "Vitillo", short: "UDS" },
+};
+// book slug of a module/path id, or null when it isn't a nested book id.
+const bookOf = (id) => {
+  const seg = (id || "").split("/");
+  return seg[0] === "book" && seg.length >= 3 ? seg[1] : null;
+};
+const bookLabel = (slug) => (BOOK_LABELS[slug] && BOOK_LABELS[slug].name) ||
+  slug.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
 // Phase-order for the Study browser. Derived from each section's README learning path.
 // Modules not listed here sort to the end (alphabetically by JS Map insertion order).
 // extract.py --strict parses this literal (and STUDY_PATHS) — keep the "const STUDY_ORDER = {" ... "};" shape.
@@ -120,6 +140,22 @@ const STUDY_ORDER = {
     "book/designing_machine_learning_systems/09_continual_learning_and_test_in_production",
     "book/designing_machine_learning_systems/10_infrastructure_and_tooling_for_mlops",
     "book/designing_machine_learning_systems/11_the_human_side_of_machine_learning",
+    "book/machine_learning_system_design_interview/01_introduction_and_overview",
+    "book/machine_learning_system_design_interview/02_visual_search_system",
+    "book/machine_learning_system_design_interview/03_google_street_view_blurring_system",
+    "book/machine_learning_system_design_interview/04_youtube_video_search",
+    "book/machine_learning_system_design_interview/05_harmful_content_detection",
+    "book/machine_learning_system_design_interview/06_video_recommendation_system",
+    "book/machine_learning_system_design_interview/07_event_recommendation_system",
+    "book/machine_learning_system_design_interview/08_ad_click_prediction_on_social_platforms",
+    "book/machine_learning_system_design_interview/09_similar_listings_on_vacation_rental_platforms",
+    "book/machine_learning_system_design_interview/10_personalized_news_feed",
+    "book/machine_learning_system_design_interview/11_people_you_may_know",
+    "book/understanding_distributed_systems/01_communication",
+    "book/understanding_distributed_systems/02_coordination",
+    "book/understanding_distributed_systems/03_scalability",
+    "book/understanding_distributed_systems/04_resiliency",
+    "book/understanding_distributed_systems/05_maintainability",
   ],
   cs_fundamentals: [
     "cs_fundamentals/complexity_analysis_and_big_o","cs_fundamentals/discrete_math_for_engineers","cs_fundamentals/number_systems_and_bit_manipulation","cs_fundamentals/character_encoding_deep_dive","cs_fundamentals/recursion_and_problem_solving_patterns",
@@ -3714,17 +3750,62 @@ function orthPath(raw, r = 10) {
   return d;
 }
 
+// Book picker — the extra navigation level for the book section: one node per
+// book (reading order = STUDY_ORDER order), each opening that book's own chapter
+// graph at #/study/book/<book_slug>. Reuses the section-tile look so it reads as
+// "pick a shelf" rather than a 60-node flat snake.
+function renderBookPicker(section, mods) {
+  const groups = [];
+  const byBook = new Map();
+  mods.forEach((m) => {
+    const slug = bookOf(m.module) || m.module.split("/")[1] || m.module;
+    if (!byBook.has(slug)) { byBook.set(slug, { slug, chapters: 0, qs: 0 }); groups.push(byBook.get(slug)); }
+    const g = byBook.get(slug);
+    g.chapters++; g.qs += m.count;
+  });
+  const tiles = groups.map((g, i) => {
+    const meta = BOOK_LABELS[g.slug] || {};
+    return `<button class="tile bookcard" data-book="${esc(g.slug)}">
+      <span class="bk-num">${String(i + 1).padStart(2, "0")}</span>
+      <span class="bk-body">
+        <span class="tname">${esc(bookLabel(g.slug))}</span>
+        <span class="tmeta">${meta.author ? esc(meta.author) + " &middot; " : ""}${g.chapters} chapters &middot; ${g.qs} Qs</span>
+      </span>
+      <span class="bk-go" aria-hidden="true">&rarr;</span>
+    </button>`;
+  }).join("");
+  app.innerHTML = `
+    <div class="hero"><h1>${esc(label(section))}</h1>
+      <p>${groups.length} books &middot; ${mods.length} chapters &middot; pick a book to open its chapter path.</p></div>
+    <div class="grid bookshelf">${tiles}</div>
+    <div class="row" style="margin-top:18px"><button class="ghost" id="studyBack">&larr; Sections</button></div>`;
+  document.querySelectorAll(".bookcard").forEach((b) =>
+    b.addEventListener("click", () => go("#/study/book/" + b.dataset.book)));
+  el("#studyBack").addEventListener("click", () => go("#/study"));
+  wireReveals();
+}
+
 // [W5] the study path's resize listener, tracked module-level so re-entering the
 // screen removes the prior one instead of stacking a new listener each visit.
 let _pathResize = null;
-async function openStudySection(section) {
+async function openStudySection(sectionPath) {
+  // The book section adds one navigation level: "#/study/book" shows one node per
+  // book; "#/study/book/<book_slug>" is that book's own chapter graph. All other
+  // sections pass through unchanged (sectionPath === section).
+  const [section, ...scopeRest] = (sectionPath || "").split("/");
+  const bookScope = section === "book" && scopeRest.length ? scopeRest.join("/") : null;
   app.innerHTML = skeletonHTML("study");
   const bank = await loadBank(section);
   if (!bank || !bank.length) {
-    errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => openStudySection(section));
+    errorScreen(`Couldn't load ${label(section)}`, `Check your connection and try again.${devDetail(`Run <code>python3 extract.py</code>.`)}`, () => openStudySection(sectionPath));
     return;
   }
   let mods = modulesOf(bank);
+  if (section === "book" && !bookScope) { renderBookPicker(section, mods); return; }
+  if (bookScope) {
+    mods = mods.filter((m) => bookOf(m.module) === bookScope);
+    if (!mods.length) { go("#/study/book"); return; }   // unknown/renamed book slug
+  }
   // Interview-Specific path (LLM pilot): if this section has a curated subset and
   // the learner chose it, restrict the skill tree to those modules. mods is already
   // in STUDY_ORDER order (== the interview list's order), so a filter preserves it;
@@ -3764,7 +3845,11 @@ async function openStudySection(section) {
   let lastRead = null;
   try { lastRead = JSON.parse(localStorage.getItem("sd_last_read")); } catch { }
   const herePath = lastRead && lastRead.path && lastRead.path.startsWith(section + "/") ? lastRead.path : null;
-  const hereMod = herePath ? herePath.split("/").slice(0, 2).join("/") : null;
+  // Resolve the module by prefix against the real module list — book modules are
+  // three segments deep (book/<book>/<chapter>), so a fixed slice(0, 2) mislabels them.
+  const hereMod = herePath
+    ? (mods.find((m) => herePath === `${m.module}/README.md` || herePath.startsWith(m.module + "/")) || {}).module || null
+    : null;
   const openFans = new Set();
   if (herePath && hereMod && !/\/README\.md$/i.test(herePath)) openFans.add(hereMod);  // reveal the "here" leaf
 
@@ -3809,10 +3894,11 @@ async function openStudySection(section) {
         <button class="pathopt${onInterview ? "" : " on"}" role="radio" aria-checked="${!onInterview}" data-path="full">Full</button>
         <button class="pathopt${onInterview ? " on" : ""}" role="radio" aria-checked="${!!onInterview}" data-path="interview">Interview</button>
       </div>` : "";
+  const bookMeta = bookScope ? (BOOK_LABELS[bookScope] || {}) : null;
   app.innerHTML = `
     <div class="path-screen">
-    <div class="hero"><h1>${esc(label(section))}</h1>
-      <p>${mods.length} topics${onInterview ? " &middot; interview-specific path" : ""} &middot; start at 01 &mdash; the path snakes across each row in the section's learning order.</p>
+    <div class="hero">${bookScope ? `<p class="eyebrow">${esc(label(section))}${bookMeta.author ? " &middot; " + esc(bookMeta.author) : ""}</p>` : ""}<h1>${esc(bookScope ? bookLabel(bookScope) : label(section))}</h1>
+      <p>${mods.length} ${bookScope ? "chapters" : "topics"}${onInterview ? " &middot; interview-specific path" : ""} &middot; start at 01 &mdash; the path snakes across each row in the ${bookScope ? "book's chapter order" : "section's learning order"}.</p>
       ${graph ? `<p class="path-legend">${crossLinks
         ? `strongest prerequisite links drawn &middot; hover a topic to see all its connections &middot; ${crossLinks} cross-links mapped`
         : "no cross-link data yet &mdash; path order shown"}</p>` : ""}</div>
@@ -3833,7 +3919,7 @@ async function openStudySection(section) {
       </svg>
       ${steps}
     </div>
-    <div class="row" style="margin-top:18px"><button class="ghost" id="studyBack">&larr; Sections</button></div>
+    <div class="row" style="margin-top:18px"><button class="ghost" id="studyBack">&larr; ${bookScope ? "Books" : "Sections"}</button></div>
     </div>`;
 
   insertInterviewControl(section);                 // [C] Face the Interviewer / Panel / lock chip on the path header
@@ -5217,6 +5303,7 @@ function mdRender(src) {
 const readerCache = {};                            // content path -> raw markdown
 const reader = { path: null, titleText: "", back: [], nav: null, full: false, toc: false, modules: false };
 const readerExpanded = new Set();   // module keys expanded in the left sidebar (session-persistent)
+const readerBooksOpen = new Set();  // book slugs expanded in the sidebar's per-book groups (session-persistent)
 let _readerInvoker = null;          // element focused when the reader was opened; focus returns here on close
 
 // Normalise a relative link (../x/y.md) against the directory of the current file.
@@ -5573,7 +5660,7 @@ function buildModuleNav(modEl, navCtx, currentPath) {
       readerExpanded.add(mKey);
   });
 
-  const items = navCtx.list.map((m, i) => {
+  const itemHtml = navCtx.list.map((m, i) => {
     const mKey = m.path.replace("/README.md", "");
     const mFiles = files[mKey] || ["README.md"];
 
@@ -5595,9 +5682,43 @@ function buildModuleNav(modEl, navCtx, currentPath) {
       <button class="mod-folder" data-midx="${i}" title="${esc(m.title)}" aria-expanded="${isOpen}" aria-controls="modsub-${i}"><span class="mod-arrow">&#9654;</span><span class="mod-fname">${esc(m.title)}</span></button>
       <ul class="mod-subfiles" id="modsub-${i}">${subItems}</ul>
     </li>`;
-  }).join("");
+  });
+
+  // Book grouping: when the list spans nested book ids (book/<slug>/<chapter>),
+  // wrap each book's run of chapters in a collapsible group headed by the book's
+  // name — a flat 60-chapter list spanning five books is unreadable. Other
+  // sections (2-segment module ids) render exactly as before.
+  let items;
+  const curBook = bookOf(currentPath);
+  if (navCtx.list.some((m) => bookOf(m.path))) {
+    if (curBook) readerBooksOpen.add(curBook);
+    const runs = [];
+    navCtx.list.forEach((m, i) => {
+      const b = bookOf(m.path) || "";
+      const last = runs[runs.length - 1];
+      if (last && last.b === b) last.idx.push(i); else runs.push({ b, idx: [i] });
+    });
+    if (!curBook && !readerBooksOpen.size && runs[0] && runs[0].b) readerBooksOpen.add(runs[0].b);
+    items = runs.map((r, k) => {
+      if (!r.b) return r.idx.map((i) => itemHtml[i]).join("");
+      const open = readerBooksOpen.has(r.b);
+      const meta = BOOK_LABELS[r.b] || {};
+      return `<li class="mod-book${open ? " open" : ""}">
+        <button class="mod-bookh" data-book="${esc(r.b)}" aria-expanded="${open}" aria-controls="modbook-${k}" title="${esc(bookLabel(r.b))}${meta.author ? " — " + esc(meta.author) : ""}"><span class="mod-arrow">&#9654;</span><span class="mod-bkname">${esc(meta.short || bookLabel(r.b))}</span><span class="mod-bkn">${r.idx.length}</span></button>
+        <ul class="mod-bookul" id="modbook-${k}">${r.idx.map((i) => itemHtml[i]).join("")}</ul>
+      </li>`;
+    }).join("");
+  } else items = itemHtml.join("");
 
   modEl.innerHTML = `<div class="mod-h">Modules</div><ul>${items}</ul>`;
+
+  modEl.querySelectorAll(".mod-bookh").forEach((h) => h.addEventListener("click", () => {
+    const li = h.closest(".mod-book");
+    const willOpen = !li.classList.contains("open");
+    li.classList.toggle("open", willOpen);
+    h.setAttribute("aria-expanded", String(willOpen));
+    if (willOpen) readerBooksOpen.add(h.dataset.book); else readerBooksOpen.delete(h.dataset.book);
+  }));
 
   modEl.querySelectorAll("a.mod-item").forEach((a) => a.addEventListener("click", (e) => {
     e.preventDefault();
@@ -5618,9 +5739,9 @@ function buildModuleNav(modEl, navCtx, currentPath) {
 
   modEl.querySelectorAll("a.mod-file").forEach((a) => a.addEventListener("click", (e) => {
     e.preventDefault();
-    const pathParts = a.dataset.path.split("/");
-    const mKey = pathParts.slice(0, 2).join("/");
-    const midx = navCtx.list.findIndex((m) => m.path.replace("/README.md", "") === mKey);
+    // Match by module-prefix against the real list — book modules are three
+    // segments deep, so a fixed two-segment key would never find them.
+    const midx = navCtx.list.findIndex((m) => a.dataset.path.startsWith(m.path.replace("/README.md", "") + "/"));
     openReaderPath(a.dataset.path, null, midx >= 0 ? { list: navCtx.list, idx: midx } : reader.nav);
   }));
 

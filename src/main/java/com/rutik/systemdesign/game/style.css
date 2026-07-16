@@ -392,6 +392,12 @@ button:active { transform: scale(0.98); }
   box-shadow: var(--glass-hilite);
 }
 .tile:hover { border-color: var(--glass-brd-hi); background: var(--glass-2); transform: translateY(-2px); box-shadow: var(--shadow-sm), var(--glass-hilite); }
+/* Book picker (#/study/book): one card per book, reading-order numbered. */
+.tile.bookcard { flex-direction: row; align-items: center; gap: 12px; }
+.bookcard .bk-num { font-family: var(--mono, ui-monospace, monospace); font-size: 13px; font-weight: 700; color: var(--accent); flex-shrink: 0; }
+.bookcard .bk-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.bookcard .bk-go { margin-left: auto; color: var(--muted); font-size: 18px; flex-shrink: 0; transition: transform 0.15s; }
+.bookcard:hover .bk-go { transform: translateX(3px); color: var(--text); }
 .tile.suggested {
   border-color: color-mix(in srgb, var(--accent-2) 65%, transparent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-2) 45%, transparent) inset,
@@ -1032,6 +1038,24 @@ a.mod-item.read::before, a.mod-file.read::before { content: "\2713 "; color: var
 
 .mod-subfiles { display: none; padding-left: 16px; }
 .mod-group.open > .mod-subfiles { display: block; }
+
+/* Per-book groups in the reader sidebar (book section only): collapsible shelf
+   headers so five books' chapters never render as one flat list. */
+.mod-book > .mod-bookh {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  background: none; border: none; font: inherit; cursor: pointer; user-select: none;
+  padding: 6px 8px; margin-top: 8px; border-radius: 6px 0 0 6px;
+  color: var(--od-muted); font-size: 11px; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+.mod-book:first-child > .mod-bookh { margin-top: 2px; }
+.mod-book > .mod-bookh:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--od-text); }
+.mod-book.open > .mod-bookh { color: var(--od-text); }
+.mod-book.open > .mod-bookh .mod-arrow { transform: rotate(90deg); }
+.mod-bkname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mod-bkn { margin-left: auto; font-weight: 600; opacity: 0.65; flex-shrink: 0; }
+.mod-bookul { display: none; margin: 0; padding: 0 0 0 7px; list-style: none; border-left: 1px solid var(--od-line); }
+.mod-book.open > .mod-bookul { display: block; }
 a.mod-file {
   display: block; padding: 3px 8px; color: var(--od-muted); font-size: 11px; line-height: 1.5;
   text-decoration: none; border-right: 2px solid transparent; border-radius: 6px 0 0 6px;

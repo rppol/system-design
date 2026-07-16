@@ -82,3 +82,17 @@ The `game/` directory is an application, not study content — see
   meaningful cut — it gains an interview array once it reaches >= 4 modules (see
   `technologies/CLAUDE.md`). Each interview path is added the same way (a subset
   array here + a README "Learning Paths" block).
+- **The book section navigates one level deeper than every other section** (owner-set
+  2026-07-16; module ids are `book/<book_slug>/<chapter>`, three segments). Three
+  pieces in `app.js` implement it, all keyed on `BOOK_LABELS` + `bookOf()`:
+  (1) `#/study/book` renders `renderBookPicker()` — one card per book in
+  `STUDY_ORDER.book` order — and `#/study/book/<book_slug>` renders the standard
+  serpentine chapter graph scoped to that book (`openStudySection` parses the scope
+  from the route); (2) `buildModuleNav()` wraps the reader sidebar's chapter list in
+  collapsible per-book groups (`readerBooksOpen` session Set; the current page's book
+  auto-opens); (3) module-key resolution matches by prefix against the real module
+  list — never assume 2-segment `path.split("/").slice(0, 2)` module keys, book ids
+  are 3 segments. **Adding a book = a `BOOK_LABELS` entry (`{ name, author, short }`)
+  + `STUDY_ORDER.book` entries**; a missing label degrades to a title-cased slug (no
+  author/short), never a broken screen. No other section may nest — the picker and
+  sidebar grouping activate only when module ids match `book/*/*`.
