@@ -35,7 +35,7 @@ former.
 |------|--------|--------|----------|--------|
 | Designing Data-Intensive Applications | Martin Kleppmann | [designing_data_intensive_applications/](designing_data_intensive_applications/README.md) | 12 (+ preface) | Complete |
 | System Design Interview — Vol 1 | Alex Xu | [system_design_interview_vol_1/](system_design_interview_vol_1/README.md) | 16 | Complete |
-| System Design Interview — Vol 2 | Alex Xu & Sahn Lam | [system_design_interview_vol_2/](system_design_interview_vol_2/README.md) | 13 | In progress |
+| System Design Interview — Vol 2 | Alex Xu & Sahn Lam | [system_design_interview_vol_2/](system_design_interview_vol_2/README.md) | 13 | Complete |
 | Designing Machine Learning Systems | Chip Huyen | [designing_machine_learning_systems/](designing_machine_learning_systems/README.md) | 11 | In progress |
 
 The two *System Design Interview* volumes are one series split across two folders (each
