@@ -3020,9 +3020,13 @@ function exportProgress() {
   // APK: no browser download chrome — hand the same filename + pretty JSON to the
   // native bridge, which writes it to shared storage, then run the shared tail.
   if (window.SDAndroid && typeof window.SDAndroid.saveBackup === "function") {
-    window.SDAndroid.saveBackup(filename, json);
-    safeSet("sd_last_export", todayISO());
-    announce("Backup exported.");
+    // The bridge returns success synchronously; only record/announce a real
+    // export — a failed write must not suppress the 30-day backup nudge (the
+    // native side already toasts the failure reason).
+    if (window.SDAndroid.saveBackup(filename, json)) {
+      safeSet("sd_last_export", todayISO());
+      announce("Backup exported.");
+    }
     return;
   }
   const a = document.createElement("a");

@@ -3,17 +3,22 @@ package io.github.rppol.sddaily
 import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Message
 import android.provider.MediaStore
+import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -51,8 +56,26 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
             val cb = filePathCallback
             filePathCallback = null
-            cb?.onReceiveValue(if (uri == null) emptyArray() else arrayOf(uri))
+            if (cb == null) {
+                // Process death while the picker was open: the launcher survived
+                // recreation but the page's file-input state did not — the picked
+                // URI has nowhere to go. Say so instead of failing silently.
+                if (uri != null) toast("Import interrupted — please try again")
+            } else {
+                cb.onReceiveValue(if (uri == null) emptyArray() else arrayOf(uri))
+            }
         }
+
+    // Enabled only when in-app back has somewhere meaningful to go (see
+    // doUpdateVisitedHistory below). When disabled, back falls through to the
+    // system, restoring the Android 15 predictive back-to-home animation and
+    // making Home a true exit point instead of forcing the user to unwind the
+    // whole session's hash history one press at a time.
+    private val backCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            if (webView.canGoBack()) webView.goBack() else finish()
+        }
+    }
 
     // Immersive-sticky fullscreen: bars stay hidden; an edge swipe shows them
     // transiently and they auto-hide again.
@@ -75,7 +98,21 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         webView = WebView(this)
-        setContentView(webView)
+        // WebView's own surface defaults to WHITE until the page's first paint —
+        // a visible flash on every cold start of a dark app, and any inset margin
+        // around it would show as white bands. Black on both layers closes it.
+        webView.setBackgroundColor(Color.BLACK)
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            addView(
+                webView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+        setContentView(root)
 
         // TRUE FULLSCREEN (owner request): hide the status + navigation bars
         // entirely, immersive-sticky style — a swipe from the edge peeks them
@@ -89,16 +126,36 @@ class MainActivity : ComponentActivity() {
         // Let content extend into a camera cutout in both orientations instead
         // of showing letterbox bands beside the notch.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            window.attributes.layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            // Reassign (not mutate in place) so the change survives a future move
+            // to after window-attach, where in-place mutation is a silent no-op.
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
         }
 
-        // With the bars hidden their insets report zero; what remains is the
-        // display cutout (punch-hole/notch), which the WebView must still avoid
-        // so the page's top toolbar never hides behind the camera.
-        ViewCompat.setOnApplyWindowInsetsListener(webView) { v, insets ->
+        // Insets are applied as MARGINS on the WebView inside the black root, not
+        // as WebView padding: WebView (an AbsoluteLayout descendant managing its
+        // own rendering surface) has a long history of painting straight across
+        // its padded region — the root cause of the earlier failed inset fix.
+        // Margins change the view's bounds, which the layout system enforces
+        // unconditionally. One maxOf listener covers three states at once:
+        //  - immersive fullscreen: bars report 0, only the cutout matters
+        //  - split-screen/freeform: immersive is ignored there, bars report real
+        //    values again — without this the status-bar overlap bug returns
+        //  - keyboard open: the ime inset lifts inputs above the keyboard (the
+        //    window never resizes itself once decorFitsSystemWindows is false)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
-            v.setPadding(cutout.left, cutout.top, cutout.right, cutout.bottom)
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            (webView.layoutParams as FrameLayout.LayoutParams).setMargins(
+                maxOf(cutout.left, bars.left),
+                maxOf(cutout.top, bars.top),
+                maxOf(cutout.right, bars.right),
+                maxOf(cutout.bottom, bars.bottom, ime.bottom)
+            )
+            webView.requestLayout()
             WindowInsetsCompat.CONSUMED
         }
 
@@ -112,6 +169,13 @@ class MainActivity : ComponentActivity() {
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            // WebView initializes textZoom to systemFontScale x 100, silently
+            // multiplying every CSS px on top of the reader's own persisted
+            // A-/A+ font control — two compounding scaling systems, one of them
+            // invisible to the app ("fullscreen readjusts text"). Pin to 100 so
+            // the APK renders identically to Pages; reading comfort belongs to
+            // the in-app control.
+            textZoom = 100
             // The bundle is self-contained; deny file:// and content:// reach-out.
             allowFileAccess = false
             allowContentAccess = false
@@ -145,9 +209,39 @@ class MainActivity : ComponentActivity() {
                     startActivity(Intent(Intent.ACTION_VIEW, url))
                     true
                 } catch (e: Exception) {
-                    // No app can handle it -> just swallow the navigation.
+                    // Nothing resolves ACTION_VIEW: a silent no-op reads as
+                    // "the app is broken" — say what happened.
+                    toast("No app can open this link")
                     true
                 }
+            }
+
+            // Keeps the in-app back walk (reader close, quiz pause-guard) but
+            // treats Home as the root: at #/home the callback disables itself,
+            // back falls through to the system, and predictive back-to-home
+            // works. A live quiz is never at #/home, so the guard is intact.
+            override fun doUpdateVisitedHistory(
+                view: WebView,
+                url: String?,
+                isReload: Boolean
+            ) {
+                val frag = url?.substringAfter('#', "") ?: ""
+                backCallback.isEnabled =
+                    view.canGoBack() && frag.isNotEmpty() && frag != "/home"
+            }
+
+            // Without this, a crashed WebView renderer (OOM on a huge doc + heavy
+            // Mermaid SVG is a realistic trigger) terminates the WHOLE app process
+            // by default on API 26+. Detach and destroy the dead WebView, then
+            // rebuild the activity; localStorage state survives untouched.
+            override fun onRenderProcessGone(
+                view: WebView,
+                detail: RenderProcessGoneDetail
+            ): Boolean {
+                (view.parent as? ViewGroup)?.removeView(view)
+                view.destroy()
+                recreate()
+                return true
             }
         }
 
@@ -164,12 +258,16 @@ class MainActivity : ComponentActivity() {
                 filePathCallback?.onReceiveValue(null)
                 filePathCallback = callback
                 return try {
-                    // Import expects a single progress-backup JSON, but some file
-                    // managers mistag the exported backup as a generic/binary or
-                    // text type -> accept those too so the picker doesn't grey
-                    // the file out.
+                    // Import expects a single progress-backup JSON, but file
+                    // managers mistag exported backups as generic/binary/text —
+                    // accept those, and keep "*/*" as the escape hatch for SAF
+                    // providers with odd types (application/x-json) so the file
+                    // is never greyed out; the page validates the payload anyway.
                     fileChooserLauncher.launch(
-                        arrayOf("application/json", "application/octet-stream", "text/plain")
+                        arrayOf(
+                            "application/json", "application/octet-stream",
+                            "text/plain", "*/*"
+                        )
                     )
                     true
                 } catch (e: Exception) {
@@ -201,19 +299,32 @@ class MainActivity : ComponentActivity() {
                 resultMsg: Message
             ): Boolean {
                 val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
-                val tempWebView = WebView(view.context)
+                // applicationContext, not the Activity: if the popup never
+                // navigates (window.open() with no URL, about:blank), the engine
+                // retains this WebView as a pending popup indefinitely -- it must
+                // not pin the Activity when that happens.
+                val tempWebView = WebView(applicationContext)
                 tempWebView.webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(
                         childView: WebView,
                         request: WebResourceRequest
                     ): Boolean {
                         val url = request.url
-                        try {
-                            startActivity(Intent(Intent.ACTION_VIEW, url))
-                        } catch (e: Exception) {
-                            // No app can handle it -> swallow the navigation.
+                        // Internal target="_blank" links stay in the main WebView;
+                        // the system browser cannot resolve the virtual host.
+                        if (url.host == "appassets.androidplatform.net") {
+                            webView.loadUrl(url.toString())
+                        } else {
+                            try {
+                                startActivity(Intent(Intent.ACTION_VIEW, url))
+                            } catch (e: Exception) {
+                                toast("No app can open this link")
+                            }
                         }
-                        tempWebView.destroy()
+                        // Defer destruction: destroying a WebView synchronously
+                        // inside its own client callback is re-entrant and has
+                        // crashed on some WebView versions.
+                        childView.post { childView.destroy() }
                         return true
                     }
                 }
@@ -226,18 +337,29 @@ class MainActivity : ComponentActivity() {
         // window.SDAndroid bridge for the JSON backup export path.
         webView.addJavascriptInterface(SDAndroid(), "SDAndroid")
 
-        // Hardware/gesture back: walk WebView history first, then leave the app.
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                if (webView.canGoBack()) {
-                    webView.goBack()
-                } else {
-                    finish()
-                }
-            }
-        })
+        // Hardware/gesture back: walk WebView history while away from Home
+        // (enable/disable is driven by doUpdateVisitedHistory above).
+        onBackPressedDispatcher.addCallback(this, backCallback)
+
+        // chrome://inspect remote debugging, debug builds only. (Runtime flag
+        // check: AGP 8 doesn't generate BuildConfig unless opted in.)
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            WebView.setWebContentsDebuggingEnabled(true)
+        }
 
         webView.loadUrl("https://appassets.androidplatform.net/www/game/index.html")
+    }
+
+    // Pause the page's timers/rAF when backgrounded (the blitz runs a countdown
+    // loop) so the app doesn't burn battery behind the lock screen.
+    override fun onPause() {
+        super.onPause()
+        webView.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        webView.onResume()
     }
 
     /**
@@ -246,9 +368,12 @@ class MainActivity : ComponentActivity() {
      * permission on API 29+ (minSdk is 29), then confirms with a Toast.
      */
     private inner class SDAndroid {
+        // Returns success synchronously so the page only records/announces a
+        // completed export when the file actually exists — otherwise the 30-day
+        // backup nudge gets suppressed by a backup that was never written.
         @JavascriptInterface
-        fun saveBackup(name: String, json: String) {
-            try {
+        fun saveBackup(name: String, json: String): Boolean {
+            return try {
                 val fileName = if (name.endsWith(".json")) name else "$name.json"
                 val values = ContentValues().apply {
                     put(MediaStore.Downloads.DISPLAY_NAME, fileName)
@@ -262,7 +387,7 @@ class MainActivity : ComponentActivity() {
                 )
                 if (uri == null) {
                     toast("Backup failed: could not create file")
-                    return
+                    return false
                 }
                 resolver.openOutputStream(uri)?.use { out: OutputStream ->
                     out.write(json.toByteArray(Charsets.UTF_8))
@@ -272,8 +397,10 @@ class MainActivity : ComponentActivity() {
                 values.put(MediaStore.Downloads.IS_PENDING, 0)
                 resolver.update(uri, values, null, null)
                 toast("Saved to Downloads/$fileName")
+                true
             } catch (e: Exception) {
                 toast("Backup failed: ${e.message}")
+                false
             }
         }
     }

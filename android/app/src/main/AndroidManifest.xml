@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- The game calls navigator.vibrate() for answer haptics; WebView silently
+         no-ops it without this (install-time, non-dangerous permission). -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- allowBackup=false: progress lives in WebView localStorage (app_webview/),
+         which Auto Backup does NOT include — a cloud restore would bring back an
+         empty app and read as data loss. The in-app export/import JSON is the
+         one honest backup path. -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -10,10 +19,15 @@
         android:theme="@style/Theme.SDDaily"
         android:usesCleartextTraffic="false">
 
+        <!-- Handle config changes in-process: an Activity recreation tears down
+             and reloads the WebView (reader position lost; an in-flight file
+             chooser callback orphaned). uiMode covers dark/light toggles,
+             density/fontScale cover display-size and font-size changes. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|screenLayout|smallestScreenSize|uiMode|density|fontScale|navigation">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

@@ -938,6 +938,16 @@ body.native-fs #reader { box-shadow: none; border-left: none; }
   padding: 40px max(28px, env(safe-area-inset-right)) calc(80px + env(safe-area-inset-bottom)) max(28px, env(safe-area-inset-left));
 }
 #reader.full #readerMain { max-width: var(--reader-measure, 860px); margin: 0 auto; }
+/* On phones, immersive must be purely "the chrome disappears": keep the same
+   20px side padding as normal mode so toggling fullscreen never re-wraps a
+   single line (the 20->28px delta reflowed every line, reading as "fullscreen
+   readjusts the text"; env() terms are 0 in the Android WebView). */
+@media (max-width: 640px) {
+  #reader.full .reader-body {
+    padding-left: max(20px, env(safe-area-inset-left));
+    padding-right: max(20px, env(safe-area-inset-right));
+  }
+}
 @media (prefers-reduced-motion: reduce) { #reader.full .reader-head { transition: none; } }
 
 /* in-page find bar (reader-scoped, opened by Ctrl/Cmd+F or the head button) */
