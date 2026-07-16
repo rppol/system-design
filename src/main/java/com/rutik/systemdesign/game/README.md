@@ -1,4 +1,4 @@
-# Game — System Design Daily
+# Game — LORA (Learn Often, Recall Always), by Rutik
 
 A browser-based daily learning game built **from this repo's own content**. It turns
 the ~8,800 interview Q&As scattered across all 14 sections (every module README **and
@@ -283,6 +283,37 @@ python3 extract.py     # re-run after editing ANY module's Q&A, then reload the 
 
 ---
 
+## Android APK
+
+LORA also ships as a fully-offline, sideloadable Android APK — a raw-WebView
+wrapper (no Capacitor/frameworks) built by `scripts/build_android_assets.sh`,
+which mirrors the whole repo (every section's Markdown + freshly regenerated
+question banks/graphs) plus a vendored `mermaid@11.16.0` UMD build into the
+app's assets, for a ~59MB offline-first bundle. `.github/workflows/android-apk.yml`
+builds and publishes a signed GitHub Release on **every push to `main`**
+(green-skip if signing secrets are absent); the stable download is
+`releases/latest/download/systemdesign-daily.apk`.
+
+Three `IS_APK`-gated hooks in `app.js` are the only places behavior forks from
+the Pages build (keyed on `location.hostname === "appassets.androidplatform.net"`):
+
+- **Vendored Mermaid loader** — `_loadMermaidModule()` injects the bundled
+  `vendor/mermaid.min.js` UMD script instead of the jsDelivr ESM import, since
+  the CDN is unreachable offline.
+- **Service worker skipped** — `registerServiceWorker()` returns early in the
+  APK; every asset is already local and SW registration would just fail noisily
+  against the WebView's asset loader.
+- **`SDAndroid.saveBackup` export bridge** — `exportProgress()` hands the
+  backup JSON to the native bridge (no browser download chrome in a WebView)
+  when `window.SDAndroid.saveBackup` exists, instead of the `<a download>` path.
+
+Progress does not carry over automatically between the Pages site and the APK
+(separate `localStorage`); a one-time Export (Pages) / Import (APK) carries it
+across. No Play Store — sideload the APK directly, or point **Obtainium** at
+the GitHub repo for tap-to-update. Full detail: `android/README.md`.
+
+---
+
 ## QA harness pattern
 
 Features are smoke-tested with headless Chrome over the Chrome DevTools Protocol (raw Node
@@ -319,5 +350,6 @@ Features are smoke-tested with headless Chrome over the Chrome DevTools Protocol
 ### Out of scope
 
 Accounts/multi-user, a server or database, cloud hosting, frontend frameworks/build
-tooling, and a native mobile app. The whole point is a zero-friction static tool whose
-only state is `localStorage`.
+tooling, and Play Store publishing. The Android APK (see above) is an offline WebView
+wrapper of the same static tool, not a departure from it — the only state anywhere is
+still `localStorage`.

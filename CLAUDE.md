@@ -20,7 +20,7 @@ A comprehensive system design study repository. All content is Markdown — no r
 | **CUDA** | GPGPU / CUDA programming guide (kernel-author viewpoint) — 24 modules, 6 case studies | [cuda/CLAUDE.md](src/main/java/com/rutik/systemdesign/cuda/CLAUDE.md) |
 | **CS Fundamentals** | Language-agnostic CS spine — 24 modules, 6 case studies + DSA pattern playbooks sub-section (25-pattern recognition engine, interview execution playbook, Blind 75/NeetCode 150 study plans — complete; wired as its own Study topic (`cs_fundamentals/dsa_patterns`) in the game) | [cs_fundamentals/CLAUDE.md](src/main/java/com/rutik/systemdesign/cs_fundamentals/CLAUDE.md) |
 | **Book** | Chapter-by-chapter book summaries (book-faithful chapter template, not the 14-section module template) — Designing Data-Intensive Applications (Kleppmann): 12 chapters + preface | [book/CLAUDE.md](src/main/java/com/rutik/systemdesign/book/CLAUDE.md) |
-| **Game** | Pages-deployed daily learning game (a static SPA, NOT 14-section content — template-exempt). 5-min MCQ blitz auto-built from all sections' Q&As via `extract.py`; SM-2 spaced-repetition review, daily sealed Gauntlet, and an in-app coach; `localStorage` is the single source of truth (no server). | [game/CLAUDE.md](src/main/java/com/rutik/systemdesign/game/CLAUDE.md) |
+| **Game** | **LORA — Learn Often, Recall Always**, by Rutik (Pages-deployed daily learning game; a static SPA, NOT 14-section content — template-exempt). 5-min MCQ blitz auto-built from all sections' Q&As via `extract.py`; SM-2 spaced-repetition review, daily sealed Gauntlet, and an in-app coach; `localStorage` is the single source of truth (no server). Also ships as a fully-offline sideloadable Android APK — built and released by CI on every push; see `android/`. | [game/CLAUDE.md](src/main/java/com/rutik/systemdesign/game/CLAUDE.md) |
 
 ---
 
@@ -276,6 +276,13 @@ for the "dive deeper" content view. Content that violates this contract is
 silently dropped from the game or renders wrong. These rules are derived from
 `game/extract.py`, `game/app.js` (`renderMermaid`), and
 `game/CLAUDE.md` — do not contradict them.
+
+- **Android APK exception:** the game also ships as an offline-sideloadable APK
+  (see `android/README.md`). Three `IS_APK`-gated hooks in `game/app.js`
+  (vendored Mermaid UMD loader, skipped service-worker registration,
+  `SDAndroid.saveBackup` export bridge) are the ONLY APK-conditional branches,
+  keyed on the `appassets.androidplatform.net` hostname — the Pages build must
+  stay byte-identical outside them.
 
 ### What gets scanned
 

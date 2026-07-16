@@ -1,10 +1,21 @@
-# DESIGN.md — System Design Daily
+# DESIGN.md — LORA (Learn Often, Recall Always)
 
 The visual identity of the game and the study content it renders. Companion to `PRODUCT.md`; token source of truth is `src/main/java/com/rutik/systemdesign/game/style.css`.
 
 ---
 
 ## Identity
+
+**Wordmark:** LORA — Learn Often, Recall Always. The topbar lockup reads "LORA
+by Rutik"; the "by Rutik" byline appears in lockups (topbar, splash, store
+listings) but never inside the launcher icon itself.
+
+**Mark — "The Expert Gate":** a mixture-of-experts router diamond — the
+branching decision point of a token being routed to one of several experts —
+rendered as a single gold-gated path threading an aurora gradient on a
+midnight base; every other path stays unlit. Master file: `game/logo.svg`
+(`src/main/java/com/rutik/systemdesign/game/logo.svg`); derived app icons and
+favicons are exported from it, not redrawn.
 
 A living aurora-mesh: three blurred 110px drift blobs on 64-88s alternating loops, floating over a blueprint grid. Glass materials (translucent panels, soft borders, layered shadows) float above the mesh. The scene should feel alive but never busy — motion is ambient, not attention-seeking.
 

@@ -1,4 +1,4 @@
-# PRODUCT.md — System Design Daily
+# PRODUCT.md — LORA (Learn Often, Recall Always), by Rutik
 
 A personal daily-learning PWA built over the owner's own study repository: the repo is the content, the game makes showing up every day the easy part.
 
@@ -58,7 +58,18 @@ These are constraints the product treats as non-negotiable:
 
 ## Out of Scope
 
-Accounts and login, any server component, cloud sync, JS frameworks, a native app, hearts/lives-style punishment mechanics, and social features (leaderboards against other people, sharing, feeds). These are permanent non-goals, not backlog items.
+Accounts and login, any server component, cloud sync, JS frameworks, Play Store publishing, hearts/lives-style punishment mechanics, and social features (leaderboards against other people, sharing, feeds). These are permanent non-goals, not backlog items.
+
+---
+
+## Android APK
+
+LORA also ships as a fully-offline personal build: a raw-WebView wrapper around
+the same static app, packaged with the whole repo's content and a vendored
+Mermaid renderer, assembled and signed on CI and published as a GitHub Release
+on every push to `main`. It is sideload-only — no Play Store, no distinct
+backend — and progress is carried across from the Pages site with a one-time
+export/import. See `android/README.md`.
 
 ---
 

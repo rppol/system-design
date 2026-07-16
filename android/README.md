@@ -1,4 +1,4 @@
-# SD Daily — offline Android APK
+# LORA — offline Android APK
 
 A raw-WebView wrapper (no Capacitor/frameworks) that packages the whole study
 repo + the learning game into one offline APK. `scripts/build_android_assets.sh`
@@ -37,7 +37,7 @@ gradle -p android :app:assembleDebug
 
 1. Copy `systemdesign-daily.apk` to the phone (or open the URL in its browser).
 2. Tap it; allow "install unknown apps" for that source when prompted.
-3. Open **SD Daily** — it runs fully offline.
+3. Open **LORA** — it runs fully offline.
 
 ## Update
 

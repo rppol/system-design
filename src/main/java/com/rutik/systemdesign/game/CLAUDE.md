@@ -1,4 +1,4 @@
-# CLAUDE.md — Game (browser app, template-exempt)
+# CLAUDE.md — Game — LORA (Learn Often, Recall Always), by Rutik (browser app, template-exempt)
 
 The `game/` directory is an application, not study content — see
 [README.md](README.md) for architecture, features, and how to run it.
@@ -16,7 +16,20 @@ The `game/` directory is an application, not study content — see
 ## Other invariants
 
 - Vanilla JS + CSS, no build step, no frameworks, no external deps (the reader's
-  mermaid CDN import is the only exception).
+  mermaid CDN import is the only exception on Pages).
+- **`IS_APK` is the only APK/Pages fork.** LORA also ships as an offline Android
+  APK (see `android/README.md`); `IS_APK` (`app.js`, keyed on
+  `location.hostname === "appassets.androidplatform.net"`) gates exactly three
+  hooks, and no others may exist: the vendored-Mermaid-UMD loader in
+  `_loadMermaidModule()` (jsDelivr ESM is unreachable offline), the early
+  return in `registerServiceWorker()` (every asset is already local; SW
+  registration fails noisily against the WebView asset loader), and the
+  `SDAndroid.saveBackup` native bridge in `exportProgress()` (no browser
+  download chrome in a WebView). Every other line must render byte-identically
+  on Pages and in the APK. The vendored `game/vendor/mermaid.min.js` (fetched
+  once at CI build time by `scripts/build_android_assets.sh`, bundled into the
+  APK, never fetched at runtime) is a second sanctioned exception to the
+  no-external-deps rule, alongside the Pages Mermaid CDN import.
 - **Pages-only (2026-07-03): `localStorage` `sd_progress` is the single source of
   truth and the single write path for all progress.** There is no server, no
   `/api`, no database, and no local scheduling stack. Every `localStorage` write —
