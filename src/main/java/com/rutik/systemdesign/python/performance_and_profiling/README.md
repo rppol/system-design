@@ -702,6 +702,18 @@ For a local variable, `x += 1` compiles to `LOAD_FAST x`, `LOAD_CONST 1`, `BINAR
 **Q12: How does the `join()` pattern for string building avoid the O(n^2) behavior of `+` concatenation?**
 Python strings are immutable. Each `s += fragment` allocates a new string object of length `len(s) + len(fragment)`, copies both strings into it, and discards the old `s`. Over `n` fragments, total bytes copied sum to 0 + 1 + 2 + ... + n = O(n^2). `"".join(fragments)` first computes the total length in one pass, allocates one buffer of that size, then copies each fragment once — O(n) total bytes copied. For 1,000 strings of average length 10, join is approximately 10x faster and eliminates quadratic memory allocation.
 
+**Q13: What does `line_profiler` add over `cProfile`, and what does it cost?**
+`line_profiler` reports execution time for every individual line inside a decorated function, not just an aggregate per function like `cProfile`. Decorate the target function with `@profile` and run `kernprof -l -v script.py` to get an annotated source listing showing hits and time per line, pinpointing exactly which line inside a slow function is the bottleneck. The overhead is higher than cProfile's 1.5-3x, roughly 3-5x, because it must instrument every line rather than every function call. Reserve it for the specific function cProfile already identified as hot, rather than running it across an entire codebase.
+
+**Q14: Why is `time.time()` around a code block an unreliable way to benchmark Python code?**
+`time.time()` measures wall-clock time, which includes OS scheduling jitter, GC pauses, and background I/O that have nothing to do with the code being measured. A single `time.time()` measurement of `sum(range(1_000_000))` can vary by roughly ±30% between runs on identical hardware because of this noise. `timeit`, by contrast, disables the garbage collector during the run and repeats the statement many times, producing results stable to within about ±2% across runs. Reserve `time.time()` for coarse-grained request-level latency logging, and use `timeit` whenever a 10-20% difference actually matters.
+
+**Q15: Why does `timeit` disable garbage collection by default, and when should you re-enable it?**
+`timeit` calls `gc.disable()` before running the timed statement so that an unrelated GC pause triggered by prior allocations does not inflate the measurement. This isolates the code under test from garbage-collection noise, but it also means the benchmark no longer reflects production behavior where GC is always enabled and does periodically pause execution. Re-enable it explicitly with `setup="import gc; gc.enable()"` when benchmarking heavily allocating code and you specifically want realistic end-to-end numbers including GC overhead. For most micro-benchmarks comparing two implementations, leaving GC disabled is the right default since it isolates the comparison from allocation-pattern noise.
+
+**Q16: How does `memray` improve on `memory_profiler` for production memory debugging?**
+`memray` traces every memory allocation, including allocations made inside C extensions, and renders the results as an interactive flamegraph. `memory_profiler` only reports line-by-line RSS deltas measured from the OS, which misses allocations freed within the same line and cannot attribute memory to a call stack inside a C extension like NumPy or a database driver. `memray`, built by Bloomberg, hooks the allocator itself, so it shows exactly which Python and native call stack is responsible for each byte allocated. Use `memray` when investigating a leak involving third-party C extensions; `memory_profiler` remains adequate for quick pure-Python line-level checks.
+
 ---
 
 ## 13. Best Practices

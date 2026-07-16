@@ -860,6 +860,18 @@ FastAPI's default `JSONResponse` uses the stdlib `json` encoder, which raises `T
 **Q12: Explain the `pathlib` `/` operator. What Python feature does it use?**
 `Path` overrides `__truediv__` (the `/` division operator) to return a new `Path` representing the concatenated path: `Path("/data") / "uploads" / "file.csv"` returns `Path("/data/uploads/file.csv")`. This uses Python's operator overloading mechanism. The result is always a `Path` object regardless of which side is a string, as long as the left operand is a `Path`.
 
+**Q13: What happens when you call `Path.rename()` across two different filesystems, and what is the fix?**
+`Path.rename()` raises `OSError` when the source and destination are on different filesystems because a rename is only a metadata operation within one filesystem. `shutil.move()` detects this case and falls back to copying the file's bytes to the destination then deleting the source, which works across devices but is not atomic and costs O(file size) time instead of O(1). Use `Path.replace()` only when source and destination share a filesystem — same directory tree or mounted volume — and reach for `shutil.move()` whenever the destination might be a different mount, such as a separate Docker volume or network share.
+
+**Q14: What happens to an open file descriptor when an exception occurs between `open()` and a manual `close()` call, without a `with` block?**
+The file descriptor stays open until CPython's reference-counting garbage collector destroys the file object, which may not happen immediately. On PyPy or Jython, which do not rely on deterministic reference counting, the descriptor can stay open indefinitely until a full GC cycle runs. In a long-running FastAPI worker processing thousands of uploads this leaks descriptors until the process hits the OS `ulimit -n` ceiling (often 1024), and every later `open()` call fails with `OSError: Too many open files`. Always wrap `open()` in a `with` block so `__exit__` closes the descriptor deterministically on every exception path.
+
+**Q15: What does `csv.Sniffer().sniff()` do, and when should you use it instead of assuming a fixed dialect?**
+`csv.Sniffer().sniff(sample)` inspects a sample of file content and returns a `Dialect` object describing the delimiter, quote character, and line terminator it detected. Pass the detected dialect into `csv.DictReader(f, dialect=dialect)` so parsing matches the file's actual formatting instead of a hardcoded guess. Use it when ingesting CSV files from external partners or user uploads where the delimiter might be a comma, semicolon, or tab, and a wrong hardcoded assumption would silently misparse every row into one column. Always `f.seek(0)` after sniffing, since `sniff()` consumes the sample from the current file position.
+
+**Q16: How do you handle a file whose encoding is unknown, such as a CSV uploaded by an external partner?**
+Use `charset_normalizer.detect(raw_bytes)` (or the older `chardet` library) to statistically guess the encoding from the raw byte distribution before decoding. Read the file in binary mode first, run detection on a sample of the bytes, then decode with the returned encoding key. `charset-normalizer` is the modern, faster choice and is what `requests` uses internally as of version 2.26. Never guess `latin-1` as a fallback — it decodes every byte sequence without raising, silently turning a corrupted or misidentified file into garbage text instead of surfacing the real mismatch.
+
 ---
 
 ## 13. Best Practices

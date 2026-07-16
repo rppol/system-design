@@ -871,6 +871,18 @@ Call `parser.add_subparsers(dest="command", required=True)` to create a subparse
 **Q12: How do you prevent log records from being emitted multiple times (duplicate log lines)?**
 Duplicate lines almost always mean a handler is attached at multiple levels of the logger hierarchy while propagation is still enabled. Fix: attach handlers to exactly one logger (typically `"app"` or the root), and set `propagate=False` on any logger that has its own handlers to prevent the record from walking up to a parent that also has a handler. Alternatively, attach handlers only to the root logger and rely entirely on propagation.
 
+**Q13: What is the `fold` attribute on a `datetime` object, and what ambiguity does it resolve?**
+`fold` disambiguates the one wall-clock hour that repeats every autumn when clocks are set back for daylight saving time. During the fall-back transition a time like `01:30` occurs twice — once while still in daylight time, once after switching to standard time — and without `fold`, both instants print identically even though they differ by an hour in UTC. Setting `fold=0` (the default) selects the first occurrence and `fold=1` selects the second; `ZoneInfo`-aware datetimes use it to compute the correct UTC offset for each. Spring-forward is the opposite failure mode — a gap rather than a repeat — where a wall-clock time like `02:30` never exists at all on that day.
+
+**Q14: What does the `utc=True` parameter do on `TimedRotatingFileHandler`, and what happens if you omit it?**
+`utc=True` makes the handler rotate log files at UTC midnight instead of the server's local midnight. Without it, rotation timing is computed from the server's local timezone, so a fleet of servers running in different regions rotates at different real-world instants, and a non-UTC server can rotate at an unexpected wall-clock hour relative to your monitoring dashboards. This can split a single day's traffic across two rotated files or merge two different days' traffic into one, depending on the offset. Always pass `utc=True` for services deployed across multiple regions so rotation boundaries stay consistent everywhere.
+
+**Q15: When would you reach for `structlog` instead of the stdlib `logging` module?**
+Choose `structlog` when you need a processor-chain API that composes context binding, filtering, and formatting as explicit pipeline steps rather than subclassing `Formatter`. stdlib `logging` builds structured output by writing a custom `Formatter` and stitching context together with `LoggerAdapter` and `ContextVar`, which works but scatters the logic across several extension points. `structlog` lets you bind context once (`log = log.bind(request_id=rid)`) and chain processors like timestamping, JSON-rendering, and exception-formatting declaratively. For most services the stdlib approach is sufficient with zero extra dependencies; adopt `structlog` once you need reusable processor chains across many services.
+
+**Q16: What is the practical CPU cost of switching log output from plain text to JSON in production, and why is it usually acceptable?**
+Formatting a log record as JSON instead of plain text costs roughly 5 microseconds of extra CPU time per record. That overhead comes from constructing a dict of fields and calling `json.dumps()` for every record, rather than a single `%`-style string interpolation. At typical application log volumes this adds well under a millisecond to total request latency, negligible compared to the value of having every log line machine-parseable by ELK, Datadog, or another log aggregator. Reserve plain-text formatting for local development, where terminal readability outweighs the parsing benefit.
+
 ---
 
 ## 13. Best Practices

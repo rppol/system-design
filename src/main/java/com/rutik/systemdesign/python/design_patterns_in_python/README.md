@@ -923,6 +923,15 @@ The `@register` decorator requires the registering module to be imported before 
 **Q13: When is a `typing.Protocol` preferable to an ABC for defining a pattern interface?**
 `Protocol` enables structural (duck-type) subtyping: a class satisfies the Protocol if it has the required methods, with no inheritance. Use `Protocol` when you cannot or should not modify the implementing class (third-party code, stdlib types). Use ABC when you want to enforce the contract at instantiation time (`@abstractmethod` raises `TypeError` if a subclass forgets to implement a method) or when you want to share default implementations across subclasses.
 
+**Q14: Why is the classic `if cls._instance is None: cls._instance = ...` singleton check not thread-safe even though CPython has a GIL?**
+The GIL makes each bytecode instruction atomic, but the None check and the instance assignment are two separate instructions separated by a thread-switch point. Thread A can evaluate `cls._instance is None` as `True`, then the interpreter switches to thread B before thread A executes the assignment; thread B also sees `None` and constructs its own instance, leaving two distinct objects alive. The switch can happen at the default switch interval (`sys.getswitchinterval()`, 5ms) or immediately if `__new__`/`__init__` performs any blocking call. Guard the check-and-set with a `threading.Lock`, as `SafeSingletonMeta` does, or avoid the race entirely with the module-level singleton pattern.
+
+**Q15: What is the Unit of Work pattern, and how does SQLAlchemy's `Session` implement it alongside a Repository?**
+Unit of Work tracks every object changed during a business transaction and commits them together as one atomic database operation. SQLAlchemy's `Session` accumulates pending inserts, updates, and deletes in its identity map and flushes them as a single transaction on `session.commit()`, instead of each repository call issuing its own write. Pairing Unit of Work with Repository means `save()` only stages a change in the `Session`; the caller — typically a FastAPI dependency's `yield` teardown — decides when to commit or roll back. This lets one request modify several aggregates through several repositories and still get one atomic commit at the end.
+
+**Q16: How do you decide whether applying a design pattern is premature abstraction in a Python codebase?**
+A pattern is premature abstraction when it adds indirection to handle variation that does not yet exist and is not concretely planned for the next release. The case study's Pitfall 6 — wrapping a script that just reads a CSV and writes a report in a Repository, Factory, and Observer — adds three layers of indirection with no variation to justify any of them. A practical heuristic is the rule of three: introduce the pattern only after the same variation (a second payment provider, a second notification channel) has been written by hand at least twice. Reserve patterns for the parts of the system with a demonstrated or contractually required need to vary.
+
 ---
 
 ## 13. Best Practices

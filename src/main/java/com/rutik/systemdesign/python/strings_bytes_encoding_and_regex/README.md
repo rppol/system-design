@@ -767,6 +767,42 @@ roughly 3x faster than `.format()` and 1.5–2x faster than `%`. f-strings compi
 format-string parsing; `%` scans the format string at runtime. For most web services the delta is
 negligible, but in tight loops generating thousands of log lines or CSV rows per second it adds up.
 
+**Q13: Why does decoding bytes with `latin-1` never raise `UnicodeDecodeError`, even on corrupted or wrong-encoding data?**
+`latin-1` maps every possible byte value 0-255 directly to a Unicode code point, so no byte
+sequence is ever invalid for it. This makes it tempting to use as a universal "safe" fallback when
+the real encoding is unknown, but decoding UTF-8 bytes as `latin-1` produces a string that decodes
+successfully while containing garbage characters — UTF-8 `中文` becomes the nonsense string
+`ä¸­æ–‡` with no exception raised to signal the mismatch. Prefer `errors="replace"` with the
+correct expected encoding, which fails loudly and visibly, over silently corrupting data with
+`latin-1`.
+
+**Q14: What is the difference between the `replace`, `ignore`, and `backslashreplace` error handlers when decoding bytes?**
+All three decide what happens when a byte sequence cannot be decoded, but they produce different
+output for the invalid bytes. `errors="replace"` substitutes each invalid byte with the Unicode
+replacement character, preserving the string's length and making corruption visible without
+crashing. `errors="ignore"` silently drops the invalid bytes entirely, almost always the wrong
+choice in production because it destroys evidence that data was corrupted. `errors="backslashreplace"`
+renders invalid bytes as an escaped hex sequence like `\xe9`, the most useful choice for debugging
+because it preserves the exact original byte value in a readable form.
+
+**Q15: What do the regex lookbehind `(?<=...)` and negative lookahead `(?!...)` assertions match, and how do they differ from capturing groups?**
+Lookbehind and lookahead assertions check that surrounding text matches a pattern without
+consuming it or including it in the match result. `(?<=\$)\d+` matches digits only when
+immediately preceded by a literal `$`, but the `$` itself is not part of the returned match,
+useful for extracting an amount without the currency symbol. `(?!bar)` after `foo` matches `foo`
+only when not immediately followed by `bar`, excluding one alternative without a capturing-group
+workaround. Because they consume zero characters, lookaround assertions combine freely with the
+rest of the pattern without disturbing group numbering.
+
+**Q16: What does the `{x=}` self-documenting f-string specifier print, and how do the `!r` and `!a` conversion flags differ?**
+`{x=}` (added in Python 3.8) expands to both the literal source expression and its value,
+printing `x = 42` instead of just `42`. This is a debugging convenience that eliminates writing
+`print(f"x={x}")` by hand and keeps the printed label in sync automatically if the variable name
+changes. The `!r` conversion flag calls `repr()` on the value before formatting — `f"{name!r}"`
+prints `'café'` with quotes — while `!a` calls `ascii()`, which additionally escapes any
+non-ASCII characters, printing `'caf\xe9'` instead. Use `!r` for readable debug output and `!a`
+only when the destination cannot safely display non-ASCII bytes.
+
 ---
 
 ## 13. Best Practices
