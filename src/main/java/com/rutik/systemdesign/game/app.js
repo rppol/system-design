@@ -5502,13 +5502,21 @@ function wireScrollSpy(main, scrollBox) {
   const h2count = main.querySelectorAll("h2[id]").length;
   const posEl = toc ? toc.querySelector(".toc-pos") : null;
   if (!heads.length) { reader._spy = null; return; }
-  let activeId = null;
+  let activeId = null, lastPos = "";
+  // Heading offsets are cached and refreshed only when the document height
+  // changes (Mermaid/images finishing layout, font-size change): reading
+  // offsetTop for every heading on every scroll frame forces a full reflow
+  // per frame on long docs — the reader's biggest scroll-jank source.
+  let offs = null, cachedSH = -1;
   reader._spy = () => {
+    const sh = scrollBox.scrollHeight;
+    if (sh !== cachedSH) { cachedSH = sh; offs = heads.map((h) => h.offsetTop); }
     const top = scrollBox.scrollTop + 90;               // "reading line" ~90px below the fold top
     let cur = heads[0], h2seen = 0, h2idx = 0;
-    for (const h of heads) {
+    for (let i = 0; i < heads.length; i++) {
+      const h = heads[i];
       if (h.tagName === "H2") h2seen++;
-      if (h.offsetTop <= top) { cur = h; if (h.tagName === "H2") h2idx = h2seen; }
+      if (offs[i] <= top) { cur = h; if (h.tagName === "H2") h2idx = h2seen; }
       else break;
     }
     if (cur.id !== activeId) {
@@ -5517,7 +5525,12 @@ function wireScrollSpy(main, scrollBox) {
       if (a) { a.classList.add("toc-active"); a.scrollIntoView({ block: "nearest" }); }
       activeId = cur.id;
     }
-    if (posEl && h2count) posEl.textContent = `§ ${Math.max(1, h2idx)} / ${h2count}`;
+    if (posEl && h2count) {
+      const pos = `§ ${Math.max(1, h2idx)} / ${h2count}`;
+      // Write only on change — an unconditional textContent write dirties
+      // layout every frame and turns the next offset read into a reflow.
+      if (pos !== lastPos) { lastPos = pos; posEl.textContent = pos; }
+    }
   };
   reader._spy();
 }
@@ -6110,15 +6123,26 @@ async function openReaderPath(path, title, navCtx, frag) {
   // Reading progress bar + back-to-top, driven by the body's scroll position.
   {
     const body = el("#readerBody"), prog = el("#readerProg"), top = el("#readerTop");
+    // Coalesced to one update per frame, with every layout READ done before any
+    // style WRITE: the old handler wrote the progress width and then let the
+    // scrollspy read heading offsets, forcing a synchronous reflow per scroll
+    // event — visible jitter on phones. Progress moves via transform (scaleX),
+    // which the compositor animates without touching layout at all.
+    let scrollRaf = 0;
     body.addEventListener("scroll", () => {
-      const max = body.scrollHeight - body.clientHeight;
-      prog.style.width = max > 0 ? (body.scrollTop / max) * 100 + "%" : "0";
-      top.classList.toggle("show", body.scrollTop > 600);
-      if (panel.classList.contains("head-peek")) panel.classList.remove("head-peek");
-      if (reader._spy) reader._spy();
-      scheduleScrollSave(reader.path, body.scrollTop);
-      maybeMarkRead(reader.path, body);              // reading feeds the game (Phase 6)
-      if (reader._read && !reader._closed) { reader._closed = true; revealClosure(); }
+      if (scrollRaf) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        const st = body.scrollTop;
+        const max = body.scrollHeight - body.clientHeight;
+        if (reader._spy) reader._spy();
+        maybeMarkRead(reader.path, body);            // reading feeds the game (Phase 6)
+        prog.style.transform = `scaleX(${max > 0 ? st / max : 0})`;
+        top.classList.toggle("show", st > 600);
+        if (panel.classList.contains("head-peek")) panel.classList.remove("head-peek");
+        scheduleScrollSave(reader.path, st);
+        if (reader._read && !reader._closed) { reader._closed = true; revealClosure(); }
+      });
     }, { passive: true });
     top.addEventListener("click", () => body.scrollTo({ top: 0, behavior: REDUCED() ? "auto" : "smooth" }));
   }

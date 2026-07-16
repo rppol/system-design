@@ -1556,6 +1556,16 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   .lenopt, .pathopt { min-height: 44px; }
   .pathleaf { min-height: 40px; }
   .mm-grip { width: 32px; height: 32px; }
+  /* [perf] Scroll-path glass diet: these cards live INSIDE the scrolling
+     content, so each one re-samples and re-blurs its backdrop every frame
+     while it moves — the main scroll-jank source on phone GPUs. The aurora
+     behind them is already blurred, so dropping the filter is visually
+     near-lossless; the translucent tints stay. Fixed chrome (topbar, tabbar)
+     and transient overlays keep their glass. */
+  .topic-card, .tile, .badge, .opt, .reveal, .review-card,
+  .sectiontile, .modrow, .pathnode {
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+  }
 }
 /* [W3] the mermaid resize grip only appears on :hover — keep it visible on touch. */
 @media (hover: none) { .md-body .mermaid .mm-grip { opacity: 0.5; } }
@@ -1763,8 +1773,11 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 .linklike:hover { color: var(--text); text-decoration: underline; }
 
 /* reader: reading-progress bar, font buttons, back-to-top */
-.reader-progress { height: 2px; background: transparent; flex: 0 0 auto; }
-.reader-progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--sec-accent, var(--accent)), color-mix(in srgb, var(--sec-accent, var(--accent)) 55%, var(--accent-2))); transition: width 0.15s linear; }
+.reader-progress { height: 2px; background: transparent; flex: 0 0 auto; overflow: hidden; }
+/* transform, not width: the bar updates every scroll frame, and a width
+   transition animates layout on the main thread — scaleX stays on the
+   compositor and never causes a reflow. */
+.reader-progress i { display: block; height: 100%; width: 100%; transform: scaleX(0); transform-origin: 0 0; background: linear-gradient(90deg, var(--sec-accent, var(--accent)), color-mix(in srgb, var(--sec-accent, var(--accent)) 55%, var(--accent-2))); transition: transform 0.15s linear; }
 .reader-nav.rfs { font-size: 11px; padding: 6px 7px; }
 .reader-top {
   position: absolute; right: 18px; bottom: 18px; z-index: 42;
