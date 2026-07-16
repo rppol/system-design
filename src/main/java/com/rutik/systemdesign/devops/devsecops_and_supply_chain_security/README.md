@@ -367,6 +367,18 @@ Both are standard SBOM formats; CycloneDX (OWASP) is security-focused with first
 **Q: How would you roll out signature enforcement without breaking existing deploys?**
 Start the policy in `warn` mode so it logs violations without denying, sign all artifacts in CI, then watch the warning rate drop toward zero as old unsigned images age out. Once warnings are near zero and a break-glass path is tested, flip the policy to `enforce` per-namespace, starting with low-risk namespaces. This staged rollout surfaces unsigned legacy workloads before they cause an outage and gives teams time to onboard their signing pipelines.
 
+**Q: What does IaC scanning catch that SAST and SCA don't?**
+IaC scanning (Checkov, tfsec, Conftest) analyzes Terraform and Kubernetes manifests for misconfiguration, catching things like a public S3 bucket or an overly permissive security group. SAST looks at application source and SCA looks at dependency manifests, so neither would catch an `aws_s3_bucket_acl` resource set to `public-read`; IaC scanning is the category that treats infrastructure definitions as the attack surface they actually are. Run it as its own PR gate alongside SAST and SCA, not as a substitute for either.
+
+**Q: Why is pre-commit secret scanning not sufficient by itself?**
+A pre-commit hook runs entirely on the developer's machine, so it can always be bypassed with `git commit --no-verify` or by simply not installing it, meaning a leaked credential can still reach the remote repository. The fix is defense in depth: pre-commit for fast local feedback plus a server-side push-time check (or a CI job) that re-scans every commit regardless of what ran locally, so the control cannot be silently skipped. Treat pre-commit as a courtesy to developers, not the actual security boundary.
+
+**Q: How does lockfile pinning defend against dependency confusion and typosquatting?**
+A lockfile like `package-lock.json` records an integrity hash for every dependency, so `npm ci` fails the install if the fetched bytes don't match what was originally locked. A floating range like `"left-pad": "^1.0.0"` in `package.json` alone lets a hijacked or typosquatted `1.9.9` install silently on the next `npm install`, since nothing pins it to known-good bytes. The practical guidance is to commit the lockfile and run `npm ci` (lockfile-strict) in CI, never `npm install`, so builds are reproducible and tamper-evident.
+
+**Q: Why did Log4Shell become a board-level incident rather than just another CVE?**
+Log4Shell (CVE-2021-44228) scored a maximum CVSS 10.0 and sat inside an estimated 35,000 Java packages, so it was transitively present across most of the Java ecosystem rather than confined to one application. Exploitation required only a single crafted string reaching a log statement, making it trivially remote-executable with no authentication, and it was often buried several dependency layers deep where teams didn't know it existed. It became the canonical case for supply chain tooling because scanning your own code was useless; only an SBOM or dependency-tree query could answer "which of our 400 services are exposed" fast enough to matter.
+
 ---
 
 ## 13. Best Practices

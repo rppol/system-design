@@ -340,6 +340,18 @@ All runc containers share the host kernel, so the kernel is the trust boundary: 
 **Q12: How does Firecracker enable both isolation and density?**
 Firecracker is a minimal VMM that boots a stripped microVM in ~125 ms with a tiny memory footprint, giving hardware-level isolation without a full VM's overhead. It underpins AWS Lambda and Fargate, where each function/task gets VM-grade isolation yet the platform still packs thousands per host — bridging the container-density vs VM-isolation gap.
 
+**Q13: containerd vs CRI-O — what actually differs architecturally?**
+Both are CRI-compliant and run OCI images identically, but containerd is a general-purpose runtime with a broader plugin/snapshotter ecosystem, while CRI-O is purpose-built for Kubernetes only. containerd is also embedded inside Docker and is the default on EKS and GKE, while Red Hat drives CRI-O as the default on OpenShift, tracking the Kubernetes release cadence closely with a smaller feature surface (no independent CLI/API beyond CRI). Pick containerd for broad ecosystem/tooling reuse, CRI-O when you want a runtime whose scope is strictly "what Kubernetes needs."
+
+**Q14: How does the OCI distribution spec make an image pull portable across registries?**
+The distribution spec defines a standard HTTP API for pulling and pushing content-addressed blobs and manifests, so any OCI-compliant client can pull from any compliant registry without registry-specific code. Each layer and the manifest are identified by a SHA-256 digest, and a manifest list (index) can point to per-architecture manifests so the same tag resolves to the right binary on amd64 vs arm64. This is why `docker pull`, `crictl pull`, and `ctr images pull` all work identically against any registry — the wire protocol is the standard, not the client.
+
+**Q15: How does a namespaced resource limit in the OCI runtime spec actually get enforced on the host?**
+containerd translates the pod's CPU and memory requests into the `linux.resources` block of the OCI `config.json`, and runc writes those values directly into the container's cgroup files before starting the process. A `cpu.quota: 50000` with `cpu.period: 100000` caps the container at 0.5 CPU-seconds of runtime per 100ms period — exceeding it throttles the process rather than killing it, while exceeding the memory limit triggers the kernel OOM killer against that cgroup specifically. This is why resource limits are enforced by the kernel, not by containerd or runc watching the process — once the cgroup is written, the runtime's job is done.
+
+**Q16: What is overlayfs and why is it the default snapshotter?**
+overlayfs is a union filesystem that layers a container's read-only image layers under a thin writable "upper" directory, presenting them as one merged view without copying the read-only data. Multiple containers can share the same lower (image) layers on disk while each gets its own isolated upper layer for writes, which is why pulling a common base image once and starting 50 containers from it costs almost no extra disk. It's the default snapshotter because it's fast (no copy-on-first-write across whole layers, just directory merging) and built into the mainline Linux kernel, though pluggable alternatives like stargz trade this for lazy-pull startup latency instead.
+
 ---
 
 ## 13. Best Practices

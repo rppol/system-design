@@ -384,6 +384,18 @@ When you run multiple operator replicas for availability, only one should active
 **Q12: How do CRDs get schema validation, and why use it?**
 A CRD includes an OpenAPI v3 schema; the API server validates every custom resource against it at admission (types, required fields, enums, min/max), rejecting malformed CRs before they're stored or reconciled. This catches user errors early (e.g., `replicas: 0` where minimum is 1) with clear messages, rather than the operator having to defensively handle garbage input at runtime.
 
+**Q13: What do OwnerReferences give you that finalizers don't?**
+OwnerReferences let Kubernetes' built-in garbage collector automatically delete child objects when their owner is deleted. A finalizer instead blocks and gates deletion of the *owner itself* until custom cleanup logic runs, so setting `controllerutil.SetControllerReference(&cr, cj, r.Scheme)` on a created CronJob means deleting the parent `Database` CR cascades to delete that CronJob for free with no reconcile code required, while a finalizer handles cleanup the garbage collector cannot do, like deprovisioning an external S3 bucket. In practice you use both: OwnerReferences for in-cluster children, finalizers for anything that lives outside the cluster's own garbage collection.
+
+**Q14: How do you evolve a CRD's schema without breaking existing custom resources?**
+Add a new API version to the CRD rather than mutating the existing version's schema in place, and mark exactly one version `storage: true` so etcd has a single source of truth while all served versions remain readable. When the new version's shape genuinely differs from the old one, you provide a **conversion webhook** that the API server calls to translate CRs between versions on the fly, so old and new clients both get a valid object. Skipping this and just editing the schema in place risks the API server rejecting every existing CR the next time it's read or reconciled.
+
+**Q15: Why must an operator's RBAC be scoped to least privilege?**
+An operator is a powerful, always-running controller, so a compromised or buggy one with cluster-wide access can modify or destroy far more than its intended scope. Scoping RBAC to exactly the API groups, verbs, and namespaces the reconciler actually touches means a bug or a supply-chain-compromised operator image can only damage what it legitimately needed to manage, not the whole cluster. This is the same least-privilege principle applied to CI tokens, just for a controller that runs continuously rather than a pipeline that runs once.
+
+**Q16: What do the operator capability levels (1-5) actually distinguish?**
+The maturity model measures how much day-2 operational knowledge is encoded in the controller, not how well it's built. Level 1 just installs the application, Level 2 adds patch/minor upgrades, Level 3 adds lifecycle operations like backup and failure recovery, Level 4 adds insights such as metrics and alerts, and Level 5 ("autopilot") adds autonomous scaling, tuning, and remediation without human intervention. Most production operators (CloudNativePG, Prometheus Operator) sit at Level 3-4, since reaching Level 5 is rare — autonomous remediation for stateful systems is genuinely hard to get safely right, and a Level 1 operator from OperatorHub still requires you to build your own backup/failover automation around it.
+
 ---
 
 ## 13. Best Practices

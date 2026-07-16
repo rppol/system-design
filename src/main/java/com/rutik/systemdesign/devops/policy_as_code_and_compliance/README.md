@@ -413,6 +413,18 @@ The CIS Kubernetes Benchmark is a set of roughly 120 hardening controls spanning
 **Q: What is the difference between validate, mutate, and generate in Kyverno?**
 Validate rejects resources that violate a pattern (e.g., require runAsNonRoot), mutate modifies incoming resources to inject defaults (e.g., add seccompProfile RuntimeDefault if missing), and generate creates dependent resources automatically (e.g., a default NetworkPolicy for each new namespace). Validate enforces, mutate fixes silently, and generate provisions. Use mutate to make the secure path the default so developers comply without extra effort, reducing validate-stage friction.
 
+**Q: Conftest vs Checkov — how do you choose between them for scanning Terraform?**
+Conftest runs Rego rules you author yourself, so it's the right choice for custom logic tied to your own compliance matrix or one engine shared across Terraform, Kubernetes, and Dockerfiles. Checkov ships roughly 1,000 built-in rules covering common Terraform and CloudFormation misconfigurations out of the box, giving broad coverage with essentially no authoring effort, though it's harder to extend with organization-specific rules than a Rego policy. Many teams run both: Checkov for fast baseline coverage and Conftest for rules specific to their own environment.
+
+**Q: What does the ~5-50ms per-request latency of an admission webhook mean for how you decide what to enforce there?**
+Every policy evaluated at admission adds to that latency budget on every matching request cluster-wide, so it's the right place for non-bypassable checks but the wrong place for expensive logic better caught earlier. The practical guidance is to push cheap, fast rules into admission and reserve genuinely deep analysis for CI-time Conftest or scheduled scans, so the webhook stays fast enough that developers never notice it. An incident shouldn't turn "add a policy" into "we made every pod creation slower."
+
+**Q: What does Gatekeeper's background audit catch that CI and admission together might still miss?**
+The audit re-scans every existing object in etcd on a fixed interval, independent of any request, so it surfaces resources that predate a constraint or were created while the webhook was briefly down. Neither CI-time Conftest, which only sees a proposed change, nor admission, which only fires on new requests, can detect non-compliant objects already sitting in the cluster; the audit closes exactly that gap by continuously re-evaluating live state. This is why "audit found zero violations" is a meaningful health signal even in enforce mode — it proves nothing has drifted since the last scan.
+
+**Q: What do you do when a policy has no clean equivalent across every compliance framework you map to?**
+Not every control maps one-to-one — "encryption at rest required" has a clear SOC2, PCI-DSS, and HIPAA mapping but no single CIS Kubernetes Benchmark line item. That's because CIS focuses on cluster and workload hardening rather than data-at-rest cryptography, so the traceability matrix should record the gap explicitly with a dash rather than a guessed control ID, and the policy's enforcement doesn't depend on having every framework represented. This matters operationally because an auditor querying "show me every control this policy satisfies" needs an honest answer, not a fabricated cross-reference that later fails scrutiny.
+
 ---
 
 ## 13. Best Practices

@@ -368,6 +368,18 @@ With a CSI driver supporting them: a `VolumeSnapshot` object triggers the driver
 **Q12: How does storage factor into Kubernetes disaster recovery?**
 You back up two things: the Kubernetes objects (manifests/etcd) and the PVC data. Velero captures both — taking CSI snapshots of PVCs and exporting object definitions — enabling restore into a new cluster. Reclaim policy `Retain`, cross-region snapshot copies, and tested restores are the pillars; relying on volume re-attach alone is not DR (see [disaster_recovery_and_resilience](../disaster_recovery_and_resilience/)).
 
+**Q13: What's the difference between ReadWriteOnce and ReadWriteOncePod, and why is it a common gotcha?**
+ReadWriteOnce (RWO) restricts a volume to a single *node* but does not stop multiple Pods scheduled onto that same node from all mounting it simultaneously. This surprises engineers who assume RWO means "one Pod," when in fact ReadWriteOncePod is the stricter CSI access mode that genuinely limits the volume to exactly one Pod cluster-wide, closing the gap for a single-writer database that would otherwise silently corrupt data. Use ReadWriteOncePod whenever true single-writer semantics matter, not RWO, since RWO's node-level guarantee is weaker than its name implies.
+
+**Q14: When would you run in-cluster software-defined storage (Rook-Ceph, OpenEBS, Longhorn) instead of cloud CSI block storage?**
+Choose in-cluster software-defined storage when you need capabilities cloud block storage doesn't offer natively, such as RWX shared volumes or a backend for bare-metal clusters. The tradeoff is real operational cost: Ceph and Longhorn are themselves distributed stateful systems you now run and upgrade, layering storage-cluster operations on top of Kubernetes operations. On a cloud provider with mature CSI drivers, prefer the managed cloud primitive; reach for in-cluster storage mainly for on-prem clusters or sharing needs the cloud CSI driver can't satisfy.
+
+**Q15: What does a StatefulSet's `volumeClaimTemplates` give you that a shared PVC on a Deployment doesn't?**
+`volumeClaimTemplates` provisions one dedicated PVC per replica, named and bound to that replica's stable ordinal identity, so each Pod always reattaches to *its own* volume across reschedules. A Deployment's Pods are interchangeable and typically share nothing or use RWX for shared state, which is wrong for a database where each replica must own distinct, non-interchangeable data such as its own WAL. This per-identity PVC binding is what makes StatefulSets the correct primitive for self-hosted databases, not Deployments.
+
+**Q16: Why isn't spreading StatefulSet replicas across AZs enough for stateful high availability by itself?**
+Each replica's PVC is still a single zonal RWO volume, and topologySpreadConstraints only guarantees where the *Pods* land, not that the *data* is replicated between them. Losing the AZ holding the primary's volume still loses that replica's data if nothing has copied it elsewhere, so real HA requires the application or database layer to replicate data across the spread replicas — Postgres streaming replication, or an operator like CloudNativePG — so a failover promotes a replica that already has the data. Combine topology spread for placement with DB-level replication for actual failover; one without the other leaves a gap.
+
 ---
 
 ## 13. Best Practices

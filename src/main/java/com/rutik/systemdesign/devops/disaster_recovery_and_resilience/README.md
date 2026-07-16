@@ -410,6 +410,18 @@ RPO equals the replication lag at the moment of failure for async systems, or th
 **Q: Design a DR strategy for a multi-tenant SaaS with a 5-minute RTO and 30-second RPO requirement.**
 Warm standby in a second region: continuous async replication (Aurora cross-region replica or Global DB for sub-second lag, comfortably under 30s RPO) plus a scaled-down but live app tier behind Route53 failover with a fast (10s) health check. Pre-bake AMIs and use warm pools so scaling from minimal to full completes within the 5-minute RTO, and reserve capacity in the DR region. Validate the full failover quarterly with a game day that measures actual RTO/RPO, and store immutable cross-account backups as the logical-corruption safety net.
 
+**Q: How does DynamoDB Global Tables achieve multi-region writes, and what's the tradeoff?**
+DynamoDB Global Tables replicates a table to multiple regions in a multi-active configuration, so every region accepts writes locally with sub-second cross-region propagation and near-zero RPO. The tradeoff is conflict resolution: because two regions can write the same item concurrently, DynamoDB resolves conflicts with last-writer-wins based on a timestamp, which silently discards the losing write rather than merging it. This makes Global Tables a strong fit for workloads where per-item last-write-wins is acceptable (session state, user preferences) but a poor fit for financial ledgers or anything requiring strict conflict-free accounting.
+
+**Q: What does AWS Elastic Disaster Recovery (DRS) do differently from Aurora Global Database?**
+AWS DRS operates at the block/host level, continuously replicating an entire server's disk blocks so the whole machine — OS, application, and data — can be recovered in a target region within minutes. Aurora Global Database only replicates the managed database layer, so it says nothing about application servers, custom AMIs, or non-database state that DRS covers. Use DRS for pilot-light-style recovery of whole servers or lift-and-shift workloads without database-level replication built in, and Aurora Global Database specifically for the data tier of a cloud-native application.
+
+**Q: Is S3 Cross-Region Replication's RPO actually "near zero"?**
+No — S3 CRR is asynchronous, and even with Replication Time Control (RTC) enabled, AWS's contractual SLA only guarantees 99.99% of objects replicate within 15 minutes, not instantly. An object written to the primary bucket seconds before a regional outage may not have replicated yet, so the real RPO for S3-backed data is "up to 15 minutes for the vast majority of objects," not zero. Treat S3 CRR as a strong but bounded-lag safety net and enable Object Lock on the destination bucket so the replicated copies also survive a ransomware or fat-finger delete.
+
+**Q: What lesson did the 2020/2021 AWS us-east-1 outages teach about single-region architectures?**
+They showed that even workloads entirely built on managed AWS services are not automatically resilient to a regional outage. A control-plane or dependency failure — Kinesis, then the network control plane — cascaded into dozens of services that other teams' applications depended on transitively, and teams pinned to us-east-1 alone went fully dark regardless of how well-architected their own application was, while teams with a warm standby in us-west-2 stayed up by failing over. The takeaway is that multi-region DR is insurance against your cloud provider's regional blast radius, which no amount of single-region multi-AZ redundancy can substitute for.
+
 ---
 
 ## 13. Best Practices
