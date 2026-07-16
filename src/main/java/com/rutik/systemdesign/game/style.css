@@ -881,6 +881,14 @@ body.reader-resizing #reader { animation: none; }
 #reader .reader-nav.on { color: var(--od-text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .reader-close { background: transparent; color: var(--od-muted); font-size: 22px; line-height: 1; padding: 1px 10px; border: 1px solid var(--od-line); border-radius: 8px; }
 .reader-close:hover { color: var(--od-text); border-color: var(--accent); }
+/* Phones: the head's full control set is wider than the screen — let the row
+   scroll horizontally so Contents/immersive/close stay reachable. */
+@media (max-width: 899px) {
+  .reader-head { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .reader-head::-webkit-scrollbar { display: none; }
+  .reader-head > * { flex: 0 0 auto; }
+  .reader-title { min-width: 120px; max-width: 40vw; }
+}
 
 /* immersive reading mode (.full): distraction-free. Native fullscreen (when the
    browser grants it) + every piece of app chrome hidden. The head auto-hides and

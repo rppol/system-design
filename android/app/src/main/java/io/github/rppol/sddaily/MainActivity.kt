@@ -19,6 +19,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewAssetLoader.AssetsPathHandler
 import java.io.OutputStream
@@ -54,6 +56,19 @@ class MainActivity : ComponentActivity() {
 
         webView = WebView(this)
         setContentView(webView)
+
+        // Android 15 (targetSdk 35) draws activities edge-to-edge by default, and
+        // WebView does not surface the status/navigation bars as CSS safe-area
+        // insets — so the page's toolbars would render underneath the system bars.
+        // Pad the WebView by the system-bar + cutout insets instead; the window's
+        // midnight background shows through behind the bars.
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { v, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            WindowInsetsCompat.CONSUMED
+        }
 
         // Serve assets/www at the root of the reserved virtual host. A request to
         // https://appassets.androidplatform.net/www/game/index.html maps to the
