@@ -506,6 +506,22 @@ A: Costs come from storage (metrics retention, log volume, trace volume) and com
 
 A: This is exactly the scenario observability (vs. monitoring) is for — the aggregate metric is healthy because the affected population is a small fraction of total traffic, below the threshold that would move the aggregate noticeably. Query traces or structured logs filtered by attributes specific to that customer (user ID, tenant ID, region, feature flag) — these are high-cardinality dimensions that live in traces/logs, not metrics. This is also a strong argument for "wide event" / Honeycomb-style approaches (§7) that let you `GROUP BY` arbitrary high-cardinality fields after the fact, rather than only the dimensions someone thought to pre-aggregate into a metric.
 
+**Q13: What's the difference between the RED method and the USE method, and when do you use each?**
+
+A: RED (Rate, Errors, Duration) measures request-driven services from the outside, while USE (Utilization, Saturation, Errors) measures the resources underneath them. RED answers "is this service healthy?" — request rate, error rate, and the latency distribution — and is the first thing to instrument for any service. USE answers "which resource is the bottleneck?" by tracking utilization, saturation, and errors for CPU, connection pools, thread pools, and queues, turning a RED-detected symptom like "checkout is slow" into a resource-level cause like "the DB connection pool is at 100% utilization with a 40-deep wait queue." Instrument RED for every service and USE for every shared resource from day one, so the two together connect symptom to cause without a separate investigation step.
+
+**Q14: How do you calculate SLO burn rate, and why use two-window alerting instead of a single threshold?**
+
+A: Burn rate is the current error rate divided by (1 minus the SLO), showing how many times faster than the allowed pace you are consuming the error budget. At a 99.9% SLO (0.1% error budget), a 10% current error rate gives a burn rate of 100x, meaning the entire 28-day budget would be consumed in about 24 minutes if that rate continued — a signal to page immediately. Two-window alerting requires both a short window (5 minutes) and a long window (1 hour) to independently confirm the same burn-rate breach before firing, which prevents a single brief blip that self-resolves within the short window from paging anyone. This two-window confirmation is what keeps burn-rate alerting fast enough to catch real incidents quickly while still avoiding the noise a naive single-threshold check would generate.
+
+**Q15: Why should application logs be structured (JSON) instead of free text?**
+
+A: Structured logs are queryable like a database, letting you filter with something like `WHERE level='ERROR' AND service='inventory-service'` instead of grep-ing free text across files. Free-text logs require full-text search or regex matching that scales poorly and misses fields that were not anticipated when the log line was written, whereas a JSON log line's fields are all queryable and filterable without parsing tricks. Critically, structured logs are joinable with traces and metrics via a shared `trace_id` field, which is what makes it possible to jump from a metric anomaly to the exact log line that explains it. Emit every log line as a structured object from day one, since retrofitting structure onto years of free-text logs is a much larger effort than starting with it.
+
+**Q16: What's the architectural tradeoff between Loki and ELK/Elasticsearch for log storage at scale?**
+
+A: Loki indexes only a small set of labels and stores log content compressed and unindexed, while Elasticsearch (ELK) fully indexes every field of every log line for rich full-text search. This makes Loki dramatically cheaper to run at high log volume, since it avoids building and storing a full-text search index over terabytes of daily log data, but query flexibility suffers — a Loki query must first narrow by label before it can grep the remaining log content, whereas Elasticsearch can search any field directly. Elasticsearch remains the better choice when engineers need to search arbitrary text across unindexed fields quickly, such as searching for a specific error message string with no known service or time range. Choose Loki when log volume is the dominant cost driver and queries are typically scoped by trace ID or a few known labels; choose Elasticsearch when ad hoc full-text search flexibility matters more than storage cost.
+
 ---
 
 ## 13. Best Practices

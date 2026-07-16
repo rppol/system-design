@@ -577,6 +577,22 @@ A: Two different flows, sharing the same underlying IdP/OAuth2 server: the web f
 
 A: Envelope encryption uses a Key Management Service (KMS) to generate a per-object Data Encryption Key (DEK); the data is encrypted locally with the DEK (fast), and the DEK itself is encrypted by a Customer Master Key (CMK) that never leaves the KMS. Only the small encrypted DEK is stored alongside the data. This means rotating the CMK requires re-encrypting only the (small) DEKs, not the (potentially petabytes of) underlying data, and every decryption is an auditable KMS API call — giving centralized "who decrypted what, when" logging without re-architecting storage.
 
+**Q13: What is the principle of least privilege, and why scope a service account narrowly even if "it would never misuse broader permissions"?**
+
+A: Least privilege means every identity gets only the minimum permissions needed for the minimum time needed, never more just because it seems convenient or unlikely to be misused. A service that only reads from a queue should have an IAM role that cannot write or delete, because the question that matters is not "would this service ever do that" but "what happens if this service's credentials are ever stolen" — the blast radius of a compromise is bounded by what the credentials CAN do, not by what the code currently does. A read-only role that gets compromised can only leak data; a role with unnecessary write access that gets compromised can also destroy it. Apply least privilege to every identity — human users, service accounts, and CI/CD pipelines alike — and treat any permission broader than what is actively used as a liability, not a convenience.
+
+**Q14: What is a salt in password hashing, and what attack does it specifically defend against?**
+
+A: A salt is a random value generated per password and stored alongside its hash, ensuring that two users with the identical password produce completely different hash outputs. Without a salt, an attacker can precompute a "rainbow table" — a lookup table mapping common passwords to their hash values — once, and then instantly reverse any stolen hash that matches an entry in the table, across every system using that same hashing scheme. With a unique salt per password, the attacker would need a separate precomputed table for every possible salt value, which makes precomputation practically useless and forces brute-forcing each stolen hash individually. Always generate a fresh random salt per password and store it alongside the hash — bcrypt, scrypt, and Argon2 all handle this automatically as part of their hash output format.
+
+**Q15: What are the security weaknesses of static, long-lived API keys compared to short-lived tokens?**
+
+A: A static API key is coarse-grained and long-lived, so a single leaked key grants full access until manually rotated, unlike a token that self-expires in minutes. Because the key does not change, accidentally logging it — a common mistake when keys are passed as URL query parameters — permanently compromises it until rotation, and rotation itself is often disruptive because every client using the key must be updated in coordination. API keys also usually represent "one key equals full access" rather than a scoped, auditable set of permissions tied to a specific identity and expiry, making it harder to answer "who did this" after an incident. Reserve static API keys for service-to-service or developer-API access with proper scoping (like Stripe's `sk_live_`/`sk_test_` prefixed, permission-scoped keys), and never use them as a substitute for proper user session or token management.
+
+**Q16: What is refresh token rotation, and how does reuse detection signal a compromised token?**
+
+A: Refresh token rotation issues a brand-new refresh token every time the old one is used to get a new access token, immediately invalidating the one that was just used. If an attacker has stolen a refresh token and uses it, and the legitimate user's device later tries to use that same now-invalidated token, the server detects two uses of a token that should only ever be used once and treats this as a compromise signal. On detecting reuse, the server revokes the entire token family — every refresh token descended from that original login — forcing full re-authentication rather than just blocking the one stolen token. This turns a stolen refresh token from a silent, long-lived liability into a detectable event, closing the gap that a non-rotating refresh token would leave open indefinitely.
+
 ---
 
 ## 13. Best Practices

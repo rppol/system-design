@@ -430,6 +430,18 @@ Use `@WebMvcTest` with `@WithMockUser(roles = "ADMIN")` or `@WithMockUser(userna
 **Q: What is the difference between @Mock and @MockBean?**
 `@Mock` (Mockito) creates a mock object outside the Spring context. It works in unit tests with `@ExtendWith(MockitoExtension.class)`. The mock is injected into the class under test via `@InjectMocks`. `@MockBean` (Spring Boot Test) creates a Mockito mock and registers it as a Spring bean in the application context, replacing any existing bean of that type. Use `@MockBean` in `@WebMvcTest` and `@SpringBootTest` to replace real beans (service, repository) with mocks without loading the entire application graph. `@MockBean` causes Spring to restart its context (unless the same mock configuration is cached), so use it sparingly.
 
+**Q: What is the difference between a Fake and a Stub in the test doubles taxonomy?**
+A Fake is a working implementation with shortcuts, while a Stub only returns pre-programmed answers to specific calls. An in-memory H2 database standing in for PostgreSQL is a Fake — it executes real SQL semantics, just without disk persistence. A Stub configured with `when(repo.findById(1)).thenReturn(order)` has no real logic behind it; it simply returns the value it was told to return for that one call. Choose a Fake when the test needs realistic behavior across many operations; choose a Stub when only a single canned response is needed.
+
+**Q: Why must Testcontainers be declared as static @Container fields rather than instance fields?**
+A static @Container field creates one container per test class instead of one per test method, avoiding minutes of redundant startup and teardown. JUnit 5 instantiates a new test class instance for every test method by default, so an instance-level container field would start and stop a fresh Docker container for each of the class's tests. A class with 20 test methods and an instance-level PostgreSQL container adds roughly 10 minutes of pure container churn to the suite. Declare shared infrastructure containers as static so they start once and are reused across all methods in the class.
+
+**Q: What are Google's test size annotations and what do they enforce?**
+Google's test size annotations classify tests as small, medium, or large based on the I/O and time they are allowed to use. Small tests permit no network or filesystem I/O and no sleeps, and must complete in under 60 seconds; medium tests may talk to localhost services like a database and must finish within 5 minutes; large tests may perform any I/O and take any amount of time. Enforcing these sizes at the build system level keeps the fast small-test suite runnable on every commit while still allowing slower integration and end-to-end coverage. Tag tests by size so CI can run small tests on every push and reserve medium and large tests for a separate pipeline stage.
+
+**Q: How does WireMock differ from Testcontainers when testing an external HTTP dependency?**
+WireMock stubs HTTP responses in-process so tests never make a real network call, while Testcontainers spins up an actual instance of the real dependency in Docker. Use WireMock to simulate a third-party API you do not control — a payment gateway or a partner's REST service — by configuring canned JSON responses and fault scenarios like timeouts or 500s. Use Testcontainers when the dependency itself is what you own or need production-fidelity behavior for, such as PostgreSQL query semantics or Kafka consumer group rebalancing. Reach for WireMock when the goal is isolating your service from an external system's availability, not verifying that system's own behavior.
+
 ---
 
 ## 13. Best Practices

@@ -418,6 +418,12 @@ Detection: async-profiler `-e alloc` shows top allocation sites. JFR's jdk.Objec
 **Q: What production signals indicate a need for profiling?**
 High CPU utilization without high throughput (CPU-intensive processing). Increasing heap usage over time (memory leak). GC throughput < 95% (too much time in GC). Latency p99 >> p50 (long-tail latency from GC pauses, lock contention, or occasional slow I/O). Thread pool rejection or queue depth growing (thread pool exhaustion or slow tasks). JVM OOM errors in logs. Service response time degrading after running for hours (heap pressure, leak, fragmentation).
 
+**Q: How do you diagnose off-heap memory leaks that don't show up in a heap dump?**
+Off-heap leaks live outside the JVM heap entirely, so a heap dump shows normal usage while the process's system RSS keeps growing. Direct ByteBuffers (NIO, Netty), JNI-allocated native memory, and memory-mapped files are the usual sources, and none of them appear in `jmap` or Eclipse MAT because those tools only inspect the managed heap. Use JFR's `jdk.DirectBufferStatistics` event to track direct buffer allocation over time, or inspect `/proc/<pid>/smaps` on Linux to see the process's actual memory map segment by segment. A service whose heap metrics look flat but whose container gets OOM-killed by the kernel is the classic symptom — check off-heap sources before assuming the heap dump tool missed something.
+
+**Q: How do you choose between G1, ZGC, and Shenandoah for a production service?**
+Choose G1 as the default for most services, and move to ZGC or Shenandoah when the requirement is sub-millisecond pauses regardless of heap size. G1 targets a configurable pause goal (default 200ms), which scales acceptably for typical heap sizes but grows less predictable as heaps reach tens of gigabytes. ZGC (stable since JDK 15) and Shenandoah (production-ready since JDK 17) both hold pause times under 1ms independent of heap size by doing most collection work concurrently with application threads, at the cost of somewhat lower throughput and higher CPU overhead. ZGC scales especially well on very large heaps because, unlike G1, its pause time does not grow with heap size — pick it when p99 latency requirements are tighter than G1's pause target can reliably hit.
+
 ---
 
 ## 13. Best Practices
