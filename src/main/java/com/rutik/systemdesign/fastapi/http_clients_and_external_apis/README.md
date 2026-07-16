@@ -915,13 +915,16 @@ persistent queue (Redis, Kafka) and process with a worker that acknowledges only
 This survives process restarts.
 
 **Q13: Why does `httpx.Auth` require both a sync `auth_flow` and an `async_auth_flow` generator method?**
-`httpx.AsyncClient` and the sync `httpx.Client` share the same `Auth` interface, and Python has no
-single generator syntax that works correctly for both blocking and async token refresh. `auth_flow`
-is a plain generator used by the sync client, while `async_auth_flow` is an async generator that
-can `await` a coroutine (such as `self._refresh()`) before yielding the authenticated request. If
-only `auth_flow` is defined, an `AsyncClient` falls back to it and any `await` inside token refresh
-logic silently never runs. Implement `async_auth_flow` explicitly whenever the client is async and
-the refresh call itself is a network request.
+httpx's sync `auth_flow` cannot express an async token refresh: an `await` there is a
+`SyntaxError`, not a silently-skipped no-op, since Python forbids `await` in a non-async
+generator. `httpx.AsyncClient` and the sync `httpx.Client` share the same `Auth`
+interface; when only `auth_flow` is defined, `AsyncClient` falls back to a default
+`async_auth_flow` that just drives that sync generator, so any refresh logic placed there
+is limited to synchronous, blocking work. `async_auth_flow` is the async generator
+counterpart — the only place `await self._refresh()` is legal — and it can await a
+coroutine before yielding the authenticated request. Implement `async_auth_flow`
+explicitly whenever the client is async and the token refresh itself is a network call
+that needs to be awaited.
 
 **Q14: Why does the webhook fix reject events whose timestamp is more than 300 seconds old, even though the HMAC signature is valid?**
 A valid signature alone only proves the payload was not tampered with, not that it is being seen

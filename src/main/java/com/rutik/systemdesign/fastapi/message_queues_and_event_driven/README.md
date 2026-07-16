@@ -655,14 +655,18 @@ place to see and resume a stuck workflow. Both trade the outbox pattern's strong
 consistency for eventual consistency, so reserve either for workflows spanning multiple services
 that a single outbox transaction cannot cover.
 
-**Q16: Why does the lifespan shutdown handler call `await consumer_task` immediately after `consumer_task.cancel()` instead of just cancelling it?**
-Calling `.cancel()` only schedules a `CancelledError` to be raised inside the task on its next
-await point; it does not block until the task actually stops. Without `await consumer_task`,
-`lifespan` could return and let the ASGI server tear down the event loop before the consumer's
-`finally: await consumer.stop()` block has run, leaving the Kafka session unclosed and logging
-a `Task was destroyed but it is pending` warning. Awaiting the cancelled task blocks shutdown
-until the `CancelledError` propagates and the `finally` clause completes, guaranteeing a clean
-disconnect before the process exits.
+**Q16: How does Kafka detect an ungracefully killed consumer, and what determines how long the resulting rebalance stall lasts?**
+Kafka only learns a consumer is gone when its heartbeats stop arriving within
+`session.timeout.ms` (default 10 s), since a hard kill sends no LeaveGroup request to
+trigger an immediate rebalance. A separate setting, `max.poll.interval.ms` (default 5
+min), guards a different failure: a consumer that is still heartbeating on a background
+thread but whose processing loop never returns to call `poll()` again is evicted once
+that interval elapses, even though the broker still sees it as alive. Every partition
+the dead or stuck consumer owned sits unconsumed until the group finishes rebalancing,
+so the stall lasts up to `session.timeout.ms` for a crash and up to
+`max.poll.interval.ms` for a poll-starved handler. Lower both for latency-sensitive
+pipelines, but keep enough headroom above your worst-case GC pause or batch-processing
+time to avoid false-positive evictions that cause needless rebalance churn.
 
 ---
 
