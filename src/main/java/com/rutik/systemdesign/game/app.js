@@ -22,6 +22,7 @@ const SECTION_LABELS = {
   cs_fundamentals: "CS Fundamentals", cuda: "CUDA / GPGPU", database: "Databases", devops: "DevOps & Cloud",
   hld: "High-Level Design", java: "Java", lld: "Low-Level Design",
   llm: "LLM Engineering", ml: "Machine Learning", python: "Python", fastapi: "FastAPI", spring: "Spring",
+  technologies: "Technologies",
 };
 
 // Per-section visual identity for the reader: a One-Dark-band accent (readable on
@@ -43,6 +44,7 @@ const SECTION_IDENTITY = {
   cuda:            { accent: "#9ece6a", glyph: "▦" },
   cs_fundamentals: { accent: "#f2917e", glyph: "∴" },
   book:            { accent: "#c0a36e", glyph: "¶" },
+  technologies:    { accent: "#ff7eb6", glyph: "⌗" },
 };
 const sectionIdentity = (path) => SECTION_IDENTITY[(path || "").split("/")[0]] || null;
 
@@ -172,6 +174,9 @@ const STUDY_ORDER = {
     "spring/spring_security_architecture","spring/spring_security_jwt_oauth","spring/spring_session",
     "spring/spring_cloud_config","spring/spring_cloud_patterns","spring/spring_messaging","spring/spring_websocket_stomp","spring/spring_batch","spring/spring_events_and_scheduling","spring/spring_ai","spring/spring_integration",
     "spring/spring_testing","spring/spring_performance","spring/observability_and_tracing","spring/spring_native_graalvm",
+  ],
+  technologies: [
+    "technologies/apache_airflow","technologies/nvidia_triton_inference_server",
   ],
 };
 

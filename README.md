@@ -1,6 +1,6 @@
 # System Design Master Repository
 
-A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python**, **FastAPI**, **Backend Engineering**, **Database Engineering**, **DevOps / Cloud / Platform Engineering**, and **CS Fundamentals** — with practical examples, real-world scenarios, and interview preparation material.
+A comprehensive, one-stop repository for learning **Low-Level Design (LLD)**, **High-Level Design (HLD)**, **Large Language Models (LLM)**, **Machine Learning (ML)**, **Java**, **Spring**, **Python**, **FastAPI**, **Backend Engineering**, **Database Engineering**, **DevOps / Cloud / Platform Engineering**, **Technologies (per-tool deep dives)**, and **CS Fundamentals** — with practical examples, real-world scenarios, and interview preparation material.
 
 ---
 
@@ -996,6 +996,19 @@ The language-agnostic computer-science spine: 24 modules across 6 phases + 6 int
 | 25 pattern playbooks | Two pointers, sliding window, fast/slow, prefix sum, hashing, cyclic sort, monotonic stack, LL reversal, merge intervals, binary search, top-K, k-way merge, two heaps, tree BFS/DFS, graph traversal, topo sort, union-find, trie, shortest path, backtracking, DP, greedy, bit manipulation, matrix traversal |
 
 See the [CS Fundamentals Master Index](src/main/java/com/rutik/systemdesign/cs_fundamentals/README.md) for the full 6-phase learning path, scope & non-overlap boundary, cross-reference map, and build-status tracker.
+
+---
+
+### Technologies — Per-Technology Deep Dives
+
+A canonical, senior-engineer-level module per major infrastructure technology — architecture, internals with real configs, operations, and when NOT to reach for it — cross-linked back into the concept sections (`backend/`, `llm/`, `ml/`, `devops/`, `cuda/`) that use each technology as a worked example. A technology earns a module here only when no existing section already owns it (Kafka stays in `backend/kafka_deep_dive`; vLLM stays in `llm/vllm_deep_dive`).
+
+| Module | Category | Key Topics |
+|--------|----------|-----------|
+| [apache_airflow](src/main/java/com/rutik/systemdesign/technologies/apache_airflow/README.md) | Workflow Orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler |
+| [nvidia_triton_inference_server](src/main/java/com/rutik/systemdesign/technologies/nvidia_triton_inference_server/README.md) | GPU Model Serving | Model repository + `config.pbtxt`, backends, dynamic batching, ensembles/BLS, `perf_analyzer` |
+
+See the [Technologies Master Index](src/main/java/com/rutik/systemdesign/technologies/README.md) for the learning path, Knowledge-Question Map, and Study Plan.
 
 ---
 

@@ -73,8 +73,12 @@ The `game/` directory is an application, not study content — see
   Paths" list (same hand-maintained discipline as `STUDY_ORDER`). Sections absent
   from `STUDY_PATHS` show no toggle (Full only). Choice persists in `sd_study_path`
   (JSON map keyed by section). **All game sections have interview paths** — every
-  section except `book`. `book` IS a bank section (its chapter Q&As extract into
-  the MCQ bank like any module) and has a `STUDY_ORDER` entry pinning chapter order
-  00 -> 12, but no `interview` array — it is Full-only, and the toggle auto-hides
-  when a section is absent from `STUDY_PATHS`. Each interview path is added the
-  same way (a subset array here + a README "Learning Paths" block).
+  section except `book` and `technologies`. Both ARE bank sections (their Q&As
+  extract into the MCQ bank like any module) and both have a `STUDY_ORDER` entry
+  pinning module/chapter order, but neither has an `interview` array — both are
+  Full-only, and the toggle auto-hides when a section is absent from `STUDY_PATHS`.
+  `book` is Full-only because a chapter-by-chapter summary has no interview subset to
+  cut; `technologies` is Full-only because it is too small (2 modules) for a
+  meaningful cut — it gains an interview array once it reaches >= 4 modules (see
+  `technologies/CLAUDE.md`). Each interview path is added the same way (a subset
+  array here + a README "Learning Paths" block).

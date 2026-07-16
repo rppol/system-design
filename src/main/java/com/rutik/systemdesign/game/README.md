@@ -1,7 +1,7 @@
 # Game — LORA (Learn Often, Recall Always), by Rutik
 
 A browser-based daily learning game built **from this repo's own content**. It turns
-the ~8,800 interview Q&As scattered across all 14 sections (every module README **and
+the ~8,800 interview Q&As scattered across all 15 sections (every module README **and
 its deep-dive sub-files**; case studies excluded) into a one-click, 5-minute
 multiple-choice blitz with streaks, XP, spaced repetition, per-section mastery, and an
 in-app coach that curates the day's topic and reports weekly.
