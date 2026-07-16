@@ -1019,8 +1019,11 @@ In-depth, chapter-by-chapter summaries of foundational engineering books, writte
 | Book | Author | Chapters | Folder |
 |------|--------|----------|--------|
 | [Designing Data-Intensive Applications](src/main/java/com/rutik/systemdesign/book/designing_data_intensive_applications/README.md) | Martin Kleppmann | 12 (+ preface) | `book/designing_data_intensive_applications/` |
+| [System Design Interview — Vol 1](src/main/java/com/rutik/systemdesign/book/system_design_interview_vol_1/README.md) | Alex Xu | 16 | `book/system_design_interview_vol_1/` |
+| [System Design Interview — Vol 2](src/main/java/com/rutik/systemdesign/book/system_design_interview_vol_2/README.md) | Alex Xu & Sahn Lam | 13 | `book/system_design_interview_vol_2/` |
+| [Designing Machine Learning Systems](src/main/java/com/rutik/systemdesign/book/designing_machine_learning_systems/README.md) | Chip Huyen | 11 | `book/designing_machine_learning_systems/` |
 
-Each chapter covers the book's sections in depth with ASCII diagrams, a key-concept glossary, tradeoff tables, production pitfalls, and 15+ interview Q&As. See the [Book Section Index](src/main/java/com/rutik/systemdesign/book/README.md) and the [DDIA Master Index](src/main/java/com/rutik/systemdesign/book/designing_data_intensive_applications/README.md) for the part map, chapter table, and recommended reading paths.
+Each chapter covers the book's sections in depth with Mermaid/ASCII diagrams, a key-concept glossary, tradeoff tables, production pitfalls, and 15+ interview Q&As. See the [Book Section Index](src/main/java/com/rutik/systemdesign/book/README.md) for the per-book master indexes (part maps, chapter tables, and recommended reading paths).
 
 ---
 

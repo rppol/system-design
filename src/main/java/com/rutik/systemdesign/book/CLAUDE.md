@@ -13,6 +13,9 @@ a sub-folder containing a `README.md` that follows the book's own section order.
 | Book | Folder | Chapters |
 |------|--------|----------|
 | Designing Data-Intensive Applications (Kleppmann) | `designing_data_intensive_applications/` | preface + Ch 1–12 |
+| System Design Interview Vol 1 (Xu) | `system_design_interview_vol_1/` | Ch 1–16 |
+| System Design Interview Vol 2 (Xu & Lam) | `system_design_interview_vol_2/` | Ch 1–13 |
+| Designing Machine Learning Systems (Huyen) | `designing_machine_learning_systems/` | Ch 1–11 |
 
 Per-chapter build status lives in each book's `README.md` **Build Manifest** table.
 
@@ -55,7 +58,10 @@ completeness guarantee: a missing topic is structurally visible.
 - No emojis (use `✓`/`✗`, not emoji check marks)
 - **≥15 Q&As per chapter**, ordered by interview frequency (gotchas/traps first)
 - Tables in Markdown pipe syntax; `---` rules between major sections
-- Target depth: ~700–1200 lines per chapter ("comprehensive — don't miss anything")
+- Depth: **no line ceiling in `book/`** (owner-set 2026-07-16) — a chapter runs as long as
+  full coverage requires ("comprehensive — don't miss anything"). Practical floor ~700
+  lines for design/technical chapters; short-form chapters (e.g. resource-list closers
+  like SDI-1 Ch 16) may be 400–600 lines but must still carry ≥15 Q&As
 
 ---
 

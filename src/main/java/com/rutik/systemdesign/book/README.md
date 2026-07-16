@@ -33,10 +33,15 @@ former.
 
 | Book | Author | Folder | Chapters | Status |
 |------|--------|--------|----------|--------|
-| Designing Data-Intensive Applications | Martin Kleppmann | [designing_data_intensive_applications/](designing_data_intensive_applications/README.md) | 12 (+ preface) | In progress |
+| Designing Data-Intensive Applications | Martin Kleppmann | [designing_data_intensive_applications/](designing_data_intensive_applications/README.md) | 12 (+ preface) | Complete |
+| System Design Interview — Vol 1 | Alex Xu | [system_design_interview_vol_1/](system_design_interview_vol_1/README.md) | 16 | Complete |
+| System Design Interview — Vol 2 | Alex Xu & Sahn Lam | [system_design_interview_vol_2/](system_design_interview_vol_2/README.md) | 13 | In progress |
+| Designing Machine Learning Systems | Chip Huyen | [designing_machine_learning_systems/](designing_machine_learning_systems/README.md) | 11 | In progress |
 
-More books may be added over time (e.g. *Database Internals*, *Streaming Systems*). Each
-new book follows the same folder-per-chapter convention — see [CLAUDE.md](CLAUDE.md).
+The two *System Design Interview* volumes are one series split across two folders (each
+volume numbers its chapters independently); together with DDIA and DMLS the section covers
+three books. More may be added over time (e.g. *Database Internals*, *Streaming Systems*).
+Each new book follows the same folder-per-chapter convention — see [CLAUDE.md](CLAUDE.md).
 
 ---
 
@@ -49,9 +54,22 @@ exists to answer), so you always know why you're reading it.
 
 ---
 
-## Interview-Specific Reading Path (planned)
+## Interview-Priority Reading Order
 
-Unlike the module sections, `book/` is chapter summaries and is **not** wired into the learning game's Study toggle (no `STUDY_ORDER` entry, so no Full/Interview switch). A prose **interview-priority reading order** is **planned** instead: for *Designing Data-Intensive Applications*, prioritize the chapters that dominate system-design interviews — **Replication**, **Partitioning**, **Transactions**, **Consistency & Consensus**, and **The Trouble with Distributed Systems** — over a linear front-to-back read. The remaining chapters (encoding, batch/stream processing, the future of data systems) are valuable context; read them once the five above are solid.
+`book/` IS wired into the learning game: every chapter folder is a Study topic, ordered by
+the `STUDY_ORDER.book` array in `game/app.js` (DDIA → SDI Vol 1 → SDI Vol 2 → DMLS). The
+section is **Full-only** — it has no `STUDY_PATHS` interview subset, because a
+chapter-by-chapter book summary has no meaningful "interview cut"; instead, use these
+prose priorities:
+
+- **DDIA:** prioritize **Replication**, **Partitioning**, **Transactions**,
+  **Consistency & Consensus**, and **The Trouble with Distributed Systems** over a linear
+  front-to-back read; the remaining chapters are context.
+- **SDI Vol 1:** Ch 3 (framework) first, then Ch 4–6 (rate limiter, consistent hashing,
+  key-value store) — the primitives every other design question borrows.
+- **SDI Vol 2:** pick the track matching the role — geo (Ch 1–3), data infra (Ch 4–6, 9),
+  or fintech (Ch 7, 11–13).
+- **DMLS:** Ch 2, 4, 5, 7, 8, 9 map 1:1 onto ML system design interview rounds.
 
 ---
 
