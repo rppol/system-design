@@ -23,7 +23,7 @@ AWS is the default cloud in worked examples; GCP/Azure appear in comparison tabl
 
 **Q&A floor:** 15 per module (root CLAUDE.md hard floor). Deep modules aim higher (18+): kubernetes_architecture, kubernetes_networking, kubernetes_security, infrastructure_as_code_terraform, observability_metrics_prometheus, sre_principles_and_slos, ml_platform_and_gpu_infrastructure
 
-Backfill status (2026-07-15): all devops modules at or below 10 Q&As were raised to 16, and every interview-path module now meets the floor; 9 devops modules (non-interview-path) remain at 11-14 as deferred backlog (43 repo-wide).
+Backfill status (2026-07-16): the floor backlog is fully cleared — every module repo-wide now meets the 15-question floor (all former 11-14 modules raised to 16 across backend, database, devops, fastapi, hld, and python).
 
 ---
 
