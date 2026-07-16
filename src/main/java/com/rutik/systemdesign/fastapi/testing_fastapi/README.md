@@ -705,6 +705,15 @@ Run `pytest --cov=app --cov-report=term-missing --cov-fail-under=80`. Target 80â
 **Q13: How do you handle `pytest-xdist` parallel execution with the rollback strategy?**
 Each worker process gets its own database connection and its own savepoint. Because the rollback strategy never commits to shared tables, workers do not interfere. The only risk is if two workers use a sequence that generates the same primary key â€” avoid hard-coded IDs in factories; use `db.flush()` to let the sequence assign PKs. For the SQLite in-memory engine use `StaticPool` with a single connection; for PostgreSQL use a per-worker schema prefix or a separate test database per worker (`--dist=loadscope` with schema isolation).
 
+**Q14: What breaks when a `dependency_overrides` entry is set in a fixture but never cleared in teardown?**
+An uncleared override stays on the shared `FastAPI` app object after the test that set it finishes, so any later test that builds a fresh `TestClient` from the same `app` instance unknowingly inherits it. A second test with no `client` fixture at all can end up hitting the first test's already-closed `db_session`, producing a confusing `DetachedInstanceError` that has nothing to do with the second test's own code. Always pair `app.dependency_overrides[dep] = ...` with `app.dependency_overrides.clear()` in a `yield`-based fixture's teardown so cleanup runs even when the test raises.
+
+**Q15: Why does the SQLite in-memory engine fixture pass `poolclass=StaticPool` instead of using the default connection pool?**
+`sqlite+aiosqlite:///:memory:` opens a brand-new, empty database on every new connection, so SQLAlchemy's default pool would hand different async tasks completely separate, unrelated databases. `StaticPool` forces every checkout to reuse the exact same underlying connection for the lifetime of the engine, so the tables created once at fixture setup remain visible to every session used across the test. Always pair an in-memory SQLite engine with `StaticPool` and `connect_args={"check_same_thread": False}` to keep the schema and data consistent across async test code.
+
+**Q16: How would you use `freezegun` to test that an expired JWT is correctly rejected?**
+Wrap the token-creation and the request-under-test in separate `freeze_time` contexts so the clock the application reads is deterministic rather than depending on real wall-clock timing. Create the token while frozen at a known issue time, then re-enter `with freeze_time(issue_time + timedelta(minutes=31)):` around the request call for a token whose `exp` claim was set to a 30-minute lifetime, forcing the expiry check to evaluate against a time strictly past the boundary. This avoids the flakiness of `time.sleep(1860)` and makes the boundary condition (`now == exp` vs `now > exp`) exactly reproducible on every CI run.
+
 ---
 
 ## 13. Best Practices

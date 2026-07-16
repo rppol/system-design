@@ -639,6 +639,31 @@ Producers register a schema version before first publish; the registry assigns a
 **Q13: How do you safely shut down a Kafka consumer in an asyncio application?**
 Cancel the consumer asyncio task on `SIGTERM`, catch `CancelledError`, and call `await consumer.stop()` in the finally block. `consumer.stop()` triggers a final offset commit (if using auto-commit) and sends a LeaveGroup request so the broker can rebalance the partition to another consumer immediately rather than waiting for the session timeout (default 10 s). For manual commits, commit before calling `stop()`.
 
+**Q14: Why can Kafka consumers replay historical events while RabbitMQ queues cannot?**
+Kafka retains messages in an append-only log for a configured time or size window regardless of
+whether any consumer has read them. A consumer group can reset its offset and re-read anything
+still inside that window, while RabbitMQ deletes a message the moment every bound consumer has
+acknowledged it, making it gone permanently. This makes Kafka the natural fit for event sourcing
+or reprocessing after a bug fix, while RabbitMQ requires an explicit archive if replay is needed.
+
+**Q15: How does saga choreography compare to saga orchestration for multi-service workflows?**
+Choreography has each service publish and react to events with no central coordinator, keeping
+coupling low but leaving workflow state implicit and recovery dependent on compensating
+transactions written per service. Orchestration introduces a central coordinator that explicitly
+calls each step and tracks workflow state, trading higher implementation complexity for a single
+place to see and resume a stuck workflow. Both trade the outbox pattern's strong single-database
+consistency for eventual consistency, so reserve either for workflows spanning multiple services
+that a single outbox transaction cannot cover.
+
+**Q16: Why does the lifespan shutdown handler call `await consumer_task` immediately after `consumer_task.cancel()` instead of just cancelling it?**
+Calling `.cancel()` only schedules a `CancelledError` to be raised inside the task on its next
+await point; it does not block until the task actually stops. Without `await consumer_task`,
+`lifespan` could return and let the ASGI server tear down the event loop before the consumer's
+`finally: await consumer.stop()` block has run, leaving the Kafka session unclosed and logging
+a `Task was destroyed but it is pending` warning. Awaiting the cancelled task blocks shutdown
+until the `CancelledError` propagates and the `finally` clause completes, guaranteeing a clean
+disconnect before the process exits.
+
 ---
 
 ## 13. Best Practices

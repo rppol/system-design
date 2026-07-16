@@ -886,6 +886,21 @@ the header. So `x_request_id: Annotated[str | None, Header()] = None` looks up `
 in the request headers. You can disable this with `convert_underscores=False` in `Header()`.
 This is a common source of `None` bugs when developers forget the conversion rule.
 
+**Q15: What happens when an `APIRouter` prefix and a route path both declare a path parameter with the same name?**
+FastAPI raises a startup error because the resolved path would contain the same parameter name
+twice, and it cannot determine which occurrence should populate the handler's argument. A router
+mounted with `prefix="/orgs/{org_id}"` combined with a route decorated `@router.get("/members/{org_id}")`
+resolves to `/orgs/{org_id}/members/{org_id}`, an ambiguous duplicate. Give the nested resource a
+distinct parameter name, such as `{member_id}`, so both values are extractable independently.
+
+**Q16: What is the difference between returning `RedirectResponse(url=..., status_code=301)` and the default `307`?**
+`301 Moved Permanently` tells clients and caches the resource has moved for good, so browsers and
+CDNs may cache the redirect and, historically, some clients silently rewrite a `POST` into a `GET`
+on the follow-up request. `307 Temporary Redirect` (Starlette's default) explicitly preserves the
+original HTTP method and body on the follow-up request and is never cached as permanent, making it
+the safer default for redirects following a `POST` or `PUT`. Use `301` only for genuinely permanent
+resource moves such as the legacy-to-new-path migration in this module's example.
+
 ---
 
 ## 13. Best Practices

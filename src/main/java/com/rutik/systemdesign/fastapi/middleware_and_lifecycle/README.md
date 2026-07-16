@@ -911,6 +911,37 @@ or task volume exceeds what a single worker can handle. `BackgroundTasks` in mid
 anti-pattern — middleware's `call_next` must complete before the response is sent, so tasks
 registered there block the response.
 
+**Q13: Why does reading `request.body()` inside `BaseHTTPMiddleware.dispatch()` cause the route handler to receive an empty body?**
+`request.body()` consumes the ASGI `receive` stream, which is a one-shot async generator that
+cannot be rewound. Once middleware awaits it to inspect or log the bytes, the underlying
+`receive` callable has nothing left to yield, so the route handler's own `await request.body()`
+call returns empty. The fix is to cache the bytes and monkey-patch `request._receive` with a
+callable that replays the cached body, letting downstream code read the same content again.
+
+**Q14: What does `GZipMiddleware`'s `minimum_size` threshold control, and why should it be skipped for SSE and WebSocket routes?**
+`minimum_size` sets the smallest response body, in bytes, that `GZipMiddleware` will compress.
+Bodies below the threshold (default 500 bytes) pass through uncompressed because the compression
+overhead outweighs the savings on small payloads, while a JSON response over 1 KB typically saves
+70-80% of its wire size. Skip GZip entirely for SSE and WebSocket connections because those
+protocols stream events incrementally and gzip's block-based compression would buffer and delay
+delivery, defeating the purpose of a live stream.
+
+**Q15: What does `TrustedHostMiddleware` protect against, and what happens on a `Host` header mismatch?**
+`TrustedHostMiddleware` validates the incoming `Host` header against an explicit allowlist and
+rejects any request whose header does not match. This prevents HTTP Host header injection attacks
+that exploit apps generating absolute URLs — password reset links, redirect targets — from the
+unvalidated `Host` value, and a spoofed header receives a `400 Bad Request` before it reaches any
+route handler or middleware below it in the stack. Always configure an explicit `allowed_hosts`
+list in production rather than the permissive `["*"]` default.
+
+**Q16: What should happen if the code before `yield` in a `lifespan` context manager raises an exception?**
+The exception propagates out of the `lifespan` context manager and Uvicorn aborts startup
+entirely — the ASGI server never begins accepting connections and the process exits with a
+non-zero code. This is the intended fail-fast behavior: a service that cannot reach its
+database or Redis at startup should crash immediately rather than accept traffic it cannot
+serve, which is exactly why connection-pool creation belongs before the `yield` rather than
+being deferred to first use inside a route handler.
+
 ---
 
 ## 13. Best Practices

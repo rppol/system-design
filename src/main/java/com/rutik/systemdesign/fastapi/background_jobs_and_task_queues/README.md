@@ -929,6 +929,37 @@ duration (e.g., 120 seconds), and configure `preStop` hooks to send `SIGTERM` be
 pod is killed. Never send `SIGKILL` to workers directly — it bypasses graceful shutdown
 and can leave tasks in an inconsistent state (partially processed, already acked).
 
+**Q13: What is the difference between at-most-once, at-least-once, and exactly-once task delivery?**
+At-most-once runs a task zero or one times by acking before processing, so a crash silently
+drops it; at-least-once runs it one or more times by acking after processing, so a crash
+causes a retry that may duplicate work. True exactly-once delivery is impossible without
+distributed transactions across the broker and every side effect the task touches. Production
+systems approximate it as idempotent at-least-once — accept the possibility of redelivery and
+make replays a no-op with an idempotency key.
+
+**Q14: Why does blocking CPU work inside an ARQ task handler stall unrelated jobs on the same worker?**
+An ARQ worker runs one `asyncio` event loop, so a synchronous CPU-bound call like PIL image
+resizing blocks that loop for its entire duration, freezing every other concurrent coroutine
+on the same worker process. A 50-200ms thumbnail resize means every other job assigned to that
+worker's 50-coroutine capacity stalls for the same 50-200ms window. Offload CPU-bound work to
+a `ProcessPoolExecutor` via `loop.run_in_executor` so the event loop stays free to service I/O.
+
+**Q15: Why does ARQ ship built-in cron scheduling while Celery requires a separate Beat process?**
+ARQ's worker already runs a single async event loop, so its cron scheduler is just another
+coroutine registered inside the same process with no extra moving parts. Celery's prefork
+worker model has no natural place for a scheduler loop, so Celery Beat runs as an independent
+process that periodically pushes scheduled tasks onto the same broker queue the workers consume.
+The tradeoff is operational: Celery Beat is a single point of failure that must itself be kept
+running and deduplicated across replicas, while ARQ cron scales with the worker fleet automatically.
+
+**Q16: How do you choose a task result backend — Redis, PostgreSQL, RPC, or none?**
+Pick the backend based on how long the result must survive and who needs to read it. Redis
+gives sub-millisecond result writes but expires results on a TTL, so it suits short-lived
+polling from the same request cycle. PostgreSQL costs roughly 5ms per write but persists
+indefinitely, making it the right choice for audit trails or results a support team must query
+days later. RPC (RabbitMQ) suits callers blocking synchronously on `.get()`, and disabling the
+result backend entirely removes all storage overhead for true fire-and-forget tasks.
+
 ---
 
 ## 13. Best Practices

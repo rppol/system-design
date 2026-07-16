@@ -705,6 +705,18 @@ Implement a `PublicSettings` response model with only the non-sensitive fields (
 **Q12: What is the difference between model_config case_sensitive=True and the default?**
 By default (`case_sensitive=False`), pydantic-settings matches `APP_DATABASE_URL`, `app_database_url`, and `App_Database_Url` to the `database_url` field. With `case_sensitive=True`, only the exact casing matches. Linux environment variables are case-sensitive by default, so `case_sensitive=False` (the default) is safer on Linux production deployments and avoids a common deployment gotcha where the env var is set in uppercase but the field name is lowercase.
 
+**Q13: Why should a database engine be constructed inside the `lifespan` startup hook rather than at module import time?**
+Constructing the engine at import time risks building it before the deployment platform has finished injecting environment variables. Many test runners and process managers set environment variables after the Python interpreter has already imported application modules, so a module-level `Settings()` call can read stale or missing values and bake a wrong connection string into a long-lived engine object. Deferring engine creation to `lifespan` guarantees `get_settings()` runs after the environment is fully populated, and the resulting `OperationalError` failure mode collapses into a clear `ValidationError` at startup instead. Always treat module import order as untrusted and push side-effecting construction into an explicit startup hook.
+
+**Q14: What happens if `env_prefix` is set but the deployment platform injects an unprefixed variable name?**
+Pydantic-settings finds no matching prefixed variable and silently falls back to the field's default value with no error raised. A service configured with `env_prefix="APP_"` that expects `APP_DATABASE_URL` but receives a plain `DATABASE_URL` from the platform connects to whatever default is coded — commonly `localhost`, which fails or worse, quietly points at a local resource in production. Because there is no missing-field error to catch, this bug surfaces only through wrong behavior, not a startup crash. Remove defaults from any field whose env var name is uncertain so a mismatch produces a loud `ValidationError` instead of a silent fallback.
+
+**Q15: When should you reach for `dynaconf` instead of `pydantic-settings` in a FastAPI project?**
+Choose `dynaconf` when configuration must live in layered TOML or YAML files with native environment sections, or when you need a built-in Vault or AWS Secrets Manager loader without writing custom fetch code. `dynaconf` costs roughly 5-10ms of startup overhead versus `pydantic-settings`' ~2ms, and its FastAPI dependency-injection integration needs a manual adapter rather than the native `Depends()` support pydantic-settings ships with. Default to `pydantic-settings` for a Pydantic-v2-native FastAPI service, and switch only when the config format itself demands file-based hierarchical merging.
+
+**Q16: Why should a derived setting like `database_url` be computed with a `@model_validator(mode="after")` instead of a `@property`?**
+A `model_validator` writes the computed value back onto the model instance, so it appears in `model_dump()` and shows up in the startup log line that prints the loaded settings. A `@property` computes the value on each access but never becomes part of the model's serialized state, so a diagnostic log of `settings.model_dump()` would omit it entirely, hiding exactly the value an engineer debugging a wrong connection string needs to see. Prefer `model_validator` for any field whose value is assembled from other fields and needs to be auditable at startup.
+
 ---
 
 ## 13. Best Practices

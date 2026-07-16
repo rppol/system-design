@@ -914,6 +914,39 @@ which prevents garbage collection and surfaces exceptions. (2) For durability, p
 persistent queue (Redis, Kafka) and process with a worker that acknowledges only after success.
 This survives process restarts.
 
+**Q13: Why does `httpx.Auth` require both a sync `auth_flow` and an `async_auth_flow` generator method?**
+`httpx.AsyncClient` and the sync `httpx.Client` share the same `Auth` interface, and Python has no
+single generator syntax that works correctly for both blocking and async token refresh. `auth_flow`
+is a plain generator used by the sync client, while `async_auth_flow` is an async generator that
+can `await` a coroutine (such as `self._refresh()`) before yielding the authenticated request. If
+only `auth_flow` is defined, an `AsyncClient` falls back to it and any `await` inside token refresh
+logic silently never runs. Implement `async_auth_flow` explicitly whenever the client is async and
+the refresh call itself is a network request.
+
+**Q14: Why does the webhook fix reject events whose timestamp is more than 300 seconds old, even though the HMAC signature is valid?**
+A valid signature alone only proves the payload was not tampered with, not that it is being seen
+for the first time. An attacker who captures one legitimate webhook request can replay the exact
+same bytes indefinitely, and since the signature was computed over that unchanged payload it still
+verifies. Binding the signature to a timestamp (`payload = f"{timestamp}."+ body`) and rejecting
+anything outside a 300-second window means a captured request becomes unusable after five minutes,
+bounding the attacker's replay window without requiring server-side request-id tracking.
+
+**Q15: Why does creating `aiohttp.ClientSession()` at module import time raise `RuntimeError: no running event loop`?**
+`aiohttp.ClientSession` binds internal resources to the currently running asyncio event loop at
+construction time, and no event loop exists yet during module import. Uvicorn only starts the
+event loop once the ASGI server begins running the application, which happens after all modules
+have already been imported. Create the session inside the `lifespan` context manager, where the
+event loop is guaranteed to be running, and store it on `app.state` for handlers to reuse.
+
+**Q16: When does `tenacity` provide a clearer win over a hand-rolled retry loop?**
+`tenacity` earns its dependency once retry policy needs to be composed declaratively across
+several call sites rather than duplicated by hand in each one. Its `@retry(stop=..., wait=...)`
+decorator combines stop conditions, wait strategies, and exception filters in one line, exposes
+retry statistics via `.retry.statistics`, and supports async natively through `AsyncRetrying` —
+all of which a bespoke `for` loop must reimplement manually. For a single call site with one
+simple backoff rule, a manual loop is often easier to read; reach for `tenacity` once more than
+two or three call sites need the same consistent policy.
+
 ---
 
 ## 13. Best Practices

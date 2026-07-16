@@ -741,6 +741,33 @@ Pass `docs_url=None, redoc_url=None` to the `FastAPI()` constructor. This disabl
 **Q13: What is improper inventory management (OWASP API9) and how do versioned APIRouters address it?**
 Improper inventory management means old, forgotten, or shadow API endpoints remain accessible after newer versions ship. Attackers probe `/v1/`, `/v0/`, `/internal/`, `/debug/` paths. The FastAPI fix is explicit `APIRouter` versioning with a deprecation lifecycle: add a `Deprecated: true` header and `Sunset: <date>` header to v1 routes when v2 ships, and remove them on the sunset date. CI can count public routes via `app.routes` and alert on unexpected additions.
 
+**Q14: What is the difference between Broken Function Level Authorization (BFLA) and BOLA?**
+BFLA is a missing check on which *operations* a caller's role permits, while BOLA is a missing
+check on which *specific object instance* a caller owns. A user can pass BOLA's ownership check
+yet still lack the role to call a privileged operation like `DELETE /users/{id}`; the
+`require_role("admin")` dependency factory closes that gap by raising `403` when
+`current_user.role` is outside the allowed set, wired in via `dependencies=[Depends(require_role("admin"))]`.
+Apply BFLA role checks and BOLA ownership checks together — an admin-only delete route still
+needs a tenant check if admins are themselves scoped per tenant.
+
+**Q15: Why enforce a request body size limit before the handler runs, and what status code should the rejection return?**
+An unbounded request body lets a single client exhaust server memory or disk by streaming a
+multi-gigabyte payload into a handler that buffers it. This is a denial-of-service vector
+distinct from rate limiting because a single request is enough; the `RequestSizeLimitMiddleware`
+example checks `Content-Length` against a 1 MB default cap before `call_next` runs, returning
+`413 Payload Too Large` without ever reading the oversized body into memory. Reject at the
+middleware layer, before any parsing or database interaction, so an oversized request costs only
+a header inspection.
+
+**Q16: Why does using UUIDv7 instead of sequential integer IDs in API paths raise the bar against enumeration attacks?**
+A sequential integer ID lets an attacker increment `/invoices/1001` to `/invoices/1002` and
+iterate the entire dataset even when authorization checks exist, turning one successful bypass
+into a scriptable full-table walk. UUIDv7 values are 128 bits and time-ordered but not
+sequentially predictable across resources, so guessing a neighboring valid ID is computationally
+infeasible even though the timestamp component is visible. This does not replace an ownership
+check — it removes the cheap enumeration path an attacker would otherwise pair with a missed
+authorization bug.
+
 ---
 
 ## 13. Best Practices

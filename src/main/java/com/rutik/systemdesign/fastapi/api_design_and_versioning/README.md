@@ -878,6 +878,37 @@ the collection after `GET`, the confirmation object after a `POST` that creates 
 Never return `200` with an empty body — that confuses clients that buffer the body expecting
 JSON.
 
+**Q13: What is the practical difference between PUT and PATCH, and which one is naturally idempotent?**
+PUT replaces the entire resource with the request body while PATCH updates only the fields provided.
+PUT is naturally idempotent because sending the same full representation twice produces the same
+end state. PATCH is idempotent only if the handler uses set operations rather than increments — a
+body like `{"status": "active"}` is safe to retry, but `{"views_delta": 1}` is not. Document which
+PATCH fields are safe for clients to retry blindly.
+
+**Q14: How does the token bucket rate-limiting algorithm allow bursts while still enforcing an average rate?**
+A token bucket refills at a fixed rate and lets a client spend up to the full bucket capacity in
+a single burst. Tokens accumulate at the configured rate (e.g., 60 tokens/minute = 1 token/second)
+up to a maximum capacity; each request consumes one token, and requests are rejected once the
+bucket empties. This differs from sliding window, which tracks exact request timestamps and never
+allows more than the per-window count regardless of spacing. Reach for token bucket when short
+bursts are acceptable but the long-run average must stay bounded, such as third-party API quotas.
+
+**Q15: Why does the cursor pagination handler fetch `limit + 1` rows instead of exactly `limit`?**
+Fetching one extra row lets the server detect whether a next page exists without running a
+separate `COUNT` query. If the query returns `limit + 1` rows, the server strips the last one and
+uses it only to confirm `has_more` and build the next cursor; if it returns `limit` or fewer rows,
+pagination has reached the end. A separate `COUNT(*)` to compute `has_more` would double the query
+cost on every page. This is why the v2 `/posts` handler queries `.limit(limit + 1)` and slices
+`posts[:limit]` before returning the response.
+
+**Q16: How does validating the `sort` query parameter with a Pydantic `Enum` prevent SQL injection in an `ORDER BY` clause?**
+Restricting `sort` to a Pydantic `Enum` of allowed column names rejects any value that is not an
+exact enum member before it reaches SQL. Building `ORDER BY {sort}` by string-formatting a raw
+client-supplied column name lets an attacker inject arbitrary SQL through a crafted identifier.
+Because FastAPI validates the enum before the handler runs, an invalid value fails with a 422 and
+never reaches `getattr(Post, filters.sort.value)`. Never string-format user input directly into a
+SQL clause, even for something that looks like a harmless column name.
+
 ---
 
 ## 13. Best Practices

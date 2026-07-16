@@ -926,6 +926,42 @@ HTTP/2 multiplexes all streams over one TCP connection, removing this limit enti
 Uvicorn supports HTTP/2 via the `h2` library (`uvicorn --http h2`). When SSE runs over
 HTTP/2, hundreds of SSE streams share a single TCP connection with no browser-side throttling.
 
+**Q13: When would you choose Kafka over Redis pub/sub for WebSocket fan-out, given Redis is faster?**
+Choose Kafka when a reconnecting client must receive messages it missed while disconnected. Redis
+pub/sub is fire-and-forget with no persistence and simply drops any message published while no
+subscriber was listening, whereas it delivers in sub-millisecond latency versus Kafka's 5-20ms
+and is operationally far simpler — the right default for chat and live notifications where a
+missed message during a brief reconnect is acceptable. Reach for Kafka only when the fan-out also
+needs a durable, replayable event log, such as an audit trail or a client that must seek back to
+an offset after reconnecting.
+
+**Q14: Why does 200ms of synchronous CPU work inside one WebSocket handler stall every other WebSocket connection on that worker?**
+A FastAPI worker runs a single `asyncio` event loop, and a blocking call like
+`heavy_cpu_computation()` occupies that loop's one thread for its entire duration with no
+opportunity for other coroutines to run. Every other WebSocket connection assigned to that same
+worker process — potentially hundreds of concurrent chat or notification sessions — freezes for
+the same 200ms window because none of their `receive_json()`/`send_json()` calls can be
+scheduled. Offload CPU-bound work with `await asyncio.to_thread(heavy_cpu_computation, data)` so
+the event loop stays free to service every other connection concurrently.
+
+**Q15: Why does SSE support automatic client-side reconnection while WebSocket does not?**
+The browser's native `EventSource` API is specified to reconnect automatically after a dropped
+connection, waiting the milliseconds given by the stream's `retry:` field before retrying, with
+no application code required. The browser `WebSocket` API has no equivalent built-in retry logic;
+a dropped socket simply fires a `close` event and the application must detect it and call
+`new WebSocket(url)` again itself, typically with its own backoff loop. This is one reason to
+prefer SSE for one-way feeds where the extra reconnect-handling code WebSocket requires adds no
+benefit.
+
+**Q16: Why does streaming LLM tokens with `StreamingResponse` reduce perceived latency even though total generation time is unchanged?**
+`StreamingResponse` writes each yielded chunk to the socket immediately instead of buffering the
+full body, so the client sees the first token roughly 100ms after the request rather than
+waiting for the entire completion. Total wall-clock time to the last token is the same
+either way — streaming does not make the model faster — but time-to-first-byte is what a user
+perceives as responsiveness, and a UI rendering tokens as they arrive feels instantaneous next to
+one frozen for 5 seconds. Stream whenever the perceived responsiveness of partial output matters
+more than delivering the complete response in one shot.
+
 ---
 
 ## 13. Best Practices
