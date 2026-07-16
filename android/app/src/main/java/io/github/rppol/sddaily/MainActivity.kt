@@ -19,8 +19,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import android.os.Build
+import android.view.WindowManager
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewAssetLoader.AssetsPathHandler
 import java.io.OutputStream
@@ -50,6 +54,22 @@ class MainActivity : ComponentActivity() {
             cb?.onReceiveValue(if (uri == null) emptyArray() else arrayOf(uri))
         }
 
+    // Immersive-sticky fullscreen: bars stay hidden; an edge swipe shows them
+    // transiently and they auto-hide again.
+    private fun hideSystemBars() {
+        val controller = WindowCompat.getInsetsController(window, webView)
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+    }
+
+    // Dialogs, the import file picker, and app switches can bring the bars
+    // back permanently — re-assert fullscreen whenever focus returns.
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && ::webView.isInitialized) hideSystemBars()
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,16 +77,28 @@ class MainActivity : ComponentActivity() {
         webView = WebView(this)
         setContentView(webView)
 
-        // Android 15 (targetSdk 35) draws activities edge-to-edge by default, and
-        // WebView does not surface the status/navigation bars as CSS safe-area
-        // insets — so the page's toolbars would render underneath the system bars.
-        // Pad the WebView by the system-bar + cutout insets instead; the window's
-        // midnight background shows through behind the bars.
+        // TRUE FULLSCREEN (owner request): hide the status + navigation bars
+        // entirely, immersive-sticky style — a swipe from the edge peeks them
+        // transiently and they re-hide on their own. This removes the whole
+        // status-bar-overlap failure class (padding around the bars proved
+        // unreliable across devices) and lets the reader's immersive mode be
+        // genuinely full screen.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        hideSystemBars()
+
+        // Let content extend into a camera cutout in both orientations instead
+        // of showing letterbox bands beside the notch.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+
+        // With the bars hidden their insets report zero; what remains is the
+        // display cutout (punch-hole/notch), which the WebView must still avoid
+        // so the page's top toolbar never hides behind the camera.
         ViewCompat.setOnApplyWindowInsetsListener(webView) { v, insets ->
-            val bars = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
-            )
-            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
+            v.setPadding(cutout.left, cutout.top, cutout.right, cutout.bottom)
             WindowInsetsCompat.CONSUMED
         }
 
