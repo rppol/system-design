@@ -7,8 +7,10 @@ and vendors Mermaid, then Gradle builds a signed release.
 
 ## Get the APK
 
+[![Download the Android APK](https://img.shields.io/badge/Download-Android%20APK-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/rppol/system-design/releases/latest/download/systemdesign-daily.apk) [![Latest build](https://img.shields.io/github/v/release/rppol/system-design?style=for-the-badge&label=Latest&color=1f6feb)](https://github.com/rppol/system-design/releases/latest)
+
 Every push to `main` builds and publishes a GitHub Release automatically. The
-stable, always-latest download URL is:
+button above always downloads the newest build; the stable URL behind it is:
 
 ```
 https://github.com/rppol/system-design/releases/latest/download/systemdesign-daily.apk
