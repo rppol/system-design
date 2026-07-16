@@ -4,6 +4,10 @@
 
 const QUESTIONS_PER_BLITZ = 10;
 const DAILY_XP_GOAL = 100;
+// True only inside the offline Android APK WebView (assets served from the
+// virtual appassets host). Every APK-specific branch is feature-detected off
+// this so the GitHub Pages build stays byte-for-byte on its original paths.
+const IS_APK = location.hostname === "appassets.androidplatform.net";
 // [E1] session length: a 5/10/20 segmented control on the topic picker,
 // persisted as sd_deck_len. deckLen() replaces QUESTIONS_PER_BLITZ at every
 // deck-building/copy use site EXCEPT the Gauntlet (always 10 — a fixed daily
@@ -3006,9 +3010,19 @@ const BACKUP_KEYS = [
 function exportProgress() {
   const blob = { version: 2, exportedAt: new Date().toISOString(), data: {} };
   for (const k of BACKUP_KEYS) { const v = localStorage.getItem(k); if (v != null) blob.data[k] = v; }
+  const filename = `sysdesign-daily-backup-${todayISO()}.json`;
+  const json = JSON.stringify(blob, null, 2);
+  // APK: no browser download chrome — hand the same filename + pretty JSON to the
+  // native bridge, which writes it to shared storage, then run the shared tail.
+  if (window.SDAndroid && typeof window.SDAndroid.saveBackup === "function") {
+    window.SDAndroid.saveBackup(filename, json);
+    safeSet("sd_last_export", todayISO());
+    announce("Backup exported.");
+    return;
+  }
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([JSON.stringify(blob, null, 2)], { type: "application/json" }));
-  a.download = `sysdesign-daily-backup-${todayISO()}.json`;
+  a.href = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+  a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   safeSet("sd_last_export", todayISO());
@@ -4689,16 +4703,40 @@ function mmFixViewBox(sv) {
   } catch { return null; }
 }
 
+// Resolves the mermaid module object (exposing initialize()/render()/run()) that
+// the shared initialize block below configures. On the APK origin the jsDelivr
+// ESM import is unreachable and the app runs fully offline, so inject the UMD
+// build shipped in vendor/ (relative to the game dir) and resolve the
+// window.mermaid global it defines; the script's onerror rejects so the caller's
+// existing failure/retry path still fires. On the web it is the exact original
+// pinned ESM import, resolving its .default. Both paths yield the same-shaped API.
+function _loadMermaidModule() {
+  if (IS_APK) {
+    return new Promise((resolve, reject) => {
+      if (window.mermaid) { resolve(window.mermaid); return; }
+      const s = document.createElement("script");
+      s.src = "vendor/mermaid.min.js";
+      s.onload = () => window.mermaid
+        ? resolve(window.mermaid)
+        : reject(new Error("mermaid UMD loaded but window.mermaid is undefined"));
+      s.onerror = () => reject(new Error("mermaid UMD script failed to load"));
+      document.head.appendChild(s);
+    });
+  }
+  // [W5] pinned to the exact latest 11.x (11.16.0, via `npm view mermaid version`)
+  // instead of the floating mermaid@11 tag, so a CDN-side minor bump can't change
+  // rendering under us; bump deliberately when validating a newer release.
+  return import("https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.esm.min.mjs")
+    .then(m => m.default);
+}
+
 async function renderMermaid(root) {
   const nodes = [...root.querySelectorAll(".mermaid")];
   if (!nodes.length) return;                       // no mermaid on this page — skip
   let mermaid;
   try {
     if (!_mermaidReady) {
-      // [W5] pinned to the exact latest 11.x (11.16.0, via `npm view mermaid version`)
-      // instead of the floating mermaid@11 tag, so a CDN-side minor bump can't change
-      // rendering under us; bump deliberately when validating a newer release.
-      _mermaidReady = import("https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.esm.min.mjs")
+      _mermaidReady = _loadMermaidModule()
         .then(m => {
           // One stack for BOTH measurement and display. themeVariables.fontFamily
           // only styles the rendered SVG via CSS; the sequence renderer sizes its
@@ -4706,7 +4744,7 @@ async function renderMermaid(root) {
           // Trebuchet defaults — far narrower than monospace), so text drawn in
           // mono spilled outside boxes sized for proportional metrics.
           const mmFont = "ui-monospace, SFMono-Regular, Menlo, monospace";
-          m.default.initialize({
+          m.initialize({
             startOnLoad: false,
             theme: "dark",
             themeVariables: {
@@ -4807,7 +4845,7 @@ async function renderMermaid(root) {
             },
             quadrantChart: { pointLabelFontSize: 12, pointRadius: 5, pointTextPadding: 4 },
           });
-          return m.default;
+          return m;
         });
     }
     mermaid = await _mermaidReady;
@@ -7488,7 +7526,9 @@ async function boot() {
 function registerServiceWorker() {
   const secure = location.protocol === "https:" ||
     ["localhost", "127.0.0.1"].includes(location.hostname);
-  if (!secure || !navigator.serviceWorker) return;
+  // APK: SW script fetches bypass the WebView's shouldInterceptRequest, so
+  // registration rejects noisily — and every asset is already local, so skip it.
+  if (!secure || IS_APK || !navigator.serviceWorker) return;
   try { navigator.serviceWorker.register("sw.js"); } catch { /* unsupported */ }
 }
 
