@@ -1,0 +1,118 @@
+name: Build Android APK
+
+# Every push to main (fresh offline APK) plus manual dispatch.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Unlike pages.yml, a superseded APK build is safe to cancel — only the newest
+# commit's APK matters.
+concurrency:
+  group: android-apk
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  # Gate on the signing secret. If it is missing we skip the build cleanly
+  # (green/neutral) rather than painting main red on every push forever.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      signing: ${{ steps.check.outputs.signing }}
+    steps:
+      - name: Check signing secret
+        id: check
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::warning::Skipping APK build: signing secrets not configured."
+            echo "::warning::Add KEYSTORE_B64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD"
+            echo "::warning::in Settings > Secrets and variables > Actions to enable it."
+            echo "signing=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "signing=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: gate
+    if: needs.gate.outputs.signing == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # rev-list --count HEAD needs full history for a monotonic versionCode.
+          fetch-depth: 0
+
+      - name: Derive version
+        id: ver
+        run: |
+          VC=$(git rev-list --count HEAD)
+          VN="$(date -u +%Y.%m.%d)-$(git rev-parse --short HEAD)"
+          echo "VERSION_CODE=$VC" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VN" >> "$GITHUB_ENV"
+          echo "code=$VC" >> "$GITHUB_OUTPUT"
+          echo "name=$VN" >> "$GITHUB_OUTPUT"
+
+      - name: Regenerate question bank + graphs
+        # Same bank-regen steps as pages.yml: run extract.py fresh so newly added
+        # modules are picked up, then rebuild the relatedness graph per section.
+        run: |
+          cd src/main/java/com/rutik/systemdesign/game
+          python3 extract.py --strict
+          for sec in $(python3 -c "import json;print(' '.join(json.load(open('questions/index.json'))['sections']))"); do
+            python3 build_graph.py "$sec"
+          done
+
+      - name: Build WebView asset payload
+        run: bash scripts/build_android_assets.sh
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        # Gradle 8.10: AGP 8.7 requires 8.9+, and Kotlin 2.1.0 supports up to 8.10.
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10"
+
+      - name: Decode release keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 --decode > android/app/release.keystore
+
+      - name: Assemble signed release APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/android/app/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          gradle -p android :app:assembleRelease
+          cp android/app/build/outputs/apk/release/app-release.apk \
+             android/app/build/outputs/apk/release/systemdesign-daily.apk
+
+      - name: Publish GitHub Release
+        # Primary delivery: a stable latest URL at
+        # releases/latest/download/systemdesign-daily.apk. Auth via GITHUB_TOKEN.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-v${{ steps.ver.outputs.code }}
+          name: APK ${{ steps.ver.outputs.name }}
+          files: android/app/build/outputs/apk/release/systemdesign-daily.apk
+          make_latest: true
+
+      - name: Upload APK artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: systemdesign-daily.apk
+          path: android/app/build/outputs/apk/release/systemdesign-daily.apk
+          if-no-files-found: error
