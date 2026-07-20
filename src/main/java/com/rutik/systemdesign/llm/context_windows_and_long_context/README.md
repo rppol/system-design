@@ -49,6 +49,46 @@ Problem: model trained on 512 tokens has no embedding for position 513
 Used by: BERT, original GPT
 ```
 
+**Reading it in plain English.** "Stamp every position with a bundle of sine waves running at
+wildly different speeds — fast waves that tick over every few tokens, slow waves that barely
+move across the whole sequence — so each position gets a unique fingerprint."
+
+It is an odometer. The rightmost digit spins fast, the leftmost digit spins slowly, and the
+combination is unique. That "spectrum of speeds" idea is the single most important thing to
+carry forward, because RoPE (§4.3) reuses the exact same `10000^(2i/d)` spectrum — it just
+applies it as a rotation instead of an addition.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `pos` | "position" | Which token slot this is: 0, 1, 2, ... |
+| `i` | "i" | Which *pair* of embedding dimensions. `2i` and `2i+1` are the sin/cos partners |
+| `d_model` | "d model" | Embedding width, e.g. 512. Sets how many pairs exist (`d_model/2`) |
+| `10000^(2i/d_model)` | "ten thousand to the two-i over d" | The wavelength scale for pair `i`. Grows from 1 to ~10,000 |
+| `pos / 10000^(2i/d)` | "pos over the scale" | The angle fed to sin/cos. Big scale = slow-moving angle |
+| `PE(pos, 2i)` | "P E of pos, two i" | The value written into dimension `2i` of the position vector |
+
+**Walk one example.** `d_model = 512`, so `i` runs 0 to 255. Watch the wavelength explode:
+
+```
+    i     2i/d_model    10000^(2i/d)      angle per token     wavelength (tokens)
+    0       0.000            1.0            pos / 1              6.3
+   64       0.250           10.0            pos / 10            62.8
+  128       0.500          100.0            pos / 100          628
+  255       0.996        ~9,820             pos / 9820      ~61,700
+
+  wavelength = 2 * pi * scale, e.g. i=128 -> 2 * 3.1416 * 100 = 628 tokens
+```
+
+Dimension pair 0 completes a full cycle every ~6 tokens — it says "am I odd or even, roughly
+here". Dimension pair 255 completes a cycle every ~61,700 tokens — it says "am I near the front
+or the back of the whole document". Read together, they pin down `pos` exactly.
+
+**Why it still cannot extrapolate.** The sinusoid itself is defined for any `pos`, so you *can*
+evaluate position 5000 on a 512-trained model. The failure is that the model's attention weights
+never saw those angle combinations and have no idea what to do with them — plus in the *learned*
+APE variant there is literally no row 513 in the `[max_length x d_model]` table. Remove nothing
+and it still breaks; this is the gap RoPE and ALiBi were invented to close.
+
 ### 4.2 Relative Positional Encoding (RPE)
 
 Encode relative distance between positions rather than absolute:
@@ -66,6 +106,43 @@ Benefits: position patterns generalize better; model sees "how far apart" not "w
 Problem: still needs learned embeddings for all distances seen in training
 Used by: T5, DeBERTa
 ```
+
+**Reading it in plain English.** "Before token `i` scores token `j`, hand it a little note saying
+how far apart they are — and let the model learn one note per distance."
+
+The shift from "where am I" to "how far apart are we" is the whole point. A pattern like "the
+subject is usually 3 tokens before the verb" is now learnable *once*, instead of separately at
+every absolute position in the document.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `A(i,j)` | "A of i j" | The pre-softmax attention score from query token `i` to key token `j` |
+| `q_i` | "q sub i" | Query vector of the token doing the looking |
+| `k_j` | "k sub j" | Key vector of the token being looked at |
+| `i - j` | "i minus j" | Signed distance. Positive = `j` is behind me; negative = ahead of me |
+| `r_{i-j}` | "r sub i minus j" | Learned vector for that exact distance. One per distance bucket |
+| `(...)^T k_j` | "transposed, times k j" | Dot product — the standard "how well do these match" score |
+| `∝` | "proportional to" | Ignoring the `1/sqrt(d)` scaling factor, which does not change the idea |
+
+**Walk one example.** Query at position 12 attends to three keys:
+
+```
+    key at j     i - j     which r is used     meaning
+       12          0            r_0            "this is me"
+       11         +1            r_1            "the token just before me"
+        2        +10            r_10           "ten tokens back"
+
+  score to j=11 = (q_12 + r_1)^T  k_11
+  score to j=2  = (q_12 + r_10)^T k_2
+
+  Now move the whole sentence to position 512:
+  score to j=511 = (q_512 + r_1)^T k_511   <- SAME r_1, same learned behaviour
+```
+
+**Why this term exists.** Delete `r_{i-j}` and attention becomes fully order-blind: `q^T k` alone
+cannot tell "dog bites man" from "man bites dog". The catch is that `r` is a lookup table of
+learned vectors, so a distance of 5,000 tokens has no entry if training never exceeded 512 — the
+same wall APE hits, just moved from absolute positions to distances.
 
 ### 4.3 RoPE (Rotary Position Embedding)
 
@@ -93,6 +170,114 @@ Long-context extensions:
 Used by: LLaMA (all versions), Mistral, Qwen, DeepSeek, most modern models
 ```
 
+**Reading it in plain English.** "Chop the embedding into 2D pairs and physically *spin* each
+pair by an angle proportional to the token's position. Because spinning two vectors and then
+dotting them gives an answer that depends only on the difference of their angles, attention
+automatically sees DISTANCE APART and never absolute position."
+
+That last clause is the entire reason RoPE won. Nothing in the formula stores "position 4,096";
+the position information lives in a rotation that cancels down to `(m - n)` the moment a query
+meets a key. There is no lookup table to run off the end of.
+
+**The clock-hands picture.** Think of each 2D pair as one hand on a clock face, and the token's
+position as the time. Pair `i = 0` is the second hand — it whips around once every ~6 tokens.
+The last pair is the hour hand — one slow revolution across the whole document. Read one hand
+and you know position only modulo its own cycle; read all 64 hands together and the position is
+pinned down exactly. `θ_i = 10000^(-2i/d)` is nothing more than the gear ratio between the hands.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `x` | "x" | The query or key vector, read as `d/2` consecutive 2D pairs `(x_0,x_1), (x_2,x_3), ...` |
+| `position` | "position" | Token index `m`. Also written `m` for the query and `n` for the key |
+| `θ_i` | "theta i" | Rotation speed of pair `i`, in radians per token. Big = fast hand |
+| `i` | "i" | Which pair, `0` to `d/2 - 1`. Low `i` = fast/local, high `i` = slow/global |
+| `d` | "d" | Head dimension, e.g. 128. So 64 pairs, 64 clock hands |
+| `10000` | "the base" | Base frequency. Sets the spread between fastest and slowest hand |
+| `⊗` | "elementwise multiply" | Multiply matching slots, no summing. Not a matrix product |
+| `x̃` | "x twiddle" | `x` with each pair swapped and the first sign-flipped: `(-x_1, x_0, -x_3, x_2, ...)` |
+| `θ × position` | "theta times position" | The rotation angle for this pair at this token, in radians |
+| `q_m^T k_n` | "q m transposed k n" | Attention score between query at `m` and key at `n` |
+| `(m - n)` | "m minus n" | The distance between the two tokens — all the score ends up depending on |
+
+**Walk one example — the spectrum of speeds.** Head dimension `d = 128`, so `i` runs 0 to 63:
+
+```
+     i     -2i/d      theta_i = 10000^(-2i/d)      wavelength = 2*pi / theta_i
+     0     -0.000            1.0                         6.3 tokens
+    16     -0.250            0.1                        62.8 tokens
+    32     -0.500            0.01                      628   tokens
+    48     -0.750            0.001                   6,283   tokens
+    63     -0.984            0.000115               54,600   tokens
+
+  worked: i = 32 -> 10000^(-0.5) = 1/sqrt(10000) = 1/100 = 0.01 rad per token
+                 -> full turn after 2 * 3.1416 / 0.01 = 628 tokens
+```
+
+Pair 0 turns a full radian per token, so it resolves "1 token apart vs 2 tokens apart" sharply
+but wraps every 6 tokens. Pair 63 turns 0.000115 rad per token — useless for adjacency, but it is
+the only hand that can still tell token 10,000 from token 40,000.
+
+**Walk one example — actually rotating a pair.** Take pair 0, so `θ_0 = 1.0` rad/token, holding
+the vector `(x_0, x_1) = (0.6, 0.8)`:
+
+```
+  component 0 = x_0 * cos(a) - x_1 * sin(a)        (this is where x-twiddle's minus comes from)
+  component 1 = x_1 * cos(a) + x_0 * sin(a)
+
+  position 0  ->  a = 1.0 * 0 = 0.00 rad   cos = 1.0000   sin = 0.0000
+      c0 = 0.6(1.0000) - 0.8(0.0000) =  0.600
+      c1 = 0.8(1.0000) + 0.6(0.0000) =  0.800
+
+  position 1  ->  a = 1.0 * 1 = 1.00 rad   cos = 0.5403   sin = 0.8415
+      c0 = 0.6(0.5403) - 0.8(0.8415) =  0.324 - 0.673 = -0.349
+      c1 = 0.8(0.5403) + 0.6(0.8415) =  0.432 + 0.505 =  0.937
+
+  position 2  ->  a = 1.0 * 2 = 2.00 rad   cos = -0.4161  sin = 0.9093
+      c0 = 0.6(-0.4161) - 0.8(0.9093) = -0.250 - 0.727 = -0.977
+      c1 = 0.8(-0.4161) + 0.6(0.9093) = -0.333 + 0.546 =  0.213
+
+  length is never changed: 0.349^2 + 0.937^2 = 1.000, same as 0.6^2 + 0.8^2
+```
+
+Nothing is added to the vector and nothing is scaled — it is a pure turn. That is why RoPE adds
+zero parameters and costs only a multiply.
+
+**Walk one example — why the dot product only sees distance.** Give the query and the key the
+same underlying pair `(0.6, 0.8)` and place them at different positions:
+
+```
+  q sits at position m, k sits at position n
+  q ends up at angle (phi + theta_0 * m), k ends up at angle (phi + theta_0 * n)
+  angle BETWEEN them = theta_0 * (m - n)      <- phi cancels, absolute position is gone
+
+  dot = cos(theta_0 * (m - n))
+
+    m = 5     n = 3    ->  cos(1.0 * 2) = cos(2.0) = -0.416
+    m = 100   n = 98   ->  cos(1.0 * 2) = cos(2.0) = -0.416    <- identical score
+    m = 100   n = 99   ->  cos(1.0 * 1) = cos(1.0) = +0.540    <- different distance, differs
+```
+
+Rows 1 and 2 are 95 tokens apart in the document and score exactly the same, because both pairs
+are 2 tokens apart. Move a sentence anywhere in a 128K document and its internal attention
+pattern is untouched. This is the property APE (§4.1) cannot have and RPE (§4.2) buys only by
+learning a table.
+
+**Why `10000^(-2i/d)` exists — the failure mode without it.** Suppose every pair used the same
+speed `θ = 1.0`. Then every pair reports `cos(m - n)`, so the whole head only knows one number,
+and `cos` repeats every 6.28 tokens — distance 1 and distance 7.28 become indistinguishable
+(aliasing). The exponent `-2i/d` sweeps the speeds geometrically from `1.0` down to `~0.0001`, so
+fast hands give fine local resolution and slow hands disambiguate which wrap you are in. Together
+they cover 6 tokens to ~54,600 tokens with no ambiguity.
+
+**Why the base 10000 is the context ceiling.** The slowest hand has wavelength
+`2 * pi * base = 2 * 3.1416 * 10,000 = 62,832` tokens. Past that even the hour hand has wrapped
+and two genuinely different positions alias to the same rotation — which is why LLaMA 3 raised
+the base to 500,000, pushing the ceiling to `2 * pi * 500,000 = 3.14M` tokens. The bill comes due
+locally: a larger base slows every intermediate pair (at `d = 128`, pair 16 drops from
+`θ = 0.1` to `θ = 0.038`), so fewer hands remain in the fast regime and short-range position
+resolution gets coarser. Long-range reach and short-range precision are traded against each
+other through one number.
+
 ### 4.4 ALiBi (Attention with Linear Biases)
 
 Instead of positional embeddings, add a linear bias to attention scores:
@@ -117,6 +302,64 @@ Limitations:
   - Long-range dependencies are harder
 Used by: MPT, BLOOM (older models)
 ```
+
+**Reading it in plain English.** "Skip positional encoding entirely. Just subtract a penalty from
+every attention score that grows linearly with how far away the token is — the further back you
+look, the bigger the fine you pay."
+
+There is no encoding, no rotation, and nothing added to the embeddings; the position information
+is injected straight into the score matrix as a fixed, un-learned penalty. That is why ALiBi
+extrapolates for free — a distance of 100,000 is just a bigger subtraction, and subtraction does
+not run out of table entries.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `q_i^T k_j` | "q i transposed k j" | The ordinary content-match score, before any position effect |
+| `\|i - j\|` | "absolute value of i minus j" | Distance in tokens. Unsigned — only "how far", not "which side" |
+| `m` | "m", the slope | Penalty charged per token of distance. Fixed constant, never learned |
+| `m × \|i - j\|` | "m times the distance" | Total fine for this pair of tokens |
+| `-` (the minus) | "minus" | Subtracted BEFORE softmax, so it becomes a multiplicative decay after |
+| head-specific | — | Every attention head gets a different `m`, so heads specialise by range |
+
+**Where the slopes come from.** For a model with `h` heads, ALiBi assigns a geometric sequence
+`m = 2^(-8k/h)` for `k = 1..h`. At `h = 8` that is a simple halving:
+
+```
+   head k      slope m       distance where penalty hits -5      role
+      1        0.5000                    10 tokens               very local
+      2        0.2500                    20 tokens               local
+      3        0.1250                    40 tokens
+      4        0.0625                    80 tokens
+      5        0.0313                   160 tokens
+      6        0.0156                   320 tokens
+      7        0.0078                   640 tokens
+      8        0.0039                 1,280 tokens               long range
+
+   "distance where penalty hits -5" = 5 / m  (a -5 logit is ~150x attenuation after softmax)
+```
+
+**Walk one example.** Two heads look at the same token pair, 100 apart, both with a raw content
+score of `2.0`:
+
+```
+   head 1 (m = 0.5000):   score = 2.0 - 0.5000 x 100 = 2.0 - 50.00 = -48.00
+   head 8 (m = 0.0039):   score = 2.0 - 0.0039 x 100 = 2.0 -  0.39 =   1.61
+
+   after softmax the bias acts as a multiplier exp(-m x distance):
+     head 1: exp(-50.00) = 2e-22    -> this pair is effectively erased
+     head 8: exp(-0.39)  = 0.677    -> barely dampened, still fully in play
+
+   same pair at distance 10:
+     head 1: exp(-5.00)  = 0.0067   -> attenuated ~150x but not gone
+     head 8: exp(-0.039) = 0.962    -> essentially untouched
+```
+
+**Why the slopes must differ per head.** Give every head the same `m` and the model gets one
+fixed notion of "nearby" — either it is blind past a few hundred tokens, or it is too flat to
+enforce locality anywhere. The geometric ladder lets head 1 act as a syntax-local head and head 8
+as a document-level head inside the same layer. The residual limitation is that the decay is
+monotonic and fixed: ALiBi can never assign *more* attention to a distant token than a near one
+on position grounds alone, which is exactly the "long-range dependencies are harder" line above.
 
 ---
 
@@ -178,6 +421,59 @@ Ring Attention (Sequence Parallelism for Long Context):
   Pass KV blocks in a "ring" between devices
   Enables 1M+ token training across many GPUs
 ```
+
+**Reading the complexity classes in plain English.** "`O(n²)` means every token looks at every
+other token, so the work is the area of a square. Every trick in this list is a different way of
+refusing to fill in the whole square."
+
+Big-O hides how violent the difference is at real context lengths, so here is the same claim as
+scored operation counts. `n` is the sequence length and `w = 4096` is Mistral's sliding window:
+
+| Mechanism | Class | n = 1K | n = 8K | n = 128K | vs. full at 128K |
+|-----------|-------|--------|--------|----------|------------------|
+| Standard attention | `O(n²)` | 1.0e6 | 6.7e7 | 1.7e10 | 1x (baseline) |
+| Sliding window (w=4096) | `O(n × w)` | 1.0e6 | 3.4e7 | 5.4e8 | 32x cheaper |
+| Sparse (local + global) | `O(n √n)` | 3.3e4 | 7.4e5 | 4.7e7 | 362x cheaper |
+| Hypothetical | `O(n log n)` | 1.0e4 | 1.1e5 | 2.2e6 | 7,700x cheaper |
+
+**Walk the arithmetic.** Nothing here is estimated — it is just the class evaluated at `n`:
+
+```
+  n = 131,072 (128K tokens)
+
+  O(n^2)     = 131,072 x 131,072            = 17,179,869,184   ~ 1.7e10
+  O(n x w)   = 131,072 x 4,096              =    536,870,912   ~ 5.4e8
+  O(n sqrt n)= 131,072 x 362                =     47,448,064   ~ 4.7e7
+  O(n log n) = 131,072 x 17     (log2)      =      2,228,224   ~ 2.2e6
+
+  the savings ratios are the classes divided out, so they are exactly:
+    n^2 / (n x w)      = n / w      = 131,072 / 4,096 = 32
+    n^2 / (n sqrt n)   = sqrt(n)    = sqrt(131,072)   = 362
+```
+
+**Feel the growth, not the symbol.** Going from 1K to 128K is 128x more tokens:
+
+```
+  step                1K -> 8K     8K -> 128K     1K -> 128K
+  token multiplier          8x            16x           128x
+
+  O(n^2)     work          64x           256x        16,384x   <- squares the multiplier
+  O(n x w)   work           8x            16x           128x   <- linear once n > w
+  O(n sqrt n) work         22x            64x         1,448x   <- multiplier to the 1.5
+```
+
+Read the first row: an 8x longer prompt costs 64x the attention compute, which is the "4x longer
+sequence = 16x compute" principle from §3 restated. This is also why the §8 table jumps from 16M
+ops at 4K to 16B ops at 128K — a 32x token increase buying a ~1,000x compute increase.
+
+**Why `O(n √n)` and not `O(n)`.** Sparse attention keeps a local neighbourhood plus a set of
+global "summary" tokens; the count of summary tokens has to grow with the sequence or distant
+information has nowhere to route through, and `√n` is the balance point where the local cost and
+the global cost are equal. Drive the global set to a constant and you get `O(n)` — but the
+summary tokens become an information bottleneck, and long-range recall collapses. Sliding window
+takes the opposite bet: no global tokens at all, and it recovers long-range reach only indirectly
+by stacking layers (32 layers x 4,096 window = ~131K effective receptive field), which is lossier
+than true full attention.
 
 ---
 
@@ -248,6 +544,43 @@ Compute: O(seq²/N) per GPU (1/N of full attention per device)
 Memory: O(seq/N) per GPU for K, V
 ```
 
+**Reading the three cost lines in plain English.** "Every GPU still does full attention *for its
+own slice of queries* — it just borrows the keys and values a chunk at a time instead of holding
+them all. Compute is divided by N, memory is divided by N, and the price is N rounds of passing
+data around the circle."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `seq` | "seq" | Total sequence length across all devices, e.g. 1,000,000 |
+| `N` | "N" | Number of GPUs in the ring, e.g. 8 |
+| `seq/N` | "seq over N" | Tokens each GPU owns, e.g. 125,000 |
+| `d` | "d" | Model hidden dimension — the width of each K and V vector |
+| `O(seq²/N)` | "seq squared over N" | Each GPU scores its `seq/N` queries against all `seq` keys |
+| `O(seq/N × d)` | "seq over N times d" | Bytes moved per hop: one KV chunk |
+
+**Walk one example.** 1M tokens on 8 GPUs, reusing the 320 KB/token KV figure from above:
+
+```
+   full attention on one device : 1,000,000 x 1,000,000  = 1.0e12 score ops
+   per GPU with the ring        : 125,000 x 1,000,000    = 1.25e11 score ops  (1/8)
+
+   KV memory, whole sequence    : 1,000,000 x 320 KB     = 320 GB  <- fits no single GPU
+   KV memory, one GPU's slice   :   125,000 x 320 KB     =  40 GB  <- fits an H100
+
+   ring hops needed             : N = 8 (every chunk must visit every GPU once)
+   bytes moved per GPU per hop  : 125,000 x 320 KB       =  40 GB
+   total bytes per full circuit : 8 hops x 40 GB         = 320 GB per GPU per layer
+```
+
+**Why the interconnect requirement is not optional.** Total compute per GPU fell 8x, but the ring
+must push one whole copy of the KV cache past every device each layer — and notice that
+`O(seq/N × d) per hop × N hops = O(seq × d)`, so the total bytes moved do *not* shrink as you add
+GPUs. Adding devices buys memory and compute, never communication. On NVLink at 600 GB/s that
+320 GB circuit is ~0.5 s of transfer that can hide behind the 1.25e11 ops of compute; drop to a
+slow interconnect and the GPUs sit idle waiting for chunks, which is exactly why the guidance
+below is "single GPU with Flash Attention under 128K tokens" — below that threshold there is not
+enough compute per hop to hide the transfer behind.
+
 **Gemini 1.5 Pro (1M context):**
 - Uses ring attention (or equivalent sequence parallelism) across TPU pods
 - 8 devices handling 128K tokens each → 1M effective context
@@ -289,6 +622,94 @@ Method 4: LongLLaMA, MemGPT
   Augment with external memory
   Not extending the context window but adding external retrieval
 ```
+
+**Reading position interpolation in plain English.** "Do not ask the model to imagine positions
+it has never seen. Instead, lie about the positions — divide them all down until 128K tokens fit
+inside the 4K range the model was actually trained on."
+
+Physically, using the clock-hands picture from §4.3: interpolation does not add new clock
+positions, it *slows every hand down by the same factor* so the hands still finish inside one
+revolution after 128K tokens instead of 4K. Nothing extrapolates, because nothing leaves the
+range the model knows.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `p` | "p" | The real position of a token in the extended context, 0 to 131,071 |
+| `original_length` | — | What the model was trained on, e.g. 4,096 |
+| `new_length` | — | What you want to serve, e.g. 131,072 |
+| `s` | "the scale factor" | `new_length / original_length`. Here 32 |
+| `p × (orig / new)` | "p over s" | The fake position handed to RoPE. Now fractional |
+
+**Walk one example.** `original_length = 4,096`, `new_length = 131,072`, so `s = 32`:
+
+```
+   real position p     fake position p / 32     inside trained range?
+             0                  0.00                  yes
+           100                  3.125                 yes
+        65,536              2,048.00                  yes
+       131,071              4,095.97                  yes  (just inside 4,096)
+
+   every one of the 131,072 positions now lands in [0, 4096) -- nothing extrapolates
+```
+
+**Why it degrades local resolution — the cost, made concrete.** Adjacent tokens used to be 1.0
+apart; after squeezing they are `1/32 = 0.03125` apart. Run that through the fastest RoPE pair
+(`θ_0 = 1.0` rad/token from §4.3) and watch the signal that distinguishes "next to me" from "me"
+almost vanish:
+
+```
+   before scaling:  angle gap for adjacent tokens = 1.00000 rad
+                    cos(0) - cos(1.00000) = 1.0000 - 0.5403 = 0.4597   <- strong signal
+
+   after  scaling:  angle gap for adjacent tokens = 0.03125 rad
+                    cos(0) - cos(0.03125) = 1.0000 - 0.99951 = 0.00049 <- ~940x weaker
+
+   0.4597 / 0.00049 = ~940
+```
+
+That ~940x collapse in the local signal is the mechanism behind the war story below: linear
+`factor: 32` with no fine-tuning left the model unable to tell nearby clause numbers apart, so it
+confabulated ones like "Section 14.3(b)".
+
+**Reading YaRN in plain English.** "Position interpolation squeezes every clock hand equally,
+which needlessly ruins the fast ones. YaRN squeezes only the slow hands — the ones that were
+actually going to run off the end — and leaves the fast, local hands exactly as trained."
+
+The test YaRN applies per dimension is "does this hand complete a full revolution within the
+original training length?" If it does, it never extrapolates and needs no help. If it does not,
+it is the one that will wander into unseen angles, so it gets interpolated.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `λ_i` | "lambda i" | Wavelength of pair `i` in tokens: `2π / θ_i` (the §4.3 table) |
+| `L` | "L" | Original training length, e.g. 4,096 |
+| `r = L / λ_i` | "r", the ratio | How many full revolutions this hand makes during training |
+| `α`, `β` | "alpha", "beta" | Band cutoffs, typically 1 and 32 |
+| `s` | "the scale factor" | Same as interpolation: `new_length / original_length` |
+
+**Walk one example.** `L = 4,096`, `s = 32`, head dimension 128 — reusing the §4.3 wavelengths:
+
+```
+     i      lambda_i (tokens)     r = 4096 / lambda      band              treatment
+     0             6.3                  652              r > 32            untouched
+    16            62.8                   65              r > 32            untouched
+    32           628                      6.5            1 < r < 32        ramped, partial
+    48         6,283                      0.65           r < 1             full / 32
+    63        54,600                      0.075          r < 1             full / 32
+
+  read r as "revolutions completed during training". Pair 0 spun 652 times in 4K tokens --
+  the model has seen every angle it can produce, so stretching it would only destroy the
+  local resolution that interpolation wrecks. Pair 63 completed 0.075 of a turn in 4K
+  tokens -- at 128K it enters angles never seen in training, so it is the one to squeeze.
+```
+
+**Why the three bands exist.** Collapse them to one band and you are back to plain interpolation,
+paying the ~940x local-signal loss above across all dimensions for a problem that only the slow
+dimensions have. Skip the ramp (the `1 < r < 32` middle band) and you get a hard discontinuity
+between a scaled and an unscaled dimension sitting side by side in the same head, which shows up
+as unstable attention around the boundary frequency. This selective treatment is why YaRN needs
+only a few hundred fine-tuning steps where linear interpolation needs full continued pretraining
+— most of the model's positional machinery was never disturbed in the first place.
 
 ### Context Rot — Non-Uniform Reliability Degradation
 

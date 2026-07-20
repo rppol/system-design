@@ -94,6 +94,75 @@ retrieved context. Never drop the system prompt or the current user query.
 | Specific facts that must always be present | System prompt | Retrieval may miss; embed directly |
 | Long multi-step conversation | Conversation compaction | Summarize old turns rather than truncate |
 
+**Decoding the "<200k tokens" cutoff in that matrix.** The row boundaries look like cost thresholds.
+They are not. Write both sides out and the cost comparison collapses almost immediately:
+
+```
+  long-context cost per query   = C x p
+  RAG cost per query            = k x s x p + r
+
+  break-even corpus size  C*    = (k x s x p + r) / p  =  k x s + r/p
+```
+
+**Reading it in plain English.** "Long context makes you pay for the entire corpus on every single
+query; RAG makes you pay for the handful of chunks you retrieved, plus small change for the
+retrieval itself."
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `C` | "C", corpus size | Total tokens you would stuff into the window. The whole knowledge base |
+| `p` | "p", the price | Input price per token. $2.50/1M for GPT-4o = $0.0000025 per token |
+| `k` | "k", top-k | How many chunks the retriever returns. 4 in the Section 5 layout |
+| `s` | "s", chunk size | Average tokens per chunk. 1,750 in the Section 5 layout |
+| `r` | "r", retrieval overhead | Per-query cost of embedding the query plus the vector search. Fractions of a cent |
+| `C*` | "C star" | Corpus size above which RAG is cheaper. Everything larger favours retrieval |
+
+**Walk one example.** GPT-4o pricing, the `k = 4` and `s = 1,750` from the Section 5 budget:
+
+```
+  p = $2.50/1M       = $0.0000025 per token
+  k x s = 4 x 1,750  = 7,000 tokens retrieved
+  r     ~ $0.00002   (500-token query embedding at $0.02/1M, plus amortized index search)
+
+  C* = 7,000 + 0.00002 / 0.0000025
+     = 7,000 + 8
+     = 7,008 tokens
+
+  So on pure token cost, RAG wins for ANY corpus above about 7,000 tokens.
+  The retrieval overhead is 8 tokens' worth -- it barely registers.
+
+  At the matrix's own 200k boundary, per query:
+
+      long context:  200,000 x $0.0000025  =  $0.5000
+      RAG:             7,000 x $0.0000025  =  $0.0175  + $0.00002  =  $0.0175
+
+      ratio = 0.5000 / 0.0175 = 28.6x
+
+  At the 1M queries/day scale from Section 1:
+
+      long context:  $500,000/day
+      RAG:           $ 17,500/day        difference: $482,500/day
+```
+
+**Why the matrix still says "long context" for a 200k corpus.** Because cost is not the binding
+constraint — 28.6x cheaper and the recommendation still goes the other way. What the matrix is
+actually trading is *recall risk against engineering cost*. Long context has recall 1.0 by
+construction: the answer is definitionally in the window. RAG multiplies two fallible terms:
+
+```
+  RAG answer accuracy         = recall@k x accuracy_given_present
+                              = 0.85    x 0.92                    = 0.782
+
+  long-context accuracy at 200k, key fact mid-window (the U-curve floor)
+                              = 1.00    x 0.75                    = 0.750
+```
+
+Those land within three points of each other, so at 200k the accuracy argument is a wash and the
+tiebreaker is that RAG costs you a retriever, an index, a reranker, an embedding pipeline, and a
+freshness story. Below 200k, skip all of it. Above 200k, `recall@k` stays roughly flat while
+long-context accuracy keeps sliding down the U-curve *and* the 28.6x cost gap widens — which is
+when RAG becomes not just cheaper but more accurate, and the matrix flips.
+
 **Compaction strategies:**
 
 - *Sliding window* — keep only the last N turns verbatim, drop older ones entirely.
@@ -132,6 +201,64 @@ Context Budget Allocation (32k window example)
 +--[20,500]------[32,000] Reserve (model output headroom + safety)
 ```
 
+**Decoding those bracket boundaries.** Every number above is derived from one inequality, the one
+the context assembler in Section 6 enforces before it will make the call:
+
+```
+  sum(zones) + output_reserve <= total
+
+  where sum(zones) = system + tools + few_shot + retrieved + history + user_msg
+  and    slack     = total - sum(zones) - output_reserve
+```
+
+**Reading it in plain English.** "Everything you put in, plus room for everything the model wants
+to say back, has to fit in the window — and you must decide the split before you start filling, not
+after you overflow."
+
+The `output_reserve` term is what separates context engineering from just truncating. The context
+window is shared between input and output; a budget that only counts input is a budget that
+produces truncated answers under exactly the conditions where the answer matters most.
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `total` | "total" | The model's full context window. 32,000 here; 128k on GPT-4o, 1M+ on Gemini 1.5 Pro |
+| `sum(zones)` | "sum of the zones" | Everything you send. Input tokens, billed at the input rate |
+| `output_reserve` | "output reserve" | Tokens held back, unspent, for the completion. Pitfall 6 is forgetting this |
+| `slack` | "slack" | Unallocated headroom. Your absorber for a long user turn or a mis-estimated chunk |
+| `<=` | "must be less than or equal to" | A hard wall. Cross it and the API returns a context-length error, not a degraded answer |
+
+**Walk one example.** The exact 32k allocation drawn above, added up zone by zone against the
+`ContextBudget` dataclass in Section 6:
+
+```
+  zone                        tokens    cumulative   position in window
+  -------------------------   ------    ----------   ---------------------------
+  system prompt                3,000         3,000   [0]      - [3,000]    stable
+  tool definitions             2,000         5,000   [3,000]  - [5,000]    stable
+  few-shot examples            2,000         7,000   [5,000]  - [7,000]    stable
+  retrieved context            7,000        14,000   [7,000]  - [14,000]   dynamic
+  conversation history         6,000        20,000   [14,000] - [20,000]   dynamic
+  current user message           500        20,500   [20,000] - [20,500]   dynamic
+                              ------
+  sum(zones)                  20,500
+
+  output_reserve               4,000        24,500
+
+  slack = 32,000 - 20,500 - 4,000 = 7,500 tokens  (23.4% of the window, unspent)
+
+  Check against Pitfall 6's "reserve 20-30%":
+      reserve + slack = 4,000 + 7,500 = 11,500 = 35.9% of 32,000  -> comfortably inside
+
+  Cacheable share:  7,000 / 20,500 = 34.1% of input tokens are the stable prefix
+```
+
+**Why the stable prefix is exactly the first 7,000 tokens.** Notice that the three stable zones are
+contiguous and come first — that is not aesthetic ordering, it is the KV-cache alignment principle
+from Section 3 expressed as arithmetic. Because prefix caching matches from position 0 forward, the
+cacheable quantity equals the length of the *unbroken* stable run at the front. Move tool
+definitions after the retrieved context and the cacheable run collapses from 7,000 to 3,000 tokens
+— you lose 4,000 tokens of discount per request without changing a single word of content.
+
 ```mermaid
 xychart-beta
     title "Lost in the Middle — accuracy vs position of key doc (Liu et al. 2023, 20 docs)"
@@ -145,6 +272,67 @@ fact is in the first document and ~90% in the last, but drops to ~54% in the mid
 where naive RAG lands its retrieved docs (after 14k tokens of system+history), so critical
 facts there go unnoticed. Fix: place the most critical retrieved chunks BEFORE conversation
 history, immediately after the stable prefix.
+
+**Decoding the U-curve into a number you can act on.** The chart shows accuracy per position; what
+you actually care about is expected accuracy over your *placement policy*, which is a weighted
+average across the curve:
+
+```
+  A(i)        = accuracy when the key document sits at position i
+  E[A]        = sum over i of  P(key doc lands at i) x A(i)
+  lift        = E[A | ranked placement] - E[A | random placement]
+```
+
+**Reading it in plain English.** "If you do not control where the answer lands, you get the average
+of the whole curve; if your reranker puts it first, you get the peak of the curve — and the gap
+between those two is free accuracy."
+
+This reframes reranking. A reranker is usually sold as "finds better documents." Its larger effect
+in a long context is positional: it decides *where in the U-curve* the right document sits.
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `i` | "i", the position | Which slot in the retrieved list the key document occupies. 1 = first, 20 = last |
+| `A(i)` | "A of i" | Measured accuracy at that slot. 92% at i=1, 54% at i=10, 90% at i=20 |
+| `P(...)` | "probability that" | Your placement policy. Random ordering = 1/20 everywhere; a good reranker concentrates it at i=1 |
+| `E[A]` | "expected A" | Accuracy averaged over where the doc actually lands. The number your eval harness reports |
+| `lift` | "lift" | Accuracy gained purely by reordering. No new documents, no bigger model, no extra tokens |
+
+**Walk one example.** 20 retrieved documents, one of which contains the answer, using the five
+sampled points from the chart above as the curve:
+
+```
+  random placement -- the key doc is equally likely to be anywhere:
+
+      position       i=1     i=5     i=10    i=15    i=20
+      A(i)            92%     70%     54%     69%     90%
+      weight         0.20    0.20    0.20    0.20    0.20
+      contribution   18.4    14.0    10.8    13.8    18.0
+
+      E[A] = 18.4 + 14.0 + 10.8 + 13.8 + 18.0 = 75.0%
+
+  ranked placement -- reranker puts the key doc first 80% of the time,
+  and it lands mid-list the other 20%:
+
+      contribution   0.80 x 92%  = 73.6
+                     0.20 x 54%  = 10.8
+
+      E[A] = 73.6 + 10.8 = 84.4%
+
+  lift = 84.4 - 75.0 = 9.4 accuracy points, for zero extra tokens
+
+  Worst case -- Pitfall 1, chunks dumped after 5,000 tokens of history so the key
+  doc reliably lands mid-context:
+
+      E[A] = 54.0%    -> 30.4 points BELOW ranked placement
+```
+
+**Why the curve is a U and not a slope.** Two separate mechanisms pin up the ends. The start is
+privileged by attention sinks and the recency of the instruction framing; the end is privileged
+because it is nearest the generation point. The middle has neither, so it decays to roughly the
+54% floor. This is why "just put it at the end" and "just put it at the start" are both defensible
+and "put it wherever the retriever emitted it" is not — the only genuinely bad position is the one
+naive RAG picks by default.
 
 ```
 Context Engineering Pipeline (per request)
@@ -324,6 +512,61 @@ def compact_history(turns: list[dict], max_tokens: int = 500) -> str:
     ).choices[0].message.content
     return f"[Prior conversation summary]\n{summary}"
 ```
+
+**Decoding `max_tokens = 500` and the compression it implies.** Compaction is usually described
+qualitatively ("summarize old turns"). The quantity that matters is the ratio, and whether the
+summarizer call pays for itself:
+
+```
+  compression ratio     R  = tokens_before / tokens_after
+  tokens saved per call    = tokens_before - tokens_after
+  summarizer cost          = tokens_before x p_small        (one time)
+  saving per later request = tokens_saved  x p_main
+  break-even requests  N*  = summarizer_cost / saving_per_request, rounded UP
+```
+
+**Reading it in plain English.** "Pay a cheap model once to shrink the history, then collect the
+savings on every expensive call afterwards — and the summary only has to survive a couple of turns
+to be worth it."
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `R` | "R", the compression ratio | How many times smaller the history got. `5x` means 5,000 tokens became 1,000 |
+| `p_small` | "p small" | Price of the summarizer. gpt-4o-mini at $0.15/1M — 17x cheaper than the main model |
+| `p_main` | "p main" | Price of the model doing the real work. GPT-4o at $2.50/1M |
+| `N*` | "N star" | Turns the compacted history must survive before the summarizer call is repaid |
+| one time | "amortized" | The summary is computed once and reused on every subsequent turn — that is the whole economics |
+
+**Walk one example.** A 40-turn support session at 500 tokens per turn, compacted to fit the
+6,000-token history zone from the Section 5 budget:
+
+```
+  raw history        40 turns x 500 =  20,000 tokens
+  keep verbatim       6 turns x 500 =   3,000 tokens   (recent, uncompressed)
+  compact the rest   34 turns x 500 =  17,000 tokens  ->  3,000 tokens
+
+  R on the compacted portion = 17,000 / 3,000  = 5.67x
+  R overall                  = 20,000 / 6,000  = 3.33x
+
+  tokens saved per request   = 20,000 - 6,000  = 14,000
+
+  summarizer cost   = 17,000 x $0.15/1M   = $0.00255   (once)
+  saving/request    = 14,000 x $2.50/1M   = $0.03500   (every subsequent turn)
+
+  N* = 0.00255 / 0.03500 = 0.073  ->  ceil  ->  1 request
+
+  The compaction pays for itself on the very next turn, then returns
+  $0.035 per turn for the rest of the session.
+```
+
+**Why R has a ceiling, and what breaks when you exceed it.** Nothing in the arithmetic stops you
+from compressing 17,000 tokens to 300 (`R = 57x`) — the cost model says that is strictly better.
+Pitfall 4 is what stops you: past roughly 5-8x, entity-centric summaries start dropping the
+specifics (names, agreed numbers, earlier decisions) that make the summary useful at all, and the
+model begins contradicting commitments it made twenty turns ago. The `R = 5.67x` above sits
+deliberately at the top of the safe band. Treat R as a quality budget you spend down, not a cost
+knob you turn up: the marginal saving from 5x to 10x is $0.0175 per turn, which is nowhere near
+worth an agent that forgets the customer's name.
 
 ---
 

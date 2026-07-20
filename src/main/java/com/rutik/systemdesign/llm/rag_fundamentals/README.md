@@ -91,7 +91,43 @@ chunks = ["Paris is the capital of France.", "The Eiffel Tower is in Paris."]
 embeddings = model.encode(chunks)  # shape: [2, 768]
 ```
 
-At query time, embed the user query and find nearest neighbor chunks.
+At query time, embed the user query and find nearest neighbor chunks. "Nearest" is almost always measured by cosine similarity:
+
+```
+cosine(q, d) = (q · d) / (||q|| x ||d||)
+
+  q · d  = Sigma over i of (q_i x d_i)   <- dot product across all 768 dimensions
+  ||q||  = sqrt(Sigma over i of q_i^2)   <- Euclidean length of the query vector
+```
+
+**Reading it in plain English.** "Ignore how long the two texts are and how loud their vectors are — compare only the *direction* they point in."
+
+That framing is why cosine, not raw dot product, is the retrieval default. A 30-token sentence and a 400-token paragraph on the same topic produce vectors of very different lengths; dividing by both lengths cancels magnitude out so only topic direction survives.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `q`, `d` | "q", "d" | Query vector and document-chunk vector. Both live in the same 768-dim space |
+| `q · d` | "q dot d" | Dot product. Multiply matching dimensions, add them all up. One number |
+| `Σ` | "sum over" | Add up the term that follows, once per dimension |
+| `q_i` | "q sub i" | The value in dimension `i` of the query vector |
+| `\|\|q\|\|` | "norm of q" / "length of q" | How far the vector reaches from the origin. Always positive |
+| `sqrt` | "square root" | Undoes the squaring, turning summed squares back into a length |
+| result | "cosine similarity" | Lands in `[-1, 1]`. 1 = same direction; 0 = unrelated; -1 = opposite |
+
+**Walk one example.** Toy 3-dimensional vectors so the arithmetic is checkable by hand:
+
+```
+  query q = (3, 4, 0)          ||q|| = sqrt(9 + 16 + 0)  = 5
+
+  chunk       vector       q · d              ||d||   cosine        reading
+  ----------  -----------  -----------------  ------  ------------  --------------------
+  d1          (6, 8, 0)    18 + 32 + 0 = 50   10      50/(5x10)=1.00  identical topic
+  d2          (4, 0, 3)    12 +  0 + 0 = 12    5      12/(5x5) =0.48  partly related
+  d3          (0, 0, 5)     0 +  0 + 0 =  0    5       0/(5x5) =0.00  unrelated
+  d4          (-3,-4, 0)  -9 - 16 + 0 = -25    5     -25/(5x5)=-1.00  opposite direction
+```
+
+Note `d1`: it is literally `2 x q`, twice as "long" as the query, yet scores a perfect 1.00. That is magnitude invariance doing its job — a long document is not penalized for being long. If you drop the `/(||q|| x ||d||)` divisor and rank by bare dot product, `d1` scores 50 while `d2` scores 12, and long chunks win the top-K purely for having more text in them.
 
 ### 4.3 Retrieval
 
@@ -105,6 +141,81 @@ At query time, embed the user query and find nearest neighbor chunks.
 - Exact keyword matching; excellent for rare proper nouns, IDs, technical terms
 - Best for: "Find all mentions of regulation X.Y.Z"
 
+The scoring function itself:
+
+```
+                              f(t,D) x (k1 + 1)
+BM25(q, D) = Sigma  IDF(t) x -------------------------------------------
+             t in q           f(t,D) + k1 x (1 - b + b x |D| / avgdl)
+
+              N - n(t) + 0.5
+IDF(t) = ln( ---------------- + 1 )
+                n(t) + 0.5
+```
+
+**Reading it in plain English.** "Score a document by adding up, for every query word it contains, how rare that word is across the whole corpus times how often it appears here — but stop rewarding repetition after a few hits, and don't let long documents win just by being long."
+
+Three separate ideas are welded into one line, and each one is a knob you can turn. Reading BM25 as "rarity x saturating count x length correction" makes the parameters `k1` and `b` stop being magic numbers.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `Σ` (`t in q`) | "sum over t in q" | Do the whole calculation once per query term, then add the results |
+| `t` | "tee" | One term (word) from the query |
+| `D` | "dee" | The candidate document or chunk being scored |
+| `f(t,D)` | "f of t comma D" / "term frequency" | How many times term `t` occurs inside document `D` |
+| `\|D\|` | "size of D" | Length of this document in tokens |
+| `avgdl` | "average dee ell" | Average document length across the corpus |
+| `N` | "en" | Total number of documents in the corpus |
+| `n(t)` | "n of t" / "document frequency" | How many documents contain term `t` at all |
+| `IDF(t)` | "inverse document frequency" | Rarity weight. Common word -> small; rare word -> large |
+| `ln` | "natural log" | Compresses a huge rarity ratio into a manageable weight |
+| `k1` | "kay one" | Saturation knob. How fast extra repeats stop counting. Typical `1.2`–`2.0` |
+| `b` | "bee" | Length-normalization knob. `0` = ignore length, `1` = fully penalize. Typical `0.75` |
+
+**What each knob physically does.** `k1` sets the ceiling: as `f(t,D)` grows without bound the fraction converges to `k1 + 1`, so with `k1 = 1.2` no single term can ever contribute more than `2.2 x IDF(t)` no matter how many times it is repeated. `b` scales how much a document's length inflates the denominator: at `b = 0.75` a document four times the average length has its term counts discounted by roughly 3.25x.
+
+**Walk one example.** Corpus of `N = 10,000,000` documents (the case study's enterprise index), `avgdl = 400` tokens, `k1 = 1.2`, `b = 0.75`.
+
+```
+Step 1 — rarity (IDF). Two query terms with very different document frequencies:
+
+  term          n(t)       (N - n(t) + 0.5)/(n(t) + 0.5)     + 1        ln(...)   IDF
+  ------------  ---------  -------------------------------   ---------  --------  -----
+  "regulation"    500,000  9,500,000.5 / 500,000.5 = 19.0     20.0       ln 20     3.00
+  "X.Y.Z"              40  9,999,960.5 /      40.5 = 246,913  246,914    ln 246k  12.42
+
+  The rare identifier is worth 4.1x more per occurrence than the common word.
+
+Step 2 — saturation (k1). Short doc, |D| = 300, so the length factor is
+  1 - b + b x |D|/avgdl = 1 - 0.75 + 0.75 x (300/400) = 0.25 + 0.5625 = 0.8125
+  and k1 x 0.8125 = 0.975.
+
+  f(t,D)    numerator        denominator        tf component   gain over previous
+  --------  ---------------  -----------------  -------------  ------------------
+       1    1 x 2.2 =  2.2   1 + 0.975 = 1.975      1.114        --
+       2    2 x 2.2 =  4.4   2 + 0.975 = 2.975      1.479        +0.365
+       5    5 x 2.2 = 11.0   5 + 0.975 = 5.975      1.841        +0.362 (over 3 hits)
+      20   20 x 2.2 = 44.0  20 + 0.975 = 20.98      2.098        +0.257 (over 15 hits)
+     100  100 x 2.2 = 220   100 + 0.975 = 100.98    2.179        +0.081 (over 80 hits)
+   ceiling                                          2.200        <- k1 + 1, never exceeded
+
+Step 3 — length normalization (b). Same 5 occurrences, two document lengths:
+
+  |D|     1 - b + b x |D|/avgdl        k1 x factor   tf component
+  ------  ---------------------------  ------------  ------------
+     300  0.25 + 0.75 x 0.75 = 0.8125     0.975         1.841
+    1600  0.25 + 0.75 x 4.00 = 3.2500     3.900         1.236
+
+  The 1600-token document is penalized 33% for diluting the same 5 hits over 4x the text.
+
+Step 4 — final score for the short doc containing "X.Y.Z" twice:
+  BM25 = 12.42 x 1.479 = 18.37
+```
+
+**Why saturation exists.** Remove `k1` (equivalently, let it go to infinity) and the term-frequency component becomes raw count. A spam page repeating "regulation" 400 times would then outscore the actual regulation document that mentions it 6 times in context. The saturation curve above is the fix: going from 1 to 2 occurrences buys `+0.365`, but going from 20 to 100 buys only `+0.081`. Presence is strong evidence; repetition is weak evidence.
+
+**Why length normalization exists.** Remove `b` (set `b = 0`) and the length factor collapses to `1`, so a 50,000-token document that mentions every query term once beats a tightly-focused 300-token chunk that is genuinely about the query. Set `b = 1` and it flips: long documents are penalized in full proportion to their length, which over-punishes legitimately comprehensive documents. `b = 0.75` is the empirical compromise — most of the correction, none of the overshoot.
+
 **Hybrid retrieval** (recommended):
 ```
 Dense score + Sparse score combined via:
@@ -114,6 +225,112 @@ Dense score + Sparse score combined via:
   Weighted combination:
     final_score = α × dense_score + (1-α) × sparse_score
 ```
+
+**Reading it in plain English (RRF).** "Forget the scores — nobody can compare a BM25 8.3 to a cosine 0.72. Just ask each retriever for its ranked list, give every document a small vote worth `1/(60 + its position)`, and add the votes up."
+
+The whole design goal is to make *agreement across retrievers* worth more than *dominance within one retriever*. The `k = 60` constant is what buys that, and it is the single most consequential number in a hybrid pipeline.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `Σ` | "sum over" | Add one term per retrieval system the document appeared in |
+| `rank_i` | "rank sub i" | This document's 1-based position in system `i`'s list. Rank 1 = top hit |
+| `k` | "kay" | Damping constant, conventionally `60`. Bigger `k` = flatter votes = agreement matters more |
+| `1/(k + rank)` | "one over k plus rank" | One system's vote. Always small, always positive, always shrinking with rank |
+| `final_score` | "R R F score" | Sum of votes. Ranked descending to produce the fused list |
+
+**Walk two ranked lists fusing into one.** Reusing the case study's query, "What is the parental leave policy for VP-level employees?", with `k = 60`:
+
+```
+  BM25 list (sparse)                       Vector list (dense)
+  ---------------------------------------  ---------------------------------------
+  1. Parental Leave Policy v2.3            1. Parental Leave FAQ
+  2. VP Benefits Summary                   2. Benefits for Senior Employees
+  3. Leave Types Overview                  3. Parental Leave Policy v2.3
+  4. (not returned)                        4. Leave Policy
+  5. (not returned)                        5. VP Benefits Summary
+
+  Fusing, vote by vote (rows already sorted by the resulting score):
+
+  document                        BM25 vote        dense vote       RRF score   final
+  ------------------------------  ---------------  ---------------  ----------  -----
+  Parental Leave Policy v2.3      1/61 = 0.01639   1/63 = 0.01587    0.03226      1
+  VP Benefits Summary             1/62 = 0.01613   1/65 = 0.01538    0.03151      2
+  Parental Leave FAQ              --               1/61 = 0.01639    0.01639      3
+  Benefits for Senior Employees   --               1/62 = 0.01613    0.01613      4
+  Leave Types Overview            1/63 = 0.01587   --                0.01587      5
+  Leave Policy                    --               1/64 = 0.01563    0.01563      6
+```
+
+Read the top two rows carefully: neither document topped both lists, and "Parental Leave FAQ" — the outright winner of the dense list — lands only 3rd, because it earned a single vote while the two documents above it earned two apiece.
+
+**Why `k = 60` damps top-rank dominance.** Look at what one vote is worth at each rank, with and without the damping constant:
+
+```
+  rank    1/(60 + rank)   share of rank-1    1/(0 + rank)   share of rank-1
+  ------  --------------  -----------------  -------------  -----------------
+     1        0.01639          100%              1.0000          100%
+     2        0.01613           98.4%            0.5000           50%
+     3        0.01587           96.8%            0.3333           33%
+     5        0.01538           93.8%            0.2000           20%
+    10        0.01429           87.2%            0.1000           10%
+    50        0.00909           55.5%            0.0200            2%
+```
+
+With `k = 60`, rank 10 still carries 87% of rank 1's weight — the votes are nearly flat across the head of the list. With `k = 0` they collapse geometrically, and rank 1 is worth ten times rank 10.
+
+That flatness is exactly the point. Compare two documents:
+
+```
+  Document A: rank 1 in BM25 only        -> 0.01639
+  Document B: rank 5 in BOTH systems     -> 0.01538 + 0.01538 = 0.03077
+
+  With k = 60:  B (0.03077) beats A (0.01639)  <- two mediocre agreements win
+  With k = 0:   A (1.00000) beats B (0.40000)  <- one loud opinion wins
+```
+
+**Why the `k` term exists at all.** Delete it and `1/rank` makes the rank-1 document of *any* single system nearly unbeatable — a BM25 lexical fluke that happens to top the sparse list can never be outvoted by a document both systems ranked 4th. Since sparse and dense retrievers fail in different, uncorrelated ways, "both systems liked it" is the strongest available relevance signal, and `k = 60` is the constant that makes the arithmetic respect that. Push `k` far higher (say 1000) and the votes go so flat that rank stops mattering at all and RRF degenerates into "count how many systems retrieved this document."
+
+**Reading it in plain English (weighted combination).** "Rescale both scores onto a shared 0–1 ruler, then take a weighted average where `α` decides how much you trust semantics over keywords."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `α` | "alpha" | Dense weight, `0`–`1`. `1.0` = pure dense, `0.0` = pure sparse |
+| `(1-α)` | "one minus alpha" | Sparse weight. The two always add to 1 |
+| `dense_score` | "dense score" | Cosine similarity, natively bounded in `[-1, 1]`, in practice `[0, 1]` |
+| `sparse_score` | "sparse score" | BM25 output, unbounded above, corpus-dependent, typically `0` to `~30` |
+
+**The scale mismatch, walked with numbers.** This is why the normalization step is mandatory and not cosmetic:
+
+```
+  Raw scores for the same 3 candidates, alpha = 0.5:
+
+  candidate   cosine   BM25    naive 0.5 x cos + 0.5 x bm25
+  ----------  -------  ------  -----------------------------
+  C1           0.91     2.10    0.5 x 0.91 + 0.5 x 2.10 = 1.505
+  C2           0.62    18.40    0.5 x 0.62 + 0.5 x 18.40 = 9.510   <- "wins"
+  C3           0.88     3.20    0.5 x 0.88 + 0.5 x 3.20 = 2.040
+
+  C2 wins by 4.7x despite the worst semantic match. The dense signal contributed
+  at most 0.455 to any row; the sparse signal contributed up to 9.200. Alpha = 0.5
+  was never actually 50/50 — it was roughly 95/5 in favor of BM25.
+
+  Min-max normalize each list to [0, 1] first:
+    norm(s) = (s - min) / (max - min)
+
+  cosine:  min 0.62, max 0.91, range 0.29
+  BM25:    min 2.10, max 18.40, range 16.30
+
+  candidate   norm cosine                norm BM25                    0.5/0.5 blend
+  ----------  -------------------------  ---------------------------  -------------
+  C1          (0.91-0.62)/0.29 = 1.000   (2.10-2.10)/16.30 = 0.000       0.500
+  C2          (0.62-0.62)/0.29 = 0.000   (18.40-2.10)/16.30 = 1.000      0.500
+  C3          (0.88-0.62)/0.29 = 0.897   (3.20-2.10)/16.30 = 0.067       0.482
+
+  Now alpha genuinely means 50/50: C1 and C2 tie, and alpha becomes the real dial.
+  Set alpha = 0.7 (semantic-leaning): C1 = 0.700, C2 = 0.300, C3 = 0.648.
+```
+
+**Why normalization is non-optional here and absent from RRF.** Weighted combination consumes raw magnitudes, so any retriever whose scores happen to live on a bigger numeric range silently monopolizes the blend regardless of `α`. Min-max is also fragile: it is computed per query over the returned candidates, so one outlier BM25 score compresses everything else toward 0. RRF sidesteps the entire problem by never touching scores — ranks are always `1..N` on every system, which is why it needs no tuning and why the case study's measured gap between RRF and optimally-tuned linear interpolation is only 2–3%.
 
 ### 4.4 Reranking
 
@@ -257,6 +474,41 @@ With 100-token overlap:
   → Both chunks contain complete information
 ```
 
+**The chunk arithmetic, decoded.** Chunk size and overlap are not two independent style choices — they jointly determine how many vectors you store, how much text you duplicate, and how much of the context window each retrieved chunk consumes:
+
+```
+  stride       = chunk_size - overlap
+  num_chunks   = ceil( (doc_tokens - overlap) / stride )
+  duplication  = overlap / chunk_size
+  context_cost = top_k x chunk_size
+```
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `chunk_size` | "chunk size" | Tokens per chunk. The unit both the embedder and the LLM see |
+| `overlap` | "overlap" | Tokens repeated from the end of the previous chunk into the next |
+| `stride` | "stride" | How far the window advances each step. This, not `chunk_size`, sets the chunk count |
+| `ceil` | "ceiling" | Round up — a partial trailing chunk is still a chunk |
+| `top_k` | "top kay" | How many chunks you inject into the prompt |
+| `duplication` | "duplication rate" | Fraction of your index that is copied text you pay to store and embed |
+
+**Walk one example.** The production settings from §12 — 512-token chunks with 64-token overlap — over a 100,000-token document set, compared against two alternatives:
+
+```
+  chunk  overlap  stride  num_chunks over 100,000 tokens        dup    ctx cost at top_k=5
+  -----  -------  ------  -----------------------------------   -----  -------------------
+    512       64     448  ceil((100000-64)/448)  =  224 chunks  12.5%   5 x 512 = 2,560 tok
+    256       50     206  ceil((100000-50)/206)  =  486 chunks  19.5%   5 x 256 = 1,280 tok
+   1024      100     924  ceil((100000-100)/924) =  109 chunks   9.8%   5 x1024 = 5,120 tok
+
+  Halving the chunk size from 512 to 256 does NOT double the chunk count -- it goes
+  224 -> 486 (2.17x), because the fixed 50-64 token overlap eats a larger share of a
+  smaller stride. That extra 0.17x is pure duplication tax: storage, embedding compute,
+  and ANN search fan-out all scale with num_chunks.
+```
+
+**Why overlap exists.** Set `overlap = 0` and `stride` equals `chunk_size`, giving the fewest chunks and zero duplication — but every chunk boundary is a hard cut, and any fact that straddles one is unretrievable by either neighbor, exactly the "trained on / datasets from 2023" split above. The 12.5% duplication at 512/64 is the insurance premium; the failure it prevents is a silent recall hole that no amount of reranking can recover, because the correct passage never enters the candidate set.
+
 ### Metadata Filtering
 
 Beyond semantic similarity, filter by metadata to scope retrieval:
@@ -294,6 +546,67 @@ Strategy 4: Long context models
   Use Gemini 1.5 Pro (1M tokens) or Claude 3.5 (200K)
   Load entire document set into context (expensive but simple)
 ```
+
+### Retrieval Metrics, Decoded
+
+The three retrieval metrics used throughout this module answer three different questions, and mixing them up is how teams end up optimizing the wrong thing:
+
+```
+                    | {relevant docs} intersect {retrieved top-K} |
+  Recall@K   = mean --------------------------------------------------
+               q             | {relevant docs for q} |
+
+  MRR        = mean  1 / rank_of_first_relevant_doc
+               q
+
+               DCG@K                       K      rel_i
+  NDCG@K     = --------  where  DCG@K = Sigma  ------------
+               IDCG@K                     i=1   log2(i + 1)
+```
+
+**Reading it in plain English.** "Recall@K asks *did we find it at all* in the top K. MRR asks *how far down was the first good one*. NDCG@K asks *did we put the best ones highest*, graded against the best ordering that was theoretically possible."
+
+They form a ladder of strictness: recall ignores order entirely, MRR looks only at the first hit, NDCG grades the whole ordering. A pipeline can have great recall and terrible NDCG — everything relevant is in the top 20 but buried under noise, which the LLM then has to read past.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `K` | "at kay" | Cutoff. Only the top `K` retrieved results are examined |
+| `mean over q` | "averaged over queries" | Every metric is per-query, then averaged over the eval set |
+| `intersect` | "intersection" | Documents that are both relevant and retrieved. The hits |
+| `rank_of_first` | "rank of the first relevant" | Position (1-based) of the highest-placed correct document |
+| `rel_i` | "rel sub i" | Relevance grade of the doc at position `i`. Binary `0/1`, or graded `0`–`3` |
+| `log2(i + 1)` | "log base two of i plus one" | The positional discount. Deeper position -> bigger divisor -> less credit |
+| `DCG` | "discounted cumulative gain" | Your ordering's score |
+| `IDCG` | "ideal D C G" | Same formula applied to the perfect ordering. The normalizer |
+| `NDCG` | "en D C G" | `DCG/IDCG`, so it always lands in `[0, 1]` and is comparable across queries |
+
+**Walk one example.** One query with 3 relevant documents in the corpus; the retriever returns 5, of which positions 2, 3 and 5 are relevant:
+
+```
+  position i    doc      relevant?   rel_i    log2(i+1)    rel_i / log2(i+1)
+  ------------  -------  ----------  -------  -----------  -----------------
+       1        D_a      no             0      1.000            0.000
+       2        D_b      YES            1      1.585            0.631
+       3        D_c      YES            1      2.000            0.500
+       4        D_d      no             0      2.322            0.000
+       5        D_e      YES            1      2.585            0.387
+                                                    DCG@5  =    1.518
+
+  Ideal ordering puts all 3 relevant docs first:
+       1        rel=1    1 / 1.000 = 1.000
+       2        rel=1    1 / 1.585 = 0.631
+       3        rel=1    1 / 2.000 = 0.500
+                                                   IDCG@5  =    2.131
+
+  Recall@5 = 3 relevant found / 3 relevant total          = 1.00
+  Recall@1 = 0 relevant found / 3 relevant total          = 0.00
+  MRR      = 1 / 2 (first relevant sat at position 2)     = 0.50
+  NDCG@5   = 1.518 / 2.131                                = 0.71
+```
+
+One query, three very different verdicts: recall says the retriever was perfect, MRR says it wasted the top slot, NDCG says the ordering was 71% as good as it could have been. The results table in §14's case study reports NDCG@5 climbing `0.31 -> 0.58 -> 0.71 -> 0.79` across BM25, vector, hybrid and reranker stages — the reranker moves NDCG without moving recall much, because reranking reorders the candidate set rather than enlarging it.
+
+**Why the `log2(i + 1)` discount exists.** Drop it and DCG becomes a plain count of relevant documents, which is just recall again — position stops mattering, and a pipeline that buries the answer at rank 20 scores the same as one that puts it at rank 1. The `+1` inside the log is there so position 1 divides by `log2(2) = 1` rather than `log2(1) = 0`, which would be undefined. **Why divide by IDCG.** A query with 8 relevant documents can accumulate far more raw DCG than a query with 1, so averaging raw DCG across an eval set would let easy, answer-rich queries dominate the number. Normalizing by the best achievable score puts every query on the same `[0, 1]` ruler.
 
 ---
 

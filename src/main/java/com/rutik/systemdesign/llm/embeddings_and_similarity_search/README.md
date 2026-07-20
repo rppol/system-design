@@ -70,6 +70,56 @@ Loss = -log[ exp(sim(anchor, pos)/τ) / Σ exp(sim(anchor, neg_i)/τ) ]
        (InfoNCE / NT-Xent loss, τ = temperature)
 ```
 
+**Reading the InfoNCE loss in plain English.** "Out of this whole pile of candidates, the positive should look like the obvious answer. Score every candidate, turn the scores into probabilities, and penalize the model by how little probability mass it put on the right one."
+
+It is a classification loss in disguise: an N-way multiple-choice question where the positive is the correct option and every negative is a distractor.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `sim(a, b)` | "similarity of a and b" | Usually cosine similarity, so it lives in -1 to +1 |
+| `τ` | "tau" (the temperature) | Divisor that sharpens the scores. Small tau = harsher contrast. Typically 0.01-0.1 |
+| `sim/τ` | "sim over tau" | Scaled score. Dividing by 0.05 multiplies every gap by 20 |
+| `exp(...)` | "e to the" | Makes everything positive and amplifies differences exponentially |
+| `Σ` | "sum over" | Add across all candidates in the denominator |
+| `exp(pos) / Σ exp(all)` | "softmax of the positive" | Probability the model assigns to the correct answer |
+| `-log(...)` | "negative log" | Loss. `-log(1) = 0` when perfect; grows without bound as the probability falls |
+
+**Walk one example.** Anchor = "The capital of France", `τ = 0.05`. First with easy random negatives:
+
+```
+  candidate                          sim     sim/tau  exp(sim/tau)
+  --------------------------------   -----   -----    --------------
+  POS  "Paris is the capital"         0.90    18.0    65,659,969
+  neg  "How to poach an egg"          0.30     6.0           403
+  neg  "The 2019 tax code changed"    0.20     4.0            55
+  neg  "Blue whales are mammals"      0.10     2.0             7
+  --------------------------------                    --------------
+                                      sum           = 65,660,434
+
+  P(positive) = 65,659,969 / 65,660,434 = 0.999993
+  loss = -log(0.999993) = 0.000007      <- essentially ZERO gradient
+```
+
+The model already knows this. Training on it is wasted compute. Now swap in one **hard negative** — semantically close but wrong:
+
+```
+  candidate                          sim     sim/tau  exp(sim/tau)
+  --------------------------------   -----   -----    --------------
+  POS  "Paris is the capital"         0.90    18.0    65,659,969
+  HARD "Berlin is a great city"       0.85    17.0    24,154,953   <- close!
+  neg  "How to poach an egg"          0.30     6.0           403
+  neg  "Blue whales are mammals"      0.10     2.0             7
+  --------------------------------                    --------------
+                                      sum           = 89,815,332
+
+  P(positive) = 65,659,969 / 89,815,332 = 0.7311
+  loss = -log(0.7311) = 0.313            <- 45,000x more gradient signal
+```
+
+**This single comparison is why hard negatives dominate embedding quality.** A 0.05 difference in similarity between the positive and the hardest negative moved the loss from 0.000007 to 0.313. Easy negatives are already crushed by the exponential and contribute nothing; only candidates that come close to the positive produce gradient. Mining a handful of near-miss negatives per example is worth more than thousands of random ones.
+
+**What τ controls.** Temperature sets how brutally the exponential punishes the runner-up. Re-run the hard-negative case with `τ = 0.5` instead of `0.05` and `P(positive)` falls from 0.731 to about 0.377 — a softer, flatter distribution that spreads gradient across many candidates. Small tau produces sharp, confident, well-separated embeddings but can destabilize early training; large tau trains smoothly but leaves the space poorly separated. The 0.01-0.1 band is where almost every published recipe lands.
+
 **SimCSE (2021)**: Uses the same sentence passed through the model twice with different dropout masks as a positive pair — extremely simple and effective self-supervised approach.
 
 **Hard negatives**: The most important factor. Random negatives are easy; the model learns more from examples that are semantically similar but not correct answers.
@@ -85,6 +135,39 @@ Full embedding: [d1, d2, ..., d1536]  (1536 dim, best quality)
 Truncated 512:  [d1, d2, ..., d512]   (512 dim, faster, ~2% quality drop)
 Truncated 64:   [d1, d2, ..., d64]    (64 dim, much faster, ~5% quality drop)
 ```
+
+**Reading truncation in plain English.** "The model was trained so the important information lands in the earliest dimensions. That means you can chop the tail off a vector and still have a working embedding — no retraining, no second model."
+
+Ordinary embeddings do not survive this. In a normal model, dimension 1400 is no less important than dimension 3; lopping off the tail destroys the geometry. MRL earns the property by computing the loss at several truncation points simultaneously during training, which forces the model to front-load meaning.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `D` | "big D" | The model's full output dimension. 1536 for text-embedding-3-small |
+| `d` | "little d" | The truncated dimension you actually store. Must be `d <= D` |
+| `v[:d]` | "v up to d" | Keep the first `d` components, discard the rest. That is the entire operation |
+| `bytes/vector` | "bytes per vector" | `d x 4` for float32, `d x 2` for float16 |
+| `N x d x 4` | "N times d times 4" | Total index memory in bytes |
+
+**Walk the memory arithmetic.** 10,000,000 vectors stored as float32 (4 bytes per component):
+
+```
+  dims    bytes/vector        total for 10M vectors        vs 1536    quality retained
+  ----    -----------------   --------------------------   -------    ----------------
+  1536    1536 x 4 = 6,144    10M x 6,144 = 61.44 GB        1.0x       100% (baseline)
+   768     768 x 4 = 3,072    10M x 3,072 = 30.72 GB        2.0x       ~99%
+   512     512 x 4 = 2,048    10M x 2,048 = 20.48 GB        3.0x       ~98%
+   256     256 x 4 = 1,024    10M x 1,024 = 10.24 GB        6.0x       ~95%
+    64      64 x 4 =   256    10M x   256 =  2.56 GB       24.0x       ~90%
+  ----    -----------------   --------------------------   -------    ----------------
+
+  The memory saving is exactly linear in d -- halve the dimensions, halve the
+  bytes. The quality loss is emphatically NOT linear: the first halving
+  (1536 -> 768) costs about 1 point, while the last (128 -> 64) costs several.
+```
+
+**The decision this table drives.** 61 GB does not fit on a commodity 32 GB box; 10 GB does. Truncating 1536 -> 256 turns a multi-node sharded deployment into a single-server one and makes every distance computation 6x cheaper, for roughly 5% recall. That is why the standard production pattern is **two-stage**: search the 256-dim index for a top-100 shortlist, then rerank those 100 with the full 1536-dim vectors (or a cross-encoder). You pay small-index cost on the 10M-vector scan and full-precision quality on the 100 that matter.
+
+**The trap.** Truncation is only safe *within a single model version*. Dimension ordering is a property of one training run — a new checkpoint's first 256 dimensions carry different information than the old one's, even at identical `D`. Truncating new vectors into an index built from old ones produces no error and no warning, just collapsed relevance. This is precisely the 31%-quality-drop war story in Section 14.
 
 Benefits:
 - Store smaller vectors in production, full vectors for reranking
@@ -188,12 +271,180 @@ Query:
 
 **Important**: For unit-normalized vectors, cosine similarity and dot product are equivalent. Many systems normalize embeddings at index time to use faster dot product operations.
 
+#### Decoding cosine similarity
+
+```
+cos(a, b) = (a . b) / (||a|| * ||b||)
+```
+
+**Reading it in plain English.** "Measure how much two vectors point the same way, and divide out how long they are so only the *direction* survives."
+
+The numerator alone already grows when vectors agree — but it also grows when either vector is simply longer. Dividing by both lengths cancels that out, which is why the result is a pure angle measurement pinned to the range -1 to +1.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `a · b` | "a dot b" | Dot product: multiply matching components, add them up. `Σ a_i b_i` |
+| `‖a‖` | "norm of a" (or "the length of a") | `sqrt(Σ a_i²)`. Pythagoras in d dimensions |
+| `‖a‖ ‖b‖` | "norm of a times norm of b" | The two lengths multiplied — the scale factor being divided out |
+| `cos(a, b)` | "cosine of a and b" | Literally the cosine of the angle between them |
+| `+1` | "plus one" | Same direction, angle 0 degrees. Maximum similarity |
+| `0` | "zero" | Perpendicular, angle 90 degrees. Unrelated |
+| `-1` | "minus one" | Opposite direction, angle 180 degrees. Maximum dissimilarity |
+
+**Walk one example.** Two 3-dimensional vectors, worked end to end:
+
+```
+  a = [3, 1, 2]
+  b = [2, 4, 1]
+
+  STEP 1  dot product -- pair up components, multiply, sum
+          a . b = (3 x 2) + (1 x 4) + (2 x 1)
+                =    6    +    4    +    2
+                = 12
+
+  STEP 2  norm of a -- square, sum, square-root
+          ||a|| = sqrt(3^2 + 1^2 + 2^2) = sqrt(9 + 1 + 4)  = sqrt(14) = 3.742
+
+  STEP 3  norm of b
+          ||b|| = sqrt(2^2 + 4^2 + 1^2) = sqrt(4 + 16 + 1) = sqrt(21) = 4.583
+
+  STEP 4  divide
+          cos(a, b) = 12 / (3.742 x 4.583) = 12 / 17.150 = 0.700
+
+  Read as: the vectors sit at about 45.6 degrees apart -- clearly related,
+  not identical.
+```
+
+**Now watch magnitude fall out.** Scale `a` up 10x and nothing changes:
+
+```
+  c = 10a = [30, 10, 20]        (same direction as a, ten times longer)
+
+  c . b = 120                   (dot product grew 10x)
+  ||c|| = 37.42                 (length grew 10x)
+  ||b|| =  4.583                (unchanged)
+
+  cos(c, b) = 120 / (37.42 x 4.583) = 120 / 171.50 = 0.700   <- IDENTICAL
+
+  The 10x in the numerator and the 10x in the denominator cancel exactly.
+```
+
+**Why "direction not magnitude" is the point.** Embedding magnitude is mostly an artifact, not a signal. A 300-word passage typically produces a longer vector than a 5-word query about the same topic, and some models emit larger norms for text they were more confident about. If you ranked by raw dot product, long documents would systematically outrank short ones regardless of relevance. Cosine strips that away so "is this about the same thing?" is answered independently of "how much text was there?" This is also why pre-normalizing at index time is free performance: once every stored vector has `‖v‖ = 1`, the denominator becomes `1 x 1 = 1` and cosine collapses into a plain dot product — same ranking, one fewer division and two fewer square roots per comparison.
+
+#### When the three metrics disagree
+
+For unit vectors they agree. For raw vectors they can produce three *different* rankings from the same data — this is the trap.
+
+**Walk one example.** Query `q = [1, 0]` against three candidate documents:
+
+```
+  q  = [1, 0]
+  d1 = [3, 3]        far away, 45 degrees off
+  d2 = [0.8, 0.1]    very close, nearly aligned, but short
+  d3 = [5, 0]        perfectly aligned, but very long
+
+  metric                d1        d2        d3       winner
+  -------------------  ------    ------    ------    -----------------
+  dot product  q.d      3.000     0.800     5.000    d3  (longest)
+  cosine similarity     0.707     0.992     1.000    d3  (best aligned)
+  L2 distance ||q-d||   3.606     0.224     4.000    d2  (nearest point)
+
+  full rankings, best first
+    by dot product :  d3 > d1 > d2
+    by cosine      :  d3 > d2 > d1
+    by L2 distance :  d2 > d1 > d3
+```
+
+Three metrics, three different orderings, one dataset. Note `d1` and `d2` swap between dot product and cosine purely because `d1` is long, and `d3` falls from first to last under L2 purely because it is far from `q` despite pointing exactly at it.
+
+| Metric | Say it | Answers the question | Correct when |
+|--------|--------|---------------------|--------------|
+| `a · b` | "a dot b" | "Do they agree, weighted by size?" | Magnitude is meaningful — e.g. a popularity or confidence term is deliberately baked into the norm |
+| `cos(a,b)` | "cosine similarity" | "Do they point the same way?" | Almost always for text retrieval. Length is an artifact you want removed |
+| `‖a-b‖` | "L2 norm of a minus b" / "Euclidean distance" | "How far apart are the points?" | Absolute position matters — clustering, k-means centroids, geometric embeddings |
+
+The practical rule: **normalize at index time and use dot product.** Once `‖a‖ = ‖b‖ = 1`, cosine and dot product become identical, and L2 becomes a monotonic function of cosine (`‖a-b‖² = 2 - 2cos(a,b)`), so all three produce the same ranking. Every disagreement above only exists because the vectors were left un-normalized. This is exactly the pitfall listed in Section 10 — mixing a normalization assumption with raw stored vectors returns plausible-looking results that are quietly mis-ranked.
+
 ### HNSW Deep Dive (Hierarchical Navigable Small World)
 
 **Properties:**
 - Insert/query time: O(log N)
 - Memory: O(N × M) where M = connections per node (typically 16-64)
 - Search quality parameter: `ef_construction` (index time) and `ef` (query time)
+
+#### Decoding the HNSW parameters and the layer assignment
+
+A new node's layer is drawn randomly, and the formula is the whole reason the index works:
+
+```
+layer = floor( -ln(uniform(0,1)) * mL )        where mL = 1 / ln(M)
+
+which is equivalent to: promote each node to the next layer up with probability 1/M
+```
+
+**Reading it in plain English.** "Every vector lives on the bottom layer. Each one then flips a weighted coin — roughly a 1-in-M chance — to also appear on the layer above, and keeps flipping until it loses. The rare survivors form a sparse express network over the top."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `M` | "M" | Max neighbor links per node per layer. 16-64. Also sets the layer thinning rate |
+| `mL` | "m L" (the level multiplier) | `1/ln(M)`. Tunes how fast layers thin out; `1/ln(M)` is the proven optimum |
+| `ln` | "natural log" | Log base e. Turns a uniform random draw into an exponential one |
+| `uniform(0,1)` | "a uniform random draw" | A random number between 0 and 1 |
+| `floor(...)` | "floor" | Round down to a whole layer number |
+| `efConstruction` | "E F construction" | Beam width while **building**. How many candidates to keep in play per insert |
+| `efSearch` | "E F search" | Beam width while **querying**. The live recall/latency dial |
+
+**The skip-list analogy, made concrete.** A skip list is a sorted linked list with express lanes: layer 0 has every element, layer 1 has every Mth element, layer 2 every M²th, and so on. To find something you ride the sparsest lane until you overshoot, drop down, and repeat. HNSW is that idea with "sorted order" replaced by "nearest in vector space."
+
+**Walk one example.** 1,000,000 vectors, `M = 16`, so each layer keeps 1/16 of the one below:
+
+```
+  layer   nodes on it        how you use it
+  -----   ---------------    ------------------------------------------------
+    L5              1        entry point. one node, the whole world below it
+    L4             15        continent-scale hops
+    L3            244        country-scale hops
+    L2          3,906        city-scale hops
+    L1         62,500        neighborhood-scale hops
+    L0      1,000,000        every vector. the final fine-grained search
+  -----   ---------------
+  layer count ~ log_16(1,000,000) = 4.98  ->  about 6 layers
+
+  A QUERY'S PATH
+    L5 -> L4   ~1-2 greedy hops, then descend
+    L4 -> L3   ~2-3 greedy hops, then descend
+    L3 -> L2   ~2-3 greedy hops, then descend
+    L2 -> L1   ~2-3 greedy hops, then descend
+    L1 -> L0   ~2-3 greedy hops, then descend
+    at L0      explore efSearch candidates, keep the best k
+    -----------------------------------------------------------------
+    roughly 10-15 hops above L0, versus 1,000,000 comparisons brute force
+```
+
+Each descent cuts the remaining search space by a factor of `M`, which is exactly why query time is `O(log N)` — the same reason binary search is logarithmic, just generalized to a graph.
+
+**Why M does double duty.** Raising `M` makes every node better-connected (higher recall, greedy search less likely to get stranded in a local minimum) *and* thins the layers faster (fewer layers, longer hops per layer). It also directly sets memory: `M` neighbor pointers per node per layer, so memory is `O(N x M)`. That is the whole M tradeoff — 16 for under 1M vectors, 32-64 above that.
+
+**Why efConstruction and efSearch are different knobs.** Both are beam widths, but they are paid for at different times and are not interchangeable:
+
+```
+  efConstruction = 200        paid ONCE, at build time
+    -> better neighbor choices baked permanently into the graph
+    -> costs build hours; costs nothing at query time
+    -> you cannot fix a low value later without rebuilding
+
+  efSearch = 100              paid on EVERY query
+    -> how many candidates the beam holds while descending L0
+    -> costs latency, linearly
+    -> tunable live, no reindex needed
+
+  the recall dial in practice (10M vectors, M=32)
+    efSearch =  50   ->  ~92% recall@10,  ~2ms
+    efSearch = 100   ->  ~95% recall@10,  ~4ms
+    efSearch = 200   ->  ~98% recall@10,  ~8ms
+```
+
+The practical consequence: **build with efConstruction high (200-500) even though it hurts, because it is a one-time cost you cannot revisit; then tune efSearch downward at query time until you hit your latency budget.** A cheap `efConstruction` produces a permanently mediocre graph that no amount of `efSearch` fully rescues.
 
 **HNSW vs Flat vs IVF:**
 ```
@@ -215,6 +466,62 @@ HNSW (M=32, ef=128):
   - Build time: ~1 hour
   - Memory: ~5GB (vs 3GB flat)
 ```
+
+### IVF Deep Dive — nlist and nprobe
+
+```
+vectors_scanned = nlist + nprobe * (N / nlist)
+                  ^^^^^   ^^^^^^^^^^^^^^^^^^^
+                  find    scan the vectors inside
+                  the     the chosen clusters
+                  right
+                  clusters
+```
+
+**Reading it in plain English.** "Instead of comparing the query against all N vectors, compare it against nlist cluster centers, pick the nprobe closest clusters, and only look inside those. You scan a tiny slice of the corpus and hope the true nearest neighbor was in it."
+
+That last clause is where the recall loss lives. IVF is not approximating distances — every distance it computes is exact. It loses recall purely because a true neighbor sitting just across a cluster boundary is never examined at all.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `N` | "N" | Total vectors in the index |
+| `nlist` | "N list" | Number of k-means clusters the corpus is partitioned into |
+| `nprobe` | "N probe" | How many of those clusters to actually search. The recall dial |
+| `N / nlist` | "cluster size" | Average vectors per cluster |
+| `nlist` (first term) | "the centroid scan" | Every query must compare against all centroids first — a fixed floor cost |
+| `sqrt(N)` | "root N" | The rule of thumb for choosing `nlist`. Balances the two terms |
+
+**Walk one example.** 1,000,000 vectors, `nlist = 1000` (= `sqrt(1,000,000)`), so ~1,000 vectors per cluster:
+
+```
+  brute force baseline: 1,000,000 distance computations per query
+
+  nprobe   centroid scan   cluster scan        total       fraction    speedup   recall
+  ------   -------------   -----------------   ---------   --------    -------   ------
+     1         1,000        1 x 1,000 = 1,000      2,000      0.20%       500x    ~70%
+     5         1,000        5 x 1,000 = 5,000      6,000      0.60%       167x    ~88%
+    10         1,000       10 x 1,000 = 10,000    11,000      1.10%        91x    ~95%
+    50         1,000       50 x 1,000 = 50,000    51,000      5.10%        20x    ~99%
+  1000         1,000     1000 x 1,000 = 1,000,000  1,001,000  100%       1.0x     100%
+  ------   -------------   -----------------   ---------   --------    -------   ------
+
+  At the documented default (nprobe=10) you touch 11,000 of 1,000,000 vectors
+  -- 1.1% of the corpus -- and still recover ~95% of the true neighbors.
+```
+
+**Why recall climbs so steeply then flattens.** The true nearest neighbor is overwhelmingly likely to be in the single closest cluster, so `nprobe=1` already gets ~70%. Each extra cluster catches progressively rarer boundary cases: going 1 -> 10 buys 25 recall points for 5.5x the work, but 10 -> 50 buys only 4 more points for another 4.6x. That knee is why `nprobe = 1-10% of nlist` is the standard recommendation — past it you are paying linearly for diminishing returns and would be better served by HNSW.
+
+**Why `nlist = sqrt(N)` is the sweet spot.** The two terms in the formula pull against each other. Large `nlist` means tiny clusters (cheap to scan) but a huge centroid scan on every query. Small `nlist` means a trivial centroid scan but enormous clusters. Setting `nlist = sqrt(N)` makes both terms equal to `sqrt(N)`, minimizing the total:
+
+```
+  N = 1,000,000, nprobe = 1
+
+  nlist = 100      ->    100 + 1 x 10,000  =  10,100    (clusters too fat)
+  nlist = 1,000    ->  1,000 + 1 x  1,000  =   2,000    <- minimum, = 2 x sqrt(N)
+  nlist = 10,000   -> 10,000 + 1 x    100  =  10,100    (centroid scan too fat)
+```
+
+Note the symmetry: overshooting and undershooting by 10x cost exactly the same. This is also why the centroid scan becomes the bottleneck at billion scale — `sqrt(1e9)` is ~31,600 centroids to compare against on every single query, which is why large deployments use a second-level coarse quantizer (IVF over the centroids themselves, or an HNSW graph over them) rather than a flat centroid list.
 
 ### Product Quantization (PQ)
 

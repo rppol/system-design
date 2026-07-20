@@ -282,6 +282,38 @@ Cost per token estimation:
               API models where quality is critical
 ```
 
+**Reading it in plain English.** "You rent the GPU by the hour whether it is busy or not, so the price of a token is simply the hourly rent divided by however many tokens that hour produced."
+
+That framing matters because the numerator (rent) is fixed the moment you provision the box, while the denominator (throughput) is something you control with batching, quantization, and a better serving engine. Every self-hosting cost win is a denominator win.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `$3/hr` | "three dollars an hour" | On-demand rent for one H100 80GB. Spot pricing cuts this 60-70% |
+| `tokens/sec` | "tokens per second" | Sustained output throughput of the whole GPU, all concurrent requests summed |
+| `3600` | "thirty-six hundred" | Seconds in an hour. The unit bridge between "$/hr" and "$/token" |
+| `$0.00000083` | "eight point three times ten to the minus seven dollars" | Cost of one token. Too small to reason about — always restate per 1M |
+| `$/1M tok` | "dollars per one million tokens" | The comparable unit. Every API provider quotes this, so convert to it |
+| `$0.15/1M` | "fifteen cents per million" | gpt-4o-mini input price, the API side of the comparison |
+
+**Walk one example.** The H100 numbers from the block above, carried all the way to the comparable unit:
+
+```
+  rent                    = $3.00 per hour
+  throughput              = 1,000 tokens/sec         (7B model, continuous batching)
+
+  tokens produced in 1 hr = 1,000 x 3,600            = 3,600,000 tokens
+  cost per token          = $3.00 / 3,600,000        = $0.00000083
+  cost per 1K tokens      = $0.00000083 x 1,000      = $0.00083
+  cost per 1M tokens      = $0.00000083 x 1,000,000  = $0.83
+
+  vs gpt-4o-mini output   = $0.60 per 1M tokens      <- API is CHEAPER here
+  vs gpt-4o-mini input    = $0.15 per 1M tokens      <- API is 5.5x cheaper here
+```
+
+The arithmetic says self-hosting a 7B at $0.83/1M loses to gpt-4o-mini's $0.60/1M output price outright — and loses badly on input. Self-hosting only wins once throughput climbs (bigger batches, FP8/INT4, better engine) or the GPU is bought on spot, both of which move one of the two numbers above.
+
+**Why the "per hour" framing is the trap.** The formula silently assumes the GPU is saturated for the full hour. At 30% utilization your real denominator is 1,080,000 tokens, not 3,600,000, and the true cost per 1M tokens is `$0.83 / 0.30 = $2.77` — over 4x the API price. This is the single most common self-hosting cost miscalculation: the quoted number is a *peak-throughput* number, and idle GPU time is billed at exactly the same rate as busy GPU time.
+
 ### Monitoring LLM Quality
 
 Traditional ML metrics (accuracy, F1) don't apply to free-form LLM output. Use:
@@ -336,6 +368,104 @@ Cold start problem:
     Use model caching on persistent volumes (avoid re-download)
 ```
 
+The triggers above tell a replica *when* to appear. They do not tell you *how many* to
+run. That comes from Little's Law, the one capacity formula every serving system reduces to:
+
+```
+  concurrency = QPS x latency_seconds
+
+  replicas    = ceil( concurrency / (per_replica_concurrency x target_utilization) )
+```
+
+**Reading it in plain English.** "The number of requests in flight at any instant equals how fast they arrive multiplied by how long each one stays — so size the fleet to hold that many at once, with headroom."
+
+The reason this matters is that neither QPS nor latency alone tells you anything about fleet size. A system at 100 QPS with 50ms responses needs 5 concurrent slots; the same 100 QPS with 5-second LLM responses needs 500. LLM latency is 10-100x traditional web latency, which is exactly why LLM fleets look absurdly oversized next to the QPS number.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `QPS` | "queries per second" | Arrival rate. Use *peak* QPS, never the monthly average |
+| `latency_seconds` | "latency in seconds" | End-to-end time a request occupies a slot. Use p95, not p50 |
+| `concurrency` | "concurrency" | Requests in flight at one instant. The actual thing you provision for |
+| `per_replica_concurrency` | "per replica concurrency" | How many simultaneous sequences one GPU replica can decode. KV-cache bound |
+| `target_utilization` | "target utilization" | Headroom factor, typically 0.6-0.8. Above this, queueing latency explodes |
+| `ceil(...)` | "ceiling of" | Round up. You cannot run 2.9 GPUs |
+
+**Walk one example.** The case study platform in Section 14 — 40M requests/month, p50 800ms:
+
+```
+  avg QPS  = 40,000,000 / (30 x 86,400 sec)   = 15.4 QPS
+  peak QPS = 15.4 x 3       (3x diurnal peak) = 46.2 QPS
+
+  concurrency = 46.2 QPS x 0.8 sec            = 37 requests in flight
+
+  per_replica_concurrency = 16                (KV cache limit for this model/GPU)
+  target_utilization      = 0.80              (leave 20% for bursts)
+  effective per replica   = 16 x 0.80         = 12.8 slots
+
+  replicas = ceil( 37 / 12.8 ) = ceil(2.89)   = 3 replicas
+```
+
+Three replicas carry a 40M-request month. Note how sensitive this is: if p95 latency is
+2.4 seconds rather than the 800ms p50, concurrency becomes `46.2 x 2.4 = 111` and you need
+`ceil(111 / 12.8) = 9` replicas — 3x the fleet from a latency number, with QPS unchanged.
+Sizing on p50 is how teams under-provision by a factor of three.
+
+**Why `target_utilization` exists.** Remove it and you size for exactly 100% occupancy, which
+by queueing theory means unbounded wait time — the moment arrivals fluctuate above the mean
+(and they always do), requests queue, latency rises, which raises concurrency, which queues
+more requests. The headroom factor is what keeps that feedback loop from running away. It is
+also why the "FIXED" HPA in Common Pitfalls drops `targetGPUUtilization` from 80 to 60: scaling
+out earlier is cheaper than riding the knee of the latency curve.
+
+### Batch Size vs Latency
+
+Batching is the throughput lever, and it trades directly against per-user speed:
+
+```
+  per_user_token_rate = 1 / step_time_seconds
+  gpu_throughput      = batch_size / step_time_seconds
+```
+
+**Reading it in plain English.** "Every decode step emits one token for every request in the batch, so a bigger batch multiplies total output while each individual user waits slightly longer per token."
+
+The asymmetry is the whole point: step time grows *sublinearly* with batch size (decode is
+memory-bandwidth bound, so loading the weights once serves the whole batch), while output
+grows linearly. That gap is free throughput.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `batch_size` | "batch size" | Sequences decoded simultaneously in one forward pass |
+| `step_time` | "step time" | Wall time for one decode step. Grows slowly with batch, not proportionally |
+| `TPOT` | "T-POT" or "time per output token" | `step_time` from a single user's view. The streaming smoothness metric |
+| `TTFT` | "T-T-F-T" or "time to first token" | Prefill + queue wait. Governed by batching *policy*, not batch size |
+
+**Walk one example.** One GPU, decode-bound, measured step times:
+
+```
+  batch   step_time    per-user tok/s    GPU total tok/s    relative $/token
+  -----   ---------    --------------    ---------------    ----------------
+      1      20 ms          50.0                 50               1.00x
+      8      25 ms          40.0                320               0.16x
+     16      32 ms          31.3                500               0.10x
+     32      50 ms          20.0                640               0.08x
+
+  batch 1 -> 32:  per-user speed  50.0 -> 20.0 tok/s   = 2.5x SLOWER
+                  GPU throughput    50 ->  640 tok/s   = 12.8x MORE
+                  cost per token                       = 12.8x CHEAPER
+```
+
+You pay 2.5x in per-user token rate to buy 12.8x in cost. At batch 32 a user still receives
+20 tokens/sec — roughly 15 words/sec, comfortably faster than anyone reads — so the latency
+"cost" is invisible while the cost saving is not. That is why continuous batching is
+non-negotiable for self-hosted serving, and why the 1,000 tokens/sec figure in the cost block
+above is only reachable with batching on.
+
+**Why this does not fix TTFT.** Batch size sets the *steady-state* token rate; it does nothing
+for time to first token, which is prefill plus queue wait. Push batch size high enough and TTFT
+actually gets *worse*, because new arrivals wait for a batch slot. This is the exact failure in
+Common Pitfalls #2 — a dashboard showing record tokens/second while users report the app is
+slow, because the metric being optimized is not the metric being felt.
+
 ### Observability Stack
 
 ```
@@ -362,6 +492,108 @@ Quality dashboard:
   Monthly: A/B test results, model upgrade candidates
 ```
 
+### Reading Latency Percentiles
+
+`latency_p50/p99` appears in the metrics list above and as an SLA in the case study. It is
+routinely misread:
+
+```
+  p99 = 3,000 ms  means:  99% of requests finished in under 3,000 ms
+                          1 in 100 requests took LONGER than 3,000 ms
+```
+
+**Reading it in plain English.** "p99 is not 'the slow case' — it is the promise you keep 99 times out of 100, and the 1 time you break it is a real user having a real bad experience."
+
+Percentiles matter more than averages for LLM serving because the latency distribution is
+violently long-tailed: queueing, prefill of a long prompt, a KV-cache eviction, or a cold
+replica all produce outliers that an average absorbs and hides.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `p50` | "p fifty" (median) | Half of requests are faster. What a typical user feels |
+| `p95` | "p ninety-five" | 1 in 20 requests is slower. The right number for capacity sizing |
+| `p99` | "p ninety-nine" | 1 in 100 is slower. The usual SLA line |
+| `p99.9` | "p ninety-nine point nine" or "three nines" | 1 in 1,000. Where GC pauses and cold starts live |
+| `2 sigma` | "two sigma" | Two standard deviations from the mean. The alerting threshold in Section 12 |
+
+**Walk one example — why percentiles do not add across a chain.** A request crosses four
+services, each with its own p99. The intuition "p99 of the chain = sum of the p99s" is wrong
+in both directions:
+
+```
+  stage           p50      p99      P(this stage is in ITS OWN slow 1%)
+  -------------   ------   ------   -----------------------------------
+  gateway          10 ms     80 ms                 0.01
+  retrieval        60 ms    400 ms                 0.01
+  LLM decode      600 ms  2,200 ms                 0.01
+  guardrail        30 ms    320 ms                 0.01
+
+  P(no stage is slow) = 0.99 x 0.99 x 0.99 x 0.99 = 0.9606
+  P(at least one is slow) = 1 - 0.9606             = 0.0394  -> 3.94%
+
+  So ~4 requests in 100 hit SOME tail, not 1 in 100.
+  Sum of p50s =  700 ms   <- what a naive "typical" estimate gives
+  Sum of p99s = 3,000 ms  <- an UPPER bound, requires all four to spike together
+  Real chain p99 sits between: usually one stage tails while the rest run at p50
+                              ~ 600 + 2,200 - 600 = 2,200 ms dominated by LLM decode
+```
+
+Two lessons fall out. First, tail probability *compounds*: chaining four independent 99%
+services yields a 96% service, so each stage must individually be better than the end-to-end
+target. Second, one stage usually dominates the tail — here LLM decode — so tail work should
+go entirely into that stage rather than being spread evenly.
+
+### SLO and Error Budget Arithmetic
+
+An availability SLA converts to a concrete number of minutes you are permitted to be down:
+
+```
+  error_budget_minutes = (1 - SLO) x minutes_in_period
+
+  burn_rate = observed_bad_minutes / error_budget_minutes
+```
+
+**Reading it in plain English.** "An SLO of 99.95% is not a promise of perfection — it is a budget of 22 downtime minutes per month that you are allowed, and encouraged, to spend."
+
+Framing failure as a *budget* rather than a *violation* is what makes the number actionable:
+budget remaining is the argument for shipping the risky change, and budget exhausted is the
+argument for a change freeze. It turns reliability from an opinion into arithmetic.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `SLI` | "S-L-I" (service level indicator) | The measured number, e.g. "fraction of requests served under 3s" |
+| `SLO` | "S-L-O" (service level objective) | The internal target for that number, e.g. 99.95% |
+| `SLA` | "S-L-A" (service level agreement) | The contractual version, with money attached. Always looser than the SLO |
+| `1 - SLO` | "one minus the S-L-O" | The failure fraction. 99.95% -> 0.0005 |
+| `error budget` | "error budget" | Failure fraction expressed as time or requests. The spendable quantity |
+| `burn rate` | "burn rate" | Budget consumed per unit time. Burn rate 1.0 = exactly on pace to exhaust it |
+
+**Walk one example.** The case study's 99.95% availability SLA and its 14 failover events:
+
+```
+  minutes in a 30-day month = 30 x 24 x 60          = 43,200 min
+  failure fraction          = 1 - 0.9995            = 0.0005
+
+  error budget = 0.0005 x 43,200                    = 21.6 min/month  (the "< 22 min")
+
+  observed over 90 days: 14 failover events x 38 s  = 532 sec = 8.87 min
+  per month             = 8.87 / 3                  = 2.96 min/month
+
+  burn rate = 2.96 / 21.6                           = 0.137  -> 13.7% of budget used
+
+  Remaining budget = 21.6 - 2.96 = 18.6 min/month   <- room to ship
+```
+
+At 13.7% burn the fallback chain is not the reliability risk — there is 18.6 minutes of budget
+left to spend on canaries and model swaps. Had those same 14 events each lasted 2 minutes
+instead of 38 seconds, the burn would be `9.33 / 21.6 = 0.43` per month, and a single bad
+deploy would blow the quarter.
+
+**Why the budget must be a rate, not a count.** A raw "we were down 20 minutes" says nothing
+without the window. Burn rate normalizes it, which is what lets you alert on *trajectory* —
+a 14x burn rate for one hour consumes a month of budget and should page immediately, even
+though total downtime so far is only 8 minutes.
+
 ### GPU Memory Monitoring & OOM Prevention
 
 GPU memory is the most constrained resource in LLM serving. A single OOM crash kills all in-flight requests on that node. Serving-engine-level memory mechanics (PagedAttention, KV block management, preemption) are covered in [vLLM Deep Dive](../vllm_deep_dive/README.md).
@@ -385,6 +617,52 @@ GPU Memory Budget (A100 80GB serving LLaMA 3 8B in FP16):
   Total at peak:           ~50-61 GB
   Headroom:                19-30 GB (comfortable)
 ```
+
+**Reading it in plain English.** "GPU memory is a fixed 80 GB drawer: weights take a fixed, known slice, and everything left over is KV cache — which is the only part that grows with traffic, and therefore the only part that can kill you."
+
+The budget matters because three of the four line items are constants you can compute before
+deploying. Only KV cache is a function of load, so "how much headroom do I have" is really
+"how many more concurrent tokens can I hold."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `INT4` | "int four" | 4-bit weights. Roughly 0.5 bytes per parameter |
+| `FP16` | "F-P sixteen" | 16-bit weights. 2 bytes per parameter |
+| `KV cache` | "K-V cache" | Stored keys and values for every token of every live sequence. The variable term |
+| `utilization %` | "utilization percent" | `used / total`. The 75/85/95% alert ladder is set on this |
+| `headroom` | "headroom" | `total - peak`. Absorbs one long-context request or one batch spike |
+
+**Walk one example.** The 70B INT4 budget above, turned into the utilization number the alerts
+actually fire on, and then stress-tested with one long-context arrival:
+
+```
+  capacity                = 80 GB
+
+  weights (INT4, fixed)   = 40 GB      50.0% of the card, and it never moves
+  activations (fixed)     =  5 GB       6.3%
+  CUDA overhead (fixed)   =  3 GB       3.8%
+                            -----      -----
+  fixed floor             = 48 GB      60.0%   <- occupied before ONE request arrives
+  available for KV cache  = 32 GB      40.0%
+
+  at peak KV cache        = 30 GB  ->  total 78 GB / 80 GB = 97.5% utilization
+                                       -> past the 95% EMERGENCY threshold
+
+  now add one 128K-token request (4-8 GB of KV per Common Pitfalls #8):
+    78 GB + 6 GB = 84 GB  >  80 GB     -> OOM, and every in-flight request dies
+```
+
+Compare the 8B FP16 row: a 16 GB fixed floor leaves 64 GB for KV cache, so peak occupancy is
+`(16 + 40 + 3 + 2) / 80 = 76%` and the same 6 GB long-context arrival lands at 84% — inside
+the CRITICAL alert band but still alive. Same GPU, same request; the difference is entirely
+how much of the drawer the weights claimed up front.
+
+**Why 85% is the critical line and not 95%.** The alert must fire while there is still time to
+act. Degradation (shrink batch, reject long contexts, shed to an API provider) takes seconds to
+take effect, and KV cache can grow by several GB in that window. At 95% you are already
+allocating into the last few GB and the malloc that fails is the one that kills the process —
+so the threshold is set where the remaining 12 GB buys enough seconds for the degradation
+chain to run.
 
 ```
 Monitoring Strategy:
@@ -493,6 +771,39 @@ class CostTracker:
         )
         self.check_budget(request.metadata["team"], cost)
 ```
+
+**Reading it in plain English.** "Divide each token count by a million to get 'how many millions of tokens', multiply by the per-million price for that direction, and add the two — because input and output tokens are priced differently."
+
+The `/ 1_000_000` is the only subtle part, and it exists purely because providers quote prices
+per million tokens while requests carry raw token counts. Getting this factor wrong by 1,000x
+is the classic cost-dashboard bug — and it fails silently, since the number still looks
+plausible.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `input_tokens` | "input tokens" | Prompt plus system prompt plus retrieved context. Usually the larger count |
+| `output_tokens` | "output tokens" | Generated tokens. Usually 4-10x more expensive per token |
+| `1_000_000` | "one million" | Unit bridge. Converts raw counts into the "per 1M tokens" price unit |
+| `pricing["input"]` | "input price" | Dollars per 1M input tokens. gpt-4o: 2.50 |
+| `pricing["output"]` | "output price" | Dollars per 1M output tokens. gpt-4o: 10.00 |
+
+**Walk one example.** The gpt-4o request logged in the tagging block above (1,200 in, 450 out):
+
+```
+  input  = (1,200 / 1,000,000) x $2.50   = 0.0012 x 2.50   = $0.00300
+  output = (  450 / 1,000,000) x $10.00  = 0.00045 x 10.00 = $0.00450
+                                                             ---------
+  total cost                                               = $0.00750
+
+  same request on gpt-4o-mini:
+  input  = 0.0012  x $0.15 = $0.00018
+  output = 0.00045 x $0.60 = $0.00027   -> total $0.00045   = 16.7x cheaper
+```
+
+Note the shape: output is only 27% of the token count but 60% of the cost, because output is
+priced 4x higher. This is why `max_tokens` ceilings are a cost control and truncating the
+prompt usually is not — and why routing a query to gpt-4o-mini saves 16.7x while trimming
+context saves single-digit percentages.
 
 ---
 
@@ -970,6 +1281,48 @@ async def fixed_route_request(prompt: str) -> str:
     raise RuntimeError("All providers unavailable")
 ```
 
+**Reading it in plain English.** "Keep a rolling 30-second scrapbook of every request to a provider, count what fraction failed, and if more than one in ten failed, stop talking to that provider for a minute."
+
+The sliding window is the load-bearing design choice. A lifetime error counter never recovers
+from an old outage, and a fixed reset interval either forgets too fast or too slow. A window
+means the breaker's opinion is always about *right now*.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `window_seconds` | "window seconds" | How far back the breaker remembers. 30s here |
+| `error_threshold` | "error threshold" | Failure fraction that trips the circuit. `0.10` = 10% |
+| `rate` | "rate" | `errors / total` inside the window. Compared against the threshold |
+| `_opened_at` | "opened at" | Timestamp the circuit tripped. `None` means closed |
+| `half_open_probe_interval` | "half open probe interval" | Cooldown before one test request is let through. 60s |
+| `is_open` | "is open" | True = refuse traffic, take the fallback. Open circuit means blocked, as in a broken wire |
+
+**Walk one example.** GPT-4o starts returning 503s; watch the breaker trip and recover:
+
+```
+  t=0.0s   window holds 200 requests,   4 errors  -> rate = 4/200  = 0.020   closed
+  t=8.0s   window holds 210 requests,  12 errors  -> rate = 12/210 = 0.057   closed
+  t=15.0s  window holds 220 requests,  26 errors  -> rate = 26/220 = 0.118   0.118 > 0.10
+                                                                             -> TRIPS
+           _opened_at = 15.0
+
+  t=15.0s .. t=75.0s   is_open == True
+           every "complex" request skips GPT-4o entirely
+           FALLBACK_CHAIN sends it to SONNET in < 5 ms instead of hanging 10 s
+
+  t=75.0s  75.0 - 15.0 >= 60.0  -> _opened_at = None, half-open: one probe allowed
+           probe succeeds -> record(is_error=False) -> circuit stays closed
+           probe fails    -> record(is_error=True)  -> rate re-trips it
+```
+
+The payoff is the latency arithmetic. Without the breaker, 220 requests each wait the full
+`timeout=10.0` before failing, so a 60-second outage produces a wall of 10-second p99s. With
+it, the first ~26 requests pay the timeout, then every subsequent request re-routes in under
+5 ms — converting an outage into a barely visible latency blip.
+
+**Why a fraction and not a raw count.** A threshold of "20 errors" trips instantly on a
+high-traffic provider during a normal blip and never trips on a low-traffic one that is fully
+broken. Normalizing by window size makes the breaker behave identically at 5 RPS and 5,000 RPS.
+
 **Pitfall 1 — Heuristic classifier promotes short-but-complex requests to cheap tier.**
 
 ```python
@@ -1050,6 +1403,47 @@ async def shadow_eval_quality(
 | Shadow eval quality delta | baseline | -0.6% (within 1% SLA) |
 | Provider failover events | n/a | 14 in 90 days (avg 38s outage) |
 | Routing accuracy (heuristic) | n/a | 91.4% correct tier |
+
+**Reading it in plain English.** "Every percentage in that table is the same one-line calculation — how far the number moved, divided by where it started — and the blended cost is just each tier's price weighted by how much traffic it caught."
+
+Reading the table this way matters because the -73.8% headline is not one optimization. It is
+three multiplicative effects (cache removes requests, routing downgrades the survivors, the
+self-hosted tier is 16x cheaper than the tier it replaced) that compound.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `delta %` | "delta percent" | `(after - before) / before x 100`. Negative = improvement for cost/latency |
+| `hit rate` | "hit rate" | Fraction of requests answered from cache without any LLM call |
+| `volume share` | "volume share" | Fraction of remaining requests landing on a given tier |
+| `blended cost` | "blended cost" | Traffic-weighted average price per request across all tiers |
+| `quality delta` | "quality delta" | Routed-model judge score minus reference score. -0.6% here vs a < 1% SLA |
+
+**Walk one example.** Reconstruct the cost and latency headlines from the table's own numbers:
+
+```
+  COST
+  before = $180,000/month  (100% of 40M requests on GPT-4o)
+  after  =  $47,200/month
+
+  delta  = (47,200 - 180,000) / 180,000 x 100 = -132,800 / 180,000 x 100 = -73.8%
+
+  where it came from, applied in order:
+    34% cache hit rate     -> 40.0M requests become 26.4M billable   (-34.0%)
+    61% to self-hosted     -> 16.1M of those at $0.0009/1k out
+    remainder to API tiers ->  10.3M at Haiku $0.0025 / GPT-4o $0.015
+
+  LATENCY
+  p50: (780 - 2,100) / 2,100 x 100 = -1,320 / 2,100 x 100 = -62.9%
+  p99: (2,400 - 6,800) / 6,800 x 100 = -4,400 / 6,800 x 100 = -64.7%
+
+  Both clear the SLA:  p50 780 ms < 800 ms  and  p99 2,400 ms < 3,000 ms
+                       but p50 clears it by only 20 ms of margin
+```
+
+The latency win is mostly the cache: a 34% hit rate answers a third of traffic in single-digit
+milliseconds, which drags the median down hard without any model being faster. That is also the
+fragility — the p50 SLA has 20 ms of slack, so a cache hit rate falling from 34% to ~28% breaches
+it while every model in the fleet is behaving perfectly normally.
 
 **Interview Q&As**
 

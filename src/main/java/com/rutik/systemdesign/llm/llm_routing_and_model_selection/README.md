@@ -241,6 +241,51 @@ def should_escalate(response_logprobs: list[float], threshold: float = -0.5) -> 
     return mean_logprob(response_logprobs) < threshold
 ```
 
+**Reading it in plain English.** "Average how surprised the model was at each word it chose; if it
+was more surprised than your threshold allows, do not trust the answer — pay for a bigger model."
+
+The framing to hold onto is that this measures hesitation, not correctness. It is a cheap proxy that
+catches the model *fumbling*, which is a real and common failure mode, but it is blind to the model
+being fluently and confidently wrong.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `logprob` | "log prob" | Natural log of the probability the model assigned to the token it actually emitted. Always `<= 0`; `0` means certainty |
+| `mean_logprob` | "mean log prob" | Sum of the token log-probs divided by token count. Length-normalized, so a long answer is not penalized for being long |
+| `-0.5` | "minus zero point five" | The escalation threshold. More negative = more surprised = escalate |
+| `exp(x)` | "e to the x" | Undoes the log. Converts a log-prob back into a plain probability so you can reason about it |
+| `<` | "is less than" | Note the direction: escalate when the score falls *below* the threshold, because both are negative |
+
+**Walk one example.** Two 5-token responses from the cheap model, threshold `-0.5`:
+
+```
+  response A -- fluent, the model knew what it wanted to say
+    token logprobs      -0.05   -0.11   -0.02   -0.30   -0.07
+    sum                 = -0.55
+    mean                = -0.55 / 5   = -0.110
+    exp(-0.110)         = 0.896       -> ~90% average per-token confidence
+    is -0.110 < -0.50?  = NO          -> PASS, return the cheap answer
+
+  response B -- hedging, the model was picking among many options
+    token logprobs      -1.20   -0.85   -2.10   -0.40   -1.55
+    sum                 = -6.10
+    mean                = -6.10 / 5   = -1.220
+    exp(-1.220)         = 0.295       -> ~30% average per-token confidence
+    is -1.220 < -0.50?  = YES         -> FAIL, escalate to the next tier
+
+  What the threshold means once you undo the log:
+    exp(-0.5) = 0.607
+    -> "escalate whenever average per-token confidence drops below ~61%"
+```
+
+That last line is how the threshold should be tuned. `-0.5` is not a meaningful dial; "61% average
+per-token confidence" is, and it can be argued about with product owners.
+
+**Why the mean and not the sum.** Using the raw sum would make every long answer look uncertain —
+response A's `-0.55` over 5 tokens would become `-11.0` over 100 equally confident tokens and trip
+any fixed threshold. Dividing by token count is what makes one threshold work across a 20-token
+answer and a 2,000-token one. Drop the normalization and your cascade escalates on verbosity.
+
 **Self-assessment method (prompt-based):**
 
 Append a confidence elicitation to the prompt:
@@ -326,6 +371,130 @@ With routing (70% Haiku, 25% Sonnet, 5% Opus):
   Total:  ~$33,500/day
 Savings: ~44% cost reduction
 ```
+
+**Reading it in plain English.** "Work out what one query costs at each tier, then multiply each of
+those by the share of traffic that actually lands there and add them up — the routed bill is a
+weighted sum, not an average of the price list."
+
+The reason to lay it out this way rather than trust the 44% headline is that the weighted sum
+immediately exposes where the money really goes, and it is almost never where the traffic goes.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `$0.25 / 1M` | "twenty-five cents per million tokens" | A tier's unit price. Divide by 1,000,000 for the price of one token |
+| `C_i` | "C sub i" | Cost of one query at tier i: `(in_tok x r_in + out_tok x r_out) / 1M` |
+| `w_i` | "w sub i", "weight of tier i" | Fraction of traffic routed to tier i. The weights sum to 1.0 |
+| `N` | "N" | Total query volume. `10M/day` here |
+| `sum(w_i x N x C_i)` | "sum over i of w-i N C-i" | The routed daily bill. The whole routing economics in one expression |
+| baseline | "baseline" | `N x C_mid` — what you paid before routing, everything on one mid-tier model |
+
+**Walk one example.** 10M queries/day, 500 input + 300 output tokens each:
+
+```
+Step 1 -- cost of ONE query at each tier:
+
+  Haiku    input   500 x $0.25 / 1M  = $0.000125
+           output  300 x $1.25 / 1M  = $0.000375
+                                       ---------
+                                       $0.00050 / query
+
+  Sonnet   input   500 x $3.00 / 1M  = $0.001500
+           output  300 x $15.00 / 1M = $0.004500
+                                       ---------
+                                       $0.00600 / query      (12x Haiku)
+
+  Opus     input   500 x $15.00 / 1M = $0.007500
+           output  300 x $75.00 / 1M = $0.022500
+                                       ---------
+                                       $0.03000 / query      (60x Haiku)
+
+Step 2 -- weight each by its traffic share and sum:
+
+  tier     share    queries/day    x cost/query    daily cost    share of bill
+  ------   -----    -----------    ------------    ----------    -------------
+  Haiku     70%      7.00M          $0.00050       $ 3,500          10.4%
+  Sonnet    25%      2.50M          $0.00600       $15,000          44.8%
+  Opus       5%      0.50M          $0.03000       $15,000          44.8%
+                                                   -------
+  routed total                                     $33,500 / day
+
+  baseline (all Sonnet)   10M x $0.00600         = $60,000 / day
+  saving   = 1 - ($33,500 / $60,000)             = 44%
+
+Step 3 -- the number the headline hides:
+
+  5% of traffic (Opus) costs exactly as much as 25% of traffic (Sonnet),
+  and 70% of traffic (Haiku) costs 10% of the bill.
+  The tail sets the bill; the bulk sets the latency.
+```
+
+Step 3 is the actionable finding. Shaving the Opus share from 5% to 3% saves `$6,000/day` — more
+than moving another 10 points of traffic from Sonnet down to Haiku would. When routing savings
+plateau, the next win is almost always at the top of the ladder, not the bottom.
+
+**Why the weights and not an average of the three prices.** Averaging `$0.00050`, `$0.00600` and
+`$0.03000` gives `$0.0122/query` and a projected `$122,000/day` — twice the *unrouted* baseline.
+The weights are what make the calculation about your traffic instead of the provider's catalogue.
+
+**Reading the cascade version in plain English.** "A cascade always pays the cheap model, on every
+single query, and then pays the expensive model again on the fraction it escalates — so the cheap
+leg is a floor you can never get below, and the escalation rate is the only dial."
+
+This differs structurally from classifier routing, where a query goes to exactly one model. In a
+cascade the two costs stack on escalated queries, which is why the break-even escalation rate is the
+number to check before choosing a cascade at all.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `P_esc` | "P escalate" | Probability a query fails the confidence check and moves up a tier |
+| `1 - P_esc` | "one minus P escalate" | Share handled by the cheap model alone. The cascade's success rate |
+| `C_cheap` | "C cheap" | Cost of one cheap-model call. Paid on 100% of queries, including escalated ones |
+| `C_exp` | "C expensive" | Cost of one expensive-model call. Paid only on the escalated share |
+| `E[C]` | "expected cost", "E of C" | `C_cheap + P_esc x C_exp`. Average cost per query across the whole distribution |
+| break-even `P_esc` | "break-even escalation rate" | The `P_esc` at which `E[C]` equals just calling the expensive model directly |
+
+**Walk one example.** Haiku `$0.00050` and Sonnet `$0.00600` from Step 1 above:
+
+```
+  E[C] = C_cheap + P_esc x C_exp
+       = $0.00050 + P_esc x $0.00600
+
+  P_esc    cheap leg     escalation leg                E[C]/query   vs all-Sonnet
+  -----    ----------    --------------------------    ----------   -------------
+    0%     $0.00050      0.00 x $0.00600 = $0.00000     $0.00050        -92%
+   10%     $0.00050      0.10 x $0.00600 = $0.00060     $0.00110        -82%
+   20%     $0.00050      0.20 x $0.00600 = $0.00120     $0.00170        -72%
+   30%     $0.00050      0.30 x $0.00600 = $0.00180     $0.00230        -62%
+   50%     $0.00050      0.50 x $0.00600 = $0.00300     $0.00350        -42%
+   92%     $0.00050      0.92 x $0.00600 = $0.00552     $0.00602         +0%   <- break-even
+
+  Break-even algebra:
+    $0.00050 + P x $0.00600 = $0.00600
+    P = ($0.00600 - $0.00050) / $0.00600 = 0.917  -> 92%
+
+Why a 20% escalation rate still captures most of the savings:
+
+  at P_esc = 20%, the escalated fifth of traffic carries 71% of the
+  cascade's own bill ($0.00120 of $0.00170) -- yet the total is still
+  only 28% of the all-Sonnet price ($0.00170 / $0.00600 = 0.283).
+
+  The reason is the 12x gap between tiers: the 80% that stayed cheap
+  ran at one-twelfth the rate, so their contribution to the bill is
+  almost a rounding error. Savings decay linearly in P_esc, and the
+  cheap leg is small enough that the line does not reach zero benefit
+  until P_esc passes 90%.
+```
+
+The practical reading: cascades are robust to a badly calibrated confidence check. Doubling the
+escalation rate from 20% to 40% moves you from -72% to -52% — worse, but still a large win. Compare
+that to the latency picture, where the same change is catastrophic (Pitfall 4), and the tradeoff
+becomes clear: cascades fail gracefully on cost and abruptly on tail latency.
+
+**Why `C_cheap` sits outside the `P_esc` term.** It is tempting to write
+`E[C] = (1 - P_esc) x C_cheap + P_esc x C_exp`, treating the two as alternatives. That is the
+*classifier* formula, and using it for a cascade understates the true cost by `P_esc x C_cheap` —
+the wasted cheap call on every escalated query. At `P_esc = 50%` that error is `$0.00025/query`,
+`$2,500/day` at 10M queries, silently missing from the forecast.
 
 ### 6.4 Semantic Router Implementation
 
@@ -436,6 +605,57 @@ quadrantChart
 
 The three tiers form a Pareto frontier along the diagonal. Routing goal: operate near the frontier, selecting the leftmost (cheapest) model that meets the quality threshold per task — any query served from the bottom-right of its adequate tier is pure overpayment.
 
+**Reading it in plain English.** "Divide dollars by quality points to see what you are paying per
+unit of goodness — then look at the *steps between* tiers, because that is where the price of the
+next increment of quality is actually set."
+
+The frontier chart shows that all three tiers are defensible choices. The arithmetic below shows
+that the gaps between them are priced wildly differently, and that is the fact routing exploits.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `Q` | "Q", "quality" | Empirical quality score on your eval set, normalized 0–1. The y-axis of the chart above |
+| `Q_min` | "Q min" | The minimum acceptable quality for this task type. A business decision, not a measurement |
+| `C` | "C", "cost per query" | Dollars per query at that tier, from Section 6.3 |
+| `C / Q` | "cost over quality" | Average price of a quality point. Useful for ranking, misleading for deciding |
+| `dC / dQ` | "delta C over delta Q" | *Marginal* price of the next quality point — what the upgrade actually costs you |
+
+**Walk one example.** Quality read off the frontier chart, cost from Section 6.3:
+
+```
+  tier      Q        C / query     C / Q         (average price per quality point)
+  ------   -----    ----------    ---------
+  Haiku     0.40     $0.00050      $0.00125
+  Sonnet    0.72     $0.00600      $0.00833
+  Opus      0.90     $0.03000      $0.03333
+
+  Now the marginal steps, which is what you actually buy:
+
+    Haiku  -> Sonnet    +0.32 Q for +$0.00550    $0.00550 / 0.32 = $0.0172 per Q point
+    Sonnet -> Opus      +0.18 Q for +$0.02400    $0.02400 / 0.18 = $0.1333 per Q point
+
+    The second step costs 7.8x as much per quality point as the first
+    ($0.1333 / $0.0172 = 7.76) while delivering barely half the gain.
+
+  Apply a threshold:
+
+    Q_min = 0.70 (summarization)   Sonnet clears it at 0.72.
+                                   Opus is pure overpayment: 5x the price
+                                   ($0.03000 / $0.00600) for quality you
+                                   already agreed you do not need.
+
+    Q_min = 0.85 (code generation) Sonnet fails at 0.72. Opus is the only
+                                   option, and its terrible marginal rate
+                                   is irrelevant -- correctness is a gate,
+                                   not a preference.
+```
+
+**Why `Q_min` is a gate and not a term in an optimization.** It is tempting to maximize `Q / C` and
+route everything to Haiku, which wins that ratio outright at `320 Q points per dollar`. But a
+summary scoring 0.40 when the task needs 0.70 is not cheap quality — it is a failed request that
+gets retried, escalated, or complained about. Quality below `Q_min` has value zero, which is why the
+rule is "cheapest model above the line", never "best ratio".
+
 ### Cascade vs. Classifier
 
 | Dimension | Cascade | Classifier |
@@ -477,6 +697,68 @@ A team deployed a DistilBERT router on CPU with 80ms P50 latency. Their cheap mo
 ### Pitfall 2: Over-Routing to Cheap Models Degrades User Experience
 
 A startup set an aggressive cost target (90% of queries to the cheapest model). The classifier was only 75% accurate. Net result: 15% of queries (1.5M/day) routed incorrectly to a weak model. User satisfaction scores dropped 12 points before the team noticed. The problem was caught only because they had a quality monitoring pipeline. Lesson: set the routing threshold conservatively (start with 50-60% to cheap models, expand gradually) and monitor quality per route segment.
+
+**Reading it in plain English.** "A single accuracy number tells you nothing useful, because the two
+ways a router can be wrong are not the same kind of wrong — one costs dollars and the other costs
+users, and only one of them is bounded."
+
+That asymmetry is the whole reason to report a confusion matrix instead of an accuracy figure. A
+75%-accurate router is fine or catastrophic depending entirely on which direction its 25% of errors
+lean, and the aggressive cheap-routing target is what decides that lean.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `A` | "A", "accuracy" | Fraction of queries sent to the correct tier. `0.75` in this incident |
+| `1 - A` | "one minus A" | Total error rate. Says nothing about direction |
+| `r_cheap` | "r cheap" | Target share of traffic routed to the cheap model. `0.90` here — the aggressive setting |
+| downward misroute | "downward misroute" | Complex query sent to the weak model. Costs quality. **Unbounded** — you cannot price a lost user |
+| upward misroute | "upward misroute" | Simple query sent to the frontier model. Costs money. **Bounded** — exactly the tier price gap |
+| `C_exp - C_cheap` | "the tier gap" | Dollars wasted per upward misroute. `$0.00600 - $0.00050 = $0.00550` |
+
+**Walk one example.** 10M queries/day, classifier accuracy 75%, cheap-routing target 90%:
+
+```
+Step 1 -- split the errors by direction:
+
+    total error rate      = 1 - 0.75             = 25%  = 2.5M queries/day
+    the 90% cheap target pushes errors downward:
+      downward misroutes  ~ 15% of all traffic   = 1.5M queries/day
+      upward misroutes    ~ 10% of all traffic   = 1.0M queries/day
+
+Step 2 -- price each direction (Haiku $0.00050, Sonnet $0.00600):
+
+    upward misroute   waste per query = $0.00600 - $0.00050 = $0.00550
+                      1.0M/day x $0.00550                   = $5,500/day burned
+
+    downward misroute waste per query = a degraded answer, not dollars
+                      1.5M/day users get the weak model     -> -12 CSAT points
+
+Step 3 -- retune to the conservative 60% cheap-routing target:
+
+    downward misroutes fall to ~6%   = 0.6M/day    (-900K/day)
+    upward misroutes rise to ~19%    = 1.9M/day
+                      1.9M x $0.00550                       = $10,450/day burned
+
+    incremental spend = $10,450 - $5,500                    = $4,950/day
+
+Step 4 -- price the trade:
+
+    $4,950/day  /  900,000 rescued users/day  =  $0.0055 per rescued user
+
+    Half a cent to turn a degraded answer into a correct one. This is
+    exactly the tier gap from Step 2 -- rescuing a user IS buying them
+    the upgrade, so the price can never be anything else.
+```
+
+Step 4 is the sentence to bring to the meeting where someone proposes a more aggressive cost target.
+The exchange rate is fixed and knowable in advance: you are buying correct answers at the tier gap,
+and the only question is how many of them are worth half a cent.
+
+**Why the two error directions must never be summed.** Reporting "25% error rate" invites the fix of
+"improve the classifier", which is slow and expensive. Reporting "15% downward, 10% upward" invites
+the fix of "move the decision threshold", which is a config change shipping this afternoon and which
+converts the unbounded risk into the bounded one. Bias the threshold toward upward misroutes; you
+can always find the money, and you cannot always find the user again.
 
 ### Pitfall 3: Not Monitoring Quality Per Route
 
@@ -792,6 +1074,75 @@ class AdaptiveCascadeRouter:
             if abs(self.threshold - 0.6) > 0.15:
                 alert_oncall(f"Router threshold shifted to {self.threshold:.2f} — investigate query distribution")
 ```
+
+**Reading it in plain English.** "Stop asking 'is this score above 0.6' and start asking 'is this
+score in the top 35% of scores I have seen lately' — the threshold becomes a percentile, so it moves
+by itself when the query mix moves."
+
+A fixed threshold silently assumes the classifier's score distribution is stable forever. It is not:
+the scores are a property of the model *and* the incoming traffic, and only one of those is under
+your control. Pinning the routing *rate* instead of the routing *score* is what makes the router
+survive a change in customer mix.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `score` | "score" | Classifier's complexity output for one query, `0.0`–`1.0`. Higher = more complex |
+| `threshold` | "threshold" | Cut point above which a query goes premium. The thing that used to be hardcoded at `0.6` |
+| `target_premium_rate` | "target premium rate" | The share of traffic you *intend* to send to the expensive model. `0.35` |
+| `actual_premium_rate` | "actual premium rate" | The share currently going premium: `count(score >= threshold) / window` |
+| `deviation` | "deviation" | `actual - target`. Recalibrate when `abs(deviation) > 0.10` |
+| `score_window` | "score window" | Rolling buffer of the last 10,000 scores. The empirical distribution you re-cut |
+| `new_threshold_idx` | "new threshold index" | `int(N x (1 - target))` — the position in the *sorted* scores that leaves exactly `target` above it |
+
+**Walk one example.** Window of 10,000 recent scores, `target_premium_rate = 0.35`:
+
+```
+Week 1 -- the distribution the static 0.6 was tuned on:
+
+    scores >= 0.60      = 3,480 of 10,000  = 34.8% premium
+    deviation           = 0.348 - 0.350    = -0.002
+    is |−0.002| > 0.10? = NO               -> no action, 0.6 is correct
+
+Month 3 -- enterprise queries arrive; the classifier underscores them
+           (it never saw 500-line codebases in training):
+
+    scores >= 0.60      = 2,100 of 10,000  = 21.0% premium
+    deviation           = 0.210 - 0.350    = -0.140
+    is |−0.140| > 0.10? = YES              -> recalibrate
+
+Recalibration -- re-cut the threshold at the target percentile:
+
+    new_threshold_idx   = int(10,000 x (1 - 0.35)) = int(6,500) = 6,500
+    sorted_scores[6500] = 0.48
+    threshold           : 0.60 -> 0.48     (lowered to let more through)
+
+    Check: with threshold 0.48, exactly 10,000 - 6,500 = 3,500 scores
+           sit above it = 35.0% premium. Target restored by construction.
+
+Alert check -- did it move more than a tweak should?
+
+    |0.48 - 0.60| = 0.12
+    is 0.12 > 0.15?     = NO  -> router self-corrects quietly, no page
+
+    Had the shift pushed the threshold past 0.45 or below, the on-call
+    page fires: a move that large is a distribution change, not drift,
+    and a threshold nudge should not be asked to absorb it.
+
+Cost of NOT recalibrating -- the incident, in one line of arithmetic:
+
+    premium share drifts    0.35 -> 0.21   = -0.14
+    at 1M queries/day       0.14 x 1,000,000 = 140,000 queries/day
+    that should have gone premium and silently got the cheap model.
+
+    That is the 18% enterprise satisfaction drop -- 140K degraded
+    answers a day, landing entirely on the newest and largest accounts.
+```
+
+**Why the deviation band exists.** Without the `abs(deviation) > 0.10` guard, the router would re-cut
+its threshold on every single request, chasing sampling noise and making routing non-reproducible
+between two identical queries seconds apart. The band is what separates "the world changed" from
+"the last hundred queries happened to be hard", and 0.10 is wide enough that normal daily traffic
+rhythm — mornings skew simple, deploy windows skew complex — never trips it.
 
 **Additional interview Q&As:**
 

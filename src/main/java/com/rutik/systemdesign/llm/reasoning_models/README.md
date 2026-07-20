@@ -115,6 +115,45 @@ Benefits:
   - Filters high-quality reasoning chains for training data
 ```
 
+**Reading it in plain English.** "An ORM asks *did you land on the right answer*; a PRM asks *was every step you took a good one* — and then you have to decide how to squash those step scores into one number."
+
+That last decision is the load-bearing one and it is almost never stated. The same PRM, with the same step scores, will rank candidate chains in a *different order* depending on whether you aggregate by sum, mean, min, product, or last step. Picking the aggregator is picking what you believe about reasoning.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `s_t` | "s sub t" | The PRM's score for reasoning step `t`. Here: `+0.3, +0.4, +0.4, -0.2` |
+| `T` | "capital T" | How many steps the chain has. Four, in the block above |
+| `sum(s_t)` | "sum of the step scores" | Total credit. Long good chains beat short good chains |
+| `mean(s_t)` | "mean of the step scores" | Average step quality. Length-neutral |
+| `min(s_t)` | "min of the step scores" | The weakest link. One bad step condemns the chain |
+| `prod(p_t)` | "product of the step probabilities" | Chance *every* step is right, if steps are independent |
+| `s_T` | "s sub capital T" | The last step's score only. Cheapest to compute, blindest |
+
+**Walk one example.** Chain A is the four-step proof scored in the block above; chain B is a duller chain that never blunders:
+
+```
+                    step 1   step 2   step 3   step 4    sum    mean     min    last
+  chain A            +0.30    +0.40    +0.40    -0.20   0.90   0.225   -0.20   -0.20
+  chain B            +0.20    +0.20    +0.25    +0.20   0.85   0.213   +0.20   +0.20
+
+  sum:    0.90 > 0.85   -> picks A
+  mean:  0.225 > 0.213  -> picks A
+  min:   -0.20 < +0.20  -> picks B
+  last:  -0.20 < +0.20  -> picks B
+```
+
+Same PRM, same two chains, and the aggregator flips the winner. Chain A does better *work* for three steps and then breaks; chain B plods but never breaks. `sum` and `mean` forgive the break because three good steps outvote one bad one. `min` and `last` refuse to.
+
+**Why `min` and `product` exist.** In math and code a proof is only as good as its worst step — a single invalid inference makes the whole chain worthless no matter how elegant the other steps were. Averaging destroys exactly that information, so a mean-aggregated PRM happily promotes a chain with one fatal error over a chain with none. `product` says the same thing in probability form: if the PRM's step scores are read as per-step correctness probabilities, then
+
+```
+  4 steps at p = 0.90 each  ->  0.90^4 = 0.6561    <- chain-level correctness
+  4 steps at p = 0.95 each  ->  0.95^4 = 0.8145
+  3 steps at 0.95, 1 at 0.50 ->  0.95^3 x 0.50 = 0.4286   <- one weak step dominates
+```
+
+The 0.4286 row is the point: the product collapses toward the weakest factor, which is the behaviour you want from a verifier. Drop `min`/`product` in favour of `mean` and you get the classic PRM failure mode — best-of-N reranking that confidently selects chains containing one silent invalid step, precisely the chains an ORM would have caught.
+
 ### 4.4 Self-Consistency
 
 Generate multiple reasoning chains and vote:
@@ -137,6 +176,50 @@ Final answer: 10:30am
 Improves accuracy by 5-15% on reasoning tasks
 Useful when you can't afford a full reasoning model but need better reliability
 ```
+
+**Reading it in plain English.** "If the model is right more often than it is wrong in any *one* particular way, then sampling it many times and taking the most common answer is right more often than any single sample."
+
+The condition hidden in that sentence is everything. Voting does not make the model smarter — it only cancels *noise*. It cancels nothing at all when the model is wrong the same way every time, and it actively hurts when the model is wrong more often than it is right.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `p` | "p" | Single-chain accuracy. The chance one sampled chain lands on the right answer |
+| `N` | "capital N" | How many chains you sample. The block above uses `N = 10` |
+| `k` | "k" | How many of those `N` chains happened to be correct |
+| `C(N,k)` | "N choose k" | The number of ways to pick which `k` of the `N` chains were the correct ones |
+| `p^k` | "p to the k" | Chance those `k` specific chains are all correct |
+| `(1-p)^(N-k)` | "one minus p, to the N minus k" | Chance the other `N-k` chains are all wrong |
+| `P(vote)` | "P of vote" | `sum over k > N/2 of C(N,k) x p^k x (1-p)^(N-k)` — chance the majority is correct |
+
+**Walk one example.** The block above shows 7 of 10 chains agreeing. With `p = 0.60` and `N = 10`, the majority is correct whenever at least 6 chains are correct:
+
+```
+  k     C(10,k)    p^k        (1-p)^(10-k)     term
+  6         210    0.046656       0.025600    0.2508
+  7         120    0.027994       0.064000    0.2150
+  8          45    0.016796       0.160000    0.1209
+  9          10    0.010078       0.400000    0.0403
+ 10           1    0.006047       1.000000    0.0060
+                                             ------
+                              P(vote correct) 0.6331
+```
+
+So `0.600 -> 0.633` — a 3.3-point gain, not a miracle. Now sweep `p` and `N` and the shape of the whole technique falls out:
+
+```
+    p      N       P(vote)     delta        what is happening
+  0.40    10        0.166      -23.4   voting AMPLIFIES the error; below 50% it hurts
+  0.60    10        0.633       +3.3   real but small; the module's low end
+  0.80    10        0.967      +16.7   the sweet spot the 5-15% claim comes from
+  0.60    40        0.871      +27.1   more chains buy a lot while p is mid-range
+  0.80    40        0.9996     +19.9   saturated; N=10 already captured the gain
+```
+
+**Where it saturates, and why.** Each extra chain shrinks the error, but it shrinks a quantity that is already small — going `N = 10 -> 40` at `p = 0.80` moves accuracy from 96.7% to 99.96%, buying 3.3 points for 4x the cost, while the same jump at `p = 0.60` buys 23.8 points. The cost is linear in `N`; the benefit decays exponentially. That is the whole reason the rule of thumb is "worth it between 40% and 80% single-chain accuracy" — above it there is nothing left to win, and below 50% the majority is voting for the *wrong* answer.
+
+**Why the `p < 0.5` row is worse than useless.** With `p = 0.40` a single sample is right 40% of the time, but the majority of ten samples is right only 16.6% of the time. Voting is a *sharpening* operator: it drives the outcome toward whatever the model believes most often, so when the model's favourite answer is wrong, voting removes the lucky correct samples that would otherwise have shown up. In production this is the trap — self-consistency reports look great on easy benchmarks and silently degrade the hardest slice of traffic, the exact slice you deployed it for.
+
+**One caveat that makes real numbers better than these.** The table assumes every wrong chain agrees on the *same* wrong answer, which is the pessimistic case. In practice wrong chains scatter across many different wrong answers (10:15am, 10:45am, ... in the block above), so the correct answer only needs a *plurality*, not a majority — the effective threshold drops well below `N/2` and observed gains beat this arithmetic. The table is the floor, not the forecast.
 
 ### 4.5 Tree of Thought (ToT)
 
@@ -182,6 +265,74 @@ Backprop: update node values with rollout rewards
 Used in: AlphaCode 2, AlphaProof (Google DeepMind math reasoning)
 Limitation: slow — requires many forward passes (10-1000× base inference)
 ```
+
+The "UCB selection" line above is one formula doing all the work. Written out, the UCT rule that MCTS uses to pick which child node to descend into is:
+
+```
+                         Q(child)             /  ln N(parent)  \
+  UCT(child)  =  ------------------  +  c x  / ----------------  \
+                       n(child)             \/     n(child)     /
+
+                 \______________/            \__________________/
+                  exploitation                    exploration
+                  "how good has this            "how little do I still
+                   branch looked so far"         know about this branch"
+```
+
+**Reading it in plain English.** "Descend into the child with the best combination of *proven track record* and *unexplored potential* — and let the potential term fade automatically as you gather evidence."
+
+The reason it is a *sum of two terms* rather than a rule with an if-statement is that the two pressures are never resolved once and for all. Early in the search the second term dominates and MCTS behaves like breadth-first sampling; late in the search the second term has decayed to near-nothing and MCTS behaves like greedy best-first descent. Nobody schedules that transition — it falls out of the arithmetic.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `Q(child)` | "Q of child" | Total reward accumulated by every rollout that passed through this child |
+| `n(child)` | "little n of child" | How many rollouts have passed through this child |
+| `Q/n` | "Q over n" | Mean reward. The **exploitation** term: this branch's observed win rate, 0 to 1 |
+| `N(parent)` | "big N of parent" | How many rollouts have passed through the parent. The total evidence budget spent here |
+| `ln N(parent)` | "natural log of big N" | Grows *slowly* with total search. Doubling the search adds only 0.69 |
+| `ln N / n` | "log N over little n" | Ignorance ratio: much search done overall, little of it here, so look here |
+| `sqrt(...)` | "square root of" | Softens the ratio so a barely-visited node is attractive, not overwhelming |
+| `c` | "c" (the exploration constant) | How much you value curiosity over track record. Typical `sqrt(2) = 1.41` |
+
+**Walk two candidate nodes.** The parent has been visited 100 times. `c = 1.41`. Two children compete:
+
+```
+                     Q      n     exploitation      exploration                 UCT
+                                    Q / n         c x sqrt(ln N / n)
+  node A           24.0     30     24/30 = 0.800   1.41 x sqrt(4.605/30)      1.352
+                                                 = 1.41 x sqrt(0.15350)
+                                                 = 1.41 x 0.3918  = 0.552
+
+  node B            3.0      5      3/5  = 0.600   1.41 x sqrt(4.605/5)       1.953
+                                                 = 1.41 x sqrt(0.92100)
+                                                 = 1.41 x 0.9597  = 1.353
+
+  ln N(parent) = ln 100 = 4.605
+
+  MCTS picks node B  (1.953 > 1.352)
+```
+
+**Node B wins despite being the worse-looking branch.** On raw value A is far ahead — 0.800 versus 0.600 — but A's opinion rests on 30 rollouts while B's rests on 5. The exploration term prices that gap: B's bonus is 1.353 against A's 0.552, more than covering the 0.200 value deficit. MCTS is saying "your evidence that B is worse is too thin to act on."
+
+Now spend 25 more rollouts on B, which confirm B really is a 0.600 branch. The parent is now at 130:
+
+```
+                     Q      n     exploitation      exploration                 UCT
+  node A           24.0     30       0.800          1.41 x sqrt(4.868/30)     1.368
+                                                  = 1.41 x 0.4028  = 0.568
+  node B           18.0     30       0.600          1.41 x sqrt(4.868/30)     1.168
+                                                  = 1.41 x 0.4028  = 0.568
+
+  ln N(parent) = ln 130 = 4.868
+
+  MCTS now picks node A  (1.368 > 1.168)
+```
+
+Once the two children have equal visit counts their bonuses are identical and cancel exactly, so the decision collapses to pure value — and A wins on merit. The exploration term did its whole job and then got out of the way. This self-cancelling property is why MCTS converges: every child's bonus shrinks as `1/sqrt(n)` while `ln N(parent)` grows only logarithmically, so the bonus is guaranteed to lose to the value term eventually, for every node, no matter how the search started.
+
+**Why `c` is the only knob that matters.** Set `c = 0` and the exploration term vanishes: MCTS commits to whichever branch got a lucky first rollout and never revisits the decision — this is the failure mode where a reasoning tree locks onto a wrong first step and burns all 100 rollouts elaborating it. Set `c` too high and the bonus never loses to the value term within your rollout budget, so MCTS spreads rollouts evenly across every branch and behaves like uniform sampling, which is strictly worse than best-of-N at the same cost because you paid for tree bookkeeping and got nothing for it. On top of that, `Q/n` is only meaningful if the reward signal is trustworthy — with a noisy PRM the exploitation term is measuring noise, which is the deeper reason MCTS needs a reliable verifier before it beats simpler methods.
+
+**Why `ln` and not `N` itself.** If the numerator were `N(parent)` instead of `ln N(parent)`, the exploration bonus would grow as fast as the search itself and never decay relative to it — the search would keep re-opening settled questions forever. The logarithm makes total search cheap to accumulate but expensive to convert into curiosity: going from 100 to 1,000 parent visits raises `ln N` only from 4.605 to 6.908, a 50% increase, while `n(child)` in the denominator can grow 10x. Value wins in the long run by construction.
 
 ### 4.7 Reward Hacking and Mitigation
 
@@ -315,6 +466,47 @@ Accuracy
 Key insight: accuracy scales log-linearly with test-time compute
   (up to some task-specific ceiling)
 ```
+
+**Reading it in plain English.** "Every time you *multiply* the thinking compute by ten, accuracy goes up by a *fixed number of points* — not by a fixed percentage, and not by ten times anything."
+
+Log-linear is a much weaker promise than it sounds, and reading the curve correctly is the difference between a sane inference budget and an unbounded one. The x-axis of the plot above is `1x, 5x, 20x, 100x` — those are equal *visual* spacings for wildly unequal *cost* jumps, which is exactly what "log-linear" encodes.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `C` | "C" | Compute multiplier at inference. The `1x / 5x / 20x / 100x` on the axis |
+| `log10(C)` | "log base ten of C" | How many *tenfold* jumps of compute you have bought. `100x` is 2 |
+| `b` | "b" | Points of accuracy per tenfold jump. The slope of the straight line |
+| `a` | "a" | Accuracy at `C = 1x`. Where the line starts, i.e. the base model |
+| `acc(C)` | "accuracy of C" | `a + b x log10(C)`, until the task ceiling clamps it |
+
+**Walk one example.** Take a base model at 50% and a slope of 12 points per tenfold jump, and read off the four points the chart plots:
+
+```
+    C        log10(C)     a + b x log10(C)        accuracy    cost vs previous
+   1x          0.000     50.0 + 12 x 0.000          50.0%          -
+   5x          0.699     50.0 + 12 x 0.699          58.4%          5x
+  20x          1.301     50.0 + 12 x 1.301          65.6%          4x
+ 100x          2.000     50.0 + 12 x 2.000          74.0%          5x
+
+  first 8.4 points of accuracy cost   4 extra units of compute
+  last  8.4 points of accuracy cost  80 extra units of compute   <- 20x worse deal
+```
+
+Both jumps buy the same 8.4 points. The second one costs twenty times more. Every step right along that axis is a worse deal than the step before it, forever — which is the entire economic argument for difficulty routing, and the reason the break-even heuristic is phrased as "accuracy gain per additional 1,000 tokens."
+
+**Where the ceiling comes from — best-of-N and the verifier.** The clean way to see why the line flattens instead of continuing is to price the *best possible* use of `N` samples. If a single attempt succeeds with probability `p` and you had a perfect verifier that always recognises a correct answer when one is present, then at least one of `N` attempts succeeds with probability `1 - (1-p)^N`:
+
+```
+    N     (1-p)^N with p=0.50     pass@N (perfect verifier)     with a 0.85-accurate verifier
+    1        0.500000                     50.0%                            42.5%
+    5        0.031250                     96.9%                            82.3%
+   20        0.00000095                   99.999%                          85.0%
+  100        ~0                          100.000%                          85.0%
+```
+
+The middle column explodes toward 100% almost immediately — so if compute alone drove accuracy, the curve would be a steep exponential, not a gentle line. The right column is what actually happens: your selector is a majority vote or a PRM, not an oracle, so accuracy converges to *the selector's own reliability* (85% here) and then stops dead. Generating a 21st candidate cannot help, because the bottleneck stopped being "is a correct answer in the pool" at around `N = 5` and became "can we tell which one it is."
+
+**Why that reframes the whole scaling story.** The task-specific ceiling in the caption above is usually not a reasoning ceiling — it is a *verification* ceiling. This is why competition math scales furthest (answers are checkable), why code with held-out tests scales next (tests are a near-oracle verifier), and why open-ended QA plateaus early (no verifier exists). It is also the sharpest argument for PRMs: improving the verifier raises the asymptote, while spending more thinking tokens only walks you along a line toward an asymptote you have already nearly reached.
 
 ### GRPO Training Loop (DeepSeek-R1 style)
 

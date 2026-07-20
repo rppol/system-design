@@ -195,6 +195,48 @@ JSON-RPC Response (error):
 }
 ```
 
+**Reading it in plain English.** "Every MCP message is a small JSON envelope wrapped around an even smaller payload — cheap in bulk, but the wrapper is nearly half the bytes, which is exactly why the protocol feels heavy on a single hot-path call."
+
+The envelope is fixed cost per message, not per byte of useful work. That ratio is harmless across a long session and terrible for one-shot use.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `jsonrpc` | "jason are pee see" | Protocol version marker, always `"2.0"`. Pure overhead, required on every message |
+| `id` | "eye dee" | Correlation number. The response must echo it back so the client can match them |
+| `method` | "method" | Which operation: `tools/call`, `resources/read`, `initialize` |
+| `params` / `result` | "params" / "result" | The actual payload. Everything else on the message is envelope |
+| round trip | "round trip" | One request plus one response. Two messages per tool call |
+| base64 | "base sixty-four" | Binary-to-text encoding for blobs. Costs 4 bytes for every 3 bytes of input |
+
+**Walk one example.** The `tools/call` request above, minified the way it actually goes on the wire:
+
+```
+  {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file",
+   "arguments":{"path":"/home/user/project/main.py"}}}
+
+    JSON-RPC envelope   jsonrpc + id + method + params keys        55 bytes
+    MCP payload         tool name + argument value                 70 bytes
+                                                                 ---------
+    total on the wire                                            125 bytes
+
+    envelope share = 55 / 125 = 44%
+
+  Pretty-printed as displayed above (newlines + 2-space indent): ~340 bytes, 2.7x
+  larger. The indentation in this document is for human readers; minify in transit.
+
+  One tool call = 2 messages. A 20-call session:
+    20 x (125 request + 125 response) = 5,000 bytes of JSON -- genuinely negligible.
+
+  Now the case that is not negligible. resources/read on a 500 KB PDF:
+    base64 inflation    500 KB x 4/3                    = 667 KB on the wire
+    stdio 64 KB buffer  667 / 64                        = 11 write chunks
+    if that blob reaches the model, at ~4 bytes/token:
+                        667,000 / 4                     = ~167,000 tokens
+                        167,000 / 200,000               = 83% of a 200K window
+```
+
+**Why `id` exists.** stdio is a single pair of pipes, and a client may have three requests in flight at once. Without `id`, an arriving response is unattributable — the client cannot tell whether the `read_file` result belongs to the call it made 5ms ago or the one from 50ms ago, and any interleaving corrupts both. Notifications deliberately omit `id` for the same reason inverted: nothing is waiting on them, so there is nothing to correlate.
+
 ### 5.4 Sampling Flow (Server-Initiated LLM Call)
 
 ```mermaid
@@ -263,6 +305,50 @@ sequenceDiagram
 
 9. Model generates next response using tool result
 ```
+
+**Reading it in plain English.** "Step 2 is the expensive one: every tool a server registers becomes context the model must be shown on every single request of the session — which is what actually limits how many MCP servers you can connect at once."
+
+`tools/list` runs once, so it looks free. It is not. The model is stateless per request, so the client re-injects the entire manifest into every prompt. The protocol cost is trivial; the context cost is the real constraint.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `t_schema` | "tee schema" | Tokens for one ToolDefinition: name, description, and full inputSchema |
+| `N` | "en" | Total tools registered across all connected servers, not per server |
+| `N x t_schema` | "en times tee schema" | Manifest size. Prepended to every request for the whole session |
+| `W` | "double-u" | Model context window. 200K for Claude, 128K for many others |
+| schema share | "schema share" | `N x t_schema / W`. The fraction of the window gone before the task starts |
+| `R` | "are" | Requests in the session. The manifest is paid `R` times, not once |
+
+**Walk one example.** The `search_documents` definition above is ~120 tokens; richly documented tools with 4-6 parameters and negative guidance run 250-300. Start with the environment from the Section 14 case study:
+
+```
+    server          tools                                                count
+    filesystem      read_file, write_file, list_dir, search_content          4
+    git             git_diff, git_log, create_commit, git_status             4
+    postgres        query                                                    1
+    docs            search, get_doc                                          2
+                                                                         -----
+    N (total registered)                                                    11
+
+    11 x 120 = 1,320 tokens on every request  =  0.7% of a 200K window   fine
+
+  Now scale to the pagination threshold from Section 6.6 (~100 tools):
+
+    100 x 120 =  12,000 tokens  =   6.0% of a 200K window
+    100 x 300 =  30,000 tokens  =  15.0% of a 200K window
+
+  Paid per request, not per session. Over R = 50 requests at 12,000 tokens:
+    50 x 12,000 = 600,000 tokens of pure schema
+    at $3.00 per 1M input tokens = $1.80 per session, before any actual work
+
+  Solving for a 5% schema budget on a 200K window:
+    200,000 x 0.05 = 10,000 tokens
+    10,000 / 120   = 83 tools
+```
+
+That last line is where the "servers with more than ~100 tools should paginate" guidance in Section 6.6 comes from. It is a context-budget limit, not a serialization limit — the JSON would transfer fine at 1,000 tools; the model simply has no window left for the conversation.
+
+**Why the manifest is re-sent at all.** MCP sessions are stateful but model requests are not. The server remembers the session; the model remembers nothing between calls, so the client has no choice but to re-inject every tool description each time. Two mitigations follow directly: put the manifest at the very front of the prompt so provider prompt caching can treat it as a stable prefix (see [LLM Caching](../llm_caching/README.md)), and filter the manifest per turn so the model sees the 10 relevant tools rather than all 100 — the same tool-filtering problem covered in [Tool Selection at Scale](../agents_and_tool_use/tool_selection_at_scale.md).
 
 ### 6.3 Resource Read Flow
 
@@ -396,6 +482,40 @@ Multiple internal LLM applications (a support bot, a contract reviewer, an onboa
 | Auth | Process isolation | HTTP headers (Bearer/OAuth) | HTTP headers |
 | Proxy-friendly | N/A | Yes (with keep-alive tuning) | Yes |
 | Connection overhead | Process spawn (~50–200ms) | HTTP handshake | Single HTTP connection |
+
+**Reading it in plain English.** "Transport cost is a one-time setup charge plus a small per-call charge — so the right transport depends entirely on how many calls you spread the setup across."
+
+The comparison table ranks stdio as "lowest latency," and that is true per call and false per session if you only make one call. Setup amortization is the whole decision.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| setup | "setup" | Paid once per session: process spawn for stdio, TCP + TLS + `initialize` for SSE |
+| RTT | "are tee tee" | Round-trip time. One network hop out and back |
+| per-call | "per call" | Marginal cost of one more `tools/call`. IPC for stdio, one RTT for SSE |
+| `C` | "see" | Calls made in the session. The number setup gets divided by |
+| setup/`C` | "setup over see" | Amortized setup per call. The number that actually matters |
+
+**Walk one example.** A 20-call session, taking the ~50-200ms spawn from the table above and typical network RTTs:
+
+```
+    transport             setup                     per call     20-call total
+    stdio (local)         150ms process spawn       0.2ms IPC    150 + 4    =   154ms
+    SSE, same region      3 x 5ms RTT = 15ms        5ms RTT      15 + 100   =   115ms
+    SSE, cross region     3 x 80ms RTT = 240ms      80ms RTT     240 + 1,600 = 1,840ms
+
+  (SSE setup = TCP handshake + TLS handshake + the initialize/initialized exchange)
+
+  Amortizing the stdio spawn:
+      C =   1 call    150 / 1    = 150ms of setup charged to that one call
+      C =  20 calls   150 / 20   = 7.5ms per call
+      C = 200 calls   150 / 200  = 0.75ms per call
+
+  The 750x ratio behind "not for latency-critical paths" in Section 9:
+      one-shot MCP call = 150ms setup for 0.2ms of actual transport work
+      150 / 0.2 = 750x overhead
+```
+
+**Why cross-region SSE is the configuration to avoid.** It loses on both terms at once — the 80ms RTT inflates the setup *and* is charged again on every call, so the 20-call session runs 12x longer than the same work over stdio (1,840ms vs 154ms). Co-locate remote MCP servers with the host application, or move the server local via stdio. The keep-alive ping from Section 6.6 is a related defense: a proxy that drops the idle SSE connection forces the client to pay the 240ms setup all over again mid-session.
 
 ### 8.3 MCP vs A2A (Agent-to-Agent Protocol)
 

@@ -227,6 +227,48 @@ def route(hidden_state, W_gate, k=2, N=8):
 
 The router weight matrix W_gate is tiny relative to the expert FFNs. For Mixtral d_model=4096, N=8: W_gate is 4096x8 = 32K parameters versus each expert FFN at ~7B parameters.
 
+**Reading the router in plain English.** "Score all 8 experts, turn the scores into percentages, keep only the two best, then re-split those two back to 100% and blend their outputs in that ratio."
+
+The re-normalization step is the one people forget. After top-k you are holding two probabilities that came out of an 8-way softmax, so they do NOT sum to 1 — dividing by their sum is what makes the final blend a proper weighted average instead of a shrunken one.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `h @ W_gate` | "h matmul W gate" | Token hidden state times the router matrix. Produces one logit per expert |
+| `logits` | "logits" | Raw, unbounded scores. Can be negative. Not yet comparable as probabilities |
+| `softmax(z)_i` | "softmax of z" | `exp(z_i) / sum_j exp(z_j)`. Turns any scores into positives that sum to 1 |
+| `topk(s, k)` | "top k of s" | Keep the `k` largest entries and their indices; discard the rest |
+| `k` | "k" | How many experts fire per token. 1 (Switch), 2 (Mixtral), 8 (DeepSeek-V3) |
+| `N` | "N" | Total experts available in the layer. 8 for Mixtral |
+| `w_i / sum(w)` | "renormalize" | Rescale the surviving `k` weights so they sum to exactly 1 |
+
+**Walk one example.** One token, 8 experts, k=2 — the same logits as the routing diagram above:
+
+```
+  expert    logit    exp(logit)    softmax = exp / 12.337     selected?
+  ------    -----    ----------    ----------------------     ---------
+   E1        0.2        1.221              0.099
+   E2        0.9        2.460              0.199              <- 1st
+   E3        0.1        1.105              0.090
+   E4        0.5        1.649              0.134
+   E5        0.3        1.350              0.109
+   E6        0.8        2.226              0.180              <- 2nd
+   E7        0.2        1.221              0.099
+   E8        0.1        1.105              0.090
+  ------    -----    ----------    ----------------------
+                     sum = 12.337        sum = 1.000
+
+  Step 1  softmax over ALL 8 experts        (every expert gets a probability)
+  Step 2  top-2 selection -> E2 (0.199), E6 (0.180)
+          the other 6 experts never run -- their FLOPs are simply skipped
+  Step 3  renormalize:  0.199 + 0.180 = 0.379
+                        E2 = 0.199 / 0.379 = 0.525
+                        E6 = 0.180 / 0.379 = 0.475
+                        (now sums to 1.000, not 0.379)
+  Step 4  output = 0.525 * E2(token) + 0.475 * E6(token)
+```
+
+**Why renormalize at all.** Skip step 3 and the layer output is scaled by 0.379 instead of 1.0 — every MoE layer would shrink its own activations by ~62%, and 32 stacked layers would drive the residual stream toward zero. Worse, the shrink factor varies per token (a confident token whose top-2 hold 0.7 of the mass shrinks less than an uncertain one), so the scale of the hidden state would start encoding router confidence rather than content. Renormalizing makes the blend a true convex combination and keeps activation magnitude stable regardless of how peaked the routing was.
+
 ### 6.2 Expert Computation and Output Combination
 
 ```python
@@ -270,6 +312,44 @@ where:
 When f_i = 1/N for all i (uniform distribution), aux_loss is minimized.
 ```
 
+**Reading the auxiliary loss in plain English.** "Charge the model a fee proportional to how lopsided its routing is. The fee is smallest when every expert gets an equal share, and it climbs fast when one expert hogs the traffic."
+
+**Why this term exists at all.** Without it, MoE training has a runaway feedback loop. Suppose E2 wins slightly more tokens than average by pure initialization luck. E2 therefore receives more gradient updates, gets better faster, so the router scores it higher, so it wins even more tokens. Within a few thousand steps E2 and one friend take everything, the other six experts never receive gradient and stay at their random initialization, and you have paid for a 46.7B model that behaves like a 12.9B one with 34B of dead weight. The aux loss is the counterweight that keeps the loop from closing — it is not a nice-to-have regularizer, it is the thing that makes sparse training work.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `f_i` | "f sub i" | Fraction of tokens actually **routed** to expert i. Hard counts. All `f_i` sum to 1 |
+| `P_i` | "P sub i" | Mean routing **probability** the softmax assigned expert i. Also sums to 1 |
+| `sum_i` | "sum over i" | Add the product across all N experts |
+| `N *` | "times N" | Scale factor that fixes the minimum at 1.0 regardless of expert count |
+| `alpha` | "alpha" | Fee rate. 0.01 (Mixtral), 0.001 (DeepSeek-V3) |
+| `f_i * P_i` | "f i times P i" | Pairs hard counts with soft probabilities — this is what makes it differentiable |
+
+**Walk two distributions.** Same 8 experts, same formula, `alpha = 0.01`. Take `P_i ~ f_i`:
+
+```
+  BALANCED (the target)                  COLLAPSED (the failure)
+  expert    f_i     P_i    f_i*P_i       expert    f_i     P_i    f_i*P_i
+  ------   -----   -----   -------       ------   -----   -----   -------
+   E1      0.125   0.125   0.01563        E1      0.00    0.00    0.00000
+   E2      0.125   0.125   0.01563        E2      0.85    0.85    0.72250
+   E3      0.125   0.125   0.01563        E3      0.02    0.02    0.00040
+   E4      0.125   0.125   0.01563        E4      0.00    0.00    0.00000
+   E5      0.125   0.125   0.01563        E5      0.00    0.00    0.00000
+   E6      0.125   0.125   0.01563        E6      0.10    0.10    0.01000
+   E7      0.125   0.125   0.01563        E7      0.03    0.03    0.00090
+   E8      0.125   0.125   0.01563        E8      0.00    0.00    0.00000
+  ------                   -------       ------                   -------
+             sum          = 0.12500                 sum          = 0.73380
+
+  aux = N * sum = 8 * 0.12500 = 1.000    aux = N * sum = 8 * 0.73380 = 5.870
+  alpha * aux  = 0.01 * 1.000 = 0.0100   alpha * aux  = 0.01 * 5.870 = 0.0587
+
+  Penalty difference added to the task loss: 0.0587 - 0.0100 = 0.0487
+```
+
+Three things to say about that table in an interview. First, **1.0 is the floor**, not 0 — the `N *` factor is chosen so perfectly uniform routing always scores exactly 1.0 whether you have 8 experts or 256, which makes `alpha` mean the same thing across architectures. Second, the penalty is **quadratic in the imbalance**: E2's share went up 6.8x (0.125 -> 0.85) but its contribution went up 46x (0.0156 -> 0.7225), so the gradient gets sharply stronger the closer you drift to collapse. Third, `f_i` alone has **no gradient** — it comes from a discrete top-k argmax. Multiplying it by the differentiable `P_i` is the trick that lets backprop reach the router at all; that is the entire reason the formula is a product of two things that look redundant.
+
 DeepSeek-V3 introduced a "bias" term added to router logits that adjusts dynamically to maintain balance without the auxiliary loss degrading task performance.
 
 ### 6.4 Expert Capacity Factor
@@ -287,6 +367,43 @@ Dropped tokens bypass expert computation and pass through a residual
 connection (the token's hidden state is used as-is, as if the expert
 applied an identity function).
 ```
+
+**Reading capacity in plain English.** "Work out how many tokens each expert would get if routing were perfectly fair, then hand every expert that many slots plus a percentage buffer. Tokens arriving after the slots run out are thrown away."
+
+The word doing the work is *ideal*. Capacity is budgeted against the uniform assumption, but real routing is never uniform — the buffer is what absorbs the gap between what the aux loss achieved and what perfect balance would have been.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `batch_size * seq_len` | "tokens in the batch" | Total tokens the layer sees this forward pass |
+| `* k` | "times k" | Each token occupies `k` expert slots, not one. k=2 doubles total demand |
+| `/ N` | "divided by N" | Split the demand evenly across the N experts |
+| `tokens_per_expert_ideal` | "the fair share" | What each expert gets if routing were perfectly uniform |
+| `capacity_factor` | "the capacity factor" | Buffer multiplier over fair share. 1.25 = 25% headroom |
+| `capacity` | "capacity" | Hard slot count. Token `k+1` past this is dropped, no error raised |
+
+**Walk one example.** Batch of 512 tokens, k=2, N=8 experts — the production case study's batch size:
+
+```
+  fair share = (512 tokens x 2 experts each) / 8 experts = 1024 / 8 = 128 tokens
+
+  Total expert slots demanded this batch: 512 x 2 = 1024
+
+  Now a REAL (skewed) batch arrives. Expert E2 attracts 200 tokens, not 128.
+
+  capacity_factor   capacity = CF x 128   E2 receives   dropped   drop rate
+  ---------------   -------------------   -----------   -------   --------------
+       1.00                128                200          72     72/1024 = 7.0%
+       1.25                160                200          40     40/1024 = 3.9%
+       1.50                192                200           8      8/1024 = 0.8%
+       2.00                256                200           0      0/1024 = 0.0%
+  ---------------   -------------------   -----------   -------   --------------
+
+  Each dropped token skips its expert entirely and passes through the residual
+  connection unchanged -- as if that expert were the identity function. The
+  forward pass SUCCEEDS. Latency looks normal. Nothing is logged.
+```
+
+That last line is the whole reason this parameter is dangerous. A 7% drop rate at `capacity_factor = 1.0` is not a crash, it is a quiet accuracy tax that shows up only as a downstream eval regression weeks later. Note also that the drop rate is measured against the **1024 total slots**, not against E2's 200 — so a single overloaded expert out of eight can still poison a meaningful share of the batch.
 
 The factor is a dial between two costs — memory you reserve vs. tokens you silently
 drop. Laying the levels side by side shows why production settles near 1.25-1.5:
@@ -339,6 +456,67 @@ Parameter accounting:
 Inference cost per token ~ 12.9B parameter dense model
 Knowledge capacity       ~ 46.7B parameter dense model
 ```
+
+#### Why "8x7B" is 46.7B and not 56B
+
+This is the single most-asked MoE arithmetic question, and the name is actively misleading. "8x7B" reads like eight copies of a 7B model, which would be 56B. The real answer is 46.7B, and the ~11B gap is the entire concept.
+
+**Reading it in plain English.** "Only the FFN is replicated eight times. Attention and embeddings exist once and every expert shares them, so multiplying the whole 7B model by 8 counts the shared stack seven extra times."
+
+| Piece of the model | Say it | Replicated per expert? |
+|---|---|---|
+| Attention (Q, K, V, O projections) | "the attention stack" | **No** — one copy, all tokens use it |
+| Embeddings + output head | "the embedding table" | **No** — one copy |
+| Feed-forward network (FFN) | "the expert" | **Yes** — 8 copies, this is what "8x" counts |
+| Router / gating matrix | "the router" | One tiny 4096x8 matrix per layer (~32K params) |
+
+**Walk the total.** Mistral-7B is really 7.24B, and it splits like this:
+
+```
+  A single Mistral-7B, decomposed
+  --------------------------------------------------------------------
+  FFN     32 layers x 3 matrices x 4096 x 14336        =  5.64B
+  Attn    32 layers x (Q 4096x4096 + K,V 4096x1024
+                       + O 4096x4096)                  =  1.34B
+  Embed   32000 x 4096, tied in and out                =  0.26B
+  --------------------------------------------------------------------
+  total                                                =  7.24B
+
+  THE NAIVE (WRONG) ANSWER
+      8 x 7.24B  =  57.9B      "eight whole models"
+
+  THE ACTUAL MIXTRAL 8x7B
+      FFN experts   8 x 5.64B  = 45.10B   <- replicated 8 times
+      Attention         1.34B  =  1.34B   <- shared, counted ONCE
+      Embeddings        0.26B  =  0.26B   <- shared, counted ONCE
+      --------------------------------------------------------
+      total                    = 46.70B
+
+  THE GAP
+      57.9B - 46.7B = 11.2B = 7 x 1.60B
+                              ^^^^^^^^^^
+      exactly 7 redundant copies of the 1.60B shared stack that the
+      naive multiplication double-counted
+```
+
+**Now walk the active count.** Active parameters are "shared stack, always" plus "k of N experts":
+
+```
+  Attention  (always runs)                         1.34B
+  Embeddings (always runs)                         0.26B
+  Experts    (2 of 8)   2/8 x 45.10B            = 11.27B
+  ------------------------------------------------------
+  active per token                              = 12.87B  ~ 12.9B
+
+  Sanity check on the sparsity claim:
+    total  / active =  46.70 / 12.87 = 3.6x more parameters
+    FLOPs  per token stay at the 12.9B level -- the 6 unselected
+    experts are never multiplied by anything
+```
+
+**The two-sentence interview answer.** "The `8x` only multiplies the FFN, not the whole model — attention and embeddings are shared across all experts and counted once, which is why it is 46.7B rather than 8 x 7 = 56B. Active is then the shared stack plus 2 of the 8 experts, which lands at ~12.9B, and note that memory is still sized by the 46.7B total because every expert must be resident even though only two fire."
+
+Different write-ups slice the 46.7B slightly differently — some fold layer norms and the router into the "attention" bucket, which shifts the shared portion by a few hundred million. The structural point is what is being tested: **shared components counted once, expert FFNs counted N times, and active counts k of those N.**
 
 ---
 

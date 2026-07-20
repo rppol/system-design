@@ -58,6 +58,40 @@ The most widely used algorithm. Starts with individual bytes/characters, iterati
 3. Result: N+initial vocabulary of subword units
 ```
 
+**Reading it in plain English.** "Start with an alphabet you know can spell anything — the 256 byte values — then buy one new vocabulary entry per merge. Vocabulary size is not a knob you set; it is a count of how many merges you paid for, plus the alphabet you started with."
+
+That framing kills a common confusion. `vocab_size` in a config file is not a target the trainer approximates — it is an exact arithmetic consequence of the merge budget, which is why merge tables and vocabularies are always in lockstep and why you cannot "trim" a vocabulary without invalidating the merge ranks.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `V_init` | "V initial" | The starting alphabet. 256 for byte-level BPE — every byte, so nothing is ever `[UNK]` |
+| `N` | "N merges", the merge budget | How many times you run "find the most frequent adjacent pair and glue it". The only real hyperparameter |
+| `V_final` | "final vocab size" | `V_init + N + S`. What lands in `vocab.json` |
+| `S` | "special tokens" | Reserved slots — BOS, EOS, PAD, chat delimiters. Usually rounded up to a nice number |
+| merge rank | "merge rank" | A merge's position in the ordered list. Encoding replays merges in rank order, so rank *is* the algorithm |
+
+**Walk one example.** Llama 3's tokenizer, and the byte-level general case:
+
+```
+  V_final = V_init + N + S
+
+  Llama 3 (128,256 embedding rows)
+    V_init   byte alphabet                     =     256
+    N        merges purchased                  = 127,744
+    ---------------------------------------------------
+    BPE ranks                                  = 128,000
+    S        reserved special-token slots      =     256
+    ---------------------------------------------------
+    V_final                                    = 128,256
+
+  Llama 2 (32,000)  ->  N = 32,000 - 256 - S   ~= 31,7xx merges
+
+  Going 32K -> 128K is buying ~96,000 additional merges.
+  Each merge is one more entry in the table AND one more embedding row.
+```
+
+**Why `V_init = 256` is load-bearing.** A character-level alphabet has no fixed size — new scripts, emoji, and mojibake keep introducing symbols the tokenizer never saw, which historically forced an `[UNK]` token and made the round-trip lossy. Byte-level BPE starts from the 256 values every file is already made of, so *every* input has a spelling and `decode(encode(x)) == x` always. The cost is that an unseen script degrades to one token per byte rather than failing outright — expensive, but never wrong.
+
 **Inference (Encoding):**
 ```
 Input: "tokenization"
@@ -156,6 +190,47 @@ Positional Embedding (or RoPE applied inside attention):
 Input to Transformer = token_embedding + positional_embedding
 ```
 
+**Reading it in plain English.** "The embedding layer is not a computation, it is a lookup table with `V` rows and `D` columns. Its parameter count is one multiplication — and for a small model with a big vocabulary, that one table can be a tenth of the whole model."
+
+Calling it a "layer" hides the cost. There is no matrix multiply at the input side, just a row fetch — but every one of those `V x D` numbers is a trained parameter that must be stored, sharded, and checkpointed like any other.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `V` | "V", vocab size | Number of rows. One per token ID |
+| `D` | "D", or `d_model` | Embedding width. Fixed by the model architecture, not the tokenizer |
+| `W_e` | "W-e", the embedding matrix | The `[V x D]` table. `W_e[i]` is token `i`'s vector |
+| `V x D` | "V times D" | Total parameters. The entire formula |
+| tied / untied | "weight tying" | Whether the output softmax reuses `W_e^T` (tied, one table) or trains its own (untied, two tables) |
+
+**Walk one example.** Two real configs, both `D = 4096`, and what the vocabulary jump cost:
+
+```
+  params = V x D
+
+  Llama 2 7B     V =  32,000    D = 4,096
+    32,000 x 4,096                          =   131,072,000   = 131.1 M
+    share of 6.74 B total                                     =   1.9 %
+    BF16 bytes  131.1 M x 2                 =   262 MB
+
+  Llama 3 8B     V = 128,256    D = 4,096
+    128,000 x 4,096 = 524,288,000
+        256 x 4,096 =   1,048,576
+                     -------------
+                      525,336,576           =   525.3 M
+    share of 8.03 B total                                     =   6.5 %
+    BF16 bytes  525.3 M x 2                 =  1,051 MB
+
+  Untied output head doubles it
+    525.3 M (input) + 525.3 M (output)      = 1,050.7 M
+    share of 8.03 B total                                     =  13.1 %
+
+  Cost of the 32K -> 128K vocabulary change, at fixed D
+    525.3 M - 131.1 M                       =   394.3 M extra params
+                                            =   789 MB extra in BF16
+```
+
+Note the denominator effect: the same 525 M table is 6.5% of an 8B model but would be 26% of a 2B one. This is why small-language-model families often keep a 32K vocabulary while frontier models move to 128K+ — the table is a fixed cost that a small model cannot amortize.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -197,6 +272,41 @@ Implication: An LLM with 4K context window can process:
   ~1500 Python lines of code
 ```
 
+**Reading it in plain English.** "Fertility is how many tokens it costs to say one word. The merge table was trained mostly on English, so English words got merged into single tokens and everyone else pays by the syllable."
+
+This is the cost gotcha that surprises teams at launch: the *same sentence*, translated, is a different-sized bill and a different-sized context. Pricing is per token, not per meaning, so a tokenizer trained on an English-skewed corpus is a permanent tax on every other language.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| fertility | "fertility", tokens per word | Average tokens the tokenizer emits per whitespace word. 1.0 would be perfect |
+| `L` | "L", sequence length | Token count of the input. What you are actually billed and context-limited on |
+| `W` | "W", word count | Human-visible length of the text |
+| `L = W x fertility` | "L equals W times fertility" | The whole conversion. Everything downstream is denominated in `L`, never `W` |
+| compression ratio | "compression ratio" | `bytes / tokens`. The tokenizer-research view of the same number, inverted |
+
+**Walk one example.** One 500-word support ticket, same content, four languages, at $3.00 per 1M input tokens:
+
+```
+             fertility     L = 500 x f     cost @ $3/M      vs English
+  English      1.3            650           $0.00195          1.00x
+  French       1.4            700           $0.00210          1.08x
+  Chinese      1.75           875           $0.00263          1.35x
+  Arabic       2.5          1,250           $0.00375          1.92x
+
+  Same 500 words. Arabic costs 1.92x English and burns 1.92x the context.
+
+  Now scale it: 1,000,000 tickets/month
+    English   650,000,000 tokens   ->  $1,950
+    Arabic  1,250,000,000 tokens   ->  $3,750     <- +$1,800/month, zero
+                                                     extra information
+
+  Context ceiling at a 4K window
+    English   4096 / 1.3  =  3,150 words fit
+    Arabic    4096 / 2.5  =  1,638 words fit      <- half the document
+```
+
+**Why this is a design defect, not a language property.** Arabic is not intrinsically more verbose — it is under-represented in the merge-training corpus, so its frequent character pairs never won a merge slot and never became single tokens. Buying more merges fixes it: the `p50k_base` to `cl100k_base` move (§7) cut non-English token counts roughly 4x for exactly this reason, and `o200k_base` bought another round. If you serve a non-English market on an English-trained tokenizer, the fertility gap is a line item you can shrink by changing tokenizers, not something to budget around forever.
+
 ### Special Tokens
 
 Every model uses special tokens to delimit structure:
@@ -220,6 +330,38 @@ Every model uses special tokens to delimit structure:
 | Large (100K-200K) | Better multilingual, better coding | Larger embedding matrix, rare token quality |
 
 Modern trend: 100K+ vocabulary for broader language coverage (GPT-4o uses 200K, Llama 3 uses 128K).
+
+**Reading it in plain English.** "A bigger vocabulary buys shorter sequences. You pay for it once in the embedding table, and again on every single token you generate, because the output softmax has to score all `V` candidates."
+
+Stating both halves is the point. The embedding cost is a one-time storage hit that people quote constantly; the softmax cost is a per-step compute hit that gets forgotten, and it is the one that actually caps how far vocabularies can grow.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `V` | "V" | Vocabulary size. Grows the embedding table and the softmax width |
+| `L` | "L" | Sequence length in tokens. Shrinks as `V` grows, because fertility improves |
+| `D` | "D" | Hidden width. Multiplies both costs |
+| `L^2 x D` | "L squared times D" | Attention cost. Quadratic in `L`, so shortening sequences pays off superlinearly |
+| `L x V` | "L times V" | Logit cost — one score per vocabulary entry per position. Linear in both, and the counterweight |
+
+**Walk one example.** One 1,000-word English document under a 32K vs a 128K tokenizer, `D = 4096`:
+
+```
+                            V = 32K        V = 128K       change
+  fertility (tok/word)        1.50            1.25          -17 %
+  L = 1000 x fertility        1,500           1,250         -250 tokens
+
+  WHAT GETS CHEAPER
+    attention  ~ L^2          2,250,000       1,562,500     -31 %
+    FFN / step ~ L            1,500           1,250         -17 %
+    KV cache   ~ L            1,500 slots     1,250 slots   -17 %
+
+  WHAT GETS MORE EXPENSIVE
+    embedding table  V x D    131.1 M         525.3 M       +394.2 M params
+    logits  L x V             1,500 x 32,000  1,250 x 128,256
+                            =  48.0 M       = 160.3 M       +3.34x
+```
+
+**Why the softmax term decides the ceiling.** The attention saving is real but bounded — you cut `L` by 17% and get 31% off a term that is already a minority of FLOPs at short context. The logit matrix went up 3.34x, and unlike the embedding table it is recomputed at *every decode step*, in fp32, for every sequence in the batch. That is why nobody ships a 1M-token vocabulary even though fertility would keep improving: past roughly 200K the output projection starts to dominate decode latency and memory, and the shorter sequences no longer pay for it. The 32K-to-128K move is a genuine win; the next doubling is where the arithmetic turns.
 
 ---
 

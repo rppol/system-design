@@ -388,6 +388,40 @@ Mitigation Loop:
   Anthropic, OpenAI publish red team reports for transparency
 ```
 
+**Reading the severity scale in plain English.** "The 1-to-5 score exists so that findings can be *summed* instead of merely counted. Forty mild findings and one catastrophic finding are not the same backlog, and a raw count says they are."
+
+Without the weighting, the mitigation loop optimizes for whatever is easiest to close, because closing a severity-1 finding moves the count by exactly as much as closing a severity-5 one.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `s` | "s" | Severity of one finding, 1 (mild) to 5 (catastrophic) |
+| `c_s` | "c sub s" | Count of findings at severity `s` |
+| weighted risk | "weighted risk" | `sum over s of (c_s x w_s)`. One number for the whole red-team cycle |
+| `w_s` | "w sub s" | The weight attached to severity `s`. Linear (`w = s`) or exponential (`w = 10^(s-1)`) |
+| blind evaluation | "blind evaluation" | Graders do not know which model produced the output. Removes the pull toward scoring your own model kindly |
+
+**Walk one example.** One red-team cycle's findings, scored two ways:
+
+```
+   severity   count    linear w = s   contribution      exponential w = 10^(s-1)   contribution
+     1 mild     40           1              40                     1                      40
+     2           18          2              36                    10                     180
+     3           7           3              21                   100                     700
+     4           2           4               8                  1,000                  2,000
+     5 catastr.  1           5               5                 10,000                 10,000
+             -----                        -----                                     --------
+   total        68                          110                                       12,920
+
+   raw count says:      68 findings, and the 40 mild ones are 59% of the work
+   linear says:         the mild tier is still 36% of the score
+   exponential says:    the single severity-5 finding is 77% of your entire risk
+
+   Fix the one severity-5 finding:  12,920 -> 2,920  (a 77% reduction)
+   Fix all 40 severity-1 findings:  12,920 -> 12,880 (a 0.3% reduction)
+```
+
+**Why the weighting choice is a policy decision.** Linear weighting implicitly claims five mild findings are as bad as one catastrophic one, which is false for exactly the categories the taxonomy above lists as immediate harms — a single CBRN uplift finding is not tradeable against any number of mild ones. Pick exponential weights when the harm tail is unbounded, and state the weights in the report; a "risk score dropped 40%" headline is meaningless until the reader knows whether the drop came from the tail or from the noise.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -417,6 +451,45 @@ Over-refusal benchmark:
   "Explain how computer viruses work" (educational)
   Target: refuse <1% of benign requests
 ```
+
+**Reading these metrics in plain English.** "Attack success rate and over-refusal rate are the same 2x2 table read down its two columns. Reporting one without the other is how a model that refuses everything gets called safe."
+
+That is the single most important framing in safety evaluation. Attack success rate has a trivial optimum — refuse every input and it hits zero — so it is only interpretable when pinned against the benign column. WildGuard's "calibration" aspect above is exactly this: it grades both columns at once.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `ASR` | "A S R" / "attack success rate" | `complied_harmful / total_harmful`. Fraction of harmful prompts the model answered. Lower is better |
+| harmlessness | "harmlessness" | `1 - ASR`. Refusal rate on the harmful set. Recall against harm |
+| over-refusal rate | "over-refusal rate" | `refused_benign / total_benign`. The false positive rate of the safety behavior |
+| helpfulness | "helpfulness" | `1 - over-refusal`. Fraction of legitimate requests actually served |
+| AdvBench `n` | "n" | 500 harmful instructions. The denominator under every AdvBench ASR you read |
+| alignment tax | "alignment tax" | Capability lost to safety training. Shows up as the over-refusal column climbing |
+
+**Walk one example.** A model run against both halves of a paired eval — AdvBench's 500 harmful instructions plus 500 benign lookalikes from an over-refusal set:
+
+```
+                              model REFUSED        model COMPLIED
+      harmful prompts (500)       480                   20        <- 20 = successful attacks
+      benign  prompts (500)         4                  496        <-  4 = wrongly refused users
+
+    ASR              =  20 / 500  = 4.0%    <- passes the <5% bar in Section 7
+    harmlessness     = 480 / 500  = 96.0%
+    over-refusal     =   4 / 500  = 0.8%    <- passes the <1% target above
+    helpfulness      = 496 / 500  = 99.2%
+
+  Now the degenerate model that just refuses everything:
+
+                              model REFUSED        model COMPLIED
+      harmful prompts (500)       500                    0
+      benign  prompts (500)       500                    0
+
+    ASR          =   0 / 500 = 0.0%     <- a PERFECT safety score
+    over-refusal = 500 / 500 = 100%     <- and a completely useless product
+
+  Same eval, and only the second column tells you which model to ship.
+```
+
+**Why the benign set has to be adversarial too.** If the 500 benign prompts are ordinary questions ("what is the capital of France"), the over-refusal column reads 0% for every model and stops discriminating. The examples above are chosen precisely because they sit near the boundary — a knife in a cooking story, viruses explained for education — so the column measures whether the model reasons about *context* or just pattern-matches on keywords. That is also why Section 13's "measure both harmful outputs AND over-refusal" is a hard requirement rather than a nicety: a keyword-matching refusal policy scores identically to a genuinely aligned model on the harmful column alone.
 
 ### The Helpful-Harmless-Honest Tradeoff
 

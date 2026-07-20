@@ -71,6 +71,38 @@ Key insights:
 - Include edge cases and ambiguous examples
 - Balance examples across classes
 
+**Reading it in plain English.** "Every example you paste into the prompt is a fixed tax you pay on *every single request*, forever — so the question is never 'do more examples help?' but 'do they help more than they cost?'"
+
+That framing matters because the cost is recurring and traffic-scaled while the accuracy gain is one-time and bounded. Few-shot tokens are the one part of the bill that never amortizes.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `k` | "kay" | Number of demonstrations in the prompt. The 3-8 range above |
+| `t_ex` | "tee sub ex" | Tokens per example, counting the input text, separator, and label |
+| `k x t_ex` | "kay times tee sub ex" | Total few-shot budget added to every request, before the query |
+| `R` | "are" | Requests per day. The multiplier that turns a small prompt into a large bill |
+| `$/1M` | "dollars per million" | Provider input-token price. ~$3.00/1M for a mid-tier model |
+
+**Walk one example.** Sentiment demonstrations like the three above run ~125 tokens each once the review text, arrow, and label are counted:
+
+```
+                    k       t_ex      k x t_ex      accuracy gain (Section 8)
+  zero-shot         0       125             0       baseline
+  3-shot            3       125           375       +5-15%
+  8-shot            8       125         1,000       +5-15%
+
+  delta 3-shot -> 8-shot = 1,000 - 375 = 625 extra input tokens on every request
+
+  at R = 1,000 requests/day and $3.00 per 1M input tokens:
+    3-shot     375 x 1,000 =   375,000 tok/day  x $3/1M  =  $1.13/day
+    8-shot   1,000 x 1,000 = 1,000,000 tok/day  x $3/1M  =  $3.00/day
+    delta                                                =  $1.87/day = $683/year
+```
+
+The 4th through 8th examples cost $683/year at this traffic and land inside the same +5-15% band the 3rd example already reached. That is why "3-8 examples, more doesn't always help" is a budget statement as much as an accuracy one.
+
+**Why `t_ex` matters more than `k`.** Teams tune the example *count* and ignore example *length*. Swapping five 125-token reviews for five 400-token support transcripts triples the same line item without changing `k` at all. Trim each demonstration to the shortest text that still shows the pattern — format is what the model copies, not content.
+
 ### 4.3 Chain-of-Thought (CoT)
 
 Prompt the model to reason step-by-step before answering. Dramatic improvement on math, logic, and multi-step tasks.
@@ -137,6 +169,54 @@ Final answer = majority vote = 42
 Improves accuracy by 5-15% on math/reasoning tasks
 Cost: N× tokens (use for high-stakes decisions)
 ```
+
+**Reading it in plain English.** "Ask the same question ten times and trust the answer that shows up most often — because a model's mistakes scatter but its correct reasoning converges."
+
+The asymmetry is the whole mechanism. There is exactly one right answer for the correct chains to agree on, and many wrong answers for the incorrect ones to split across. Voting exploits that imbalance.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `N` | "en" | Number of independent reasoning chains sampled. 10 in the block above |
+| `p` | "pee" | Probability any single chain reaches the correct answer on its own |
+| `C(N,k)` | "en choose kay" | How many ways exactly `k` of the `N` chains can be the correct ones |
+| `p^k` | "pee to the kay" | Probability those `k` specific chains all got it right |
+| `(1-p)^(N-k)` | "one minus pee to the en minus kay" | Probability the other chains all got it wrong |
+| majority | "majority" | More than half agree: `k > N/2`, so `k >= 6` when `N = 10` |
+
+**Walk one example.** Ten chains, each correct 60% of the time on its own:
+
+```
+  N = 10, p = 0.60. Strict majority = at least 6 of 10 chains land on the right answer.
+
+    k correct   C(10,k)    p^k        (1-p)^(10-k)    term
+        6         210      0.046656      0.0256       0.2508
+        7         120      0.027994      0.0640       0.2150
+        8          45      0.016796      0.1600       0.1209
+        9          10      0.010078      0.4000       0.0403
+       10           1      0.006047      1.0000       0.0060
+                                                     --------
+                                         sum    =     0.6330
+
+  one chain alone   60.0% correct
+  majority of 10    63.3% correct        gain: +3.3 points
+  token cost        10x                  latency: 10x serial, 1x if run in parallel
+```
+
+**Why the real gain beats +3.3 points.** Strict majority is the pessimistic floor — it assumes the 4 wrong chains all agree with each other. They do not. An arithmetic slip lands on a different wrong number each time, so the wrong votes scatter and the correct answer usually wins by *plurality* with 2 or 3 votes, not 6:
+
+```
+  If the 4 wrong chains scatter across 4 distinct wrong answers, the correct answer
+  wins with only 2 votes. Probability at least 2 of 10 chains are correct:
+
+    P(0 correct) = 0.4^10                    = 0.000105
+    P(1 correct) = 10 x 0.6 x 0.4^9          = 0.001573
+    P(>= 2)      = 1 - 0.000105 - 0.001573   = 0.9983
+
+  So the true accuracy sits between 63.3% (all wrong answers collide) and 99.8%
+  (all wrong answers scatter). The reported +10-20% is where real tasks land.
+```
+
+Concentrated wrong answers are the failure case: if the model has a *systematic* bias — always off-by-one, always the same misread of the prompt — all 10 chains agree on the same wrong answer and voting confidently returns garbage. Self-consistency fixes noise, never bias.
 
 ### 4.6 Structured Outputs / JSON Mode
 
@@ -261,6 +341,60 @@ top_p (nucleus sampling): Only sample from top tokens whose
 top_k: Only consider top-k tokens at each step
 ```
 
+**Reading it in plain English.** "Temperature stretches or squashes the *gaps* between token scores before they become probabilities; top-p then throws away the tail entirely."
+
+They are not two dials doing the same job. Temperature reshapes the whole distribution and leaves every token with some chance, however small. Top-p makes a hard cut — the tokens below the line get probability exactly zero. You need both because reshaping alone never removes the garbage.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `logit_i` | "logit eye" | The model's raw pre-softmax score for token `i`. Unbounded, can be negative |
+| `τ` | "tau" | Temperature. Divides every logit before softmax. Small τ = bigger gaps = more decisive |
+| `softmax` | "soft max" | Exponentiate every score, divide each by the total. Turns any scores into probabilities summing to 1 |
+| `p` (top_p) | "top pee" | Cumulative-probability cutoff. Keep tokens until their running sum reaches `p`, drop the rest |
+| `top_k` | "top kay" | Fixed-count cutoff. Keep exactly `k` tokens regardless of how the probability mass sits |
+| nucleus | "nucleus" | The surviving set after the top-p cut. Its size changes token by token |
+
+**Walk one example.** Four candidate next tokens after "The product quality is":
+
+```
+    token        logit    P at τ=0.5    P at τ=1.0    P at τ=2.0
+    " great"      4.0        0.865         0.644         0.455
+    " good"       3.0        0.117         0.237         0.276
+    " okay"       2.0        0.016         0.087         0.167
+    " awful"      1.0        0.002         0.032         0.102
+
+  How one column is built (τ = 1.0, so logits pass through unchanged):
+    exp(4.0) = 54.60   exp(3.0) = 20.09   exp(2.0) = 7.39   exp(1.0) = 2.72
+    sum      = 84.80
+    P(" great") = 54.60 / 84.80 = 0.644
+
+  Halving τ to 0.5 doubles every logit before exp: 8.0, 6.0, 4.0, 2.0
+    exp: 2981.0, 403.4, 54.6, 7.4      sum = 3446.4
+    P(" great") = 2981.0 / 3446.4 = 0.865
+    top-two ratio widened from 0.644/0.237 = 2.7x  to  0.865/0.117 = 7.4x
+
+  Now apply top_p = 0.9 to each column (keep tokens until the running sum >= 0.9):
+    τ = 0.5    0.865 -> 0.982                            stop after 2 tokens
+    τ = 1.0    0.644 -> 0.881 -> 0.968                   stop after 3 tokens
+    τ = 2.0    0.455 -> 0.731 -> 0.898 -> 1.000          stop after 4 tokens
+
+  Renormalize the survivors at τ = 1.0 (divide each by 0.968):
+    " great" 0.665    " good" 0.245    " okay" 0.090    " awful" cut to 0.000
+```
+
+The nucleus size is what makes top-p adaptive: the same `p = 0.9` kept 2 tokens at low temperature and all 4 at high temperature, without anyone changing a setting. A fixed `top_k = 2` would have been right in the first case and badly wrong in the third.
+
+**Why top-p exists at all.** Temperature alone never zeroes anything out. At `τ = 1.0` the junk token `" awful"` still carries 0.032 probability, and a generation is hundreds of independent draws:
+
+```
+  P(never sampling the 3.2% tail across a 500-token response)
+    = (1 - 0.032)^500
+    = 0.968^500
+    = 0.0000001              <- about 1 in 10 million
+```
+
+So without a truncation step, sampling at least one tail token per response is effectively guaranteed — one derailed token, and the model conditions on its own mistake for the rest of the generation. Top-p removes the tail from the draw instead of merely making it unlikely.
+
 ### Prompt Token Limits and Context Management
 
 ```
@@ -277,6 +411,42 @@ For 128K context model:
 Tip: Count tokens BEFORE sending to API
 Use tiktoken for OpenAI models
 ```
+
+**Reading it in plain English.** "The context window is one shared bucket, and the answer the model has not written yet is already taking up space in it."
+
+That is the part teams get wrong. Input and output are not two separate budgets — a request that fits perfectly on the way in fails halfway through the response, because `max_tokens` was never subtracted up front.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| context window | "context window" | Hard ceiling on input + output combined. 128K here, 200K for Claude |
+| input subtotal | "input subtotal" | System prompt + few-shot + retrieved docs + query. Everything you send |
+| response reserve | "response reserve" | `max_tokens` you allow the model to generate. Spend it before the call, not after |
+| headroom | "headroom" | Window minus everything committed. Your margin for a longer query or one more doc |
+
+**Walk one example.** The 128K budget from the block above, made explicit:
+
+```
+    system prompt                500
+    few-shot examples          1,000
+    retrieved docs            80,000
+    user query                   500
+                            --------
+    input subtotal            82,000
+    response reserve           2,000     <- subtract BEFORE the call, not after
+                            --------
+    committed                 84,000
+    headroom                  44,000     = 128,000 - 84,000   (34% of the window)
+
+  What one more retrieved document costs, at 2,000 tokens per doc:
+    44,000 / 2,000 = 22 docs would exactly fill the window
+    keep the response reserve intact -> 21 docs is the real ceiling
+
+  Same budget on an 8K model:
+    8,000 - 500 - 1,000 - 500 - 2,000 = 4,000 tokens left for retrieval
+    4,000 / 2,000 = 2 documents, versus 41 on the 128K model
+```
+
+**Why headroom is not slack.** Retrieval sizes are inputs you do not control — a chunk that averages 2,000 tokens occasionally arrives at 6,000. Running at 95% committed means those outliers hard-fail the request in production while every test passed. Size the budget against the p99 retrieval length, not the mean, and count tokens with `tiktoken` before the call rather than catching the API error after it.
 
 ### Prompt Injection Detection
 

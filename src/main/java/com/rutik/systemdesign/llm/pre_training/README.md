@@ -49,6 +49,79 @@ Targets:        "The" "quick" "brown" "fox"
 Loss = -1/T × Σ log P(token_t | token_1, ..., token_{t-1})
 ```
 
+**Reading it in plain English.** "For every position in the text, ask the model how much probability it gave to the token that actually came next, and average how surprised it was. Low loss = the real text was unsurprising."
+
+That is the entire training signal for a trillion-dollar industry. There is no human label anywhere — the "answer key" is just the next token that the corpus already contains, so any text at all is training data.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `Σ` | "sum over" | Add up the term once for every token position `t` in the sequence |
+| `T` | "capital T" | Sequence length — how many token positions contributed |
+| `1/T × Σ` | "average over tokens" | Mean per-token loss, so long and short batches are comparable |
+| `P(token_t \| ...)` | "probability of token t given everything before it" | The softmax probability the model assigned to the *correct* next token |
+| `log P` | "log prob" | Turns probability into a score. `P = 1` -> `0`; `P = 0.1` -> `-2.30`; `P -> 0` -> `-infinity` |
+| `-` (leading minus) | "negative" | Flips it so loss is positive and *smaller is better* |
+| `L` | "loss" | The single number gradient descent pushes down |
+
+**Walk one example.** Three predictions on `"The quick brown fox"`, showing what probability the
+model gave the token that actually came next:
+
+```
+  position   context              true next   P(true next)   log P     surprise
+  ---------  -------------------  ----------  -------------  --------  --------
+  t=1        "The"                "quick"        0.40        -0.916     low
+  t=2        "The quick"          "brown"        0.25        -1.386     medium
+  t=3        "The quick brown"    "fox"          0.80        -0.223     very low
+
+  sum of log P  = -0.916 + -1.386 + -0.223 = -2.525
+  L = -1/T x sum = -(1/3) x (-2.525)       =  0.842
+```
+
+Notice the model was *most* confident at `t=3`: after "The quick brown" the idiom nearly forces
+"fox", so it contributes almost no loss. The `t=2` step, where many colours were plausible, carries
+most of the penalty. Training is nothing but pushing the `P(true next)` column toward `1.00`.
+
+**Why the `1/T` averaging matters.** Log-probabilities are negative and accumulate, so without
+dividing by `T` a 4,096-token sequence would always report a "worse" loss than a 512-token one
+purely from length. Sequences in a batch have different real lengths after padding and packing;
+averaging is what makes the number comparable across batches, across runs, and across model sizes.
+
+**Loss and perplexity — the same number in two costumes.** Perplexity is the loss exponentiated:
+
+```
+  ppl = exp(L)          and equivalently          L = ln(ppl)
+```
+
+**Reading it in plain English.** "Perplexity is the effective number of tokens the model is choosing
+between at each step — as if it narrowed a 32,000-token vocabulary down to a shortlist of that size
+and then guessed uniformly from the shortlist."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `exp(x)` | "e to the x" | The inverse of `ln`. Undoes the log that turned probabilities into scores |
+| `ppl` | "perplexity" | Effective branching factor — the size of the model's shortlist |
+| `L` | "loss" | Mean per-token cross-entropy, in nats (natural log units) |
+
+**Walk one example.** Reuse the loss values this module already quotes:
+
+```
+  loss L    ppl = exp(L)   read as
+  --------  -------------  ---------------------------------------------------
+  0.00       1.0           perfect: exactly one candidate, always right
+  0.84       2.3           our 3-token example above: coin-flip-ish
+  2.00       7.4           "choosing among ~7 plausible tokens" (case study 2 final)
+  2.10       8.2           the 200B-token checkpoint
+  3.10      22.2           the 10B-token checkpoint
+ 11.40  89,300            random init: ~ the whole 32k vocab, uniform
+```
+
+Two things fall out of this table that interviewers probe for. First, **loss is logarithmic, so
+small-looking loss drops are large**: 2.10 -> 2.00 looks like nothing but shrinks the shortlist from
+8.2 to 7.4 candidates, roughly a 10% cut in branching. Second, **a random model's perplexity is its
+vocabulary size** — `ln(32000) = 10.37`, which is why the 11.4 starting loss in case study 2 is the
+expected "knows nothing" value and not a bug. The same identity explains the case study 1 target:
+domain perplexity 24.3 -> 15.7 is a loss drop of `ln(24.3) - ln(15.7) = 3.19 - 2.75 = 0.44`.
+
 Properties:
 - Naturally autoregressive — model generates text by repeating this prediction
 - All tokens in a batch contribute to loss (efficient)
@@ -116,6 +189,34 @@ Architecture:
 Loss = Σ_{k=1}^{N} L_k (cross-entropy for each head)
 ```
 
+**Reading it in plain English.** "Run the same next-token loss once per head — head 1 graded on the token one step ahead, head 2 on two steps ahead, and so on — then add the grades together."
+
+Each `L_k` is exactly the cross-entropy from §4.1; the only change is which target it is compared against. Nothing new is being optimized, the same trunk is just being asked a harder question N ways at once.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `Σ_{k=1}^{N}` | "sum over k from one to N" | Loop the head index `k` from 1 to N and add every term |
+| `k` | "kay" | Which head — equivalently, how many positions into the future it predicts |
+| `N` | "capital N" | Number of heads, typically 4 |
+| `L_k` | "loss sub k" | Head `k`'s own cross-entropy against the token at position `+k` |
+
+**Walk one example.** N = 4 on `"The quick brown fox"`, per-head cross-entropy:
+
+```
+  head   predicts   target   L_k     comment
+  -----  ---------  -------  ------  --------------------------------------
+  H1        +1      "jumps"   1.90   easiest: nearest token
+  H2        +2      "over"    2.40   harder
+  H3        +3      "the"     2.80   harder still
+  H4        +4      "lazy"    3.30   hardest: furthest into the future
+
+  Loss = 1.90 + 2.40 + 2.80 + 3.30 = 10.40
+```
+
+The `L_k` column rising monotonically with `k` is the expected, healthy shape — the future gets less
+predictable the further out you look. If `L_4` were as low as `L_1` you would suspect a target
+off-by-one bug, not a brilliant model.
+
 Properties:
 - Forces the model to plan ahead — to predict token +3 correctly, the model must implicitly reason about what tokens +1 and +2 will be, improving coherence on longer sequences
 - Enables 2-3x faster inference via speculative decoding compatibility: the auxiliary heads can draft candidate tokens that the main head verifies in parallel
@@ -171,6 +272,56 @@ xychart-beta
     line [0, 2.96, 2.78, 2.49, 2.12, 1.69, 1.27, 0.87, 0.57, 0.37, 0.30]
 ```
 Peak LR: 1e-4 to 3e-4 (depends on model size); warmup: 1-2% of total steps; final LR: ~10% of peak (or 0). The short linear ramp protects Adam's uncalibrated moment estimates early on; the long cosine tail keeps mid-training exploration high and anneals gently at the end. (Sampled every 10% of steps, so the 1-2% warmup spike to 3.0 sits inside the first segment — the ramp is far steeper than one chart segment wide.)
+
+The curve above is two formulas glued at the warmup boundary (this is exactly what `lr_at_step` in the §14 code implements):
+
+```
+  if step < warmup:
+      lr = peak_lr x (step / warmup)                          <- linear ramp up
+
+  else:
+      progress = (step - warmup) / (total_steps - warmup)     <- 0.0 .. 1.0
+      cosine   = 0.5 x (1 + cos(pi x progress))               <- 1.0 .. 0.0
+      lr       = min_lr + cosine x (peak_lr - min_lr)         <- decay down
+```
+
+**Reading it in plain English.** "Ramp the step size up from zero over the first couple of percent of training, then ride it back down along the first half of a cosine wave — fast in the middle, gentle at both ends — until it lands on a small floor instead of zero."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `lr` | "learning rate" | How big a step the optimizer takes along the gradient |
+| `peak_lr` | "peak L R" | The maximum, reached at the end of warmup. 1e-4 to 3e-4 here |
+| `min_lr` | "min L R" | The floor, `min_lr_ratio x peak_lr` = 10% of peak in the §14 config |
+| `warmup` | "warmup steps" | Length of the linear ramp. 2,000 steps in both case studies |
+| `progress` | "progress" | Fraction of post-warmup training done, 0 at the start, 1 at the end |
+| `pi x progress` | "pi times progress" | Maps that fraction onto 0 .. pi radians — the first half of a cosine |
+| `cos` | "cosine" | Wave that runs `+1 -> 0 -> -1` over 0 .. pi |
+| `0.5 x (1 + cos(...))` | "half of one plus cosine" | Rescales that `+1 .. -1` swing onto a clean `1.0 .. 0.0` multiplier |
+
+**Walk one example.** Case study 1's schedule: peak 1e-5, min_lr_ratio 0.1 (so min 1e-6),
+warmup 2,000, total 250,000 steps:
+
+```
+  step      progress   cos(pi x progress)   multiplier   lr
+  --------  ---------  -------------------  -----------  --------
+  0            --             --               --        0.0        (ramp start)
+  1,000        --             --               --        0.5e-5     (halfway up ramp)
+  2,000       0.000        +1.000            1.000       1.00e-5    (peak, ramp done)
+  64,000      0.250        +0.707            0.854       0.87e-5
+  126,000     0.500         0.000            0.500       0.55e-5    (halfway: half of peak)
+  188,000     0.750        -0.707            0.146       0.23e-5
+  250,000     1.000        -1.000            0.000       0.10e-5    (the min_lr floor)
+```
+
+**Why the cosine shape rather than a straight line.** A linear decay spends its whole life falling;
+the cosine is deliberately *flat at both ends*. The flat top holds the LR near peak through
+mid-training, where the model is still exploring and large steps pay off — note that at 25% of the
+way through it is still at 85% of peak, whereas linear would be at 75%. The flat bottom means the
+last few percent of steps barely move the weights, letting the model settle into a minimum instead
+of bouncing around it. Remove the warmup half and the classic failure appears: Adam's variance
+estimate is built from a handful of gradients, its preconditioner is garbage, and a full-size step
+from random init sends the loss to NaN in the first few hundred steps. Remove the decay half and
+the loss plateaus noisily forever — the model keeps stepping over the minimum it is trying to reach.
 
 ---
 
@@ -237,6 +388,112 @@ The Pile (EleutherAI):
 
 **Batch size ramp-up**: Start with small batch size (256K tokens), linearly increase to target (4M tokens) over first few billion tokens. Improves training stability.
 
+**Effective batch size and gradient accumulation**: no GPU can hold a 4M-token batch, so the batch is assembled in pieces and the gradients are summed before a single optimizer step:
+
+```
+  tokens_per_gpu_step = micro_batch_sequences x sequence_length
+  effective_tokens    = tokens_per_gpu_step x num_gpus x grad_accum_steps
+```
+
+**Reading it in plain English.** "Each GPU chews a small slice it can actually fit, you do that several times in a row without stepping the optimizer, and the gradients pile up until together they represent the huge batch you actually wanted."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `micro_batch_sequences` | "micro batch" | Sequences one GPU processes in one forward/backward. Limited by VRAM |
+| `sequence_length` | "sequence length" | Tokens per sequence — 4,096 in case study 1, 8,192 in case study 2 |
+| `num_gpus` | "number of GPUs" | Data-parallel replicas, each on a different slice |
+| `grad_accum_steps` | "grad accum steps" | Backward passes accumulated before one `optimizer.step()` |
+| `effective_tokens` | "effective batch" | The batch size that actually matters for the LR — the *only* one to quote |
+
+**Walk one example.** Case study 1's config, straight from `ContinuedPretrainingConfig`:
+
+```
+  micro_batch_sequences   =        2
+  sequence_length         =    4,096
+  tokens_per_gpu_step     = 2 x 4,096              =      8,192 tokens
+  num_gpus                =       32
+  tokens_per_gpu_pass     = 8,192 x 32             =    262,144 tokens
+  grad_accum_steps        = 2,000,000 / 262,144    =          7 (integer division)
+  effective_tokens        = 262,144 x 7            =  1,835,008 tokens per step
+
+  total_steps             = 500e9 / 2e6            =    250,000 optimizer steps
+```
+
+The trap this arithmetic exposes: `grad_accum_steps` is an integer, so the *realized* batch is
+1.84M tokens, not the 2M the config asks for — an 8% shortfall that quietly changes the step count
+and the LR schedule's endpoint. Also note that doubling `grad_accum_steps` makes each optimizer step
+twice as expensive in wall-clock but does **not** change how many steps you take per token, so the
+schedule must be recomputed whenever it moves. And the LR is tuned against `effective_tokens`, never
+against `micro_batch_sequences` — someone who halves the micro-batch to fix an OOM, doubles
+accumulation to compensate, and leaves the LR alone has changed nothing and should see no drift; the
+person who halves the micro-batch and forgets the accumulation bump has silently halved the batch
+and is now training at double the effective LR.
+
+**AdamW update rule**: the optimizer that actually applies those gradients keeps two running averages per weight:
+
+```
+  m_t = beta1 x m_{t-1} + (1 - beta1) x g_t              <- momentum (mean of gradients)
+  v_t = beta2 x v_{t-1} + (1 - beta2) x g_t^2            <- variance (mean of squared gradients)
+
+  m_hat = m_t / (1 - beta1^t)                            <- bias correction
+  v_hat = v_t / (1 - beta2^t)
+
+  w_t = w_{t-1} - lr x [ m_hat / (sqrt(v_hat) + eps) + weight_decay x w_{t-1} ]
+```
+
+**Reading it in plain English.** "Step in the direction gradients have been pointing lately, but scale that step down for any weight whose gradient has been noisy or large — and separately shrink every weight a little each step regardless."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `g_t` | "g sub t" | This step's gradient for one weight |
+| `m_t` | "m sub t" | Running mean of gradients. The momentum term — smooths out batch noise |
+| `v_t` | "v sub t" | Running mean of *squared* gradients. A per-weight noise/magnitude meter |
+| `beta1` | "beta one" | Momentum decay, 0.9. Memory of roughly the last 10 steps |
+| `beta2` | "beta two" | Variance decay, 0.95 here (0.999 in generic Adam). Memory of ~20 steps |
+| `m_hat`, `v_hat` | "m hat", "v hat" | Bias-corrected versions — `m_0` starts at zero, so early estimates read too small |
+| `eps` | "epsilon" | Tiny floor, 1e-8. Stops division by zero when a weight's gradient is dead |
+| `sqrt(v_hat)` | "root v hat" | Typical gradient magnitude for this weight — the per-weight step normalizer |
+| `weight_decay` | "weight decay" | 0.1 here. Pulls weights toward zero; the "W" in AdamW keeps it out of `m`/`v` |
+
+**Walk one example.** One weight over three steps, `beta1 = 0.9`, `beta2 = 0.95`, `lr = 1e-5`:
+
+```
+  step  g_t     m_t                        v_t                          m_hat/(sqrt(v_hat)+eps)
+  ----  ------  -------------------------  ---------------------------  -----------------------
+  1     0.020   0.9x0      +0.1x0.020      0.95x0     +0.05x0.000400
+                = 0.00200                  = 0.0000200
+                m_hat = 0.00200/0.100      v_hat = 0.0000200/0.0500
+                      = 0.0200                   = 0.000400              0.0200/0.0200 = +1.00
+  2     0.018   0.9x0.00200+0.1x0.018      0.95x0.0000200+0.05x0.000324
+                = 0.00360                  = 0.0000352
+                m_hat = 0.00360/0.190      v_hat = 0.0000352/0.0975
+                      = 0.0189                   = 0.000361              0.0189/0.0190 = +0.995
+  3     -0.040  0.9x0.00360+0.1x(-0.040)   0.95x0.0000352+0.05x0.001600
+                = -0.00076                 = 0.0000934
+                m_hat = -0.00076/0.271     v_hat = 0.0000934/0.143
+                      = -0.00280                 = 0.000653              -0.00280/0.0256 = -0.110
+
+  step 1 weight change = -1e-5 x (+1.00)  = -1.00e-5
+  step 3 weight change = -1e-5 x (-0.110) = +1.10e-6
+```
+
+Two behaviours to name in an interview. First, **the normalized step is roughly +/-1 whenever the
+gradient is behaving consistently** (steps 1 and 2), which is why Adam's `lr` is a near-absolute
+bound on how far any weight can move per step — that is what makes 3e-4 a sane number across wildly
+different layers. Second, when a **large outlier gradient arrives** (step 3), `v_t` jumps
+immediately while `m_t` barely turns, so the normalized step *shrinks* to 0.110 rather than
+exploding: Adam automatically distrusts weights whose gradients just got noisy. This is also why
+`beta2` is lowered from 0.999 to 0.95 for LLMs — a shorter variance memory lets the optimizer react
+to a loss spike within tens of steps instead of thousands.
+
+**Why `eps` and bias correction exist.** Drop `eps` and any weight whose gradients have been exactly
+zero for a while divides by zero on its first nonzero gradient — instant NaN, and a NaN in one
+weight propagates to the whole model in one forward pass. Drop bias correction and `m_1 = 0.1 x g_1`
+while `v_1 = 0.05 x g_1^2`, so the very first steps are scaled by roughly `0.1 / sqrt(0.05) = 0.45`
+of what they should be, wrongly and inconsistently across the two moments — the training run starts
+with hundreds of miscalibrated steps, which is precisely the hole that LR warmup was invented to
+paper over.
+
 **BF16 vs FP16 training**: BF16 (Brain Float16) has the same exponent range as FP32 but fewer mantissa bits. More numerically stable than FP16 for training. Standard for modern LLM training.
 
 ### Training Loss Diagnostics
@@ -244,6 +501,49 @@ The Pile (EleutherAI):
 Monitoring the loss curve and related signals is critical for catching problems early and avoiding wasted compute.
 
 **Healthy loss curve**: Smooth exponential decay with small noise. The curve follows a power law: L(t) ~ t^(-alpha), where alpha depends on model size and data quality. Noise amplitude should be consistent — increasing noise suggests data pipeline issues.
+
+**Reading the power law in plain English.** "Every time you multiply the training tokens (or parameters, or compute) by some fixed factor, the loss shrinks by a fixed factor — never by a fixed amount. Progress is bought in multiples, not in increments."
+
+The same shape appears in all three scaling-law forms, which is why the Chinchilla work could fit them jointly:
+
+```
+  L(t) ~ t^(-alpha)          loss vs training steps / tokens seen
+  L(N) = (N_c / N)^alpha_N   loss vs parameter count      (N_c = a fitted constant)
+  L(D) = (D_c / D)^alpha_D   loss vs dataset size         (D_c = a fitted constant)
+```
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `L(N)` | "loss as a function of N" | The loss you would reach with `N` parameters, trained properly |
+| `N` | "capital N" | Model parameters. `D` = training tokens, `t` = steps, `C` = compute FLOPs |
+| `N_c`, `D_c` | "N critical", "D critical" | Fitted constants that set the scale — where the curve crosses `L = 1` |
+| `alpha` | "alpha" | The exponent. How steeply loss falls; measured near 0.05-0.10 for LLMs |
+| `x^(-alpha)` | "x to the minus alpha" | The power law itself. Negative exponent = grows -> loss falls |
+| `~` | "scales as" | Proportional to, ignoring the constant out front |
+
+**Walk one example.** Take `alpha = 0.076` (roughly the Kaplan/Chinchilla parameter exponent) and
+ask what each 10x in model size buys:
+
+```
+  N          relative loss = N^(-0.076)      loss (scaled to 3.00 at 1B)   delta
+  ---------  ------------------------------  ---------------------------   ------
+  1B         reference                            3.00                       --
+  10B        10^(-0.076) = 0.839                  2.52                     -0.48
+  100B       10^(-0.152) = 0.705                  2.11                     -0.41
+  1T         10^(-0.228) = 0.592                  1.78                     -0.33
+
+  ppl at 1B  = exp(3.00) = 20.1
+  ppl at 1T  = exp(1.78) =  5.9
+```
+
+**What this means practically.** Every 10x in parameters buys roughly the same *fraction* off the
+loss — about 16% each time — so the absolute gains visibly shrink (0.48, then 0.41, then 0.33) even
+though the underlying law has not changed at all. Straight-line progress on a loss chart therefore
+requires *exponentially* growing budgets, which is the entire economics of frontier training in one
+sentence. It also tells you how to read a run in flight: plot loss vs tokens on **log-log axes** and
+a healthy run is a straight line whose slope is `-alpha`. A curve that bends *up* off that line
+means the run is degrading (bad data, LR too high); a curve that flattens *early* means you have
+saturated what this model size can extract and the fix is a bigger `N`, not more `D`.
 
 **Loss spike classification:**
 ```
@@ -275,6 +575,37 @@ Where:
   N       = number of prediction heads (typically 4)
 ```
 
+**Reading it in plain English.** "Train normally on the next token, then average the extra heads' losses together and add a small fraction of that as a nudge — the future-planning signal helps, but it must never outvote the objective you actually care about."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `L_total` | "total loss" | What gradient descent actually minimizes |
+| `L_CLM` | "C L M loss" | The §4.1 next-token loss. The real objective, weight fixed at 1 |
+| `lambda` | "lambda" | Auxiliary weight, 0.1-0.3. How loud the side objective is allowed to be |
+| `(1/N) x Σ` | "average over the heads" | Mean, not sum, so changing `N` does not change the auxiliary's loudness |
+| `Σ_{k=2}^{N}` | "sum over k from two to N" | Starts at **2** — head 1 is already counted as `L_CLM` |
+
+**Walk one example.** `lambda = 0.2`, `N = 4`, using the per-head numbers from §4.4:
+
+```
+  L_CLM (= head 1)                       = 1.90
+  heads 2..4:  2.40, 2.80, 3.30
+
+  mean of aux heads  = (2.40 + 2.80 + 3.30) / 4   = 2.125
+  aux contribution   = 0.2 x 2.125                = 0.425
+  L_total            = 1.90 + 0.425               = 2.325
+
+  aux share of total = 0.425 / 2.325              = 18%
+```
+
+**Why `lambda` and the `1/N` both exist.** Without `lambda`, the three auxiliary heads collectively
+carry more loss mass than the head you will actually serve at inference, and the trunk optimizes for
+predicting four steps ahead at the expense of predicting one — measurable as worse next-token
+perplexity on the exact metric you ship. Without the `1/N`, raising `N` from 4 to 8 would silently
+double the auxiliary's influence, so any head-count experiment would be confounded with a lambda
+change. Note also the `k=2` lower bound: including head 1 twice would double-weight the primary
+objective and make `lambda` mean something different than intended.
+
 Each auxiliary head is a lightweight linear projection from the shared trunk's hidden state. The heads do not attend to each other — they independently predict their assigned future position. This keeps the additional compute overhead to ~15-20% per training step while providing a strong planning signal that improves the trunk's representations. During inference, only Head 1 is required for standard autoregressive generation, but all heads can participate in speculative decoding for 2-3x throughput improvement.
 
 ### Compute Scaling
@@ -293,6 +624,84 @@ In practice:
   LLaMA 3 8B trained on 15T tokens (10x Chinchilla-optimal for inference efficiency)
   Rationale: inference on a smaller, longer-trained model is cheaper per token
 ```
+
+Everything above rests on one budget identity that every pre-training interview reaches for:
+
+```
+  C ~= 6 x N x D
+```
+
+**Reading it in plain English.** "The total cost of a training run is just: how big the model is, times how much text it reads, times six. Nothing about architecture, optimizer, or cluster enters — only params and tokens."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `C` | "capital C" | Total training compute, in FLOPs (floating-point operations) |
+| `N` | "capital N" | Model parameters — 7e9 for a 7B model |
+| `D` | "capital D" | Training tokens seen — counted with repeats, not unique tokens |
+| `6` | "six" | FLOPs spent per parameter per token. Derived below |
+| `~=` | "approximately equals" | Ignores attention's quadratic term, negligible until context >> hidden dim |
+
+**Where the 6 comes from.** Each weight participates in one multiply and one add — 2 FLOPs — every
+time a token passes through it. That happens three times per training token:
+
+```
+  pass                 what it computes                         FLOPs per param per token
+  -------------------  ---------------------------------------  -------------------------
+  forward              activations from inputs and weights                 2
+  backward (inputs)    gradient w.r.t. the layer's input                   2
+  backward (weights)   gradient w.r.t. the layer's weights                 2
+                                                                          --
+                                                            total          6
+```
+
+This also settles a question interviewers like: **inference costs 2N FLOPs per token, training costs
+6N** — the backward pass is exactly twice the forward pass, so training a token is 3x the cost of
+generating one. (Gradient checkpointing trades memory for a repeated forward pass and pushes the
+constant toward 8, which is one reason real MFU lands below the 6ND-implied ceiling.)
+
+**Walk one example — 7B model, Chinchilla-optimal 140B tokens.** The §12 answer quotes 140B as
+compute-optimal for 7B (20 tokens per parameter); here is that budget end to end on A100s:
+
+```
+  N  = 7e9 params
+  D  = 140e9 tokens                (= 20 x N, the Chinchilla ratio)
+  C  = 6 x 7e9 x 1.4e11            = 5.88e21 FLOPs
+
+  A100 80GB BF16 peak              = 312 TFLOPS = 3.12e14 FLOPS
+  ideal GPU-seconds  = 5.88e21 / 3.12e14           = 1.88e7 s
+  ideal GPU-hours    = 1.88e7 / 3600               =  5,235 GPU-hours
+
+  at 45% MFU (the realistic figure this module uses):
+  real GPU-hours     = 5,235 / 0.45                = 11,630 GPU-hours
+  on 512 GPUs        = 11,630 / 512                =     23 hours wall clock
+  at $2/GPU-hour     = 11,630 x 2                  = $23,300
+```
+
+Now re-run the same arithmetic for case study 2's actual choice of 400B tokens and the shape of the
+tradeoff appears immediately: `C = 6 x 7e9 x 4e11 = 1.68e22` FLOPs, 2.86x the Chinchilla budget,
+33,000 GPU-hours at 45% MFU. That is the exact number §14 quotes — and the 3x spend buys a model
+that is cheaper to *serve* forever, because serving cost scales with `2N` and is completely
+indifferent to how many tokens it was trained on.
+
+**How `N_optimal ~= (C/6)^0.5` and the 70B/1.4T pair fit together.** The clean way to get the quoted
+numbers is to substitute Chinchilla's `D = 20N` into the identity, which leaves one unknown:
+
+```
+  C = 6 x N x (20 x N) = 120 x N^2
+  N = sqrt(C / 120)
+
+  for C = 1e24:   N = sqrt(1e24 / 120) = sqrt(8.33e21) = 9.1e10  ~= 70-90B params
+                  D = 20 x N                           = 1.8e12  ~= 1.4-1.8T tokens
+```
+
+**Why the square root is the whole story.** Because `C` grows with `N^2` once you hold the token
+ratio fixed, **10x more compute buys only ~3.2x more parameters** — the other 3.2x has to go into
+tokens. That is Chinchilla's central correction to GPT-3: OpenAI spent its 10x almost entirely on
+`N`, giving a 175B model trained on 300B tokens (a ratio of 1.7 tokens per parameter, not 20), which
+is why a 70B Chinchilla beat it. Split the budget wrong in either direction and you waste compute:
+too much `N` and the model is undertrained (the GPT-3 failure), too much `D` and you are paying to
+re-teach a model that has run out of capacity to absorb it (the flattening curve from the power-law
+section above).
 
 ---
 

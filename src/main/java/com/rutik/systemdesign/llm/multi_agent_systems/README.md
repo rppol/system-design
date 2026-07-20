@@ -76,6 +76,55 @@ Flow:
 
 Best for: tasks with clear subtask boundaries and sequential dependencies.
 
+**The cost arithmetic — why "5-15x a single agent" is the default expectation.** The six-step flow above is not six LLM calls' worth of tokens. Two multipliers stack:
+
+```
+  tokens  =  rounds  x  agents  x  (shared_context + per_agent_work)
+             \____________________/    \_________________________/
+              call-count multiplier     context-duplication multiplier
+```
+
+**Reading it in plain English.** "Every agent pays the full context bill, so adding an agent does not add its own small share of tokens — it re-buys the entire conversation so far."
+
+The framing matters because the second multiplier is invisible in an architecture diagram. Four boxes look like 4x. The context term is what turns 4x into 15x, and it is the term you can actually engineer away.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `agents` | "agents" | Worker count. Four in the diagram above; five in the war story below |
+| `rounds` | "rounds" | Orchestration cycles. One dispatch-and-collect pass per round |
+| `shared_context` | "shared context" | Accumulated history handed to *each* worker. The duplicated part |
+| `per_agent_work` | "per agent work" | Tokens genuinely unique to that worker's subtask. The part you wanted |
+| `O(agents x history)` | "order agents times history" | Growth law of the naive design — quadratic-feeling in practice |
+
+**Walk one example.** The numbers from the war story in Section 14, after 10 back-and-forth turns:
+
+```
+  naive: full history to every worker
+    accumulated history                     8,000 tokens
+    workers                                     5
+    input tokens per round      5 x 8,000 = 40,000 tokens
+
+  fixed: summarize history once, then fan out
+    summary                                   500 tokens
+    workers                                     5
+    5 x 500                     =           2,500 tokens
+    + summarizer call                       ~2,500 tokens
+    input tokens per round                   5,000 tokens
+
+    40,000 -> 5,000  =  8x reduction, and the workers still see the same facts
+```
+
+**Where the 15x comes from.** Anthropic's published research system ran at ~15x the token spend of a single chat. Decompose that against the formula and it is unremarkable:
+
+```
+   agents  x  rounds  =  raw call multiplier      context duplication      total
+      4          2     =        8x                     ~2x                 ~15x
+```
+
+Neither factor is exotic. Eight calls is a modest orchestrator, and 2x context duplication is what you get *after* summarizing. This is why the honest planning question is never "is multi-agent better" but "is it 15x better" — Anthropic's 90.2% improvement cleared that bar on long-horizon research, and for a bounded 5-step task almost nothing does.
+
+**Why the summarization step exists.** Remove it and the shared-context term is multiplied by both `agents` and `rounds`, so cost grows with the *product* of team size and conversation length — a system that is affordable in testing with 2 workers and 3 turns becomes unaffordable in production with 5 workers and 10 turns, having changed nothing about the task. The summarizer converts that product into a constant per round. It is the single highest-leverage cost control in the pattern, worth more than switching models.
+
 ### 4.2 Peer-to-Peer / Debate Pattern
 
 Agents debate and critique each other to improve output quality:
@@ -101,6 +150,55 @@ Final output: refined architecture incorporating all critique points
 ```
 
 Research shows multi-turn critique dramatically improves reasoning quality (Society of Mind pattern).
+
+**Consensus thresholds — what "until consensus" actually costs.** The `[Continue until consensus or max rounds]` line hides a design decision with real arithmetic behind it. For `N` agents each independently correct with probability `p`, the chance that at least `k` of them agree on the correct answer is:
+
+```
+  P(k of N correct)  =  sum over j >= k  of  C(N,j) x p^j x (1-p)^(N-j)
+
+    k = ceil(N/2)   majority        k = N   unanimity
+```
+
+**Reading it in plain English.** "Raising the agreement bar makes the verdicts you *do* get more trustworthy, and makes you get far fewer of them."
+
+That trade is the whole point. A threshold is not a quality dial — it is a dial between *being wrong* and *not answering*, and the second failure has to go somewhere (a judge agent, a default, a human).
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `N` | "N" | Number of debating agents. The `N >= 5` in the majority-voting mitigation |
+| `p` | "p" | Per-agent accuracy. How often one agent alone gets it right |
+| `k` | "k" | Agreement threshold. How many must agree before you accept the verdict |
+| `C(N,j)` | "N choose j" | Ways that exactly `j` of the `N` agents could be the correct ones |
+| `rho` | "rho" | Correlation between agents' errors. 0 = independent, 1 = identical |
+| `N_eff` | "N effective" | `N / (1 + (N-1) x rho)` — how many *genuinely independent* votes you have |
+
+**Walk one example.** Five agents, each 70% accurate, independent:
+
+```
+   j    C(5,j)     p^j        (1-p)^(5-j)      term
+   3      10      0.343         0.0900        0.3087
+   4       5      0.2401        0.3000        0.3602
+   5       1      0.16807       1.0000        0.1681
+
+   threshold          reached when      P(threshold met AND correct)   escalation rate
+   majority  k = 3      j >= 3                    0.837                     16.3%
+   supermaj. k = 4      j >= 4                    0.528                     47.2%
+   unanimity k = 5      j  = 5                    0.168                     83.2%
+```
+
+The majority row is the 5-agent majority vote: `0.700 -> 0.837`, a 13.7-point gain that brackets the 8-12% improvement over 2-agent debate. But read the unanimity row before reaching for a stricter threshold — demanding all five agree yields a verdict on only 16.8% of inputs and dumps the other 83% onto whatever your fallback is. If that fallback is "default to most recent proposal," you have built an expensive five-agent system that behaves like a single agent five times out of six.
+
+**Why correlation destroys this table — and is the real story behind sycophantic collapse.** Every number above assumes the five agents fail *independently*. Five instances of the same base model with the same prompt do not:
+
+```
+   rho     N_eff = N / (1 + (N-1) x rho)      what you actually bought
+   0.0     5 / (1 + 4 x 0.0)  =  5.00        five real opinions
+   0.3     5 / (1 + 4 x 0.3)  =  2.27        two and a bit
+   0.5     5 / (1 + 4 x 0.5)  =  1.67        barely better than one agent
+   0.8     5 / (1 + 4 x 0.8)  =  1.19        one agent, billed five times
+```
+
+At `rho = 0.8` you are paying 5x for 1.19 independent votes, and the majority vote confidently ratifies the shared error — the vote *looks* like strong evidence precisely because the agents agreed. This is why the mitigations are all attacks on `rho` rather than on `N`: temperature diversity, different base models, blind debate (hiding confidence scores so agents cannot anchor on each other), and enforced devil's-advocate roles. Adding a sixth clone raises `N` and does nothing to `N_eff`. Also note the sharp limit at `p < 0.5`: voting drives the outcome toward the model's most common answer, so when that answer is wrong, more agents make the system *more* confidently wrong.
 
 ### 4.3 Hierarchical Multi-Agent
 
@@ -171,6 +269,51 @@ flowchart TD
 ```
 
 Clean separation; easy to add/remove agents by changing message routing.
+
+**Communication overhead — why the coordinator sits in the middle of that diagram.** The topology above is a star, not a mesh, and that is a deliberate choice with a formula behind it:
+
+```
+  fully connected mesh:   channels  =  n(n-1)/2        every agent talks to every agent
+  star / orchestrator:    channels  =  n - 1           every agent talks only to the hub
+```
+
+**Reading it in plain English.** "Let agents talk to each other freely and the number of conversations you have to reason about grows with the *square* of the team; route everything through one coordinator and it grows in a straight line."
+
+This is the same result that makes distributed systems hard, arriving in agent form — which is exactly the point made in Section 2's key insight. The cost being counted is not just messages: it is the number of interactions that can deadlock, loop, or corrupt state, i.e. the size of the thing you must debug.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `n` | "n" | Number of agents in the system |
+| `n(n-1)` | "n times n minus one" | Ordered pairs — every agent paired with every other, both directions |
+| `/2` | "over two" | Halves it, because a channel between A and B is the same channel as B to A |
+| `n(n-1)/2` | "n choose 2" | Mesh channel count. The number of distinct conversations that can exist |
+| `n - 1` | "n minus one" | Star channel count. One spoke per agent, into the coordinator |
+
+**Walk one example.** Grow the team and watch the two curves separate:
+
+```
+    n      mesh = n(n-1)/2        star = n-1      mesh / star
+    2      2 x 1 / 2  =    1           1            1.0x
+    3      3 x 2 / 2  =    3           2            1.5x
+    4      4 x 3 / 2  =    6           3            2.0x     <- the 4 workers in 4.1
+    5      5 x 4 / 2  =   10           4            2.5x
+    7      7 x 6 / 2  =   21           6            3.5x     <- ChatDev's 5-7 roles
+   10     10 x 9 / 2  =   45           9            5.0x
+   20     20 x 19 / 2 =  190          19           10.0x
+```
+
+**Adding the 10th agent to a mesh adds 9 new channels; adding it to a star adds 1.** Going from 7 agents to 10 more than doubles a mesh's channels (21 to 45) while a star goes 6 to 9. The ratio itself is `n/2`, so it degrades without limit — there is no team size at which mesh coordination stops getting relatively worse.
+
+**Why this compounds with the token arithmetic from 4.1.** Channels are not free to run; each one carries context. Combine the two formulas and a naive mesh costs `n(n-1)/2 x context` per round against the star's `(n-1) x context`:
+
+```
+   n = 5, context = 8,000 tokens per exchange
+     mesh:  10 channels x 8,000  =  80,000 tokens/round
+     star:   4 channels x 8,000  =  32,000 tokens/round      <- matches the 40,000 figure
+                                                                once the hub's own call is added
+```
+
+The star is 2.5x cheaper at five agents and 5x cheaper at ten, before any summarization. That is the concrete reason orchestrator-worker is the default production pattern and peer-to-peer meshes stay confined to small-`n` debate (2-5 agents) where the quadratic has not yet bitten. Blackboard (4.4) is the third answer to the same problem: it replaces channels entirely with one shared surface, trading `n(n-1)/2` conversations for `n` readers of a single state — at the price of needing concurrency control on that state.
 
 ---
 

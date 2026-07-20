@@ -48,6 +48,59 @@ Sequential LLM calls where the output of step N becomes input to step N+1. Gates
 
 **Performance**: Each hop adds 200-500ms network + inference latency. On a 5-step chain with GPT-4o, expect 1-2.5 seconds of added wall-clock time versus a single call. Hallucination rate on complex long-document tasks drops approximately 70% compared to a single monolithic prompt, because each LLM call operates on a smaller, cleaner input.
 
+**Reliability compounds multiplicatively — the single most important number in this module.** A chain succeeds only if *every* step succeeds, so per-step reliabilities multiply:
+
+```
+  P(chain succeeds)  =  p_1 x p_2 x ... x p_n  =  p^n     (when every step is equally reliable)
+```
+
+**Reading it in plain English.** "A chain is not as reliable as its steps — it is as reliable as all of its steps *at once*, which is a much smaller number than anyone's intuition suggests."
+
+The reason this deserves top billing is that "95% reliable" sounds like a good step and reads like a good system, and it is not. Human intuition averages; chains multiply. Everything else in this module — gates, retries, routing away from long chains — exists to fight this one exponent.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `p` | "p" | Per-step success rate. The chance one LLM call in the chain does its job correctly |
+| `n` | "n" | Chain length. How many sequential steps must all succeed |
+| `p^n` | "p to the n" | End-to-end success rate. Multiply `p` by itself once per step |
+| `1 - p^n` | "one minus p to the n" | End-to-end failure rate. What your users actually experience |
+
+**Walk one example.** Take a step that is 95% reliable — a perfectly respectable LLM call — and lengthen the chain:
+
+```
+    n        p^n                          end-to-end     failure rate     1 in every
+    1     0.95                               95.0%           5.0%           20 runs
+    3     0.95 x 0.95 x 0.95                 85.7%          14.3%            7 runs
+    5     0.95^5                             77.4%          22.6%            4 runs
+   10     0.95^10                            59.9%          40.1%          2.5 runs
+```
+
+**A "95% reliable" step becomes a 60% reliable 10-step chain.** Nothing degraded. No step got worse. The five percent that each step throws away is simply charged ten times, and by the tenth hop four runs in ten have failed somewhere. This is why "our components are all above 95%" is not a statement about the system, and why the module's core guidance is to use the *shortest* pattern that works.
+
+**Run it backwards to size a chain.** If you need 95% end-to-end across 10 steps, solve `p^10 = 0.95`:
+
+```
+  p  =  0.95^(1/10)  =  0.9949        <- every step must hit 99.49%, not 95%
+
+  compare: p = 0.99  ->  0.99^10  = 90.4%    still misses the target
+           p = 0.999 ->  0.999^10 = 99.0%    comfortably clears it
+```
+
+The target reliability of a *step* is far higher than the target reliability of the *system*, and it climbs as the chain lengthens. A team that specs "99% per step" and ships ten steps has quietly specced a 90% product.
+
+**Why gates exist — the failure mode if you remove them.** A gate converts a silent failure into a caught one that can be retried, which raises the effective per-step reliability that feeds the exponent. Suppose a gate catches 80% of the 5% failures and the retry itself succeeds 95% of the time:
+
+```
+  effective p  =  0.95  +  0.05 x 0.80 x 0.95
+               =  0.95  +  0.038
+               =  0.988
+
+  ungated:  0.95^10  = 59.9%
+  gated:    0.988^10 = 88.6%      <- +28.7 points, from one cheap JSON parse per hop
+```
+
+The gate never touched the model or the prompt; it only stopped bad output from entering the next step. Because the improvement enters an exponent, a small per-step gain becomes a large end-to-end one — the same leverage that made the ungated chain so bad now works in your favour. Remove the gates and a chain does not merely fail more often; it fails *silently*, with step 3's malformed output being confidently elaborated by steps 4 through 10 (see Pitfall 4, error amplification).
+
 ```python
 import anthropic
 from typing import Optional
@@ -183,6 +236,53 @@ Two sub-patterns:
 **Sectioning**: Split a large input into N independent chunks, process all N in parallel, merge results. Latency drops from O(N) sequential to O(1) parallel (bounded by the slowest chunk). Cost stays the same.
 
 **Voting**: Send the same prompt to the LLM N times (often with temperature > 0), collect N independent answers, pick the majority. Reduces variance on stochastic tasks; useful for classification, fact verification, and risk assessment. Cost multiplies by N.
+
+**The speedup and cost arithmetic.** "Latency drops from O(N) to O(1)" is the headline; the real formula has two terms the headline hides:
+
+```
+                    T_chunk x N
+  T_parallel  =  ------------------  +  T_merge          W = worker pool size
+                  min(N, W)                              ceiling on the first term
+```
+
+**Reading it in plain English.** "You divide the chunk work by however many workers you actually have — not by however many chunks you have — and then you pay the merge step in full, every time, no matter how many workers you own."
+
+Both hidden terms bite in production. The `min(N, W)` says buying more chunks past your pool size buys nothing. The `+ T_merge` says the merge is *serial*, so it sets a hard floor on latency that no amount of parallelism can go below.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `N` | "N" | Number of chunks the input was split into. 20 in the Big 4 contract example |
+| `W` | "W" | Worker pool size. The `max_workers=8` in the thread-pool code in Section 6 |
+| `T_chunk` | "T chunk" | Wall-clock time to process one chunk. ~2 minutes for a 10-page contract section |
+| `ceil(N/W)` | "ceiling of N over W" | Number of *waves* the pool must run. 20 chunks, 8 workers = 3 waves |
+| `T_merge` | "T merge" | The serial synthesis step. Cannot be parallelized — it needs all chunks |
+| `speedup` | "speedup" | `T_sequential / T_parallel`. Always less than `N` |
+
+**Walk one example.** The 200-page contract from Section 7: `N = 20` sections, `T_chunk = 2 min`, `T_merge = 1 min`, sequential baseline `20 x 2 = 40 min`:
+
+```
+    W      waves = ceil(N/W)    chunk time      + merge     total     speedup
+    1            20             20 x 2 = 40 min     1        41 min     1.0x
+    4             5              5 x 2 = 10 min     1        11 min     3.6x
+    8             3              3 x 2 =  6 min     1         7 min     5.7x
+   20             1              1 x 2 =  2 min     1         3 min    13.3x
+  100             1              1 x 2 =  2 min     1         3 min    13.3x   <- no gain
+```
+
+**Two things to read off this table.** First, the `W = 20` row reproduces the "40 minutes to 3 minutes" claim in Section 7 — and it is a **13.3x speedup, not 20x**, because the 1-minute merge survives untouched. Second, the `W = 100` row is identical to `W = 20`: once `W >= N` every extra worker sits idle, and latency is pinned at `T_chunk + T_merge = 3 min` forever. That 3 minutes is the floor for this workload no matter what you spend.
+
+**Why the merge term deserves its own name.** As `W` grows, the parallel term goes to zero and the whole runtime collapses onto `T_merge` — so the maximum achievable speedup is `T_sequential / (T_chunk + T_merge)`, here `40 / 3 = 13.3x`, and it is decided entirely by the serial fraction. Doubling the merge to 2 minutes drops the ceiling to `40/4 = 10x` before you have written a line of concurrency code. Teams that model sectioning as a clean `N x` win consistently over-provision workers chasing a speedup the serial step has already made unreachable; the fix is always to shrink the merge (hierarchical merges, cheaper merge model), never to add workers.
+
+**Cost is the mirror image.** Latency and cost move in opposite directions across the two sub-patterns, which is why they are separate patterns at all:
+
+```
+                    LLM calls made        token cost        wall-clock latency
+  sequential          N  = 20                 1.00x            40 min
+  sectioning          N + 1 = 21              1.05x             3 min    <- time win, cost flat
+  voting (N=5)        5 + 1 synthesis         6.00x           ~1 call    <- cost hit, no time win
+```
+
+Sectioning splits *different* work across calls, so total tokens are unchanged and you pay only the merge — a 5% premium for a 13.3x latency win. Voting repeats the *same* work, so tokens multiply by `N` while latency stays flat at roughly one call (all `N` start together). Sectioning buys latency with negligible cost; voting buys variance reduction with a 6x bill and buys no latency at all.
 
 ```python
 import anthropic
@@ -339,6 +439,56 @@ A generator LLM produces an output. An evaluator LLM scores the output and provi
 **Convergence**: On well-defined tasks (code correctness, factual accuracy, style adherence), evaluator-optimizer loops converge in 2-4 rounds. On subjective tasks (creative writing quality), convergence is slower and the stopping criterion harder to define.
 
 **Cost**: Each round doubles the token cost versus a single call (one generation + one evaluation). Three rounds = 6× the cost of a single call. Use this pattern only when quality improvement justifies the cost.
+
+**The iteration-count arithmetic.** Cost and quality grow on different curves, which is the whole reason a cap exists:
+
+```
+  cost(r)     =  2r  x  cost(single call)          linear in rounds
+  quality(r)  =  q_max - (q_max - q_0) x d^r       geometric approach to a ceiling
+```
+
+**Reading it in plain English.** "Each round costs the same as the one before it, but each round fixes a *fraction* of what is left wrong — so you pay in a straight line while you improve on a curve that flattens."
+
+Two straight lines would justify looping forever; a line against a flattening curve guarantees a crossover point where the next round costs more than it is worth. That crossover is what "cap at 3-5 rounds" is a hard-coded approximation of.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `r` | "r" | Round number. One generation plus one evaluation per round |
+| `2r` | "two r" | Cost multiplier. Each round is 2 calls, so 3 rounds = 6x a single call |
+| `q_0` | "q naught" | Quality of the first draft, before any feedback. Score out of 10 |
+| `q_max` | "q max" | The ceiling. The best the generator-evaluator pair can reach, ever |
+| `d` | "d" (the decay) | Fraction of the remaining gap that *survives* a round. `d = 0.5` means each round halves the gap |
+| `1 - d` | "one minus d" | Fraction of the remaining gap each round actually closes |
+
+**Walk one example.** First draft scores 6.0, the pair tops out at 9.5, each round closes half the remaining gap (`d = 0.5`), approval threshold is 8:
+
+```
+   r    gap before    closed this round    score after    cost      gain/round
+   0       3.50              -                6.00        2x           -
+   1       3.50            1.750              7.75        4x         +1.75
+   2       1.750           0.875              8.63        6x         +0.88   <- crosses 8
+   3       0.875           0.438              9.06        8x         +0.44
+   4       0.438           0.219              9.28       10x         +0.22
+   5       0.219           0.109              9.39       12x         +0.11
+
+   rounds 1-2:  +2.63 points for 4x extra cost   =  0.66 points per unit cost
+   rounds 3-5:  +0.77 points for 6x extra cost   =  0.13 points per unit cost
+```
+
+**Round 3 onward is a 5x worse deal than rounds 1-2.** Each round's gain is exactly half the previous round's, so the marginal return halves every iteration while the marginal cost stays flat at 2x. That is the arithmetic behind "converges in 2-4 rounds" — not that the loop stops improving at round 4, but that it stops improving *enough*. Note also that the threshold of 8 is cleared at round 2 and every later round is spent buying quality nobody asked for.
+
+**Why the cap must be hard, not adaptive.** The model above is the well-behaved case, where `d < 1` and the loop converges. Two real failure modes break it, and both are unbounded:
+
+```
+  d = 1.0   evaluator's criteria shift each round; gap never closes
+            r = 1..inf, score oscillates 7.4 / 7.6 / 7.4 ...   -> infinite cost, no gain
+
+  d < 1 but q_max < threshold   pair simply cannot reach 8
+            r = 10:  9.5-point ceiling never applies; score creeps to 7.9 and stalls
+            -> loop runs to timeout on every hard input
+```
+
+A cap on *rounds* is the only termination condition that holds in both cases, because it does not depend on the evaluator being right. Remove it — the classic version of this bug is `while not approved:` — and a single hard or ambiguous input consumes cost without bound (see Pitfall 1). The companion rule is to keep the best-scoring output seen so far and return it on timeout, since without that the loop can terminate on a round that scored *worse* than round 2.
 
 ```python
 import anthropic
@@ -645,6 +795,73 @@ If the classifier has 90% accuracy and misroutes 10% of simple queries to the ex
 - Blended cost: $0.15×0.54 + $5×0.46 = $2.38/1M vs $2.09/1M at 100% accuracy
 
 Classifier accuracy matters. A 5% improvement in routing accuracy can save 10-15% of inference cost in high-volume systems.
+
+**Reading it in plain English.** "Your bill is not set by what your queries *are* — it is set by what your classifier *thinks* they are, and every misread simple query gets billed at the expensive model's rate."
+
+The framing that matters is that the classifier sits upstream of the pricing. A router with 90% accuracy is not 10% wrong about cost; it is wrong in a direction that is 33x more expensive per unit, so a small accuracy error produces a disproportionate cost error.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `f_simple` | "fraction simple" | Share of traffic that genuinely needs only the cheap model. 60% above |
+| `a` | "a" | Classifier accuracy. 0.90 in the worked figures above |
+| `1 - a` | "one minus a" | Misroute rate. The 10% that lands on the wrong model |
+| `c_cheap` | "c cheap" | Cheap model price. $0.15 per 1M tokens |
+| `c_exp` | "c expensive" | Expensive model price. $5 per 1M tokens — a **33x** ratio |
+| `blended` | "blended cost" | `c_cheap x share_cheap + c_exp x share_exp`. What you are actually billed |
+
+**Walk one example.** Reproducing the numbers above step by step:
+
+```
+  traffic mix                     60% simple            40% complex
+  classifier at a = 0.90
+
+  simple routed correctly    0.60 x 0.90 = 0.54  -> cheap
+  simple MISrouted           0.60 x 0.10 = 0.06  -> expensive     <- the leak
+  complex (assumed correct)              = 0.40  -> expensive
+
+  share_cheap = 0.54          share_expensive = 0.06 + 0.40 = 0.46
+
+  blended  = $0.15 x 0.54  +  $5 x 0.46
+           = $0.081        +  $2.300
+           = $2.381 per 1M
+
+  perfect router (a = 1.00):
+           = $0.15 x 0.60  +  $5 x 0.40  =  $0.09 + $2.00  =  $2.090 per 1M
+
+  overpayment from 10% misrouting = $0.291 per 1M = 13.9% above the floor
+```
+
+Six percent of all traffic moved to a model costing 33x more, and that alone is a 13.9% surcharge on the entire bill.
+
+**When the "5% accuracy = 10-15% savings" rule holds.** Push accuracy from 90% to 95% and rerun the same arithmetic, at two traffic mixes:
+
+```
+  mix 60/40 (the example above)       a = 0.90     a = 0.95     saving
+    share_cheap / share_expensive     0.54/0.46    0.57/0.43
+    blended per 1M                      $2.381       $2.236      6.1%
+
+  mix 80/20 (high-volume assistant)   a = 0.90     a = 0.95     saving
+    share_cheap / share_expensive     0.72/0.28    0.76/0.24
+    blended per 1M                      $1.508       $1.314     12.9%
+```
+
+The rule of thumb is a statement about *traffic shape*, not about classifiers. The savings scale with how much simple traffic there is to misroute — at a 60/40 mix the same 5-point accuracy gain returns 6.1%, while the 80/20 mix typical of high-volume assistants returns 12.9%, landing squarely in the quoted 10-15%. Before funding classifier work, check your mix: on complex-heavy traffic there is very little to win, because most queries belong on the expensive model anyway.
+
+**Why the other error direction is missing from this arithmetic — and why that is the dangerous one.** The calculation above only counts simple-to-expensive misroutes. The reverse error, a complex query routed to the cheap model, makes the bill go *down*:
+
+```
+  two-sided errors, 60/40 mix, a = 0.90
+    simple  -> cheap      0.60 x 0.90 = 0.54
+    simple  -> expensive  0.60 x 0.10 = 0.06
+    complex -> expensive  0.40 x 0.90 = 0.36
+    complex -> cheap      0.40 x 0.10 = 0.04        <- cheaper, and WRONG
+
+    blended = $0.15 x 0.58 + $5 x 0.42 = $0.087 + $2.100 = $2.187 per 1M
+
+  $2.187 < $2.381    the "better" bill contains 4% of queries answered badly
+```
+
+Cost went down and quality went down together. This is the single most treacherous property of routing: the two error directions have opposite signs on the metric most teams watch. A router that has silently drifted toward under-routing looks like a cost win on the dashboard and shows up only as degraded answers, with no error, no exception, and no retry — the silent-misclassification failure documented in Pitfall 2. Never tune a router on blended cost alone; hold accuracy on a labelled set and read cost as a secondary metric.
 
 ### Parallelization — Thread Pool Sizing
 

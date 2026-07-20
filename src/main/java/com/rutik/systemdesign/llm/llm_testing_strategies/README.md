@@ -199,6 +199,74 @@ Respond with valid JSON only:
 {{"relevance": <0-5>, "faithfulness": <0-5>, "completeness": <0-5>, "format": <0-5>, "reasoning": "<one sentence per dimension>"}}"""
 ```
 
+### Validating the Judge — Cohen's Kappa and Spearman Correlation
+
+Before this rubric can gate a PR, you have to prove the judge agrees with humans. Two numbers do
+that, and they answer different questions:
+
+```
+Cohen's kappa (categorical: did the judge and human make the SAME call?)
+
+  kappa = (p_o - p_e) / (1 - p_e)
+
+    p_o = observed agreement = (items labelled identically) / (total items)
+    p_e = agreement expected by chance
+        = sum over labels c of  P(judge picks c) x P(human picks c)
+
+Spearman rho (ordinal: did the judge RANK them the same way?)
+
+                6 x sum d_i^2
+  rho = 1 -  ------------------          d_i = rank_judge(i) - rank_human(i)
+                 n(n^2 - 1)
+```
+
+**Reading it in plain English.** "Kappa asks 'how much of the agreement that was actually up for
+grabs did the judge earn?' Spearman asks 'when the judge says one answer is better than another,
+is it right about the ordering?'"
+
+The distinction matters because a judge can be systematically miscalibrated and still be useful.
+If it scores everything one point lower than humans do, kappa collapses but Spearman stays near
+1.0 — and since regression testing only ever compares a candidate against a baseline, ordering is
+what you actually need. That is why this module's rule is a Spearman threshold of 0.7, not an
+accuracy threshold.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `kappa` | "kappa" | Chance-corrected agreement. 1 perfect, 0 no better than guessing, negative = anti-correlated |
+| `p_o` | "p observed" | Raw agreement rate — the inflated number teams quote |
+| `p_e` | "p expected" | Agreement two independent guessers would hit given their own base rates |
+| `1 - p_e` | "the headroom" | How much agreement was available to earn above chance |
+| `rho` | "rho" (rhymes with "row") | Spearman rank correlation, from -1 to +1 |
+| `d_i` | "d sub i" | Rank gap on item i: judge's rank minus human's rank |
+| `sum d_i^2` | "sum of squared rank gaps" | Squaring makes big disagreements dominate small ones |
+| `n(n^2 - 1)` | "n times n squared minus one" | Normalizer — the worst possible total, so rho lands in [-1, 1] |
+
+**Walk one example.** The 50-example calibration set this module recommends, judged pass/fail. The
+judge and the human agreed on 41 of 50. The judge said "pass" 76% of the time, the human 80%:
+
+```
+  p_o = 41 / 50                                            = 0.820
+
+  chance agreement on "pass" = 0.76 x 0.80                 = 0.608
+  chance agreement on "fail" = 0.24 x 0.20                 = 0.048
+  p_e                                                      = 0.656
+
+  kappa = (0.820 - 0.656) / (1 - 0.656)
+        = 0.164 / 0.344                                    = 0.477
+
+  headline "82% agreement"  ->  kappa 0.48, only MODERATE
+```
+
+Scale: `0.21-0.40` fair, `0.41-0.60` moderate, `0.61-0.80` substantial, `> 0.80` almost perfect. A
+judge at kappa 0.48 is not ready to block merges, even though 82% sounds convincing.
+
+**Why you subtract chance agreement.** Eval sets are lopsided — most responses are fine. Push both
+the judge's and the human's pass rate to 90% and chance agreement alone is
+`0.90 x 0.90 + 0.10 x 0.10 = 0.82`. A judge that agrees 82% of the time on that set scores
+`kappa = (0.82 - 0.82) / 0.18 = 0.00`: it has contributed literally zero information, while its
+raw agreement number is identical to the walked example above. Skip the chance correction and the
+more imbalanced your eval set gets, the more reliable your judge falsely appears.
+
 ### Regression Suite in pytest
 
 ```python
@@ -288,6 +356,80 @@ def test_aggregate_regression(qa_chain, judge_model):
     )
 ```
 
+Two pieces of arithmetic in that file are doing more work than they look like they are — the
+`/ 15` normalization and the `-0.05` gate.
+
+```
+  primary_score = (relevance + faithfulness + completeness) / 15
+                = sum of 3 dimensions, each scored 0-5
+                  --------------------------------------
+                             3 x 5 = 15 max
+
+  aggregate uses 2 dimensions -> divide by 2 x 5 = 10
+
+  gate:  primary_score - baseline  >=  -REGRESSION_THRESHOLD    (-0.05)
+```
+
+**Reading it in plain English.** "Add up the rubric dimensions you actually care about, divide by
+the best score they could possibly have summed to, and you get one number on a 0-1 scale that is
+comparable across releases."
+
+The denominator is `dimensions x max_per_dimension`, not a magic 15 — change the rubric from three
+dimensions to four and the divisor must become 20, or every historical baseline silently becomes
+incomparable. This is the single most common way an eval suite starts lying: someone adds a
+dimension, forgets the divisor, and every score drops by a quarter overnight.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `relevance` etc. | "the dimension scores" | Judge output, integers 0-5, one per rubric dimension |
+| `15` | "fifteen" | 3 dimensions x 5 points. The theoretical maximum, used to normalize to 0-1 |
+| `primary_score` | "primary score" | The normalized 0-1 quality number for one example |
+| `baseline` | "baseline" | The same example's score on the last known-good commit |
+| `delta` | "delta" | `primary_score - baseline`. Negative means worse than before |
+| `-0.05` | "minus five points" | The regression threshold — 5 percentage points on the 0-1 scale |
+
+**Walk two examples.** Same rubric, same threshold, opposite verdicts:
+
+```
+  example q001   relevance 5, faithfulness 4, completeness 4
+                 primary = (5 + 4 + 4) / 15 = 13 / 15         = 0.867
+                 baseline                                      = 0.900
+                 delta = 0.867 - 0.900                         = -0.033
+                 -0.033 >= -0.05   ->  PASS (within noise)
+
+  example q002   relevance 4, faithfulness 2, completeness 3
+                 primary = (4 + 2 + 3) / 15 =  9 / 15          = 0.600
+                 baseline                                      = 0.900
+                 delta = 0.600 - 0.900                         = -0.300
+                 -0.300 >= -0.05   ->  FAIL, blocks the PR
+
+  note: one dimension dropping 5 -> 2 costs 3/15 = 0.20 on its own.
+        The rubric is coarse; a single dimension flip clears the gate 4x over.
+```
+
+**Why the threshold is 5% and not 2%.** The gate has to sit above the suite's own noise floor, and
+the noise floor sets the minimum detectable effect. The standard paired power formula gives the
+number of golden examples you need:
+
+```
+  n = (z_(alpha/2) + z_beta)^2 x sigma_d^2 / delta^2
+    = (1.96 + 0.84)^2 x sigma_d^2 / delta^2
+    = 7.84 x sigma_d^2 / delta^2
+
+  sigma_d = run-to-run stdev of the per-example score (use 0.15, the flakiness threshold)
+
+    detect delta = 0.10   n = 7.84 x 0.0225 / 0.0100  =  18 examples
+    detect delta = 0.05   n = 7.84 x 0.0225 / 0.0025  =  71 examples
+    detect delta = 0.03   n = 7.84 x 0.0225 / 0.0009  = 196 examples
+    detect delta = 0.02   n = 7.84 x 0.0225 / 0.0004  = 441 examples
+```
+
+A 200-example golden dataset is comfortably powered to catch a 5% drop (needs 71) and just barely
+powered for 3% (needs 196). Tightening the gate to 2% would need 441 examples — more than double
+the dataset — and running it anyway means the gate fires on noise and engineers start adding
+`--no-verify`. `delta` is squared in the denominator, so halving the effect you want to catch
+quadruples the dataset you need; that is why "just lower the threshold" is never free.
+
 ### Flakiness Detection
 
 ```python
@@ -318,6 +460,96 @@ async def run_flakiness_suite(chain, dataset: list, n_runs: int = 5) -> list:
     print(f"Flaky examples ({len(flaky)}/{len(dataset)}): {flaky}")
     return results
 ```
+
+`statistics.stdev` and the bare `0.15` above are the whole flakiness gate. Written out:
+
+```
+  per-example instability (continuous scores):
+
+              sqrt(  sum (s_i - s_bar)^2  /  (N - 1)  )      s_i    = score on run i
+    sigma  =                                                 s_bar  = mean of the N scores
+                                                             N - 1  = Bessel correction
+
+    flag as flaky when sigma > 0.15
+
+  suite-level flakiness rate (binary pass/fail judgments):
+
+    flakiness_rate = (examples whose N runs were NOT unanimous) / (total examples)
+    target < 0.05
+```
+
+**Reading it in plain English.** "Run the same input five times. If the scores fan out more than
+0.15, the prompt is not producing one behaviour with noise on top — it is producing two different
+behaviours, and which one a user gets is a coin flip."
+
+The `N - 1` instead of `N` is not pedantry at these sample sizes. With N = 5 it inflates the
+variance by 25%, which is deliberate: you estimated the mean from the same five points, so the
+spread around it is systematically too small, and dividing by 4 corrects for that. Use `N` and you
+will under-report flakiness on exactly the small-N runs you can afford to do.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `s_i` | "s sub i" | The judge score from run number i of the same unchanged input |
+| `s_bar` | "s bar" | The mean of those runs. The bar means "average of" |
+| `sum (s_i - s_bar)^2` | "sum of squared deviations" | Total spread. Squaring means one outlier dominates |
+| `N - 1` | "N minus one" | Bessel correction — degrees of freedom left after estimating the mean |
+| `sigma` | "sigma" | Standard deviation, in the same 0-1 units as the score itself |
+| `0.15` | "the flakiness threshold" | Empirical line: above it, the variance swamps a 5% regression signal |
+| `flakiness_rate` | "flakiness rate" | Fraction of the suite that cannot even agree with itself |
+
+**Walk one example.** One golden example, five runs at production temperature:
+
+```
+  runs:   0.90   0.88   0.92   0.55   0.89
+  mean:   (0.90 + 0.88 + 0.92 + 0.55 + 0.89) / 5              = 0.828
+
+  deviations:    +0.072  +0.052  +0.092  -0.278  +0.062
+  squared:      0.00518 0.00270 0.00846 0.07728 0.00384
+  sum                                                          = 0.09748
+
+  variance = 0.09748 / (5 - 1)                                 = 0.02437
+  sigma    = sqrt(0.02437)                                     = 0.156
+
+  0.156 > 0.15  ->  FLAKY, exclude from the regression gate
+
+  note: four runs cluster inside 0.04 of each other. The single 0.55 run
+        contributes 0.077 of the 0.097 total -- 79% of all the variance.
+```
+
+Then at suite level: 200 golden examples run 5 times each, 9 of them not unanimous, gives
+`9 / 200 = 0.045` — a 4.5% flakiness rate, just inside the 5% target.
+
+**Why the flaky set must be excluded from the gate, not just noted.** Variance adds. With 40 flaky
+examples at sigma 0.15 sitting in a 200-example suite, the aggregate's own standard error is
+inflated enough to hide a genuine 15% drop on 20 stable examples — the exact production incident
+described in Pitfall 4. Keeping flaky examples in the gate does not make it stricter, it makes it
+blind. Quarantine them into a "volatile" set, gate only on the stable set, and treat the volatile
+count as a prompt-quality bug list rather than regression data.
+
+**Establishing the noise floor before you pick any threshold.** Same idea, one level up: evaluate
+the *unchanged* commit N times, take the mean and put a confidence interval around it.
+
+```
+  SEM  = sigma / sqrt(N)                          standard error of the mean
+  CI   = mean +/- t_(0.975, N-1) x SEM            t = 2.776 for N = 5
+
+  five full-suite runs on one unchanged commit:
+    0.842   0.849   0.838   0.855   0.846
+
+    mean       = 4.230 / 5                                  = 0.8460
+    deviations = -0.004  +0.003  -0.008  +0.009  0.000
+    squared sum                                             = 0.000170
+    sigma      = sqrt(0.000170 / 4)                         = 0.0065
+    SEM        = 0.0065 / sqrt(5) = 0.0065 / 2.236          = 0.0029
+    CI         = 0.8460 +/- 2.776 x 0.0029
+               = 0.8460 +/- 0.0081     -> [0.8379, 0.8541]
+```
+
+The suite cannot distinguish anything smaller than roughly +/-0.8 percentage points from its own
+noise. A 5% regression threshold sits six times outside that band — safe. A 1% threshold sits
+inside it, and would fire on unchanged code often enough that the team would learn to ignore it.
+Measure this once per suite, then set the gate above it; `sqrt(N)` in the denominator means
+shrinking the band by 2x costs 4x the eval runs.
 
 ### Prompt Mutation Testing
 
@@ -357,6 +589,58 @@ def test_prompt_robustness(chain_factory, original_prompt: str, dataset: list) -
 
     return results
 ```
+
+The `abs(delta) > 0.1` check is a fragility measure. Spelled out, with the relative form this
+module's robust/fragile bands are actually stated in:
+
+```
+  delta_m       = score(mutated prompt) - score(original prompt)
+  sensitivity_m = |delta_m| / score(original)          <- relative, comparable across prompts
+
+  robust    : sensitivity < 0.05     (minor mutations move the score < 5%)
+  fragile   : sensitivity > 0.15     (minor mutations move the score > 15%)
+```
+
+**Reading it in plain English.** "Change something about the prompt that should not matter. If the
+score moves anyway, the prompt was not working for the reason you thought it was."
+
+Note the absolute value: a mutation that *improves* the score is just as damning as one that hurts
+it. If deleting your last sentence raises quality, that sentence was actively harmful and you only
+found out by accident. Fragility is about the magnitude of the model's reaction to irrelevant
+edits, not its direction.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `delta_m` | "delta sub m" | Signed score change caused by mutation m. Sign tells you which way, not how bad |
+| `\|delta_m\|` | "absolute value of delta" | Magnitude only. Improvements count as fragility too |
+| `sensitivity_m` | "sensitivity" | Delta as a fraction of the original score, so prompts at different score levels compare |
+| `score(...)` | "score of" | Full golden-dataset evaluation, so each mutation costs a whole eval run |
+| `0.05 / 0.15` | "five and fifteen percent" | The robust and fragile bands. Between them is "watch it" |
+
+**Walk one example.** Original prompt scores 0.84 on the golden set. Four mutations:
+
+```
+  mutation              score   delta    sensitivity        verdict
+  ------------------------------------------------------------------------
+  word_substitute       0.830   -0.010   0.010/0.84 = 1.2%  robust
+  add_noise             0.855   +0.015   0.015/0.84 = 1.8%  robust
+  remove_last_sentence  0.792   -0.048   0.048/0.84 = 5.7%  watch
+  reorder_sentences     0.710   -0.130   0.130/0.84 = 15.5% FRAGILE
+
+  cost: 4 mutations x 200 examples x $0.004 = $3.20 per prompt
+```
+
+The reorder result is the finding. Nothing was added or removed — the same instructions in a
+different order cost 13 points, which means the prompt depends on positional accident rather than
+on stated constraints. That prompt will break on the next model upgrade, when attention patterns
+over the system prompt shift.
+
+**Why you compare against the noise floor here too.** The `remove_last_sentence` result at 5.7%
+looks like a real signal but sits close enough to a suite whose run-to-run band is +/-0.8 points
+that it deserves a re-run before anyone rewrites a prompt over it. Mutation testing is expensive
+enough that teams run each mutation once; a single run cannot separate a 5% fragility from three
+unlucky flaky examples. Re-run any mutation landing between the 5% and 15% bands before acting on
+it, and exclude the volatile set exactly as the regression gate does.
 
 ### GitHub Actions CI/CD Integration
 

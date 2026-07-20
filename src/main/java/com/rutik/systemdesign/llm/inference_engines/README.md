@@ -340,6 +340,258 @@ Fix options:
   4. Add a 3rd GPU (TP=3)
 ```
 
+**Reading it in plain English.** "Each GPU must simultaneously hold the weights, one KV cache per
+active user, and a little scratch space — and only the KV cache grows with traffic."
+
+Weights are a fixed toll you pay before serving a single token. The KV cache is the *variable* cost,
+and it is what actually decides how many users fit on the card. This is why capacity planning is
+always "solve for the number of concurrent users", never "solve for the model".
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `P` | "P" | Parameter count. 70B = 70 × 10^9 weights |
+| `bytes_per_element` | "bytes per element" | 2 for BF16/FP16, 1 for INT8/FP8, 0.5 for INT4 |
+| `num_layers` | "num layers" | Transformer blocks stacked. 80 for LLaMA 3 70B |
+| `num_kv_heads` | "num K-V heads" | Attention heads that keep their own K and V. GQA shrinks this |
+| `head_dim` | "head dim" | Width of one head's vector. 128 in every LLaMA 3 size |
+| `× 2` (leading) | "times two" | One copy for K, one copy for V. Not a fudge factor |
+| `TP` | "tee-pee" | Tensor-parallel degree — how many GPUs the weights are sliced across |
+
+**Walk one example.** LLaMA 3 70B, BF16, GQA with 8 KV heads:
+
+```
+  weights          = P x bytes_per_element
+                   = 70e9 x 2               = 140 GB total
+                   / TP=2                   =  70 GB per GPU
+
+  KV per token     = 2 x num_layers x num_kv_heads x head_dim x bytes
+                   = 2 x 80 x 8 x 128 x 2   = 327,680 B  = 320 KB per token
+
+  KV per user      = 320 KB x context
+                     context 2048           = 655 MB      <- the "660MB" above
+                     context 4096           = 1.31 GB
+
+  50 users @ 2048  = 50 x 655 MB = 32.8 GB  -> 16.4 GB per GPU with TP=2
+
+  per-GPU total    = 70 GB weights + 16.4 GB KV + 3 GB overhead = 89.4 GB
+                     H100 capacity          = 80 GB
+                     overdraw               =  9.4 GB       <- does not fit
+```
+
+Note the reconciliation: the `660MB` figure in the block above is the **2,048-token** number, not
+the 4,096-token one. At the stated 4,096 context the same 50 users need 65.5 GB of KV cache, and the
+deficit is not 9.4 GB but 42 GB — the plan fails twice as hard as the first pass suggests.
+
+**Why the leading `× 2` exists.** Drop it and every estimate is exactly half the truth, which is the
+single most common way teams OOM in week one: they size for K, forget V, ship, and discover the
+gap only when the fiftieth user connects. The `num_kv_heads` term is the other trap — using
+`num_attention_heads` (32 for the 8B, 64 for the 70B) instead of `num_kv_heads` (8 for both)
+inflates the estimate 4-8× on any GQA model and sends you buying GPUs you do not need.
+
+### Throughput vs Latency — Little's Law
+
+The two numbers people argue about are bound by one identity:
+
+```
+concurrency = throughput x latency          (Little's Law)
+
+  N   = X x R
+  N   = sequences in flight  (vLLM: max_num_seqs)
+  X   = completed requests per second
+  R   = end-to-end latency per request (seconds)
+```
+
+**Reading it in plain English.** "You cannot pick throughput and latency independently — fix any two
+of concurrency, throughput, and latency, and the third is already decided."
+
+That framing kills the most common planning error: promising both "10× throughput" and "unchanged
+p99 latency" on the same hardware. Batching buys throughput by *raising* the number of sequences in
+flight, and each of those sequences waits behind the others in every decode step.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `N` | "N" | Sequences resident in the engine at once. The `--max-num-seqs` knob |
+| `X` | "X" | Throughput — requests finished per second (or tokens/sec if you count tokens) |
+| `R` | "R" | Residence time — arrival to last token. TTFT + (output_tokens × TPOT) |
+| `TTFT` | "tee-tee-eff-tee" | Time to first token. Queue wait + one prefill pass |
+| `TPOT` | "tee-pot" | Time per output token. One decode step, memory-bandwidth-bound |
+
+**Walk one example.** vLLM, 8B on one A100 80GB, using the numbers from §4.1:
+
+```
+  aggregate throughput            = 3,500 tokens/sec   (mid of the 3000-4000 range)
+  per-user decode speed           =    50 tokens/sec   (TPOT = 20 ms)
+
+  concurrent users N              = 3,500 / 50         = 70 users
+                                                         (inside the "50-200" range above)
+
+  average request = 200 in + 256 out
+    R = TTFT + 256 x TPOT
+      = 0.30 s + 256 x 0.020 s   = 0.30 + 5.12         = 5.42 s
+
+  request throughput X            = N / R = 70 / 5.42  = 12.9 req/sec
+  daily capacity                  = 12.9 x 86,400 x 256 tokens
+                                                        = 285M output tokens/day
+```
+
+Now push `--max-num-seqs` from 70 to 140. Aggregate throughput does *not* double — it is already
+near the bandwidth ceiling (next block), so `X` stays ~3,500 tokens/sec while `N` doubles, and
+Little's Law forces `R` to double: every user's decode speed halves to 25 tokens/sec. The fleet
+serves the same tokens per second and every single user perceives the server as twice as slow.
+
+### The Memory-Bandwidth Ceiling on Tokens/sec
+
+Decode is bandwidth-bound, so the hardware sets a hard ceiling before any kernel is written:
+
+```
+tokens/sec ceiling = (HBM bandwidth) / (bytes read per decode step)
+
+  bytes read per decode step ~= model weight bytes  (every weight is touched once)
+  a batch of B sequences reads those weights ONCE and emits B tokens
+```
+
+**Reading it in plain English.** "Each decode step has to drag the entire model out of HBM, so the
+fastest you can possibly go is bandwidth divided by model size — and batching is the only way to
+amortize that read across more than one token."
+
+This is the sentence behind the module's key insight. It also explains why quantization is a
+*latency* lever and not just a memory lever: halving the bytes read halves the step time directly.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `HBM` | "aitch-bee-em" | High-bandwidth memory on the GPU. A100 80GB: ~2.0 TB/s; H100: ~3.35 TB/s |
+| `B` | "B" | Batch size — how many sequences step together |
+| bytes/step | "bytes per step" | Weight bytes streamed per decode iteration. `P × bytes_per_element` |
+| arithmetic intensity | "arithmetic intensity" | FLOPs done per byte read. Decode at B=1 is ~1 — dismal |
+
+**Walk one example.** LLaMA 3 8B, FP16 (16 GB of weights), A100 80GB at 2.0 TB/s:
+
+```
+  B = 1     2,000 GB/s / 16 GB   =   125 tokens/sec      <- single-user ceiling
+  B = 8     125 x 8              = 1,000 tokens/sec
+  B = 32    125 x 32             = 4,000 tokens/sec      <- matches the 3000-4000 above
+  B = 128   125 x 128            =16,000 tokens/sec      <- never reached; compute-bound first
+
+  same model at INT4 (4 GB of weights):
+  B = 1     2,000 / 4            =   500 tokens/sec      <- 4x faster for ONE user
+```
+
+Two things fall out. First, the observed 3,000-4,000 tokens/sec on an A100 is not a vLLM
+achievement so much as "vLLM got the batch to ~32 and the memory bus did the rest" — the ceiling
+was always there. Second, the B=1 row is why a single-user chat feels the same on a lightly loaded
+and a heavily loaded server right up until the batch saturates: below saturation you are paying for
+bandwidth nobody else is using.
+
+**Why batching stops helping.** Past some `B` the step stops being bandwidth-bound and becomes
+compute-bound (attention FLOPs grow with batch *and* context), so the linear `125 × B` line bends
+over. Ignore this and you set `--max-num-seqs 512`, watch throughput flatten while p99 TPOT triples,
+and conclude — wrongly — that the engine is broken.
+
+### Tensor vs Pipeline Parallelism — Params per GPU and Wire Volume
+
+```
+Tensor parallel (TP): every weight matrix is sliced; activations are all-reduced inside each layer
+  params_per_gpu   = P / TP
+  syncs per token  = num_layers x 2            (after attention out-proj, after MLP down-proj)
+  bytes per sync   = hidden_dim x bytes x 2(TP-1)/TP     (ring all-reduce, per GPU)
+
+Pipeline parallel (PP): the model is cut into layer stages; one activation crosses each seam
+  params_per_gpu   = P / PP
+  syncs per token  = PP - 1
+  bytes per sync   = hidden_dim x bytes
+```
+
+**Reading it in plain English.** "Both split the weights the same way — `P` divided by the degree —
+but TP pays for it with two network round-trips inside every single layer, while PP pays only once
+per stage boundary."
+
+That asymmetry, not the memory math, is the whole choice. TP and PP are equally good at making a
+model fit; they are wildly unequal at how much interconnect they demand to do it.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `TP` | "tee-pee" | Tensor-parallel degree. `--tensor-parallel-size`. Must stay inside one node |
+| `PP` | "pee-pee" | Pipeline-parallel degree. `--pipeline-parallel-size`. Fine across nodes |
+| `hidden_dim` | "hidden dim" | Residual-stream width. 8192 for LLaMA 3 70B, 4096 for the 8B |
+| all-reduce | "all reduce" | Every GPU ends up with the sum of all GPUs' copies. Ring cost `2(TP-1)/TP` |
+| NVLink | "en-vee-link" | Intra-node GPU fabric. 900 GB/s per H100 SXM |
+| InfiniBand | "infiniband" | Inter-node fabric. ~50 GB/s per NIC — 18× thinner than NVLink |
+
+**Walk one example.** LLaMA 3 70B: `P` = 70e9, 80 layers, `hidden_dim` = 8192, BF16.
+
+```
+  weights per GPU
+    TP=2      70e9 x 2 B / 2   = 70 GB      TP=8   70e9 x 2 B / 8  = 17.5 GB
+    PP=2      70e9 x 2 B / 2   = 70 GB      (identical -- memory is a tie)
+
+  wire volume per generated token, TP=2
+    syncs      = 80 layers x 2                       = 160 syncs
+    per sync   = 8192 x 2 B x 2(2-1)/2               = 16,384 B  = 16 KB
+    per token  = 160 x 16 KB                         = 2.56 MB
+
+  wire volume per generated token, PP=2
+    syncs      = PP - 1                              = 1 sync
+    per sync   = 8192 x 2 B                          = 16 KB
+    per token  = 1 x 16 KB                           = 0.016 MB
+
+  ratio       2.56 MB / 0.016 MB                     = 160x more traffic for TP
+```
+
+Now put it on wire. At 2,000 tokens/sec aggregate, TP=2 pushes `2.56 MB × 2000` = 5.1 GB/s — trivial
+for NVLink's 900 GB/s and even survivable on PCIe's 32 GB/s *by bandwidth alone*. The killer is
+latency, not volume: those 160 syncs per token are 160 blocking barriers. At ~10 microseconds each
+over PCIe that is 1.6 ms of pure waiting added to a decode step that should take 20 ms — an 8%
+tax — and at TP=4 across a PCIe switch boundary the per-sync cost climbs until the 5-10× collapse
+described in §12 shows up while `nvidia-smi` still reports high utilization.
+
+**Why the `2(TP-1)/TP` factor exists.** A ring all-reduce is not "send everything to everyone" — each
+GPU sends `(TP-1)/TP` of the payload twice (reduce-scatter, then all-gather). Model it as a naive
+broadcast and you over-predict traffic by roughly `TP/2`, conclude TP=8 is impossible on your fabric,
+and buy pipeline stages you did not need.
+
+### Engine Comparison Arithmetic
+
+The "15-40% higher throughput" claim in §4.2 converts to GPUs, and GPUs convert to dollars:
+
+```
+gpus_needed = ceil(demand_tokens_per_sec / per_gpu_tokens_per_sec)
+savings     = (gpus_vllm - gpus_trt) x $/gpu-hour x 730 hours/month
+```
+
+**Reading it in plain English.** "A percentage speedup is worth exactly the number of whole GPUs it
+lets you delete — and because you cannot delete a fraction of a GPU, small percentages often buy
+nothing at all."
+
+Framing the comparison this way stops the benchmark argument cold. A 20% engine win on a 4-GPU
+fleet is not 20% of your bill; it is one GPU, if the ceiling happens to fall the right way.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `ceil` | "ceiling" | Round up. You cannot rent 16.4 GPUs |
+| demand | "demand" | Peak sustained tokens/sec you must serve, not the daily average |
+| 730 | "seven-thirty" | Hours in an average month (24 × 365 / 12) |
+| build cost | "build cost" | TensorRT-LLM compiles per model per GPU type: 30-60 min, redone on every swap |
+
+**Walk one example.** 70,000 tokens/sec peak demand, A100s at $4/hr reserved:
+
+```
+                       per-GPU tok/s     gpus_needed          monthly GPU cost
+  vLLM                     3,500          ceil(70000/3500)=20   20 x 4 x 730 = $58,400
+  TensorRT-LLM +15%        4,025          ceil(70000/4025)=18   18 x 4 x 730 = $52,560
+  TensorRT-LLM +40%        4,900          ceil(70000/4900)=15   15 x 4 x 730 = $43,800
+
+  saving at +15%   = $5,840/month     = 2 GPUs
+  saving at +40%   = $14,600/month    = 5 GPUs
+
+  same math at 1/10th the scale (7,000 tokens/sec):
+  vLLM   ceil(7000/3500) = 2 GPUs         TRT +15%  ceil(7000/4025) = 2 GPUs
+  saving = $0 -- the 15% vanished into the ceiling
+```
+
+The scale term is the whole story. Above ~20 GPUs the compilation pipeline pays for itself in weeks;
+at 2 GPUs a 15% engine advantage rounds to zero saved dollars while still costing you a 30-60 minute
+rebuild on every model swap. Benchmark first, then divide by your actual fleet size before switching.
+
 ---
 
 ## 7. Real-World Examples
@@ -542,6 +794,45 @@ Quality: Acceptable — Mistral 7B matched the ~GPT-3.5-turbo bar the A/B set;
          the delta vs the old GPT-4-class endpoint was invisible for these
          writing tasks (that endpoint was the overkill being paid for)
 ```
+
+**Reading it in plain English.** "Self-hosting is not cheaper per GPU-hour — it is cheaper per
+token, and only once one GPU is kept busy enough to spread its hourly rent over enough tokens."
+
+The comparison above walks into and back out of the classic trap: priced naively, four on-demand
+A100s cost *more* than the OpenAI bill. Nothing about the hardware changed between that line and the
+84% saving — only utilization and the purchase term did.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| $/M tokens | "dollars per million tokens" | The only unit in which the two options are comparable |
+| on-demand | "on demand" | Hourly rate, cancel anytime. ~$3/hr per A100 here (4 GPUs = $12/hr) |
+| reserved | "reserved" | 1-year commit. ~$4/hr for the whole job's slice — roughly 3× cheaper per GPU |
+| utilization | "utilization" | Fraction of the rented hour that actually produced tokens |
+| standby | "standby" | A second idle GPU you pay for so a failure is not an outage |
+
+**Walk one example.** 25M tokens/day of traffic, Mistral 7B:
+
+```
+  OpenAI, GPT-4-class blended
+    $1,200/day / 25M tokens              = $48.00 per M tokens
+
+  Self-hosted, 4x on-demand A100, mostly idle
+    4 x $12/hr... = $1,152/day / 25M     = $46.08 per M tokens   <- 4% saving. pointless.
+
+  Self-hosted, 1x reserved A100, saturated
+    $4/hr x 24 = $96/day / 25M           = $ 3.84 per M tokens   <- 12.5x cheaper
+
+  add one standby GPU for availability
+    $192/day / 25M                       = $ 7.68 per M tokens
+    monthly                              = $5,760   vs   $36,000   = 84% saving
+```
+
+**Why the utilization term is load-bearing.** Delete it and self-hosting looks like a rounding-error
+saving, which is exactly the conclusion the middle row reaches. Three GPUs in that first plan were
+buying nothing: 25M tokens/day is 289 tokens/sec average, and a single A100 running vLLM ceilings
+around 3,500 tokens/sec (§6). The original plan was provisioned at roughly 2% of capacity. The
+lesson generalizes past this case study — before comparing an API bill to a GPU bill, divide your
+daily token volume by 86,400 and check it against one GPU's ceiling first.
 
 ---
 

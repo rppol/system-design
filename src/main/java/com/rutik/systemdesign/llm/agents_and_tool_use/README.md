@@ -110,6 +110,36 @@ Final Answer: Tim Cook is the CEO of Apple. His net worth is approximately $1.5 
 
 ReAct was proposed as a prompting pattern (2022) and is now the default architecture for most agents.
 
+**Reading it in plain English.** "An agent is a chain, and a chain succeeds only if every link does — so per-step reliability gets multiplied by itself once per step, and a 95%-reliable agent is worse than a coin flip by step 14."
+
+This is the single most counterintuitive number in agent design. Engineers reason about steps additively ("each step is pretty good") when the math is multiplicative, and multiplication of numbers below 1 collapses fast.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `p` | "pee" | Probability one step succeeds: right tool, right arguments, usable result |
+| `n` | "en" | Number of steps in the trajectory. The `max_steps` of the loop |
+| `p^n` | "pee to the en" | End-to-end success. Every step must succeed; one failure kills the trajectory |
+| `p^(1/n)` | "the en-th root of pee" | Inverted: the per-step reliability needed to hit a target end-to-end rate |
+
+**Walk one example.** The 2-tool trace above, then the same agent stretched longer:
+
+```
+    per-step p     n=3      n=5      n=10     n=20
+      0.99        0.970    0.951    0.904    0.818
+      0.95        0.857    0.774    0.599    0.358
+      0.90        0.729    0.590    0.349    0.122
+      0.80        0.512    0.328    0.107    0.012
+
+  The 2-search trace above at p = 0.95 (3 model turns):  0.95^3  = 0.857
+  The same agent given a 20-step budget:                 0.95^20 = 0.358
+
+  Inverting it -- what per-step reliability buys 90% end-to-end over 10 steps:
+    p = 0.90^(1/10) = 0.9895
+    that is 98.95% per step, i.e. one failure per 95 tool calls
+```
+
+**Why plan-and-execute and error injection exist.** Both attack this exact formula, from opposite ends. Plan-and-execute (next section) shrinks `n` by collapsing exploratory turns into one planning call. Injecting a tool error back as an observation — instead of aborting — converts a failed step into a retried step, which restores `p` rather than terminating the product `p^n`. Neither is a stylistic preference; they are the only two levers the arithmetic offers.
+
 ### 4.3 Plan-and-Execute
 
 Separate planning from execution for more reliable long-horizon tasks:
@@ -164,6 +194,45 @@ Procedural memory:
   Example: successful code templates
 ```
 
+**Reading it in plain English.** "Summarizing old turns does not just save tokens once — it converts working memory from something that grows with every step into something that stops growing at a fixed ceiling."
+
+The ratio matters less than that shape change. A 3x saving on a quantity that still grows without bound only delays the overflow; capping the growth removes it.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `t_turn` | "tee turn" | Tokens one full turn adds: the assistant's thought and tool call, plus the tool result |
+| `W_before` | "double-u before" | Working-memory tokens with every turn kept verbatim |
+| `W_after` | "double-u after" | Working-memory tokens after compaction: summary plus the verbatim tail |
+| `r` | "are" | Compression ratio, `W_after / W_before`. Lower is tighter. `1/r` is the "Nx reduction" |
+| tail window | "tail window" | The most recent turns kept verbatim. Compaction never touches these |
+
+**Walk one example.** A turn that appends a 180-token thought plus tool call and a 600-token observation:
+
+```
+    assistant thought + tool call     180
+    tool result (observation)         600
+                                      ---
+    t_turn                            780 tokens per turn
+
+  W_before after 20 turns   =  20 x 780                    = 15,600 tokens
+
+  Compact turns 1-15 into a 600-token running summary, keep the last 5 verbatim:
+    summary                                                     600
+    tail window       5 x 780                               = 3,900
+                                                              -----
+    W_after                                                   4,500 tokens
+
+    r = 4,500 / 15,600 = 0.288           reduction = 1/r = 3.5x
+    tokens reclaimed   = 15,600 - 4,500  = 11,100
+
+  Turns affordable inside a 32,000-token working budget:
+    no compaction     32,000 / 780 = 41 turns, then the window overflows
+    with compaction   ceiling = 600 + 5 x 780 = 4,500 tokens, reached at turn 20
+                      and flat from there -- turn 200 costs the same as turn 20
+```
+
+**Why the verbatim tail is not optional.** A summary is lossy by construction, and the detail an agent most needs is the detail from the step it just took — the exact error string, the precise row it read. Summarize the recent turns too and the agent loses its own footing mid-task, typically re-running the tool it just ran. Keeping 3-5 turns raw costs a few thousand tokens and is what makes the compression safe.
+
 ### 4.5 Tool Library
 
 Common tools given to agents:
@@ -178,6 +247,41 @@ Common tools given to agents:
 | Communication | Email, Slack, calendar | Enterprise automation |
 | LLM sub-calls | Summarizer, translator | Specialized sub-tasks |
 | Vector DB | Retrieval, storage | Long-term memory |
+
+**Reading it in plain English.** "Adding a tool does two things at once: it lowers the odds the model picks the right one, and it charges you schema tokens on every request — and the confusion grows faster than the tool count does."
+
+The second half is what surprises people. Tools grow linearly but *pairs* of tools grow quadratically, and it is pairs that get confused with each other.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `N` | "en" | Number of tools registered and visible to the model on a given call |
+| `1/N` | "one over en" | Random-choice baseline. The floor the model's selection accuracy must beat |
+| `t_schema` | "tee schema" | Tokens for one tool definition: name, description, and parameter schema |
+| `N x t_schema` | "en times tee schema" | Context tax paid on every request, before the task even starts |
+| `N(N-1)/2` | "en times en minus one over two" | Number of tool *pairs* — every chance for two descriptions to overlap |
+
+**Walk one example.** The 8 categories in the table above, then scaling up, at ~120 tokens per definition against a 200K window:
+
+```
+    N tools    random baseline 1/N    N x t_schema    % of a 200K window
+        8            12.5%                960              0.5%
+       20             5.0%              2,400              1.2%
+       50             2.0%              6,000              3.0%
+      100             1.0%             12,000              6.0%
+
+  Confusable pairs grow much faster than the tool count:
+      N =   8  ->  8 x 7 / 2   =    28 pairs
+      N =  20  -> 20 x 19 / 2  =   190 pairs
+      N =  50  -> 50 x 49 / 2  = 1,225 pairs
+
+  Going from 8 tools to 50 tools:
+    schema cost   6.3x higher   (960 -> 6,000 tokens, on every single request)
+    pair count   43.8x higher   (28 -> 1,225 chances for two descriptions to collide)
+```
+
+Each pair is one more opportunity for two descriptions to overlap enough that the model reaches for the wrong one — a search tool and a retrieval tool whose descriptions both read "find relevant information" will be confused no matter how good the model is, because the prompt genuinely does not distinguish them.
+
+**Why this caps the tool count, not the model.** The fix is never "register fewer tools" — it is to stop showing all `N` at once. Filter the tool list per turn by task relevance so the model sees 5-10 candidates instead of 50, which restores both the `1/N` baseline and the schema budget simultaneously. See [Tool Selection at Scale](tool_selection_at_scale.md) for retrieval-based tool filtering and hierarchical tool namespaces.
 
 ### 4.6 Multi-Agent Systems
 
@@ -337,6 +441,105 @@ def agent_loop(task, max_steps=10):
 
     return "Task exceeded maximum steps. Partial results: ..."
 ```
+
+**Reading it in plain English.** "That `messages.append` in the loop is the whole cost story: every turn re-sends everything that came before it, so the cumulative token bill of an `N`-step agent grows with `N` squared, not with `N`."
+
+The API is stateless. `messages` is not a handle the provider remembers — it is the full transcript, serialized and shipped again on every iteration. Step 10 pays for steps 1 through 9 all over again, and so did steps 2 through 9 before it. This is the single most common source of a shocking agent bill.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `S` | "es" | System prompt plus all tool definitions. Fixed, and re-sent on every step |
+| `T` | "tee" | The task/user message. Fixed, and also re-sent every step |
+| `a` | "ay" | Tokens the assistant adds per turn: its reasoning plus the tool call |
+| `o` | "oh" | Tokens the observation adds: the tool result injected back as a message |
+| `a + o` | "ay plus oh" | How much the transcript grows per completed turn |
+| `N` | "en" | Steps actually taken. Capped by `max_steps` — 10 in the loop above |
+| `N(N-1)/2` | "en times en minus one over two" | The triangular number. Why the total is quadratic |
+
+**Walk one example.** Sizing the loop above with `max_steps = 10`:
+
+```
+  Tokens sent on step n (0-indexed):   S + T + n x (a + o)
+  Cumulative across N steps:           N x (S + T)  +  (a + o) x N(N-1)/2
+                                                                ^^^^^^^^^
+                                                            the quadratic term
+
+    S = system prompt + tool definitions      1,500
+    T = task                                    200
+    a = assistant thought + tool call            180
+    o = tool result (observation)                600
+    a + o                                        780   growth per turn
+
+    step      tokens sent      running total
+      1           1,700              1,700
+      2           2,480              4,180
+      3           3,260              7,440
+      5           4,820             16,300
+     10           8,720             52,100
+
+  Closed form:  10 x 1,700 + 780 x (10 x 9 / 2) = 17,000 + 35,100 = 52,100
+
+  The naive estimate -- "10 calls at a 1,700-token prompt" -- says 17,000 tokens.
+  The real number is 52,100. That is 3.1x higher, at $3.00/1M input = $0.156.
+```
+
+Now the trap. Pitfall 4 below says to truncate verbose tool results; here is what skipping that actually costs:
+
+```
+  Same loop, tool results left untruncated: o = 3,000 instead of 600
+    a + o      = 3,180
+    cumulative = 10 x 1,700 + 3,180 x 45 = 17,000 + 143,100 = 160,100 tokens
+
+  The observation grew 5x.  The bill grew 3.1x (52,100 -> 160,100).
+  Because o is multiplied by N(N-1)/2 = 45, not by N = 10 -- one fat tool result
+  is paid for by every step that follows it.
+
+  And raising the step cap is not linear either. At max_steps = 20:
+    20 x 1,700 + 780 x (20 x 19 / 2) = 34,000 + 148,200 = 182,200 tokens
+    doubling the steps multiplied the tokens 3.5x (52,100 -> 182,200)
+```
+
+**Why the quadratic term is the one to attack.** `S` and `T` are multiplied by `N`; `a + o` is multiplied by `N(N-1)/2`, which at 20 steps is 190. Shaving 200 tokens off the system prompt saves 4,000 tokens across a 20-step run; shaving 200 tokens off each observation saves 38,000. Truncate tool results, cap `max_steps`, and compact old turns — all three shrink the term that is being multiplied by 190. Provider prompt caching attacks it from the other side: the re-sent prefix is byte-identical across steps, so a cache hit charges roughly a tenth for those tokens and pulls the effective curve back toward linear.
+
+### Retry and Backoff Arithmetic
+
+The `except ToolError` branch above injects the error and moves on, but production tool calls retry first. Exponential backoff with jitter is the standard:
+
+```
+  delay_i = random(0, min(cap, base x 2^i))       i = 0, 1, 2, ...
+```
+
+**Reading it in plain English.** "Wait twice as long after each failure, never longer than the cap, and pick a random point inside that window so you do not retry in lockstep with everyone else."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `base` | "base" | First retry delay. 1 second here |
+| `i` | "eye" | Retry attempt index, starting at 0 |
+| `2^i` | "two to the eye" | Doubling factor. Backs off fast enough to let a struggling service recover |
+| `cap` | "cap" | Ceiling on any single delay. Stops the doubling running away |
+| `random(0, x)` | "random zero to ex" | Full jitter. Spreads retries across the window instead of stacking them |
+
+**Walk one example.** `base = 1s`, `cap = 8s`, 5 attempts:
+
+```
+    attempt    base x 2^i    after cap    expected delay (half the window)
+       1           1s            1s              0.5s
+       2           2s            2s              1.0s
+       3           4s            4s              2.0s
+       4           8s            8s              4.0s
+       5          16s            8s              4.0s
+                                              --------
+    worst-case wall clock    1 + 2 + 4 + 8 + 8  =  23s
+    expected wall clock                            11.5s
+
+  Uncapped, the same 5 attempts: 1 + 2 + 4 + 8 + 16 = 31s
+  and an 8th attempt would wait 2^7 = 128s on its own.
+
+  Against the agent budget: max_steps = 10, each step retrying to the worst case
+    10 x 23s = 230s of pure waiting, before any model or tool time
+```
+
+**Why the jitter term exists.** Drop `random()` and every client backs off on the identical schedule. Two hundred agents that all hit the same 429 retry together at exactly t=1s, then together at t=3s, then t=7s — synchronized waves that re-trigger the rate limit and guarantee none of them recovers. Full jitter spreads those 200 retries uniformly across each window, so the service sees a smooth trickle instead of a thundering herd. The cap and the global deadline are separate safeguards: cap bounds one delay, and a per-task deadline is what stops the 230s above from consuming the whole request budget.
 
 ### Prompt Construction for Agents
 

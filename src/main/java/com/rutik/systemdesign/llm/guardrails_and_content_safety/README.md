@@ -109,6 +109,56 @@ def check_toxicity(response: str) -> dict:
     }
 ```
 
+**Reading it in plain English.** "The classifier only ever hands you a number between 0 and 1. The `> 0.7` is the actual safety policy — the model ranks, the threshold decides."
+
+That split matters because the two are tuned by different people for different reasons. Swapping in a better classifier moves the ranking quality; moving `0.7` to `0.5` moves how much harm you let through and how many innocent users you block, with the same model. Almost every guardrail incident post-mortem is a threshold argument, not a model argument.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `p` | "p" | The classifier's toxicity score for this text, 0.0 to 1.0. Not a probability you can trust literally — a rank |
+| `tau` (`τ`) | "tau" | The block threshold. Here `0.7`. The only knob that turns a score into a decision |
+| `TP` | "true positive" | Genuinely toxic, and you blocked it. The win |
+| `FN` | "false negative" | Genuinely toxic, and you let it through. Harm reaches the user |
+| `FP` | "false positive" | Perfectly fine, and you blocked it. A real user hits a wall |
+| `TN` | "true negative" | Fine, and you allowed it. The overwhelming majority |
+| `P` | "precision" | `TP / (TP + FP)` — of everything you blocked, what fraction deserved it |
+| `R` | "recall" | `TP / (TP + FN)` — of all the harm out there, what fraction you caught |
+| `F1` | "F one" | `2PR / (P + R)` — the harmonic mean. One number that punishes lopsidedness |
+| `FPR` | "F P R" / "false positive rate" | `FP / (FP + TN)` — fraction of *innocent* traffic you blocked |
+
+**Walk one example.** One day of traffic through the toxicity filter, at two thresholds:
+
+```
+  10,000 messages/day.  200 are genuinely toxic (2% base rate).  9,800 are benign.
+
+  tau = 0.7   (block when score > 0.7)
+                            predicted TOXIC     predicted SAFE
+        actually toxic          TP =   150        FN =    50    <- 50 harmful got through
+        actually benign         FP =    10        TN =  9790    <- 10 real users blocked
+
+      precision = 150 / (150 + 10)   = 150 / 160  = 0.938
+      recall    = 150 / (150 + 50)   = 150 / 200  = 0.750
+      F1        = 2(0.938)(0.750) / (0.938 + 0.750) = 1.407 / 1.688 = 0.833
+      FPR       =  10 / (10 + 9790)  =  10 / 9800 = 0.00102 = 0.10%
+
+  tau = 0.5   (block when score > 0.5 — same model, looser policy)
+                            predicted TOXIC     predicted SAFE
+        actually toxic          TP =   180        FN =    20    <- 30 fewer got through
+        actually benign         FP =    49        TN =  9751    <- 39 more users blocked
+
+      precision = 180 / 229  = 0.786
+      recall    = 180 / 200  = 0.900
+      F1        = 360 / 429  = 0.839
+      FPR       =  49 / 9800 = 0.00500 = 0.50%
+
+  Delta from 0.7 -> 0.5:   harm caught  +30      innocent blocks  +39
+                           recall  0.75 -> 0.90  FPR  0.10% -> 0.50%  (5x)
+```
+
+Read the delta row, not the F1 row. F1 barely moved (`0.833 -> 0.839`) while the false-positive rate quintupled — because F1 weights a false positive and a false negative exactly the same, and a safety filter almost never does. A blocked customer files a support ticket; a leaked toxic response is a screenshot on social media. Pick the threshold from the *cost ratio* you actually face, then report F1 as a sanity check, never as the objective.
+
+**Why the FPR denominator is 9,800 and not 160.** FPR divides by the benign population, not by the set you blocked. That is what makes it comparable across days when attack volume swings — a spike in real toxicity would inflate a "blocks that were wrong / total blocks" figure even with the filter behaving identically. It is also why the `<0.1%` target in the monitoring section below is achievable at all: 0.1% of 9,800 benign messages is ten people, which is the entire error budget for a day.
+
 **Format validation** (for structured outputs):
 ```python
 def validate_json_output(response: str, schema: dict) -> bool:
@@ -309,6 +359,33 @@ flowchart TD
 
 Total latency = max(LLM, classifier) — no added latency when classifiers finish before LLM.
 
+**Reading it in plain English.** "Because the checks run beside the model instead of in front of it, you pay for the slowest one, not for all of them added up — and the LLM is almost always the slowest one, so the checks are free."
+
+That `max` is the entire argument for the parallel layout. The serial version costs a sum, and sums grow every time someone adds a guardrail; the max stops growing the moment every classifier is faster than inference.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `max(a, b)` | "max of a and b" | Whichever finishes last. The wall-clock cost of work done side by side |
+| `a + b` | "a plus b" | The serial cost. What you pay when each check gates the next |
+| headroom | "headroom" | `LLM time - slowest classifier`. How much slower a new guardrail can get before users feel it |
+
+**Walk one example.** The numbers already in the diagram above — LLM 1–3 s, each classifier 50–200 ms:
+
+```
+                              serial (gate)        parallel (this diagram)
+  LLM inference                   1500 ms                1500 ms
+  safety classifier                200 ms                 200 ms
+  PII detector                     150 ms                 150 ms
+                              -----------            ------------
+  user-visible latency        1500+200+150          max(1500, 200, 150)
+                                = 1850 ms               = 1500 ms
+  guardrail overhead              +350 ms                   +0 ms
+
+  headroom = 1500 - 200 = 1300 ms of classifier budget still unused
+```
+
+**Why the free lunch ends.** The overhead is zero only while every classifier stays under the inference time. Add a Tier 3 LLM-based grounding check at 500 ms–2 s and the max flips to the guardrail, so overhead reappears — which is exactly why the tier table below runs Tier 3 *after* generation and only on responses that already cleared Tiers 1 and 2. Streaming breaks it too: if you stream tokens, the user's perceived latency is time-to-first-token, and any output guardrail that needs the complete response has to buffer, converting the `max` back into a sum.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -358,6 +435,42 @@ Monitoring:
   Track false positive rate (user complaints / total blocks)
   Target: <0.1% of legitimate requests blocked
 ```
+
+**Reading it in plain English.** "Sweep the threshold across every value it could take, plot what you catch against what you break, and pick the point where the damage you cause is smaller than the damage you prevent."
+
+The ROC curve is not a model quality report — it is the menu of policies a single fixed classifier can implement. Every point on it is the same weights with a different number in the `>` comparison.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| ROC | "rock" / "R O C" | Receiver Operating Characteristic. The curve of TPR against FPR as `tau` sweeps 1.0 down to 0.0 |
+| `TPR` | "T P R" | True positive rate. Same number as recall — fraction of genuinely toxic messages caught |
+| `FPR` | "F P R" | False positive rate. Fraction of benign messages wrongly blocked. The x-axis |
+| AUC | "A U C" | Area under the ROC curve, 0.5 to 1.0. Probability a random toxic message scores above a random benign one |
+| AUC = 0.5 | "point five" | Coin flip. The classifier carries no signal and no threshold can save it |
+| AUC = 1.0 | "one" | Perfect separation. Some threshold gives 100% recall at 0% FPR |
+| operating point | "operating point" | The one `tau` you actually ship. A business decision, not a metric |
+
+**Walk one example.** The same 10,000-message day from Section 4.2 — 200 toxic, 9,800 benign — swept across thresholds:
+
+```
+    tau     TP    FN     FP      TN     recall(TPR)   FPR      precision
+   ----    ---   ---    ---    ----     -----------  ------    ---------
+   0.90     96   104      2    9798        0.480     0.02%       0.980
+   0.70    150    50     10    9790        0.750     0.10%       0.938
+   0.50    180    20     49    9751        0.900     0.50%       0.786
+   0.30    192     8    196    9604        0.960     2.00%       0.495
+   0.10    198     2    980    8820        0.990    10.00%       0.168
+
+   Reading the curve:  0.90 -> 0.70   costs 8 more innocent blocks, catches 54 more attacks
+                       0.70 -> 0.50   costs 39 more innocent blocks, catches 30 more attacks
+                       0.50 -> 0.30   costs 147 more innocent blocks, catches 12 more attacks
+
+   The knee is between 0.70 and 0.50. Past it you are buying harm-catch at 12x the price.
+```
+
+**Why AUC does not pick the threshold for you.** AUC integrates over *all* thresholds, including the absurd ones — it summarizes the classifier, and it is the right number for comparing two candidate models. It is the wrong number for shipping, because your users only ever experience one operating point. Two classifiers with identical AUC can behave completely differently in the low-FPR region you actually live in, which is why the sweep table above is the deliverable and AUC is the footnote.
+
+**Why the monitoring formula above is a lower bound, not the FPR.** `user complaints / total blocks` is not `FP / (FP + TN)`. Its denominator is the blocks, not the benign population, and its numerator counts only the wrongly-blocked users who bothered to complain — realistically a single-digit percentage of them. Treat it as a cheap production tripwire that catches a threshold regression, and measure the real FPR offline against a labeled benign set. A team that tunes on the complaint ratio alone will keep tightening the filter, because silence reads as success.
 
 ### Enterprise Compliance
 

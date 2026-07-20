@@ -93,6 +93,38 @@ Intuition: Increase likelihood of chosen relative to rejected,
   while not deviating too far from the reference model
 ```
 
+**Reading it in plain English.** "Make the good answer more likely and the bad answer less likely — but score both *relative to the frozen original model*, so you are rewarding improvement, not raw confidence."
+
+That relative framing is the whole trick. If the base model already loved the chosen answer, DPO gives you almost no credit for it. The gradient flows toward answers where you actually moved the needle.
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `π_θ` | "pi theta" | The model you are training. `π` = policy (RL's word for "the model"), `θ` = its weights |
+| `π_ref` | "pi ref" | The frozen SFT model. The yardstick you measure improvement against |
+| `π(y|x)` | "probability of y given x" | How likely that model thinks response `y` is, for prompt `x` |
+| `β` | "beta" | Leash length. Small β = free to wander; large β = stay near the reference. Typical 0.01–0.5 |
+| `σ` | "sigmoid" | Squashes any number onto 0–1. Big positive in → near 1; big negative in → near 0 |
+| `log[a/b]` | "log of the ratio" | Turns "how many times bigger" into "how many steps better". Ratio 1 → 0; ratio >1 → positive; ratio <1 → negative |
+
+**Walk one example with real numbers.** One training pair, β = 0.1:
+
+```
+                          π_ref (frozen)   π_θ (training)   ratio   log(ratio)
+  chosen response             0.20             0.30          1.5      +0.41
+  rejected response           0.20             0.10          0.5      -0.69
+
+  margin = β × (+0.41) - β × (-0.69)
+         = 0.1 × 0.41 + 0.1 × 0.69
+         = 0.110              <- "how much better did we get the ordering right"
+
+  σ(0.110) = 0.527            <- probability the model ranks this pair correctly
+  loss = -log(0.527) = 0.641  <- what gradient descent pushes down
+```
+
+Training drives that `0.527` toward `1.0`. Perfect ranking → `σ → 1` → `-log(1) = 0` loss. Backwards ranking (chosen made *less* likely than reference) → margin goes negative → `σ < 0.5` → loss climbs above 0.69 and the gradient shoves hard the other way. The `-log σ(...)` wrapper is just "penalize being wrong, and penalize it more the wronger you are."
+
+**Why β is the safety leash.** The `β ×` scaling caps how large the margin can get, so no single pair can yank the weights far from `π_ref`. Set β too low and the model is free to drift until it forgets base capabilities; too high and the margins are so compressed that nothing learns. This is the same knob as the KL penalty in PPO, arriving by a different route.
+
 **Pros**: Simpler than RLHF (one training run); more stable; no reward hacking; state-of-the-art results
 **Cons**: Requires SFT reference model; can degrade base capabilities if β is too low
 
@@ -131,6 +163,27 @@ Where odds_ratio = P(chosen) / (1 - P(chosen)) / [P(rejected) / (1 - P(rejected)
 No reference model needed — self-contained optimization
 More parameter efficient; faster training
 ```
+
+**Reading it in plain English.** "Do ordinary fine-tuning on the good answer, and bolt on a second term that actively penalizes the bad one. Two jobs, one loss, no reference model."
+
+| Piece | Say it | What it does |
+|-------|--------|--------------|
+| `-log P(chosen)` | "negative log likelihood" | The plain SFT loss. "Learn to produce the good answer" |
+| `odds_ratio` | "odds ratio" | Gambling odds. How much better are the odds of the chosen answer vs the rejected one |
+| `λ` | "lambda" | Mixing weight. How hard to push down the bad answer relative to learning the good one |
+
+**What "odds" means, concretely.** Odds are probability rewritten as a bet: `P / (1 - P)`. A 75% chance is odds of `0.75/0.25 = 3`, meaning 3-to-1 in favor.
+
+```
+  P(chosen)   = 0.75  ->  odds = 0.75/0.25 = 3.0
+  P(rejected) = 0.20  ->  odds = 0.20/0.80 = 0.25
+
+  odds_ratio = 3.0 / 0.25 = 12   <- chosen is 12x better odds than rejected
+```
+
+An odds ratio of `12` means the model already separates them well, so the penalty term contributes little. An odds ratio near `1` means the model finds them equally plausible — and the `log(1 - odds_ratio)` term produces a large gradient that drives them apart.
+
+**Why this removes the reference model.** RLHF and DPO both need a frozen `π_ref` to answer "did we drift?" ORPO answers a different question — "did we separate the pair?" — which only needs the current model's own two probabilities. No second copy of the weights in VRAM, and SFT and alignment happen in a single pass instead of two sequential stages.
 
 Used by: Phi-3, some Mistral variants.
 
@@ -190,6 +243,31 @@ Key differences from DPO:
   - gamma enforces a minimum margin between chosen/rejected rewards
   - Lower GPU memory: no need to hold reference model in VRAM (~halves model memory)
 ```
+
+**Reading it in plain English.** "Score each response by its average per-token confidence, require the good one to beat the bad one by a set margin, and drop the reference model entirely."
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `y_w` | "y winner" | The chosen response (`w` = winning) |
+| `y_r` | "y rejected" | The rejected response |
+| `\|y\|` | "length of y" | Token count of that response |
+| `sum(log π_θ(y\|x))` | "sum of log probs" | Total confidence across every token in the response |
+| `(1/\|y\|) × sum(...)` | "average log prob" | Per-token confidence. The length normalization |
+| `γ` | "gamma" | Required margin. The good answer must win by at least this much. Typical 0.5–2.0 |
+
+**Why dividing by `|y|` matters so much.** Log-probabilities are negative and they *accumulate*, so a longer response always has a worse total — regardless of quality:
+
+```
+  response A: 10 tokens,  total log-prob = -12.0  ->  avg = -1.20  per token
+  response B: 60 tokens,  total log-prob = -48.0  ->  avg = -0.80  per token
+
+  By TOTAL:   A (-12.0) beats B (-48.0)   <- rewards short answers, always
+  By AVERAGE: B (-0.80) beats A (-1.20)   <- rewards confident answers
+```
+
+Without the `1/|y|`, the loss has a built-in bias toward whichever response is shorter. This is the length-bias bug that plagues preference tuning: models trained on unnormalized scores learn to pad or truncate rather than to improve. SimPO's length normalization is precisely what its AlpacaEval 2 *length-controlled* win rate is measuring.
+
+**What `γ` buys you.** Subtracting `γ` before the sigmoid means a pair only stops producing gradient once the chosen response beats the rejected one *by γ*, not merely by a hair. Barely-correct orderings keep training instead of being marked done — the model is pushed toward decisive separation rather than coin-flip margins.
 
 **Pros**: Simpler training pipeline; lower memory footprint; competitive with DPO on AlpacaEval 2 (44.7 vs 40.5 length-controlled win rate) and MT-Bench
 **Cons**: Gamma requires tuning per task; length normalization can under-reward genuinely detailed responses
@@ -344,6 +422,40 @@ Data format: Human raters rank K responses (K=4-9) per prompt
   This gives K(K-1)/2 pairwise comparisons per prompt
 ```
 
+**Reading the Bradley-Terry loss in plain English.** "Score the better answer higher than the worse one. How much higher doesn't matter — only the ordering does."
+
+Bradley-Terry is a 1952 model for ranking chess players from match outcomes, borrowed wholesale. Swap "player A beat player B" for "rater preferred response A" and it works unchanged.
+
+| Piece | Say it | What it does |
+|-------|--------|--------------|
+| `r_θ(prompt, response)` | "r theta" | The reward model's scalar score. Higher = humans liked it more |
+| `r_chosen - r_rejected` | "the margin" | Gap between the two scores. Positive = correct ordering |
+| `σ(margin)` | "sigmoid of the margin" | Converts the gap into "probability we ranked this pair right" |
+| `-log σ(...)` | "negative log likelihood" | Loss. Zero when certain and correct, large when confident and wrong |
+
+**Walk one example.** Watch that only the *gap* matters, never the absolute scores:
+
+```
+                r_chosen   r_rejected   margin   σ(margin)   loss = -log σ
+  case A          2.0         0.5        +1.5      0.818        0.20   good
+  case B        102.0       100.5        +1.5      0.818        0.20   identical
+  case C          0.6         0.5        +0.1      0.525        0.64   weak, unsure
+  case D          0.5         2.0        -1.5      0.182        1.70   wrong, punished
+```
+
+Cases A and B score identically — shift every reward by +100 and nothing changes. This is why **reward model scores have no absolute meaning**: an RM output of `3.7` tells you nothing on its own, only `3.7 vs 1.2` does. Interviewers ask this constantly, and it is the reason you cannot compare raw reward numbers across two separately-trained RMs.
+
+**Why K(K-1)/2 is such a good deal.** Ranking `K` responses once gives you every possible pair, for free:
+
+```
+  K = 4 responses ranked   ->   4x3/2  =  6 training pairs
+  K = 9 responses ranked   ->   9x8/2  = 36 training pairs
+
+  The rater does ~2x the work going 4 -> 9, but you get 6x the pairs.
+```
+
+It is the handshake count: `K` people in a room, everyone shakes everyone else's hand once, `K(K-1)/2` handshakes. Divide by 2 because A-vs-B and B-vs-A are the same comparison. This superlinear payoff is exactly why RLHF pipelines collect ranked lists instead of isolated thumbs-up/down.
+
 **Reward model quality is the bottleneck** in RLHF. A poor reward model leads to reward hacking — the policy finds responses that score high but aren't actually good (e.g., very long responses, specific phrases that correlate with high ratings).
 
 ### PPO Mechanics
@@ -361,6 +473,45 @@ KL regularization:
   Total reward = RM_score(response) - β × KL(π_θ || π_SFT)
   β typically 0.01-0.1; higher β = stay closer to SFT model
 ```
+
+**Reading the clipped objective in plain English.** "Take the improvement you earned — but if this single update moves the model more than 20% away from where it started, stop counting the extra."
+
+It is a trust region enforced with a clamp instead of a constraint solver. That is the entire innovation PPO is famous for.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `r_t(θ)` | "the ratio" | New probability ÷ old probability of the same action. `1.0` = unchanged, `1.2` = 20% more likely now |
+| `A_t` | "the advantage" | Was this action better (+) or worse (−) than the baseline expected? Sign is what matters |
+| `ε` | "epsilon" | Trust-region width, `0.2`. Allows the ratio to roam in `[0.8, 1.2]` |
+| `clip(r, 1-ε, 1+ε)` | "clip r" | Clamp: anything below `0.8` becomes `0.8`, above `1.2` becomes `1.2` |
+| `E[...]` | "expectation" | Plain average over the batch |
+| `min(a, b)` | "min" | Take the smaller — always choose the *more pessimistic* of the two estimates |
+
+**Walk one example.** A good action (`A_t = +2.0`) that the update made much more likely:
+
+```
+  r_t = 1.5  (this action is now 50% more likely than before -- a big jump)
+
+  unclipped term :  r  x A  = 1.5 x 2.0 = 3.0
+  clipped term   : clip(1.5, 0.8, 1.2) x A = 1.2 x 2.0 = 2.4
+  min(3.0, 2.4)  = 2.4     <- objective caps here
+
+  Push r from 1.5 to 1.6? Clipped term stays 1.2 x 2.0 = 2.4.
+  Gradient = 0. No further incentive to move. The update stops itself.
+```
+
+Compare a modest update of the same action:
+
+```
+  r_t = 1.1  (inside the trust region)
+  unclipped : 1.1 x 2.0 = 2.20
+  clipped   : 1.1 x 2.0 = 2.20   (clip does nothing, 1.1 is within [0.8, 1.2])
+  min       = 2.20 -> gradient flows normally. Learning proceeds.
+```
+
+**Why `min` and not just `clip`.** The `min` is what makes the clamp one-sided, and it is the part interviewers probe. Clipping alone would also cap the *penalty* for a bad update; wrapping it in `min` means PPO always takes the pessimistic estimate — it will happily let a gradient pull you *back* toward safety, but never let one push you further out. That asymmetry is drawn below.
+
+**Reading the KL penalty.** `Total reward = RM_score - β × KL(π_θ ‖ π_SFT)` says: "you get paid for the reward model's score, and charged rent for every step you drift from the original model." `KL(‖)` is "KL divergence" — a distance between two probability distributions, `0` when identical, growing as they disagree. `β` is the rent rate. Set `β = 0` and the policy will happily produce gibberish that games the RM (see the broken example in Section 10); set it too high and the policy never moves.
 
 The `min` + `clip` is hard to read off the formula. Plotting L_CLIP against the ratio
 r shows what it actually does: the objective goes FLAT (gradient -> 0) once the update
@@ -404,6 +555,33 @@ Where Z(x) is a normalization constant (partition function)
 Intuition: The policy itself encodes the reward — a response
   with higher probability than the reference model is preferred
 ```
+
+**Reading it in plain English.** "You never needed a separate reward model. The gap between your trained model and the frozen one *is* the reward, already sitting there in the log-probabilities."
+
+This one equation is why DPO exists. RLHF trains an RM, then trains a policy to maximize it. DPO's authors proved those two steps collapse into one — so you can skip straight to the answer.
+
+| Symbol | Say it | What it is |
+|--------|--------|------------|
+| `r*(x, y)` | "r star" | The *optimal* reward. The star means "the best possible one", not a specific trained network |
+| `π*` | "pi star" | The optimal policy — the model RLHF would have converged to |
+| `log[π*/π_ref]` | "log ratio" | How much more likely the tuned model finds this response than the frozen one |
+| `Z(x)` | "Z of x" | Partition function — a normalizing constant that makes probabilities sum to 1 |
+
+**Why `Z(x)` is the part you can ignore.** `Z(x)` depends only on the prompt `x`, never on the response `y`. So when DPO subtracts two rewards for the *same prompt*:
+
+```
+  r*(x, chosen) - r*(x, rejected)
+
+  = [ B x log(pi*/pi_ref for chosen)   + B x log Z(x) ]
+  - [ B x log(pi*/pi_ref for rejected) + B x log Z(x) ]
+                                          ^^^^^^^^^^^
+                                          identical -- cancels
+  = B x log(pi*/pi_ref for chosen) - B x log(pi*/pi_ref for rejected)
+```
+
+`Z(x)` vanishes. That cancellation is the whole reason DPO is computable: `Z(x)` would require summing over every possible response — astronomically expensive — but since it never survives the subtraction, nobody ever has to compute it. Recognize this pattern and you have recognized the DPO derivation.
+
+**The takeaway to say in an interview.** "DPO shows the optimal reward is a closed-form function of the policy, so the reward-modeling stage is redundant. The partition function cancels in the pairwise difference, which makes the loss tractable — one training run instead of three."
 
 ### SimPO: Reference-Free Mechanics
 

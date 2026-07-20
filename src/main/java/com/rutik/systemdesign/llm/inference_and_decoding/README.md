@@ -63,6 +63,39 @@ Latency decomposition:
   Total latency = TTFT + TPOT × output_length
 ```
 
+**Reading it in plain English.** "You wait once for the model to read your prompt, then you wait a little bit again for every single word it writes — so total time is one fixed charge plus a per-token meter."
+
+Keeping the two terms separate is the point. They scale off different inputs (input length vs output length), sit in different bottleneck regimes (prefill is compute-bound, decode is memory-bound), and have completely different fixes. A single "latency" number averages away the only information you could have acted on.
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `TTFT` | "T T F T" / "time to first token" | Prefill wall-clock. Scales with *input* length. What the user experiences as "is it broken?" |
+| `TPOT` | "T-pot" / "time per output token" | Decode cost of one token. Set by model size, batch, and bandwidth — not by input length |
+| `output_length` | "output length" | Tokens generated. Usually the term nobody budgets for, and the one that dominates |
+| `1 / TPOT` | "one over T-pot" | Reading speed in tokens/sec. 30 ms/token → 33 tok/s, comfortably above human reading |
+
+**Walk one example with real numbers.** Two requests against the same 70B deployment:
+
+```
+  Short chat turn:      TTFT = 280 ms,  TPOT = 20 ms,  output =   150 tokens
+    total = 280 ms + (20 ms x 150)   =  280 + 3,000    =  3,280 ms
+    split:  TTFT is  8.5% of the wait, decode is 91.5%
+
+  RAG answer over a long document:  TTFT = 1,800 ms,  TPOT = 20 ms,  output = 150
+    total = 1,800 ms + (20 ms x 150) = 1,800 + 3,000   =  4,800 ms
+    split:  TTFT is 37.5% of the wait, decode is 62.5%
+
+  Same TPOT fix (-5 ms/token) applied to each:
+    short chat:  280 + (15 x 150) = 2,530 ms   ->  23% faster
+    RAG:       1,800 + (15 x 150) = 4,050 ms   ->  16% faster
+
+  Same TTFT fix (prompt caching, 1,800 -> 200 ms) applied to each:
+    short chat:  no change worth measuring
+    RAG:         200 + 3,000      = 3,200 ms   ->  33% faster
+```
+
+The two levers pay off on opposite workloads, which is why Section 13 insists on monitoring them separately. Optimize the wrong one and you ship a change that measures as nothing.
+
 ### 4.2 Sampling Strategies
 
 The sampler turns a logit vector into a token. Core knobs:
@@ -72,6 +105,125 @@ The sampler turns a logit vector into a token. Core knobs:
 - **Top-k**: keep only the k highest-probability tokens — a fixed-count cut that doesn't adapt to how peaked or flat the distribution is.
 - **Top-p (nucleus)**: keep the smallest set of tokens whose cumulative probability ≥ p (p≈0.9 typical) — adaptive to distribution mass, the most common production default.
 - **Min-p**: keep tokens with probability ≥ min_p × max_token_prob (min_p≈0.05) — thresholds *relative to the mode*, so it tightens on peaked distributions and widens on flat ones using the same parameter.
+
+**Temperature — reading it in plain English.** "Divide every logit by T before the softmax: shrinking T stretches the gaps between candidates so the leader runs away with the vote; growing T squeezes the gaps so underdogs get a real chance."
+
+The reason this works is that softmax is exponential, not linear. A gap of 2.0 logits becomes a gap of 2.9 logits at T=0.7 and only 1.33 logits at T=1.5 — so temperature is a *contrast* knob on the distribution, not a coin-flip randomness knob bolted on afterwards.
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `z_i` | "z sub i" | The raw logit for token `i` — the model's unnormalized score, any real number |
+| `T` | "tee" / "temperature" | The divisor. T<1 sharpens; T=1 leaves the model's own distribution; T>1 flattens |
+| `softmax(z)_i` | "softmax of z, i-th" | `exp(z_i) / Σ_j exp(z_j)` — turns arbitrary scores into probabilities summing to 1 |
+| `Σ_j` | "sum over j" | Add up the term for every token `j` in the vocabulary (~128,000 of them) |
+| `p_i` | "p sub i" | Final probability the sampler draws token `i` with |
+
+**Walk one example with real numbers.** Four candidate tokens after "The capital of France is":
+
+```
+  token        logit z_i    T=0.7            T=1.0            T=1.5
+  ---------    ---------    -------------    -------------    -------------
+  Paris          4.0        z/T =  5.714     z/T =  4.000     z/T =  2.667
+  Lyon           2.0        z/T =  2.857     z/T =  2.000     z/T =  1.333
+  Nice           1.5        z/T =  2.143     z/T =  1.500     z/T =  1.000
+  Berlin         1.0        z/T =  1.429     z/T =  1.000     z/T =  0.667
+
+  exp() of each:
+  Paris                          303.1            54.60            14.39
+  Lyon                            17.41            7.389            3.793
+  Nice                             8.524           4.482            2.718
+  Berlin                           4.174           2.718            1.948
+  sum                            333.2            69.19            22.85
+
+  p_i = exp / sum:
+  Paris                            0.910            0.789            0.630
+  Lyon                             0.052            0.107            0.166
+  Nice                             0.026            0.065            0.119
+  Berlin                           0.013            0.039            0.085
+
+  Paris:Lyon odds                17.5 : 1         7.4 : 1          3.8 : 1
+```
+
+Same logits, three different worlds. T=0 is not a division at all — it is special-cased to `argmax`, because dividing by zero would be undefined; conceptually it is the T→0 limit where Paris gets probability 1.000.
+
+**Top-k, top-p, and min-p — reading them in plain English.** All three answer the same question, "which tokens are even allowed to be drawn?", and differ only in how they draw the line:
+
+> **Top-k**: "keep the k best, no matter what their probabilities look like."
+> **Top-p**: "sort descending, keep adding tokens until you have covered p of the total probability mass, then stop."
+> **Min-p**: "keep every token worth at least a fraction `min_p` of what the *front-runner* is worth."
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `k` | "kay" | Fixed count of survivors. Typical 40-50. Ignores the shape of the distribution |
+| `p` | "pee" | Cumulative-probability target for the nucleus. Typical 0.9-0.95 |
+| `Σ_{i≤m} p_i` | "sum of p sub i for i up to m" | Running total down the sorted list — the "cumulative" column |
+| `m*` | "em star" | Smallest cut point where the running total first reaches `p`. The nucleus is tokens 1..m* |
+| `min_p` | "min pee" | Relative floor, typical 0.05. Threshold = `min_p × p_max`, so it moves with the distribution |
+| `p_max` | "p max" | Probability of the single most likely token — the front-runner the floor is scaled against |
+
+**Walk one example with real numbers.** One decode step, vocabulary sorted descending, p=0.9, k=2, min_p=0.05:
+
+```
+  rank  token        p_i      cumulative Σ    top-p (0.9)?   top-k (k=2)?   min-p (0.05)?
+  ----  ---------   ------    ------------    ------------   ------------   -------------
+   1    Paris        0.62         0.62        keep           keep           keep
+   2    Lyon         0.14         0.76        keep           keep           keep
+   3    Nice         0.09         0.85        keep           CUT            keep
+   4    Marseille    0.06         0.91  <- crosses 0.9       CUT            keep
+   5    Toulouse     0.04         0.95        CUT            CUT            keep
+   6    Nantes       0.02         0.97        CUT            CUT            CUT
+  7..N  long tail    0.03         1.00        CUT            CUT            CUT
+
+  top-p:  m* = 4, because 0.85 < 0.90 <= 0.91.  Nucleus = {Paris, Lyon, Nice, Marseille}
+          renormalize by 0.91:  0.681 / 0.154 / 0.099 / 0.066   (sums to 1.000)
+
+  top-k:  keeps 2 tokens regardless -- it never even looks at the 0.62/0.14 gap
+
+  min-p:  threshold = 0.05 x p_max = 0.05 x 0.62 = 0.031
+          keep every p_i >= 0.031  ->  ranks 1-5.  Nantes at 0.02 falls below
+```
+
+Notice all three cut points differ on the *same* distribution: 4, 2, and 5 tokens. That is the entire argument between the samplers. Now flatten the distribution — say `p_max` drops to 0.10 because the model is genuinely unsure. Top-k still keeps exactly 2 (too narrow, the model had 30 reasonable options). Top-p keeps whatever it takes to reach 0.9, which could be 60 tokens including junk. Min-p's threshold auto-drops to `0.05 × 0.10 = 0.005`, widening in proportion — which is why it is the same parameter that works on both peaked and flat steps.
+
+**Why renormalization exists.** After truncation the surviving probabilities sum to 0.91, not 1.0. Dividing each by 0.91 restores a valid distribution. Skip it and your sampler has a 9% chance of drawing nothing, or — depending on implementation — silently biases toward whichever token the RNG's fallback branch picks.
+
+**Repetition and frequency penalties — reading them in plain English.** Two different formulas that get confused constantly:
+
+```
+  Repetition penalty (CTRL-style, MULTIPLICATIVE, applied to logits):
+    z_i' = z_i / r     if z_i > 0
+    z_i' = z_i x r     if z_i <= 0            (for any token i already seen)
+
+  Frequency + presence penalty (OpenAI-style, ADDITIVE, applied to logits):
+    z_i' = z_i - alpha_presence x 1[count_i > 0] - alpha_frequency x count_i
+```
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `r` | "are" | Repetition penalty, typical 1.05-1.2. `r=1.0` disables it. Multiplicative |
+| `count_i` | "count sub i" | How many times token `i` already appeared in the generated text so far |
+| `1[count_i > 0]` | "indicator that count is positive" | 1 if the token has appeared at all, else 0. Flat one-time charge |
+| `alpha_presence` | "alpha presence" | Fixed subtraction for *having appeared*, typical 0-1.0. Encourages new topics |
+| `alpha_frequency` | "alpha frequency" | Subtraction *per occurrence*, typical 0-1.0. Escalates with each repeat |
+
+**Walk one example with real numbers.** Token `" the"` currently has logit 3.0 and has already appeared 4 times:
+
+```
+  Repetition penalty, r = 1.2:
+    z' = 3.0 / 1.2 = 2.500        <- one flat haircut, no matter how many repeats
+
+  Frequency + presence, alpha_presence = 0.5, alpha_frequency = 0.3:
+    presence term  = 0.5 x 1        = 0.5      (it has appeared, so charge once)
+    frequency term = 0.3 x 4        = 1.2      (charge again for every occurrence)
+    z' = 3.0 - 0.5 - 1.2            = 1.300    <- escalates with the 5th, 6th, ... repeat
+
+  Effect on a 2-token race against "a" at logit 2.8 (never seen):
+    no penalty         " the" 3.0 vs "a" 2.8  ->  " the" wins
+    repetition r=1.2   " the" 2.5 vs "a" 2.8  ->  "a" wins, narrowly
+    freq+presence      " the" 1.3 vs "a" 2.8  ->  "a" wins decisively
+```
+
+**Why the sign branch in the repetition penalty exists.** Dividing a *negative* logit by `r>1` makes it less negative — i.e. it would *reward* the repeated token. The `z_i <= 0 → z_i × r` branch flips to multiplication so the penalty always pushes the logit down. Implementations that forget the branch produce the notorious bug where turning up `repetition_penalty` makes a model repeat itself *more*.
 
 → **Deep dive**: [Sampling & Decoding Strategies](sampling_and_decoding_strategies.md) covers the sampler-ordering gotcha (why identical temperature/top_p values produce different output across inference engines), repetition/presence/frequency penalties, no-repeat-ngram, the DRY sampler, contrastive search vs. contrastive decoding, typical/eta/epsilon/tail-free/Mirostat/XTC sampling, beam search mechanics and cost, and determinism/batch-invariance.
 
@@ -94,6 +246,71 @@ LLaMA 3 70B (80 layers, 8 KV heads via GQA, head_dim=128, BF16):
 
 This is why KV cache, not model weights, is the **primary memory bottleneck** in production LLM serving.
 
+**Reading it in plain English.** "For every token you have ever seen, every layer had to stash two vectors — one key, one value — per KV head. Multiply that stash by how many tokens and how many concurrent requests you are holding, and that is the GPU memory you can never get back until the request finishes."
+
+The framing that matters in an interview: weights are a *fixed* cost you pay once, KV cache is a *per-token, per-user* cost that grows linearly in both. Weights set your minimum GPU count; KV cache sets your maximum concurrency. Interviewers ask this because it is the one calculation that decides how many users a box actually serves.
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `batch` | "batch" | Concurrent requests holding cache right now. Not requests/sec — requests *in flight* |
+| `seq_len` | "sequence length" | Tokens cached for that request = prompt + tokens generated so far. Grows every step |
+| `L` | "ell" / "num layers" | Transformer blocks. Each keeps its own independent KV — 80 for LLaMA 3 70B |
+| `H_kv` | "H k v" / "num KV heads" | K/V heads per layer. **Not** the attention-head count once GQA/MQA is in play |
+| `d_head` | "d head" | Width of one head's vector, typically 128. `H_attn × d_head = d_model` |
+| `× 2` | "times two" | One K tensor **plus** one V tensor. The most-forgotten factor in the whole formula |
+| `bytes` | "bytes per element" | 2 for FP16/BF16, 1 for FP8/INT8, 0.5 for INT4. The quantization lever |
+
+**Walk one example with real numbers.** Lay the multiplication out vertically with units and there is nowhere to hide an error. LLaMA 2 13B (MHA, no GQA) on one A100 80GB:
+
+```
+  KV bytes = batch x seq_len x L x H_kv x d_head x 2 x bytes
+
+    batch          16     concurrent requests
+    seq_len     4,096     tokens cached per request
+    L              40     transformer layers
+    H_kv           40     KV heads per layer   (MHA: H_kv = H_attn = 40)
+    d_head        128     elements per head
+    x 2                   one K tensor + one V tensor
+    bytes           2     FP16
+
+  Step 1 -- per token, per request (drop batch and seq_len):
+    2 x 40 x 40 x 128 x 2 bytes
+      = 2 x 40                    =        80
+      x 40                        =     3,200
+      x 128                       =   409,600
+      x 2 bytes                   =   819,200 bytes
+                                  =       800 KB per token
+
+  Step 2 -- one full request at 4K context:
+    800 KB/token x 4,096 tokens   = 3,276,800 KB
+                                  =     3,200 MB
+                                  =     3.125 GB per request
+
+  Step 3 -- the whole batch:
+    3.125 GB x 16 requests        =      50.0 GB of KV cache
+
+  Step 4 -- does it fit on one 80 GB A100?
+    weights   13B x 2 bytes       =      26.0 GB
+    KV cache                      =      50.0 GB
+    activations + fragmentation   =    ~  4.0 GB
+    total                         =      80.0 GB   <- exactly at the edge; batch 17 OOMs
+```
+
+Now the same walk for a 7B, which is the config interviewers reach for most often. LLaMA 2 7B: L=32, H_kv=32, d_head=128, FP16:
+
+```
+  per token   = 2 x 32 x 32 x 128 x 2 bytes  = 524,288 bytes = 512 KB
+  4K context  = 512 KB x 4,096               = 2.0 GB per request
+  weights     = 7B x 2 bytes                 = 14.0 GB
+
+  On one 80 GB A100:   (80 - 14 - 4) / 2.0 GB  = 31 concurrent 4K requests
+  Same card at 32K:    per request = 512 KB x 32,768 = 16 GB  ->  only 3 requests
+```
+
+**Why GQA shows up in this formula and not anywhere else.** `H_kv` is the only term a model architect can shrink without touching quality much. Compare the 13B above against the LLaMA 3 70B already computed in this section: 70B is *bigger* in every other term (80 layers vs 40) yet its per-token cost is **320 KB against the 13B's 800 KB** — because GQA cuts `H_kv` from 64 attention heads down to 8 shared KV heads, an 8× saving that swamps the 2× layer increase. Remove GQA from the formula and 70B would cost 2.56 MB/token, making 128K context economically impossible. Every other lever (INT8 KV → `bytes` 2→1, eviction → `seq_len`, PagedAttention → removes the padding waste *around* the formula) attacks one of the other terms.
+
+**The interview trap.** Candidates multiply by attention heads instead of KV heads on a GQA model and land 8× too high, or drop the `× 2` and land 2× too low. Say the terms aloud in order — "batch, sequence, layers, KV heads, head dim, times two for K and V, times bytes" — and both errors disappear.
+
 → **Deep dive**: [KV Cache Optimization](kv_cache_optimization.md) covers the full capacity-planning formula, how GQA/MQA/MLA shrink this formula's `num_kv_heads` term (with pointers to the attention-mechanism derivations), KV cache quantization (INT8/FP8/KIVI), eviction strategies (H2O, SnapKV, StreamingLLM, Scissorhands — see also Section 4.10), and cross-layer KV sharing (YOCO, CLA).
 
 ### 4.4 Continuous Batching (PagedAttention)
@@ -115,6 +332,49 @@ Step 50:    A finishes → immediately add Request C to the batch
 Step 51+:   Process [B, C] together
 No wasted compute; new requests fill slots as old ones complete
 ```
+
+**Reading it in plain English.** "Throughput is just how many sequences are alive in the batch divided by how long one step takes — and since a decode step costs the same whether one slot or sixty-four are filled, every empty slot is throughput you paid for and threw away."
+
+```
+  Slot utilization (naive, batch-level scheduling):
+
+                  sum of tokens actually generated
+    U_naive  =  -------------------------------------
+                 batch_size x longest_output_in_batch
+
+  Throughput:   tokens/sec = batch_size x U x (1 / step_time)
+```
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `B` | "bee" / "batch size" | Sequence slots the engine runs in one forward pass |
+| `U` | "you" / "utilization" | Fraction of slot-steps doing real work rather than idling on a finished request |
+| `step_time` | "step time" | Wall-clock for one decode iteration. Roughly constant below the ridge point |
+| `L_max` | "L max" | Longest output in the batch — the request everyone else waits on under naive batching |
+| `1 / step_time` | "one over step time" | Steps per second. 70 ms/step → 14.3 steps/sec |
+
+**Walk one example with real numbers.** Four requests with outputs 50, 120, 300, and 2,000 tokens; 70B on an A100 with a 70 ms decode step:
+
+```
+  Naive batching (batch completes as a unit):
+    useful token-steps   =  50 + 120 + 300 + 2,000     =  2,470
+    slot-steps paid for  =  4 slots x 2,000 steps      =  8,000
+    U_naive              =  2,470 / 8,000              =  0.31   (31%)
+
+    throughput = 4 x 0.31 x (1 / 0.070 s) = 4 x 0.31 x 14.3 =  17.7 tokens/sec
+
+  Continuous batching (finished slots refill at the next iteration boundary):
+    request A frees its slot at step   50, E enters at step   51
+    request B frees its slot at step  120, F enters at step  121
+    request C frees its slot at step  300, G enters at step  301
+    U_cont               =  ~0.90   (only scheduler gaps and the tail are lost)
+
+    throughput = 4 x 0.90 x 14.3                       =  51.5 tokens/sec
+
+  Ratio from scheduling alone:  0.90 / 0.31            =  2.9x
+```
+
+That 2.9× is the *scheduling* half of the story and is exactly the "utilization from roughly 30% to 90%" figure quoted in Section 12. The remaining gap to vLLM's headline 24× comes from PagedAttention raising `B` itself: cutting KV fragmentation from 60-80% waste down to under 4% lets the same GPU hold roughly 8× more concurrent sequences, and `2.9 × 8 ≈ 23`. The two optimizations multiply because one fixes *time* wasted and the other fixes *space* wasted — which is why "continuous batching alone gets you 24×" is a wrong answer.
 
 **PagedAttention** (vLLM innovation — see [vLLM Deep Dive](../vllm_deep_dive/README.md) for scheduler and block-manager internals):
 ```
@@ -142,6 +402,62 @@ Acceptance rate α (probability draft token matches target) drives the speedup:
 
 Practical: code α≈0.75-0.90 (use it) | chat α≈0.60-0.75 (marginal) | creative writing α≈0.40-0.55 (usually not worth it)
 ```
+
+**Reading it in plain English.** "Each drafted token is a coin flip that lands 'accept' with probability α, and the run ends at the first tails — so the tokens you harvest per target pass is just the expected length of a winning streak, capped at how many tokens you bothered to draft."
+
+That framing explains the shape of every number in the table above. Streaks are geometric, so the *first* drafted token is worth a lot and the *fifth* is worth almost nothing — drafting more is subject to hard diminishing returns while its cost stays strictly linear. Speculative decoding is a bet on streak length, and α is the only thing that sets the odds.
+
+```
+  Expected tokens produced per target forward pass (geometric streak, capped at gamma):
+
+                    1 - alpha^(gamma+1)
+    E[tokens]  =  -----------------------
+                        1 - alpha
+
+  Net speedup, once you charge for the draft passes:
+
+                       E[tokens]
+    Speedup    =  ---------------------
+                    1 + gamma x c
+```
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `alpha` (α) | "alpha" | Acceptance rate — probability one drafted token survives verification. 0 to 1 |
+| `gamma` (γ) | "gamma" | Draft length, how many tokens you speculate per round. Called K elsewhere in this file |
+| `alpha^(gamma+1)` | "alpha to the gamma plus one" | Probability the *entire* draft is accepted; shrinks fast, which is why long drafts stop helping |
+| `1 / (1 - alpha)` | "one over one minus alpha" | The ceiling. Infinite drafting can never beat this — the streak's expected length |
+| `c` | "see" | Draft cost as a fraction of one target pass. A 1B draft against a 70B target is ~0.1 |
+| `1 + gamma x c` | "one plus gamma see" | Total cost of a round: one target verify pass plus gamma draft passes |
+| `E[tokens]` | "expected tokens" | Average accepted tokens harvested per target pass. Numerator of the win |
+
+**Walk one example with real numbers.** α = 0.70 (roughly the 0.71 code acceptance rate measured in the Section 14 case study), draft cost c = 0.1:
+
+```
+  Numerator first -- powers of alpha = 0.70:
+    0.70^2 = 0.490    0.70^3 = 0.343    0.70^4 = 0.2401
+    0.70^5 = 0.16807  0.70^6 = 0.117649 0.70^7 = 0.0823543
+
+  Denominator is fixed:  1 - alpha = 0.30
+
+  gamma   1 - alpha^(g+1)      E[tokens]       cost 1+g(0.1)     net speedup
+  -----   ----------------     -----------     -------------     -----------
+    1     1 - 0.490 = 0.510    0.510/0.3=1.70      1.1              1.55x
+    2     1 - 0.343 = 0.657    0.657/0.3=2.19      1.2              1.83x
+    3     1 - 0.2401= 0.760    0.760/0.3=2.53      1.3              1.95x
+    4     1 - 0.1681= 0.832    0.832/0.3=2.77      1.4              1.98x  <- peak
+    5     1 - 0.1176= 0.882    0.882/0.3=2.94      1.5              1.96x
+    6     1 - 0.0824= 0.918    0.918/0.3=3.06      1.6              1.91x
+    inf   1 - 0     = 1.000    1.000/0.3=3.33      grows forever    -> 0
+
+  Ceiling:  1 / (1 - 0.70) = 3.33 tokens per target pass, no matter how long the draft
+```
+
+Read the two right-hand columns against each other. `E[tokens]` climbs 1.70 → 2.77 → 3.06 and is already 83% of its ceiling by γ=4, while cost climbs 1.1 → 1.4 → 1.6 without ever slowing down. Their ratio peaks at γ=4 and decays after. This is why production configs cluster at K=4-5 (the case study uses K=5) rather than K=20 — γ is not "more is better," it has an optimum that moves with α.
+
+**Where break-even comes from.** Speedup > 1 requires `E[tokens] > 1 + γc`. At γ=4, c=0.1 the bar is 1.4 tokens per pass, and solving `(1 - α^5)/(1 - α) = 1.4` lands near α ≈ 0.45 — precisely the break-even quoted above. Below that, the draft model is burning GPU on tokens the target throws away.
+
+**Why α is not a knob you can turn.** Nothing in your config sets α; it emerges from how closely the draft's distribution tracks the target's on *this* traffic. Code is templated and predictable (α ≈ 0.75-0.90), open-ended creative text is not (α ≈ 0.40-0.55), and the same deployment therefore sees different speedups per route. It also collapses if you break the match — a T=0 draft against a T=0.7 target drops α to ~0.35 (Section 14), which the formula turns into `(1 - 0.35^5)/0.65 / 1.4 = 1.09×`, essentially nothing for the extra GPU. Monitor α in production the way you monitor cache hit rate; it is the same kind of number.
 
 → **Deep dive**: [Speculative Decoding](speculative_decoding.md) covers the rejection-sampling exactness proof, the full draft-strategy landscape (independent draft models, EAGLE/EAGLE-2/EAGLE-3, Medusa, lookahead/Jacobi decoding, prompt-lookup/ngram decoding, self-speculative/LayerSkip, DeepSeek-V3 multi-token prediction), tree-based verification, and production tuning (adaptive K, acceptance-rate monitoring, when to disable).
 
@@ -207,6 +523,35 @@ Per-request cost without caching: 2,000 × $3/1M = $0.006
 Per-request cost with caching: 2,000 × $0.30/1M = $0.0006 (cache write: 1.25×, cache read: 0.1×)
 Effective: 90% cost reduction on shared prefix for high-traffic applications
 ```
+
+**Reading it in plain English.** "Pay a small premium the first time to have the server keep your prefix warm, then pay a tenth of list price every time you reuse it — so the cache pays for itself the moment a second request touches the same prompt."
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `N` | "en" | Requests sharing the prefix inside one cache lifetime (~5 min TTL for Anthropic) |
+| `T_p` | "T sub p" | Prefix length in tokens — the part being cached (2,000 here) |
+| `C_base` | "C base" | List price per token. $3 per 1M tokens in this example |
+| `1.25x` | "one point two five ex" | Cache-*write* multiplier. The premium on the first request only |
+| `0.1x` | "point one ex" | Cache-*read* multiplier. The 90% discount on every subsequent request |
+| `N_be` | "N break-even" | Requests needed before caching is cheaper than not caching |
+
+**Walk one example with real numbers.** 2,000-token system prompt at $3/1M tokens, so one uncached pass costs `2,000 × $3/1M = $0.0060`:
+
+```
+  no cache:      N x 0.0060
+  with cache:    0.0060 x 1.25  +  (N - 1) x 0.0060 x 0.1
+                 = 0.0075       +  (N - 1) x 0.00060
+
+  N = 1     no cache 0.0060   cached 0.00750   -> caching LOSES  ($0.0015 wasted)
+  N = 2     no cache 0.0120   cached 0.00810   -> caching wins    32% cheaper
+  N = 10    no cache 0.0600   cached 0.01290   -> caching wins    78% cheaper
+  N = 100   no cache 0.6000   cached 0.06690   -> caching wins    89% cheaper
+  N -> inf                                     -> approaches the 90% floor
+
+  Break-even:  0.0075 + (N-1)(0.0006) = 0.006N  ->  N_be = 1.27, i.e. the 2nd request
+```
+
+**Why the 1.25× write premium matters.** It makes caching a *net loss* on any prefix touched exactly once inside the TTL. Mark a per-user or per-document prefix that never repeats and you have added 25% to your bill while the dashboard says "caching enabled." Cache only prefixes you can prove are shared, and check the cache-hit ratio, not the cache-enabled flag.
 
 **Best for**: AI assistants with large system prompts, applications with shared document context, multi-turn conversations with long histories.
 
@@ -544,6 +889,39 @@ For highly repetitive workloads (40% hit rate):
   Plus latency improvement: cache hit returns in ~50ms vs. 1-3s for LLM call
 ```
 
+**Reading it in plain English.** "Blend the two prices by how often you hit: a hit costs almost nothing and a miss costs full freight, so your effective cost per request is just the miss price scaled down by the fraction you avoided."
+
+The consequence people miss: cost savings are *linear* in hit rate and can never exceed it. A 30% hit rate is a 30% discount, full stop — no threshold tuning turns it into 60%. Latency, by contrast, improves non-linearly, because a hit collapses 1-3 s down to ~50 ms.
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `h` | "aitch" / "hit rate" | Fraction of requests answered from cache. 0.05-0.50 depending on workload |
+| `C_miss` | "C miss" | Full inference cost of one request — LLM tokens, the expensive path |
+| `C_hit` | "C hit" | Embed + vector search. ~$0 against LLM tokens, so it usually drops out |
+| `C_eff` | "C effective" | Blended cost per request after caching. What actually lands on the invoice |
+| `(1 - h)` | "one minus aitch" | Miss rate. The fraction still paying full price |
+
+**Walk one example with real numbers.** Reusing this section's workload — 1,000 requests/hour, 500 output tokens each, $15/1M tokens:
+
+```
+  C_eff = (1 - h) x C_miss  +  h x C_hit
+
+  Baseline hourly spend:
+    1,000 req x 500 tok x $15/1M  =  1,000 x $0.0075  =  $7.50 / hour
+
+  h = 0.30 (customer support bot):
+    (1 - 0.30) x $7.50  +  0.30 x ~$0.00  =  $5.25 / hour   -> 30% saved
+  h = 0.40 (FAQ / knowledge base):
+    (1 - 0.40) x $7.50  +  0.40 x ~$0.00  =  $4.50 / hour   -> 40% saved
+  h = 0.10 (general chat):
+    (1 - 0.10) x $7.50  +  0.10 x ~$0.00  =  $6.75 / hour   -> 10% saved
+
+  Blended latency at h = 0.30, miss = 2,000 ms, hit = 50 ms:
+    0.70 x 2,000  +  0.30 x 50  =  1,400 + 15  =  1,415 ms   -> 29% faster
+```
+
+**Why `C_hit` is written in rather than dropped.** It is negligible on *cost* but not on *risk*: every miss also pays the embedding and vector-search latency before falling through to the LLM. At h=0.10 you have added ~10 ms to 90% of requests to save 10% of spend — which is why the general-chat row above is usually not worth deploying, and why hit rate is the number to measure before turning semantic caching on.
+
 **Tools and implementations:**
 ```
 GPTCache:        Open-source, pluggable embedding + cache backends
@@ -648,6 +1026,44 @@ Time to compute: 140B FLOPs / 312 TFLOPS = 0.45ms
 → Solution: quantization (load less data per weight)
 ```
 
+**Reading it in plain English.** "A decode step cannot finish faster than the time it takes to drag the model's weights across the memory bus once — so your token rate is a division problem, bandwidth divided by bytes-per-token, and the GPU's arithmetic units have nothing to do with the answer."
+
+This is the single most useful reframe in inference: stop asking "how fast is this GPU?" and start asking "how many times per second can this GPU read its own weights?" It converts every hardware and quantization decision into one division you can do in your head.
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `BW` | "bee double-you" / "bandwidth" | HBM read bandwidth in bytes/sec. A100 = 2 TB/s, H100 = 3.35 TB/s |
+| `bytes/token` | "bytes per token" | Everything read from HBM for one decode step: weights + the KV that step touches |
+| `BW / bytes` | "bandwidth over bytes" | Steps per second — the hard ceiling on tokens/sec at batch 1 |
+| `AI` | "A I" / "arithmetic intensity" | FLOPs performed per byte loaded. Low = starved for data, high = starved for math |
+| `ridge point` | "ridge point" | `peak FLOPS / BW`, in FLOPs/byte. The AI at which the two ceilings cross |
+| `2 x params` | "two times params" | FLOPs per token: one multiply + one add per weight. 70B params → 140 GFLOPs |
+
+**Walk one example with real numbers.** Watch the units cancel — that is the whole proof:
+
+```
+  Token ceiling = memory bandwidth / bytes moved per token
+
+  70B model, BF16 weights, batch = 1, on an A100:
+
+      2 TB/s          2,000 GB/s          GB     1
+    ----------  =  ---------------  =  -------- x --  =  14.3 tokens/sec
+      140 GB           140 GB             GB      s
+                                        (cancels)
+
+  Same model, same card, INT4 weights (70B x 0.5 bytes = 35 GB):
+
+    2,000 GB/s / 35 GB                                =  57.1 tokens/sec   (4.0x)
+
+  Same BF16 model moved to an H100 (3.35 TB/s):
+
+    3,350 GB/s / 140 GB                               =  23.9 tokens/sec   (1.67x)
+```
+
+Note what the second line proves: INT4 delivered a 4× speedup on a card whose FLOPS did not change at all. Quantization is a *bandwidth* optimization that people mistakenly file under "compute." And the third line explains why H100 beats A100 for decode by 1.67× rather than by its 3× FLOPS advantage — you get the bandwidth ratio, not the compute ratio, because bandwidth is the binding constraint.
+
+**Why the FLOPs side of the ledger loses.** The same step does `2 × 70B = 140 GFLOPs` of math. At 312 TFLOPS that is `140e9 / 312e12 = 0.45 ms`, against `140 GB / 2 TB/s = 70 ms` of loading. The compute unit finishes and then waits `70 - 0.45 = 69.55 ms` — idle for better than 99% of the step. Every optimization in this module exists to fill that gap: batching gives the idle units other requests' math to chew on while the *same* weight bytes stream past once.
+
 **Roofline model — batch size as the crossover lever:**
 ```
 Arithmetic intensity = FLOPs / bytes_loaded
@@ -675,6 +1091,48 @@ Implication:
   - KV cache grows with batch and context → practical limit is usually KV OOM before
     the compute crossover is reached
 ```
+
+**Reading it in plain English.** "Arithmetic intensity asks how much math you get done per byte you dragged off the bus; the hardware has its own fixed ratio of math-to-bandwidth, and whichever side of that ratio you fall on names your bottleneck."
+
+The trick is that batching moves *your* intensity without changing the *hardware's* ratio. The weights get loaded once and B requests all do their math against them, so intensity is almost exactly B — which makes "what batch size do I need?" and "where is the ridge point?" literally the same question.
+
+| Symbol | Say it out loud | What it actually is |
+|--------|-----------------|---------------------|
+| `AI` | "arithmetic intensity" | `FLOPs / bytes_loaded` for your workload. Yours to change, via batching |
+| `peak FLOPS` | "peak flops" | The card's compute ceiling. A100 BF16 = 312 TFLOPS |
+| `ridge point` | "ridge point" | `peak FLOPS / BW`. The card's own ratio — fixed in silicon, nothing you do moves it |
+| `AI < ridge` | "A I below ridge" | Memory-bound. Adding batch is nearly free throughput |
+| `AI > ridge` | "A I above ridge" | Compute-bound. Adding batch now buys latency, not throughput |
+
+**Walk one example with real numbers.** Both sides of the comparison, on an A100:
+
+```
+  Hardware ridge point (a property of the card, not your model):
+
+      312 TFLOPS       312e12 FLOP/s      FLOP
+    --------------  =  --------------  =  ----  = 156 FLOPs/byte
+        2 TB/s          2e12 byte/s       byte
+
+  Your workload's intensity at batch B (70B BF16):
+
+              FLOPs        B x 140e9 FLOPs
+    AI  =  -----------  =  ----------------  =  B x 1.0 FLOPs/byte
+             bytes            140e9 bytes
+
+    B =   1   ->  AI =   1  FLOP/byte    1/156  =  0.6% of compute used   memory-bound
+    B =  64   ->  AI =  64                64/156 = 41%                    memory-bound
+    B = 156   ->  AI = 156               156/156 = 100%                   BALANCED
+    B = 256   ->  AI = 256               bandwidth now idles              compute-bound
+
+  Throughput while memory-bound (step time pinned at 70 ms):
+    B =   1   ->    1 / 0.070  =    14.3 tokens/sec
+    B =  64   ->   64 / 0.070  =   914   tokens/sec     (64x, essentially free)
+    B = 156   ->  156 / 0.070  = 2,229   tokens/sec     (the ceiling of this regime)
+```
+
+Every token from B=1 to B=156 is free throughput — the weight bytes were being loaded anyway. Past 156 you are paying real compute per added request and step time starts to stretch, so throughput flattens while latency climbs.
+
+**Why you almost never reach the ridge point.** Serving B=156 concurrent 8K requests on LLaMA 3 70B needs `156 × 8,192 × 320 KB ≈ 409 GB` of KV cache by the Section 4.3 formula — five H100s of KV alone, on top of the 140 GB of weights. You hit KV OOM around B=30-40 and stop there. This is the punchline that ties the whole module together: the *compute* crossover is theoretical, the *memory* wall is what you actually operate against, and that is why PagedAttention, GQA, KV quantization, and eviction all attack the same term.
 
 ### Latency vs Throughput Optimization
 
