@@ -447,11 +447,11 @@ Architecture:
   Expert FFN dim:  14336
 
 Parameter accounting:
-  Attention (shared):   32 * (4096*4096 + 4096*1024 + ...) ~ 7.7B
-  Expert FFNs:          8 * 32 * (4096*14336*3) ~ 32B
+  Attention (shared):   32 * (4096*4096 + 2*4096*1024 + 4096*4096) ~ 1.34B
+  Expert FFNs:          8 * 32 * (4096*14336*3) ~ 45.10B
   Embeddings:           32000 * 4096 ~ 0.13B
-  Total:                ~ 46.7B
-  Active (top-2):       ~ 12.9B
+  Total:                1.34 + 45.10 + 0.13         ~ 46.57B  (published 46.7B)
+  Active (top-2):       1.34 + 0.13 + (2/8 * 45.10) ~ 12.75B  (published 12.9B)
 
 Inference cost per token ~ 12.9B parameter dense model
 Knowledge capacity       ~ 46.7B parameter dense model

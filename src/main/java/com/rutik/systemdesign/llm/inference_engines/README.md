@@ -323,7 +323,8 @@ Example: Serving LLaMA 3 70B, max 4096 context, 50 concurrent users on 2× H100 
 
 Model weights (BF16):  70B × 2 bytes = 140GB (72GB per GPU with TP=2)
 Activations:           ~2GB per GPU (small)
-KV cache per user:     70B model: 2 × 80 layers × 8 KV heads × 128 dim × 4096 tokens × 2 bytes = 660MB
+KV cache per user:     70B model: 2 × 80 layers × 8 KV heads × 128 dim × 2048 tokens × 2 bytes = 660MB
+                       (at 4096 tokens this doubles to ~1.34GB)
 50 users KV cache:     50 × 660MB = 33GB → 16.5GB per GPU
 
 Total per GPU:

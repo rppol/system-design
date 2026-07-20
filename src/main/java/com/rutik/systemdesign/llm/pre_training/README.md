@@ -612,11 +612,17 @@ Each auxiliary head is a lightweight linear projection from the shared trunk's h
 
 The Chinchilla (Hoffman et al. 2022) formula for compute-optimal training:
 ```
-For compute budget C (in FLOPs):
-  N_optimal ≈ (C / 6)^0.5  (model params)
-  D_optimal ≈ (C / 6)^0.5 × 20  (training tokens)
+For compute budget C (in FLOPs), using C = 6ND and D = 20N:
+  C = 6N(20N) = 120N^2
+  N_optimal ≈ (C / 120)^0.5   (model params)
+  D_optimal ≈ 20 × N_optimal  (training tokens)
 
 For 1e24 FLOPs:
+  N ≈ 91B parameters
+  D ≈ 1.8T tokens
+  check: 6 × 91e9 × 1.8e12 ≈ 1e24 FLOPs
+
+For 5.9e23 FLOPs (the budget behind the widely-quoted pair):
   N ≈ 70B parameters
   D ≈ 1.4T tokens
 
@@ -683,8 +689,10 @@ tradeoff appears immediately: `C = 6 x 7e9 x 4e11 = 1.68e22` FLOPs, 2.86x the Ch
 that is cheaper to *serve* forever, because serving cost scales with `2N` and is completely
 indifferent to how many tokens it was trained on.
 
-**How `N_optimal ~= (C/6)^0.5` and the 70B/1.4T pair fit together.** The clean way to get the quoted
-numbers is to substitute Chinchilla's `D = 20N` into the identity, which leaves one unknown:
+**Where the `(C/120)^0.5` comes from.** You never memorize it — you derive it in ten seconds from
+`C = 6ND` by substituting Chinchilla's `D = 20N`, which leaves one unknown. Writing `(C/6)^0.5`
+instead (forgetting the substitution) overshoots badly: it returns 408B params at `C = 1e24`,
+more than four times the right answer.
 
 ```
   C = 6 x N x (20 x N) = 120 x N^2
@@ -902,11 +910,11 @@ Model FLOPs Utilization is the ratio of useful model FLOPs (≈ 6 × params × t
   ┌────────────────────────────────▼────────────────────────────┐
   │  Training Timeline                                           │
   │  32 × A100 at ~50% MFU: 32 × 312 × 0.5 = 4992 TFLOPS      │
-  │  7B model: 14B FLOPs/token                                   │
-  │  Tokens/sec: 4992e12 / 14e9 = 356,571 tok/s                 │
-  │  500B / 356,571 = 1,402,000 sec = 16.2 days                 │
-  │  With 85% availability: 19.1 days                           │
-  │  Cost: 32 GPUs × $2/hr × 24h × 19.1 days = $29,400         │
+  │  7B model: 42B FLOPs/token (6N training, not 2N forward)     │
+  │  Tokens/sec: 4992e12 / 42e9 = 118,857 tok/s                 │
+  │  500B / 118,857 = 4,206,731 sec = 48.7 days                 │
+  │  With 85% availability: 57.3 days                           │
+  │  Cost: 32 GPUs × $2/hr × 24h × 57.3 days = $88,000         │
   └─────────────────────────────────────────────────────────────┘
 ```
 

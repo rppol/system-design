@@ -1085,7 +1085,7 @@ A100 hardware ridge point: 312 TFLOPS / 2 TB/s = 156 FLOPs/byte
 → Batch size ~156 is the crossover from memory-bound to compute-bound
 
 Implication:
-  - At batch=1 (single user): GPU compute is 99.7% idle, waiting for data
+  - At batch=1 (single user): GPU compute is 99.4% idle, waiting for data
   - At batch=156: compute and memory are balanced — maximum efficiency
   - Beyond batch=156: compute becomes the bottleneck (diminishing returns on batching)
   - KV cache grows with batch and context → practical limit is usually KV OOM before
@@ -1333,7 +1333,7 @@ Production gotchas:
 ## 12. Interview Questions with Answers
 
 **Q: Why is LLM decode memory-bandwidth-bound rather than compute-bound? What does this mean for optimization?**
-A: During decode, each token generation requires loading all model weights from HBM. For a 70B BF16 model that is 140GB of data. An A100 loads this in 70ms (140GB / 2TB/s bandwidth) but computes it in 0.45ms (140B FLOPs / 312 TFLOPS). The GPU's compute units are idle 99.7% of the time waiting for data. The primary optimization lever is therefore reducing data movement: quantization (load INT4 instead of BF16, 4× fewer bytes), batching (amortize the 140GB weight load across many requests so each request "pays" 1/N of the bandwidth cost), and KV cache efficiency (fewer KV bytes transferred per step). Compute-bound optimizations like better algorithms have near-zero impact on memory-bandwidth-bound workloads.
+A: During decode, each token generation requires loading all model weights from HBM. For a 70B BF16 model that is 140GB of data. An A100 loads this in 70ms (140GB / 2TB/s bandwidth) but computes it in 0.45ms (140B FLOPs / 312 TFLOPS). The GPU's compute units are idle 99.4% of the time waiting for data. The primary optimization lever is therefore reducing data movement: quantization (load INT4 instead of BF16, 4× fewer bytes), batching (amortize the 140GB weight load across many requests so each request "pays" 1/N of the bandwidth cost), and KV cache efficiency (fewer KV bytes transferred per step). Compute-bound optimizations like better algorithms have near-zero impact on memory-bandwidth-bound workloads.
 
 **Q: What is the KV cache and why is it important?**
 A: The KV cache stores the key and value tensors computed for each token during the prefill phase. During decoding, each new token only needs to compute its own query, then attend to all cached K, V tensors. Without KV cache, you'd recompute K and V for all past tokens at every decoding step — O(n²) work for a length-n response. With KV cache, it's O(n) total. The trade-off: KV cache consumes significant GPU memory (320KB per token for LLaMA 3 70B in BF16; at 8K context and 100 concurrent users, that is 256GB just for KV — more than the model weights).

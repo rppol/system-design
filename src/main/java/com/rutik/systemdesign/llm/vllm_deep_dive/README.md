@@ -121,10 +121,14 @@ Total KV cache pool:
   = num_layers × tokens_per_block × num_blocks × above_formula
 
 Example: LLaMA 3 8B (FP16)
-  = 32 layers × 8 KV heads × 128 head_dim × 2 bytes
-  = 524,288 bytes per token = 512 KB per token
-  Block size 16 tokens → 8 MB per block
-  A100 80GB: reserve ~60GB for KV cache → ~7,500 blocks → ~120K token capacity
+  = 32 layers × 2 (K and V) × 8 KV heads × 128 head_dim × 2 bytes
+  = 131,072 bytes per token = 128 KB per token
+  Block size 16 tokens → 2 MB per block
+  A100 80GB: reserve ~60GB for KV cache → ~30,720 blocks → ~491K token capacity
+
+  Note: use num_key_value_heads (8), NOT num_attention_heads (32).
+  LLaMA 3 8B runs 32 query heads over 8 KV heads — that is grouped-query
+  attention, and it is a 4× difference in every KV-cache number below.
 ```
 
 **The idea behind it.** "Every token a sequence has ever seen leaves behind a fixed-size
@@ -161,14 +165,16 @@ generated instead of what it might eventually generate.
   token capacity       = 30,720 x 16                       =   491,520 tokens
 ```
 
-**Reconciling the figure above.** The summary block quotes 512 KB per token and 8 MB per block —
-exactly 4× these numbers — because it counts LLaMA 3 8B's **32 query heads** rather than its
-**8 KV heads**. That 4× *is* grouped-query attention: the model runs 32 query heads but only 8 K/V
-heads, so four query heads share each cached K/V pair. 512 KB/token is what this model would have
-cost under classic multi-head attention; 128 KB/token is what it actually costs. Use the
-GQA-corrected number and the same A100 pool holds 30,720 blocks and ~491K tokens, not 7,500 and
-~120K. Reading `num_attention_heads` out of `config.json` when you meant `num_key_value_heads` is
-the single most common KV-cache sizing bug, and it always errs toward buying GPUs you do not need.
+**The 4× trap hiding in this formula.** Substitute LLaMA 3 8B's **32 query heads** where
+`num_kv_heads` belongs and every number above inflates exactly 4×: 512 KB per token, 8 MB per
+block, ~7,500 blocks, ~120K tokens of capacity. That 4× *is* grouped-query attention — the model
+runs 32 query heads over only 8 K/V heads, so four query heads share each cached K/V pair. The
+inflated figure is what this model *would* have cost under classic multi-head attention; 128 KB
+per token is what it actually costs, and the same A100 pool really holds 30,720 blocks and ~491K
+tokens. Reading `num_attention_heads` out of `config.json` when you meant `num_key_value_heads`
+is the single most common KV-cache sizing bug, and it always errs toward buying GPUs you do not
+need. Sanity check against a bigger model: LLaMA 3 70B costs ~320 KB/token, so any 8B figure
+above that is wrong on its face.
 
 ### The Fragmentation Delta — Why vLLM Exists
 
