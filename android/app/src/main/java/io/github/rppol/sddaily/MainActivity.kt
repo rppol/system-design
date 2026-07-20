@@ -1,6 +1,7 @@
 package io.github.rppol.sddaily
 
 import android.annotation.SuppressLint
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -9,7 +10,9 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Message
 import android.provider.MediaStore
+import android.util.Log
 import android.view.ViewGroup
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.ValueCallback
@@ -42,7 +45,21 @@ import java.io.OutputStream
  */
 class MainActivity : ComponentActivity() {
 
+    private companion object {
+        const val START_URL = "https://appassets.androidplatform.net/www/game/index.html"
+        const val INTERNAL_HOST = "appassets.androidplatform.net"
+        const val KEY_LAST_ROUTE = "lastRoute"
+    }
+
     private lateinit var webView: WebView
+
+    // Last in-app hash route (e.g. "/reader/hld%2Fcaching%2FREADME.md"), tracked
+    // as a plain field so onSaveInstanceState never has to touch a WebView that
+    // may already be dead. Restored ONLY from savedInstanceState, which arrives
+    // exactly in the two cases where the route is lost against the user's will:
+    // a renderer crash (recreate below) and system process death. A launch from
+    // the launcher carries no bundle, so Home stays the front door.
+    private var lastRoute: String? = null
 
     // Holds the in-flight WebChromeClient file-chooser callback while the system
     // document picker is open; null when no chooser is pending. The WebView
@@ -228,6 +245,9 @@ class MainActivity : ComponentActivity() {
                 val frag = url?.substringAfter('#', "") ?: ""
                 backCallback.isEnabled =
                     view.canGoBack() && frag.isNotEmpty() && frag != "/home"
+                if (frag.startsWith("/") && Uri.parse(url ?: "").host == INTERNAL_HOST) {
+                    lastRoute = frag
+                }
             }
 
             // Without this, a crashed WebView renderer (OOM on a huge doc + heavy
@@ -246,6 +266,20 @@ class MainActivity : ComponentActivity() {
         }
 
         webView.webChromeClient = object : WebChromeClient() {
+            // Debug builds only: without this the page's console is invisible,
+            // so a JS error in the field leaves nothing in a bug report but
+            // "the screen was blank". Release keeps chromium's default handling
+            // (return false) rather than logging user content.
+            override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return false
+                Log.d(
+                    "SDWeb",
+                    "[${message.messageLevel()}] ${message.message()} " +
+                        "(${message.sourceId()}:${message.lineNumber()})"
+                )
+                return true
+            }
+
             // Wired so the import <input type="file"> works, and so JS
             // alert()/confirm() render as native dialogs (default WebChromeClient
             // behaviour, active once a chrome client is set).
@@ -347,7 +381,19 @@ class MainActivity : ComponentActivity() {
             WebView.setWebContentsDebuggingEnabled(true)
         }
 
-        webView.loadUrl("https://appassets.androidplatform.net/www/game/index.html")
+        // A renderer crash or a process kill used to dump the reader mid-chapter
+        // back at Home. Reopen where the user was; the page restores its own
+        // scroll position from sd_reader_scroll once the route loads.
+        val restored = savedInstanceState?.getString(KEY_LAST_ROUTE)
+        webView.loadUrl(
+            if (restored.isNullOrEmpty() || restored == "/home" || !restored.startsWith("/")) START_URL
+            else "$START_URL#$restored"
+        )
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        lastRoute?.let { outState.putString(KEY_LAST_ROUTE, it) }
     }
 
     // Pause the page's timers/rAF when backgrounded (the blitz runs a countdown
@@ -375,6 +421,39 @@ class MainActivity : ComponentActivity() {
         fun saveBackup(name: String, json: String): Boolean {
             return try {
                 val fileName = if (name.endsWith(".json")) name else "$name.json"
+                // The page names backups by date, so exporting twice in one day
+                // collides. MediaStore's default answer is to invent
+                // "…backup-2026-07-20 (1).json", leaving the user to guess which
+                // of several same-day files is current. Overwrite our own row
+                // instead. A query here can only ever see rows this app owns
+                // (scoped storage, minSdk 29), so a same-named file belonging to
+                // anything else is invisible and can never be clobbered.
+                val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                var existing: Uri? = null
+                contentResolver.query(
+                    collection,
+                    arrayOf(MediaStore.Downloads._ID),
+                    "${MediaStore.Downloads.DISPLAY_NAME} = ?",
+                    arrayOf(fileName),
+                    null
+                )?.use { c ->
+                    if (c.moveToFirst()) existing = ContentUris.withAppendedId(collection, c.getLong(0))
+                }
+                existing?.let { uri ->
+                    try {
+                        // "wt" truncates. Plain "w" would leave the tail of a
+                        // longer previous backup behind, producing trailing
+                        // garbage after valid JSON.
+                        contentResolver.openOutputStream(uri, "wt")?.use { out: OutputStream ->
+                            out.write(json.toByteArray(Charsets.UTF_8))
+                        } ?: throw IllegalStateException("no output stream")
+                        toast("Saved to Downloads/$fileName")
+                        return true
+                    } catch (e: Exception) {
+                        // Row is orphaned (file deleted in Files app) or not
+                        // writable — fall through and insert a fresh one.
+                    }
+                }
                 val values = ContentValues().apply {
                     put(MediaStore.Downloads.DISPLAY_NAME, fileName)
                     put(MediaStore.Downloads.MIME_TYPE, "application/json")
