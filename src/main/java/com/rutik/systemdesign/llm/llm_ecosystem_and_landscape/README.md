@@ -313,6 +313,51 @@ flowchart TD
 | Together AI | LLaMA 3.1 70B | $0.88 | $0.88 | 128K |
 | Self-hosted H100 | LLaMA 3.1 70B | ~$0.20 | ~$0.80 | 128K |
 
+**Stated plainly.** "A price table with two columns is not a price. What you pay is
+`input tokens x input rate + output tokens x output rate`, and the ratio between your input and
+output volumes decides which model is actually cheapest for you."
+
+Reading down the Input column and picking the smallest number is the most common way to choose wrong.
+Output is priced 3-4x higher than input almost everywhere, so a summarization workload (huge input,
+tiny output) and a generation workload (tiny input, huge output) rank the models differently even
+though the table is identical.
+
+| Symbol | What it is |
+|--------|------------|
+| Input $/1M | Price per million tokens you send: prompt, context, history |
+| Output $/1M | Price per million tokens generated. Consistently the more expensive side |
+| workload shape | Your input:output ratio. RAG is input-heavy; agents and drafting are output-heavy |
+| effective cost | `input_M x input_rate + output_M x output_rate` for *your* shape |
+
+**Walk one example.** A RAG-shaped workload — 1M input tokens and 200K output tokens:
+
+```
+  cost = 1.0 x input_rate + 0.2 x output_rate
+
+    gemini-1.5-flash   1.0 x $0.075 + 0.2 x $0.30  = $0.135
+    gpt-4o-mini        1.0 x $0.15  + 0.2 x $0.60  = $0.270
+    claude-sonnet-3.5  1.0 x $3.00  + 0.2 x $15.00 = $6.000
+    gpt-4o             1.0 x $5.00  + 0.2 x $15.00 = $8.000
+    o1                 1.0 x $15.00 + 0.2 x $60.00 = $27.000
+
+  SPREAD ACROSS THE TABLE
+    o1 / gemini-1.5-flash = $27.00 / $0.135 = 200x
+
+  SAME SPREAD, SCALED TO A REAL MONTH (1B input + 200M output tokens)
+    gemini-1.5-flash    $135/month
+    gpt-4o            $8,000/month
+    o1               $27,000/month
+```
+
+A 200x spread across a single table is the practical meaning of "cost commoditization" — the same
+task can cost $135 or $27,000 a month depending only on model choice. That is why this module
+insists on **cost-tier routing rather than fixed model choices**: routing even 80% of traffic from
+gpt-4o down to gpt-4o-mini on the queries that do not need frontier reasoning takes the bill from
+$8,000 to roughly `0.2 x $8,000 + 0.8 x $270 = $1,816` — a 77% cut with no change to the hard
+queries. Note also the context column: gemini-1.5-flash offers a 1M window at the *lowest* price in
+the table, so "cheap" and "small context" have fully decoupled — an assumption from 2023 that no
+longer holds.
+
 ### Self-Hosting Break-Even Calculation
 
 ```
@@ -336,6 +381,62 @@ Rule of thumb:
   $2,000-$10,000/month -> evaluate break-even carefully
   >$10,000/month API spend -> self-hosting almost always wins
 ```
+
+**What the formula is telling you.** "Self-hosting is a fixed monthly rent; API is a per-token
+meter. Break-even is simply the token volume at which the meter finally exceeds the rent — and you
+pay the rent whether you send a token or not."
+
+That asymmetry is the whole decision. API cost scales with usage and goes to zero when idle; GPU
+cost is the same at 3 a.m. on a Sunday as at peak. So the break-even is not really about price per
+token, it is about **utilization**.
+
+| Symbol | What it is |
+|--------|------------|
+| GPU hourly rate | ~$3/hr on-demand, ~$1.50/hr reserved, **per H100**. A 70B model needs 2 |
+| hours per month | `24 x 30 = 720`. Rented continuously, used or not |
+| throughput | ~2,000 output tokens/second at batch size 32 on 2x H100 |
+| monthly capacity | `throughput x 720 x 3600` — the ceiling if you ran flat out, nonstop |
+| API rate | $0.88 per 1M output tokens (Together AI, LLaMA 3.1 70B) |
+| utilization | Actual tokens served / monthly capacity. The variable nobody estimates honestly |
+
+**Walk one example.** Build both sides, being careful that the model needs two GPUs:
+
+```
+  CAPACITY (the API-equivalent bill at 100% utilization)
+    2,000 tok/s x 3,600 x 24 x 30 = 5,184,000,000 = ~5.2B tokens/month
+    5.2B x $0.88 / 1M            = $4,576/month
+
+  SELF-HOSTED RENT -- note the model needs 2x H100, so double the per-GPU rate
+    on-demand  2 x $3.00 x 720 = $4,320/month
+    reserved   2 x $1.50 x 720 = $2,160/month   <- the $2,160 quoted above
+
+  SAVINGS AT 100% UTILIZATION
+    vs reserved   $4,576 - $2,160 = $2,416/month   -> the "~$2,400" quoted
+    vs on-demand  $4,576 - $4,320 =   $256/month   -> essentially nothing
+
+  NOW VARY UTILIZATION (against the $2,160 reserved rent)
+    100%  5.20B tokens  API $4,576   -> self-hosting wins by $2,416
+     50%  2.60B tokens  API $2,288   -> self-hosting wins by $128
+     20%  1.04B tokens  API   $915   -> API wins by $1,245
+     10%  0.52B tokens  API   $458   -> API wins by $1,702
+
+  BREAK-EVEN UTILIZATION
+    $2,160 / $4,576 = 47%
+```
+
+Two things fall out of this that the rule-of-thumb table cannot express. First, **the reserved rate
+is doing the work, not self-hosting itself** — on on-demand pricing the entire annual saving is about
+$3,000, which one engineer-week of maintenance erases. Second, you need roughly **47% sustained
+utilization** to break even, and sustained means averaged across nights, weekends, and troughs. A
+workload that peaks at 2,000 tok/s during business hours and idles overnight is nowhere near 47%;
+real-world duty cycles of 15-25% are common, which puts most teams firmly on the API side even at
+volumes the $10,000/month rule of thumb would send to self-hosting.
+
+**Why the rule of thumb still works despite ignoring utilization.** It is stated in *dollars of API
+spend*, not tokens — and API spend is already utilization-adjusted, because you only pay for tokens
+you actually sent. A team spending $10,000/month on API is by definition pushing well past the
+break-even volume. The trap is applying the rule to *projected* or *peak-capacity* spend rather than
+billed spend, which is exactly the error that produces an idle GPU cluster and a postmortem.
 
 ### Key Industry Dynamics
 
