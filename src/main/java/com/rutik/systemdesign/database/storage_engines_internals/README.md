@@ -165,6 +165,58 @@ xychart-beta
 
 Leveled compaction pushes LSM-tree write amplification into the 10-30x range, roughly 5-15x higher than a B+tree's 1-3x — the structural cost of keeping SSTables sorted and non-overlapping within each level.
 
+**What this actually says.** The 10-30x is not measured, it is derived:
+`WA = 1 + T x (levels - 1)`, where `T` is the size ratio between adjacent levels. Every byte
+promoted from `Li` to `Li+1` must be merged against roughly `T` bytes already sitting there, so
+each level charges you `T` rewrites. Levels are set by data volume, so **write amplification is a
+function of how much data you store**, not of how fast you write.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Level size ratio. 10 in RocksDB and Cassandra — each level 10x the one above |
+| `levels` | Depth of the tree. `log_T(total_data / L1_size)`, rounded up |
+| `1 +` | The MemTable flush. One rewrite of the data before any compaction happens |
+| `T x (levels-1)` | Compaction. Each promotion rewrites ~`T` bytes per byte moved |
+| space amp | `~1 + 1/T` for leveled — the deepest level holds ~90% of data, so 1.1x |
+
+**Walk one example.** RocksDB defaults, `L1 = 256 MB` and `T = 10`:
+
+```
+  Level sizing:
+    L1 =     256 MB
+    L2 =   2,560 MB   (2.5 GB)
+    L3 =  25,600 MB   ( 25 GB)
+    L4 = 256,000 MB   (250 GB)
+
+  Write amplification by dataset size:
+    dataset ~2.5 GB  -> 2 levels -> WA = 1 + 10 x 1 = 11x
+    dataset ~25 GB   -> 3 levels -> WA = 1 + 10 x 2 = 21x
+    dataset ~250 GB  -> 4 levels -> WA = 1 + 10 x 3 = 31x
+
+    That IS the quoted 10-30x band -- it is just 2, 3, and 4 levels.
+
+  Physical cost at 4 levels: 1 TB of application writes -> 31 TB written to disk.
+```
+
+**Why the B+tree's 1-3x is a locality claim, not a structural one.** A B+tree writes whole pages,
+so its amplification depends entirely on how many rows in a page get dirtied before the
+checkpoint flushes it:
+
+```
+  8 KB page, 100-byte rows -> 81 rows per page
+
+  rows dirtied before flush     bytes written / bytes changed
+        1 (random UUID keys)         8,192 / 100   = 82x
+        8 (some clustering)          8,192 / 800   = 10x
+       81 (sequential keys)          8,192 / 8,100 = 1.01x
+
+  Add the WAL (every change written twice) -> the sequential case lands at ~2x.
+```
+
+That is the whole 1-3x figure: a B+tree with sequential keys. Give it random keys and its write
+amplification quietly exceeds an LSM-tree's — which is exactly the Pitfall 4 scenario, and the
+reason "B+trees write less" is only true for workloads with key locality.
+
 ### Row vs Columnar Storage
 
 **Row storage (PostgreSQL, MySQL)**:
@@ -308,6 +360,71 @@ flowchart LR
 
 Without bloom filters: O(levels) SSTable reads per lookup.
 With bloom filters: O(1) SSTable reads with 99% probability.
+
+**In plain terms.** The "10 bits/key, ~1% false positive" pairing is one formula evaluated once:
+`FPR = (1 - e^(-kn/m))^k`. Read it as "the chance that all `k` hash positions for a key you never
+inserted happen to already be set by other keys." Everything about a bloom filter — its size, its
+error rate, why it never has false negatives — falls out of that sentence.
+
+| Symbol | What it is |
+|--------|------------|
+| `m` | Bits in the filter's bit array |
+| `n` | Keys inserted into it |
+| `m/n` | Bits per key. The only knob that really matters. RocksDB default 10 |
+| `k` | Hash functions. Each key sets `k` bits; a lookup checks the same `k` bits |
+| `e^(-kn/m)` | Probability one specific bit is still 0 after inserting all `n` keys |
+| `1 - e^(-kn/m)` | Probability one specific bit IS set. Raised to `k` = all `k` bits set by chance |
+
+**Walk one example.** Start at the default `m/n = 10`, with the optimal `k = (m/n) x ln2 = 6.93`,
+rounded to 7:
+
+```
+  kn/m       = 7 / 10 = 0.7
+  e^(-0.7)   = 0.4966        <- chance a given bit is still 0
+  1 - 0.4966 = 0.5034        <- chance a given bit is set
+  0.5034 ^ 7 = 0.00819       <- all 7 positions set by accident
+
+  FPR = 0.82%   -> the quoted "~1% false positive rate"
+```
+
+Note that the optimal `k` leaves the array almost exactly half full (0.5034). That is not a
+coincidence — it is what maximizing entropy per bit looks like, and it is a fast sanity check on
+any bloom filter sizing.
+
+Now sweep both knobs. Bits per key first, each at its own optimal `k`:
+
+```
+  bits/key   optimal k   FPR         memory for 1 billion keys
+      4          3       14.69%          0.47 GB
+      8          6        2.16%          0.93 GB
+     10          7        0.82%          1.16 GB
+     16         11        0.046%         1.86 GB
+     20         14        0.0067%        2.33 GB
+```
+
+Every extra bit per key cuts the error rate by about 1.6x, so going 10 -> 16 bits/key buys
+`1.6^6 = 17x` fewer false positives for 0.70 GB more RAM per billion keys. That is a very cheap
+exchange, which is why nobody ships a 4-bit filter. Now hold `m/n = 10` and vary `k` alone:
+
+```
+  k       FPR
+   1     9.52%      too few probes -- one accidental collision is enough
+   3     1.74%
+   5     0.94%
+   7     0.82%      <- optimum
+   9     0.91%
+  11     1.17%      too many probes -- the array saturates, every bit is set
+```
+
+The curve has a genuine minimum: too few hashes and one collision fools you, too many and you
+fill the array so densely that every lookup matches. `k = (m/n) x ln2` is where those two
+failures balance.
+
+**Why there are no false negatives, ever.** Inserting a key only ever flips bits from 0 to 1;
+nothing is ever cleared. So if a key was inserted, its `k` bits are all 1 by construction and the
+filter must say "maybe." A "no" is therefore always the truth — which is precisely what the read
+path needs: a `NO` lets the engine skip the SSTable with zero I/O and no correctness risk, while
+a `YES` merely costs one wasted disk read 0.82% of the time.
 
 ### WAL Crash Recovery
 

@@ -304,6 +304,43 @@ Spring forward skips a wall-clock hour entirely (constructing it raises or silen
 normalizes, depending on the library); fall back repeats one, and only the `fold` flag
 tells `01:30` apart from its own reoccurrence an hour later.
 
+#### Decoding `utcoffset()`'s strange output
+
+**What the formula is telling you.** "A negative offset is stored as a whole negative day plus a positive number of seconds, because `timedelta` keeps its `seconds` field in the range 0 to 86399 and pushes all the negativity into `days`."
+
+That normalization rule is the only reason `-4:00` prints as `-1 day, 72000 seconds`. Nothing is wrong; the number just has to be added up before it reads as an offset.
+
+| Symbol | What it is |
+|--------|------------|
+| `.days` | The whole-day component. Always the sign carrier — it is the only field allowed to go negative |
+| `.seconds` | The remainder, normalized into `[0, 86399]`. Never negative, which is what causes the surprise |
+| `86400` | Seconds in a day — the conversion constant that reunites the two fields |
+| `.total_seconds()` | The field you actually want: `days * 86400 + seconds`, as one signed float |
+| `fold=0` / `fold=1` | Selects the first (EDT) or second (EST) occurrence of a repeated wall-clock hour |
+
+**Walk one example.** Reconstruct both printed offsets from the fall-back code above:
+
+```
+  fold=0  ->  timedelta(days=-1, seconds=72000)
+    total = (-1 x 86400) + 72000
+          = -86400 + 72000
+          = -14400 s
+          = -14400 / 3600 = -4 h      -> EDT, UTC-4   (daylight time, still)
+
+  fold=1  ->  timedelta(days=-1, seconds=68400)
+    total = (-1 x 86400) + 68400
+          = -86400 + 68400
+          = -18000 s
+          = -18000 / 3600 = -5 h      -> EST, UTC-5   (standard time, after)
+
+  the gap between them = -14400 - (-18000) = 3600 s = exactly 1 hour
+
+  and for the deadline arithmetic in the same block:
+    timedelta(days=30).total_seconds() = 30 x 86400 = 2,592,000.0
+```
+
+The one-hour gap is the entire point: `01:30 fold=0` and `01:30 fold=1` are two *different instants* that print as the same wall-clock string. If your audit table stores the rendered local string rather than the aware datetime, those two rows become indistinguishable, and one hour of transactions per year silently loses its ordering. Always read `.total_seconds()` rather than `.seconds` — reaching for `.seconds` alone on a negative offset yields `72000`, a plausible-looking but completely wrong `+20:00`.
+
 ### 6.2 logging — hierarchy, handlers, formatters
 
 ```python
@@ -1181,3 +1218,58 @@ After deploying these changes:
 - Log volume increased by approximately 15 % due to JSON overhead versus plain text, but
   query time in Elasticsearch dropped by 40 % because fields were pre-parsed rather than
   requiring runtime regex extraction via Grok patterns.
+
+---
+
+#### Decoding the log-volume arithmetic
+
+**In plain terms.** "Multiply how many records you emit per second by how many bytes each one weighs, and you have your daily log bill — in disk, in network, and in log-vendor ingest charges."
+
+Log volume is the one capacity number teams routinely never compute, then discover through a surprise invoice or a full disk. Every input needed is already stated above: the peak request rate, the fields the `JsonFormatter` emits, and the rotation settings.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Records per second. Here one `"request completed"` line per request, from the middleware |
+| `B` | Bytes per record — the serialized JSON line plus its trailing newline |
+| `R x B` | Bytes per second; multiply by 86,400 for the daily figure |
+| `maxBytes` | `10_485_760` (10 MiB) — the size at which `RotatingFileHandler` rolls the active file |
+| `backupCount` | `5` — how many rolled files are kept before the oldest is deleted |
+| `~5 us` | The per-record CPU cost of JSON formatting over plain text, from the Section 8 table |
+
+**Walk one example.** Take the case study's peak of 4,000 requests/minute through the exact `JsonFormatter` payload defined above:
+
+```
+  one record, serialized (6 base fields + request_id + method + path + status_code):
+
+  {"timestamp": "2024-06-04T09:15:42.123456+00:00", "level": "INFO",
+   "logger": "app", "message": "request completed", "module": "main",
+   "lineno": 1137, "request_id": "3f2b9c1e-8a4d-4e6f-9b21-7c5d0a1e4f88",
+   "method": "GET", "path": "/users/12345", "status_code": 200}
+
+    B = 264 bytes + 1 newline = 265 bytes
+
+  rate
+    R = 4,000 / 60 = 66.67 records/sec
+    records/day = 4,000 x 60 x 24 = 5,760,000
+
+  daily volume
+    5,760,000 x 265 = 1,526,400,000 bytes
+                    = 1.53 GB (decimal)  =  1.42 GiB (binary)
+
+  CPU cost of choosing JSON over plain text
+    5,760,000 x 5 us = 28.8 seconds of CPU per day, spread across the whole fleet
+```
+
+**The rotation config does not survive this rate.** Feed the same numbers into the `maxBytes` / `backupCount` settings from Section 6.2:
+
+```
+  records per 10 MiB file = 10,485,760 / 265 = 39,569 records
+  seconds to fill one file = 39,569 / 66.67  = 594 s = 9.9 minutes
+
+  retention on disk = 5 backups + 1 active = 6 files
+                    = 6 x 9.9 min = 59.4 minutes
+```
+
+Under one hour. A `maxBytes=10_485_760, backupCount=5` handler looks generous in the config file and reads like "50 MB of logs", but at 4,000 requests/minute it holds **less than a single hour** of history. An engineer paged at 02:00 about an incident that started at 00:30 would find the relevant file already deleted. This is exactly why the case study routes to Elasticsearch via Filebeat rather than relying on local files: the local handler is a buffer measured in minutes, not an archive. If local files must be the archive, size `backupCount` from `R x B` rather than from intuition — retaining 24 hours here needs roughly 146 backups, or a `TimedRotatingFileHandler` with `when="midnight"` and `backupCount=14` as shown in Section 7.1.
+
+**Reading the "15 % increase" claim.** The Outcome bullet says JSON raised volume about 15 % over plain text. Inverting that, the plain-text baseline was about `1.42 / 1.15 = 1.24 GiB/day`, so JSON added roughly `0.19 GiB/day`. That is the trade the bullet is making explicit: 0.19 GiB/day of extra storage and 28.8 s/day of CPU bought a 40 % drop in Elasticsearch query time and cut triage from 20 minutes to 90 seconds — a `13.3x` speedup on the metric an on-call engineer actually feels.

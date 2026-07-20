@@ -67,6 +67,36 @@ This module covers the complete happens-before rule enumeration, memory barrier 
 - `synchronized` block entry = `LoadLoad` + `LoadStore` (acquire semantics)
 - `synchronized` block exit = `StoreStore` + `StoreLoad` (release semantics)
 
+**What it means.** "There are only four ways two memory operations can be reordered, so there are only four barriers — and Java's constructs are just named bundles of them, which is why a volatile write costs far more than a volatile read."
+
+The asymmetry is the point. Reads need the two cheap barriers; writes need the one expensive barrier that no CPU wants to give you. Every "is `volatile` slow?" argument resolves into which side of that line your field sits on.
+
+| Symbol | What it is |
+|--------|------------|
+| `LoadLoad` | Keeps two reads in order — free on x86, which never reorders loads with loads |
+| `StoreStore` | Keeps two writes in order — free on x86 (Total Store Order) |
+| `LoadStore` | A read cannot be moved after a later write — free on x86 |
+| `StoreLoad` | A write must be globally visible before a later read — the only one x86 must enforce |
+| acquire | `LoadLoad + LoadStore` — "from here on I see everything the releaser did" |
+| release | `StoreStore + StoreLoad` — "everything I did is visible before this point" |
+
+**Walk one example.** The four Java constructs on x86-64, in terms of what the CPU actually has to emit:
+
+```
+  construct              barriers                     x86 instruction cost
+  volatile read          LoadLoad + LoadStore         none (TSO already forbids these)
+  volatile write         StoreStore + StoreLoad       MFENCE / LOCK-prefixed op
+  synchronized entry     LoadLoad + LoadStore         none beyond the lock acquisition
+  synchronized exit      StoreStore + StoreLoad       MFENCE / LOCK-prefixed op
+
+  Why StoreLoad is the expensive one:
+    every other barrier is a constraint the CPU already satisfies on x86
+    StoreLoad requires draining the store buffer, so the write reaches
+    coherent cache before the next load may issue -- the pipeline stalls
+```
+
+This table also explains the portability trap in Section 10's war stories. On x86 three of the four barriers cost nothing, so code missing a `LoadLoad` still behaves correctly; on ARM and POWER none of them are free, and the same code exposes the reordering immediately. The barriers you never paid for are exactly the ones that break when the hardware changes.
+
 ### 4.3 Safe Publication Idioms (in order of preference)
 
 | Idiom | Mechanism | When to Use |
@@ -200,6 +230,40 @@ volatile long balance = 1_000_000_000L;
 // (one 64-bit MOV instruction) — but this is NOT a JMM guarantee.
 // Never rely on platform-specific behavior; use volatile.
 ```
+
+**Stated plainly.** "A 64-bit value written as two 32-bit halves can be read half-old and half-new, producing a number that neither thread ever wrote — and unlike most race outcomes, the corrupted value can be enormous rather than merely stale."
+
+This is worth walking numerically because it is the one JMM hazard whose damage is visible in the wrong direction: a torn read does not give you a slightly out-of-date balance, it gives you a balance off by billions.
+
+| Symbol | What it is |
+|--------|------------|
+| high word | The upper 32 bits of the `long`, bits 32-63 |
+| low word | The lower 32 bits, bits 0-31 |
+| word tear | A read that takes the high word from one write and the low word from another |
+| `volatile long` | Forces the JMM to treat the 64-bit access as one indivisible operation |
+| 64-bit `MOV` | What modern x86 emits anyway — an accident of hardware, not a JMM promise |
+
+**Walk one example.** Thread A raises a balance from 1,000,000,000 to 5,000,000,000 on a 32-bit JVM:
+
+```
+  old value  1,000,000,000  = 0x00000000_3B9ACA00
+                               high = 0x00000000   low = 0x3B9ACA00
+  new value  5,000,000,000  = 0x00000001_2A05F200
+                               high = 0x00000001   low = 0x2A05F200
+
+  Thread A writes high, gets preempted, then writes low.
+  Thread B reads in that window: new high word + old low word
+
+    0x00000001_3B9ACA00  =  5,294,967,296
+
+  Neither thread ever wrote 5,294,967,296. It is 294,967,296 above the intended
+  new balance and 4.29 billion above the old one.
+
+  The other interleaving (old high + new low) yields 705,032,704 --
+  a value BELOW the starting balance even though the operation was an increase.
+```
+
+Note the exact size of the error. Only the high word differs between the two writes, so each torn value sits exactly one `0x100000000` — that is, 4,294,967,296 — away from one of the two legitimate values: `5,294,967,296 - 1,000,000,000` and `5,000,000,000 - 705,032,704` are both precisely 2^32. That is the fingerprint to look for in a log: not small drift, but a discrepancy that is a clean multiple of 4.29 billion. `volatile` on the field removes the possibility entirely, at the cost of one barrier per access.
 
 ### Broken and Fixed Safe Publication Patterns
 
@@ -628,6 +692,35 @@ enum Cfg { INSTANCE; private final Config config = Config.defaults(); }
 | uncontended `synchronized` block | ~20-50 ns | monitor enter/exit |
 
 At 40k reads/sec the `volatile` read cost is ~0.4 ms/sec total — negligible against eliminating mispricing incidents.
+
+**The idea behind it.** "Synchronisation is expensive per *operation* and almost free per *second* — the only thing that matters is how many times per second you pay it, and 40,000 is nowhere near enough to matter."
+
+People reason about `volatile` from the 30x per-operation multiplier and conclude it is costly. The correct denominator is wall-clock time, and against one second of budget the whole thing disappears.
+
+| Symbol | What it is |
+|--------|------------|
+| non-volatile read | Plain field read served from L1 with no fence — roughly 1 CPU cycle |
+| `volatile` read/write | Adds the barriers from Section 4.2; the write pays `StoreLoad` |
+| uncontended `synchronized` | Monitor enter plus exit, with no other thread competing for it |
+| contended `synchronized` | Not in the table — add a context switch, thousands of times worse |
+| read rate | 40,000 config reads/sec in this service |
+| total cost/sec | `read rate x per-read cost` — the number that actually decides anything |
+
+**Walk one example.** The same three costs at 3 GHz, then multiplied out over one second:
+
+```
+  operation                  ns      CPU cycles     x 40,000 reads/sec
+  non-volatile read          0.3      ~1            0.012 ms/sec
+  volatile read/write        5-10     15-30         0.2-0.4 ms/sec
+  uncontended synchronized   20-50    60-150        0.8-2.0 ms/sec
+
+  Worst case in the table:  2.0 ms of every 1,000 ms  =  0.2 percent of one core.
+
+  Ratio that misleads people:  10 ns / 0.3 ns  =  33x per operation
+  Ratio that matters:          0.4 ms / 1,000 ms = 0.04 percent of a second
+```
+
+The 33x multiplier is real and the 0.04 percent is also real; they are the same fact at two denominators. The break-even only arrives in genuinely hot loops — millions of operations per second, where 10ns each becomes tens of milliseconds — and that is the regime where `final` fields, thread confinement, or `VarHandle` acquire/release modes earn their complexity. At 40k/sec, choosing a plain field over a `volatile` one to save 0.4ms buys nothing and costs correctness.
 
 ### Common Pitfalls
 

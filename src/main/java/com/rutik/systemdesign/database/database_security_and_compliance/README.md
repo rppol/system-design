@@ -358,6 +358,41 @@ String secret = secretsManagerClient.getSecretValue(
 // Parse JSON: {"username": "app_user", "password": "abc123xyz"}
 ```
 
+The security value of rotation is a single quantity — how long a stolen credential keeps working:
+
+```
+  exposure_window        = credential_lifetime
+  expected_exposure      = credential_lifetime / 2      (leak equally likely at any moment)
+```
+
+**What this actually says.** "Rotation does not stop a credential from being stolen; it puts an expiry date on the theft, and the length of that date is the entire security benefit."
+
+This reframes rotation from hygiene into risk arithmetic. A password that never rotates has an unbounded exposure window, which is why a credential in Git history is a permanent incident rather than a past one.
+
+| Symbol | What it is |
+|--------|------------|
+| `credential_lifetime` | How long a given username/password remains valid. `TTL = 1 hour` for Vault dynamic creds |
+| `exposure_window` | Worst-case time an attacker can use a stolen credential before it dies on its own |
+| `expected_exposure` | Average, assuming the theft is equally likely at any point in the credential's life |
+| TTL | Vault's time-to-live. Vault revokes the database user when it expires — no human step |
+| 30-day rotation | AWS Secrets Manager's automatic cadence. Bounded, but two orders of magnitude looser than a 1-hour TTL |
+
+**Walk one example.** The same stolen credential under three regimes:
+
+```
+  regime                        lifetime      worst case      expected (half)
+  static password in Git        unbounded     forever          forever
+  Secrets Manager, 30 days       720 h         30 days          15 days
+  Vault dynamic creds, TTL 1h      1 h          1 hour          30 minutes
+
+  moving from 30-day rotation to a 1-hour TTL:
+    720 h / 1 h  =  720x smaller window   =  99.861% of the exposure removed
+```
+
+The jump from "never" to "30 days" is the one that converts an unbounded risk into a bounded one; the jump from 30 days to 1 hour is what shrinks the bound to something an incident response process can actually outrun. Both jumps matter, and they are different in kind.
+
+**What the dynamic-credential model buys beyond the shorter window.** Vault issues a *distinct* database user per application instance (`v-role-xyz123`), so the audit log attributes every statement to a specific lease rather than to a shared `app_user`. That turns "someone with the app credential read the patients table" into "this lease, issued to this pod at this time, read the patients table" — which is the difference between knowing a breach happened and being able to scope it.
+
 ### GDPR/CCPA Right to Erasure
 
 Soft delete alone does not satisfy the right to erasure — the row and its PII still exist in the database and in backups. The database has to pick a path around the foreign-key constraints that reference the user:

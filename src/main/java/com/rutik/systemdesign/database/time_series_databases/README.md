@@ -33,6 +33,44 @@ Result: ~1.37 bits per timestamp (vs 64 bits raw) for typical metrics
 Gorilla paper: 12x compression on real Facebook production metrics
 ```
 
+**What this actually says.** "1.37 bits per value" reads: "consecutive readings of the same physical
+quantity are nearly identical, so XOR cancels almost every bit, and only the handful of surviving
+bits need storing." The compression is not generic — it is a bet on *physical continuity*, which is
+why it collapses on data that jumps around (random IDs, unrelated values interleaved into one series).
+
+| Symbol | What it is |
+|--------|------------|
+| 64 bits | An IEEE 754 double stored raw — the baseline |
+| XOR | Bitwise difference of consecutive values. Identical bits cancel to `0` |
+| Leading zeros | Bits both values share (sign + exponent + high mantissa). Stored as a count, not bits |
+| Meaningful bits | The surviving non-zero window — the only part actually written |
+| 1.37 bits | Average cost per value on typical slowly-changing production metrics |
+
+**Walk one example.** Two consecutive CPU readings, then the storage arithmetic:
+
+```
+  75.200001 XOR 75.200002
+    sign + exponent identical             -> 12 leading zero bits, cancelled
+    high mantissa identical               -> ~36 more leading zeros
+    surviving window                      -> about 16 meaningful bits
+    stored: 2 control bits + 5-bit leading count + 6-bit length + 16 bits = 29 bits
+    a repeated value (XOR == 0)           -> 1 control bit, nothing else
+
+  amortised over a real metric stream, the repeats dominate:
+    average                                = 1.37 bits per value
+
+  compression vs raw
+    64 / 1.37                              = 46.7x on the value column alone
+    1,000,000,000 readings raw             = 1e9 x 8 bytes  = 8.00 GB
+    1,000,000,000 readings Gorilla         = 1e9 x 1.37 / 8 = 0.171 GB
+    saved                                                     7.83 GB
+```
+
+**Why the paper says 12x and this says 46.7x.** They measure different things. The 46.7x is the
+value column in isolation; the paper's 12x is the whole record — timestamps (compressed separately
+with delta-of-delta), series keys, and block overhead included. Quote 12x when asked about a real
+system's disk footprint and 46.7x only about the float column, or the numbers will not reconcile.
+
 **Dictionary encoding**: For string columns with low cardinality (host names, metric names), map values to small integers. 1000 unique hosts → 10-bit integer per row vs 20-50 byte string.
 
 **Run-length encoding (RLE)**: For columns with long runs of the same value. Status field = "OK" for 10,000 consecutive rows → store "OK × 10000" rather than 10,000 copies.
@@ -342,6 +380,43 @@ xychart-beta
 
 Reading only the 2 needed columns instead of every 100-byte row cuts I/O from ~100GB to ~6GB compressed, turning a ~300-second full-row scan into a ~3-second vectorized column scan — a roughly 100x gap that comes from the columnar layout itself, not from faster hardware.
 
+**Stated plainly.** The columnar win is a two-factor product: "you skip the columns you did not ask
+for, *and* the columns you did ask for compress better because neighbouring values are the same
+type." Neither factor alone explains 100x — and separating them matters, because only the first one
+survives a `SELECT *`.
+
+| Symbol | What it is |
+|--------|------------|
+| Row width | Bytes per row a row-store must read even to see one column. ~100 bytes here |
+| Projection ratio | Columns needed / columns present. The pure layout win |
+| Bytes/row/column | Compressed size of one value once same-type values sit adjacently |
+| Vectorization | SIMD over contiguous arrays — the CPU-side multiplier on top of the I/O win |
+
+**Walk one example.** The hourly-average query over 1 billion rows, factored:
+
+```
+  PostgreSQL (row store)
+    must read      100 bytes/row x 1,000,000,000 rows  =  100 GB
+    time                                                  ~300 s
+
+  ClickHouse (column store)
+    needs          ts + temperature only
+    compressed     ~6 bytes for both columns combined (Delta + ZSTD)
+    must read      6 bytes/row x 1,000,000,000 rows    =    6 GB
+    time                                                    ~3 s
+
+  factor 1 -- projection + compression
+    100 GB / 6 GB                                      =   16.7x less I/O
+  factor 2 -- vectorized SIMD aggregation, not row-at-a-time
+    300 s / 3 s = 100x total;  100 / 16.7               =    6.0x from the CPU side
+    16.7 x 6.0                                          =  100x   (reconciles)
+```
+
+The decomposition is the useful part in an interview: 16.7x of the speedup is I/O the query never
+issued, and 6x is CPU work done on arrays instead of tuples. It also predicts when the win vanishes —
+`SELECT *` on a wide table sets the projection ratio to 1, leaving only compression and SIMD, and the
+100x collapses toward single digits.
+
 ### Downsampling and Retention
 
 ```sql
@@ -365,6 +440,45 @@ TTL ts + INTERVAL 30 DAY DELETE,            -- Delete raw data after 30 days
     ts + INTERVAL 7 DAY TO DISK 'ssd',     -- Move to SSD after 7 days
     ts + INTERVAL 24 HOUR TO VOLUME 'hot'; -- Move to hot tier within 24 hours
 ```
+
+**Put simply.** A downsampling ladder says: "keep resolution only where queries need it, because
+storage cost is `series x points_per_second x retention_seconds` and you get to choose a different
+`points_per_second` for each age band." The `365B rows/year` figure above is what happens when you
+choose one resolution for all ages; the ladder replaces one big product with a sum of small ones.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Number of series (device x sensor combinations) |
+| Resolution | Points per series per unit time. 1/sec raw, 1/min, 1/hour, 1/day |
+| Retention | How long that band is kept before the next TTL clause fires |
+| Points | `S x resolution x retention` — computed independently per band, then summed |
+
+**Walk one example.** 1,000,000 series over a 3-year horizon, flat retention versus the ladder in
+the SQL comment above (1-min for 7 days, 1-hour for 90 days, 1-day forever):
+
+```
+  flat: keep 1-second raw for 3 years
+    1e6 series x 86,400/day x 1,095 days      =  94,608,000,000,000 points
+    at 2 bytes/point compressed               =  189.2 TB
+
+  ladder
+    1-min,  7 days    1e6 x 1,440 x 7         =  10,080,000,000 points
+    1-hour, 90 days   1e6 x    24 x 90        =   2,160,000,000 points
+    1-day,  3 years   1e6 x     1 x 1,095     =   1,095,000,000 points
+    total                                     =  13,335,000,000 points
+    at 2 bytes/point compressed               =  0.0267 TB  (26.7 GB)
+
+  ratio      94,608,000,000,000 / 13,335,000,000  =  7,095x less stored
+```
+
+Three orders of magnitude, and the top band still answers "what happened in the last week" at
+minute resolution. The retention clauses fire in age order precisely so a row can pass through every
+band before deletion rather than being dropped from the top.
+
+**Why the DROP has to be a partition drop.** Pitfall 5 makes this concrete: expiring the raw band
+with `DELETE` on a 1B-row table rewrites MVCC tombstones for hours. `drop_chunks` /
+`DROP PARTITION` unlinks whole files, so the cost of a retention policy is `O(chunks)`, not
+`O(rows)`. Retention math only works if the deletion itself is free.
 
 Each TTL clause above fires independently on row age, so a single row cools through three tiers in sequence rather than jumping straight to deletion:
 
@@ -480,6 +594,47 @@ Every branch past the first gate still has to satisfy the same "use a TSDB" crit
 
 **Pitfall 1: High cardinality tags in InfluxDB causing memory explosion**
 InfluxDB maintains an in-memory index of all unique tag combinations (series cardinality). If `user_id` (millions of unique values) is used as a tag, the series cardinality explodes: 1M users × 10 metrics = 10M series in memory. Symptoms: OOM crashes, slow query performance. Fix: use user_id as a field (not a tag — not indexed), not as a tag. Only index low-cardinality dimensions (region, host, service).
+
+**Read it like this.** Series cardinality is a **product, not a sum**: every distinct combination of
+tag values is its own indexed series, so `cardinality = |tag1| x |tag2| x ... x |tagN|`. Adding a tag
+does not add rows to the index — it *multiplies* the index. That single word, "multiplies", is the
+whole pitfall; teams reason additively about a metric that behaves geometrically.
+
+| Symbol | What it is |
+|--------|------------|
+| Series | One unique `(measurement, tag-set)` combination. Each has its own in-memory index entry |
+| Tag | An **indexed** dimension. Contributes its cardinality as a multiplicative factor |
+| Field | An **unindexed** value. Contributes nothing to cardinality — the escape hatch |
+| `\|tag\|` | Number of distinct values that tag takes |
+| ~3KB | Rough per-series index overhead — series count translates almost directly into RAM |
+
+**Walk one example.** A healthy tag set, then the same schema with one high-cardinality tag added:
+
+```
+  healthy: host x endpoint x status
+    hosts       500
+    endpoints    20
+    statuses      5
+    series      500 x 20 x 5           =        50,000 series
+    index RAM   50,000 x 3 KB          =         150 MB      -> fine
+
+  add user_id as a TAG (1,000,000 distinct users)
+    series      500 x 20 x 5 x 1e6     = 50,000,000,000 series
+    index RAM   5e10 x 3 KB            =         150 TB      -> OOM, instantly
+
+  the pitfall's own smaller case: 1M users x 10 metrics
+    series      1,000,000 x 10         =    10,000,000 series
+    index RAM   1e7 x 3 KB             =          30 GB      -> OOM on most nodes
+
+  fix: user_id as a FIELD, not a tag
+    series      500 x 20 x 5           =        50,000 series (unchanged)
+    cost        you can no longer filter on user_id without scanning
+```
+
+**Why the fix has teeth.** Moving `user_id` from tag to field costs you the ability to do
+`WHERE user_id = ...` as an indexed lookup — a real loss, not a free win. That is the trade the
+Best Practices "keep tag cardinality below 10,000 per tag" rule encodes. And note it is a *per-tag*
+rule guarding a *product*: three tags each just inside 10,000 still multiply out to 10^12 series.
 
 **Pitfall 2: ClickHouse ORDER BY chosen incorrectly**
 A ClickHouse table with `ORDER BY ts` (time only). Query pattern: `WHERE device_id = 42 AND ts > now() - 1h`. ClickHouse reads all granules for the time range — all devices. Fix: `ORDER BY (device_id, ts)` — device_id as leading key allows skipping granules for other devices. Primary key selectivity: highest-cardinality, most-filtered field should be first in ORDER BY.
@@ -637,3 +792,41 @@ GROUP BY machine_id, sensor_type, minute;
 - 90-day raw retention: 80MB/sec × 7.8M sec ≈ 600TB raw → 15TB compressed
 - Sub-second queries on 1-minute aggregates covering all 100K machines across 90 days
 - Anomaly detection: Kafka Streams computes z-scores in real-time → alert when value > 3 std devs from historical mean
+
+**What the formula is telling you.** Every line in the results block is one chain:
+`machines x sensors x rate x bytes x seconds / compression`. It says: "capacity planning for a TSDB
+is a single multiplication whose only uncertain term is the compression ratio — so the compression
+ratio is the number you must defend, since a 2x error there is a 2x error in the storage bill."
+
+| Symbol | What it is |
+|--------|------------|
+| 100,000 x 50 | Machines x sensors each — this product is the ingest rate, and also the series count |
+| 16 bytes | Raw width of one reading (timestamp + machine_id + sensor_type + float) |
+| 7,776,000 | Seconds in the 90-day retention window |
+| 40:1 | Compression ratio delivered by `CODEC(Gorilla)` + `LowCardinality` + LZ4 together |
+
+**Walk one example.** Every published figure in the results block, rebuilt from the scenario:
+
+```
+  ingest rate      100,000 machines x 50 sensors x 1/sec   =  5,000,000 readings/sec
+  raw throughput   5,000,000 x 16 bytes                    =  80,000,000 B/s = 80 MB/s
+  compressed       80 MB/s / 40                            =  2.0 MB/s
+                   (the module quotes 2-4 MB/s -- 40:1 is the optimistic end of that band)
+
+  90-day window    90 x 86,400                             =  7,776,000 seconds
+  raw volume       80 MB/s x 7,776,000 s                   =  622,080,000 MB = 622 TB
+  compressed       622 TB / 40                             =  15.55 TB
+
+  sanity-check the series count against the cardinality rule above:
+                   100,000 machines x 50 sensor_types      =  5,000,000 series
+                   -> far past InfluxDB's comfort zone; ClickHouse is chosen precisely
+                      because ORDER BY (machine_id, sensor_type, ts) is a sort order,
+                      not an in-memory series index
+```
+
+**Why the compression ratio is the load-bearing term.** Hold everything else fixed and vary only
+that divisor: at 40:1 you provision 15.55 TB, at 20:1 you provision 31.1 TB, at 10:1 you provision
+62.2 TB. Nothing else in the chain is uncertain — machine count and sample rate are contractual, and
+16 bytes is arithmetic. This is why the schema pins `CODEC(Gorilla)` on the float and
+`LowCardinality(String)` on `sensor_type` explicitly rather than accepting the LZ4 default: those two
+declarations *are* the capacity plan.

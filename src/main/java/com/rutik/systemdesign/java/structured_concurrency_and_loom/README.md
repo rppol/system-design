@@ -22,6 +22,40 @@ Timeline: Virtual threads GA in Java 21 (JEP 444). `StructuredTaskScope` preview
 
 **Key insight:** Platform threads cost ~1 MB of OS stack + OS context-switch overhead. Virtual threads cost ~few KB of heap (growable stack) + JVM context-switch (continuation save/restore). A service that would max out at 200 concurrent platform threads can run 100,000+ virtual threads at similar peak memory.
 
+**In plain terms.** "Concurrency in Java has always been rationed by stack memory, not by CPU — so shrinking the per-task stack from a megabyte to a few kilobytes raises the ceiling by the same factor, roughly 256x, without changing a line of your logic."
+
+That framing explains why virtual threads need no new programming model. Nothing about the
+code got faster; the resource that was scarce simply stopped being scarce.
+
+| Symbol | What it is |
+|--------|------------|
+| ~1 MB | A platform thread's OS stack — *reserved* up front, used or not |
+| ~few KB | A virtual thread's initial heap stack; here taken as 4 KB, and it grows on demand |
+| Carrier thread | The platform thread a virtual thread is mounted on; pool = CPU count |
+| Memory budget | The RAM you are willing to spend on stacks — the real concurrency ceiling |
+| 100,000+ | Not a JVM limit, just what a normal heap affords at a few KB each |
+
+**Walk one example.** Fix a 1 GiB stack budget and ask how many of each thread type fit.
+
+```
+  budget = 1 GiB = 1,073,741,824 bytes
+
+  platform threads   1,073,741,824 / 1,048,576 (1 MB)     = 1,024 threads
+  virtual threads    1,073,741,824 / 4,096     (4 KB)     = 262,144 threads
+  ratio              262,144 / 1,024                      = 256x
+
+  now run the comparison the other way, at 100,000 concurrent tasks
+    as platform threads  100,000 x 1 MB                   = 97.7 GiB   -> impossible
+    as virtual threads   100,000 x 4 KB                   = 390.6 MiB  -> routine
+    the 200-thread pool  200 x 1 MB                       = 200 MiB    -> comparable!
+```
+
+That last line is the module's claim made precise: 100,000 virtual threads (391 MiB) sit in
+the same memory bracket as a 200-thread platform pool (200 MiB), while supporting 500x the
+concurrency. The reservation is the crux — a platform thread parked on a socket read holds
+its full megabyte the entire time, which is exactly the memory an I/O-bound service wastes
+most of.
+
 **Why this matters:** Java's traditional concurrency model (thread-per-request with a thread pool) forced architects toward reactive (non-blocking) styles like `CompletableFuture` / Spring WebFlux / Reactor to escape the thread-count ceiling. Virtual threads eliminate that ceiling while keeping synchronous code that is easier to read, debug, and profile.
 
 ---
@@ -236,6 +270,45 @@ class ConnectionPool {
 
 **Diagnosis:** Check for pinning with `-Djdk.tracePinnedThreads=full` — prints a stack trace whenever a virtual thread blocks while pinned.
 
+**What this actually says.** "A pinned virtual thread stops being lightweight and becomes a platform thread again — so your concurrency ceiling silently drops from 'as many as memory allows' to 'exactly the number of carrier threads,' which is your core count."
+
+The severity is what surprises people. Pinning is not a percentage slowdown; it is a hard
+collapse of the concurrency limit to a single-digit number, and it shows up as latency, not
+as an error.
+
+| Symbol | What it is |
+|--------|------------|
+| Carrier pool | Platform threads running virtual threads; parallelism defaults to CPU count |
+| Pin | A virtual thread that cannot unmount — inside `synchronized`, or in a native frame |
+| Blocking duration | How long the pin lasts; here the 100 ms JDBC round trip |
+| Effective concurrency | `carriers` when pinned, versus unbounded when not |
+| `ReentrantLock` | Releases the lock at `await()`, letting the virtual thread unmount cleanly |
+
+**Walk one example.** An 8-core box, a 100 ms database call, first inside `synchronized` and then under `ReentrantLock`.
+
+```
+  carriers = availableProcessors()                    = 8
+
+  pinned (synchronized around the 100 ms query)
+    concurrent in-flight queries   = 8                 <- capped by carriers, not memory
+    throughput  8 / 0.100 s                            = 80 requests/second
+    the 9th request waits for a carrier, not for the DB
+
+  not pinned (ReentrantLock; the virtual thread unmounts at await())
+    concurrent in-flight queries   = unbounded by threads (bounded by the DB/pool)
+    the 8 carriers stay busy mounting other ready virtual threads
+
+  the Q13 incident, same shape
+    100 concurrent requests / 8 carriers               = 12.5 waves
+    latency 50 ms -> 4,000 ms                          = 80x degradation
+    12.5 waves x 50 ms of pinned work                  = 625 ms of pure queueing per wave
+```
+
+80 requests per second on an 8-core machine doing pure I/O is the signature to recognize:
+throughput pinned to `carriers / blocking_time` regardless of load. That the interim fix in
+Q13 was raising `maxPoolSize` to 50 makes sense arithmetically — 50 carriers gives 500 req/s
+— but it treats the symptom, since each of those 50 carriers is again a real 1 MB OS thread.
+
 ### 6.3 StructuredTaskScope — Fan-out with Automatic Cancellation
 
 ```java
@@ -318,6 +391,41 @@ static final ThreadLocal<byte[]> BUFFER = ThreadLocal.withInitial(() -> new byte
 // (a) Call ThreadLocal.remove() explicitly before the virtual thread ends.
 // (b) Set -Djdk.virtualThreadScheduler.maxPoolSize and monitor heap pressure.
 ```
+
+**Read it like this.** "`ThreadLocal` costs one copy of its value per live thread, which was harmless when the thread count was capped at a couple hundred — remove the cap and the same line of code becomes a multi-gigabyte allocation."
+
+Nothing about `ThreadLocal` changed. What changed is the multiplier, which is why this is a
+scaling bug rather than a correctness bug and why it only appears under production load.
+
+| Symbol | What it is |
+|--------|------------|
+| `ThreadLocal.withInitial` | Allocates one instance of the value **per thread that touches it** |
+| Live thread count | The multiplier — bounded by a pool, unbounded with virtual threads |
+| 64 KB | The per-thread buffer in the example above |
+| `ScopedValue` | Binds one shared immutable value per scope; no per-thread copy |
+| `remove()` | The manual escape hatch that drops the copy before the thread ends |
+
+**Walk one example.** The same 64 KB buffer under a bounded pool and under virtual threads.
+
+```
+  bounded platform pool
+    threads             = 200
+    ThreadLocal cost    = 200 x 64 KB               = 12,800 KB   = 12.5 MiB   -> fine
+
+  virtual threads, unbounded
+    threads             = 100,000
+    ThreadLocal cost    = 100,000 x 64 KB           = 6,400,000 KB = 6.4 GB
+    multiplier          = 100,000 / 200             = 500x more copies
+
+  what ScopedValue costs for the same context
+    bindings            = 1 per scope, shared by every subtask in it
+    copies              = 0 per thread
+```
+
+12.5 MiB against 6.4 GB, from the identical declaration. The bounded pool was silently
+acting as the memory limit all along, and virtual threads removed it. This is also why
+`remove()` is not a real fix at scale: it bounds the *lifetime* of each copy but not the
+peak count, so 100,000 threads alive at once still hold 100,000 buffers simultaneously.
 
 ---
 
@@ -618,6 +726,49 @@ private AirlineResponse fetchAirline(Airline a, SearchRequest req) {
 - Reactive WebFlux: p99 = 480 ms but 3,000 lines of operator chains, 14 custom operators
 - Virtual threads + StructuredTaskScope: p99 = 510 ms, 80 lines, full stack traces, linear mental model
 - Memory: reactive 120 MB heap / 1,000 req; virtual threads 115 MB heap (similar — both I/O-bound)
+
+**Put simply.** "Once every model is I/O-bound and none of them blocks an OS thread, they all converge on the same latency — so the remaining decision is not performance, it is how much code you have to write and read."
+
+That is the real result buried in these four bullets. Two of the three options are within
+noise of each other on latency and memory; only the platform pool is actually broken, and
+only for an arithmetic reason.
+
+| Symbol | What it is |
+|--------|------------|
+| Fan-out | 12 airline calls per search, all independent |
+| Concurrent HTTP calls | `searches x fan-out` — the number that must be in flight at once |
+| Pool of 200 | The platform-thread ceiling; anything beyond it queues |
+| Waves | `calls / threads` — how many sequential rounds the pool is forced into |
+| p99 | 99th-percentile latency; the tail that the queueing shows up in |
+
+**Walk one example.** 1,000 concurrent searches at a fan-out of 12.
+
+```
+  concurrent HTTP calls  1,000 x 12                     = 12,000
+
+  platform pool of 200
+    waves               12,000 / 200                    = 60 sequential rounds
+    -> the tail request waits behind 59 rounds of other requests
+    observed p99                                        = 4.2 s
+
+  as threads, by memory
+    12,000 platform threads x 1 MB                      = 11.7 GiB
+    12,000 virtual threads  x 4 KB                      = 46.9 MiB
+    -> the pool is 200 not because 200 is right, but because 12,000 was impossible
+
+  reactive vs virtual threads, the actual comparison
+    p99          480 ms  vs  510 ms
+    delta        510 - 480                              = 30 ms
+    relative     30 / 480                               = 6.25%
+    heap         120 MB  vs  115 MB                     = 4.2% less
+    code         3,000 lines -> 80 lines
+    reduction    (3,000 - 80) / 3,000                   = 97.3%
+```
+
+The 60 waves are the whole story of the platform-pool failure: 4.2 s of p99 is queueing, not
+network time. On the reactive-vs-virtual comparison, note that the 30 ms gap is 6.25% of the
+480 ms baseline rather than the 3% quoted in the Lesson below — either way it is dwarfed by
+the 97.3% cut in code, which is the trade the team actually made.
 
 **Lesson:** Virtual threads close the performance gap with reactive for I/O-bound workloads while recovering readable, debuggable code. The 30 ms latency difference (3%) was acceptable; the 97% reduction in code complexity was not.
 

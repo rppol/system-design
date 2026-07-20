@@ -168,6 +168,39 @@ String summary = IntStream.rangeClosed(1, 10).boxed()
 // "Total: 10 items, Sum: 55, Avg: 5.5"
 ```
 
+**In plain terms.** "A `Collector` is a fold expressed as four separate functions — make an empty box, put one element in the box, merge two boxes, turn the final box into the answer — and splitting it that way is what lets the same code run sequentially or in parallel unchanged."
+
+The four-way split is not ceremony. `reduce` needs a single combining function and therefore a fresh immutable value per element; `collect` gets a *mutable* box per thread, which is why it can accumulate 5M rows without allocating 5M intermediates.
+
+| Symbol | What it is |
+|--------|------------|
+| `Supplier<A>` | Creates one empty accumulator — here `new int[]{0, 0}`, holding `[count, sum]` |
+| `BiConsumer<A,T>` | Folds one element into the box in place: bump `acc[0]`, add to `acc[1]` |
+| `BinaryOperator<A>` | Merges two boxes; runs only in parallel, once per split boundary |
+| `Function<A,R>` | The finisher — turns the raw box into the result the caller asked for |
+| `A` vs `R` | The mutable working type versus the published result type; keeping them distinct is what makes the box safe to mutate |
+
+**Walk one example.** `IntStream.rangeClosed(1, 10).boxed().collect(toSummary())`, run sequentially:
+
+```
+  supplier              acc = [0, 0]                    (count, sum)
+
+  accumulate 1          acc = [ 1,  1]
+  accumulate 2          acc = [ 2,  3]
+  accumulate 3          acc = [ 3,  6]
+  ...
+  accumulate 10         acc = [10, 55]
+
+  combiner              not called -- sequential run, only one accumulator existed
+
+  finisher              count = 10
+                        sum   = 55
+                        avg   = 55 / 10 = 5.5
+                        -> "Total: 10 items, Sum: 55, Avg: 5.5"
+```
+
+Run the same pipeline with `.parallel()` and the arithmetic must not move. Split at 5: one box reaches `[5, 15]`, the other `[5, 40]`, and the combiner produces `[5+5, 15+40] = [10, 55]` — the identical result, because addition is associative. Swap in a non-associative accumulator (subtraction, or a running average) and the sequential and parallel answers diverge with no warning; the combiner is where that contract is either honoured or broken.
+
 ### Parallel Stream — When It Helps vs Hurts
 
 ```java
@@ -229,6 +262,37 @@ public class RangeSpliterator implements Spliterator<Integer> {
     @Override public int characteristics() { return ORDERED | SIZED | SUBSIZED | IMMUTABLE; }
 }
 ```
+
+**Stated plainly.** "`(current + end) >>> 1` is 'take the midpoint', written with the one shift operator that still gives the right answer after the sum has overflowed past `Integer.MAX_VALUE`."
+
+This is the same defect that sat in `Arrays.binarySearch` in the JDK for nine years. It matters here because a `Spliterator` splits by index, and a source indexed near the top of the `int` range makes the plain `(lo + hi) / 2` produce a *negative* midpoint — which either splits nothing or walks off the source.
+
+| Symbol | What it is |
+|--------|------------|
+| `current`, `end` | The half-open index range this spliterator still owns |
+| `current + end` | The sum, computed in 32-bit `int` — this is the step that can overflow |
+| `>>> 1` | Unsigned right shift: shifts in a 0 at the top, so it reads the wrapped sum as the unsigned value it really is |
+| `>> 1` | Signed right shift, which copies the sign bit down and would preserve the wrong negative result |
+| `mid <= current` | The stop condition — a range too small to halve returns `null`, ending the split recursion |
+
+**Walk one example.** A range high in the `int` space, split both ways:
+
+```
+  current =  2,000,000,000
+  end     =  2,100,000,000
+  true midpoint            =  2,050,000,000
+
+  current + end (exact)    =  4,100,000,000      <- above Integer.MAX_VALUE (2,147,483,647)
+  stored as int (wrapped)  =   -194,967,296      <- NEGATIVE
+
+  with signed   >> 1       :    -97,483,648      <- garbage; mid <= current, split refused
+  with unsigned >>> 1      :  2,050,000,000      <- correct midpoint, recovered exactly
+
+  Ordinary ranges are unaffected: current = 0, end = 10
+    0 + 10 = 10, and 10 >>> 1 = 5 -- the same answer / 2 would give.
+```
+
+The unsigned shift works because the wrapped sum still holds the correct low 32 bits; only the interpretation of the top bit went wrong. `>>>` reads those same bits as a non-negative number, undoing the misreading without needing a wider type. The alternative — `current + (end - current) / 2` — never overflows either and is clearer, but `>>> 1` is the idiom the JDK's own spliterators use.
 
 ### Currying and Partial Application in Java
 
@@ -519,6 +583,33 @@ Memoization is only correct for *pure* functions (same input -> same output, no 
 ```
 
 The custom collector folds total, min, max, count, and the per-merchant map in one traversal, so the source is read once and stays warm in cache. Four separate `stream()` calls re-iterate the list four times with cold-cache re-reads each pass.
+
+**What it means.** "The win is not that each element got cheaper to process — it got slightly more expensive — it is that you stopped reading 20 million elements to answer a question about 5 million."
+
+Reading the table that way keeps the optimisation honest. Fusing four folds into one accumulator adds work per element; it pays off only because it deletes three entire traversals, and that ratio is what you should estimate before rewriting a pipeline.
+
+| Symbol | What it is |
+|--------|------------|
+| Passes | How many times the pipeline walks the 5M-row source end to end |
+| Element reads | Passes x 5M — the total number of elements actually touched |
+| Wall time | The measured cost of the whole job, both traversal and per-element work |
+| ns/read | Wall time divided by element reads — the per-element cost, which rises when one accumulator does four jobs |
+
+**Walk one example.** The two approaches over the same 5M rows:
+
+```
+                                passes   element reads   wall time    ns per read
+  4 separate stream pipelines      4        20,000,000      2.0 s         100 ns
+  1 custom Collector               1         5,000,000      0.6 s         120 ns
+
+  reads removed   =  20,000,000 - 5,000,000  =  15,000,000   (75% fewer)
+  wall time saved =  2.0 s - 0.6 s           =  1.4 s
+  speedup         =  2.0 / 0.6               =  3.33x
+```
+
+Note the shape of the result: 4x fewer reads buys 3.33x less time, not 4x. The per-element cost went *up* from 100 ns to 120 ns, because the single accumulator now updates total, min, max, count, and a `HashMap` on every row instead of one field. That 20 ns tax is the price of the three deleted traversals — a good trade at four folds, and a losing one if you fuse so much per-element work that the extra cost outgrows the traversal you removed.
+
+
 
 ### Common Pitfalls (production war stories)
 

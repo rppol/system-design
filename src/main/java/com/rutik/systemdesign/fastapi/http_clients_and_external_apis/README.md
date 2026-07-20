@@ -122,6 +122,61 @@ integration; only move to `aiohttp` once profiling — not intuition — shows i
 **Streaming responses (LLM inference):** `connect=3.0, read=None` — read timeout must be `None`
 or set to the maximum expected streaming duration (e.g., 120s).
 
+These are not four independent settings. They compose into one number, and retries multiply it:
+
+```
+  worst_call  = pool + connect + read
+  worst_total = attempts x worst_call + sum(backoff_delays)
+```
+
+**In plain terms.** "The timeout you actually promised your caller is not any single value in
+`httpx.Timeout` — it is all of them added together and then multiplied by however many times you
+are willing to try again."
+
+Almost every "our p99 is fine but requests occasionally take 90 seconds" incident is this
+multiplication going unnoticed, because each individual number looks reasonable in isolation.
+
+| Symbol | What it is |
+|--------|------------|
+| `pool` | Seconds waiting for a free connection when all `max_connections` are busy |
+| `connect` | Seconds for TCP handshake + TLS negotiation |
+| `read` | Seconds waiting for the server's response body. Usually the dominant term |
+| `attempts` | Total tries, not retries. `max_attempts=3` means the budget is paid three times |
+| `sum(backoff_delays)` | Sleep between attempts — pure added latency, no work happening |
+
+**Walk one example.** Both profiles above, wrapped in the Section 6.3 retry loop
+(`max_attempts=3`, full jitter with caps of 1 s then 2 s):
+
+```
+  conservative (external third parties)
+    worst_call  = 5.0 pool + 3.0 connect + 30.0 read       =   38.0 s
+    worst_total = 3 x 38.0 + (1.0 + 2.0)                   =  117.0 s   <- ~2 minutes
+
+  aggressive (internal mesh)
+    worst_call  = 2.0 pool + 1.0 connect +  5.0 read       =    8.0 s
+    worst_total = 3 x 8.0 + (1.0 + 2.0)                    =   27.0 s
+```
+
+Two minutes for a call whose read timeout reads "30 seconds". Whatever coroutine is waiting is
+held for the whole 117 s, which is how a single slow downstream drains a worker's concurrency
+budget without a single error being logged.
+
+**Where this bites in Section 14.** The case study states a 3-second total response budget, and
+its `_fetch` helper retries 3 times with `connect=3.0` plus a per-provider read timeout:
+
+```
+  market data  (read 1.0 s):  3 x (3.0 + 1.0) + (1.0 + 2.0)   =  15.0 s
+  news         (read 2.5 s):  3 x (3.0 + 2.5) + (1.0 + 2.0)   =  19.5 s
+
+  the two run concurrently under gather, so worst case = max(15.0, 19.5) = 19.5 s
+  against a stated budget of                                              3.0 s   -> 6.5x over
+```
+
+The budget is only met on the happy path. Enforcing it requires a ceiling *outside* the retry
+loop — wrap the `gather` in `asyncio.wait_for(..., timeout=3.0)`, or derive `max_attempts` from
+the budget rather than setting both independently. A response budget that no configured timeout
+can enforce is documentation, not a guarantee.
+
 ### 4.3 Retry Patterns
 
 - **Fixed backoff:** `sleep(2)` between attempts. Simple, but thundering-herd risk.
@@ -441,6 +496,62 @@ async def protected_call(client: httpx.AsyncClient, url: str) -> dict:
         raise
 ```
 
+`failure_threshold=5` and `recovery_timeout=30.0` translate directly into two operational
+quantities — how long you keep hurting, and how much you stop paying:
+
+```
+  time_to_open    = failure_threshold x worst_call
+  concurrency_saved = rps x worst_call        (in-flight coroutines, while OPEN)
+  probe_duty_cycle  = worst_call / (recovery_timeout + worst_call)
+```
+
+**The idea behind it.** "The breaker does not make the downstream work; it caps the number of
+your own coroutines that a dead downstream is allowed to hold hostage — from 'everything you
+have' down to exactly one probe."
+
+That reframing is the interview answer. A circuit breaker is a resource-protection device for the
+*caller*, and its numbers should be read as coroutine counts, not as failure counts.
+
+| Symbol | What it is |
+|--------|------------|
+| `failure_threshold` | Consecutive failures before OPEN. `5` here. Sets detection time |
+| `worst_call` | The slowest a failing call can be — the timeout, `5.0 s` in `protected_call` |
+| `recovery_timeout` | Seconds spent OPEN before one HALF-OPEN probe. `30.0` here |
+| `rps` | Your own request rate at this downstream. The multiplier on everything saved |
+| `probe_duty_cycle` | Fraction of wall time spent touching a downstream that is still down |
+
+**Walk one example.** A downstream goes hard-down while you serve 100 rps against it:
+
+```
+  detection
+    time_to_open = 5 failures x 5.0 s timeout        =  25 s of full-pain window
+    (sequential worst case; concurrent traffic trips it far sooner)
+
+  while OPEN, per 30 s window
+    calls rejected instantly = 100 rps x 30 s        =  3,000 requests, failed in microseconds
+    coroutine-seconds not consumed = 3,000 x 5.0 s   =  15,000 coroutine-seconds
+
+  concurrency held, steady state
+    without breaker = 100 rps x 5.0 s timeout        =  500 coroutines permanently in flight
+    with breaker    = 1 HALF-OPEN probe              =    1 coroutine
+                                                        -> 500x reduction
+
+  probe cost while still down
+    duty cycle = 5.0 / (30.0 + 5.0)                  =  14.3% of wall time, one call at a time
+```
+
+500 in-flight coroutines waiting on a corpse is how a single failing dependency takes down
+endpoints that never call it — they are queued behind the same event loop and the same pool.
+The breaker converts that into 1.
+
+**Why the threshold and the timeout pull in opposite directions.** Lowering `failure_threshold`
+detects faster but trips on transient blips, and every false trip rejects 3,000 good requests per
+30-second window. Raising `recovery_timeout` cuts probe load on a struggling downstream but
+extends your own outage after it recovers — worst case, a service that came back one second into
+the window stays cut off for the remaining 29. Threshold `5` with recovery `30 s` is a reasonable
+default precisely because 25 s of detection and 30 s of blindness are the same order of
+magnitude; tune them together, never one alone.
+
 ### 6.5 Custom Auth — Bearer Token with Auto-Refresh
 
 ```python
@@ -583,6 +694,63 @@ Internal calls between FastAPI microservices inside a Kubernetes cluster:
   on every call. Connections reused across ~95% of requests.
 - mTLS handled by Envoy sidecar; application layer uses plain HTTP.
 
+That "~95% of requests" is the whole value of the pool, and it is priced by an expectation:
+
+```
+  avg_setup_cost = reuse_rate x ~0 + (1 - reuse_rate) x handshake_cost
+  handshake_cost = RTT_tcp + RTT_tls        (2 RTT for TCP + TLS 1.3)
+```
+
+**Put simply.** "Connection reuse does not make any single request faster — it makes the
+handshake a rare event instead of a per-request tax, so what you pay on average collapses even
+though the worst case is unchanged."
+
+The averaging is the point. A 5% miss rate is not "5% slower"; it is the difference between
+paying the handshake 5 times per 100 requests and paying it 100 times.
+
+| Symbol | What it is |
+|--------|------------|
+| `reuse_rate` | Fraction of requests that find a warm socket in the keep-alive pool (~95% here) |
+| `RTT_tcp` | One round trip for the TCP SYN/SYN-ACK handshake |
+| `RTT_tls` | One more round trip for TLS 1.3 (TLS 1.2 costs two) |
+| `handshake_cost` | Setup latency paid only on a pool miss. ~10 ms at a 5 ms intra-cluster RTT |
+| `keepalive_expiry` | How long an idle socket survives. Below this gap between calls, reuse is free |
+
+**Walk one example.** 100 rps to one internal service at a 5 ms RTT, with and without the pool:
+
+```
+  handshake_cost = 5 ms TCP + 5 ms TLS 1.3            =  10.0 ms
+
+  no pool (a fresh AsyncClient per request, reuse_rate = 0)
+    avg_setup = 1.00 x 10.0 ms                        =  10.00 ms per request
+    at 100 rps: 100 x 10 ms                           =   1.0 full second of coroutine
+                                                          time per second of wall clock
+
+  lifespan-managed pool (reuse_rate = 0.95)
+    avg_setup = 0.95 x 0.1 ms + 0.05 x 10.0 ms        =   0.595 ms per request
+                                                          -> 16.8x cheaper on average
+```
+
+On a read path with a p99 of 50 ms, 10 ms of setup is 20% of the budget spent before the request
+is even sent. At 0.595 ms it is 1.2% — the same code, the same network, one shared client.
+
+**What the pool ceiling actually is.** Keep-alive sockets are also a concurrency limit, by Little's
+Law: `rps_ceiling = connections / latency`.
+
+```
+  max_keepalive = 50 sockets, p99 read latency 50 ms
+    ceiling = 50 / 0.050 s                            =  1,000 rps sustained on warm sockets
+
+  the module's default max_connections = 100, against the Section 14 providers
+    market data (80 ms) : 100 / 0.080                 =  1,250 rps
+    news        (2.0 s) : 100 / 2.0                   =     50 rps   <- 25x lower, same pool
+```
+
+One slow provider consumes pool slots for 25x as long as a fast one, so a shared client sized for
+the fast path saturates on the slow path first — and once `max_connections` is exhausted, every
+caller waits out the `pool` timeout from Section 4.2 before its own `connect` even begins. Size
+the pool against your *slowest* downstream, or give slow downstreams their own client.
+
 ### 7.4 GitHub Actions / Webhook Consumers (Idempotent Processing)
 
 GitHub sends webhooks with `X-GitHub-Delivery` (unique UUID per event). Storing this UUID in a
@@ -661,6 +829,48 @@ Never. Creating `httpx.AsyncClient()` inside a route handler or per-request func
 connection pooling entirely. At 100 rps, each request opens and closes its own TCP connection,
 consuming 100 file descriptors concurrently and spending 3-10ms on each TCP+TLS handshake.
 The OS file descriptor limit (1024 by default on Linux) is exhausted in 10 seconds.
+
+"Exhausted in 10 seconds" is arithmetic, and the mechanism is not the concurrent requests:
+
+```
+  sockets_held = rps x TIME_WAIT      (closed sockets, not in-flight ones)
+  seconds_to_exhaustion = fd_limit / rps
+```
+
+**What the formula is telling you.** "A closed socket is not a free socket. The kernel parks every
+one you close in `TIME_WAIT` for a minute, so descriptors accumulate at your full request rate
+even though nothing is actually in flight."
+
+This is why the failure is a cliff rather than a slope, and why it never reproduces in tests: the
+accumulation only outruns the limit above a request rate you do not generate locally.
+
+| Symbol | What it is |
+|--------|------------|
+| `rps` | Requests per second, each opening and closing its own connection |
+| `TIME_WAIT` | Kernel hold on a closed socket — 60 s on Linux (`2 x MSL`), not configurable per-app |
+| `sockets_held` | Steady-state descriptors consumed once accumulation saturates |
+| `fd_limit` | `ulimit -n`, 1024 by default. Shared with DB pools, log files, and inbound sockets |
+
+**Walk one example.** 100 rps through a per-request client, from a cold start:
+
+```
+  accumulation
+    100 sockets/s, none released for 60 s
+    t =  5 s  ->    500 descriptors      (still fine)
+    t = 10 s  ->  1,000 descriptors      (about to fail)
+    t = 10.24 s -> 1,024                 <- OSError: [Errno 24] Too many open files
+    steady state, had it survived: 100 x 60 = 6,000 descriptors -- 6x over the limit
+
+  the same 100 rps through one shared pool
+    concurrent in-flight = 100 rps x 0.050 s latency  =  5 sockets
+    capped by max_connections = 100 regardless of rate
+```
+
+Five descriptors versus six thousand, for identical traffic. Note also that the crash time is
+independent of how fast the downstream is — `seconds_to_exhaustion = 1024 / rps` — so a *faster*
+downstream fails just as quickly, and doubling traffic to 200 rps halves the fuse to 5.1 seconds.
+Raising `ulimit -n` buys proportionally more time and fixes nothing; the pool removes the
+accumulation term entirely.
 
 ### When NOT to retry
 

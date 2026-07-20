@@ -206,6 +206,42 @@ Pydantic v2 fields in each error item:
 - `input` — the input value that failed (may be omitted if sensitive)
 - `url` — link to Pydantic docs for this error type (v2 only)
 
+**In plain terms.** "`loc` is not a field name — it is a full route from the request root down to
+the exact value that failed, with array indices included. Read it left to right and it tells you
+*where to look* in the payload the client sent."
+
+Treating `loc` as a name is the reason so many reshaped 422 handlers emit `"field": "price"` when
+there are forty prices in the body. The tuple is a path, and the path is the whole value.
+
+| Symbol | What it is |
+|--------|------------|
+| `loc[0]` | The source — `"body"`, `"query"`, `"path"`, `"header"`, `"cookie"` |
+| `loc[1:]` | The route through the payload: field names as `str`, list positions as `int` |
+| `int` element | An index into a list — the tell that the failure is inside a collection |
+| `".".join(...)` | The usual flattening into a client-friendly `"items.0.price"` |
+| `ctx` | Machine-readable bounds behind `msg`, e.g. `{"min_length": 3}` |
+
+**Walk one example.** Four `loc` tuples from one request, decoded:
+
+```
+  loc tuple                            source   flattened field    means
+  ("body", "email")                    body     email              top-level field missing
+  ("body", "items", 0, "price")        body     items.0.price      1st item's price
+  ("body", "items", 12, "price")       body     items.12.price     13th item's price
+  ("query", "limit")                   query    limit              ?limit= is wrong
+```
+
+Two details decide whether your reshaped envelope is usable. First, `loc[1:]` must keep the
+integer indices — dropping them collapses `items.0.price` and `items.12.price` into the same
+string `"items.price"`, and the client cannot tell which of its 40 line items to fix. Second,
+`loc[0]` belongs in its own `source` field rather than being joined into the path: a client
+fixing `"body.limit"` will search its request body for a parameter that is actually in the query
+string. The Pitfall 2 fix below splits them for exactly these two reasons.
+
+Note the index arithmetic in the last column: `loc` indices are 0-based, so `items.12` is the
+13th item a human would count. If your error messages are surfaced to end users rather than to
+client code, that off-by-one is worth translating at the presentation layer.
+
 To reshape into your own envelope, override the handler:
 
 ```python
@@ -456,6 +492,50 @@ and raise `UserNotFoundError(AppError)`, the `AppError` handler fires even if th
 specific `UserNotFoundError` handler.
 
 Practical consequence: you get subclass dispatch for free via Python's MRO.
+
+**What it means.** "Starlette does not search your handler list — it walks the raised exception's
+own ancestry, in order, and takes the first ancestor that has a handler registered. The lookup
+length is the class hierarchy's depth, not the number of handlers you registered."
+
+That distinction is why registering eight handlers costs nothing at request time, and why a
+single misplaced base-class handler can silently capture everything below it.
+
+| Symbol | What it is |
+|--------|------------|
+| `type(exc).__mro__` | The ancestry tuple Python already computed at class-definition time |
+| `d` | Position in that tuple where the first registered handler is found |
+| `d` lookups | Total dict probes to dispatch — independent of how many handlers exist |
+| `len(__mro__)` | Worst case, when only a bare `Exception` handler is registered |
+
+**Walk one example.** Dispatching the case study's `QuotaExceededError`, whose MRO is
+`QuotaExceededError -> AppError -> Exception -> BaseException -> object`:
+
+```
+  scenario A -- dedicated handler registered for QuotaExceededError
+    probe 1  QuotaExceededError   -> HIT     dispatch at depth 1, adds Retry-After
+
+  scenario B -- only the AppError handler registered
+    probe 1  QuotaExceededError   -> miss
+    probe 2  AppError             -> HIT     dispatch at depth 2, status 429 is
+                                             still correct (read off exc.status_code)
+                                             but Retry-After is silently absent
+
+  scenario C -- only the Exception backstop registered
+    probe 1  QuotaExceededError   -> miss
+    probe 2  AppError             -> miss
+    probe 3  Exception            -> HIT     depth 3, generic 500 -- the 429 is lost
+```
+
+Scenario B is the dangerous one precisely because it *looks* fine: right status code, right
+envelope, correct-looking response. Only the missing `Retry-After` header distinguishes it, and
+no test that asserts on status code alone will catch it. That is the concrete answer to
+Discussion Question 1 in the case study, and it generalizes: a base-class handler makes every
+future subclass silently *work*, which is exactly what makes it easy to forget that a particular
+subclass needed more.
+
+The cost side is reassuring. Depth is bounded by the hierarchy you wrote — two or three levels in
+any sane design — so dispatch is 1–3 dict probes regardless of whether you registered 2 handlers
+or 20. There is no performance argument for registering fewer.
 
 ```mermaid
 flowchart LR
@@ -1311,6 +1391,54 @@ async def test_check_quota_raises_when_exceeded():
     assert exc_info.value.limit == 100
     assert exc_info.value.used == 105
 ```
+
+**Stated plainly.** "Check the quota against what the request *would* consume, not against what
+has already been consumed. The comparison is `used + requested > limit`, and every term in it is
+load-bearing."
+
+The naive form — `used > limit` — is the classic quota bug: it only ever fires *after* the tenant
+has already gone over, so the request that actually breaches the limit is the one you let through.
+
+| Symbol | What it is |
+|--------|------------|
+| `used` | Units the tenant has already consumed this period |
+| `requested_units` | Units this in-flight request will consume if allowed |
+| `limit` | The tenant's subscription ceiling |
+| `limit - used` | Remaining headroom — the largest request that can still pass |
+| `used + requested - limit` | Overshoot, the amount by which this request would breach |
+
+**Walk one example.** The exact numbers the unit test above asserts on:
+
+```
+  used = 90, limit = 100, requested_units = 15
+
+  headroom  = 100 - 90            = 10 units   <- largest request that passes
+  projected =  90 + 15            = 105 units
+  breach?   = 105 > 100           = True       -> raise QuotaExceededError
+  overshoot = 105 - 100           =   5 units
+  utilisation = 105 / 100         = 105%       <- the exception's message shows
+                                                  "90/100" or "105/100" depending
+                                                  on which value you pass as `used`
+```
+
+Note what the service passes: `used=quota.used + requested_units`, i.e. `105`, not the stored
+`90`. That is deliberate and worth being explicit about, because the two choices produce different
+client-facing messages from the same failure:
+
+```
+  used=90   -> "Quota exceeded: 90/100 used"    confusing: 90 < 100, looks fine
+  used=105  -> "Quota exceeded: 105/100 used"   clear: shows the projected breach
+```
+
+The `105/100` form is the right one — a client reading `90/100 used` alongside a 429 has been
+told two contradictory things. The trade is that `exc.used` no longer means "currently consumed",
+so anything that reads it for metrics must know it is the projected figure; the assertion
+`exc_info.value.used == 105` in the test above is what pins that contract down.
+
+Finally, `retry_after_seconds=3600` is the other half of the response and is not derived from
+this arithmetic at all — it is a fixed hour, which is correct only if quotas reset hourly. If the
+period is monthly, the honest value is seconds until the reset boundary; a flat `3600` invites a
+well-behaved client to retry 720 times before the quota actually refills.
 
 #### Discussion Questions
 

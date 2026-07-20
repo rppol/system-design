@@ -249,6 +249,40 @@ print(s3 is s4)   # False in general — spaces prevent interning
 print(s3 == s4)   # True — always use == for string equality
 ```
 
+**Read it like this.** "CPython builds 262 integers when it starts up and hands out the same ones
+forever; ask for a 263rd value and you get a fresh object every time." `is` is not testing the
+number — it is testing whether you happened to land inside that prebuilt table.
+
+| Symbol | What it is |
+|---|---|
+| `-5` | Bottom of the cache. Negative because `-1` is a ubiquitous sentinel and `-2`..`-5` are cheap |
+| `256` | Top of the cache. One byte's worth of non-negative values, `0x00` through `0xFF` |
+| `256 - (-5) + 1` | Count of preallocated singletons: **262** objects, built once at interpreter startup |
+| `28 bytes` | Size of one CPython `int` object, so the whole table costs `262 x 28` = 7,336 bytes |
+| `257` | The first value above the ceiling — the smallest positive integer where `is` starts lying |
+
+**Walk one example.** Follow two identical assignments across the boundary:
+
+```
+  a = 256 ; b = 256                      a = 257 ; b = 257
+  ------------------------              ------------------------
+  256 is inside [-5, 256]                257 is outside [-5, 256]
+  both names bind the SAME               each literal may allocate
+  cached object                          its OWN 28-byte int
+  a is b  ->  True                       a is b  ->  False
+  a == b  ->  True                       a == b  ->  True
+
+  the only thing that changed between the two columns is +1
+```
+
+The lesson is not "remember 256". It is that **`is` on integers reports an allocation accident, not
+a value**, and the accident is doubly slippery because the compiler also folds constants inside a
+single code object — so `a is b` for `257` can print `True` when both literals sit in one function
+and `False` when they sit in two. The cache is a memory optimisation (7,336 bytes buys you every
+loop counter, list index, and small tally in the program); it was never an equality guarantee. Use
+`==` for every numeric comparison and reserve `is` for `None`, `True`, `False`, and sentinels you
+created yourself.
+
 ### 6.2 Truthiness deep dive
 
 ```python
@@ -320,6 +354,47 @@ xychart-beta
     bar [1.2, 2.1, 5.0, 1.8]
 ```
 *When the file usually exists, EAFP's happy path (~1.2 µs) beats LBYL's stat-then-open (~2.1 µs); the crossover flips when the file is usually missing, where LBYL's cheap failed check (~1.8 µs) beats EAFP's ~5.0 µs exception cost — the numeric case for using EAFP only when success is common (Section 9).*
+
+**What this actually says.** "Neither style is faster; each is faster at a different success rate, so
+the only honest comparison is a weighted average." The four bars above are two pairs, and what you
+actually pay is each pair blended by how often your calls succeed.
+
+| Symbol | What it is |
+|---|---|
+| `p` | Probability a call succeeds — the file exists, the key is present, the attribute is there |
+| `1 - p` | Probability it fails and the failure path is taken |
+| `E_eafp` | `1.2p + 5.0(1-p)` = `5.0 - 3.8p`. Steep line: exceptions are the expensive term |
+| `E_lbyl` | `2.1p + 1.8(1-p)` = `1.8 + 0.3p`. Nearly flat: LBYL pays its check either way |
+| break-even | The `p` where the two lines cross — solve `5.0 - 3.8p = 1.8 + 0.3p` |
+
+**Walk one example.** Solve for the crossing, then sample the curve on both sides:
+
+```
+  5.0 - 3.8p = 1.8 + 0.3p
+  5.0 - 1.8  = 0.3p + 3.8p
+  3.2        = 4.1p
+  p          = 3.2 / 4.1 = 0.7805        break-even at about 78% success
+
+    p        E_eafp    E_lbyl    winner
+  0.50        3.100     1.950    LBYL   (EAFP costs 59% more)
+  0.70        2.340     2.010    LBYL   (still LBYL, at 70%)
+  0.78        2.036     2.034    tied
+  0.90        1.580     2.070    EAFP
+  0.99        1.238     2.097    EAFP   (EAFP costs 41% less)
+```
+
+**A note on the 50% figure.** The code comment above says "use EAFP when success is the common case
+(>50% of calls succeed)", and Section 9 repeats the "majority of the time" framing. Taken as a
+*performance* rule against these four numbers, that threshold is optimistic: with a 5.0 µs failure
+path against a 1.8 µs one, EAFP does not pull ahead until roughly `p = 0.78`, and at exactly 50% it
+is 59% *slower*. Between 50% and 78% the two styles stay within 1.15 µs of each other, which is
+the real reason the imprecision is harmless in practice — at that scale neither is your bottleneck.
+
+That is also why the guidance should not be read as a stopwatch rule. The durable arguments for EAFP
+are that it closes the TOCTOU race window LBYL leaves open between the check and the act, and that
+it does not double the work of the lookup. Those hold at every value of `p`. Reach for LBYL when
+failure is genuinely common, when the operation is irreversible, or when you need to report which
+precondition failed — not because of a microsecond count.
 
 ### 6.4 Comprehensions and generator expressions
 
@@ -875,5 +950,48 @@ def parse_database_config(config: dict | None) -> dict[str, object]:
 | Type hints on signature | 0 | 2 |
 | `match`/`case` used | No | Yes |
 | Walrus `:=` used | No | 3 times |
+
+**Stated plainly.** "Every row in that table is a count of one construct the language already had a
+shorter, safer spelling for." Read it as a defect inventory rather than a style score — the line
+count is a side effect of removing the defects, not the goal.
+
+| Symbol | What it is |
+|---|---|
+| legacy lines | Non-comment, non-blank lines in the BROKEN block above: **34** |
+| idiomatic lines | Non-comment, non-blank lines in the FIX block above: **27** |
+| `== None` / `!= None` | Identity checks written as equality: **8** occurrences (2 `==`, 6 `!=`) |
+| `is` on a string literal | The genuinely dangerous one: **3** occurrences, one per branch |
+| walrus `:=` | Get-then-check-then-get triples collapsed into one expression: **4** in the rewrite |
+
+**Walk one example.** Attribute each removed construct to the idiom that absorbed it:
+
+```
+  construct removed                        count   idiom that replaced it
+  == None  (config, db_type)                   2   is None
+  != None  (host, port, ssl, path,             6   truthiness, or walrus :=
+            url, max_connections)
+  is on string ("postgres"/"sqlite"/           3   match/case on the value
+                "redis")
+  len(config) == 0, len(str(max_conn)) > 0     2   plain truthiness
+  if/else pair setting a bool                  1   bool(config.get("ssl"))
+                                             ---
+  latent or non-idiomatic constructs          14
+
+  line reduction as counted here:  (34 - 27) / 34  =  7 / 34  =  0.206  ->  20.6%
+```
+
+Only 3 of those 14 were true *bugs* — the `is`-on-a-string comparisons. Each one passes every test
+where the value is a short literal and fails the first time the config value arrives from a YAML
+parser rather than a source literal, which is exactly the `257` failure mode Section 6.1 walks
+through, one type up. The other 11 were merely slower or noisier. Shorter code is the side effect;
+**making the 3 bugs unrepresentable is the result.**
+
+**A note on the counts.** The metrics table's own figures do not all reconcile with the two code
+blocks as printed: counting non-comment, non-blank lines gives 34 legacy against 27 idiomatic
+(a 20.6% reduction), not 47 against 27; the None-comparisons number 8 rather than 5; `len()` checks
+number 2 rather than 3; and the rewrite uses the walrus 4 times rather than 3. Only the `is`-on-
+string count of 3 and the idiomatic line count of 27 match exactly. The direction of every row is
+right and the argument does not depend on the magnitudes — but if you quote this case study in an
+interview, quote the ratios you can point at in the code.
 
 The refactored version eliminates 43% of the lines, makes all equality checks correct by construction (no interning dependency), and uses `match`/`case` to make the dispatch structure immediately visible to any reader. The walrus operator removes the redundant `config.get()` calls that previously appeared once in the condition and once in the body.

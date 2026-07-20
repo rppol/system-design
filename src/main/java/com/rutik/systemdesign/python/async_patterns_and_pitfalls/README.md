@@ -450,6 +450,41 @@ async def fetch_all(urls: list[str]) -> list[dict[str, Any]]:
 # Throughput with limit: 50 req / avg_latency_per_req ≈ 50 / 0.1s = 500 req/s (sustained)
 ```
 
+**In plain terms.** That last comment line is Little's Law wearing a disguise: "a semaphore does not
+set a request rate, it sets a *population*. The rate falls out of the population divided by how long
+each member stays." Set `SEM_LIMIT` and the latency of the downstream API picks your RPS for you.
+
+| Symbol | What it is |
+|--------|------------|
+| `C` | Concurrency — the semaphore's permit count, coroutines inside `async with sem` right now |
+| `L` | Average latency of one call, wall-clock, from acquire to release |
+| `RPS = C / L` | Sustained throughput. Rearranged Little's Law |
+| `C = RPS x L` | The same law read backwards — the permits needed to *hit* a target rate |
+| `ceil(N / C)` | Rounds needed to clear `N` URLs, hence the "20 sequential batches" above |
+
+**Walk one example.** Read the equation in both directions, using this module's own numbers:
+
+```
+  forward -- permits are known, find the rate
+    C = 50 permits,  L = 0.1 s
+    RPS = 50 / 0.1                     = 500 req/s sustained
+    rounds for 1000 URLs = ceil(1000/50) = 20      wall = 20 x 0.1 = 2.0 s
+
+  backward -- the API's published limit is known, find the permits
+    target = 500 req/s,  measured L = 0.1 s
+    C = 500 x 0.1                      = 50 permits   <- so Semaphore(50) is not a guess
+
+  the trap: latency is the hidden variable
+    same Semaphore(50), downstream degrades to L = 0.5 s
+    RPS = 50 / 0.5                     = 100 req/s    <- rate collapsed 5x
+    the semaphore value never changed; the SLA did
+```
+
+**Why the backward reading is the one that matters in review.** A semaphore constant with no stated
+latency assumption is unreviewable — `Semaphore(50)` is correct at 100 ms and a rate-limit violation
+at 10 ms (`50 / 0.01 = 5,000 req/s`). Always record the `L` a permit count was derived from, because
+the permit count silently re-targets itself every time downstream latency moves.
+
 ### 6.5 Backpressure with asyncio.Queue
 
 ```python
@@ -558,6 +593,45 @@ async def resilient_get(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
 # Without jitter: all N services retry at exactly 4.0s → thundering herd
 # With jitter: spread across [0, 4.0] → load distributed
 ```
+
+**What the formula is telling you.** `delay = uniform(0, min(max_delay, base * 2**attempt))` says two
+separate things at once: "back off twice as far every failure" (the `2**attempt`), and "but pick a
+random point inside that window rather than its edge" (the `uniform(0, ...)`). The first protects
+the downstream from *frequency*; the second protects it from *synchronization*.
+
+| Symbol | What it is |
+|--------|------------|
+| `attempt` | Zero-based failure count. `0` is the first retry, not the first call |
+| `base_delay` | The window width after the first failure. `1.0 s` in the usage example above |
+| `2 ** attempt` | Doubling factor: 1, 2, 4, 8, ... — halves the retry rate each round |
+| `max_delay` | Hard cap so the doubling cannot run away to hours |
+| `min(max_delay, ...)` | The `ceiling` variable — the widest the window is allowed to get |
+| `uniform(0, ceiling)` | Full jitter. Draws anywhere in `[0, ceiling]`, mean `ceiling / 2` |
+
+**Walk one example.** Four attempts with `base_delay=1.0`, `max_delay=60.0` (the case-study settings):
+
+```
+  attempt   2**attempt   ceiling = min(60, 1.0 * 2**a)   delay drawn from   mean wait
+  --------- ------------ ------------------------------- ------------------ ---------
+     0          1         1.0                            [0, 1.0]            0.5 s
+     1          2         2.0                            [0, 2.0]            1.0 s
+     2          4         4.0                            [0, 4.0]            2.0 s
+     3          8         -- last attempt, raises instead of sleeping --
+
+  total added latency across the 3 sleeps
+    expected   0.5 + 1.0 + 2.0                           =  3.5 s
+    worst case 1.0 + 2.0 + 4.0                           =  7.0 s
+```
+
+So `max_attempts=4` is not a free retry — it is a decision to let p100 latency grow by up to 7
+seconds. That is the number to compare against your timeout budget before raising the attempt count.
+
+**Why full jitter beats a fixed backoff by a factor you can compute.** Suppose 1,000 clients fail at
+the same instant and all retry at attempt 2. Without jitter every one of them fires at exactly
+`4.0 s`; measured in a 10 ms bucket that is `1000 / 0.01 = 100,000 req/s` into a service that just
+proved it is unhealthy. With full jitter the same 1,000 retries spread evenly across `[0, 4.0]`, an
+expected `1000 / 4.0 = 250 req/s` — a **400x** reduction in peak load, from one `random.uniform`
+call. The doubling alone does not achieve this; only the randomization breaks the lockstep.
 
 ### 6.7 asyncio.timeout() vs asyncio.wait_for() (3.11)
 
@@ -922,6 +996,48 @@ async def get_data() -> dict:
 Impact of the broken version: at 100 RPS, a 200ms `requests.get()` inside `async def`
 serialises all requests — effective throughput drops from 100 RPS to 5 RPS (1 / 0.2s).
 The fix restores true concurrency.
+
+**Read it like this.** `1 / 0.2s` says: "while one coroutine holds the loop, the service's capacity
+is not 'many requests' — it is exactly one request per blocked interval." A blocking call does not
+slow the service down proportionally; it collapses the service's parallelism to 1 and turns every
+other request into a queue entry.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Duration of the blocking call — `0.2 s` here. Loop-frozen time, not I/O-wait time |
+| `1 / B` | Serial capacity. The absolute ceiling while the call blocks: 5 req/s at `B = 0.2` |
+| `A` | Arrival rate the service is actually receiving (100 RPS here) |
+| `A - 1/B` | Backlog growth per second. Positive means the queue never drains |
+| `A x B` | Requests that pile up during a single blocked call |
+
+**Walk one example.** Take Section 1's framing — a FastAPI service at 500 req/s meeting a 100 ms
+blocking call — and follow the queue rather than the latency:
+
+```
+  arrivals            A = 500 req/s
+  blocking call       B = 0.100 s        serial capacity 1/B = 10 req/s
+
+  during ONE blocked call
+    requests arriving      500 x 0.100                 =  50 queued
+    requests served               1                    =   1
+    net added to queue         50 - 1                  =  49
+
+  per wall-clock second
+    served               10 req/s
+    backlog growth       500 - 10                      = 490 req/s
+    after 10 s the queue holds 4,900 requests and is still growing
+```
+
+The queue is unbounded and the growth rate is constant, so this never reaches equilibrium — the
+service does not get *slow*, it fails. Compare the same 500 req/s with the call made properly async:
+in-flight coroutines settle at `500 x 0.100 = 50`, and the loop's own CPU cost is about
+`500 x 20 us = 0.01 s` per wall second, roughly **1% of one core**. Same traffic, same latency; the
+only difference is whether the 100 ms is spent holding the loop or parked on a Future.
+
+**Why `1 / B` is the number to say out loud.** Interviewers reach for "it gets slower" — the precise
+answer is that throughput becomes independent of the arrival rate and pins to `1 / B`. That is also
+the diagnostic: if a service's measured RPS is suspiciously close to the reciprocal of some
+round-number duration, you have found a blocking call without reading any code.
 
 ---
 

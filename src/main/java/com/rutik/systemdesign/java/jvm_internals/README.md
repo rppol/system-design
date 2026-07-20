@@ -85,6 +85,33 @@ G1 Mixed GC = Young collection + subset of old regions with most garbage
 Target pause: -XX:MaxGCPauseMillis=200 (default)
 ```
 
+**Stated plainly.** "G1 does not have a young half and an old half — it has about 2048 same-sized boxes, each labelled young or old at runtime, and it collects however many boxes it thinks it can finish inside your pause budget."
+
+That is why `MaxGCPauseMillis` is a *goal* rather than a limit: G1 chooses the number of regions per collection from its own throughput history, so the knob you turn is "how much work per pause", not "how long the pause may last".
+
+| Symbol | What it is |
+|--------|------------|
+| region size | Length of one G1 region; a power of two between 1MB and 32MB |
+| `heap / 2048` | G1's default region-size heuristic, rounded to a power of two |
+| region count | `heap / region size` — G1 targets roughly 2048 regions |
+| humongous | An object larger than `region size / 2`; allocated straight into old regions |
+| `MaxGCPauseMillis` | Soft pause goal (default 200) that sets how many regions a mixed GC picks |
+
+**Walk one example.** The 32GB heap used in the case study below:
+
+```
+  heap                 = 32 GB           = 32,768 MB
+  heap / 2048          = 16 MB           -> already a power of two, so region size = 16MB
+  region count         = 32,768 / 16     = 2,048 regions
+  humongous threshold  = 16 / 2          = 8 MB
+
+  Forcing -XX:G1HeapRegionSize=32m instead:
+    region count       = 32,768 / 32     = 1,024 regions
+    humongous threshold= 32 / 2          = 16 MB   <- 8MB-16MB objects stop being humongous
+```
+
+Bigger regions raise the humongous threshold, which is the whole point of tuning the flag: a humongous object bypasses Eden, needs contiguous regions, and is only reclaimed by a marking cycle, so promoting a class of objects out of "humongous" removes both the fragmentation and the allocation-failure risk. The cost is fewer, coarser regions, which gives G1 less granularity when it tries to hit the 200ms goal.
+
 ### Object Memory Layout
 ```
 +----------------+
@@ -100,6 +127,39 @@ Target pause: -XX:MaxGCPauseMillis=200 (default)
 +----------------+
 Total: 8+4+4+8+4 = 28B -> padded to 32B
 ```
+
+**In plain terms.** "An object costs you 12 bytes before you declare a single field, every field must start at an offset that is a multiple of its own width, and whatever is left over is rounded up to the next multiple of 8."
+
+Those three rules are the whole of object sizing, and they explain the two numbers people find surprising: why an empty object is 16 bytes rather than 0, and why adding one `boolean` to a class can cost 8 bytes or nothing at all depending on where the padding already sat.
+
+| Symbol | What it is |
+|--------|------------|
+| mark word | 8 bytes of per-object JVM state: hash code, lock bits, GC age, forwarding pointer |
+| class pointer | Reference to the `Klass` in Metaspace. 4 bytes with compressed oops, 8 without |
+| header | mark word + class pointer = 12 bytes on a normal (compressed-oops) JVM |
+| alignment | Every field starts at an offset divisible by its size; 8 for `long`/`double` |
+| padding | Filler bytes inserted to satisfy alignment, plus the tail pad to a multiple of 8 |
+| object alignment | `-XX:ObjectAlignmentInBytes`, default 8 — why every object size ends in 0 or 8 |
+
+**Walk one example.** A class with one `int` and one `long`, compressed oops on:
+
+```
+  offset  bytes  what
+  0       8      mark word
+  8       4      class pointer            -> header ends at offset 12
+  12      4      alignment gap            <- long cannot start at 12
+  16      8      long field               -> ends at offset 24
+  24      4      int field                -> ends at offset 28
+  28      4      tail padding             -> round 28 up to a multiple of 8
+
+  total = 32 bytes, of which 12 are header and 8 are padding
+  useful payload = 12 bytes out of 32 = 37.5 percent
+
+  Same class with compressed oops OFF (-Xmx above ~32GB):
+    8 (mark) + 8 (class ptr) + 8 (long) + 4 (int) + 4 (pad) = 32 bytes
+```
+
+The alignment gap at offset 12 is not wasted by accident — HotSpot's field layout actually reorders fields largest-first to fill such gaps, so declaring the `long` first and the `int` second changes nothing here, but adding a second `int` would land it at offset 12 for free. This is also the mechanism behind boxing overhead: an `Integer` is a 12-byte header plus a 4-byte `int` value, exactly 16 bytes with no padding needed, four times the 4 bytes an `int[]` slot costs — and that is before counting the 4-byte reference that has to point at it.
 
 ### GC Tri-Color Marking (Concurrent GC)
 
@@ -192,6 +252,36 @@ STW pauses: only initial mark and remark (a few ms for large heaps)
 Concurrent: mark, relocate, remap — all happen while app runs
 Practical result: sub-1ms pauses on 1TB heaps
 ```
+
+**What the formula is telling you.** "A 64-bit pointer has far more bits than any real heap needs, so ZGC spends the spare high bits on GC state and makes every reference read check that state — which buys concurrent relocation, and therefore a pause time that no longer depends on heap size."
+
+The bit budget is the design. Everything ZGC can and cannot do follows from how the 64 bits are split, including its historic 4TB heap ceiling and why its pauses stay flat as the heap grows.
+
+| Symbol | What it is |
+|--------|------------|
+| 42 address bits | The usable virtual-address portion of the pointer — sets the max heap |
+| 22 metadata bits | Color bits: marked0, marked1, remapped, finalizable |
+| colored pointer | An object reference carrying GC state inline instead of in a side table |
+| load barrier | Code injected at every reference *read* that inspects and repairs the color |
+| STW phases | Only initial mark and remark; both scan GC roots, not the heap |
+
+**Walk one example.** The bit budget and what it implies for pause time:
+
+```
+  pointer width        = 64 bits
+    address bits       = 42        -> 2^42 bytes = 4,398,046,511,104 B = 4 TiB max heap
+    metadata bits      = 22        -> 2^22 = 4,194,304 distinct color encodings
+    unused             = 64 - 42 - 22 = 0 bits
+
+  Pause-time scaling, G1 vs ZGC on the same workload:
+    G1  pause work  is proportional to live data evacuated  -> grows with heap
+    ZGC pause work  is proportional to GC root count        -> flat in heap size
+
+    32 GB heap:    G1 ~200 ms target      ZGC < 1 ms
+    1 TB  heap:    G1 pause grows          ZGC still < 1 ms  (same root set)
+```
+
+The load barrier is what you pay for that flatness: every single reference read in the application executes a few extra instructions, costing roughly a low-single-digit percentage of throughput. That is the trade in one line — ZGC moves work off the pause and onto the mutator, so you give up a slice of throughput on every read to stop paying for heap size in latency.
 
 ### Class Loading: Load → Link → Initialize
 
@@ -609,6 +699,40 @@ After deploying the bounded cache, old-gen occupancy plateaued, mixed GCs return
 #   - Metaspace (~256MB), thread stacks (platform ~1MB each), direct buffers
 #   Setting -Xmx30g caused swapping; -Xmx24g eliminated it.
 ```
+
+**What it means.** "`-Xmx` is not the JVM's memory budget, it is only the *heap* slice of it — the process also needs Metaspace, one stack per thread, direct buffers, code cache and GC structures, and the machine still needs room for the OS."
+
+Getting this wrong does not fail loudly; it fails as swapping, which turns a 200ms pause into a 10-second one because the collector faults pages back in one at a time. That is why the fix here was arithmetic, not a GC flag.
+
+| Symbol | What it is |
+|--------|------------|
+| physical RAM | What the node actually has — 32GB here |
+| `-Xmx` | Maximum *heap* size only; excludes everything below |
+| Metaspace | Class metadata, roughly 256MB for a typical service |
+| thread stacks | ~1MB per platform thread (a virtual thread's stack is only a few KB) |
+| off-heap | Direct `ByteBuffer`s, code cache, GC remembered sets, JVM native structures |
+| headroom | `RAM - Xmx - off-heap` — the OS page cache and safety margin |
+
+**Walk one example.** The 32GB node, before and after:
+
+```
+  BROKEN: -Xmx30g on 32 GB RAM
+    heap                                       30.00 GB
+    Metaspace                                   0.25 GB
+    200 platform threads x 1MB stack            0.20 GB
+    direct buffers + code cache + GC structs   ~0.50 GB
+    ---------------------------------------------------
+    process footprint                          30.95 GB   of 32 GB
+    left for the OS                             1.05 GB   -> swapping under load
+
+  FIXED: -Xmx24g on 32 GB RAM
+    24 / 32 = 75 percent of RAM to heap
+    off-heap as above                          ~0.95 GB
+    process footprint                          24.95 GB
+    left for the OS                             7.05 GB   -> no swap, pauses back to 60-150 ms
+```
+
+Notice how cheap the thread stacks look and how quickly that changes: those same 200 threads at 1MB cost 0.2GB, but a thread-per-request service running 10,000 platform threads would need 10GB of stack — which is precisely the constraint virtual threads remove by making a stack a few KB of heap-resident continuation rather than a reserved 1MB of native stack.
 
 Before the cache fix, GC logs showed `Pause Young (Mixed)` events of 1,800-2,100ms every ~5 min. After the bounded cache, the same log line read 60-150ms and mixed collections became infrequent because old-gen occupancy stopped climbing.
 

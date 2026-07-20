@@ -127,6 +127,53 @@ class PartialHandle:
         return b""
 ```
 
+#### Decoding the satisfaction rule
+
+**Stated plainly.** "To stand in for the protocol, a method must accept everything the protocol promised callers could pass, and return nothing broader than what the protocol promised callers would receive."
+
+The three-part rule above is one directional test applied twice per method — once to the inputs, once to the output — and the two directions point opposite ways. That asymmetry is what makes `PartialHandle` fail while a *more* permissive method would pass.
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | The Protocol — the promise made to callers |
+| `C` | The candidate class being checked against `P` |
+| Parameters | Compared **contravariantly**: `C` may accept the same or wider, never narrower |
+| Return type | Compared **covariantly**: `C` may return the same or narrower, never wider |
+| Arity | Part of the parameter check — a missing parameter is a narrowing, so it fails |
+| Extra members on `C` | Irrelevant. `P` constrains only the names it lists |
+
+**Walk one example.** Test each candidate from the Section 3.4 code against `Reader.read(self, n: int) -> bytes`:
+
+```
+  P declares:  read(self, n: int) -> bytes
+
+  FileHandle    read(self, n: int) -> bytes
+    params : accepts (int)      == promised (int)      -> OK
+    return : gives bytes        == promised bytes      -> OK
+                                                       -> SATISFIES
+
+  PartialHandle read(self) -> bytes
+    params : accepts ()         <  promised (int)      -> caller would pass n
+                                                          and the call would fail
+                                                       -> DOES NOT SATISFY
+
+  hypothetical  read(self, n: int = 0, extra: str = "") -> bytes
+    params : accepts (int) and more, all defaulted     -> WIDER, still callable
+                                                          as read(n)
+    return : bytes             == promised bytes       -> OK
+                                                       -> SATISFIES
+
+  hypothetical  read(self, n: int) -> bytes | None
+    params : OK
+    return : bytes | None      >  promised bytes       -> caller expects bytes
+                                                          and may get None
+                                                       -> DOES NOT SATISFY
+```
+
+Both failures are the same mistake pointed in opposite directions: `PartialHandle` narrows what it will accept, and the last candidate widens what it may return. Each breaks a promise the caller was already relying on. The passing case in the middle is the useful counter-intuition — being *more* flexible than the protocol is always safe, which is why adding defaulted parameters to an implementation never breaks structural compatibility.
+
+This is also the exact check `@runtime_checkable` skips. `isinstance()` verifies only line 1 of the rule — that the *name* `read` exists — and never inspects parameters or return type at all. Every distinction walked above is visible to mypy and invisible at runtime, which is the concrete content of the "shallow check" warning in Section 4.2.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -184,6 +231,43 @@ security or correctness enforcement — use it only for ergonomics (branching on
 and calls `hasattr()` for each. For hot loops this is measurably slower than `isinstance(x, SomeABC)`.
 CPython 3.12 caches the result of runtime Protocol checks internally, bringing repeat checks
 to near-zero cost after the first hit.
+
+#### Decoding the runtime check's cost
+
+**The idea behind it.** "A Protocol `isinstance()` is not one comparison — it is one `hasattr()` per declared member, every time, which turns a constant-time check into a check that scales with how rich your interface is."
+
+An ABC `isinstance()` asks a single question: is this type in the MRO? A Protocol `isinstance()` asks one question per attribute the Protocol declares. That difference is invisible at one call site and dominant inside a loop.
+
+| Symbol | What it is |
+|--------|------------|
+| `__protocol_attrs__` | The set of member names the Protocol declares. Its size drives the whole cost |
+| `k` | `len(__protocol_attrs__)` — the number of `hasattr()` calls per `isinstance()` |
+| `n` | How many times the check runs — 1 at a boundary, millions inside a loop |
+| `k x n` | Total `hasattr()` calls performed |
+| ABC `isinstance` | An MRO membership test, independent of how many methods the ABC declares |
+| CPython 3.12 cache | Memoizes the per-class result, so only the first check per class pays `k` |
+
+**Walk one example.** Read `k` straight off the Protocols defined in Section 4.4:
+
+```
+  Readable      __protocol_attrs__ = {read}            k = 1
+  Writable      __protocol_attrs__ = {write}           k = 1
+  ReadWritable  __protocol_attrs__ = {read, write}     k = 2
+                (composition UNIONS the parents' attrs -- k adds up)
+
+  hasattr() calls performed:
+
+    k = 1, one boundary check          ->         1 call    irrelevant
+    k = 2, one boundary check          ->         2 calls   irrelevant
+    k = 2, inside a 1,000,000-row loop -> 2,000,000 calls   now it is the loop
+    k = 4, inside a 1,000,000-row loop -> 4,000,000 calls   twice as bad again
+
+  the ABC equivalent stays at 1 MRO test per check regardless of k
+```
+
+The trap is that `k` grows silently. Composing `ReadWritable` from two Protocols doubled `k` without anyone writing a number down, and a four-method backend Protocol quadruples the per-check cost relative to a single-method one. Richer interfaces are better design and more expensive to check at runtime — those pull in opposite directions only inside hot loops.
+
+**Why the 3.12 cache changes the advice but not the rule.** Caching is keyed on the class being checked, so a loop over 1,000,000 instances of the *same* class pays `k` once and near-zero thereafter. A loop over a heterogeneous stream of many distinct classes gets far less benefit, because each new class is a fresh cache miss costing `k`. The durable guidance is unchanged and is not really about speed: hoist the check out of the loop entirely. Check the protocol once when the object enters your code, then work with the narrowed type — which also happens to be what lets mypy verify the signatures that `isinstance()` never looks at.
 
 ### 4.3 Generic Protocol — `Protocol[T]`
 

@@ -118,6 +118,42 @@ flowchart LR
 ```
 The formula collapses to a simple pass/fail check: with RF=3, QUORUM+QUORUM clears the bar and guarantees strong consistency, while ONE+ONE does not, leaving reads eventually consistent.
 
+**In plain terms.** `W + R > RF` says: "if the set of replicas you wrote to and the set you read from
+are big enough that they cannot possibly be disjoint, the read set is guaranteed to contain at least
+one replica holding the newest write." Nothing about the formula is about speed or durability — it
+is purely a pigeonhole argument about *set overlap*, which is why the same inequality shows up in
+Dynamo, Riak, and every other quorum system.
+
+| Symbol | What it is |
+|--------|------------|
+| `RF` | Replication factor — how many nodes hold a copy of each partition |
+| `W` | Write consistency level: replicas that must ACK before the write returns |
+| `R` | Read consistency level: replicas that must respond before the read returns |
+| `W + R - RF` | The guaranteed overlap. Must be `>= 1` for a read to see the latest write |
+| `QUORUM` | Shorthand for `floor(RF/2) + 1` — the smallest `W` that always overlaps itself |
+
+**Walk one example.** RF=3, checking each combination for guaranteed overlap:
+
+```
+                 W    R    W+R    RF    overlap = W+R-RF    strong?
+  ONE + ONE      1    1     2      3          -1              no   (may miss the write)
+  ONE + ALL      1    3     4      3          +1              yes  (slow reads)
+  ALL + ONE      3    1     4      3          +1              yes  (write unavailable if
+                                                                    any replica is down)
+  QUORUM x 2     2    2     4      3          +1              yes  (balanced -- the default)
+
+  why QUORUM self-overlaps at any RF:
+    RF = 3  ->  floor(3/2)+1 = 2   ->  2 + 2 - 3 = 1
+    RF = 5  ->  floor(5/2)+1 = 3   ->  3 + 3 - 5 = 1
+    RF = 7  ->  floor(7/2)+1 = 4   ->  4 + 4 - 7 = 1
+```
+
+The overlap is always exactly `1` for QUORUM — the tightest possible margin that still satisfies the
+inequality, which is precisely why it is the cheapest strongly-consistent setting. Note the third
+row: `ALL + ONE` is equally "strong" on paper, but a single node outage stops all writes, which is
+why nobody runs it. The formula tells you what is *correct*; the availability column tells you what
+is *operable*.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -193,6 +229,48 @@ flowchart LR
 ```
 A read checks each SSTable's Bloom filter first (99.9% accurate, a clean skip on NO costs zero I/O), falls through row-cache and partition-key-cache fast paths before walking the SSTable index, then merges versions across SSTables by timestamp; the coordinator only triggers read repair when replicas disagree.
 
+**What this actually says.** The Bloom filter's false-positive rate, `p = (1 - e^(-kn/m))^k`, reads
+as: "the chance that all `k` of a missing key's bit positions happen to have been set by *other*
+keys." A Bloom filter never says a false NO — only a false YES — so the "99.9% accurate" figure is
+one-sided: every NO is a guaranteed skip with zero disk I/O, and only the rare false YES costs you a
+wasted seek.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of keys inserted into this SSTable's filter |
+| `m` | Bits in the filter's bit array |
+| `m/n` | Bits per element — the only knob that really matters. Memory cost per key |
+| `k` | Number of hash functions. Optimal value is `k = (m/n) x ln 2` |
+| `e^(-kn/m)` | Probability one specific bit is still 0 after all insertions |
+| `p` | False-positive rate. `bloom_filter_fp_chance` in Cassandra's table schema |
+
+**Walk one example.** Working backwards from the stated 99.9% (that is, `p = 0.001`):
+
+```
+  bits per element   m/n = -ln(p) / (ln 2)^2
+                         = -ln(0.001) / 0.4805
+                         = 14.38 bits per key
+
+  optimal hashes     k   = (m/n) x ln 2 = 14.38 x 0.6931 = 9.97  ->  round to 10
+
+  verify             p   = (1 - e^(-10 / 14.38))^10
+                         = (1 - 0.49887)^10
+                         = 0.50113^10
+                         = 0.000999         ->  99.90 percent of NOs are true NOs
+
+  memory for 1,000,000 keys in this SSTable:
+                     1e6 x 14.38 bits = 14,380,000 bits = 1.71 MiB of heap
+
+  relaxing to p = 0.01 (the STCS default fp_chance):
+                     m/n = 9.59 bits, k = 7      ->  1.14 MiB     (33 percent less RAM)
+```
+
+**What breaks without the filter.** A read must consult every SSTable that could hold the partition.
+With 8 SSTables and no filter, a lookup for a key that does not exist costs 8 disk seeks. At
+`p = 0.01`, the expected wasted seeks fall to `8 x 0.01 = 0.08` — under one-tenth of a seek per read.
+That is the entire reason LSM reads are survivable: without Bloom filters, read amplification would
+scale with the SSTable count on every single miss.
+
 ### Compaction Strategies
 
 ```
@@ -214,6 +292,47 @@ TWCS (Time Window Compaction Strategy):
   Bad:  not suitable for non-time-series data
   Use:  time-series, IoT, event logs with TTL
 ```
+
+**Read it like this.** "Write amplification 10-30x" means: for every 1 byte your application writes,
+the disk physically writes 10 to 30 bytes, because compaction keeps rewriting the same row as it
+migrates down the levels. "Space amplification 2x" means the opposite resource: the disk holds twice
+the bytes of live data because superseded copies have not been merged away yet. Choosing a
+compaction strategy is choosing *which* of the two amplifications you are willing to pay.
+
+| Symbol | What it is |
+|--------|------------|
+| Write amplification | Bytes written to disk per byte of logical data. STCS ~2x, LCS 10-30x |
+| Space amplification | Disk occupied per byte of live data. STCS up to 2x, LCS ~1.1x |
+| Read amplification | SSTables consulted per lookup. LCS bounds it at roughly one per level |
+| Level multiplier | Fan-out between LSM levels, 10 by default. `Lk` holds `10^k x L1` |
+
+**Walk one example.** A 100GB/day ingest cluster holding 1TB of live data, priced both ways:
+
+```
+  disk WRITE cost (per day)
+    STCS  ~2x    100 GB x 2  =    200 GB/day  =  2.4 MB/s sustained background I/O
+    LCS   10x    100 GB x 10 =  1,000 GB/day  = 11.9 MB/s
+    LCS   30x    100 GB x 30 =  3,000 GB/day  = 35.6 MB/s   <- 15x the STCS burn
+
+  disk CAPACITY cost (for 1 TB live)
+    STCS  2.0x   1024 GB x 2.0  = 2048 GB provisioned
+    LCS   1.1x   1024 GB x 1.1  = 1126 GB provisioned
+    delta                         922 GB of disk STCS wastes on stale copies
+
+  LCS level sizing, multiplier 10, L1 = 300 MB:
+    L1     0.3 GB
+    L2     3.0 GB      (10^1 x L1)
+    L3    30.0 GB      (10^2 x L1)
+    L4   300.0 GB      (10^3 x L1)
+    L5  3000.0 GB      (10^4 x L1)  -> 1 TB of data needs 5 levels
+    a row rewritten once per level it descends  ->  ~5 rewrites, plus in-level
+    merges, is where the 10-30x figure comes from
+```
+
+The level count is `log10(dataset / L1)` — logarithmic, so a 10x bigger dataset adds only one level.
+That is why LCS write amplification plateaus instead of running away, and why LCS is safe on
+read-heavy OLTP but ruinous on a write-saturated ingest pipeline where those 35.6 MB/s of background
+compaction I/O compete directly with the foreground writes.
 
 ### Lightweight Transactions (LWT) — CAS
 
@@ -350,6 +469,42 @@ The tombstone marker must outlive `gc_grace_seconds` (10 days by default) so it 
    Fix: INSERT ... USING TTL <seconds> or set default_time_to_live on table
 ```
 
+**Stated plainly.** The "partition > 100MB or > 100K rows" rule says: "a partition is the unit that
+must fit on one node, be read into one heap, and be compacted as one object — so it has a ceiling,
+and your partition key is what sets it." Bucketing (`(device_id, date)` instead of `(device_id)`)
+does not shrink your data; it divides one unbounded partition by the number of buckets.
+
+| Symbol | What it is |
+|--------|------------|
+| Partition | All rows sharing one partition key value. Lives entirely on one node per replica |
+| 100MB / 100K rows | Soft limits. Above them: heap pressure on reads, slow compaction, hot nodes |
+| Bucket | An extra component appended to the partition key (`month`, `date`, `hour`) |
+| Divisor | How many buckets the time range yields — the factor your partition shrinks by |
+
+**Walk one example.** Pitfall 1's chat app: 10M messages in one `(conversation_id)` over 3 years:
+
+```
+  unbucketed
+    rows in partition   10,000,000            ->  100x over the 100K row limit
+    bytes at 200 B/msg  10,000,000 x 200 = 2,000,000,000 B = 2.0 GB
+                                              ->  20x over the 100 MB size limit
+
+  bucket by month, (conversation_id, YYYYMM)
+    buckets             3 years x 12 = 36
+    rows per bucket     10,000,000 / 36  = 277,778 rows   ->  STILL 2.8x over 100K
+    bytes per bucket    277,778 x 200    = 55.6 MB        ->  under the 100 MB limit
+
+  bucket by day, (conversation_id, YYYYMMDD)
+    buckets             3 x 365 = 1,095
+    rows per bucket     10,000,000 / 1095 = 9,132 rows    ->  comfortably under
+    bytes per bucket    9,132 x 200       = 1.83 MB
+```
+
+Monthly bucketing clears the *size* ceiling but not the *row-count* ceiling — worth noticing, since
+the module's stated fix is monthly. The right divisor is not a convention, it is arithmetic: pick the
+bucket width that puts your busiest key under both limits, then remember the cost — a query spanning
+6 months now touches 6 partitions instead of 1, so bucket no finer than your read pattern needs.
+
 ---
 
 ## 7. Real-World Examples
@@ -401,6 +556,46 @@ A chat application stores all messages in `(conversation_id)` partition. After 3
 
 **Pitfall 2: Tombstone explosion from time-series deletions**
 An IoT platform sends DELETE for each sensor reading older than 30 days (instead of using TTL). 10M deletes/day → 300M tombstones/month. Read latency degrades from 2ms to 2 seconds as reads scan tombstones. Fix: switch to `INSERT INTO ... USING TTL 2592000` (30 days in seconds). Use TWCS compaction — entire SSTables expire and are dropped without tombstone scanning.
+
+**What the formula is telling you.** "300M tombstones/month" is just `delete rate x retention`, and
+the retention is not yours to choose — `gc_grace_seconds` pins it. The formula says: "a DELETE in
+Cassandra is a *write*, and it stays readable for 10 days minimum, so your steady-state tombstone
+count is your delete rate multiplied by 10 days, no matter how fast compaction runs."
+
+| Symbol | What it is |
+|--------|------------|
+| Tombstone | A marker row recording "this was deleted at timestamp T". Costs a full row read |
+| `gc_grace_seconds` | 864,000 (10 days). How long a tombstone must survive so every replica sees it |
+| Delete rate | Deletes per day. Each one produces at least one tombstone |
+| Scanned/returned | `X` rows scanned to return `Y` live rows — the ratio that drives latency |
+
+**Walk one example.** The IoT platform deleting 10M readings/day, and why TTL fixes it:
+
+```
+  accumulation
+    per day             10,000,000 deletes  ->  10,000,000 tombstones
+    per month           10,000,000 x 30     = 300,000,000 tombstones
+
+  steady state (what compaction can actually clear)
+    tombstones younger than gc_grace are UNDROPPABLE:
+                        10,000,000 x 10 days = 100,000,000 permanently resident
+    only the 200,000,000 older ones are even eligible for removal
+
+  read cost
+    latency before      2 ms
+    latency after       2,000 ms       ->  1,000x regression
+    cause: a query returning 10 live rows may scan 10,000 tombstones first
+
+  the TTL fix (USING TTL 2592000, plus TWCS)
+    expired rows are dropped with the whole SSTable when its time window closes
+    tombstones read during a query:  0
+```
+
+**Why `gc_grace_seconds` exists at all.** Drop a tombstone too early and a replica that was offline
+during the delete will resurrect the row when it comes back and gossips its "live" copy — the deleted
+data returns. The 10-day default is a bet that any node can be repaired within 10 days. Lowering it
+to buy read performance is trading correctness for latency; the real fix is never generating the
+tombstones, which is exactly what TTL plus TWCS does.
 
 **Pitfall 3: Using Cassandra like a relational database**
 Development team writes `SELECT * FROM orders WHERE status = 'pending' ALLOW FILTERING`. Works fine in dev (1000 rows). In production (100M rows): scans all partitions on all nodes, takes 30+ seconds, saturates network. Fix: redesign table with status as partition key component, or maintain a separate `orders_by_status` table.

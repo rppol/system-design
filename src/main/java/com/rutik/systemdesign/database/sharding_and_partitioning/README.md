@@ -149,6 +149,53 @@ Query with partition pruning:
 
 Consistent hashing places both data keys and server nodes on a hash ring (0 to 2^32). Each key is assigned to the first node clockwise on the ring. When a node is added, only the keys between the new node and its predecessor need to move — not all keys.
 
+The remap fraction has a closed form. Growing a cluster from `N` nodes to `N+1`:
+
+```
+consistent hashing :  fraction moved = 1 / (N+1)        (only the new node's share)
+mod-N hashing      :  fraction moved = N / (N+1)        (everything except the lucky residue)
+```
+
+**What this actually says.** "Consistent hashing only makes the newcomer's own slice move; mod-N reshuffles every key that does not happen to land on the same box twice." The fraction moved is the migration bill you pay in bytes, replication lag, and hours of dual-write — which is why the choice is made once, at schema-design time, and almost never revisited.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Node (or shard) count before the change |
+| `N+1` | Node count after adding one node |
+| `1/(N+1)` | Each node's fair share of the ring once the newcomer exists — exactly what it must be handed |
+| `N/(N+1)` | Mod-N's damage: every key whose `key % N` and `key % (N+1)` disagree |
+| `2^32` | Ring size — the hash output space keys and vnodes are placed on |
+
+**Walk one example.** Three cluster sizes, both schemes, same "add one node" event:
+
+```
+  before   after    consistent hashing        mod-N hashing
+  N        N+1      1/(N+1) moves             N/(N+1) moves
+  ------   -----    --------------------      --------------------
+   3        4        1/4  = 25.00%             3/4  = 75.00%
+   4        5        1/5  = 20.00%             4/5  = 80.00%
+  10       11        1/11 =  9.09%            10/11 = 90.91%
+
+  10 -> 11 on a 20 TB dataset:
+    consistent hashing : 0.0909 x 20 TB = 1.82 TB to copy
+    mod-N hashing      : 0.9091 x 20 TB = 18.2 TB to copy   (10x the work)
+```
+
+The 9% vs 91% pair for a 10-node cluster is the number quoted in Section 12 — it falls straight out of `1/(N+1)` and `N/(N+1)`.
+
+**The one case where mod-N is not terrible: exact doubling.** Go from `N` to `2N` and the arithmetic changes shape. Any key with `key % N = r` lands on either `r` or `r+N` under `% 2N`, so exactly half the keys stay put:
+
+```
+  4 -> 8 shards, mod-N:
+    key % 4 = 1  ->  key % 8 is either 1 (stays) or 5 (moves)
+    each residue class splits 50/50  ->  50% of data moves, never more
+
+  4 -> 5 shards, mod-N:
+    no such alignment  ->  4/5 = 80% of data moves
+```
+
+This is why Section 10's "4 to 8 shards moves 50% of data" is the *best* mod-N case, not the typical one, and why teams that must live with mod-N always resize by doubling.
+
 **Virtual nodes (vnodes)**: Without virtual nodes, 3 physical nodes have 3 points on the ring, causing uneven distribution. Virtual nodes assign each physical node ~150 random positions on the ring. Each physical node handles ~150/N of the ring. Distribution is now statistically uniform. Adding a physical node by giving it M virtual nodes from each existing node moves ~M/total_vnodes fraction of data from each existing node.
 
 ```
@@ -158,6 +205,47 @@ Redis Cluster: 16384 hash slots (not traditional consistent hashing)
   - slot = CRC16(key) % 16384
   - Slots evenly distributed across cluster nodes
   - Adding a node: migrate a subset of slots from existing nodes
+```
+
+**Put simply.** "Chop each machine into `V` random pieces instead of one, and the luck of where those pieces land averages out — load imbalance shrinks like the square root of `V`." Vnodes buy uniformity with nothing but bookkeeping, which is why every production ring uses them and why the vnode count is a tuning knob, not a constant.
+
+The load a physical node carries is the sum of `V` independent random ring arcs, so it behaves like any average of `V` random draws:
+
+```
+relative spread of per-node load  ~  1 / sqrt(V)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Virtual nodes assigned to each physical node (Cassandra default 256, common default 150) |
+| `1/sqrt(V)` | Standard deviation of a node's load as a fraction of the average load |
+| `sqrt` | Square root — the reason returns diminish fast as `V` grows |
+| Ring arc | The span of hash space between one vnode and the next clockwise; a node owns the sum of its arcs |
+
+**Walk one example.** How much imbalance survives at each vnode count:
+
+```
+  V per node    1/sqrt(V)    typical node load if average = 100 GB
+  ----------    ---------    -------------------------------------
+      1          100.00%     anywhere from ~0 GB to ~200 GB   (wild)
+     10           31.62%     ~68 GB to ~132 GB
+     50           14.14%     ~86 GB to ~114 GB
+    150            8.16%     ~92 GB to ~108 GB
+    256            6.25%     ~94 GB to ~106 GB
+
+  1 -> 150 vnodes  : imbalance cut 100.00 / 8.16 = 12.3x
+  150 -> 256       : imbalance cut  8.16 / 6.25 =  1.3x   (diminishing returns)
+```
+
+Going from 1 vnode to 150 removes most of the imbalance; the extra 106 vnodes Cassandra adds on top buy only another 1.3x. What they cost is real: every vnode is a token entry that repair, gossip, and bootstrap must iterate, which is exactly why Cassandra 4.x recommends dropping `num_tokens` from 256 to 16 when a separate allocation algorithm keeps the arcs even.
+
+Redis Cluster takes the fixed-slot shortcut instead of random arcs — 16384 slots is just `V` made deterministic and shared:
+
+```
+  16384 slots / 3 nodes  =  5461.33 slots each  (5461, 5461, 5462 in practice)
+  add a 4th node         =  16384 / 4 = 4096 slots move  =  25.0% of keys
+
+  matches 1/(N+1) exactly : 1/4 = 25.0%
 ```
 
 ### Vitess: MySQL Sharding Middleware
@@ -232,6 +320,58 @@ A hotspot occurs when one shard receives disproportionately more reads/writes th
 **Sequential primary key hotspot**: All inserts go to the shard containing the max key value. Fix: UUID, ULID, or hash-sharded sequences.
 
 **Celebrity/firehose hotspot**: User ID 1 (celebrity with 100M followers) generates 1000x more write traffic than average users. A single shard hosts all of user 1's data and gets overwhelmed.
+
+Two numbers turn "one shard feels busy" into an alert. Section 12 gives both thresholds:
+
+```
+skew factor       = max_shard_QPS / mean_shard_QPS          alert above 3.0
+coefficient of    = stddev(shard_QPS) / mean_shard_QPS       alert above 0.30
+  variation (CV)
+
+effective capacity = N_shards x per_shard_limit / skew_factor
+```
+
+**Read it like this.** "A sharded cluster is only as fast as its busiest shard, so divide the capacity you paid for by the skew factor to get the capacity you actually have." The skew factor is the honest denominator: it converts a cluster spec sheet into a usable throughput number, and it is why adding shards to a skewed cluster changes nothing.
+
+| Symbol | What it is |
+|--------|------------|
+| `max_shard_QPS` | Queries per second on the busiest shard — the one that will saturate first |
+| `mean_shard_QPS` | Total cluster QPS divided by shard count — the throughput you thought you bought |
+| Skew factor | Ratio of the two. `1.0` is perfect balance; `N_shards` means one shard does everything |
+| `stddev` | Spread of per-shard QPS around the mean; squares outliers, so one hot shard dominates it |
+| CV | `stddev / mean`. Unit-free, so the same 0.30 threshold works at 1K QPS and 1M QPS |
+| `per_shard_limit` | What one shard node sustains before latency degrades (CPU, IOPS, or lock contention) |
+
+**Walk one example.** Section 10's sequential-key failure — 4 shards, `AUTO_INCREMENT` shard key, 90% of the 90K TPS landing on the newest shard:
+
+```
+  shard      QPS
+  -------   ------
+  shard 0    3,000
+  shard 1    3,000
+  shard 2    3,000
+  shard 3   81,000     <- holds the live ID range
+  -------   ------
+  total     90,000     mean = 90,000 / 4 = 22,500
+
+  skew factor = 81,000 / 22,500 = 3.60      -> above 3.0, alert fires
+  stddev      = 33,775                       -> CV = 33,775 / 22,500 = 1.50, way above 0.30
+
+  effective capacity, per_shard_limit = 30,000 QPS:
+    paid for  = 4 x 30,000            = 120,000 QPS
+    actual    = 120,000 / 3.60        =  33,333 QPS   -> 28% of what was bought
+    shard 3 is already at 81,000 > 30,000 and is throttling the whole cluster
+```
+
+Compare the same cluster after switching to a hashed shard key:
+
+```
+  shard QPS : 12,000  11,000  10,000  11,000     mean = 11,000
+  skew factor = 12,000 / 11,000 = 1.09           CV = 707 / 11,000 = 0.064
+  effective capacity = 120,000 / 1.09 = 110,000 QPS   -> 92% of what was bought
+```
+
+Note what did *not* change between the two tables: the number of shards. Doubling from 4 to 8 shards under the sequential key would have left the hot shard exactly as hot, because the newest IDs still all live in one place. Skew is a key-choice problem, and no amount of hardware fixes it — this is the whole reason Section 13 puts "choose the shard key that matches your access pattern" first.
 
 ```mermaid
 flowchart LR
@@ -406,6 +546,41 @@ None of the three sharding triggers — sustained writes over 50K TPS, an active
 
 **Partition bloat from too many tiny partitions**: Team creates daily partitions for a table with 10M rows/day. After 3 years: 1095 partitions. PostgreSQL's planner overhead for partition pruning with 1000+ partitions becomes significant (~10ms plan time). Fix: use monthly partitions and sub-partition if needed; or use range partitions with rolling windows and detach/drop old partitions automatically.
 
+**Stated plainly.** "Partition granularity is a straight trade: finer partitions prune more rows per query, but the planner pays a cost on every single query, proportional to how many partitions exist." The trap is that the pruning win is capped by your retention window while the planner cost grows without bound, so a scheme that was free in month one becomes a tax in year three.
+
+```
+partition count   = retention_period / partition_width
+planner overhead ~= partition_count x per_partition_planning_cost
+rows per partition = daily_rows x partition_width_in_days
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `retention_period` | How far back the table keeps data before partitions are detached and dropped |
+| `partition_width` | Time span each partition covers — the knob (daily, weekly, monthly) |
+| `partition_count` | How many child tables the planner must consider on every query |
+| `per_partition_planning_cost` | Roughly-constant planner work per partition; total plan time scales linearly with count |
+| `daily_rows` | Ingest rate, `10M/day` here — fixed by the business, not a tuning knob |
+
+**Walk one example.** The same 3-year, 10M-rows/day table under two widths:
+
+```
+                     daily partitions        monthly partitions
+  ----------------   ---------------------   ---------------------
+  partition_count    365 x 3 = 1,095         12 x 3 = 36
+  rows / partition   10M                     ~304M   (10M x 365/12)
+  total rows         1,095 x 10M = 10.95B    same 10.95B
+  plan time          ~10 ms   (measured)     ~10 x 36/1095 = 0.33 ms
+
+  ratio: 1,095 / 36 = 30.4x more partitions, and ~30.4x the plan time
+
+  cost on a 5 ms query executed 2,000 times per second:
+    daily   : 10.00 ms plan + 5 ms exec = 15.00 ms  -> plan is 67% of the query
+    monthly :  0.33 ms plan + 5 ms exec =  5.33 ms  -> plan is  6% of the query
+```
+
+Both schemes prune to the same handful of rows for a one-day query; only the planner bill differs. That 10ms is paid *before* the first row is read, on every query, forever — which is why the fix is monthly partitions with sub-partitioning where a genuinely finer grain is needed, not daily partitions everywhere.
+
 **Forgetting to create indexes on new partitions**: PostgreSQL CREATE INDEX on parent table creates indexes on existing partitions but not new partitions created later (before PG 11). After PG 11, indexes on parent propagate automatically. Before PG 11: scripts must CREATE INDEX on each new partition at creation time.
 
 ---
@@ -507,6 +682,39 @@ Citus VSchema:
   Distribution column: tenant_id (all tables)
   Colocation group: orders, order_items, invoices, payments all on same worker for same tenant_id
 ```
+
+**The idea behind it.** "Give each tier of tenant however many nodes its traffic needs — not however many its headcount suggests — and let the node count fall out of the arithmetic." Directory sharding exists precisely so the mapping can be uneven on purpose; hash sharding would spread 5000 tenants evenly and then let the 10 whales melt whichever 10 shards they landed on.
+
+| Symbol | What it is |
+|--------|------------|
+| Tenant tier | Enterprise / mid-market / small — the traffic class a tenant is assigned to |
+| Tenants per node | Packing density for a tier. `1` for enterprise, `163` for small |
+| Nodes per tier | `ceil(tenants in tier / tenants per node)` |
+| Skew factor | Busiest node's write rate divided by the cluster mean, from Section 6 |
+| `per_shard_limit` | What one Citus worker sustains; the real ceiling a deliberate hotspot must respect |
+
+**Walk one example.** The tier packing, then the write load it produces at the 200K TPS target:
+
+```
+  tier          tenants   per node   nodes = tenants / per node
+  -----------   -------   --------   --------------------------
+  enterprise         10          1    10 /   1  =  10
+  mid-market        100          5   100 /   5  =  20
+  small           4,890        163  4890 / 163  =  30
+  -----------   -------              -------------------------
+  total           5,000               total nodes =  60
+
+  write load at 200,000 TPS, enterprise = 70% of traffic:
+    enterprise  0.70 x 200,000 = 140,000 TPS / 10 nodes = 14,000 TPS per node
+    other tiers 0.30 x 200,000 =  60,000 TPS / 50 nodes =  1,200 TPS per node
+
+    cluster mean = 200,000 / 60 = 3,333 TPS per node
+    skew factor  = 14,000 / 3,333 = 4.20      -> above the 3.0 alert threshold
+```
+
+A 4.20 skew factor would be an incident on a hash-sharded cluster. Here it is the design working: the busiest node runs 14,000 TPS against a worker limit well above that, and the skew is *known*, *bounded*, and *addressable* — an enterprise tenant that outgrows its node gets a second node from the directory, with no rebalance of the other 59. Skew only hurts when it is accidental and unmovable.
+
+The 40K to 200K result is the same arithmetic read backwards. Unsharded, all 70% of enterprise writes queued behind one primary at 40K TPS, so each enterprise tenant got `0.70 x 40,000 / 10 = 2,800 TPS` and waited 45ms at P99 for the privilege. After the split, each has a private 14,000 TPS node and no queue — hence `45ms -> 8ms`, a `45 / 8 = 5.6x` latency win alongside the `200 / 40 = 5x` throughput win. The cross-tenant report paid the other side of the trade: `8 / 5 = 1.6x` slower, because scatter-gather now waits on the slowest of 60 workers instead of scanning one local table.
 
 **Query behavior**:
 ```sql

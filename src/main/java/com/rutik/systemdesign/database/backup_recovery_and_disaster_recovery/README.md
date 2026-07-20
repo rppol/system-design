@@ -375,6 +375,121 @@ Testing RPO and RTO:
   - Do this quarterly with production-size data; document results; compare against SLA
 ```
 
+**In plain terms.** "RPO looks backwards from the failure and asks how much work you lost; RTO looks forwards from the failure and asks how long you were down. They are two different axes, and no single technique optimizes both."
+
+The two metrics fail independently, which is the part teams get wrong. A daily `pg_dump` restored in 20 minutes has an excellent RTO and a catastrophic RPO. A synchronous replica has a perfect RPO and does nothing for an accidental `DROP TABLE`. This is why production systems run two mechanisms, not one.
+
+| Symbol | What it is |
+|--------|------------|
+| RPO | Data loss budget, measured in **time**. "We can afford to lose the last N minutes of writes" |
+| RTO | Downtime budget, measured in **time**. "We can afford to be unavailable for N minutes" |
+| recovery point | Timestamp of the newest data you can actually restore to — sets your real RPO |
+| archive interval | How often WAL segments reach object storage. Worst-case RPO equals this interval |
+| replication lag | Seconds a replica trails the primary. Worst-case RPO for a replica-based recovery |
+
+**Walk one example.** The same failure at 14:37, under four different strategies:
+
+```
+  failure at 14:37
+
+  strategy               last recovery point    RPO (data lost)    RTO (downtime)
+  daily pg_dump 02:00        02:00                12h 37m           60-180 min
+  WAL archive, 5 min lag     14:32                    5m             30-90 min
+  async replica, 3s lag      14:36:57                 3s              15-30 s
+  sync replication           14:37:00                 0               15-30 s
+
+  Note the ordering flips: pg_dump has the worst RPO AND the worst RTO,
+  but sync replication -- best on both -- still cannot undo a DROP TABLE,
+  because the DROP is replicated too. Only the WAL archive can rewind.
+```
+
+**Why "average data loss" is the wrong number.** With a daily backup, failures are uniformly likely across the day, so the *average* loss is 12 hours — but RPO is a worst-case commitment, and the worst case is 24 hours minus a second. Compliance and SLA language always means the worst case. Quoting the average is how a team promises "about half a day" and then explains a full day to an auditor.
+
+### Restore Time Is Size Divided by Throughput
+
+```
+  restore_time  = backup_size / restore_throughput
+  replay_time   = wal_window / wal_replay_rate
+  RTO           = detection + restore_time + replay_time + promotion + verification
+```
+
+**What the formula is telling you.** "Your recovery time is set by physics — how many bytes you must move and how fast the pipe moves them — plus however long the database needs to catch up afterward."
+
+Every RTO improvement is therefore an attack on one of two quantities: fewer bytes to restore, or a shorter WAL window to replay. Tuning anything else is decoration.
+
+| Symbol | What it is |
+|--------|------------|
+| `backup_size` | Bytes of the base backup, compressed as stored in S3 |
+| `restore_throughput` | Sustained MB/s from object storage to the target disk. Usually the binding constraint |
+| `wal_window` | Wall-clock time between the base backup and the recovery target — the WAL that must be replayed |
+| `wal_replay_rate` | How much WAL-time the recovering server replays per minute of real time. Faster than 1:1 because replay skips planning and concurrency |
+| `detection` / `promotion` | Human and orchestration time. Small, but not zero, and often forgotten in RTO math |
+
+**Walk one example.** The 200GB case-study database restoring from S3:
+
+```
+  restore
+    200 GB = 204,800 MB     at 200 MB/s   ->  1024 s  = 17.07 min
+    200 GB = 204,800 MB     at 190 MB/s   ->  1078 s  = 17.97 min   (the observed 18 min)
+
+  replay
+    3 h of WAL = 180 min of WAL-time
+    replayed in 8 min of real time        ->  22.5 min of WAL per minute
+
+  total
+    18 min restore  +  8 min replay       =  26 min   vs 30 min RTO target
+```
+
+The replay rate of 22.5:1 is the number worth remembering: a recovering PostgreSQL chews through roughly 22 minutes of history per minute of real time, so a 24-hour WAL window costs about 64 minutes of replay all by itself. That single figure decides your base-backup frequency.
+
+**Walk the base-backup frequency tradeoff.** At the same 22.5:1 replay rate:
+
+```
+  base backup every    WAL window     replay time     + 18 min restore = RTO
+       24 h              24 h          64.0 min            82.0 min
+       12 h              12 h          32.0 min            50.0 min
+        4 h               4 h          10.7 min            28.7 min
+        1 h               1 h           2.7 min            20.7 min
+```
+
+Backing up four times a day instead of once cuts replay from 64 minutes to 11 and is what brings the total under a 30-minute SLA. The cost is four times the base-backup storage and four times the daily backup I/O — which is exactly the tradeoff the retention policy below is negotiating.
+
+### Full Versus Incremental Sizing
+
+```
+  incremental_size  ~=  full_size x daily_change_rate
+  weekly_storage    =  full_size + 6 x incremental_size      (1 full + 6 incrementals)
+  restore_volume    =  full_size + sum(incrementals in the chain)
+```
+
+**Stated plainly.** "An incremental backup stores only what changed since the last one, so weekly storage collapses toward the size of a single full copy — but restore has to stack the whole chain back up again."
+
+| Symbol | What it is |
+|--------|------------|
+| `daily_change_rate` | Fraction of the database modified per day. Churn, not write volume — rewriting the same row twice counts once |
+| `incremental_size` | Bytes a single incremental backup occupies |
+| `restore_volume` | Total bytes read to rebuild the target — full plus every incremental after it |
+| `repo1-retention-full=4` | pgBackRest keeps 4 full backups; older fulls and their dependent WAL age out together |
+| `--type=diff` vs `--type=incr` | Differential is since the last **full**; incremental is since the last backup **of any type**. Diff restores read 2 files, incr reads the whole chain |
+
+**Walk one example.** A 200GB database, one full plus six incrementals per week:
+
+```
+  churn/day   incr size    7 fulls      1 full + 6 incr     storage saved
+     2%         4.0 GB     1400 GB          224.0 GB            84.0%
+     5%        10.0 GB     1400 GB          260.0 GB            81.4%
+    10%        20.0 GB     1400 GB          320.0 GB            77.1%
+    20%        40.0 GB     1400 GB          440.0 GB            68.6%
+
+  restore cost at 5% churn, 190 MB/s
+    newest full only        200 GB   ->  17.96 min
+    full + 6 incrementals   260 GB   ->  23.35 min     (+30% bytes, +5.4 min)
+```
+
+Storage savings stay above two-thirds even at 20% daily churn, which is why incrementals are close to free on the storage axis. The bill arrives on the RTO axis: restoring at the end of the chain reads 30% more bytes and takes 5.4 minutes longer than restoring the day a full was taken.
+
+**Why the chain length is a reliability question, not just a speed one.** A differential restore needs two artifacts intact; a six-deep incremental chain needs seven, and any single corrupt link makes every backup after it unrestorable. This is the real reason retention policies pin a full-backup cadence rather than running incrementals indefinitely — and the reason the best-practice list warns never to delete old base backups by hand, since a manual deletion can silently orphan every incremental that depends on it.
+
 ### Backup Encryption
 
 ```bash
@@ -468,6 +583,29 @@ Backup-method selection as a decision chain: small databases or selective-restor
 **Backup encryption key in the backup**: Team encrypts backups and stores the key in the backup directory alongside the backup. Ransomware encrypts both the database and the backup. Neither is accessible without the key. The key is gone with everything else. Fix: encryption keys in a separate system (Vault, AWS KMS, AWS Secrets Manager); the key must survive independent of the database and backups.
 
 **Long PITR replay during RTO window**: A 5TB database with 30 minutes of WAL to replay. Base backup restore takes 45 minutes; WAL replay takes another 90 minutes. Total RTO = 2.25 hours, exceeding the 1-hour SLA. Fix: use streaming replication as primary HA (15-30s RTO); WAL archiving as backup (high-RPO recovery scenario). Or: take base backups more frequently (every 4 hours) to reduce WAL replay window.
+
+**Put simply.** "The SLA is a budget, the recovery steps are line items, and this team overspent before they finished the first two lines."
+
+| Symbol | What it is |
+|--------|------------|
+| SLA | The RTO commitment made to the business — the total the line items must fit inside |
+| restore line item | Base-backup restore time, `backup_size / restore_throughput` |
+| replay line item | WAL replay time — the term that grows with the age of the base backup |
+| overspend | Total minus SLA. Negative headroom, not a warning threshold |
+
+**Walk one example.** The 5TB failure against a 1-hour SLA:
+
+```
+  SLA budget                              60 min
+    base backup restore        45 min  ->  15 min remaining
+    WAL replay                 90 min  -> -75 min remaining
+
+  total                       135 min  =  2.25 h   ->  2.25x the SLA
+
+  the replay line item alone (90 min) is 1.5x the entire budget
+```
+
+The diagnosis follows directly from which line item is larger. Restore is 45 minutes of unavoidable byte movement for a 5TB database, but replay — the bigger item — is entirely a function of how stale the base backup is, and that is a scheduling decision rather than a physical limit. Cutting the base-backup interval shrinks the 90 and leaves the 45 untouched, which is why it is the listed fix. The complementary fix, streaming replication at a 15-30 second RTO, does not shrink either line item; it avoids running this budget at all for the failure modes a replica can cover.
 
 ---
 
@@ -623,3 +761,31 @@ Four independent components close the gap: Patroni promotes a replica in 15-30 s
 - Total RTO: 26 minutes (< 30-minute target)
 - Data loss: 3 hours (worst case; normal WAL archive lag = 1-5 minutes → RPO = 5 minutes met)
 - Action item: add WAL archive failure alerting to catch the 3-hour gap scenario
+
+**Read it like this.** "Both targets were met, but for completely different reasons — the RTO was met by arithmetic the team controls, and the RPO was met only because the archive pipeline happened to be healthy."
+
+| Symbol | What it is |
+|--------|------------|
+| RTO target | 30 minutes, met with 26 — headroom of 4 minutes |
+| RPO target | 5 minutes, met by a 1-5 minute archive lag in normal operation |
+| silent archive failure | The 3-hour gap injected by the drill. Turns the RPO from 5 minutes into 3 hours with no alarm |
+| headroom | Target minus actual. The number that says whether the result is a design or a coincidence |
+
+**Walk one example.** Both budgets, side by side:
+
+```
+  RTO
+    restore  200 GB from S3               18 min
+    replay   3 h of WAL at 22.5:1       +  8 min
+    total                                 26 min   vs 30 min target   ->  4 min spare
+
+  RPO, archive pipeline healthy
+    worst-case lag                       1-5 min   vs  5 min target   ->  met
+
+  RPO, archive pipeline silently broken (the drill)
+    data lost                              180 min vs  5 min target   ->  36x over
+```
+
+The RTO number is robust: it is bytes over bandwidth plus a measured replay rate, and it will reproduce. The RPO number is not — it holds only while `wal-push` keeps succeeding, and nothing in the architecture noticed when it stopped. A 36x miss produced by a component failing quietly is precisely the "backup exists, restore was never tested" pitfall wearing a different hat, which is why the action item is alerting rather than a faster pipeline.
+
+**Where the 4 minutes of headroom actually go.** The 26-minute total counts restore and replay only. Detection, the decision to declare a disaster, instance provisioning, promotion, and application smoke tests all land in the same 30-minute budget in a real incident. Four minutes of spare capacity does not cover them, so the honest reading is that this design meets its RTO on the mechanical steps and depends on everything human happening instantly — an argument for the daily base backup becoming a 4-hourly one before the database grows past 200GB.

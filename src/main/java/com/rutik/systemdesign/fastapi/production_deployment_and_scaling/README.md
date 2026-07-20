@@ -532,6 +532,88 @@ CMD ["uvicorn", "app.main:app",
 ~180MB image vs ~900MB with a naive `python:3.11` image. Smaller images reduce pull time
 during K8s pod scheduling (critical during burst scale-out).
 
+### 6.7 Decoding the Worker-Count Formula and Its Memory Budget
+
+`workers = 2 * multiprocessing.cpu_count() + 1` from §6.1 is the single most-cited number
+in this module. It is worth taking apart, because it silently assumes memory is free.
+
+**In plain terms.** "Run two workers per core so that whenever one is parked waiting on the
+database the core still has something to do, and add one spare for scheduler jitter." It is
+a CPU-utilisation heuristic — it has no opinion whatsoever about RAM, and that is where it
+gets deployments killed.
+
+| Symbol | What it is |
+|--------|------------|
+| `cpu_count()` | Cores the process can schedule on — on K8s this is the node's count, not the limit |
+| `2 x` | Two workers per core, so one can run while the other waits on I/O |
+| `+ 1` | Spare worker absorbing scheduling jitter and worker respawns |
+| `RSS per worker` | Resident memory of one forked process; ~80 MB here, far more with an ML model |
+
+**Walk one example.** A 4-core VM at the ~80MB per worker figure quoted in §5.1, checked
+against two different container memory limits:
+
+```
+  workers = (2 x 4) + 1 = 9
+  memory  = 9 x 80 MB   = 720 MB total RSS
+
+  limit 1024Mi = 1073.7 MB  ->  720 MB fits,       353.7 MB headroom
+  limit  512Mi =  536.9 MB  ->  720 MB OOMKilled,  over by 183.1 MB
+                                max workers = floor(536.9 / 80) = 6
+
+  On a 4-core box with a 512Mi limit the two constraints disagree:
+  the CPU formula says 9 workers, the memory limit permits 6. Memory wins.
+```
+
+The failure mode is unpleasant because it is not gradual: the ninth worker does not run
+slowly, the kernel OOM-killer terminates a process outright and Gunicorn respawns it into
+the same wall. Always recompute `workers` from `limits.memory / RSS` and take the smaller
+of the two answers — and note that `cpu_count()` inside a container reports the *node's*
+cores, not the cgroup CPU limit, so on a 64-core node the formula happily asks for 129
+workers.
+
+### 6.8 Decoding the HPA Replica Formula
+
+The HPA in §6.5 declares two targets — CPU at 60% and 200 RPS per pod. Kubernetes turns
+those into a replica count with one arithmetic rule.
+
+**Stated plainly.** "Scale the fleet by exactly the ratio your measurement overshoots the
+target, round up, and when several metrics are declared take whichever demands the most
+pods." Nothing about the rule is proportional-integral or predictive — it is a single
+ratio recomputed every sync interval.
+
+| Symbol | What it is |
+|--------|------------|
+| `currentReplicas` | Pods running right now |
+| `currentMetricValue` | Measured average across pods — CPU utilisation or per-pod RPS |
+| `desiredMetricValue` | The target you declared (`averageUtilization: 60`, `averageValue: "200"`) |
+| `ceil(...)` | Round up — a fractional pod is impossible, so the HPA always over-provisions |
+| max over metrics | With several metrics declared, the largest desired count wins |
+
+**Walk one example.** The §14 case-study fleet: 800 req/s across 10 pods, each request
+costing ~5 ms inference plus ~2 ms of DB time, against both declared targets:
+
+```
+  desiredReplicas = ceil(currentReplicas x currentMetric / desiredMetric)
+
+  Per-pod load     800 req/s / 10 pods       = 80 req/s per pod
+  Work per second  80 x 0.007 s              = 0.56 s of CPU per wall-clock second
+                                             = 56% utilisation of one core
+
+  CPU metric   ceil(10 x 56 / 60)  = ceil( 9.33) = 10 pods   (no change)
+  RPS metric   ceil(10 x 80 / 200) = ceil( 4.00) =  4 pods   (would scale down)
+  HPA takes the max                              = 10 pods
+
+  Push utilisation to 70% -- 100 req/s per pod, 100 x 0.007 = 0.70 s:
+  CPU metric   ceil(10 x 70 / 60)  = ceil(11.67) = 12 pods   <- the §14 figure
+```
+
+Two things fall out of this. First, the RPS target of 200/pod is far looser than the CPU
+target of 60% for this workload, so it never binds — a second metric only helps when it can
+actually become the maximum. Second, the §14 figure of "about 700ms of work per second per
+CPU" corresponds to **100 req/s per pod**, i.e. a 1,000 req/s fleet; at the stated 800 req/s
+across 10 pods the per-pod work is 560 ms (56%) and the HPA holds at 10 pods rather than
+scaling to 12.
+
 ---
 
 ## 7. Real-World Examples
@@ -708,6 +790,36 @@ lifecycle:
 # If preStop=5s and drain=30s, set terminationGracePeriodSeconds=40
 terminationGracePeriodSeconds: 40
 ```
+
+**The idea behind it.** "The grace period is a budget that must cover every phase of
+shutdown end to end, because the moment it expires Kubernetes sends SIGKILL regardless of
+what is still in flight." It is a sum, not a timeout to tune by feel.
+
+| Symbol | What it is |
+|--------|------------|
+| `preStop` | Sleep that lets the load balancer notice the endpoint removal before SIGTERM |
+| `graceful-timeout` | Uvicorn's window for finishing in-flight requests after SIGTERM |
+| safety margin | Slack for `lifespan` shutdown — pool dispose, span flush, queue drain |
+| `terminationGracePeriodSeconds` | Total budget; SIGKILL fires the instant it elapses |
+
+**Walk one example.** The settings used throughout this module, added up:
+
+```
+  preStop sleep                   :   5 s   (LB propagation is 3-4 s)
+  graceful HTTP drain             :  30 s   (--graceful-timeout default)
+  lifespan cleanup + margin       :   5 s
+                                    ------
+  terminationGracePeriodSeconds   :  40 s
+
+  Set it to 30 (the Kubernetes default) instead:
+    5 s preStop leaves 25 s of the 30 s budget for a 30 s drain
+    -> SIGKILL lands 5 s early, mid-drain, every single rollout
+    -> the requests still in flight at that instant become client-side 502s
+```
+
+Note the default is the trap: Kubernetes ships 30 s and Uvicorn ships a 30 s drain, so any
+non-zero `preStop` makes the two defaults incompatible by construction. The case study in
+§14 uses 45 s for the same reason, buying extra slack for slower ML-model teardown.
 
 ### Pitfall 4: Liveness probe too aggressive — restarts healthy pods under load
 

@@ -547,6 +547,40 @@ String render(ApiResponse<OrderView> r) {
 
 **Results.** Thread count: 200 platform threads -> ~8 carrier threads. Stack memory: ~200MB -> a few MB (virtual thread stacks are ~few KB and live on the heap, growing on demand). p99: 800ms -> 120ms at 20x the concurrency.
 
+**In plain terms.** "Stack memory is just concurrency multiplied by stack size, and the migration changed the second factor by roughly a thousand-fold — which is why 50x more in-flight requests still costs less memory than before."
+
+Writing it as a product makes the ceiling obvious. With platform threads, every unit of concurrency you buy costs a megabyte of reserved address space up front; with virtual threads it costs a heap allocation that grows only as deep as the call stack actually gets.
+
+| Symbol | What it is |
+|--------|------------|
+| Stack size | Per-thread stack: ~1MB reserved for a platform thread (`-Xss` default), ~a few KB for a virtual thread |
+| Where it lives | Platform stacks are OS-reserved memory outside the heap; virtual thread stacks are heap objects that grow on demand |
+| Concurrency | Threads alive — capped at the pool size for platform threads, at the request count for virtual threads |
+| Total stack memory | Concurrency x stack size — the product this arithmetic walks |
+| Carrier threads | The ~8 real OS threads (one per core) that virtual threads mount onto; the only platform stacks left |
+
+**Walk one example.** Both configurations, priced out:
+
+```
+  Java 11, platform threads
+    concurrency          200 threads (pool cap)
+    stack size           ~1 MB each
+    stack memory         200 x 1 MB           =  ~200 MB
+    memory per served request                 =  1 MB
+
+  Java 21, virtual threads
+    concurrency          10,000 threads (1 per request)
+    stack size           ~1 KB each (grows on demand)
+    stack memory         10,000 x 1 KB        =  ~10 MB
+    memory per served request                 =  1 KB
+
+  concurrency        200 -> 10,000     =  50x more
+  stack memory      200 MB -> 10 MB    =  20x less
+  cost per request   1 MB -> 1 KB      =  ~1,000x cheaper
+```
+
+The 200MB was never the binding constraint on its own — the pool cap of 200 was. But the two are the same fact: the pool was capped at 200 *because* each thread costs a megabyte, and lifting the cap to 10,000 on platform threads would have meant reserving ~10GB of stack. Moving the stack to the heap and letting it grow on demand is what removes the cap, not the raw memory saving.
+
 #### Capacity comparison at a glance
 
 ```
@@ -560,6 +594,39 @@ String render(ApiResponse<OrderView> r) {
 ```
 
 The key insight: the platform-thread CPU was idle at 25% because threads were *blocked*, not busy. Virtual threads convert that wasted wall-clock into served requests without adding cores.
+
+**What it means.** "A fixed thread pool sets a hard throughput ceiling of `threads / hold-time`, and once demand passes that ceiling the extra requests do not run slowly — they do not run at all until a thread frees up."
+
+That is the distinction the CPU graph hides. At 25% utilisation the instinct is "there is headroom, send more traffic," but the constraint was never cores; it was the 200 slots, each held for the full duration of a downstream call the CPU spends doing nothing.
+
+| Symbol | What it is |
+|--------|------------|
+| Hold time | How long one request occupies its thread — here the sum of its downstream calls, since each blocks |
+| Threads | The pool size, 200; the number of requests that can be in flight at once |
+| Throughput ceiling | Threads / hold time — the most requests per second the pool can retire, regardless of CPU |
+| Queue depth | Offered concurrency minus threads: requests that hold no thread and are simply waiting |
+| Queueing delay | Queue depth / throughput ceiling — time spent before the request even starts |
+
+**Walk one example.** The Java 11 configuration at 500 concurrent requests:
+
+```
+  hold time      3 downstream calls x 60 ms   =  180 ms  =  0.180 s
+  threads                                        200
+
+  throughput ceiling  =  200 / 0.180           =  1,111 requests/sec
+
+  at 500 offered concurrently:
+    running (hold a thread)     200
+    queued (hold nothing)       500 - 200      =    300
+
+    queueing delay  =  300 / 1,111 per sec     =  270 ms
+    total latency   =  270 ms + 180 ms         =  450 ms
+
+  Only 180 ms of that 450 ms is real downstream work.
+  The other 270 ms -- 60% of the request -- is waiting for a thread to exist.
+```
+
+The measured p99 of 800ms sits above this 450ms figure, as it should: this arithmetic gives the average request under steady 500-way load, while p99 is the tail, where queue depth is transiently deeper and downstream calls are themselves slower than 60ms. The point of the calculation is not to predict the tail but to locate the cause — 60% of the latency is queueing for a resource the CPU meter cannot see. Virtual threads delete the queue entirely: every request gets a thread immediately, so the 270 ms vanishes and latency collapses back toward the 180 ms of actual downstream time.
 
 #### Records compress the boilerplate, sealed types make handling total
 
@@ -591,6 +658,40 @@ try { result = blockingHttpCall(); } finally { lock.unlock(); }
 (JDK 24 lifts most `synchronized` pinning, but on the Java 21 LTS baseline prefer `ReentrantLock` around blocking I/O.)
 
 **2. Virtual threads used for CPU-bound work.** A team ran a CPU-heavy image transform on virtual threads expecting a speed-up. Virtual threads do not add cores; they help *blocked* tasks. The transform still saturated 8 carriers and just added scheduling overhead. CPU-bound work belongs on a fixed pool sized to cores.
+
+**Read it like this.** "CPU utilisation is the fraction of your cores that are actually computing, so 25% on an 8-core box means 2 cores working and 6 idle — and no thread abstraction can raise that ceiling above 8."
+
+Reading utilisation as a count of busy cores rather than a percentage is what separates the two war stories. The migration worked because blocked threads were leaving cores idle; the image transform did not, because those cores were already saturated and virtual threads add none.
+
+| Symbol | What it is |
+|--------|------------|
+| Cores | 8 — the hard parallelism limit, and the number of carrier threads the JVM creates |
+| CPU utilisation | Fraction of core-time spent executing; multiply by cores to get cores actually busy |
+| I/O-bound | Threads blocked waiting; cores sit idle and utilisation is far below 100% — recoverable |
+| CPU-bound | Cores already computing; utilisation near its ceiling — not recoverable by adding threads |
+
+**Walk one example.** The same 8-core box, before and after, then applied to CPU-bound work:
+
+```
+  cores                                            8
+
+  before (Java 11, blocked on I/O)
+    utilisation      25%      ->  0.25 x 8   =   2.0 cores busy, 6.0 idle
+
+  after (Java 21, virtual threads)
+    utilisation      70%      ->  0.70 x 8   =   5.6 cores busy, 2.4 idle
+    work per core    0.70 / 0.25             =   2.8x more, on the same hardware
+
+  the 6 idle cores were the recoverable resource -- and they were only idle
+  because threads were blocked rather than because work was missing.
+
+  now the CPU-bound image transform, on the same box:
+    cores already busy                        =   8.0 of 8
+    idle cores available to recover           =   0
+    speedup from adding virtual threads       =   1.0x  (plus scheduling overhead)
+```
+
+The asymmetry is the lesson. Virtual threads recover idle cores; they never create busy ones. When utilisation is already at its ceiling, the only remaining levers are fewer instructions per item or more cores — and the extra threads make things marginally *worse*, since scheduling millions of runnable tasks onto 8 carriers costs real time that the 200-thread pool was not paying.
 
 **3. Record with a mutable collection field leaked mutation.** `record Cart(List<Item> items) {}` exposed the caller's list directly, so external mutation changed the "immutable" record's contents.
 

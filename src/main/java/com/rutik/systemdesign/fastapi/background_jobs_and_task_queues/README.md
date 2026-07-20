@@ -449,6 +449,47 @@ def send_invoice_email(self, order_id: int, recipient: str) -> None:
         raise self.retry(exc=exc, countdown=int((2 ** self.request.retries) * 30))
 ```
 
+**Stated plainly.** "Each failed attempt waits twice as long as the one before it, so a task
+configured for five retries is still being retried half an hour after it first failed — not half
+a minute."
+
+That gap between intuition and arithmetic is what makes retry budgets a production hazard: a
+worker slot stays reserved for the whole chain, and the caller's SLA clock never stops.
+
+| Symbol | What it is |
+|--------|------------|
+| `self.request.retries` | Attempts already made. `0` on the first retry, `4` on the fifth |
+| `2 ** self.request.retries` | The doubling factor: 1, 2, 4, 8, 16 |
+| base delay (`60` or `30`) | Seconds before the *first* retry; the entire schedule scales with it |
+| `random.uniform(-30, 30)` | Jitter, +/- 30 s. Decorrelates a batch of tasks that all failed at once |
+| `max_retries=5` | The attempt cap. Exhausting it ends the chain and drops the task into the DLQ |
+
+**Walk one example.** Push the `2 ** n * 60` schedule out to the configured `max_retries=5`:
+
+```
+   retry n     2^n     delay = 2^n x 60 s     cumulative wall time
+   -------    -----    -------------------    --------------------
+      0         1              60 s                   60 s   =  1.0 min
+      1         2             120 s                  180 s   =  3.0 min
+      2         4             240 s                  420 s   =  7.0 min
+      3         8             480 s                  900 s   = 15.0 min
+      4        16             960 s                 1860 s   = 31.0 min
+
+   The last retry alone waits 960 s -- longer than the first four combined (900 s).
+   The httpx.RequestError branch uses base 30 s instead of 60 s, halving every row:
+     30 + 60 + 120 + 240 + 480 = 930 s = 15.5 min total.
+```
+
+Halving the base halves the total, and adding one more retry roughly doubles it (`n=5` alone
+would add 1920 s, taking the total to 63 minutes). Pick `max_retries` by asking how long the task
+is allowed to remain unfinished, not by picking a number that "feels safe".
+
+**Why the jitter term exists.** Without `random.uniform(-30, 30)`, every task that failed during
+the same downstream outage retries at exactly `t+60`, `t+180`, `t+420` — 5,000 tasks arriving in
+the same millisecond, five times in a row. The downstream that just came back up is knocked over
+again by its own recovery traffic. Jitter smears each wave across a 60-second window, so the
+recovering service sees a ramp instead of a wall.
+
 ### 6.3 Idempotency Key with Redis `SET NX EX`
 
 ```python
@@ -629,6 +670,63 @@ instances for 1,000 concurrent outbound calls total.
 | PostgreSQL | High | ~5ms | Medium | Audit trail, long-lived results |
 | RPC (RabbitMQ) | Medium | ~1ms | Low | Synchronous `.get()` callers |
 | None (ignore result) | N/A | Zero overhead | Zero | Fire-and-forget tasks |
+
+### 8.4 Backpressure Arithmetic — What "No Durability" Costs Under Load
+
+The row above says `BackgroundTasks` has no durability. The reason it *also* cannot carry the
+Section 14 workload is a queueing identity, not an opinion:
+
+```
+  depth(t) = (lambda - mu) x t
+```
+
+**In plain terms.** "Work piles up at exactly the rate by which arrivals outrun completions, and
+that pile only ever moves in one direction until the two rates cross."
+
+There is no third option. A backlog does not stabilise on its own — if `lambda > mu`, the only
+things that end the growth are a rate change or a process death.
+
+| Symbol | What it is |
+|--------|------------|
+| `lambda` | Arrival rate — tasks enqueued per second by incoming traffic |
+| `mu` | Service rate — tasks *completed* per second by whatever executes them |
+| `lambda - mu` | The deficit. Positive means growing backlog; negative means draining |
+| `t` | Seconds spent in that state. Depth is linear in it — no curve, no plateau |
+| `depth(t)` | Tasks waiting. Multiply by bytes-per-task to get memory, by `1/mu` to get lag |
+
+**Walk one example.** Run the Section 14 traffic through `BackgroundTasks` instead of ARQ:
+
+```
+  arrivals
+    50,000 orders/hour / 3600                  =  13.9 orders/s
+    x 3 tasks per order                        =  41.7 jobs/s   <- lambda
+
+  service (BackgroundTasks: runs in the request coroutine, ~200 ms per SES call)
+    one Uvicorn worker: 1 / 0.2 s              =   5.0 jobs/s
+    x 4 Uvicorn workers                        =  20.0 jobs/s   <- mu
+
+  deficit  = 41.7 - 20.0                       =  21.7 jobs/s
+  memory   = 21.7 jobs/s x ~50 KB per pending  =   1.06 MiB/s
+  time to burn 1 GiB of headroom
+           = 1 GiB / 1.06 MiB/s                =    968 s  =  16 minutes to OOM
+```
+
+Sixteen minutes into peak, the OOM killer sends `SIGKILL` and every one of the ~21,000 pending
+tasks vanishes at once — Pitfall 1, arrived at by arithmetic rather than anecdote.
+
+Now the same traffic against the durable queue, where `mu` is set by the worker fleet:
+
+```
+  mu = 50 concurrent coroutines / 0.2 s per job   = 250 jobs/s per ARQ worker
+
+  lambda - mu = 41.7 - 250 = -208 jobs/s   ->   negative: depth drains to 0 and stays there
+
+  A 30-minute Redis-side stall parks 41.7 x 1800 = 75,000 jobs durably in the broker,
+  and one worker drains that backlog in 75,000 / 208 = 361 s = 6 minutes.
+```
+
+The durable queue does not merely survive the crash — it changes the sign of `lambda - mu`,
+because `mu` is now a number you can scale independently of the web tier.
 
 ---
 
@@ -1205,6 +1303,49 @@ async def create_order_fixed(
 - Throughput per worker: 50 / 0.2s = 250 jobs/second
 - Required workers for 42 jobs/s: 1 worker with headroom (deploy with 2 for HA)
 - Redis memory: each ARQ job JSON blob ~500 bytes; 42 jobs/s with 3600s TTL = ~75MB
+
+Every line above is one identity applied twice. It is Little's Law:
+
+```
+  L = lambda x W
+```
+
+**The idea behind it.** "How many jobs are in flight right now is just how fast they arrive
+multiplied by how long each one lingers — nothing about the workers enters into it."
+
+This is why worker sizing is never a guess. `L` is fixed by traffic and task duration alone; the
+fleet's only job is to have at least `L` execution slots available.
+
+| Symbol | What it is |
+|--------|------------|
+| `lambda` | Arrival rate of jobs, per second |
+| `W` | Time a single job spends in the system — here the ~200 ms SES round trip |
+| `L` | Jobs in flight at any instant. The number of concurrent slots you must own |
+| `max_jobs` | Slots one ARQ worker provides (50 coroutines). Workers = `L / max_jobs` |
+
+**Walk one example.** Derive the "1 worker with headroom" line two independent ways:
+
+```
+  lambda = 50,000 orders/hr / 3600 s          =  13.9 orders/s
+         x 3 tasks per order                  =  41.7 jobs/s
+  W      = 200 ms per SES call                =   0.2 s
+
+  by concurrency:  L = lambda x W = 41.7 x 0.2  =  8.3 jobs in flight
+                   workers = 8.3 / 50 slots     =  0.17  ->  1 worker
+
+  by throughput:   per-worker = 50 / 0.2 s      =  250 jobs/s
+                   workers = 41.7 / 250         =  0.17  ->  1 worker
+```
+
+Both routes land on 0.17, because they are the same equation rearranged — `L / max_jobs` and
+`lambda / (max_jobs / W)` are algebraically identical. Deploying 2 workers is not capacity
+headroom (6x is already in hand); it buys fault isolation, which is the point Discussion
+Question 3 makes.
+
+**Where the estimate breaks.** `W` is the whole lever. If SES degrades from 200 ms to 2 s,
+`L` jumps from 8.3 to 83 in-flight jobs — still inside one worker's 50 slots? No: 83 > 50, so a
+10x latency regression on an unchanged request rate silently turns a 1-worker deployment into a
+2-worker requirement. Alert on task *duration*, not just task rate.
 
 #### Discussion Questions
 

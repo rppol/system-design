@@ -227,6 +227,36 @@ private static final Comparator<Employee> COMPARATOR =
               .thenComparingInt(Employee::getId);
 ```
 
+**What the formula is telling you.** "`a - b` is not a comparison, it is a subtraction that you are *hoping* stays in range — and `int` arithmetic wraps silently instead of failing, so when it leaves the range you get a confidently wrong answer rather than an error."
+
+`Integer.compare(a, b)` never computes the difference at all; it branches on `a < b` and returns a hand-picked `-1`/`0`/`1`. That is the entire fix: remove the arithmetic, remove the overflow.
+
+| Symbol | What it is |
+|--------|------------|
+| `int` range | `[-2^31, 2^31 - 1]` = `[-2,147,483,648, 2,147,483,647]` — 2^32 distinct values |
+| `2^32` | 4,294,967,296 — the wraparound modulus; results are reduced into range by subtracting it |
+| `a - b` | The *true* difference, which may need 33 bits even when `a` and `b` each fit in 32 |
+| overflow condition | `\|a - b\| > 2^31 - 1`; safe if and only if the two values differ by less than 2^31 |
+| `compareTo`'s contract | Only the *sign* is read — which is why the wrapped sign is silently catastrophic |
+
+**Walk one example.** The exact pair in the broken code above:
+
+```
+  this.id  =  2,147,483,647     (Integer.MAX_VALUE)
+  other.id =             -1
+
+  true difference  :  2,147,483,647 - (-1)      =  2,147,483,648
+  representable?   :  2,147,483,648 > 2,147,483,647   ->  NO, exactly one past the top
+  wraps by 2^32    :  2,147,483,648 - 4,294,967,296   = -2,147,483,648  (Integer.MIN_VALUE)
+
+  compareTo returns -2,147,483,648  ->  sign is NEGATIVE  ->  "this comes FIRST"
+  but 2,147,483,647 > -1            ->  it must come LAST
+
+  Integer.compare(2147483647, -1)   ->  branches, never subtracts  ->  +1   correct
+```
+
+The reason this ships is in the safety condition, not the failure. Real id columns are positive and bounded — with ids in `[0, 1_000_000_000]` the largest possible gap is 1e9, comfortably under `2^31 - 1` = 2.15e9, so subtraction is correct for **every** row and passes **every** test. Only about a quarter of *uniformly random* `int` pairs overflow, and essentially none of your fixture data does. The bug waits for the first negative sentinel, `hashCode()` result, or `Integer.MIN_VALUE` id to reach the comparator, at which point `TreeMap` and `Arrays.sort` start returning wrong orderings — or throw `IllegalArgumentException: Comparison method violates its general contract!` from TimSort, several layers away from the subtraction that caused it.
+
 ### String Pool and `new String("abc")`
 
 ```java
@@ -249,6 +279,34 @@ e == a;               // true (both point to pool)
 // Common interview trick:
 new String("abc")     // creates 2 objects: "abc" in pool + new String on heap
 ```
+
+**In plain terms.** "Literals are counted once per *program*; `new String` is counted once per *execution*. The whole cost difference is which of those two numbers your code multiplies by."
+
+The "2 objects" answer is the interview version. The number that matters in production is what happens when that line is inside a loop, and it is not what most people guess.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | How many times the line executes at runtime |
+| pool entry | Created once, at class load, from the constant-pool literal — never `N` times |
+| `new String(lit)` | One fresh `String` header object per execution: `N` of them |
+| the `byte[]` | The character data. `new String(String)` copies the *reference*, not the bytes |
+| `.intern()` | Discards the fresh object and hands back the single pool reference |
+
+**Walk one example.** The same three-character literal, three ways, at `N` = 1 and `N` = 1,000,000:
+
+```
+                              pool entries   String objects   byte[] arrays
+  String s = "abc";  N=1           1               0                1
+  String s = "abc";  N=1,000,000   1               0                1     <- flat
+
+  new String("abc"); N=1           1               1                1
+  new String("abc"); N=1,000,000   1         1,000,000              1     <- linear
+
+  Interview answer for one execution: 1 + 1 = 2 objects.   Correct, and misleading:
+  the count that scales is the String header, and ONLY the String header.
+```
+
+The byte array staying at 1 is the part worth carrying out of this section: `new String(String original)` assigns `this.value = original.value`, sharing the array, because `String` is immutable and there is nothing to protect against. So the loop above churns a million small header objects while the actual `"abc"` bytes exist exactly once. That makes it a garbage-rate problem rather than a footprint problem — invisible in a heap dump taken after a GC, visible immediately in allocation profiling. Note this sharing does *not* apply to `new String(charArray)` or `new String(bytes, UTF_8)`, which must copy defensively because the caller still holds a mutable array.
 
 ### == vs .equals() Reference Table
 

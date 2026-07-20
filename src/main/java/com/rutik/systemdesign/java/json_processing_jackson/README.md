@@ -156,6 +156,39 @@ rebuilding metadata the process already built a moment ago.
 
 The first-ever call pays the same introspection cost whether or not you reuse the mapper — the win from reuse is that every call *after* the first drops from milliseconds to low microseconds instead of paying that cost again and again.
 
+**In plain terms.** "Multiply per-call CPU time by requests per second and you get CPU-seconds burned per wall-clock second — which is just 'how many cores this costs,' and a per-call cost measured in milliseconds turns into whole cores the moment traffic is non-trivial."
+
+Converting latency into cores is the move that makes the anti-pattern undeniable. A 15 ms cost sounds ignorable in a single trace; expressed as 15 saturated cores it stops sounding ignorable.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_call` | CPU time one (de)serialize call spends inside Jackson |
+| `QPS` | Calls per second the process handles |
+| `t_call x QPS` | CPU-seconds consumed per wall-clock second — numerically equal to cores fully saturated |
+| cache hit | The post-first-call path: no reflection, no introspection, just already-compiled (de)serialization logic |
+
+**Walk one example.** The 1,000 req/s figure from the chart above, both ways:
+
+```
+  recreate the mapper every call
+    t_call    = 15 ms      = 0.015 s   (midpoint of the 10-20 ms band)
+    QPS       = 1,000
+    CPU/sec   = 0.015 x 1,000
+              = 15 CPU-seconds per wall-clock second
+              = 15 cores fully saturated, doing nothing but rebuilding metadata
+
+  shared mapper, warm cache
+    t_call    = 50 us      = 0.00005 s (top of the 1-50 us band, i.e. pessimistic)
+    QPS       = 1,000
+    CPU/sec   = 0.00005 x 1,000
+              = 0.05 CPU-seconds per wall-clock second
+              = 5% of one core
+
+  ratio       = 15 / 0.05 = 300x
+```
+
+The 300x is measured at the *pessimistic* end of the cached range. The point is not the exact multiple — it is that the reflection cost is per-class-per-mapper, so it should be paid a fixed number of times for the life of the process, not a number of times proportional to traffic.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -356,6 +389,41 @@ Cross-reference: for the type-erasure and reflection concepts underlying `TypeRe
 - **Payment and billing APIs** configure `DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS` to avoid `double` rounding error on money fields — parsing `19.99` as a Java `double` and later re-serializing it can drift by fractions of a cent at scale.
 - **The default-typing CVE lineage** (CVE-2017-7525 onward) affected a wide swath of the Java ecosystem precisely because so many frameworks exposed a generic `Object`-typed field somewhere in a request-handling path — the vulnerability class, not any single vendor, is the real-world example worth internalizing.
 
+**Read it like this.** On the Twitter `id_str` example: "JSON numbers have no declared width, so a 64-bit Java `long` written as a bare JSON number lands in a JavaScript consumer that can only hold 53 bits of integer precision exactly — and everything above that is silently rounded, not rejected."
+
+The silence is what makes this dangerous. There is no exception, no truncation warning, no parse error; an ID just quietly becomes a *different, valid-looking* ID.
+
+| Symbol | What it is |
+|--------|------------|
+| `long` | Java's 64-bit signed integer. Max value `2^63 - 1`, which is where Snowflake IDs live |
+| IEEE-754 double | What every JavaScript `Number` is. 53 bits of mantissa, so integers are exact only up to `2^53` |
+| `2^53` | `Number.MAX_SAFE_INTEGER + 1` — the first integer JavaScript cannot distinguish from its neighbour |
+| `id_str` | The same value emitted as a JSON *string*, which has no numeric type and therefore no precision limit |
+
+**Walk one example.** The two limits, side by side:
+
+```
+  JavaScript exact-integer ceiling
+    2^53          = 9,007,199,254,740,992          (16 digits)
+
+  Java long ceiling / Snowflake ID range
+    2^63 - 1      = 9,223,372,036,854,775,807      (19 digits)
+
+  how much of the range is unsafe
+    2^63 / 2^53   = 2^10 = 1,024
+
+  -> 1,023 out of every 1,024 representable long values are ABOVE the point where
+     JavaScript stops being exact. A Snowflake ID (a 19-digit number) is always in
+     the unsafe region, never the safe one.
+
+  what the browser actually does
+    sent    : 1234567890123456789
+    parsed  : 1234567890123456768     <- rounded to the nearest representable double
+    off by  : 21                      <- a valid-looking ID pointing at nothing
+```
+
+**Why the string field exists.** Emitting `id_str` alongside `id` costs roughly 20 extra bytes per record and preserves every bit, because a JSON string is copied verbatim by every parser in every language. The general rule for Jackson: any 64-bit identifier that might reach a browser should be declared `String` or annotated `@JsonFormat(shape = JsonFormat.Shape.STRING)`. The same reasoning drives `USE_BIG_DECIMAL_FOR_FLOATS` for money — both are cases where JSON's untyped numbers lose information that the receiving language's default numeric type cannot recover.
+
 ---
 
 ## 8. Tradeoffs
@@ -432,6 +500,40 @@ try (JsonParser p = mapper.getFactory().createParser(response.getInputStream());
     while (it.hasNext()) { process(it.next()); }
 }
 ```
+
+**What it means.** "A `JsonNode` tree is not a copy of your JSON — it is a Java object graph *about* your JSON, and object headers, boxed numbers, and hash-map buckets make that graph several times heavier than the bytes it describes."
+
+The multiplier is what turns a payload that "obviously fits" into an OOM. The heap you need is not the document size; it is the document size times the inflation factor, times how many documents are in flight.
+
+| Symbol | What it is |
+|--------|------------|
+| raw payload | Bytes on the wire — the number in the `Content-Length` header and the only one anyone checks |
+| inflation factor | Heap bytes per payload byte for a `JsonNode` tree, commonly 3-5x from headers, boxing, and `HashMap` buckets |
+| `payload x factor` | Actual heap the tree occupies, which is what must fit under the container limit |
+| streaming resident set | With `MappingIterator`, one record at a time — flat in payload size |
+
+**Walk one example.** The 500 MB export from this war story:
+
+```
+  raw payload                = 500 MB
+
+  tree model heap
+    at 3x inflation          = 500 x 3 =  1,500 MB = 1.46 GB
+    at 5x inflation          = 500 x 5 =  2,500 MB = 2.44 GB
+    -> the stated 1.5-2.5 GB band
+
+  the growth that crossed the line
+    year 1: "a few MB", say  = 5 MB    -> tree heap 15-25 MB      (invisible)
+    year 2:                  = 500 MB  -> tree heap 1.46-2.44 GB  (OOM)
+    payload grew 100x; the heap requirement grew 100x with it, unnoticed,
+    because nobody was measuring the derived number
+
+  MappingIterator instead
+    resident                 = one ExportRecord, say ~2 KB
+    heap needed              = ~2 KB x inflation, regardless of the 500 MB total
+```
+
+**Why the multiplier is 3-5x rather than 1x.** Each JSON scalar becomes a distinct heap object with its own header; each `{...}` becomes a `HashMap`-backed `ObjectNode` whose bucket array is sized for load factor 0.75, so it allocates more slots than entries; and each number becomes a boxed `IntNode`/`DoubleNode` rather than a primitive. The compact text `{"id":42}` — 9 bytes — becomes an `ObjectNode`, a bucket array, a `String` key, and an `IntNode`. None of that is waste in the tree model's terms; it is the price of random access and mutability, which is exactly what a streaming pass does not need.
 
 ### Additional pitfalls
 
@@ -560,6 +662,50 @@ flowchart TD
 ```
 
 The size check is the single most important routing decision in the pipeline — everything downstream of it exists specifically to keep one partner's 50 MB manifest from being treated the same way as a 300-byte status ping.
+
+**Put simply.** "The gateway's throughput problem and its memory problem are different problems with different units — 50,000 events/sec is a CPU number, and 50 MB per manifest is a heap number — and the size check exists because a single pipeline sized for one of them will be destroyed by the other."
+
+Keeping the two separate is what makes the design legible. Mapper reuse solves the CPU axis; the streaming branch solves the heap axis; neither substitutes for the other.
+
+| Symbol | What it is |
+|--------|------------|
+| sustained rate | 50,000 events/sec. Multiplied by per-event CPU, it sets how many cores ingestion needs |
+| burst multiplier | 3x during partner batch jobs — the number capacity must actually be provisioned against |
+| payload spread | 300 bytes to 50 MB, a ratio of ~166,000x between the smallest and largest single body |
+| bulk threshold | 1 MB. Above it, route to streaming; below it, tree-peek plus data binding is affordable |
+
+**Walk one example.** The scenario's three stated numbers, each turned into the quantity it actually constrains:
+
+```
+  CPU axis (the throughput number)
+    sustained      = 50,000 events/sec
+    burst          = 50,000 x 3 = 150,000 events/sec
+    per day        = 50,000 x 86,400 = 4.32 billion events/day
+
+    with a shared mapper at 50 us/event:
+      0.00005 x 150,000 = 7.5 CPU-seconds/sec = 7.5 cores at burst
+    with a fresh mapper per event at 15 ms:
+      0.015   x 150,000 = 2,250 CPU-seconds/sec = 2,250 cores
+      -> war story 1: not a tuning problem, an architecture-is-impossible problem
+
+  heap axis (the payload number)
+    smallest body  = 300 B
+    largest body   = 50 MB
+    spread         = 50,000,000 / 300 = 166,667x
+
+    50 MB manifest via readTree, at the 3-5x inflation factor above:
+      = 150 MB to 250 MB of heap, for ONE request
+    50 MB manifest via MappingIterator:
+      = one ShipmentEvent resident, a few KB, regardless of manifest size
+
+  the threshold that separates them
+    1 MB cutoff -> a 50 MB manifest is 50x over, unambiguously the streaming path
+    war story 2's failure: the cutoff was 10 MB and a manifest reached ~10 MB,
+    landing right at the boundary where tree inflation (30-50 MB) still looked
+    survivable per request but was not survivable concurrently
+```
+
+**Why the blast-radius framing matters.** With 200 partners, any single partner is 0.5% of traffic but can be 100% of the heap if their payload takes the wrong branch. That asymmetry — one partner's payload size determining whether the pod survives for the other 199 — is why the fix in war story 2 was a *hard cap that forces streaming*, not merely a larger threshold. A threshold is a guess about payload sizes; a hard cap is a guarantee about memory.
 
 #### Canonical event hierarchy — closed allowlist, not default typing
 

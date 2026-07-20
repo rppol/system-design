@@ -354,6 +354,36 @@ int v = (int) getter.invoke(h);  // 42
 // - Not needed for one-off calls (Method.invoke() is fine there)
 ```
 
+**In plain terms.** "Divide each wall time by the 1,000,000 calls that produced it and the table stops being four numbers and becomes one statement: reflection costs about 80x a plain call, a `MethodHandle` about 10x, and `invokeExact` is within a nanosecond of the real thing."
+
+That per-call view is what decides the design. At 80 ns of overhead, `Method.invoke()` is free for a hundred startup-time lookups and ruinous for a serializer called on every field of every record.
+
+| Symbol | What it is |
+|--------|------------|
+| 1M calls | The benchmark's fixed workload; dividing wall time by it converts milliseconds into nanoseconds per call |
+| `Method.invoke()` | Reflective call: access check, arguments boxed into an `Object[]`, dispatch through the reflection machinery |
+| `MethodHandle.invoke()` | Typed handle the JIT can inline through, but which still adapts argument types at the call site |
+| `invokeExact()` | Same handle with no type adaptation at all — the signature must match exactly, so it compiles to nearly a direct call |
+| Baseline | The direct call, the floor everything else is measured against |
+
+**Walk one example.** The same method invoked 1,000,000 times, each way:
+
+```
+                            wall time    per call        overhead vs direct
+  Method.invoke()              80 ms      80 ns                79 ns
+  MethodHandle.invoke()        10 ms      10 ns                 9 ns
+  invokeExact()                 2 ms       2 ns                 1 ns
+  direct call                   1 ms       1 ns              (baseline)
+
+  Method.invoke -> invokeExact  =  80 / 2  =  40x fewer nanoseconds per call
+
+  A serializer touching 20 fields on 100,000 objects makes 2,000,000 calls:
+    via Method.invoke()   2,000,000 x 80 ns  =  160 ms
+    via invokeExact()     2,000,000 x  2 ns  =    4 ms
+```
+
+The 79 ns is not one cost but a stack of them: the access check that `setAccessible(true)` cannot fully remove, the `Object[]` allocation for arguments, and the boxing of every primitive into it. `invokeExact` deletes all three by demanding an exact signature up front — which is exactly why it throws `WrongMethodTypeException` rather than quietly widening.
+
 ### Annotation Processor Mechanics (APT)
 
 ```java
@@ -662,6 +692,36 @@ bus.subscribe(System.out::println);          // Consumer<Object> accepts OrderEv
 bus.subscribe(new AuditLogger());            // Consumer<Event>  accepts OrderEvent
 bus.publish(List.of(new OrderPlaced("o-1"))); // List<OrderPlaced> is List<? extends OrderEvent>
 ```
+
+**What this actually says.** "The nested loop in `publish` means the real work is not the event count but the event count multiplied by the subscriber count — every extra subscriber re-costs the entire event stream."
+
+That multiplication is why the type safety matters so much here. A wrong cast is not one bad dispatch; it is one bad dispatch per subscriber, per event, across a fleet already running at peak.
+
+| Symbol | What it is |
+|--------|------------|
+| Outer loop | `for (E e : events)` — walks the published batch once |
+| Inner loop | `for (Consumer<? super E> s : subscribers)` — walks the `CopyOnWriteArrayList` once per event |
+| Dispatches | The product of the two: how many `accept()` calls actually run |
+| 80k events/sec | The stated fleet peak, spread across the 30 consuming services |
+
+**Walk one example.** The fleet peak, resolved down to one service:
+
+```
+  fleet peak                    80,000 events/sec
+  consuming services                        30
+  per service                   80,000 / 30  =  2,667 events/sec
+
+  take one service with 3 registered subscribers:
+    dispatches = events x subscribers
+               = 2,667 x 3
+               =  8,001 accept() calls/sec
+
+  add a 4th subscriber (one line of code):
+               = 2,667 x 4
+               = 10,668 accept() calls/sec       <- +2,667/sec, not +1
+```
+
+`CopyOnWriteArrayList` is the right structure precisely because of this shape: the inner loop runs 8,001 times a second while `subscribe()` runs a handful of times at startup. Copy-on-write makes writes expensive and iteration lock-free — the exact trade this ratio calls for. A `synchronized` list would put a lock acquisition on every one of those 8,001 dispatches.
 
 ### Heap Pollution: Broken Raw Type, Then the Fix
 

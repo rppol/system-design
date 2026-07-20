@@ -206,6 +206,36 @@ sequenceDiagram
 ```
 The receiver's dedup store is the only place "exactly once" is actually enforced.
 
+**Put simply.** "Count side effects by distinct keys, never by deliveries — the sender controls how many times a message arrives, and only the receiver controls how many times it counts."
+
+That split is the whole reason "exactly-once delivery" is a marketing phrase and "effectively-once processing" is an engineering one. No amount of sender-side care shrinks the delivery count to 1; the receiver simply stops caring what that count is.
+
+| Symbol | What it is |
+|--------|------------|
+| `D` | Deliveries — how many times the message physically arrives. Sender/broker decide this |
+| `K` | Distinct idempotency keys among those deliveries (`msg-42` is one key, however often it lands) |
+| side effects | Always `K`, never `D`, once a dedup store guards the handler |
+| `D - K` | Wasted deliveries — the duplicates. Costs bandwidth and a store lookup, nothing more |
+| `D / K` | Duplicate amplification. `1.0` = no retries; the diagram above is `3.0` |
+
+**Walk one example.** The diagram, then the §6.1 relay's real failure mode — it publishes a batch of 100, then updates `status = 'SENT'`, then commits, so a crash after publishing but before the commit replays the entire batch:
+
+```
+  Diagram (single message, 2 retries):
+    D = 3   K = 1   ->  side effects = 1,  wasted = 3 - 1 = 2,  amplification = 3.0
+
+  Relay batch of 100 crashes after publish, before commit; restart re-reads it:
+    D = 100 + 100 = 200
+    K = 100                       (the same 100 outbox row ids)
+    side effects = K   = 100      <- correct, because the receiver dedups
+    wasted       = 200 - 100 = 100
+    amplification = 200 / 100 = 2.0
+
+  Without a dedup store: side effects = D = 200  ->  100 duplicate shipments.
+```
+
+Notice what does *not* appear in the side-effect line: `D`. Make the handler's outcome a function of `K` alone and the sender is free to retry as hard as it likes, which is exactly what lets the relay retry "until it sticks" (§6.1) without a correctness argument. The one quantity that does grow with traffic is the dedup store itself — it must hold every key for at least as long as the sender might still retry it, so its retention window, not its hit rate, is the parameter to get right.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -402,6 +432,36 @@ If `payments` goes slow, its 4 threads + 16 queue slots fill and new payment cal
 are rejected immediately (`RejectedExecutionException`) — but `inventory` keeps
 flowing on its own pool. A single shared pool would let slow payment calls consume
 every thread and starve inventory: the failure would not be isolated.
+
+**What the numbers are telling you.** "A bulkhead's two constants are not arbitrary knobs — the thread count sets how fast the dependency can be called, and the queue depth sets how long a caller can be made to wait before you would rather reject it."
+
+Those are separate decisions, and conflating them is the classic bug. Threads buy throughput; queue slots buy patience. A pool tuned by only ever raising the thread count silently sets the wait to zero; a pool tuned by only ever raising the queue depth silently sets the wait to unbounded.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Core/max thread count — how many calls to this dependency run at once (4 payments, 8 inventory) |
+| `Q` | `ArrayBlockingQueue` capacity — calls allowed to wait for a thread (16 payments, 32 inventory) |
+| `L` | Latency of one downstream call; the §14 Black-Friday Payment p99 was 8s |
+| `T / L` | Little's Law throughput — completed calls per second at that latency |
+| `T + Q` | In-flight ceiling; caller number `T + Q + 1` gets `RejectedExecutionException` |
+| `(Q / T) x L` | Worst-case queue wait — how long the last-admitted caller sits before starting |
+
+**Walk one example.** The payments pool during the §14 p99 spike, `L = 8s`:
+
+```
+  throughput   = T / L        = 4 / 8        = 0.5 calls/s
+  in-flight    = T + Q        = 4 + 16       = 20 calls admitted
+  21st caller  ->  rejected immediately, no waiting, no thread consumed
+
+  queue wait   = (Q / T) x L  = (16 / 4) x 8 = 32 s for the last queued caller
+
+  Inventory pool, same L:
+  throughput   = 8 / 8        = 1.0 calls/s
+  in-flight    = 8 + 32       = 40 calls admitted
+  queue wait   = (32 / 8) x 8 = 32 s        <- identical, despite 2x the pool
+```
+
+Both pools wait exactly 32 s because both were sized at `Q = 4T`. That ratio, not the absolute numbers, is what you are actually choosing: `Q / T` is the number of call-latencies of patience you are granting, so a request timeout shorter than `(Q / T) x L` guarantees the caller has already given up before its queued task ever runs — the task then executes for nobody, burning a thread the still-live callers needed. Size `Q` so that `(Q / T) x L` sits under your call timeout, and the queue becomes a genuine buffer rather than a place requests go to expire. This is also why the unbounded-queue pitfall in §10 is fatal: with `Q` unbounded the wait term has no ceiling, the pool never rejects, and the "bulkhead" degrades into the shared-pool failure it was meant to prevent.
 
 ---
 

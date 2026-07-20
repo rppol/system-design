@@ -218,6 +218,45 @@ C3 merge step-by-step:
   Result: D, B, C, A, object
 ```
 
+**The idea behind it.** "Take the class at the front of the first list you can — but only if it does not appear *behind* the front of some other list, because that would mean you are about to visit a subclass's parent before the subclass."
+
+Everything C3 does follows from one rule: a class may never be linearized before something that inherits from it. The "is it in a tail?" test is just how that rule is checked.
+
+| Symbol | What it is |
+|--------|------------|
+| `L(X)` | The linearization of class `X` — its full MRO, as a list |
+| `merge(...)` | The C3 combining step, run over the parents' MROs plus the parent list itself |
+| head | The first element of a candidate list |
+| tail | Everything *after* the head — appearing here means "something still depends on me" |
+| `[B, C]` | The literal base-class list from `class D(B, C)`; it forces left-to-right order |
+
+**Walk one example.** The same merge as above, with the tail test made explicit at each step:
+
+```
+  merge( [B, A, object] , [C, A, object] , [B, C] )
+
+  step  candidate  in the tail of any list?              action
+   1        B      no  (B is head of list 1 and list 3)  take B
+   2        A      YES (A is in tail of [C, A, object])  reject, try next head
+   2'       C      no  (C is head of list 2, and is      take C
+                        now head of the remainder of 3)
+   3        A      no  (both remaining lists are         take A
+                        [A, object])
+   4     object    no                                    take object
+
+  Result: D, B, C, A, object
+```
+
+**Why step 2's rejection is the whole algorithm.** Taking `A` there would place it before
+`C` — but `C` is a subclass of `A`, so a call to `super().method()` inside `D` would reach
+`A.method` and never run `C.method` at all. The tail test catches exactly that. This is the
+mechanism behind the cooperative chain shown in Section 6.5: `super()` in `B.who` resolves
+to `C`, not to `B`'s literal parent `A`, because C3 guaranteed `C` sits between them.
+
+When no candidate survives the tail test, there is no ordering that respects every subclass
+relationship, and Python raises `TypeError: Cannot create a consistent method resolution
+order (MRO)` at class-definition time rather than picking an arbitrary order at call time.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -362,6 +401,46 @@ try:
 except AttributeError as e:
     print(e)  # 'PointSlots' object has no attribute 'extra'
 ```
+
+**What this actually says.** "Stop giving every instance its own private hash table. The attribute names are already known at class-definition time, so store the values in a fixed array and look them up by offset."
+
+The saving is not a compression trick. It is the removal of an entire data structure — one `dict` per instance — that was storing the same three keys, over and over, on every object.
+
+| Symbol | What it is |
+|--------|------------|
+| object header | `ob_refcnt` + `ob_type` + GC bookkeeping — 48 bytes, paid either way |
+| `__dict__` | The per-instance hash table: ~184 bytes even for three small keys |
+| slot | One 8-byte pointer in a C array, indexed by position instead of hashed by name |
+| 232 bytes | `__dict__` layout: 48 header + 184 dict |
+| 56 bytes | Slots layout: 48-byte-class header rounded up, plus 3 x 8-byte slot pointers |
+
+**Walk one example.** The three-attribute class above, at increasing instance counts:
+
+```
+                          per instance      1,000,000        10,000,000        50,000,000
+    PointDict (__dict__)     232 bytes        232 MB          2,320 MB         11,600 MB
+    PointSlots (__slots__)    56 bytes         56 MB            560 MB          2,800 MB
+    ------------------------------------------------------------------------------------
+    saved                    176 bytes        176 MB          1,760 MB          8,800 MB
+    reduction                  75.9%           75.9%             75.9%             75.9%
+```
+
+The percentage is flat because the saving is strictly per-instance — this is a scaling
+constant, not an optimization that kicks in at some threshold. Doubling the object count
+doubles the saving exactly.
+
+**Where the 184 bytes go, and why they are pure waste here.** The instance `__dict__` stores
+the keys `"x"`, `"y"`, `"z"` — as pointers to interned strings — plus their hashes, plus the
+sparse index array, plus the dict's own header, on *every single instance*. A million
+`PointDict` objects store the same three key names a million times. `__slots__` moves that
+name-to-position mapping onto the class, where it is stored once, and leaves each instance
+holding nothing but three raw pointers. That is also where the ~30% attribute-access speedup
+comes from: no hash computation, no probe, just `*(base + offset)`.
+
+The corresponding failure mode is Section 6.4 — inherit from any class that lacks
+`__slots__` and every instance gets a `__dict__` back, dropping the saving from 176 bytes to
+exactly zero while the `__slots__` declaration still restricts which attributes you can set.
+You keep the constraint and lose the benefit.
 
 ### 6.4 `__slots__` Inheritance Footgun
 
@@ -605,6 +684,42 @@ xychart-beta
     y-axis "Bytes" 0 --> 250
     bar [232, 56, 232, 56, 72]
 ```
+
+**Put simply.** "Four of these five idioms are the same two layouts wearing different syntax — either every instance carries a `dict`, or it does not."
+
+Read the column as two clusters, not five rows. `dataclass` is a code generator, not a memory strategy; what decides the number is whether `__slots__` ended up on the class.
+
+| Symbol | What it is |
+|--------|------------|
+| 232 bytes | The `__dict__` cluster: plain class and plain `dataclass` are byte-identical |
+| 56 bytes | The `__slots__` cluster: manual `__slots__` and `dataclass(slots=True)`, identical |
+| 72 bytes | `NamedTuple` — a C tuple, so values are stored inline rather than behind slot pointers |
+| ~100 ns | Attribute read via hash lookup in the instance `__dict__` |
+| ~70 ns | Attribute read via direct slot-array index — no hashing, no probing |
+
+**Walk one example.** Turn the per-instance gap into the only question that matters in review — *at what scale is this worth arguing about?*
+
+```
+  saving = 232 - 56 = 176 bytes per instance
+
+    instances     memory saved      is it worth a code review?
+        1,000          176 KB       no  -- noise
+      100,000         17.6 MB       marginal
+    1,000,000          176 MB       yes -- one container tier
+    5,681,818        1,000 MB       yes -- exactly 1 GB saved
+   50,000,000        8,800 MB       yes -- decides the instance type
+
+  Latency side, same scale:
+    100 ns -> 70 ns is 30 ns saved per attribute read.
+    A loop touching 3 attributes on 50,000,000 objects:
+        50,000,000 x 3 x 30 ns = 4.5 seconds saved
+```
+
+So the break-even is around a million instances: below it `__slots__` buys a rounding error
+and costs you dynamic attributes and easy pickling; above it, it is the difference between
+fitting in a memory tier and not. That threshold, not a style preference, is what Section 9's
+"constructing millions of small instances" is pointing at — and it is why the honest answer
+to "should I use `__slots__`?" is always "how many instances?" before anything else.
 
 | Feature | `property` | Custom descriptor | `__getattr__` |
 |---------|-----------|-------------------|--------------|

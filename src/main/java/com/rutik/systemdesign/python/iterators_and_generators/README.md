@@ -403,6 +403,41 @@ print(next(gen))   # 1
 # Memory stays at 128 bytes throughout iteration.
 ```
 
+**What this actually says.** "A list pays for every element the moment it is built; a generator pays
+only for a bookmark." The list's cost is a straight line in `n`, the generator's is a flat line that
+never rises — that flatness is the entire reason a pipeline can outlive the dataset it processes.
+
+| Symbol | What it is |
+|---|---|
+| `n` | How many elements the sequence will eventually produce |
+| `8 x n` | The list's pointer array — one 8-byte `PyObject*` slot per element on 64-bit CPython |
+| `28 bytes` | Size of one CPython `int` object (`sys.getsizeof(0)`) — what each pointer points at |
+| `sys.getsizeof(lst)` | Measures the pointer array plus the list header only, never the pointed-to objects |
+| `sys.getsizeof(gen)` | The generator struct: code pointer, frame pointer, flags. Has no `n` term in it |
+
+**Walk one example.** Push 10,000,000 integers through both shapes and watch which term grows:
+
+```
+                             list                          generator expression
+  pointer array       8 B x 10,000,000 =  80,000,000 B      none
+  int objects        28 B x 10,000,000 = 280,000,000 B      1 live at a time =        28 B
+  ------------------------------------------------------------------------------------------
+  true resident                          360,000,000 B                          about 220 B
+
+  n =         10   ->  list      80 B +      280 B      generator   constant
+  n =  1,000,000   ->  list   8,000,000 B + 28,000,000 B  generator constant
+  n = 10,000,000   ->  list  80,000,000 B + 280,000,000 B generator constant
+                             ^ both terms linear in n     ^ no n term at all
+```
+
+Two things fall out of that table. First, `sys.getsizeof()` on a list is an **undercount**: it reports
+the 80 MB pointer array and stays silent about the 280 MB of `int` objects hanging off it, so the
+honest figure for the list is 360 MB, roughly 4.5x the number the call prints. (The exact printed
+value drifts by a few percent across CPython versions and depending on whether the list was
+pre-sized by `list(range(...))` or grown by a comprehension's over-allocation — the slope matters,
+the last digit does not.) Second, the generator's size has no `n` in it anywhere, which is why the
+same 128-ish bytes covers `n = 10` and `n = 10,000,000` alike.
+
 Generator expressions support conditions and multiple `for` clauses:
 
 ```python
@@ -462,6 +497,41 @@ def pipeline(path: str) -> Iterator[dict[str, Any]]:
 for record in pipeline("transactions.jsonl"):
     process(record)
 ```
+
+**The idea behind it.** "Peak memory is set by how many *stages* the pipeline has, not by how many
+*records* flow through it." Adding a fourth or a fortieth stage costs one more in-flight item;
+adding ten million more records costs nothing at all. That is the whole trade a lazy chain makes.
+
+| Symbol | What it is |
+|---|---|
+| `n` | Number of records in the source — 80 million in the case study below |
+| `k` | Number of generator stages chained together (`read -> parse -> filter -> ...`) |
+| `s` | Size of one item in flight — roughly 200 B for a raw line, 800 B for a parsed row dict |
+| `k x s` | Peak memory of the lazy chain. `n` does not appear, which is what "O(1)" means here |
+| `n x s` | Peak memory the moment any one stage is wrapped in `list(...)` — the lazy chain collapses |
+
+**Walk one example.** Hold `s = 800` bytes and vary each knob independently:
+
+```
+  vary the STAGE COUNT k (n fixed at 80,000,000 records)
+    k =  3 stages ->  3 x 800 =      2,400 B
+    k = 10 stages -> 10 x 800 =      8,000 B
+    k = 40 stages -> 40 x 800 =     32,000 B      still under 32 KB
+
+  vary the RECORD COUNT n (k fixed at 3 stages)
+    n =         10 ->  3 x 800 =      2,400 B
+    n =  1,000,000 ->  3 x 800 =      2,400 B
+    n = 80,000,000 ->  3 x 800 =      2,400 B     n never enters the sum
+
+  now materialise ONE stage with list(...) -- n re-enters, multiplied by s
+    80,000,000 x 800 B = 64,000,000,000 B = 64 GB     OOM on any machine
+```
+
+The middle block is the payoff and the bottom block is the failure mode: `list()` anywhere inside a
+chain converts a `k x s` cost into an `n x s` cost, a jump of about 27 million-fold here
+(`80,000,000 / 3`).
+This is why the "BROKEN pattern" in Section 14 is broken — nothing about the stage functions
+changed, only where the data was allowed to pile up.
 
 ### 6.6 `itertools` — Key Functions with Real Examples
 
@@ -1154,6 +1224,36 @@ aggregate_by_merchant     accumulation dict: 50,000 merchants * ~150 bytes = ~7 
 Total peak: ~9 MB — fits in any Lambda function, any pod, any laptop.
 Pandas approach: 10 GB raw → ~40 GB DataFrame → OOM on 16 GB machine.
 ```
+
+**Read it like this.** "The aggregation dictionary is priced by how many *different* merchants exist,
+not by how many transactions they made." Swapping row count for key cardinality is the single
+substitution that turns a 10 GB problem into a 7.5 MB one.
+
+| Symbol | What it is |
+|---|---|
+| `n` | Rows streamed through the pipeline — 80,000,000 in this file |
+| `c` | Cardinality: the number of *distinct* `merchant_id` values, about 50,000 here |
+| `~150 B` | Cost of one `defaultdict` entry — key string, `Decimal` value, hash-table slot |
+| `c x 150` | Memory of `aggregate_by_merchant`. The only term in the whole pipeline that can grow |
+| `n / c` | Rows per merchant — 1,600 here. Every one of them folds into an existing entry, free |
+
+**Walk one example.** Hold the 80,000,000 rows fixed and move only the cardinality:
+
+```
+  c =        1 merchant   ->        1 x 150 B =         150 B
+  c =    1,000 merchants  ->    1,000 x 150 B =     150,000 B   (0.15 MB)
+  c =   50,000 merchants  ->   50,000 x 150 B =   7,500,000 B   (7.5 MB)  <- this file
+  c = 5,000,000 merchants -> 5,000,000 x 150 B = 750,000,000 B  (750 MB)  <- would hurt
+
+  rows per merchant at c = 50,000:  80,000,000 / 50,000 = 1,600
+  those 1,600 rows cost 0 extra bytes -- each one does totals[key] += amount in place
+```
+
+The bottom line is the part worth saying out loud in an interview: **1,600 of every 1,600 rows are
+free.** Only the row that introduces a *new* key allocates. So the danger signal for any streaming
+aggregation is not "how big is the file" but "how unique is the group-by key" — swap
+`merchant_id` for `transaction_id` and `c` becomes `n`, the dictionary becomes 12 GB, and the same
+code OOMs on the same machine that ran it in 9 MB.
 
 **BROKEN pattern — loading stage into a list (destroys lazy pipeline)**:
 

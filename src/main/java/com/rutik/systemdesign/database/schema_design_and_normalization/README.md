@@ -58,6 +58,35 @@ employees (id, name, zip_code)
 zip_codes (zip_code, city, state)
 ```
 
+**In plain terms.** "If one column already determines another, keeping both on every row means storing the same fact once per row instead of once per distinct value." Third normal form is a deduplication rule, and the storage it saves is a side effect — the real prize is that a fact stored once cannot contradict itself.
+
+| Symbol | What it is |
+|--------|------------|
+| `zip_code -> city` | Functional dependency: knowing the zip fixes the city and state |
+| transitive dependency | `id -> zip_code -> city` — `city` depends on a non-key column, not the key |
+| determinant | The column doing the determining. Here `zip_code`, which is not a candidate key |
+| join cost added | Every query needing `city` now pays one index probe into `zip_codes` |
+
+**Walk one example.** 5,000,000 employees across 42,000 distinct US zip codes, priced with the byte widths from the type reference above (`BIGINT` 8, `CHAR(n)` n + 1 header, short `TEXT` payload + 1):
+
+```
+  per-row width           id   name   zip   city   state      total
+  denormalized (bad)       8     21     6     13       3      51 bytes
+  3NF employees            8     21     6      -       -      35 bytes
+                                                              --------
+  saved per row                                                16 bytes   (31.4%)
+
+  5,000,000 rows  x  16 bytes                         =   76.3 MB saved
+  new zip_codes table   42,000 rows x 22 bytes        =    0.9 MB added
+                                                          ----------
+  net storage reclaimed                                   75.4 MB
+
+  cost added: every read of `city` becomes a join -- one index probe into a
+  42,000-row table small enough to stay permanently resident in shared_buffers.
+```
+
+The 75 MB is the least interesting number here. What the split actually buys is that `city` now exists in exactly one place: in the denormalized table, 5,000,000 rows each carry an independent copy of "94103 is in San Francisco," and any one of them can be updated wrong. In the 3NF version there is one row to update and no way for two employees in the same zip to disagree. That is why the rule of thumb is normalize first — you denormalize back only after measuring that the added join is genuinely the bottleneck.
+
 **Boyce-Codd Normal Form (BCNF)**:
 - Stronger than 3NF: every determinant must be a candidate key
 - Handles anomalies 3NF misses with overlapping composite candidate keys (rare in practice)
@@ -441,11 +470,58 @@ CREATE INDEX idx_orders_customer_id ON orders (customer_id);
 **Pitfall 3: Storing amounts in FLOAT/DOUBLE**
 A payments system stored `amount DOUBLE PRECISION`. Over 3 years, rounding errors accumulated in financial reconciliation. $0.01 discrepancies per transaction × 100M transactions = $1M unreconciled difference. Fix: migrate to `amount_cents BIGINT` (integer cents). Never use floating-point for money.
 
+**What it means.** "A binary float cannot represent most decimal cents exactly, so every amount you store is silently off by a fraction — and fractions compound across a ledger." The bug is not in the addition; it is in the storage, before any arithmetic happens.
+
+| Symbol | What it is |
+|--------|------------|
+| `DOUBLE PRECISION` | IEEE-754 binary64: 53 bits of mantissa, base 2. Cannot represent `0.1` |
+| `0.1`, `0.01` | Terminate in decimal, repeat forever in binary — always rounded on store |
+| `NUMERIC(12,2)` | Exact base-10 decimal: 12 total digits, 2 after the point. Slower, never wrong |
+| `amount_cents BIGINT` | Integer minor units. Exact by construction — there is no fraction to lose |
+
+**Walk one example.** The drift this pitfall describes, made arithmetic:
+
+```
+  0.1 + 0.2  stored as DOUBLE PRECISION   ->   0.30000000000000004     (not 0.3)
+
+  worst-case drift per transaction                     $0.01
+  transactions accumulated over three years      100,000,000
+                                                 -----------
+  unreconciled difference                           $1,000,000
+
+  the same amounts as BIGINT cents:  10 + 20  =  30 cents.  Exact, permanently.
+```
+
+Note where the money went: nobody lost a million dollars, but a million dollars became unexplainable, which for an audited ledger is the same problem and a far more expensive one to fix retroactively. The choice between `NUMERIC` and integer cents is then a performance question rather than a correctness one — both are exact, and integer arithmetic is simply faster.
+
 **Pitfall 4: Unique constraint bypassed by soft delete**
 Users can re-register with a deleted account's email because `UNIQUE (email)` doesn't distinguish deleted from active users. Fix: `CREATE UNIQUE INDEX ON users (email) WHERE deleted_at IS NULL`.
 
 **Pitfall 5: schema-per-tenant approach with 10,000 tenants**
 Each schema needed its own connection pool (min 2 connections per pool = 20,000 connections to PostgreSQL, well above `max_connections=500`). Fix: shared schema with RLS, or PgBouncer with schema-level pool sharing.
+
+**Put simply.** "Every tenant schema drags its own connection pool along, so connections grow linearly with tenant count — while PostgreSQL's ceiling is a fixed number that does not grow with anything." Schema-per-tenant fails on a resource nobody budgets for.
+
+| Symbol | What it is |
+|--------|------------|
+| tenants | Number of separate schemas, each needing its own pool because `search_path` differs |
+| min pool size | Connections a pool holds open even while completely idle — `2` here |
+| `max_connections` | PostgreSQL's hard server-side cap. `500` in this incident |
+| backend process | Each accepted connection forks an OS process, roughly 5-10 MB resident |
+
+**Walk one example.** The wall this architecture hit, and the wall behind it:
+
+```
+  10,000 tenants  x  2 idle connections each   =   20,000 connections demanded
+  PostgreSQL max_connections                   =      500 connections available
+                                                   --------
+  oversubscription                                      40x   (19,500 refused)
+
+  and had the cap been raised to admit them all, at 10 MB per backend process:
+     20,000  x  10 MB   =   195 GB of RAM consumed by connections doing nothing
+```
+
+The 40x is the visible failure; the 195 GB is why raising `max_connections` is not the fix. PostgreSQL's process-per-connection model means an idle connection is not free — it is a whole OS process. This is the entire argument for the shared-schema-plus-RLS row in the table above: one schema means one pool, and connection count decouples from tenant count completely.
 
 ---
 
@@ -579,5 +655,26 @@ xychart-beta
 ```
 
 One targeted denormalization (adding `org_id` plus a covering index) collapsed the 4-table join into an index-only scan, cutting p50 latency more than 17x with no consistency risk — `org_id` is written once, by trigger, and never updated.
+
+**Stated plainly.** "Removing three of the four table hops turns a join plan into a single index read, and the latency falls by exactly the cost of the hops you removed." The win is structural, not a tuning gain — no amount of indexing the four-table version reaches this number.
+
+| Symbol | What it is |
+|--------|------------|
+| p50 | Median latency — half of requests finish faster than this |
+| 4-table join | `tasks -> users -> projects -> organizations`; each hop is a probe plus a join node |
+| `INCLUDE (...)` | Covering index payload: output columns carried in the index itself |
+| index-only scan | Plan that answers entirely from the index, never touching the heap |
+
+**Walk one example.** The before and after, with the saving decomposed:
+
+```
+  before  :  4-table join                          p50  =  35 ms
+  after   :  covering index, index-only scan       p50  =   2 ms
+                                                         -------
+  saved                                                    33 ms   (94.3% removed)
+  speedup :  35 / 2                                    =   17.5x
+```
+
+The reason this denormalization is safe and most are not is visible in one property of `org_id`: it is written once by the trigger at task creation and never updated again. A denormalized column that can change is a synchronization problem forever; a denormalized column that is immutable is just a cached constant. Before copying this pattern, ask whether the duplicated column can ever be updated — if it can, the 17.5x buys you a consistency bug instead.
 
 **Lesson**: Measure first, then denormalize precisely. Do not denormalize the entire schema — identify the specific join on the hot path and eliminate only that.

@@ -176,6 +176,53 @@ Blocking problem:
   But: still blocks during network partitions (not partition-safe)
 ```
 
+Two formulas explain why 2PC gets worse — not linearly, but structurally — as participants are added:
+
+```
+commit_latency  = 2 x RTT_slowest + prepare_fsync + commit_fsync
+lock_hold_time  = commit_latency          (normal case)
+                = coordinator_recovery    (crash case: 30s to 5min)
+
+P(all N vote yes) = p^N                   (p = per-participant availability)
+P(transaction blocked) = 1 - p^N
+```
+
+**What the formula is telling you.** "Every participant is a serial multiplier on your failure rate and a parallel bound on your latency — you wait for the slowest one and you fail if any one of them fails." The `p^N` term is the part that surprises teams: adding a third database to a 2PC transaction does not add a third of the risk, it multiplies the survival probability again.
+
+| Symbol | What it is |
+|--------|------------|
+| `RTT_slowest` | Round trip to the furthest participant. Both phases pay it, hence the `2 x` |
+| `prepare_fsync` | Each participant durably logging its PREPARE vote before answering |
+| `p` | Probability a single participant is reachable and healthy for the whole protocol |
+| `N` | Participant count. Appears as an exponent, which is the entire problem |
+| `p^N` | All-must-succeed: the AND of `N` independent events |
+| `lock_hold_time` | How long each participant's rows stay locked. Equals commit latency, or recovery time on a coordinator crash |
+
+**Walk one example.** Same per-participant availability, growing the participant list:
+
+```
+  N participants   p = 0.999 each   P(all yes) = p^N   P(blocked) = 1 - p^N
+  --------------   --------------   ----------------   --------------------
+        1              0.999            0.999000              0.1000%
+        2              0.999            0.998001              0.1999%
+        3              0.999            0.997003              0.2997%
+        5              0.999            0.995010              0.4990%
+       10              0.999            0.990045              0.9955%
+
+  at the Section 14 volume of 5,000 orders/min = 300,000/hour:
+    N = 2  ->  0.001999 x 300,000 =   600 transactions/hour hit a blocked commit
+    N = 3  ->  0.002997 x 300,000 =   899 transactions/hour
+    N = 5  ->  0.004990 x 300,000 = 1,497 transactions/hour
+
+  and the latency, with prepare/commit fsync = 0.5 ms each:
+    all participants on one LAN, RTT = 1 ms
+      2 x 1 + 0.5 + 0.5 = 3.0 ms       locks held 3.0 ms
+    one participant in another region, RTT = 50 ms
+      2 x 50 + 0.5 + 0.5 = 101.0 ms    locks held 101.0 ms      (34x longer)
+```
+
+**The number that actually causes the outage is none of the above.** Look at the crash row of `lock_hold_time`. Normally locks are held for 3ms; when the coordinator dies between phases they are held for the full recovery timeout, 30s to 5min. At 300,000 transactions/hour that is 5,000 transactions/minute arriving at rows that are locked for up to 5 minutes — the queue does not drain, it grows, and every service touching those rows stalls behind it. A 0.4990% blocking probability sounds survivable right up until you multiply it by a 300-second lock. That gap between the average case and the tail case is why Section 9 says to avoid 2PC across services you do not control.
+
 ### XA Transactions in Java
 
 ```java
@@ -279,6 +326,69 @@ VALUES (12345, 'comp-abc-123', 100.00)
 ON CONFLICT (compensation_id) DO NOTHING;
 -- If called twice, the second call is a no-op
 ```
+
+Sagas and 2PC add up their latency in opposite ways, and the comparison decides which one is actually faster for a given workflow:
+
+```
+saga_latency        = sum(step_1 .. step_k)              (strictly sequential)
+compensation_cost   = sum(step_j .. step_1)  for j = failed step - 1
+worst_case          = saga_latency + compensation_cost
+inconsistency_window = time from step failure to last compensation acknowledged
+
+2PC_latency         = 2 x RTT_slowest                    (participants run in parallel)
+```
+
+**In plain terms.** "A saga pays for each step one after another because each step depends on the last one succeeding; 2PC asks everyone at once and waits for the slowest reply." That means 2PC is often the *lower-latency* option, and sagas are chosen despite being slower — for failure isolation, not for speed.
+
+| Symbol | What it is |
+|--------|------------|
+| `step_i` | Latency of one saga step: the service call plus its local commit |
+| `k` | Number of forward steps in the saga |
+| `j` | Index of the last step that succeeded; compensations run from `j` back to `1` |
+| `RTT_slowest` | The furthest participant in 2PC; the parallel fan-out waits only for this one |
+| `inconsistency_window` | How long the system is visibly half-committed. The real cost of choosing saga |
+| Backoff sum | `base x (2^n - 1)` for `n` doublings — how long a retrying compensation runs |
+
+**Walk one example.** The Section 5 saga — payment, inventory, shipping — where shipping fails:
+
+```
+  step                latency   cumulative
+  -----------------   -------   ----------
+  1. reserve payment    40 ms       40 ms
+  2. reserve stock      60 ms      100 ms
+  3. create shipment    50 ms      150 ms   <- FAILS here
+
+  forward path total  = 40 + 60 + 50 = 150 ms
+  compensations (reverse, steps 2 then 1):
+    C2. release stock   60 ms
+    C1. release payment 40 ms
+  compensation_cost   = 60 + 40 = 100 ms
+
+  worst case          = 150 + 100 = 250 ms
+  inconsistency window= 100 ms  (payment held while stock is being released)
+
+  same three services under 2PC, slowest participant RTT = 60 ms:
+    2 x 60 = 120 ms       -> 150 / 120 = 1.25x FASTER than the saga's happy path
+```
+
+2PC wins the stopwatch and still loses the argument. During those 120ms it holds locks in all three databases, and if the coordinator dies the locks stay held for minutes (previous section); the saga holds no cross-service lock at any instant, so a shipping-service outage delays one order rather than freezing the inventory table.
+
+**The 100ms inconsistency window is the optimistic number.** It assumes both compensations succeed on the first try. When a compensation target is down, the retry schedule sets the real window:
+
+```
+  exponential backoff from 100 ms, doubling:
+    attempt   wait      elapsed
+    -------   -------   -------
+       1      0.1 s      0.1 s
+       3      0.4 s      0.7 s
+       5      1.6 s      3.1 s
+       8     12.8 s     25.5 s
+
+  a payment service down for 5 minutes leaves the order in a compensating state
+  for 5 minutes -- 3,000x the 100 ms happy-path window
+```
+
+That distribution — a tight median with a very long tail — is why Section 13 says compensations must be retryable *indefinitely*, and why Section 12's answer on stuck sagas is about dashboards and dead-letter queues rather than about tuning the retry count.
 
 ### Outbox Pattern
 

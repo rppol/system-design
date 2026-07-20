@@ -48,6 +48,56 @@ second eliminated entirely.
 engineering decision is always: what staleness can this data tolerate, and what is the cost of
 a cache miss?
 
+### The one formula behind every cache decision
+
+A cache's payoff is not the hit latency. It is the *blend* of hit and miss latency, weighted by
+how often each happens:
+
+```
+  eff = h x t_hit + (1 - h) x t_miss
+```
+
+**Put simply.** "Your average latency is not the fast path — it is the slow path multiplied by
+how often you still take it. A cache is a device for shrinking `(1 - h)`, and nothing else."
+
+Everyone remembers `t_hit`. The term that dominates the arithmetic is `(1 - h) x t_miss`,
+because `t_miss` is typically 50–100x larger than `t_hit`, so even a small miss rate carries
+most of the total.
+
+| Symbol | What it is |
+|--------|------------|
+| `h` | Hit rate — fraction of requests served from cache, `0.0` to `1.0` |
+| `1 - h` | Miss rate; the fraction that still pays full price |
+| `t_hit` | Latency of a cache hit — `0.3 ms` for Redis, per the numbers above |
+| `t_miss` | Latency of a miss — `20 ms`, the database call this module cites |
+| `eff` | Effective (mean) latency the caller actually experiences |
+
+**Walk one example.** Redis in front of the 20 ms database, at rising hit rates:
+
+```
+     h        h x 0.3ms      (1-h) x 20ms       eff        speedup vs no cache
+   0.00        0.00 ms         20.00 ms      20.00 ms           1.0x
+   0.50        0.15 ms         10.00 ms      10.15 ms           1.97x
+   0.80        0.24 ms          4.00 ms       4.24 ms           4.72x
+   0.90        0.27 ms          2.00 ms       2.27 ms           8.81x
+   0.94        0.28 ms          1.20 ms       1.48 ms          13.50x
+   0.99        0.30 ms          0.20 ms       0.50 ms          40.24x
+   1.00        0.30 ms          0.00 ms       0.30 ms          66.67x
+```
+
+Two things fall out of that column, and both are counter-intuitive.
+
+**First: at 80% hit rate, 94% of your latency is still misses.** `4.00 / 4.24 = 94%`. The cache
+is "working" — traffic to the database dropped fivefold — and yet almost every millisecond a
+user waits is still a database millisecond. This is why Best Practice 10's "hit rate below 80%
+indicates a problem" threshold is a floor, not a target.
+
+**Second: every 10 points of hit rate is worth the same absolute time, until it isn't.** Going
+`0.5 -> 0.6` saves 1.97 ms. Going `0.8 -> 0.9` also saves 1.97 ms — identical, because the
+saving is just `0.1 x (t_miss - t_hit)`. But `0.90 -> 0.99`, nine times more work, saves only
+1.77 ms. The last few points of hit rate are where TTL extension and stampede protection stop
+paying for themselves, and it is worth knowing that before you spend a sprint on them.
+
 ---
 
 ## 3. Core Principles
@@ -315,6 +365,51 @@ a common source of `AttributeError` when comparing keys.
 For 4 Uvicorn workers each handling up to 100 concurrent requests with 5% making Redis calls
 simultaneously: `4 × 100 × 0.05 = 20` connections.
 
+**The idea behind it.** "Count how many requests could be mid-Redis-call at the exact same
+instant, and buy that many sockets. Not how many requests you serve — how many are *in flight*
+in the same moment."
+
+The formula is three factors, and only the third is a judgement call. Getting it wrong in either
+direction has a distinct failure signature, which is what makes it worth walking rather than
+memorising.
+
+| Symbol | What it is |
+|--------|------------|
+| `W` | Uvicorn worker processes — each gets its **own** pool, so this multiplies |
+| `C` | Max concurrent requests a single worker holds open |
+| `f` | Fraction of those in-flight requests that are touching Redis *simultaneously* |
+| `W x C x f` | Peak simultaneous connections needed across the deployment |
+| headroom | The `+20%` cushion for bursts above the modelled peak |
+
+**Walk one example.** The two sizings this module quotes, side by side:
+
+```
+  Section 6.1 case     4 workers x 100 concurrent x 0.05 =  20 connections
+  Q10 case             4 workers x 200 concurrent x 0.10 =  80 connections
+                       + 20% headroom -> 80 x 1.2         =  96  -> round to 100
+```
+
+`f` is the term people get wrong, because it is not "the fraction of endpoints that use Redis".
+A request that spends 0.3 ms in Redis out of a 20 ms total is only *in* Redis for 1.5% of its
+life — so 100 concurrent requests that all use Redis still produce roughly 1–2 simultaneous
+connections, not 100. `f` is a duty cycle, not a feature-usage rate. Estimating it from
+"which routes call the cache" is how you end up provisioning 100x more connections than you
+need.
+
+The failure modes are asymmetric, which is why the headroom is added on one side only:
+
+```
+  pool too small  ->  redis.exceptions.ConnectionError: too many connections
+                      Loud. Fails requests. Shows up immediately in error rate.
+
+  pool too large  ->  idle sockets on the Redis server, each with its own buffer
+                      Quiet. Costs Redis memory and file descriptors. Shows up
+                      as a Redis-side limit weeks later, far from the cause.
+```
+
+Monitor `redis_connected_clients` against `max_connections` and treat sustained use above 80%
+as the signal to resize — `0.8 x 100 = 80` clients on the sizing above.
+
 ### 6.2 Basic Cache-Aside Pattern
 
 ```python
@@ -386,6 +481,54 @@ async def get_user_with_lock(user_id: int) -> dict:
 
 `SET key value NX EX seconds` is atomic in Redis. `NX` means "set only if Not eXists". This
 ensures exactly one caller acquires the lock per cache miss event.
+
+**Read it like this.** "The size of the herd is not your traffic rate — it is your traffic rate
+multiplied by how long the recompute takes. Every request that arrives during that window
+becomes a duplicate database query."
+
+The stampede is a *window* problem, and the window is the DB query itself. This is why the
+mutex works: it does not make the query faster, it makes the window admit exactly one caller.
+
+| Symbol | What it is |
+|--------|------------|
+| `R_key` | Request rate for the one popular key that just expired |
+| `t_db` | Time to recompute — the database query duration |
+| `R_key x t_db` | Herd size: duplicate queries fired before the first result lands |
+| `SET NX` | The atomic gate; exactly one caller gets `True`, everyone else `False` |
+| `LOCK_TIMEOUT` | `5 s` — the lock's own TTL, so a crashed holder cannot wedge the key forever |
+
+**Walk one example.** A hot key carrying 5% of this module's 50 000 RPS peak, backed by the
+18 ms query the case study measures:
+
+```
+  R_key  = 50 000 /s x 0.05        = 2 500 requests/s on this one key
+  t_db   = 18 ms                   = 0.018 s recompute window
+
+  without a lock:  2 500 x 0.018   = 45 simultaneous identical DB queries
+  with SET NX EX:                    1 query; the other 44 wait or serve stale
+
+  reduction = 45 -> 1  (97.8% of the duplicate load removed)
+```
+
+Notice what makes the herd grow. Doubling traffic doubles it, but so does a database that got
+*slower* — a 180 ms query on the same key produces `2 500 x 0.18 = 450` concurrent queries. That
+is the feedback loop behind real outages: the DB slows under load, which widens the window,
+which multiplies the herd, which slows the DB further. The mutex breaks the loop because its
+output is `1` regardless of how large `t_db` becomes.
+
+Two sizing consequences fall out of the numbers above:
+
+```
+  LOCK_TIMEOUT = 5 s  must exceed t_db = 18 ms, or the lock expires mid-query
+                      and a second caller starts a duplicate. 5 s / 0.018 s = 278x
+                      margin -- deliberately generous, because a lock released
+                      early is worse than one held slightly too long.
+
+  WAIT_INTERVAL = 0.05 s and the loop runs int(5 / 0.05) = 100 times before
+                      giving up and hitting the DB directly. A waiter therefore
+                      polls at most 100 times and adds at most 50 ms of latency
+                      before it sees the value A wrote at t = 18 ms (poll 1).
+```
 
 ### 6.4 In-Process TTL Cache (Thread/Async Safe)
 
@@ -518,6 +661,52 @@ a 1MB response saves ~90ms of pure serialization time per request.
 
 Setting `default_response_class=ORJSONResponse` on the `FastAPI` constructor applies `orjson`
 to all routes without per-endpoint changes.
+
+**What this actually says.** "A per-response microsecond count means nothing until you multiply
+it by RPS. Do that and it becomes CPU cores; multiply the payload size by RPS instead and it
+becomes bandwidth. Same two inputs, two different bills."
+
+Serialization spends two resources at once, and they are sized by different products of the same
+pair of numbers. Missing either one is how a service ends up CPU-starved or NIC-saturated with
+no idea which.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_ser` | CPU time to serialize one response — `120 us` stdlib, `30 us` orjson, at 10 KB |
+| `S` | Payload size in bytes per response |
+| `RPS` | Responses per second |
+| `t_ser x RPS` | CPU-seconds per wall-clock second — i.e. cores burned on serialization |
+| `S x RPS x 8` | Bits per second on the wire; divide by `1e6` for Mbps |
+
+**Walk one example — the CPU bill.** The two serializers at two traffic levels:
+
+```
+    RPS      stdlib 120us            orjson 30us           cores freed
+  1 000      0.12 CPU-s/s = 12%      0.03 CPU-s/s =  3%       0.09
+ 50 000      6.00 CPU-s/s = 600%     1.50 CPU-s/s = 150%      4.50
+```
+
+At 1 000 RPS the swap saves nine hundredths of a core — real, but not a reason to add a Rust
+dependency on its own. At the 50 000 RPS of the case study below it is 4.5 cores, which is
+hardware. Note also that the throughput table in Section 8 is the same fact restated:
+`1e6 / 120 us = 8 333/s` and `1e6 / 30 us = 33 333/s`, matching its "~8,000" and "~35,000"
+single-core serialization rates.
+
+**Walk one example — the bandwidth bill.** Now multiply size instead of time:
+
+```
+    payload      1 000 RPS        50 000 RPS
+     10 KB        81.9 Mbps       4 096 Mbps  (4.1 Gbps)
+      4 KB        32.8 Mbps       1 638 Mbps
+      2 KB        16.4 Mbps         819 Mbps
+```
+
+This is where `exclude_unset=True` earns its place. The 60–80% payload reduction quoted below
+moves a 10 KB response to 4 KB or 2 KB — at 1 000 RPS that is `81.9 - 16.4 = 65.5 Mbps` of
+egress removed, and it costs one keyword argument. The two optimizations are complements, not
+alternatives: `orjson` attacks `t_ser x RPS`, `exclude_unset` attacks `S x RPS`, and a service
+can easily be limited by one while you are busy tuning the other. Profile with `py-spy` to learn
+which bill you are actually paying before choosing.
 
 ### 6.9 `exclude_unset=True` to Reduce Serialization Cost
 
@@ -1158,6 +1347,85 @@ async def get_product_broken(product_id: int, r: redis.Redis) -> dict:
 | P99 latency | 120ms | 3ms (L2 hit) |
 | Redis hit rate | — | 94% |
 | L1 hit rate | — | 78% |
+
+#### Decoding the two hit rates
+
+**Stated plainly.** "The two percentages do not add and they do not average — they compose.
+Redis's 94% is 94% of what L1 already let through, so the traffic reaching PostgreSQL is the
+product of both miss rates, not the sum."
+
+This is the single most misread pair of numbers on a multi-tier cache dashboard. "78% and 94%"
+sounds like roughly 86% covered. It is actually 98.7% covered, because the second tier only ever
+sees the first tier's leftovers.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Requests per second reaching the workers — `50 000` at peak |
+| `h1` | L1 hit rate, `0.78` — measured against *all* requests |
+| `h2` | Redis hit rate, `0.94` — measured against **only the L1 misses**, not all traffic |
+| `R x (1-h1) x (1-h2)` | Requests that fall all the way through to PostgreSQL |
+| `t1, t2, t_db` | Per-tier latencies: `0.4 ms` L1, `0.5 ms` Redis, `18 ms` PostgreSQL |
+
+**Walk one example.** Follow 50 000 requests down the three tiers:
+
+```
+  reaching workers                            50 000 /s
+  L1 serves 78%            -> 39 000 served,  11 000 /s continue to Redis
+  Redis serves 94% of THOSE -> 10 340 served,     660 /s continue to PostgreSQL
+
+  DB traffic = 50 000 x 0.22 x 0.06 = 660 /s = 1.32% of peak
+  absorbed   = 98.68%
+```
+
+The naive reading — "94% hit rate, so 6% of 50 000 = 3 000 QPS hits the DB" — overstates the
+database load by 4.5x, because it applies Redis's rate to the wrong denominator. Always ask what
+a hit rate is a percentage *of*.
+
+Now blend the latencies the same way, using the nested form of the effective-latency formula from
+Section 2:
+
+```
+  eff = h1 x t1 + (1-h1) x [ h2 x t2 + (1-h2) x t_db ]
+
+  inner (Redis tier) = 0.94 x 0.5 ms + 0.06 x 18 ms
+                     = 0.47      +      1.08        = 1.55 ms
+  eff  = 0.78 x 0.4 ms + 0.22 x 1.55 ms
+       = 0.312         + 0.341                      = 0.653 ms
+
+  vs. 18 ms uncached -> 27.6x       (and it lands between the measured
+                                     P50 of 0.4 ms and P99 of 3 ms)
+```
+
+Then read the three contributions, because their ranking is the lesson:
+
+```
+  L1     0.78  x 0.4 ms          = 0.312 ms    47.8% of eff   from 78.00% of traffic
+  Redis  0.22 x 0.94 x 0.5 ms    = 0.103 ms    15.8% of eff   from 20.68% of traffic
+  DB     0.22 x 0.06 x 18 ms     = 0.238 ms    36.4% of eff   from  1.32% of traffic
+```
+
+**1.32% of requests produce 36.4% of the mean latency.** That is the argument for stampede
+protection and for the L2 TTL, stated numerically: the cheapest remaining millisecond is not in
+making L1 faster, it is in shrinking that last sliver of DB traffic.
+
+#### Sizing the L1 cache
+
+`TTLCache(maxsize=2000, ttl=10)` is a bound on *entries*, not on bytes — and there are four
+worker processes, each with its own copy. The memory you have actually committed is
+`maxsize x bytes_per_entry x workers`:
+
+```
+  bytes/entry     per worker      across 4 workers
+     1 KB           1.95 MB            7.81 MB
+     2 KB           3.91 MB           15.62 MB
+     4 KB           7.81 MB           31.25 MB
+     8 KB          15.62 MB           62.50 MB
+```
+
+`bytes_per_entry` is the one term you must measure rather than assume — a decoded product dict
+with nested attribute lists is easily 4–8 KB, and `maxsize` gives you no warning as it grows.
+The `_l1_locks` dict is a second, unbounded allocation: it gains an entry per distinct
+`product_id` ever requested and, unlike the `TTLCache`, nothing ever evicts from it.
 
 **Discussion Questions:**
 

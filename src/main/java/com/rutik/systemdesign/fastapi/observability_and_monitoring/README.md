@@ -246,6 +246,41 @@ Errors and slow (p99 over 1s) traces are always kept at 100% — only the remain
 population is downsampled to 1%, which is why tail-based sampling preserves nearly all actionable
 signal while cutting storage by an order of magnitude.
 
+**Read it like this.** "Traces kept per day = requests per day times the keep-rate, summed over each
+class of traffic at its own rate." Tail-based sampling is not one rate; it is a piecewise rate
+function, and writing it out is what shows why 99% of the volume can go while ~100% of the value stays.
+
+| Symbol | What it is |
+|--------|------------|
+| `RPS x 86400` | Traces produced per day, before any sampling decision |
+| head rate | Keep-probability chosen at trace *start*, before the outcome is known |
+| tail rate | Keep-probability chosen at trace *end*, so it can read status and duration |
+| error fraction | Share of requests that fail — the class kept at 100% |
+| kept/day | `sum over classes of (traces in class x that class's rate)` |
+
+**Walk one example.** The Section 3 figure — 10,000 req/s — under three policies:
+
+```
+  total traces/day : 10,000 x 86,400 = 864,000,000
+
+  A. keep everything            864,000,000 x 1.000  = 864,000,000 traces/day
+  B. head-based 1%              864,000,000 x 0.010  =   8,640,000 traces/day
+       -> keeps 1% of errors too: 99% of your incidents have no trace
+
+  C. tail-based
+       errors, 0.1% of traffic, kept 100%     864,000 x 1.00 =   864,000
+       healthy + fast, the rest, kept 1%  863,136,000 x 0.01 = 8,631,360
+                                                       total = 9,495,360 traces/day
+
+  C vs A : 9,495,360 / 864,000,000 = 1.1% of the volume
+  C vs B : 10% more storage than head-based -- and 100% of errors instead of 1%
+```
+
+That last comparison is the argument in one line: tail-based costs ~10% more than head-based at the
+same nominal rate and returns every failed request. What you buy it with is collector memory — the
+decision needs the completed trace, so every in-flight span sits buffered until its trace ends. Budget
+the collector for `RPS x average trace duration x span size`, not for the sampled output volume.
+
 ### 5.5 Pod lifecycle across health probes
 
 ```mermaid
@@ -348,6 +383,35 @@ Every `log.info("order.created", order_id=42, amount=99.95)` now emits:
  "request_id":"req-7f2e","event":"order.created","order_id":42,"amount":99.95}
 ```
 
+**Put simply.** "Log volume is requests per second times lines per request times bytes per line
+times seconds in a day — four multiplications, and structured JSON inflates the third and fourth of
+them." Every field you add for queryability is paid for on every line, forever.
+
+| Symbol | What it is |
+|--------|------------|
+| `RPS` | Requests per second reaching the service |
+| lines/req | How many log records one request emits. Entry + exit is 2; add one per branch |
+| bytes/line | Serialized JSON size. The record above is ~150 B; production ones run 400-600 B |
+| `x 86400` | Seconds in a day, turning bytes/second into GB/day |
+
+**Walk one example.** The Section 14 deployment, 5,000 req/min at peak:
+
+```
+  RPS = 5,000 / 60 = 83.3 req/s
+
+  3 lines/req x 400 B  ->  83.3 x 3 x 400 x 86,400 =  8.64 GB/day  =  259 GB/month
+  3 lines/req x 600 B  ->                             12.96 GB/day =  389 GB/month
+  5 lines/req x 400 B  ->                             14.40 GB/day =  432 GB/month
+  5 lines/req x 600 B  ->                             21.60 GB/day =  648 GB/month
+```
+
+Note what moves the total: going from 3 lines to 5 costs 67% more, and going from 400 B to 600 B
+costs 50% more — the two together nearly triple it, from 8.6 to 21.6 GB/day, without a single extra
+request. That is the arithmetic behind Best Practice 2: a `log.info(...)` inside a 10,000-iteration
+loop does not add "some noise", it multiplies `lines/req` by 10,000 and turns an 8.6 GB/day service
+into a 28.8 TB/day one. Log at boundaries, aggregate inside loops, and treat field count as a per-line
+tax rather than a free improvement.
+
 ### 6.3 Correlation ID middleware
 
 ```python
@@ -406,6 +470,44 @@ orders_created.labels(payment_method="card").inc()
 order_value.observe(99.95)
 active_connections.set(pool.size())
 ```
+
+**Stated plainly.** "One metric does not cost one time series — it costs the *product* of its label
+value counts, because Prometheus stores every distinct combination separately." Cardinality is
+multiplication, and multiplication is why a single extra label can end a Prometheus server.
+
+| Symbol | What it is |
+|--------|------------|
+| `\|L_i\|` | Number of distinct values label `i` ever takes |
+| series | `\|L_1\| x \|L_2\| x ... x \|L_n\|` — one stored time series per combination |
+| ~256 B | Rough in-memory cost of one active series (index + chunk head) |
+| bounded | A label whose value count is fixed by the domain: methods, status classes, regions |
+| unbounded | A label that grows with usage: user ID, order ID, request ID, IP address |
+
+**Walk one example.** Build the product up one label at a time on `http_requests_total`:
+
+```
+  method       5  (GET POST PUT PATCH DELETE)
+  route       40  (the app's registered paths)
+  status_class 3  (2xx 4xx 5xx)
+                                    5 x 40 x 3          =         600 series   ~154 KB
+
+  + tenant_id, 200 values           600 x 200           =     120,000 series   ~ 31 MB
+  + user_id, 1,000,000 values       600 x 1,000,000     = 600,000,000 series   ~154 GB
+                                                          ^^^^^^^^^^^ the OOM
+```
+
+The jump is not gradual. Adding `tenant_id` multiplies by 200 and stays affordable; adding `user_id`
+multiplies by a million and the metric alone wants more memory than the machine has. This is the
+arithmetic behind the rule in Section 3 and the `tenant_id`-versus-`user_id` distinction the case
+study relies on — the question is never "is this an identifier?" but "what does this multiply by,
+and does that factor grow?"
+
+**Why the growth direction matters more than today's number.** A bounded label has a ceiling you can
+compute once. An unbounded one has no ceiling, and Prometheus keeps a series resident for hours
+after its last sample, so churn (a fresh `request_id` on every request) accumulates faster than the
+label's instantaneous count suggests. Before adding any label, write down its maximum realistic
+value count; if you cannot, it belongs in a log field or a span attribute, both of which are stored
+per-event and multiply by nothing.
 
 ### 6.5 OpenTelemetry setup
 

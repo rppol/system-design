@@ -289,6 +289,45 @@ try (Connection conn = dataSource.getConnection();
 // Typical improvement: 10-100x faster for bulk inserts
 ```
 
+**Read it like this.** "Batching does not make the database faster — it makes you stop paying network latency once per row, so the win is exactly the ratio of rows to round trips."
+
+That framing tells you where batching helps and where it does not: it collapses the
+*latency* term, not the *work* term. If your inserts are slow because of index maintenance
+rather than round trips, batching buys you very little.
+
+| Symbol | What it is |
+|--------|------------|
+| `batchSize` | Rows accumulated in the driver before one `executeBatch()` sends them |
+| `addBatch()` | Buffers the bound parameters client-side; zero network traffic |
+| `executeBatch()` | The single round trip that ships the whole accumulated batch |
+| Round trip | One request/response to the DB server; ~1 ms on a same-AZ LAN |
+| `N / batchSize` | The number of round trips, which is what you are actually minimizing |
+
+**Walk one example.** The 1,000-row loop above with `batchSize = 500`, at 1 ms round-trip time.
+
+```
+  single-row inserts
+    round trips           = 1,000                      (one per executeUpdate)
+    network time          = 1,000 x 1 ms               = 1,000 ms
+
+  batched at 500
+    round trips           = 1,000 / 500                = 2
+    network time          = 2 x 1 ms                   = 2 ms
+    round trips avoided   = 1,000 - 2                  = 998   (99.8%)
+    latency-only speedup  = 1,000 / 2                  = 500x
+
+  the case study's measured 10,000-row insert
+    single   ~8,000 ms / 10,000 rows                   = 0.8 ms per row
+    batched  ~40 ms total
+    speedup  8,000 / 40                                = 200x
+```
+
+The measured 200x is below the pure-latency 500x because the DB still has to do the actual
+insert work, which batching cannot remove — that residual is the "DB processing time" term.
+The commit-every-batch line is a separate lever: it caps how much work a rollback has to
+undo and how long locks are held, at the cost of losing all-or-nothing semantics across the
+full 1,000 rows.
+
 ### ResultSet Streaming — OOM Prevention
 
 ```java
@@ -320,6 +359,44 @@ conn.commit();
 // Use streaming for large exports, batch processing, ETL — not for small OLTP queries.
 ```
 
+**What it means.** "`fetchSize` is the dial that trades memory for round trips: your client holds `fetchSize` rows at a time and pays one network trip per page, so halving the page doubles the trips and halves the resident bytes."
+
+The reason to hold both halves in mind is that the two failure modes sit at opposite ends
+of the same dial — unset (effectively infinite) fetch size OOMs the JVM, and a tiny fetch
+size turns one query into tens of thousands of round trips.
+
+| Symbol | What it is |
+|--------|------------|
+| `setFetchSize(n)` | Rows the driver pulls per network trip; a hint, honoured differently per driver |
+| Server-side cursor | The DB keeps its place and streams pages instead of materializing everything |
+| `Integer.MIN_VALUE` | MySQL's magic value meaning "row-by-row streaming", not "a size" |
+| `autoCommit=false` | PostgreSQL's precondition — no transaction, no server-side cursor |
+| Client buffer | `fetchSize x bytes-per-row`, the memory the JVM actually holds |
+
+**Walk one example.** The finance service's 5,000,000-row monthly report, assuming ~200 B per row.
+
+```
+  no fetchSize (driver buffers everything)
+    resident rows   = 5,000,000
+    client buffer   = 5,000,000 x 200 B         = 1,000,000,000 B  = 1.0 GB
+    round trips     = 1                          <- one trip, then OOM
+
+  setFetchSize(1000)
+    resident rows   = 1,000
+    client buffer   = 1,000 x 200 B             = 200,000 B        = ~195 KB
+    round trips     = 5,000,000 / 1,000         = 5,000
+    network time    = 5,000 x 1 ms              = 5.0 s
+
+  setFetchSize(1) -- the other extreme
+    round trips     = 5,000,000
+    network time    = 5,000,000 x 1 ms          = 5,000 s          = 83 minutes
+```
+
+1.0 GB of buffer versus ~195 KB is the whole reason the service stopped OOM-ing; the price
+is 5 seconds of accumulated network latency and a transaction held open for the length of
+the iteration. That held-open transaction is the real cost the last comment warns about: on
+PostgreSQL it also blocks vacuum from reclaiming rows the report is still reading.
+
 ### Connection Pool Exhaustion — Detection and Prevention
 
 ```java
@@ -346,6 +423,43 @@ int waiting = poolBean.getThreadsAwaitingConnection();
 int total   = poolBean.getTotalConnections();
 // Alert if: waiting > 0 (threads blocked on pool), active == maxPoolSize
 ```
+
+**Put simply.** "A connection is only useful while the database is actively executing its query, and the database can only execute as many queries at once as it has cores and disks — so the right pool size is the DB's parallelism, not your thread count."
+
+This is the single most counter-intuitive number in JDBC tuning. The formula sizes the pool
+to the *server's* capacity, which is why the answer is 9 and not 100, and why the formula
+contains no term for how many application threads you run.
+
+| Symbol | What it is |
+|--------|------------|
+| `core_count` | Cores on the **database** server, not the application server |
+| `x 2` | Two connections per core, so one can run while the other waits on I/O |
+| `effective_spindle_count` | Independent disks that can seek in parallel; SSD counts as ~1 |
+| `maximumPoolSize` | The hard ceiling; the 11th borrower blocks instead of connecting |
+| `connectionTimeout` | How long a blocked borrower waits before `PoolTimeoutException` |
+
+**Walk one example.** The formula on a 4-core SSD box, then the fleet-level clamp from the case study.
+
+```
+  per-instance formula
+    core_count = 4, spindles (SSD) = 1
+    connections = (4 x 2) + 1                        = 9
+
+  fleet clamp: 20 instances against PostgreSQL max_connections = 200
+    ceiling per instance = 200 / 20                  = 10        <- what they used
+    the naive plan       = 20 x 50                   = 1,000     <- 5x over the limit
+    overshoot            = 1,000 - 200               = 800 connections refused
+
+  what a blocked borrower costs
+    pool full, connectionTimeout = 3,000 ms
+    every waiting request's latency floor             = 3,000 ms
+    -> p99 pins to exactly the timeout, which is the pool-exhaustion signature
+```
+
+The two numbers agree by coincidence here — 9 from the formula, 10 from the fleet ceiling —
+and when they disagree you take the smaller. Setting 100 as in War Story 4 does not buy
+parallelism the database does not have; it just relocates the queue from HikariCP (where
+you can see it via `getThreadsAwaitingConnection()`) to the DB scheduler (where you cannot).
 
 ### The 4 Isolation Levels with Concrete Scenarios
 
@@ -600,6 +714,49 @@ Rule of thumb: always set `fetchSize` for any query where the result could excee
         => 1001 queries, all needing the pool -> exhaustion -> p99 30s
    FIX: SELECT * FROM payments WHERE order_id IN (?, ?, ...)   -> 1 query (2 total)
 ```
+
+**Stated plainly.** "N+1 means the query count is a function of the *data*, not of the code — one row returned becomes one more query issued — so a request that was fine in staging with 10 orders melts the pool in production with 1,000."
+
+The pool angle is what makes this an outage rather than a slow page. Latency you can
+apologize for; a request that holds pool capacity proportional to its result size takes the
+whole service down with it.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Rows the first query returns — here 1,000 orders |
+| `N + 1` | Total queries: the one list query plus one per row |
+| Connection-seconds | Pool time one request consumes; the pool's real currency |
+| `maximumPoolSize` | 10 here; the number of connection-seconds available per second |
+| IN-list collapse | Replacing the N follow-ups with one query, making cost independent of N |
+
+**Walk one example.** One order-history request at 1,000 orders and 1 ms per query.
+
+```
+  broken: N+1
+    queries          = 1,000 + 1                      = 1,001
+    request latency  = 1,001 x 1 ms                   = 1,001 ms  (~1 s)
+    pool time used   = 1,001 x 1 ms                   = 1.001 connection-seconds
+
+  fixed: IN-list
+    queries          = 2                              (orders, then payments)
+    request latency  = 2 x 1 ms                       = 2 ms
+    pool time used   = 0.002 connection-seconds
+    query reduction  = 1,001 / 2                      = 500x
+
+  what the pool can sustain, maximumPoolSize = 10
+    broken   10 / 1.001                               = ~10 requests/second
+    fixed    10 / 0.002                               = 5,000 requests/second
+
+  the observed blow-up
+    p99 80 ms -> 30,000 ms                            = 375x
+    30,000 ms is not query time -- it is connectionTimeout, i.e. pure queueing
+```
+
+That last line is the tell. 30 seconds is not a slow query; it is the acquire timeout,
+meaning requests spent essentially all their time waiting for a connection that never came.
+Note the fix's cost is bounded but not free: an `IN` list of 1,000 placeholders is a large
+statement, and because the placeholder count varies per call it defeats plan caching — page
+the result or chunk the IN list at a few hundred ids if N can grow without limit.
 
 ### Broken: N+1 Exhausting the Pool
 

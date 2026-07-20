@@ -20,6 +20,47 @@ Polyglot persistence is like a professional kitchen: different tools for differe
 
 **Eventual consistency window**: Any derived read model is eventually consistent with the source of truth. The replication lag (milliseconds to seconds via CDC) is the consistency window. Applications must tolerate this window or design around it.
 
+**What this actually says.** "Lag is not a property of the pipeline — it is the backlog
+divided by how fast the consumer drains, and a backlog only exists because arrivals briefly
+outran drain capacity."
+
+The framing matters because the instinct on seeing high lag is to blame the network or
+Debezium. Neither is usually involved. Lag is a queue that grew during a write spike and is
+still being worked off.
+
+| Symbol | What it is |
+|--------|------------|
+| arrival rate | Change events per second produced by writes to the source of truth |
+| drain rate | Change events per second the consumer can apply to the derived store |
+| backlog | Events sitting in Kafka, already committed upstream but not yet visible downstream |
+| `backlog / drain` | Lag in seconds — the consistency window a reader actually experiences |
+| deficit | `arrival - drain`. Positive means the backlog is growing right now |
+
+**Walk one example.** A consumer that applies 5,000 events/second, hit by a write spike
+producing 6,000 events/second:
+
+```
+  deficit = 6,000 - 5,000 = 1,000 events/second of backlog growth
+
+  spike lasts  60 s  ->  backlog  60,000  ->  lag =  60,000 / 5,000 =  12 s
+  spike lasts 225 s  ->  backlog 225,000  ->  lag = 225,000 / 5,000 =  45 s
+
+  Once arrivals fall back to 5,000/s the backlog stops growing -- but it does
+  not shrink. Only arrivals BELOW 5,000/s drain it.
+```
+
+That 45-second row is exactly the "Debezium is 45 seconds behind (unusually high write load)"
+incident in Section 10. A 20% overload sustained for under 4 minutes is enough to produce it,
+which is why the consistency window is a range and not a constant.
+
+**Why the window can never be designed to zero.** The last line of the walk is the
+uncomfortable one: a backlog is only paid down by spare capacity, so a consumer provisioned
+at exactly the average arrival rate has no way back and its lag ratchets upward with every
+spike. Size derived-store consumers with genuine headroom over peak, not over average, and
+treat the resulting window as a contract — the Section 10 fix (read canonical prices from
+PostgreSQL, use Elasticsearch only for discovery) is what "design around it" means in
+practice.
+
 **CDC as the synchronization backbone**: Change Data Capture (Debezium) tailing the WAL is the most reliable mechanism for propagating changes from the primary store to derived stores — lower latency than polling, no polling overhead, ordered delivery.
 
 **Compensate for dual-write failure**: Writing to two databases simultaneously creates a risk: write A succeeds, write B fails. The outbox pattern (writing a change event to the same database as the business write) eliminates this risk.

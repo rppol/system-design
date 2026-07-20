@@ -279,6 +279,42 @@ Key detail: `ntodo = len(self._ready)` is snapshotted before the loop. Any callb
 `_ready` *during* Phase 5 (e.g., a done-callback calling `call_soon`) are deferred to the *next*
 tick. This prevents a single tick from running indefinitely if callbacks keep spawning callbacks.
 
+**What this actually says.** The three-branch Phase 2 expression is the loop deciding how long it is
+allowed to sleep, and it reads as one sentence: "if I have work right now, do not sleep at all; if
+the only thing coming is a timer, sleep exactly until that timer; if nothing at all is pending,
+sleep as long as I am permitted to." Every latency property of asyncio follows from those three
+branches.
+
+| Symbol | What it is |
+|--------|------------|
+| `self._ready` | Deque of callbacks runnable *this instant*. Non-empty means zero sleep is allowed |
+| `self._scheduled[0]._when` | Absolute deadline of the earliest timer, in the loop's monotonic clock |
+| `self.time()` | Now, same clock. `_when - time()` is "seconds until that timer is due" |
+| `max(0, ...)` | Floor at zero — an already-overdue timer must not produce a negative sleep |
+| `MAXIMUM_SELECT_TIMEOUT` | The idle cap, `3600` s. Only reached when nothing is queued or scheduled |
+| `timeout` | What gets handed to `epoll_wait`. It is a *maximum*, cut short by any arriving I/O |
+
+**Walk one example.** Three loop states, same code path, wildly different sleeps:
+
+```
+  state                                   branch taken            timeout passed to select()
+  --------------------------------------- ----------------------- --------------------------
+  2 callbacks in _ready                   if self._ready          0        (poll, never block)
+  _ready empty, timer due in 0.25 s       elif self._scheduled    0.25 s
+  _ready empty, no timers, idle server    else                    3600 s   (= 60 minutes)
+
+  overdue timer, _when - time() = -0.004
+    max(0, -0.004)                                                0        (fires immediately)
+```
+
+**Why the `0` branch is the one that bites.** A non-empty `_ready` forces `timeout = 0`, so the
+selector performs a non-blocking poll and Phase 5 immediately drains more callbacks. Keep `_ready`
+permanently non-empty — which is exactly what a `call_soon` storm or a tight `sleep(0)` loop does —
+and the loop spins at `timeout = 0` forever: I/O is still *checked* every tick, but the process
+burns 100% CPU and every tick's `select()` returns instantly with no chance to wait for slower file
+descriptors. The `3600 s` cap at the other extreme is why a fully idle loop costs no CPU at all: it
+is genuinely asleep in the kernel until either a socket or `_write_to_self()` wakes it.
+
 ### 6.2 The `await` Bytecode Protocol
 
 When Python encounters `result = await some_awaitable`, it compiles to (3.12+ bytecode):
@@ -488,6 +524,39 @@ xychart-beta
 ```
 
 *uvloop roughly 2.5x's `SelectorEventLoop` throughput by moving polling, timers, and callback dispatch into libuv's C runtime — closing most of the gap to the nginx baseline while staying a drop-in `asyncio` replacement.*
+
+**Put simply.** Requests-per-second is the hard number to compare, but `1e6 / RPS` is the number to
+*reason* with: "how many microseconds of CPU does this loop spend per request?" Flipping the
+benchmark into a per-request budget turns a vague 2.5x into a concrete count of microseconds that
+libuv deletes.
+
+| Symbol | What it is |
+|--------|------------|
+| `RPS` | Measured throughput on the wrk echo benchmark, 10,000 connections |
+| `1e6 / RPS` | Microseconds of loop time consumed per request — the per-request budget |
+| `delta` | Budget difference between two loops. What the C rewrite actually removed |
+| `RPS / RPS_nginx` | Fraction of the C baseline reached — how much headroom is left to win |
+
+**Walk one example.** Convert all three benchmark rows into budgets:
+
+```
+  loop                    RPS        1e6 / RPS = us per request   % of nginx baseline
+  ----------------------- ---------- ---------------------------- -------------------
+  SelectorEventLoop        60,000     16.67 us                     33.3 %
+  uvloop                  150,000      6.67 us                     83.3 %
+  nginx (C baseline)      180,000      5.56 us                    100.0 %
+
+  what uvloop removed     16.67 - 6.67   =  10.00 us per request
+  what remains to win      6.67 - 5.56   =   1.11 us per request
+  throughput ratio       150,000 / 60,000 =  2.5x
+```
+
+**Why the budget view changes the decision.** The 2.5x headline suggests a large remaining upside;
+the budget shows uvloop already recovers `10.00` of the `11.11 µs` gap to hand-written C — about
+90% of everything available. The practical reading: swapping the loop is the last big structural
+win, and after it, further throughput must come from doing *fewer* task-steps per request, not from
+making each step cheaper. This is also why Section 13 warns to profile first — if your requests
+spend 8 ms in a database, a 10 µs saving per request is 0.125% and invisible.
 
 ### 6.7 `anyio` Abstraction
 
@@ -846,6 +915,42 @@ The GIL ensures only one Python thread runs bytecode at any instant. Two threads
 **Never block the event loop thread.** Audit all synchronous calls: database ORM queries (use async drivers), file I/O (use `aiofiles` or `run_in_executor`), `time.sleep` (use `asyncio.sleep`), `subprocess.run` (use `asyncio.create_subprocess_exec`).
 
 **Use `asyncio.sleep(0)` sparingly for cooperative yields.** Insert in CPU-heavy loops every 10,000–100,000 iterations, not every iteration — the overhead of a `call_soon` + selector pass is ~2–5 µs.
+
+**The idea behind it.** The "every N iterations" advice is a division: yielding costs a fixed
+`~3.5 µs`, so spreading that cost over `N` iterations makes the per-iteration tax `3.5 / N`
+microseconds. Picking `N` simultaneously chooses your CPU overhead *and* your worst-case I/O stall —
+the two trade directly against each other.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Iterations of real work between two `await asyncio.sleep(0)` calls |
+| `c` | Fixed cost of one yield: `call_soon` plus a tick of `_run_once`, ~2–5 µs (take 3.5) |
+| `c / N` | Overhead tax per iteration. Falls as `N` grows |
+| `N x w` | Worst-case I/O stall, where `w` is the wall time of one iteration of your own work |
+| `(ops / N) x c` | Aggregate cost of every yield across the whole loop |
+
+**Walk one example.** Pitfall 2's 10,000,000-iteration accumulator, at `c = 3.5 us`:
+
+```
+  N (yield every ...)   yields fired      total yield cost      tax per iteration
+  --------------------- ----------------- --------------------- ------------------
+  1  (every iteration)  10,000,000         35.0 s               3.5 us      absurd
+  1,000                     10,000          0.035 s             0.0035 us
+  100,000  (the fix)           100          0.00035 s           0.000035 us
+
+  the other side of the trade, at ~50 ns per accumulator iteration
+    (Pitfall 2's own figures: 10M iterations in ~0.5 s)
+    N = 100,000  ->  worst-case stall  =  100,000 x 50 ns  =  5 ms
+    N = 1        ->  worst-case stall  =  50 ns, but the job now takes 35 s
+```
+
+**Why `N = 1` is the classic wrong answer.** Yielding on every iteration looks maximally cooperative
+and is catastrophic: the fixed `3.5 µs` yield dwarfs the ~50 ns of real work by roughly **70x**, so a
+job that took 0.5 s now takes 35 s and the process spends about 99% of its life in scheduling
+overhead. `N = 100,000` costs 0.35 ms of yield overhead *in total* while capping any single stall
+near 5 ms — comfortably under the 100 ms slow-callback warning threshold. Tune `N` so `N x w` lands
+near your acceptable stall, then confirm `(ops / N) x c` is negligible; if both cannot hold at once,
+the work belongs in a `ProcessPoolExecutor`, not in the loop.
 
 **Profile before switching to uvloop.** uvloop adds a C extension dependency and complicates debugging. Measure first; most applications are not I/O-throughput-limited.
 

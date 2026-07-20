@@ -191,6 +191,56 @@ for i in range(20):
 # ~12.5% for large lists (CPython listobject.c, list_resize).
 ```
 
+**What this actually says.** "Never grow the pointer array by one slot — grow it by a fixed *fraction* of its current length, so the expensive copies get rarer exactly as fast as they get more expensive."
+
+This is the whole content of the "amortized O(1)" claim in Section 3. It is not a hand-wave; it is a geometric series with a provable constant.
+
+| Symbol | What it is |
+|--------|------------|
+| `ob_size` | Elements actually stored — the number `len()` returns |
+| `allocated` | Slots reserved in the pointer array; always `>= ob_size` |
+| growth factor `1.125` | `allocated_new / allocated_old` once the list is large (the 12.5% headroom) |
+| realloc | The O(n) event: grab a bigger block, copy every pointer across, free the old one |
+| amortized cost | Total copies over N appends, divided by N — a constant, not a function of N |
+
+**Walk one example.** The realloc points the loop above prints, and the copy each one pays:
+
+```
+  append #   len before   allocated after   pointers copied on this realloc
+       1          0              4                     0
+       5          4              8                     4
+       9          8             16                     8
+      17         16             24                    16
+      25         24             32                    24
+      33         32             40                    32
+      41         40             52                    40
+      53         52             64                    52
+     ...        ...            ...                   ...
+
+  Total pointer copies over N appends, summed over every realloc:
+
+      N =     1,000   ->        7,556 copies   ->  7.56 per append
+      N =   100,000   ->      798,128 copies   ->  7.98 per append
+      N = 1,000,000   ->    8,445,096 copies   ->  8.45 per append
+```
+
+**Why the per-append number stops growing.** Each realloc copies `allocated_old` pointers,
+and the reallocs happen at capacities `c`, `1.125c`, `1.125^2 c`, ... so the total copy work
+is a geometric series with ratio `1/1.125 = 0.889`. Its sum is bounded by
+`N / (1 - 1/1.125) = 9N` — nine copies per element, forever, no matter how large N gets.
+That fixed ceiling is what "amortized O(1)" means: any single `append` may cost O(n), but no
+sequence of appends can average more than a constant.
+
+Contrast the operation that has no such rule. `insert(0, x)` shifts every existing element
+on *every* call, with nothing amortizing it away:
+
+```
+  1,000,000 appends           ->         8,445,096 pointer copies  (8.4 per call)
+  1,000,000 insert(0, x)      ->   499,999,500,000 pointer copies  (500,000 per call)
+
+  ratio: 59,206x more work for the same number of elements added
+```
+
 **Timsort** (`list.sort()`, `sorted()`):
 - Stable — equal elements preserve original order.
 - O(n) for nearly-sorted input (detects natural runs).
@@ -247,6 +297,55 @@ bad_keys = [BadHash() for _ in range(1000)]
 bad_dict: dict[BadHash, int] = {k: i for i, k in enumerate(bad_keys)}
 # Lookup now probes all 1000 entries — O(n).
 ```
+
+**Read it like this.** "Never let the table get more than two-thirds full, and when two keys land in the same slot, jump to a new slot computed from the *whole* hash — not just the low bits that already collided."
+
+Both halves matter. The load-factor ceiling bounds how long a probe run can get on average; the perturbation bounds how *correlated* two colliding keys' probe runs are.
+
+| Symbol | What it is |
+|--------|------------|
+| `size` | Number of slots in the sparse index array; always a power of 2 |
+| load factor | `entries / size` — the fraction of slots in use. CPython resizes past 2/3 |
+| `slot` | The index currently being probed |
+| `perturb` | A working copy of the full hash, right-shifted 5 bits after each probe |
+| `5 * slot + 1` | Base recurrence — on a power-of-2 table it visits every slot before repeating |
+| `% size` | Wrap back into the table (CPython uses `& (size - 1)`, the same thing) |
+
+**Walk one example.** First the resize trigger the comment above claims, then what the 2/3 ceiling actually buys:
+
+```
+  Table of 8 slots. CPython's test is   fill * 3 >= size * 2   (i.e. fill >= 5.33)
+
+    insert #   fill   fill*3   size*2   resize?
+        4        4      12       16       no
+        5        5      15       16       no
+        6        6      18       16      YES   <- resizes on the 6th insertion
+
+  Expected probes per lookup at load factor alpha (uniform-hashing model):
+
+    alpha    failed lookup      successful lookup
+             1 / (1 - alpha)    (1/alpha) * ln(1/(1 - alpha))
+    0.25          1.33                 1.15
+    0.50          2.00                 1.39
+    0.67          3.00                 1.65    <- CPython's ceiling
+    0.75          4.00                 1.85
+    0.90         10.00                 2.56
+    0.95         20.00                 3.15
+```
+
+Two-thirds is where the curve is still flat. Paying 50% extra slots caps a failed lookup at
+three probes; letting the table reach 0.90 would cost ten, and 0.95 would cost twenty — the
+"O(1) average" would still be technically true and practically useless.
+
+**Why `perturb` exists, and what breaks without it.** Drop the `perturb` term and the
+recurrence becomes `next_slot = (5 * slot + 1) % size`, which depends only on the current
+slot. Every key that hashes to slot 3 then walks the *identical* path — 3, 0, 1, 6, 7 — so
+collisions pile into one shared chain instead of scattering. Adding `perturb` seeds the walk
+with the high bits of each key's own hash, so two keys that agree on the low bits still
+diverge immediately. The `BadHash` class above is the pathological case that no amount of
+perturbation can save: all 1,000 instances return hash `42`, so `perturb` is identical too,
+every key retraces the same probe path, and the lookup degrades to the O(n) linear scan the
+comment warns about.
 
 ---
 
@@ -543,6 +642,49 @@ def shortest_path(
 | `dict` | ~50 bytes per key-value pair | Indices + entries arrays |
 | `set` | ~25 bytes per element | Keys only |
 | `deque` | 8 bytes + block overhead (~64 ptr/block) | Block allocation |
+
+**Stated plainly.** "A list of a million integers is not a million integers — it is a million *pointers*, plus a million separately allocated integer objects sitting somewhere else on the heap."
+
+The `+ object overhead` in the first row is the entire story, and it is the term `sys.getsizeof` on the list will never show you.
+
+| Symbol | What it is |
+|--------|------------|
+| 8 bytes (pointer) | The only per-element cost *inside* the list's own array |
+| object overhead | The `PyLongObject` each pointer aims at — 28 bytes for a one-digit int |
+| `array.array('l')` | The same values as raw 8-byte C longs: no pointer, no object, no boxing |
+| shallow size | What `sys.getsizeof(the_list)` returns — header plus pointer array only |
+| deep size | Shallow size plus every object the pointers reach; the number that hits RSS |
+
+**Walk one example.** One million distinct integers, measured on 64-bit CPython:
+
+```
+  list(range(1_000_000))
+
+    list header                                        56 bytes
+    pointer array      1,000,000 x 8 bytes  =   8,000,000 bytes
+    sys.getsizeof(the list)                 =   8,000,056 bytes   <- all it reports
+
+    boxed int objects    999,743 x 28 bytes =  27,992,804 bytes   <- invisible above
+      (ints -5..256 are cached singletons, so 257 of the values cost nothing extra)
+
+    true total                              =  35,992,860 bytes  = 34.3 MiB
+
+  array.array('l', range(1_000_000))
+
+    raw C longs        1,000,000 x 8 bytes  =   8,000,000 bytes
+    plus a small fixed header
+
+    true total                              ~=  8,000,000 bytes  =  7.6 MiB
+
+  ratio  35,992,860 / 8,000,000  =  4.5x
+```
+
+The shallow number understates the real cost by 4.5x here, and the gap is not a constant —
+it grows with how many *distinct* values you store, because only the cached `-5..256` range
+is shared. Store a million distinct integers and you allocate a million objects; store a
+million copies of `7` and you allocate none. This is why `sys.getsizeof` on a container is
+the wrong tool for a memory budget, and why `array.array` (or `numpy`) is the right answer
+the moment a collection is both large and single-typed.
 
 ### When Each Collection Wins
 

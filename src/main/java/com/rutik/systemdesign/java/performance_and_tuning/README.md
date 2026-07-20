@@ -67,6 +67,41 @@ Database-bound:
   Don't create more pool threads than DB connections
 ```
 
+**In plain terms.** "A thread only burns a core while it is computing, so you need as many threads as it takes to keep every core busy *despite* the fraction of time each thread spends parked on I/O."
+
+That framing matters because the `W/C` term is not a fudge factor — it is literally "how many extra threads I must add to replace the one that just went to sleep." A thread that computes 10% of the time occupies a core 10% of the time, so it takes ten of them to saturate one core.
+
+| Symbol | What it is |
+|--------|------------|
+| `pool_size` | How many worker threads the executor keeps alive |
+| `# CPU cores` | Cores actually schedulable by this JVM (respect cgroup limits, not `nproc`) |
+| `W` | Average time one task spends *waiting* — DB round-trip, HTTP call, disk |
+| `C` | Average time one task spends *computing* — deserialization, business logic |
+| `W/C` | Wait-to-compute ratio; how many sleeping threads one running thread "pays for" |
+| `+ 1` (CPU-bound) | One spare thread so a core never idles during a page fault or scheduler gap |
+
+**Walk one example.** The War Story 1 service: 32 cores, tasks spend 90% of their time waiting on the DB.
+
+```
+  measured per task     C (compute) = 1 ms
+                        W (wait)    = 9 ms
+                        total       = 10 ms
+
+  W/C           = 9 / 1                  = 9
+  utilization   = C / (W + C) = 1 / 10   = 0.10   <- each thread holds a core 10% of the time
+  pool_size     = 32 x (1 + 9)
+                = 32 x 10                = 320    <- threads needed to keep 32 cores busy
+
+  cross-check   320 threads x 0.10 utilization    = 32 cores fully occupied
+  the old value  8 threads x 0.10 utilization     = 0.8 cores  <- 2.5% of the machine
+```
+
+At 8 threads the 32-core box was running less than one core's worth of work; the CPU
+graph looked idle while latency was terrible, which is exactly the signature of an
+undersized I/O pool. The `min(max_db_connections / services_count, ...)` clamp exists
+because the formula is blind to downstream limits: 320 threads pointed at a 100-connection
+Postgres just moves the queue from the executor to the connection pool.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -247,6 +282,38 @@ public class StringBenchmark {
 // Enabled by default: -XX:+CompactStrings (can disable with -XX:-CompactStrings)
 ```
 
+**What this actually says.** "Stop paying two bytes per character for text that only ever uses one — check the whole string once at construction, record the answer in a single byte, and store half as much."
+
+The `coder` field is what makes this cheap: the decision is made once, not per character, so every later `charAt` is one branch on a field already in cache rather than a re-scan of the array.
+
+| Symbol | What it is |
+|--------|------------|
+| `String.value` | The backing array — `char[]` before Java 9, `byte[]` from Java 9 |
+| `String.coder` | One byte recording the encoding: `0` = LATIN1, `1` = UTF16 |
+| LATIN1 | Every char fits ISO-8859-1, so 1 byte per char |
+| UTF16 | At least one char is outside LATIN1, so 2 bytes per char for the whole string |
+| "2 bytes per char" | The Java 8 fixed cost, paid whether or not the text needed it |
+
+**Walk one example.** The `"hello"` case from the block above, then scaled to a real heap.
+
+```
+  one string, "hello" (5 LATIN1 chars)
+    Java 8   char[5] x 2 B/char   =  10 bytes of payload
+    Java 9   byte[5] x 1 B/char   =   5 bytes of payload
+    saving   (10 - 5) / 10        =  50%
+
+  a service holding 2,000,000 cached strings averaging 40 chars, all ASCII
+    Java 8   2,000,000 x 40 x 2   = 160,000,000 B = 160 MB
+    Java 9   2,000,000 x 40 x 1   =  80,000,000 B =  80 MB
+    freed                            80,000,000 B =  80 MB of live heap
+```
+
+That 50% is payload only — the object header and the array header are unchanged, which is
+why the module quotes a whole-application figure of 20-30% rather than 50%. The gap is the
+fixed per-object overhead plus all the non-String heap. Note the coder is per string, not
+per character: one emoji anywhere in a 10,000-character document flips that entire backing
+array to UTF16 and the saving for it drops to zero.
+
 ### Autoboxing Cost in Hot Paths
 
 ```java
@@ -305,6 +372,47 @@ Practical implications:
   - Large gaps between accessed memory addresses = cache thrashing
 ```
 
+**Read it like this.** "Both traversals are O(n), but O(n) counts *steps*, not *cycles* — and one layout pays 4 cycles a step while the other pays 200, so the constant that big-O throws away is the entire answer."
+
+The reason to internalize the cycle numbers rather than the big-O is that no algorithmic
+change is available here: you cannot beat O(n) for visiting n elements. The only lever left
+is which level of the hierarchy each step lands in.
+
+| Symbol | What it is |
+|--------|------------|
+| Cache line | 64 bytes on x86 — the smallest unit ever moved between RAM and cache |
+| L1 hit (~4 cycles) | The data was already in the core's own cache; near-free |
+| RAM access (~200 cycles) | Full miss down L1 -> L2 -> L3 -> DRAM; ~50x an L1 hit |
+| Compressed oop (4 B) | A heap reference under 32 GB heaps, so 16 of them fit one cache line |
+| Pointer chasing | Each `node.next` is an arbitrary address, so every step is a fresh line |
+
+**Walk one example.** Traverse 1,000,000 elements, using the per-element costs stated above.
+
+```
+  ArrayList: contiguous Object[], 4-byte compressed oops
+    refs per 64-byte line   = 64 / 4                    = 16 elements
+    lines touched           = 1,000,000 / 16            = 62,500 lines
+    cost of one line        = 1 miss (200) + 15 hits x 4 = 260 cycles
+    per element             = 260 / 16                   = 16.25 cycles
+    total                   = 16,250,000 cycles          = 5.4 ms at 3 GHz
+
+  LinkedList: one Node per element, each at an unrelated address
+    lines touched           = 1,000,000 (one per node)
+    cost of one element     = 1 miss                     = 200 cycles
+    total                   = 200,000,000 cycles         = 66.7 ms at 3 GHz
+
+  ratio                     = 200 / 4    (steady-state L1 hit vs full miss) = 50x
+                            = 200 / 16.25 (including the amortized miss)    = 12x
+```
+
+The two ratios are the honest bracket. 50x is what you get once the hardware prefetcher
+recognizes the linear scan and has the next line resident before you ask for it, which is
+the case the module's "~4 cycles per element" figure assumes; 12x is the pessimistic
+no-prefetch bound where every 16th element eats a full DRAM trip. The prefetcher works for
+`ArrayList` and cannot work for `LinkedList` — it has no way to guess the next node's
+address until the current node is loaded, which is the whole reason the gap is measured in
+orders of magnitude rather than percent.
+
 ### JIT Inlining Budget and Megamorphic Call Sites
 
 ```
@@ -344,6 +452,48 @@ Production impact:
   Fix: seal the Transaction hierarchy, route to type-specific processors earlier —
   each processor site was monomorphic → inlined → 25% throughput improvement.
 ```
+
+**What it means.** "Inlining is a budget the JIT spends on method bodies, and it will only spend it when it can name the single method it is pasting in — so every extra receiver type you route through one call site buys you a virtual dispatch and cancels every optimization that inlining would have unlocked downstream."
+
+The second half is the part people miss. The vtable lookup itself is a few cycles; the real
+loss is that constant folding, escape analysis, and loop optimizations all stop at an
+un-inlined call boundary, so the penalty compounds across the whole hot region.
+
+| Symbol | What it is |
+|--------|------------|
+| `MaxInlineSize=35` | Bytecode budget for a *cold* callee — inline it just for being small |
+| `FreqInlineSize=325` | The larger budget a callee earns by being hot; ~9.3x the cold one |
+| Monomorphic | One receiver type observed; JIT pastes that one body in, no dispatch |
+| Bimorphic | Two types; JIT emits a type check plus both bodies — 2x code, still inlined |
+| Megamorphic | 3+ types; JIT gives up and emits a real vtable call |
+| vtable dispatch | Load the object's class pointer, index its method table, jump; ~10-15% cost |
+
+**Walk one example.** The `Animal[]` loop above, then the payment service's throughput.
+
+```
+  budget ratio
+    FreqInlineSize / MaxInlineSize = 325 / 35            = 9.3x
+    -> a hot method may be ~9x larger and still be inlined than a cold one
+
+  Animal[] with Cat, Dog, Bird, Fish = 4 concrete types at one call site
+    types seen 4 > 2                 -> megamorphic      -> no inline
+    per-call cost, monomorphic inlined                    = 10.0 ns  (assumed)
+    per-call cost, megamorphic +12.5% (midpoint of 10-15%) = 11.25 ns
+    over 10,000,000 elements
+      inlined     10.00 ns x 10,000,000                   = 100.0 ms
+      megamorphic 11.25 ns x 10,000,000                   = 112.5 ms
+      lost                                                =  12.5 ms per pass
+
+  payment service, after splitting 5 subtypes into 5 monomorphic sites
+    before  4,000 tx/s   -> 1 / 4,000 = 0.250 ms per transaction
+    after   4,000 x 1.25 = 5,000 tx/s -> 1 / 5,000 = 0.200 ms
+    per-transaction saving (0.250 - 0.200) / 0.250        = 20%
+```
+
+Note the asymmetry between the two ways of stating the same win: 25% more throughput is 20%
+less time per transaction. That is why the 10-15% per-call figure and the 25% service-level
+figure are not in conflict — the service gained more than the raw dispatch cost because
+restoring inlining also restored the optimizations that were blocked behind it.
 
 ### Tiered Compilation
 
@@ -644,6 +794,50 @@ for (var entry : byType.entrySet())
 | Devirtualize | hot-loop CPI | 1.9 | 0.8 |
 | G1 IHOP=35 + region 16m | full-GC pauses | 2.5s every ~10min | none |
 | Overall | batch time | 45s | 4s |
+
+**Put simply.** "Four independent fixes each removed a different tax on the same loop, and because they stack multiplicatively rather than adding up, four modest speedups compounded into an order of magnitude."
+
+Multiplicative is the key word. Engineers routinely reject a "only 1.4x" change; four of
+them chained is 8x, which is the difference between missing and meeting the nightly window.
+
+| Symbol | What it is |
+|--------|------------|
+| L1d miss rate | Share of data loads that were not in L1 — 38% means 1 load in 2.6 went to memory |
+| CPI | Cycles per instruction; lower is better, and it falls when the core stops stalling |
+| AoS | Array-of-structs — one `Position` object per element, hot and cold fields interleaved |
+| SoA | Struct-of-arrays — one array per field, so a scan touches only the bytes it reads |
+| ~11x | The end-to-end ratio, `45s / 4s`; each row is one factor inside it |
+
+**Walk one example.** Multiply the four stated factors, then check against the batch times.
+
+```
+  AoS waste, per the 200-byte Position
+    bytes the loop reads    = notionalCents (8) + factor (8)      = 16 B
+    bytes dragged per object                                      = 200 B
+    wasted                  = 1 - 16/200                          = 92%
+    cache lines per object  = 200 / 64                            = 3.1 lines
+
+  SoA density
+    longs per 64-byte line  = 64 / 8                              = 8 elements
+    -> ~8 useful positions per line instead of well under one
+
+  compounding the four fixes
+    BigDecimal -> long cents                        3.0x
+    AoS -> SoA                                      2.0x
+    devirtualize the callsite                       1.4x
+    chain so far  3.0 x 2.0 x 1.4                 = 8.4x
+    45 s / 8.4                                    = 5.36 s
+    remaining to reach 4 s: 5.36 / 4.0            = 1.34x   <- the removed full-GC stalls
+
+  end-to-end check  3.0 x 2.0 x 1.4 x 1.34        = 11.25x
+                    45 s / 11.25                  = 4.0 s   <- matches the table
+```
+
+The supporting counters move by the same order: L1d misses fall `38% -> 4%` (9.5x fewer
+memory trips) and CPI falls `1.9 -> 0.8` (2.4x fewer stall cycles per instruction), which is
+the hardware's version of the same story the wall clock tells. Note the prose above the
+chart calls this a "10x improvement" while `45s -> 4s` is 11.25x; the 10x is the rounded-down
+headline, not a different measurement.
 
 ### Common Pitfalls
 

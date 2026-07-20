@@ -109,6 +109,45 @@ A ruthless cut to what a **senior FastAPI / backend interview** actually probes,
 
 **Deliberately deferred to the Full Path** (valuable, lower interview yield): routing & request handling, middleware & lifecycle, configuration & settings management, WebSockets/SSE, background job queues, FastAPI-specific testing, HTTP clients for external APIs, message-queue-driven consumers, API design & versioning, and OWASP security hardening. A niche flagged in an interview (e.g. "have you used Celery?" or "how do you version a REST API?") is a bonus, not a gate — reach for these once the 9 above are solid.
 
+#### Decoding the "~53% fewer" cut
+
+This section index is narrative, not technical content, so it carries exactly one calculation —
+the size of the interview cut:
+
+```
+reduction = (full_modules - interview_modules) / full_modules
+
+modules_per_week = interview_modules / weeks
+```
+
+**Put simply.** "The interview path drops just over half the section, and what remains divides
+evenly across the three-week plan below." The two numbers are chosen together: the cut is sized
+to what fits the Study Plan, not the other way round.
+
+| Symbol | What it is |
+|--------|------------|
+| `full_modules` | `19` — every module in the Module Table above |
+| `interview_modules` | `9` — the three groups in the table above, three modules each |
+| `reduction` | Share of the section skipped. The "~53%" figure |
+| `weeks` | `3` — the Study Plan's horizon |
+| `modules_per_week` | Study load per week, and why each group holds exactly three |
+
+**Walk one example.**
+
+```
+  reduction = (19 - 9) / 19 = 10 / 19 = 0.5263 = 52.63%  ->  "~53% fewer"
+
+  modules_per_week = 9 / 3 = 3 modules per week
+
+  group breakdown, 3 modules each:
+    FastAPI Core & ASGI                  3  ->  week 1
+    Production Concerns                  3  ->  week 2
+    Deployment, Observability & Scale    3  ->  week 3
+                                        ---
+                                          9
+  Deferred to the Full Path: 19 - 9 = 10 modules.
+```
+
 ---
 
 ## Knowledge-Question Map

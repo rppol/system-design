@@ -420,6 +420,53 @@ Cache key is built from positional args and keyword args using `_make_key`. All 
 
 **Thread safety:** `lru_cache` is thread-safe in CPython as of 3.8 (uses a reentrant lock internally). Hit-rate overhead is ~50 ns per cache hit on a 2023 laptop.
 
+**Read it like this.** `CacheInfo` is two counters that answer one question: "what fraction of calls
+never had to run your function?" Everything you care about — hit rate, effective latency, whether
+the cache is even earning its keep — falls out of those two numbers.
+
+| Symbol | What it is |
+|--------|------------|
+| `hits` | Calls answered from the dict without running the function body |
+| `misses` | Calls that ran the body and then stored the result |
+| `hits + misses` | Total calls that reached the wrapper |
+| `h` | Hit rate, `hits / (hits + misses)` — a fraction between 0 and 1 |
+| `t_hit` | Cost of a hit: the dict lookup, ~50 ns as measured above |
+| `t_miss` | Cost of a miss: the full function body plus the store |
+| `eff` | Effective average latency, `h * t_hit + (1 - h) * t_miss` |
+| `currsize` | Entries currently held; capped by `maxsize` (128 here) |
+
+**Walk one example.** Start with the `fibonacci(30)` figures the code above prints:
+
+```
+  CacheInfo(hits=28, misses=31, maxsize=128, currsize=31)
+
+  total calls  = 28 + 31        = 59
+  hit rate h   = 28 / 59        = 0.475
+  currsize 31  = misses         (every miss stored one entry; 31 < 128, nothing evicted)
+```
+
+Now push a realistic `t_miss` through the same formula — a 2 ms database read memoized with a
+50 ns hit:
+
+```
+  eff = h * t_hit + (1 - h) * t_miss        t_hit = 50 ns = 0.00005 ms, t_miss = 2 ms
+
+    h = 0.00   ->  eff = 2.000000 ms     speedup  1.0x   (cache is pure overhead)
+    h = 0.50   ->  eff = 1.000025 ms     speedup  2.0x
+    h = 0.90   ->  eff = 0.200045 ms     speedup 10.0x
+    h = 0.95   ->  eff = 0.100048 ms     speedup 20.0x
+    h = 0.99   ->  eff = 0.020050 ms     speedup 99.8x
+
+  Read the shape, not the rows: speedup is roughly 1 / (1 - h) whenever t_hit << t_miss.
+```
+
+**Why the `1 - h` term is the whole story.** Because `t_hit` is four orders of magnitude smaller
+than `t_miss`, the `h * t_hit` term contributes almost nothing — at `h = 0.99` it is 0.00005 ms out
+of 0.02005 ms. Effective latency is governed entirely by the misses you did not avoid. This is the
+arithmetic behind a counter-intuitive production result: going from a 90% to a 95% hit rate halves
+your latency, while going from 50% to 55% barely moves it. Both are five points of hit rate; only
+one of them halves `1 - h`.
+
 ### 6.8 `functools.cached_property` (Python 3.8+)
 
 ```python
@@ -476,6 +523,52 @@ print(greet("world"))   # "HELLO WORLD!"
 ```
 
 Decoration order: bottom-up (innermost `@` applied first). Execution order: top-down (outermost wrapper runs first). This is the single most common source of confusion with stacked decorators.
+
+**In plain terms.** Every `@` line you stack is one more Python function call inserted in front of
+the real work — so the cost of a decorator is not a property of the decorator, it is the number of
+layers times the per-layer call cost, times how often you call it.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Number of stacked decorator layers (2 above: `uppercase` and `exclaim`) |
+| `d` | Added cost of one wrapper layer per invocation — one call plus `*args`/`**kwargs` packing |
+| `n` | Invocations of the decorated function over the window you care about |
+| `L * d` | Overhead added to a single call |
+| `n * L * d` | Total wall-clock the stack costs across the window |
+| `t_body` | Cost of the original function's own work — the thing you are comparing against |
+
+**Walk one example.** Measured on CPython 3.13 with `timeit`, one `functools.wraps` layer over a
+trivial `def bare(x): return x + 1`, best of 7 runs of 1,000,000 calls:
+
+```
+  bare(x)          34.7 ns per call
+  wrapped(x)       75.8 ns per call
+  d = 75.8 - 34.7 = 41.1 ns per layer per call
+
+  Over a 1,000,000-call hot loop, L = 1:
+      n * L * d = 1e6 * 1 * 41.1 ns = 0.041 s      -- 41 ms
+
+  Same loop, L = 3 stacked wrappers:
+      n * L * d = 1e6 * 3 * 41.1 ns = 0.123 s      -- 123 ms
+```
+
+Now decide whether that matters by comparing `d` against `t_body`, not against zero:
+
+```
+  t_body = 41 ns   (trivial arithmetic)      -> overhead 100% -- decorator doubles the call
+  t_body = 10 us   (a JSON parse)            -> overhead 0.4% -- invisible
+  t_body = 2 ms    (a DB round trip)         -> overhead 0.002% -- unmeasurable
+
+  A FastAPI route at 1,000 req/s with L = 3:  1000 * 3 * 41.1 ns = 0.00012 s/s
+  = 0.012% of one core. The auth + logging + tracing stack is free at that scale.
+```
+
+**Why "decorators are slow" is the wrong lesson.** The overhead is real but fixed and tiny, so it
+only surfaces when `t_body` is comparable to `d` — inside a tight numeric loop, or on a getter
+called millions of times. The fix in those rare cases is not to hand-inline the wrapper; it is to
+move the decorator *out* of the loop, decorating the function that contains the loop rather than
+the one called by it. That turns `n * L * d` into `1 * L * d` and the cost vanishes without giving
+up the abstraction.
 
 ### 6.10 FastAPI timing decorator
 
@@ -1106,6 +1199,41 @@ async def predict(body: PredictRequest) -> PredictResponse:
 ```
 
 **Behavior:** attempt 1 at t=0s fails, waits 1.0s; attempt 2 at t=1s fails, waits 2.0s; attempt 3 at t=3s succeeds or propagates the final exception. Total worst-case added latency: 3.0s over 3 attempts.
+
+**Put simply.** "Wait a bit longer after each failure, and stop counting once you have burned your
+attempts." The delay is a geometric sequence, and the total added latency is that sequence summed
+one term *short* of the attempt count — a gap that trips people up constantly.
+
+| Symbol | What it is |
+|--------|------------|
+| `max_attempts` | Total tries, including the first — 3 here, not 3 retries after the first |
+| `initial_delay` | The first wait, `1.0` s — used after failure number one |
+| `backoff_factor` | Multiplier applied after each wait, `2.0` — doubles the next wait |
+| `delay_i` | The `i`-th wait, `initial_delay * backoff_factor^(i-1)` |
+| waits executed | `max_attempts - 1` — the guard is `if attempt < max_attempts` |
+| total added latency | Sum of the executed waits only |
+
+**Walk one example.** Trace the loop with `max_attempts=3`, watching where the last delay goes:
+
+```
+  attempt   starts at   outcome    guard: attempt < 3 ?   sleeps      delay after
+  -------   ---------   -------    --------------------   --------   -----------
+    1         t=0.0s     fails      1 < 3  yes            1.0 s       1.0 -> 2.0
+    2         t=1.0s     fails      2 < 3  yes            2.0 s       2.0 -> 4.0
+    3         t=3.0s     fails      3 < 3  NO             none        4.0 unused
+                                                          ------
+  total added latency                                     3.0 s
+
+  delay_i = 1.0 * 2.0^(i-1)  ->  1.0, 2.0, 4.0
+  but only the first (max_attempts - 1) = 2 terms are ever slept.
+```
+
+**Why the last delay never happens.** The `if attempt < max_attempts` guard exists so the caller is
+not made to wait after the final failure — there is nothing left to wait *for*. So with `n`
+attempts you get `n - 1` waits and a worst-case added latency of
+`initial_delay * (backoff^(n-1) - 1) / (backoff - 1)`; here `1.0 * (2^2 - 1) / 1 = 3.0 s`. Set a
+client timeout below that sum and the retry logic never gets to finish: budget the *total*, not the
+per-attempt delay.
 
 **FastAPI correctness:** `@functools.wraps` preserves `call_inference.__name__` and `__doc__`; `asyncio.sleep` (not `time.sleep`) keeps the event loop unblocked; `response_model=PredictResponse` works because type annotations on `predict` are intact; `call_inference.__wrapped__` exposes the original coroutine for unit testing.
 

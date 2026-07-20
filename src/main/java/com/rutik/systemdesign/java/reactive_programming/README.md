@@ -196,6 +196,43 @@ so a slow consumer's `request(8)` throttles the whole chain back to the source.
 Without backpressure the queue grows unbounded and the process dies with
 `OutOfMemoryError`.
 
+**In plain terms.** "A bounded queue does not fix a rate mismatch — it only buys you time proportional to its size, and once it is full something has to give: block the producer, drop data, or crash."
+
+The useful consequence is that queue size is a *latency and blast-radius* knob, never a
+throughput one. If the consumer is slower than the producer, no buffer size makes the system
+sustainable; it only changes how long you have before the overflow strategy fires.
+
+| Symbol | What it is |
+|--------|------------|
+| Producer rate | Elements the source wants to emit per second — 1,000/s here |
+| Consumer rate | Elements the subscriber actually processes per second — 8/s here |
+| Queue depth | The operator's bounded buffer — 256 slots here |
+| `request(8)` | The demand signal; the producer may emit at most 8 more `onNext` |
+| Overflow strategy | What happens when the queue is full: buffer, drop, latest, or error |
+
+**Walk one example.** The 1,000/s producer against the 8/s consumer in the diagram.
+
+```
+  net fill rate    = 1,000 - 8                       = 992 elements/second
+  time to fill 256 = 256 / 992                       = 0.258 s  = 258 ms
+
+  -> the bounded queue absorbs the mismatch for a quarter of a second, no more
+
+  with backpressure honoured (request(8) throttles the source)
+    effective end-to-end rate = min(1,000, 8)        = 8 elements/second
+    queue depth at steady state                      = stays near 0
+
+  with an UNBOUNDED buffer instead, after 60 seconds
+    backlog        = 992 x 60                        = 59,520 elements
+    at ~100 B each = 59,520 x 100 B                  = 5.95 MB and still growing
+    -> linear growth with no ceiling; OutOfMemoryError is a matter of when, not if
+```
+
+258 ms is the whole value of that 256-slot queue: it smooths a burst, it does not raise
+throughput. The system's real rate is the consumer's 8/s, and the only honest choices are
+to speed the consumer up, throttle the producer via `request(n)`, or explicitly discard —
+which is precisely the menu the `onBackpressure*` operators offer.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -316,6 +353,52 @@ Flux.range(1, 1_000_000)
         }
     });
 ```
+
+**What the formula is telling you.** "Outstanding demand is a running balance: every `request(n)` credits it, every `onNext` debits it by one, and the producer is legally frozen the instant that balance hits zero."
+
+Seeing it as a balance sheet is what makes prefetch tuning obvious. Prefetch is just the
+opening credit, and the 75% replenish threshold is when the operator tops the balance back
+up so the producer never stalls waiting for a top-up mid-flight.
+
+| Symbol | What it is |
+|--------|------------|
+| Prefetch (`64` here) | The opening credit — how many elements the operator requests upstream |
+| Replenish threshold | 75% of prefetch; consuming that many triggers the next `request` |
+| Outstanding demand | Credited minus delivered; the producer's hard emit ceiling |
+| `request(1)` in `hookOnNext` | Pure pull mode — one credit issued per element processed |
+| `onBackpressureBuffer(1024, ...)` | The overflow queue that catches what demand could not gate |
+
+**Walk one example.** The `publishOn(Schedulers.parallel(), 64)` prefetch, then the pull-mode subscriber.
+
+```
+  prefetch-based replenishment
+    initial request upstream                            = 64
+    replenish threshold  64 x 0.75                      = 48 elements consumed
+    on hitting 48, operator issues                        request(48)
+    outstanding demand never exceeds                    = 64
+    -> upstream signals for 1,000,000 elements
+       1,000,000 / 48                                   = 20,833 request() calls
+
+  the same stream at the default prefetch of 256
+    replenish batch  256 x 0.75                         = 192
+    1,000,000 / 192                                     = 5,208 request() calls
+    -> 4x fewer demand signals, 4x more elements in flight
+
+  pull mode, as coded above
+    hookOnSubscribe request(64)                          balance = 64
+    each hookOnNext: -1 for the element, +1 for request(1)
+    balance stays pinned at                              = 64
+    -> a strict 64-element sliding window, tightest possible backpressure
+
+  the safety net behind all of it
+    onBackpressureBuffer(1024) at ~100 B/element        = 102,400 B = 100 KB max
+    beyond 1024 queued: DROP_LATEST fires, callback logs the discarded element
+```
+
+The tradeoff is entirely visible in those two round-trip counts: prefetch 64 costs 20,833
+demand signals but caps in-flight memory at 64 elements; prefetch 256 costs 5,208 signals
+and holds 4x the memory. Bounding the buffer at 1024 with an explicit `DROP_LATEST` is what
+converts an unbounded-growth OOM into a logged, measurable data-loss event you can alert on.
 
 ---
 
@@ -566,6 +649,50 @@ private Mono<EnrichedTick> enrich(PriceTick t) {
 - `onBackpressureLatest` + `sample(250ms)`: stable at ~6 GB heap, p99 client update lag 280 ms.
 - Threads: 32 Netty event-loop threads + a bounded-elastic pool for enrichment — vs ~80,000 platform threads (~80 GB) for a naive thread-per-client design.
 - CPU: 55% at peak; sampling cut outbound message volume by 92% versus forwarding every tick.
+
+**Put simply.** "The thread-per-client model does not fail because threads are slow — it fails because each one reserves about a megabyte of stack whether it is working or parked, so 80,000 idle clients cost 80 GB of RAM to do nothing."
+
+Stack reservation is the number that decides the architecture. Event loops and virtual
+threads are both answers to the same arithmetic; reactive additionally answers the *second*
+problem here, which is what a slow client's backlog costs.
+
+| Symbol | What it is |
+|--------|------------|
+| Platform thread | An OS thread with a ~1 MB reserved stack, one per blocked client |
+| Netty event loop | `2 x cores` threads, each multiplexing thousands of sockets |
+| `boundedElastic` | Elastic pool capped at `10 x cores` by default — for the blocking JDBC enrichment |
+| `sample(250ms)` | Emit at most one element per 250 ms window, discarding the rest |
+| `onBackpressureLatest` | Per-client: keep only the newest tick, drop the stale backlog |
+
+**Walk one example.** The 16-core node serving 80,000 SSE clients.
+
+```
+  thread-per-client, platform threads
+    stack reservation  80,000 x 1 MB          = 80,000 MB  = 78.1 GiB (~80 GB)
+    -> exceeds the machine before a single tick is processed
+
+  reactive on Netty
+    event-loop threads  2 x 16 cores          = 32 threads
+    stack reservation   32 x 1 MB             = 32 MB
+    ratio               80,000 / 32           = 2,500x fewer threads
+    boundedElastic cap  10 x 16 cores         = 160 threads for blocking enrichment
+
+  per-client memory actually observed
+    6 GB heap / 80,000 clients                = ~79 KB per client
+    -> three orders of magnitude below a 1 MB stack
+
+  sampling, from the stated source rates
+    ticks per instrument  50,000 / 5,000      = 10 ticks/second
+    after sample(250ms)   1,000 / 250         = 4 updates/second
+    reduction             1 - 4/10            = 60%
+```
+
+The thread arithmetic is the load-bearing part: 32 MB against 80 GB is why the design is
+possible at all, and ~79 KB of heap per client is what actually holds the connection state.
+On the sampling line, the stated rates (50,000 ticks/s over 5,000 instruments) work out to a
+60% cut rather than the 92% quoted above; 92% would require roughly 50 ticks/s per
+instrument, so the two figures are measuring different tick distributions — hot instruments
+carry far more than the flat average, and it is those that `sample` clips hardest.
 
 **Lesson:** Reactive earned its place here precisely because the problem is push +
 per-subscriber backpressure. The two operators that mattered — `onBackpressureLatest`

@@ -101,6 +101,39 @@ Resize at threshold (12 entries):
     (hash & oldCap) != 0  -->  old index + oldCap
 ```
 
+**What this actually says.** "A HashMap is an array whose length is always a power of two, so the bucket index is nothing but the low bits of the hash — and the table doubles the moment the entry count passes capacity x load factor."
+
+That framing matters because both of HashMap's famous constants fall straight out of it: the power-of-two capacity is what makes `(n - 1) & hash` a legal substitute for `hash % n`, and doubling is what makes the resize a one-bit test per entry instead of a full rehash.
+
+| Symbol | What it is |
+|--------|------------|
+| `capacity` | Length of the `Node<K,V>[] table`. Always a power of two; starts at 16 |
+| `loadFactor` | How full the table may get before it doubles. Default `0.75f` |
+| `threshold` | `capacity * loadFactor` — the entry count at which `resize()` fires |
+| `size` | Number of key-value mappings currently stored |
+| `(n - 1) & hash` | The bucket index. Equals `hash % n` only because `n` is a power of two |
+| `hash & oldCap` | The single new address bit that doubling exposes; decides stay-or-move |
+
+**Walk one example.** One key, `hash = 97`, in a default table:
+
+```
+  capacity   threshold = capacity x 0.75   resize fires on
+  16         12                            the 13th distinct key
+  32         24                            the 25th distinct key
+  64         48                            the 49th distinct key
+
+  Bucket index at capacity 16:
+    n - 1     = 16 - 1 = 15   = 0000 1111
+    hash      = 97           = 0110 0001
+    97 & 15   = 0000 0001    = bucket 1
+
+  Same key after the table doubles to 32:
+    hash & oldCap = 97 & 16  = 0000 0000 = 0   -> stays in bucket 1
+    had that bit been 1      ->  new bucket = 1 + 16 = 17
+```
+
+The bucket index is therefore the bottom 4 bits at capacity 16 and the bottom 5 bits at capacity 32. Doubling only ever adds one bit at the top of that window, which is why every entry in an old bucket has exactly two possible destinations — the same index, or that index plus the old capacity. Without the power-of-two invariant this trick collapses and resize would have to recompute `hash % n` for every entry.
+
 ### ArrayList Internal
 ```
 ArrayList:
@@ -120,6 +153,39 @@ remove(index):
   System.arraycopy(elementData, index+1, elementData, index, numMoved)
   elementData[--size] = null  // avoid memory leak
 ```
+
+**Read it like this.** "Grow by half rather than by one, and `n` appends cost about `log(n) / log(1.5)` array copies instead of `n` — paid for with up to 50 percent slack memory in the backing array."
+
+Geometric growth is what makes `add()` O(1) *amortized* rather than O(n): each copy is expensive, but copies get rarer as fast as they get bigger, so the total work across `n` appends stays proportional to `n`.
+
+| Symbol | What it is |
+|--------|------------|
+| `oldCapacity` | Current length of the backing `Object[] elementData` |
+| `oldCapacity >> 1` | Integer halving — a one-bit right shift, so it truncates downward |
+| `newCapacity` | `oldCapacity + (oldCapacity >> 1)`, i.e. 1.5x rounded down |
+| `size` | Elements actually stored; always `<= elementData.length` |
+| `Arrays.copyOf` | Allocates the new array and `System.arraycopy`s the old contents in |
+
+**Walk one example.** Filling a default `new ArrayList<>()` (capacity 10) to 10,000 elements:
+
+```
+  step   oldCapacity   >> 1     newCapacity
+  1      10            5        15
+  2      15            7        22        <- 22.5 truncated by the shift
+  3      22            11       33
+  ...
+  17     6246          3123     9369
+  18     9369          4684     14053     <- first capacity that clears 10,000
+
+  grow-and-copy cycles          = 18
+  elements copied in total      = 10 + 15 + 22 + ... + 9369 = 28,096
+  final capacity                = 14,053 for 10,000 elements
+  slack                         = 4,053 slots = 28.8 percent wasted
+
+  new ArrayList<>(10_000)  ->   0 grow cycles, 0 elements copied.
+```
+
+The 28,096 copied element references are roughly 2.8x the list length — that is the constant hiding behind "amortized O(1)". Pre-sizing removes all of it, which is why the pre-size advice shows up again in the case study below.
 
 ### LinkedHashMap for LRU Cache
 ```
@@ -246,6 +312,37 @@ For known-size maps (n entries known upfront):
   initialCapacity = ceil(n / 0.75) + 1 = n * 1.334...
   new HashMap<>(expectedEntries * 2) is a safe approximation (over-allocates ~50%)
 ```
+
+**The idea behind it.** "If the hash scatters keys independently, the count of keys landing in any one bucket is Poisson-distributed with a mean equal to the load factor — so choosing 0.75 is choosing 'nearly every bucket holds zero or one key'."
+
+The load factor is not a memory knob that happens to affect speed; it *is* the mean of the occupancy distribution. Pick it and you have picked the entire shape of the collision curve, including how astronomically rare an 8-deep bucket is.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of entries stored in the map |
+| `m` | Number of buckets — the table capacity |
+| `α` (also written `λ`) | Load factor `n / m`; simultaneously the mean entries per bucket |
+| `P(k)` | Probability that a given bucket holds exactly `k` entries |
+| `e^(-α)` | The Poisson normaliser; on its own it is `P(0)`, the empty-bucket share |
+| `α^k / k!` | How the probability mass falls off as a bucket gets deeper |
+
+**Walk one example.** `α = 0.75`, i.e. a 16-bucket table right at its threshold of 12 entries:
+
+```
+  k     P(k) = e^-0.75 * 0.75^k / k!     expected buckets out of 16
+  0     0.472367                          7.56
+  1     0.354275                          5.67
+  2     0.132853                          2.13
+  3     0.033213                          0.53
+  8     0.00000117                        0.0000188
+
+  mean entries per bucket = alpha            = 0.75
+  P(k >= 3) = 1 - (0.472367 + 0.354275 + 0.132853)
+            = 1 - 0.959495                   = 0.040505
+  P(k >= 8) (the treeify threshold)          = 0.00000128
+```
+
+Two readings fall out. First, about 83 percent of buckets hold 0 or 1 entry, so the average successful lookup is one comparison — the O(1) claim, quantified. Second, a bucket reaching 8 entries has probability roughly one in 780,000 under a good hash, so treeification is a hostile-input safety net (hash flooding, or a constant `hashCode()`), not a path healthy code ever takes.
 
 ### Spliterator Characteristics for Collections
 
@@ -585,6 +682,37 @@ The `recency.remove(key)` on every read is the cost in stage 3 (O(n) on a deque)
 //   so request it explicitly:
 Map<K, V> map = new ConcurrentHashMap<>(350_000);   // avoids ~9 doublings during warm-up
 ```
+
+**Put simply.** "Pre-sizing means picking a capacity whose 0.75 threshold already sits above the number of entries you will ever store, so the table never doubles and never re-places a single entry."
+
+The reason to do the arithmetic rather than eyeball it is that capacity is rounded up to a power of two, and a power of two that *looks* big enough can still have a threshold below your target — which costs you a full resize at the very end of warm-up, the worst possible moment.
+
+| Symbol | What it is |
+|--------|------------|
+| `expected` | Entries the map will eventually hold — 200,000 here |
+| `loadFactor` | Fullness allowed before doubling; 0.75 default |
+| `expected / loadFactor` | Smallest capacity whose threshold clears `expected` |
+| `tableSizeFor(...)` | JDK helper rounding that up to the next power of two |
+| `threshold` | `capacity * loadFactor` again — the number that must beat `expected` |
+
+**Walk one example.** Sizing for the 200,000-entry cache:
+
+```
+  expected / loadFactor = 200,000 / 0.75 = 266,666.7
+
+  candidate capacities (powers of two):
+    2^18 = 262,144   threshold = 196,608   < 200,000   -> still resizes once
+    2^19 = 524,288   threshold = 393,216   > 200,000   -> never resizes
+
+  Cost of NOT pre-sizing, starting from the default capacity 16:
+    16 -> 32 -> 64 -> ... -> 524,288          = 15 doublings
+    entries copied = 12 + 24 + 48 + ... + 196,608
+                   = 12 x (2^15 - 1)          = 393,204 entry re-placements
+
+  Pre-sized to 2^19: 1 allocation, 0 entries copied.
+```
+
+Note the shape of that sum: the final resize alone moves 196,608 entries, half the total. Geometric growth means the last doubling always costs about as much as every earlier doubling combined, so "it only resizes a handful of times" understates the pain — the handful is back-loaded onto the moment the cache is nearly warm.
 
 ### Common Pitfalls (production war stories)
 

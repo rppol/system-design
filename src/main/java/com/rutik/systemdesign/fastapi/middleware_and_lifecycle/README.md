@@ -331,6 +331,46 @@ class TimingMiddleware(BaseHTTPMiddleware):
         return response
 ```
 
+**Put simply.** "Per-middleware microseconds times how many middlewares times requests per second
+gives you CPU-seconds burned per second — which is just a count of cores spent on plumbing." The
+overhead per request is invisible; the same number multiplied by the stack depth and the traffic is
+a line item on your compute bill.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_mw` | Overhead of one middleware layer, in µs. `~25` for `BaseHTTPMiddleware`, `~1.5` pure ASGI |
+| `N` | Stack depth — how many middlewares every request passes through |
+| `RPS` | Requests per second the process fleet handles |
+| `t_mw x N x RPS` | Overhead in µs/s; divide by `10^6` for CPU-seconds per second |
+| CPU-seconds/sec | Reads directly as **cores**. `2.0` means two cores do nothing but middleware |
+
+**Walk one example.** The Section 14 deployment — 40 tenants at 500 req/s each — with the four
+middlewares that case study registers:
+
+```
+  RPS = 40 tenants x 500 req/s = 20,000 req/s
+
+  four BaseHTTPMiddleware layers, 25 us each
+    per request   25 us x 4          = 100 us
+    per second   100 us x 20,000     = 2,000,000 us = 2.00 CPU-seconds/sec = 2.00 cores
+
+  four pure ASGI layers, 1.5 us each
+    per request  1.5 us x 4          =   6 us
+    per second     6 us x 20,000     =   120,000 us = 0.12 CPU-seconds/sec = 0.12 cores
+
+  difference : 1.88 cores, recovered by changing base class -- no logic changed
+```
+
+Sanity-check the scale against the figure in Q8: one `BaseHTTPMiddleware` at 10,000 req/s is
+`20-30 us x 10,000 = 200-300 ms` of CPU per second, which is the same arithmetic with `N = 1` and
+half the traffic.
+
+**Why this is usually the wrong thing to optimize.** 2 cores at 20,000 req/s is `100 µs` on a
+request that the same section notes will spend 1–50 ms in the database — under 1% of wall-clock
+latency. The number matters in exactly two situations: when the stack is deep and the handler is
+trivial (internal services, health-check-heavy fleets), and when P99 budgets are tight enough that
+a fixed 100 µs floor is a meaningful fraction. Measure before rewriting a `dispatch` into raw ASGI.
+
 ### 6.3 Correlation ID middleware with `Request.state`
 
 ```python
@@ -459,6 +499,37 @@ app.add_middleware(
 # cutting the per-request CORS overhead to near zero for repeat callers.
 ```
 
+**The idea behind it.** "`max_age` is how long the browser is allowed to stop asking, so the number
+of `OPTIONS` round-trips is just the day divided by that value — per endpoint, per browser." It is a
+cache TTL wearing a CORS name, and it trades round-trips against how fast a policy change propagates.
+
+| Symbol | What it is |
+|--------|------------|
+| `max_age` | Seconds the browser may reuse a preflight result. Sent as `Access-Control-Max-Age` |
+| `86400 / max_age` | Preflights per day, for one browser against one endpoint+method pair |
+| cache key | `(origin, path, method, headers)` — a *new* endpoint means a *new* preflight |
+| staleness | Up to `max_age` seconds during which a browser still enforces the old policy |
+
+**Walk one example.** Same traffic, two `max_age` settings:
+
+```
+  max_age =   600 s (10 min, the default)  ->  86,400 / 600   = 144 preflights/day/endpoint
+  max_age = 86,400 s (24 h, the maximum
+            Chrome honours -- Firefox caps at 86,400 too)  ->  86,400 / 86,400 = 1 preflight/day
+
+  fleet view: 40 tenant origins x 10 endpoints at max_age = 600
+    144 x 10 x 40 = 57,600 OPTIONS requests/day
+
+  against the same day's real traffic (20,000 req/s x 86,400 s = 1.728e9 requests)
+    57,600 / 1.728e9 = 0.003% of requests
+```
+
+The fleet total looks large and is negligible — which is the actual lesson. The `~1 ms` preflight
+cost is a *first-request latency* problem for each browser, not a throughput problem for the server,
+so raise `max_age` to smooth cold-start latency and lower it while the CORS policy is in flux: at
+`86400`, a tightened `allow_origins` list takes up to a full day to take effect in a browser that
+already cached the permissive answer.
+
 ### 6.7 Exception handler vs middleware exception handling
 
 ```python
@@ -538,6 +609,33 @@ responses (token-by-token SSE). On a 10 KB JSON payload, gzip achieves 70-80% co
 reducing bandwidth from ~10 KB to ~2 KB. For token streams, chunked transfer encoding interacts
 with GZip buffering — the Starlette GZipMiddleware correctly buffers only when the full response
 is available, passing through streaming responses untouched.
+
+**What it means.** "Compression ratio times payload size times requests per second is bandwidth
+saved per second — the only form in which a percentage becomes a number you can put on an invoice."
+A `70-80%` reduction says nothing on its own; multiplied by traffic it is the whole justification.
+
+| Symbol | What it is |
+|--------|------------|
+| ratio | Fraction of bytes gzip removes. `0.70-0.80` for JSON, which is highly repetitive |
+| `minimum_size` | Floor below which GZip does not bother, `1000` bytes here (Starlette default 500) |
+| payload | Uncompressed response body — the `~10 KB` JSON in this example |
+| `ratio x payload x RPS` | Bytes/second saved on the wire |
+
+**Walk one example.** The 10 KB payload above, then the same setting at case-study traffic:
+
+```
+  one response
+    at 70% : 10 KB -> 3.0 KB   saved 7.0 KB
+    at 80% : 10 KB -> 2.0 KB   saved 8.0 KB     <- the ~2 KB figure quoted above
+
+  at 20,000 req/s (Section 14 traffic), 8 KB saved each
+    8 KB x 1024 x 20,000  = 163,840,000 bytes/s = 0.164 GB/s = 1.31 Gbit/s
+```
+
+That is the number that pays for the CPU: 1.31 Gbit/s of egress removed for a few microseconds of
+deflate per response. It also explains `minimum_size`: on a 200-byte response the same 80% saves
+160 bytes, which does not cover one TCP segment's worth of overhead plus the compression call — so
+the threshold exists to keep the ratio from being applied where the multiplication comes out small.
 
 **Cloudflare Workers (Python ASGI target).** The `TrustedHostMiddleware` with
 `allowed_hosts=["api.example.com", "*.example.com"]` ensures requests that bypass the CDN and

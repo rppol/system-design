@@ -41,6 +41,45 @@ Query: "database search"
   → Return ranked: Doc1 (has "database"), Doc2 (has "search"), Doc3 (has "database")
 ```
 
+**The idea behind it.** "Instead of asking every document whether it contains the word, keep
+a dictionary from word to the list of documents that hold it — then a query is a dictionary
+lookup plus a list intersection."
+
+The inversion is what turns search from `O(documents)` into `O(matching documents)`. Scanning
+3 documents for "database" is trivial; scanning 10 million is not, and the index makes the
+two cost the same per hit.
+
+| Symbol | What it is |
+|--------|------------|
+| term | A normalized token after analysis. "performanc" above is stemmed, not misspelled |
+| posting | One `(doc_id, freq, positions)` entry — the fact that one term is in one document |
+| posting list | Every posting for a term, sorted by doc_id so lists can be merged in one pass |
+| `freq` | Occurrences of the term in that document. Feeds `TF` in the BM25 formula below |
+| `pos` | Token offsets, needed only for phrase queries. The single largest part of the index |
+
+**Walk one example.** Scale the toy index above to a real corpus — 10M documents averaging
+300 tokens each, of which ~200 are distinct:
+
+```
+  postings entries : 10,000,000 docs x 200 distinct terms  = 2,000,000,000
+    doc_id (delta + varint)  ~2 bytes
+    freq   (varint)          ~1 byte
+    -> 2,000,000,000 x 3 bytes                             =  6.0 GB
+
+  positions        : 10,000,000 docs x 300 tokens          = 3,000,000,000
+    -> 3,000,000,000 x ~1.5 bytes (delta-encoded)          =  4.5 GB
+
+  index total                                              = 10.5 GB
+  raw text (3,000,000,000 tokens x ~6 bytes)               = 18.0 GB
+  index is 58% of the source text it searches
+```
+
+**Why doc_ids are delta-encoded.** A posting list stores ascending doc_ids, so Lucene writes
+the *gaps* — `[17, 4, 1, 220]` instead of `[17, 21, 22, 242]`. Gaps are small numbers and
+varints spend 1 byte on anything under 128, which is how 4-byte doc_ids average ~2 bytes.
+Drop the sort order and every gap becomes a full-range integer: the postings file doubles and
+the intersection that resolves a two-term AND stops being a single linear merge.
+
 ### BM25 Scoring Algorithm
 
 BM25 (Best Match 25) replaced TF-IDF as Elasticsearch's default scoring algorithm (ES 5.0+):
@@ -72,6 +111,82 @@ Tuning:
   b=1 → full length normalization (good for long documents like articles)
 ```
 
+**What this actually says.** "Rare words count for more, repeating a word helps but with
+fast-fading returns, and being a long document is not the same as being a relevant one."
+
+Three separate corrections to naive term counting, multiplied together. TF-IDF got the first
+right and the other two wrong, which is exactly why BM25 replaced it as the default.
+
+| Symbol | What it is |
+|--------|------------|
+| `IDF(T)` | Rarity weight. `log((N - df + 0.5)/(df + 0.5) + 1)` — big for rare terms, near 0 for ubiquitous ones |
+| `df` | Document frequency: how many documents contain the term at all |
+| `TF(D,T)` | Raw count of the term inside this one document |
+| `k1 = 1.2` | Saturation dial. The TF factor can never exceed `k1 + 1 = 2.2`, no matter the count |
+| `b = 0.75` | Length-penalty strength. `b=0` ignores length entirely, `b=1` applies it fully |
+| `\|D\|/avgdl` | This document's length as a multiple of the corpus average. 2.0 = twice as long |
+
+**Walk one example.** Corpus of `N = 10,000,000` documents, `avgdl = 300` tokens. The term
+"database" appears in `df = 500,000` of them, so its rarity weight is fixed for every
+document:
+
+```
+  IDF = ln((10,000,000 - 500,000 + 0.5) / (500,000 + 0.5) + 1)
+      = ln(9,500,000.5 / 500,000.5 + 1)
+      = ln(18.99998 + 1) = ln(19.99998) = 2.9957
+```
+
+Now hold the document at average length (`|D| = 300`, so the length factor is exactly 1.0)
+and vary only how many times "database" appears:
+
+```
+  TF      TF factor = tf x 2.2 / (tf + 1.2)      score = IDF x factor
+   1              1 x 2.2 / 2.2  = 1.0000              2.9957
+   2              2 x 2.2 / 3.2  = 1.3750              4.1191
+   3              3 x 2.2 / 4.2  = 1.5714              4.7076
+   5              5 x 2.2 / 6.2  = 1.7742              5.3150
+  10             10 x 2.2 /11.2  = 1.9643              5.8845
+  20             20 x 2.2 /21.2  = 2.0755              6.2176
+ 100            100 x 2.2/101.2  = 2.1739              6.5125
+
+  1 -> 2 occurrences : +1.12 score
+ 20 -> 100 occurrences: +0.29 score
+```
+
+That is the saturation curve doing its job. The second mention of "database" is worth almost
+four times as much as the eightieth through hundredth combined, and the factor is
+mathematically pinned below `k1 + 1 = 2.2` forever. Keyword stuffing cannot buy rank.
+
+Now fix `TF = 5` and vary only document length:
+
+```
+  |D|    |D|/avgdl   1 - b + b x ratio    score
+   100      0.33          0.50            5.8845
+   300      1.00          1.00            5.3150
+   900      3.00          2.50            4.1191
+  1200      4.00          3.25            3.7026
+```
+
+A 1200-token document mentioning "database" 5 times scores below a 100-token one mentioning
+it 5 times — 3.70 vs 5.88 — because 5-in-100 is a document *about* databases while 5-in-1200
+is a passing reference. This is the term interviewers ask about: set `b = 0` and both score
+5.3150, which is why `b=0` is recommended above for short fields like product names where
+length carries no signal.
+
+**Why IDF dominates everything else.** Compare a common and a rare term, each appearing
+once in an average-length document:
+
+```
+  "database", df = 500,000  ->  IDF = 2.9957  ->  score 2.9957
+  a product code, df = 200  ->  IDF = 10.8173 ->  score 10.8173   (3.61x higher)
+```
+
+One hit on a term that only 200 documents contain outranks 100 hits on a term half a million
+documents contain (10.82 vs 6.51). The `+0.5` terms are smoothing, keeping the ratio finite
+when `df = 0`; the trailing `+ 1` inside the log is what keeps IDF non-negative for terms
+present in more than half the corpus, which the original BM25 formulation allowed to go
+negative and score matches *worse* than non-matches.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -99,6 +214,46 @@ Routing:
   → Primary shards fixed at index creation (cannot change without reindex)
   → Change shard count: create new index + reindex API
 ```
+
+**Stated plainly.** "Shard count is not a performance dial you tune later — it is a
+divisor fixed at index creation, chosen so every piece lands in the 10-50GB band where
+Lucene is happiest."
+
+The routing line is the reason it is permanent. `hash(id) % shards` sends a document to a
+shard determined by the shard *count*; change the count and every existing document's hash
+now points somewhere else, so the only way forward is a full reindex.
+
+| Symbol | What it is |
+|--------|------------|
+| `number_of_shards` | Primary shards. The divisor in routing. Immutable after index creation |
+| `target_shard_size_GB` | Your chosen point in the 10-50GB band. 40GB is a common default |
+| `ceil(total_GB / target_GB)` | The sizing rule — round up, because a partial shard still needs a whole one |
+| `number_of_replicas` | Copies of each primary. Multiplies both storage and read capacity |
+| `hash(document_id) % shards` | Routing. Deterministic, uniform, and count-dependent |
+
+**Walk one example.** A log index projected to hold 1.2 TB, targeting 40GB shards, on nodes
+with 30GB heap:
+
+```
+  primaries : ceil(1200 GB / 40 GB)             = 30 shards
+  per shard : 1200 / 30                         = 40 GB      (inside the 10-50GB band)
+  replicas=1: 30 primaries + 30 replicas        = 60 shards total
+  storage   : 1.2 TB x 2                        = 2.4 TB on disk
+  routing   : shard = hash(doc_id) % 30         -> a fixed 1-of-30 choice
+  node cap  : 30 GB heap x 20 shards per GB     = 600 shards per node ceiling
+```
+
+60 shards sits far under both the 600-shard heap budget and the 1000-shard warning, so this
+cluster has room. Contrast the over-sharding war story in Section 10: 50 shards for 500MB
+is `500 / 50 = 10 MB` each — 4000x below the 40GB target here. The correct answer there is
+`ceil(0.5 GB / 40 GB) = 1` shard, and the cluster paid coordination overhead on 49
+unnecessary ones.
+
+**Why `ceil` and not rounding.** `1200 / 50 = 24` exactly, but `1250 / 50 = 25` and
+`1201 / 50 = 24.02`. Rounding down leaves 24 shards holding 50.04 GB each — over the band's
+ceiling on day one, and shards only grow. Rounding up costs one slightly-underfull shard and
+buys headroom for the drift that always happens. Size for where the index will be in a year,
+because the divisor cannot be changed once documents exist.
 
 ### Index Lifecycle Management (ILM)
 
@@ -348,6 +503,47 @@ xychart-beta
 ```
 
 Coordinator memory scales with `(from + size) × shard count`, not with the 100 rows actually requested — a 10x deeper page loads 10x more documents (50,000 to 500,000) just to return the same page size, which is why `max_result_window` caps `from + size` at 10,000 by default.
+
+**Put simply.** "To return rows 9,900-10,000 the coordinator must first collect the top
+10,000 from every shard, because no shard can know whether its 7,000th-best row is the
+global 9,900th."
+
+The cost is driven entirely by `from + size`, never by `size`. A user asking for 100 results
+on page 100 triggers exactly as much work as one asking for 10,000 results on page 1.
+
+| Symbol | What it is |
+|--------|------------|
+| `from` | Rows to skip. The offset — and the whole problem |
+| `size` | Rows actually returned to the caller. Almost irrelevant to cost |
+| shard count | Every primary shard must contribute its own top `from + size` |
+| `(from + size) x shards` | Documents materialised in coordinator heap for one request |
+| `max_result_window` | Hard cap on `from + size`, default 10,000. Guards the heap, not the shard |
+| `search_after` | Cursor: "resume after this exact sort key". No offset, so no accumulation |
+
+**Walk one example.** Same query on a 5-shard and a 30-shard index, `size = 100` throughout:
+
+```
+  page      from      5 shards            30 shards
+     1         0     100 x  5 =     500   100 x 30 =      3,000
+    10       900   1,000 x  5 =   5,000 1,000 x 30 =     30,000
+   100     9,900  10,000 x  5 =  50,000 10,000 x 30 =    300,000
+ 1,000    99,900 100,000 x  5 = 500,000     ^ blocked by max_result_window
+
+  Same 100 rows returned in every cell.
+```
+
+Two lessons live in that grid. First, the horizontal read: adding shards for write
+throughput multiplies deep-pagination cost by the same factor — 30 shards at page 100 loads
+300,000 documents to return 100. Second, the vertical read: page 1,000 loads 500,000
+documents on just 5 shards, the OOM risk the text above names, which is precisely what
+`max_result_window` exists to stop.
+
+**Why `search_after` escapes the trap.** It replaces "skip 99,900 rows" with "start after
+sort key `[29.99, prod-1234]`" — a value each shard can seek to directly in its sorted index,
+so every shard returns exactly `size` rows and the coordinator merges `100 x shards`
+regardless of depth. The cost of page 1,000 becomes identical to page 1. The tradeoff is
+that you can only move forward one page at a time, which is why it powers infinite scroll
+but cannot implement a "jump to page 1,000" control.
 
 ### Zero-Downtime Index Mapping Changes
 

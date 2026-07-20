@@ -258,6 +258,40 @@ OffsetDateTime odt = zdt.toOffsetDateTime();        // 2026-07-03T09:00-04:00 (o
 
 Note `LocalDate.of(2026, 7, 3)` uses a **1-based month** — one of the top reasons the old `Calendar` (0-based months, so December was `11`) was error-prone.
 
+**What it means.** "An `Instant` is not a date at all — it is two integers, a count of seconds since 1970 and a count of nanoseconds within that second, and every calendar field you ever see is computed from them plus a zone."
+
+That framing is why `Instant` can be ordered and diffed but not rendered. There is no year, no month, no hour stored anywhere in it; those exist only after a `ZoneId` is applied, which is precisely the property that makes it the right type to store.
+
+| Symbol | What it is |
+|--------|------------|
+| `getEpochSecond()` | Whole seconds since `1970-01-01T00:00:00Z`, as a `long`; negative for moments before 1970 |
+| `getNano()` | Nanoseconds within that second, `0` to `999_999_999` — never rolls into the second count |
+| Epoch | `1970-01-01T00:00:00Z`, the fixed origin both fields are measured from |
+| `long` seconds | 64 bits, so the range covers roughly +/- 292 billion years — no 2038 problem, unlike a 32-bit Unix timestamp |
+| `atZone(zoneId)` | The only operation that turns these two numbers into a year, month, day, and hour |
+
+**Walk one example.** The instant `2026-03-08T13:00:00Z`, taken apart and rebuilt:
+
+```
+  stored form
+    epochSecond   =  1,772,974,800
+    nano          =              0
+
+  what a zone makes of the SAME two numbers:
+    atZone(UTC)                    ->  2026-03-08T13:00Z
+    atZone(America/New_York)       ->  2026-03-08T09:00-04:00   (EDT, UTC-4)
+    atZone(Asia/Tokyo)             ->  2026-03-08T22:00+09:00   (UTC+9)
+
+  precision floor:
+    1 second      =  1,000,000,000 nanos
+    nano field max            999,999,999      <- one nano short of rolling over
+
+  ordering is pure integer comparison:
+    1,772,974,800  <  1,772,974,801            <- no zone, no calendar, no ambiguity
+```
+
+That last line is the whole argument for storing `Instant`. Comparing two events is a `long` comparison that cannot be wrong; comparing two `LocalDateTime` values is a comparison of wall-clock readings that may have come from different walls. Note also that `getNano()` is a *within-second* field — `Instant.ofEpochSecond(5, 1_500_000_000)` is normalised to second 6, nano 500,000,000, never left as an out-of-range nano count.
+
 ### BROKEN → FIX #1: `SimpleDateFormat` is not thread-safe
 
 `SimpleDateFormat` keeps mutable parsing state in a field, so a single instance shared across threads (the usual "static final" formatter) corrupts output or throws under load.
@@ -326,6 +360,39 @@ Duration realGapForPeriod = Duration.between(before, plusPeriod);   // PT23H  <-
 ```
 
 `Period.ofDays(1)` moved the wall clock; `Duration.ofHours(24)` moved real time. A "remind me in 1 day" feature must use `Period` (users mean "same time tomorrow"); a "session expires in 24h" feature must use `Duration`.
+
+**Read it like this.** "Both operations pin one thing and let the other float: `Period` pins the wall-clock reading and lets the elapsed seconds vary, `Duration` pins the elapsed seconds and lets the wall-clock reading drift."
+
+Once you see it as "which quantity am I holding fixed," the choice stops being a coin flip. Ask what the user would notice if it were wrong — a missed 09:00 alarm, or a session that lived 25 hours — and the answer names the type.
+
+| Symbol | What it is |
+|--------|------------|
+| `Period.ofDays(1)` | Calendar arithmetic: increment the day field, keep the wall-clock time, re-derive the offset from tzdata |
+| `Duration.ofHours(24)` | Machine arithmetic: add exactly 86,400 seconds to the epoch second, then re-render whatever wall clock results |
+| Offset | The zone's gap from UTC at that moment — `-05:00` in EST, `-04:00` in EDT; the DST transition changes it mid-interval |
+| Spring-forward day | The day clocks jump 02:00 to 03:00, so the calendar day contains only 23 real hours (fall-back contains 25) |
+| `Duration.between(a, b)` | Measures the actual elapsed seconds between two instants, which is how `PT23H` gets revealed |
+
+**Walk one example.** Both operations from `2026-03-08T01:00-05:00` in `America/New_York`:
+
+```
+  start                2026-03-08T01:00-05:00 (EST)   epochSecond 1,772,949,600
+
+  plus Period.ofDays(1)      -- pin the wall clock at 01:00
+    result             2026-03-09T01:00-04:00 (EDT)   epochSecond 1,773,032,400
+    elapsed seconds    1,773,032,400 - 1,772,949,600  =  82,800 s
+                       82,800 / 3,600                 =  23 hours     <- not 24
+
+  plus Duration.ofHours(24)  -- pin the elapsed time at 86,400 s
+    epochSecond        1,772,949,600 + 86,400         =  1,773,036,000
+    result             2026-03-09T02:00-04:00 (EDT)
+    wall clock drifted 01:00 -> 02:00                 <- one hour late
+
+  the offset moved -05:00 -> -04:00 partway through, and that one hour has to
+  come out of one side or the other: the calendar day, or the wall-clock reading.
+```
+
+Neither result is a bug; they answer different questions. The 23 hours is not `Period` malfunctioning — it is the correct real duration of that calendar day, and `Duration.between` reporting `PT23H` is the API telling you so honestly. The failure mode is only ever using the type that pins the quantity the user does not care about: a daily reminder advanced by `Duration` drifts to 02:00 and, six months later at fall-back, back to 01:00 — the twice-a-year misfire in War Story 1.
 
 ### Legacy conversions
 
@@ -605,6 +672,44 @@ Instant nextFireUtc(Reminder r, Instant after) {
 ```
 
 `.with(localTime)` re-pins the wall clock to 09:00 in the user's zone; `Period.ofDays(1)` advances *calendar* days so the reminder stays at 09:00 local across DST. Converting back with `.toInstant()` yields the UTC value the scheduler compares against. Had this used `Duration.ofHours(24)`, the 09:00 reminder would have crept to 08:00 or 10:00 twice a year.
+
+**Put simply.** "Every reminder makes exactly one round trip — local intent in, UTC instant out — and the whole design is the rule that the scheduler only ever compares the UTC side, never the local one."
+
+That one-way discipline is what makes the service survive both DST transitions and users who change zones. The local intent is the durable truth; the UTC instant is a derived cache that can always be recomputed, which is why storing only the instant would have been the trap.
+
+| Symbol | What it is |
+|--------|------------|
+| `localTime` + `zone` | The durable local intent — "09:00, `America/New_York`"; survives tzdata edits and re-derivation |
+| `next_fire_utc` | The derived `Instant`, recomputed after every firing; the only value the due-check reads |
+| Offset | The zone's UTC gap on that date — `-05:00` in EST, `-04:00` in EDT; supplied by `ZoneRules`, never hard-coded |
+| `.toInstant()` | Applies the offset: UTC hour = local hour minus the offset, i.e. local hour + the gap's magnitude when west of UTC |
+| Peak fan-out | 4,000 reminders/sec at the top of a minute — the burst the due-check query must clear |
+
+**Walk one example.** A daily 09:00 New York reminder, resolved across the spring-forward boundary:
+
+```
+  intent        LocalTime 09:00, ZoneId America/New_York, daily
+
+  2026-03-07 (still EST, offset -05:00)
+    local       2026-03-07T09:00-05:00
+    to UTC      09:00 + 5h                     ->  2026-03-07T14:00:00Z
+
+  2026-03-08 (DST began 02:00; now EDT, offset -04:00)
+    advance     Period.ofDays(1) keeps 09:00 local
+    local       2026-03-08T09:00-04:00
+    to UTC      09:00 + 4h                     ->  2026-03-08T13:00:00Z
+    epochSecond                                    1,772,974,800
+
+  the stored UTC instant moved by 23 hours, not 24 -- and that is the point:
+  the user still sees 09:00, which is the only thing they specified.
+
+  fan-out at the minute tick:
+    peak                                           4,000 reminders/sec
+    a 60-second tick window absorbs                4,000 x 60 = 240,000
+    8M users, if every one held a daily reminder   8,000,000 / 4,000 = 2,000 s
+```
+
+The last figure is the capacity check the design has to pass. Firing all 8M reminders at one instant would take 2,000 seconds at peak rate — far past any acceptable delay — so the service depends on reminders being spread across the 1,440 minute-ticks in a day and 40+ time zones rather than piling onto one. The due-check query is `next_fire_utc <= now` against an indexed UTC column, which is why the comparison must never involve a zone: a wall-clock predicate could not use that index, and on a fall-back night it would match the same row in two different hours.
 
 #### BROKEN → FIX at the heart of the outage
 

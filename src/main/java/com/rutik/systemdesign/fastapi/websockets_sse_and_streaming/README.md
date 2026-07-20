@@ -437,6 +437,48 @@ class BufferedWebSocket:
             await self._sender_task
 ```
 
+`MAX_QUEUE = 100` is a deliberately chosen number, and what it buys is measured in seconds:
+
+```
+  time_to_full = MAX_QUEUE / (produce_rate - drain_rate)
+  bytes_held   = MAX_QUEUE x message_size x connections
+```
+
+**Read it like this.** "The bound is a stopwatch, not a memory limit: it decides how long a
+client is allowed to fall behind before you are forced to make a decision about it."
+
+An unbounded queue never forces that decision, which is precisely the failure — it converts a
+slow client into an out-of-memory event for every other client on the pod.
+
+| Symbol | What it is |
+|--------|------------|
+| `MAX_QUEUE` | Bound on outbound messages held per connection. The `Queue(maxsize=...)` |
+| `produce_rate` | Messages/s the application generates for this connection |
+| `drain_rate` | Messages/s the client's socket actually absorbs — set by its bandwidth, not yours |
+| `time_to_full` | Grace period. How long the client may lag before `QueueFull` fires |
+| `QueueFull` | The signal. Drop, disconnect, or throttle upstream — silence is not an option |
+
+**Walk one example.** A client on a degraded mobile link during a burst:
+
+```
+  produce_rate = 50 msg/s   (a busy room)
+  drain_rate   = 10 msg/s   (client is 5x too slow)
+
+  time_to_full = 100 / (50 - 10)          =  2.5 s   <- grace period before QueueFull
+  catch-up if the burst ends now: 100 / 10 = 10.0 s  <- how stale the client already is
+
+  memory, at ~2 KB per queued message:
+    per connection  = 100 x 2 KB                     =  200 KB
+    worst case, 5,000 connections on one pod full    =  1.0 GB
+```
+
+Two things fall out. First, 2.5 seconds is short — `MAX_QUEUE=100` is tuned to detect a slow
+consumer quickly, not to buffer through one. Second, the bound is what makes the pod's worst case
+*finite*: 200 KB x 5,000 connections = 1 GB is survivable and provisionable, while the same
+scenario with an unbounded queue has no upper number at all. Size `MAX_QUEUE` from
+`time_to_full`, then multiply out `bytes_held` to confirm the pod can survive every connection
+hitting the bound simultaneously.
+
 ### 6.7 Heartbeat / Ping-Pong
 
 The browser silently drops WebSocket connections through idle firewalls after ~30–90 seconds.
@@ -569,6 +611,52 @@ inside the dashboard — unidirectional server push over HTTP, no custom WebSock
 | Implementation complexity | Low | Low | Medium |
 | CDN caching | Possible | No | No |
 | Auto-reconnect | Manual | Built-in | Manual |
+
+The first row's "poll interval / 2" is half a formula. The full cost of polling is two numbers
+that move in opposite directions:
+
+```
+  mean_latency = poll_interval / 2
+  request_rate = users / poll_interval
+```
+
+**What it means.** "Latency and load are the same dial turned in opposite directions — every
+halving of the delay a user sees doubles the number of requests your servers answer, and almost
+all of those answers are empty."
+
+Push notification cannot be tuned into existence from polling, because the limit of this trade as
+latency goes to zero is infinite request rate. That is the structural argument for SSE and
+WebSockets, independent of any benchmark.
+
+| Symbol | What it is |
+|--------|------------|
+| `poll_interval` | Seconds a client waits between requests |
+| `mean_latency` | Average staleness — an event landing uniformly in the window waits half of it |
+| `users / poll_interval` | Sustained request rate the fleet must serve, event or no event |
+| hit rate | Fraction of polls that actually return data. `events_per_s / request_rate` |
+
+**Walk one example.** Use the Section 14 deployment — 20,000 concurrent users, ~500 notification
+events/s across all of them — and assume ~800 bytes of request+response headers per poll:
+
+```
+  poll every 5 s:
+    mean_latency = 5 / 2                            =    2.5 s
+    request_rate = 20,000 / 5                       =  4,000 req/s
+    egress       = 4,000 x 800 B                    =   25.6 Mbps of pure overhead
+    hit rate     = 500 / 4,000                      =   12.5%   (87.5% empty responses)
+
+  want 1 s mean latency? poll every 2 s:
+    request_rate = 20,000 / 2                       = 10,000 req/s   (2.5x the load)
+    mean_latency = 2 / 2                            =    1.0 s       (2.5x better)
+
+  the WebSocket deployment, same 500 events/s at ~500 B each:
+    egress       = 500 x 500 B                      =    2.0 Mbps
+    latency      = single-digit ms
+```
+
+Polling burns 12.8x the bandwidth for 2,500x the latency, and 87.5% of that bandwidth carries
+nothing. The 20,000 idle connections that replace it cost coroutines and file descriptors —
+priced in the Section 14 capacity estimate — not request-per-second capacity.
 
 ### StreamingResponse vs Chunked Transfer
 
@@ -1210,6 +1298,64 @@ async def notification_ws_broken(
 - Each coroutine stack: ~50 KB → 20,000 × 2 × 50 KB = 2 GB RAM across 4 pods = 500 MB per pod
 - Redis pub/sub: 20,000 SUBSCRIBE commands at startup; steady-state messages = notification event rate (e.g., 500 events/s across all users) → 500 PUBLISH/s on Redis, well within Redis's 1M ops/s single-node capacity
 - Heartbeat: 20,000 connections × 1 ping/30 s = 667 sends/s — negligible
+
+Those four bullets are three formulas. Fan-out capacity is always the same product:
+
+```
+  memory  = connections x coroutines_per_conn x stack_size
+  egress  = fan_out x messages_per_s x bytes_per_message x 8      (bits/s)
+  fds     = connections x sockets_per_conn
+```
+
+**Stated plainly.** "Idle connections cost memory and file descriptors; only *messages* cost
+bandwidth — so the number that scares people (20,000 connections) and the number that actually
+saturates a NIC (how many of them each message must reach) are different numbers."
+
+Conflating them is the classic sizing error in both directions: teams panic about connection
+counts that cost almost nothing, and under-provision the fan-out that costs everything.
+
+| Symbol | What it is |
+|--------|------------|
+| `connections` | Concurrent WebSockets. Costs memory and descriptors, not bandwidth |
+| `coroutines_per_conn` | 2 here — the receive loop plus the per-user `_redis_subscriber` task |
+| `stack_size` | ~50 KB per coroutine. Compare a thread-per-connection model at ~1 MB each |
+| `fan_out` | How many sockets one logical event must be written to. The bandwidth multiplier |
+| `sockets_per_conn` | 2 here — the client WebSocket plus this connection's Redis pub/sub socket |
+
+**Walk one example.** Same 20,000 users across 4 pods, for both the per-user feed and a global
+broadcast:
+
+```
+  memory, per pod
+    5,000 conns x 2 coroutines x 50 KB              =   500 MB    (matches the bullet above)
+    the same 10,000 coroutines as OS threads at 1 MB =    10 GB    <- why async wins here
+
+  egress, per-user notifications (fan_out = 1, ~500 B payload)
+    500 events/s x 1 x 500 B x 8                    =   2.0 Mbps  across the whole fleet
+  egress, heartbeat (~30 B ping)
+    667 sends/s x 30 B x 8                          =  0.16 Mbps  -- negligible, as stated
+
+  egress, one global broadcast per second (fan_out = 20,000)
+    20,000 x 1/s x 500 B x 8                        =    80 Mbps  fleet
+                                                    =    20 Mbps  per pod
+
+  file descriptors, per pod
+    5,000 WebSockets + 5,000 Redis pub/sub sockets  = 10,000 fds
+```
+
+The last two lines are where this design breaks first. One message per second addressed to
+everyone costs 40x the entire per-user notification stream, because `fan_out` went from 1 to
+20,000 — Discussion Question 1's room-broadcast feature changes the bandwidth model, not just the
+routing. And 10,000 descriptors per pod is roughly 10x the default `ulimit -n` of 1024: the pod
+stops accepting connections around 512 users unless the limit is raised, long before the 500 MB
+of memory is anywhere near exhausted.
+
+**Why `sockets_per_conn` is 2 and not 1.** `_redis_subscriber` opens a pub/sub connection per
+user rather than sharing one subscription per pod. That doubles descriptor pressure and is the
+same design choice the BROKEN block punishes — a leaked subscriber task holds its Redis socket
+open forever, so 10,000 unclean disconnects exhaust the pool. A single per-pod subscriber
+multiplexing all users would make `sockets_per_conn` 1 and remove the leak's blast radius
+entirely.
 
 **Discussion Questions:**
 

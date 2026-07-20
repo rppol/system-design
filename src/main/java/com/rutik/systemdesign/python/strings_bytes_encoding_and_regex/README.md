@@ -269,6 +269,39 @@ print(sys.getsizeof("中" * 100))           # 250  — 2 bytes/char + header
 print(sys.getsizeof("\U0001F600" * 100))   # 448  — 4 bytes/char + header
 ```
 
+**Stated plainly.** "One character in the string decides the price of every other character in it."
+PEP 393 picks a single storage width for the whole string from its single widest code point, so the
+cost is `header + width x length` — and `width` is chosen once, globally, not per character.
+
+| Symbol | What it is |
+|---|---|
+| `len(s)` | Number of code points. Never a byte count, in any encoding |
+| `width` | 1, 2, or 4 bytes per code point — set by the *maximum* code point in the string |
+| `header` | Fixed `PyUnicodeObject` overhead, roughly 40-80 B depending on kind and CPython version |
+| `U+00FF` | The Latin-1 ceiling. One code point above it doubles every character to 2 bytes |
+| `U+FFFF` | The BMP ceiling. One code point above it widens every character to 4 bytes |
+
+**Walk one example.** Take a 1,000,000-character string and change only its widest character. The
+header is a rounding error at this length, so the data term is the whole story:
+
+```
+  content                            kind      width          data bytes
+  1,000,000 x 'a'                    Latin-1   1 B/char        1,000,000    ( 1.0 MB)
+  1,000,000 x '中'  (U+4E2D)          UCS-2     2 B/char        2,000,000    ( 2.0 MB)
+  1,000,000 x emoji (U+1F600)        UCS-4     4 B/char        4,000,000    ( 4.0 MB)
+
+  now the trap -- change ONE character out of a million:
+    999,999 x 'a'  +  1 emoji        UCS-4     4 B/char        4,000,000    ( 4.0 MB)
+                                                              ---------
+    cost of that single emoji:                        +3,000,000 bytes, a 4x blow-up
+```
+
+The last row is the one that bites in production. A million-row table of ASCII product names sits in
+1 MB; let a single row carry one emoji and — if those names are ever concatenated into one string —
+the storage quadruples, because `width` is a property of the string, not of the character. This is
+also why the fix is to keep such data in separate `str` objects rather than one joined buffer: each
+string then gets its own `width`, and the emoji taxes only itself.
+
 ### 6.2 `encode()` / `decode()` and Error Handlers
 
 ```python
@@ -290,6 +323,44 @@ print(messy.decode("utf-8", errors="backslashreplace"))  # "Caf\\xe9 is great"
 everything = bytes(range(256))
 everything.decode("latin-1")  # never raises; correct for latin-1, corrupts UTF-8 data
 ```
+
+**What it means.** "UTF-8 charges each character by its own code point, one character at a time —
+unlike PEP 393, which charges every character the price of the most expensive one." Same string, two
+completely different sizing rules, and mixing them up is where `len()` bugs come from.
+
+| Symbol | What it is |
+|---|---|
+| `U+0000`-`U+007F` | ASCII. 1 byte. This is why UTF-8 is a drop-in replacement for ASCII files |
+| `U+0080`-`U+07FF` | Latin accents, Greek, Cyrillic, Hebrew, Arabic. 2 bytes |
+| `U+0800`-`U+FFFF` | Rest of the BMP — CJK, Devanagari, most symbols. 3 bytes |
+| `U+10000`-`U+10FFFF` | Supplementary planes — emoji, rare CJK, historic scripts. 4 bytes |
+| `len(s.encode())` | Sum of the per-character costs above. Always `>= len(s)`, never smaller |
+
+**Walk one example.** Encode the strings this section already uses, character by character:
+
+```
+  "Café"      C U+0043 -> 1     "你好"    你 U+4F60 -> 3      emoji U+1F600 -> 4
+              a U+0061 -> 1              好 U+597D -> 3
+              f U+0066 -> 1                        -----
+              é U+00E9 -> 2              total       6      len("你好") = 2, bytes = 6
+                       -----
+              total      5      len("Café") = 4, bytes = 5
+```
+
+Now scale each to 1,000,000 characters and lay the wire cost beside the RAM cost from Section 6.1:
+
+```
+  content                     in RAM (PEP 393)      on the wire (UTF-8)     ratio
+  1,000,000 x 'a'              1,000,000 B           1,000,000 B            1.0x
+  1,000,000 x '中'             2,000,000 B           3,000,000 B            1.5x   wire is BIGGER
+  1,000,000 x emoji            4,000,000 B           4,000,000 B            1.0x
+```
+
+The CJK row is the non-obvious one and it trips people up in capacity planning: a BMP character
+costs 2 bytes in CPython's memory but 3 bytes in UTF-8, so a Chinese-language payload is **50%
+larger over the network than it is in RAM**. Size your request-body limits and column widths from
+the UTF-8 number, never from `len()` — a `VARCHAR(255)` measured in bytes holds only 85 CJK
+characters.
 
 ### 6.3 BOM and UTF-8-SIG
 
@@ -422,6 +493,48 @@ safe = re.compile(r"a+b")    # linear NFA — single pass
 # Another common ReDoS structure: r"(\w+\s+)+" on long word sequences
 # Fix: r"\w+(?:\s+\w+)*" — unambiguous, linear
 ```
+
+**Put simply.** "`(a+)+` gives the engine two different ways to split every single `a`, and it will
+try all of them before admitting there is no `b`." The count of ways to partition `n` identical
+characters into ordered non-empty groups is `2^(n-1)`, so each character you add doubles the work.
+
+| Symbol | What it is |
+|---|---|
+| `n` | Length of the run of `a` characters in the input |
+| `2^(n-1)` | Number of ways to split that run between the inner `a+` and the outer `+` |
+| ambiguity | The root cause: `a+` and `(...)+` can both consume the same character, so both try |
+| the missing `b` | Why it explodes. A match short-circuits; **only a failure forces every path** |
+| `a+b` | The safe rewrite — one quantifier, one way to split, `n` steps instead of `2^(n-1)` |
+
+**Walk one example.** Grow the input one character at a time. Assume a generous 10,000,000
+backtracking steps per second, which is roughly what CPython's `re` manages:
+
+```
+  input          paths explored          wall-clock at 10M steps/sec
+  "aaa"          n=3      ->        4              instant
+  "a" x 10       n=10     ->      512              0.00005 s
+  "a" x 20       n=20     ->  524,288              0.05 s     still looks fine in a unit test
+  "a" x 25       n=25     -> 16,777,216            1.7 s      one request now hurts
+  "a" x 30       n=30     -> 536,870,912           54 s       one request holds a worker
+  "a" x 35       n=35     -> 17,179,869,184        28 minutes
+  "a" x 40       n=40     -> 549,755,813,888       15 hours
+
+  the safe pattern a+b, same inputs:
+  n = 40         ->  40 steps  ->  0.000004 s
+```
+
+Two lessons live in that table. First, the dangerous zone is **absurdly small**: 20 characters is
+harmless and 40 characters is a permanently wedged worker, so no realistic input-length cap saves
+you — the file's 2,000-character limit in Section 14 is around `2^1999` paths, which is why the
+process timeout, not the length check, is the control that actually works. Second, the growth is
+why a fuzz test rarely finds these: the jump from "passes in 0.05 s" to "never returns" spans about
+twenty characters, and a test suite that stops at `n = 20` reports green.
+
+The `b` at the end is the load-bearing detail. `(a+)+b` on `"aaaab"` returns immediately, because
+the first partition the engine tries succeeds and it never explores the other 7. Remove the `b` and
+every one of the `2^(n-1)` paths must be walked to prove failure. **Catastrophic backtracking is a
+property of the non-matching input, not of the pattern alone** — which is precisely why a pattern
+that passed every test in development detonates on the first malformed request in production.
 
 ---
 
@@ -605,6 +718,55 @@ def build_report(records: list[dict]) -> str:
         parts.append(f"ID={rec['id']} NAME={rec['name']}\n")
     return "".join(parts)
 ```
+
+**In plain terms.** "Every `+=` rewrites the whole string built so far, so the 9,000th append copies
+9,000 fragments to add one." The output is the same either way; what differs is that `+=` re-copies
+its own history on every iteration while `join` copies each fragment exactly once.
+
+| Symbol | What it is |
+|---|---|
+| `n` | Number of fragments appended — 10,000 records here |
+| `L` | Average fragment length in bytes — 50 characters here |
+| `i x L` | Bytes copied on iteration `i`: the whole accumulated prefix, rebuilt from scratch |
+| `L x n(n+1)/2` | Total bytes copied by the `+=` loop. The `n^2` term is the entire problem |
+| `L x n` | Total bytes copied by `"".join(parts)` — one pass, one allocation, no re-copying |
+
+**Walk one example.** Add up what each approach actually moves through memory:
+
+```
+  the += loop, iteration by iteration (L = 50 B)
+    i =      1  copies      1 x 50 =         50 B
+    i =      2  copies      2 x 50 =        100 B
+    i =      3  copies      3 x 50 =        150 B
+    ...
+    i =  9,999  copies  9,999 x 50 =    499,950 B
+    i = 10,000  copies 10,000 x 50 =    500,000 B
+                                     ------------
+    total = 50 x (10,000 x 10,001 / 2) = 2,500,250,000 B    about 2.5 GB copied
+
+  the join, in one pass
+    measure all 10,000 fragments, allocate once, fill:
+    total = 50 x 10,000            =       500,000 B    exactly 500 KB copied
+
+  ratio: 2,500,250,000 / 500,000 = 5,000.5x more bytes moved, for identical output
+```
+
+Watch how the gap widens, because this is what makes it a *production* bug rather than a slow
+function — the penalty is not a constant factor, it grows with `n`:
+
+```
+  n            += total copied        join total       ratio
+       100            252,500 B          5,000 B        50.5x
+     1,000         25,025,000 B         50,000 B       500.5x
+    10,000      2,500,250,000 B        500,000 B     5,000.5x
+   100,000    250,002,500,000 B      5,000,000 B    50,000.5x
+```
+
+The ratio is always about `n/2`, which is the practical rule to remember: **doubling the input
+doubles the penalty multiplier**, so a loop that is merely sluggish in a 1,000-row test becomes a
+timeout at 100,000 rows in production. Note also that the ~2.5 GB is copy *work*, not peak
+resident memory — CPython frees each intermediate immediately, so this shows up as burned CPU and
+allocator churn rather than an OOM, which is exactly why it survives code review.
 
 Benchmark: for 10,000 records of 50 chars each, the join approach is approximately 40x faster,
 allocating a single 500 KB string instead of accumulating ~2.5 GB of intermediate allocation work.

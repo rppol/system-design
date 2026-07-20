@@ -32,6 +32,39 @@ Intent locks (IS, IX) are placed on parent objects (table, page)
 to prevent conflicting locks on children without scanning all child locks.
 ```
 
+**What this actually says.** "Any number of readers may share a row, but a writer needs it to itself — so the only 'Yes' in the whole matrix is the one where nobody intends to modify anything."
+
+The matrix looks like nine independent facts, but it collapses to a single rule: `S` conflicts only with `X`; `X` conflicts with everything. Everything else in the table is bookkeeping that lets the engine reach that answer without walking every child lock.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` (Shared) | Read lock. Held while a transaction reads a row it must not see change |
+| `X` (Exclusive) | Write lock. Held while a transaction modifies a row |
+| `U` (Update) | "I am reading this, and I intend to upgrade to `X`." Blocks other `U` holders so two readers cannot both decide to upgrade |
+| `IS` / `IX` | Intent locks on the *parent* (table, page): "somewhere below me an `S`/`X` exists" |
+| `SIX` | Shared on the whole object plus intent-exclusive below it — reading everything, writing a part |
+| "Yes" / "No" | Whether the row lock and the column lock can be held simultaneously by different transactions |
+
+**Walk one example.** Two transactions reaching for the same row, and then the same table:
+
+```
+  row level
+    T1 holds S, T2 wants S    ->  Yes    both read, neither blocks
+    T1 holds S, T2 wants X    ->  No     T2 waits for T1 to commit
+    T1 holds U, T2 wants S    ->  Yes    reading is still fine
+    T1 holds U, T2 wants U    ->  No     only one transaction may plan to upgrade
+
+  table level, without intent locks
+    T2 wants a table-wide X on a 50,000,000-row table
+    -> must scan every row's lock state to know if any S exists    = 50,000,000 checks
+
+  table level, with intent locks
+    T1 already placed IS on the table when it took its row S
+    T2 asks: is table-X compatible with IS?  -> No                 = 1 check
+```
+
+**Why `U` exists at all.** Without it, the classic upgrade deadlock is unavoidable: two transactions both take `S` on a row (compatible, both succeed), then both try to upgrade to `X`, and each waits for the other to release its `S` — a cycle with no victim-free exit. The `U` lock breaks the symmetry up front by being incompatible with itself, so the second transaction blocks *before* it has acquired anything, where blocking is harmless.
+
 ### MVCC Overview (PostgreSQL)
 
 ```
@@ -47,6 +80,45 @@ Row versions:
 |  104   |  0   | Carol | ...  |  ← NOT visible (xmin=104 >= max_xid=105... actually visible, 104 < 105 and committed)
 +--------+------+-------+------+
 ```
+
+**Read it like this.** "Show me a row version only if the transaction that created it had already finished when I started, and the transaction that deleted it had not."
+
+MVCC never asks "what is the current value?" It asks "what was true at my snapshot instant?" Reads therefore need no locks at all — the answer is a property of the snapshot, and no concurrent writer can change history.
+
+| Symbol | What it is |
+|--------|------------|
+| `xmin` | Transaction ID that **created** this row version |
+| `xmax` | Transaction ID that **deleted** or superseded it. `0` means still live |
+| `min_xid` (100) | Every transaction below this had already committed when the snapshot was taken |
+| `max_xid` (105) | The snapshot's ceiling. Anything at or above it started after me and is invisible by definition |
+| `active=[102,103]` | Transactions that were still in flight at snapshot time — invisible even though their IDs are below the ceiling |
+| `ctid` | Physical location of this version. How the version chain is linked, not part of visibility |
+
+**Walk one example.** The snapshot `100:105:102,103` against the three row versions above:
+
+```
+  snapshot: min_xid = 100, max_xid = 105, active = [102, 103]
+
+  Carol row, xmin = 104, xmax = 0
+    is 104 >= max_xid 105?        no      -> not a future transaction
+    is 104 in active [102,103]?   no      -> was not in flight at snapshot time
+    is 104 committed?             yes     -> creator finished before me
+    is xmax = 0?                  yes     -> nobody has deleted it
+    VISIBLE
+
+  Bob row, xmin = 102, xmax = 0
+    is 102 in active [102,103]?   YES     -> in flight when I took my snapshot
+    NOT VISIBLE                            (fails at the first gate, no further checks)
+
+  Alice row, xmin = 99, xmax = 0
+    is 99 < min_xid 100?          yes     -> committed long ago, no lookup needed
+    is xmax = 0?                  yes
+    VISIBLE
+```
+
+Note the shortcut on Alice: anything below `min_xid` skips the commit-status lookup entirely, because the snapshot's lower bound is a promise that all such transactions are already committed. This is why `min_xid` is carried around at all — it turns the common case into an integer comparison instead of a `pg_xact` probe.
+
+**What breaks without `xmax`.** A row would only ever be created, never retired, so a `DELETE` would have to physically remove the tuple — and any older snapshot still entitled to see it would find a hole. Storing the deleter's transaction ID instead lets one physical row serve readers on both sides of the delete simultaneously. The cost is that dead versions accumulate until `VACUUM` reclaims them, which is the direct price MVCC pays for lock-free reads.
 
 ---
 
@@ -71,6 +143,38 @@ COMMIT;
 ```
 
 Best for: low-conflict workloads (most reads succeed without conflicting writes). Higher throughput, no blocking. More complex retry logic in application.
+
+The "low-conflict" qualifier is quantifiable. If `p` is the probability a given attempt loses the version check, the expected number of attempts is:
+
+```
+  E[attempts] = 1 / (1 - p)
+```
+
+**The idea behind it.** "Optimistic control is free when conflicts are rare and ruinous when they are not — and the crossover is much sharper than the word 'optimistic' suggests."
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Probability that another transaction bumped `version` between your `SELECT` and your `UPDATE` |
+| `1 - p` | Probability an attempt succeeds — the `rows_affected = 1` case |
+| `E[attempts]` | Average number of full read-modify-write cycles per logical operation |
+| `version` | The optimistic token. Any monotonic value works; a timestamp or a row hash serves the same role |
+| `rows_affected = 0` | The conflict signal. Not an error — the `WHERE version = 7` predicate simply matched nothing |
+
+**Walk one example.** The same code path at five different contention levels:
+
+```
+    p        E[attempts]      wasted work
+  0.01         1.0101            1.0%       rare conflict, optimistic is nearly free
+  0.05         1.0526            5.3%
+  0.10         1.1111           11.1%       still comfortably better than blocking
+  0.30         1.4286           42.9%       nearly half the database work is discarded
+  0.50         2.0000          100.0%       every operation runs twice on average
+  0.90        10.0000          900.0%       collapse: 10 round trips per success
+```
+
+At `p = 0.9` the pattern is not merely slow — it is actively harmful, because each doomed attempt still consumed a connection, a snapshot, and a round trip. That is the regime where `SELECT FOR UPDATE` wins: one transaction waits quietly instead of ten burning capacity.
+
+**Where `p` comes from.** It is roughly the chance two concurrent transactions pick the same row, so it rises with write concurrency and falls with key cardinality. Decrementing stock on a catalog of 100,000 products has a tiny `p`; decrementing stock on the one product in a flash sale has `p` near 1. Same code, same schema — opposite correct answers, which is why the optimistic-vs-pessimistic choice belongs to the access pattern rather than to the table.
 
 ### Pessimistic Concurrency Control
 
@@ -176,6 +280,40 @@ Locks acquired:
 Purpose: prevent phantom reads at REPEATABLE READ
 Any INSERT of id=25 or id=35 is blocked until this transaction commits.
 ```
+
+**Stated plainly.** "To stop a row that does not exist yet from appearing, InnoDB has to lock the empty space where it would go — so a range query locks intervals, not just rows."
+
+A record lock protects a value; a gap lock protects an absence. Phantom prevention is impossible with record locks alone, because there is no record to lock. This single fact explains every surprising gap-lock outage.
+
+| Symbol | What it is |
+|--------|------------|
+| `(a, b)` | Gap lock — the open interval strictly between two existing keys. Blocks inserts, locks no actual row |
+| `[b]` | Record lock — one existing row, blocking modification of it |
+| `(a, b]` | Next-key lock — gap plus the record at its upper bound. InnoDB's default unit under REPEATABLE READ |
+| existing keys | The index entries that define where the gaps are. Gaps are a property of the **index**, not the query |
+| phantom | A row that did not exist at first read but appears on re-read, because someone inserted into the range |
+
+**Walk one example.** Rows `[10, 20, 30, 50]`, query `WHERE id BETWEEN 15 AND 45 FOR UPDATE`:
+
+```
+  index keys:      10        20        30        50
+  gaps:         ...  (10,20)   (20,30)   (30,50)  ...
+
+  query range 15..45 touches:
+
+    (10, 20)    gap lock        blocks inserts of 11..19    covers where 15 would land
+    [20]        record lock     row 20 is in range
+    (20, 30]    next-key lock   blocks inserts 21..29, plus row 30
+    (30, 50]    next-key lock   blocks inserts 31..49, plus row 50
+
+  effective blocked insert range:  11 .. 49       = 39 values
+  values the query actually asked for: 15 .. 45   = 31 values
+  over-locking:  39 - 31 = 8 extra values, and row 50 which is outside the range entirely
+```
+
+The lock reaches to `50` even though the query stopped at `45`, because `(30, 50]` is the smallest next-key unit containing `45` — InnoDB cannot lock "up to 45" without knowing 45 is a boundary, and it is not one. Gap width is set by the data, not the predicate.
+
+**Why this is an availability risk, not just a correctness detail.** Sparse indexes make gaps enormous. If the orders table has one row per day and a reporting query takes `FOR UPDATE` over a month, the gaps between those daily keys cover every possible insert for the month — which is precisely the 80% insert-rate collapse described in Pitfall 3. Dropping to `READ COMMITTED` removes gap locks entirely (accepting phantoms) and is the standard fix for read-only reporting connections.
 
 **MVCC snapshot isolation vs. SSI (write skew).** Two transactions each read `X=0, Y=0`, each write only the variable the other didn't touch, and both commit cleanly under plain snapshot isolation — yet the combined result violates an invariant neither transaction could see alone.
 
@@ -285,6 +423,35 @@ UPDATE accounts SET balance = balance - 100 WHERE id = MIN(1, 2);  -- id=1 first
 UPDATE accounts SET balance = balance + 100 WHERE id = MAX(1, 2);  -- id=2 second
 COMMIT;
 ```
+
+**What it means.** "A deadlock needs two transactions to disagree about the order of the same locks — so if every transaction sorts its locks the same way, disagreement becomes impossible and the deadlock rate drops to exactly zero."
+
+This is a stronger guarantee than tuning `deadlock_timeout` or adding retries. Those manage deadlocks; consistent ordering eliminates the precondition that creates them.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Number of rows a transaction locks in one unit of work |
+| `k!` | Number of distinct orders it could take them in, if the order is left to chance |
+| `1 / k!` | Probability two independent transactions happen to choose the same order |
+| `1 - 1/k!` | Probability they disagree — the window in which a cycle can form |
+| global order | Any total ordering all code agrees on. Primary key ascending is the usual choice |
+
+**Walk one example.** Two transactions touching the same `k` rows, with and without an enforced order:
+
+```
+   k     possible orders    P(agree) = 1/k!    P(disagree) = deadlock window
+   2            2              0.50000              0.50000
+   3            6              0.16667              0.83333
+   4           24              0.04167              0.95833
+   5          120              0.00833              0.99167
+
+  With a global lock order enforced:
+    possible orders = 1    ->    P(agree) = 1.0    ->    deadlock window = 0
+```
+
+The window does not merely grow with `k` — it approaches certainty. At `k = 5`, better than 99 in 100 concurrent pairs are ordered such that a cycle can form; the only reason production does not deadlock constantly is that the two transactions must also interleave within the same narrow time window. Add load and that saving grace disappears, which is why deadlocks characteristically appear at peak traffic and vanish in staging.
+
+**Why the ORM case (Pitfall 5) is the common one.** Hibernate flushes a batch of dirty entities in whatever order its internal collection yields, so `k` is the batch size and the order is effectively random per transaction — the `1 - 1/k!` column above, applied to every flush. Sorting entities by primary key before the flush collapses `k!` to `1` at zero runtime cost, which is why it is the standard fix rather than raising the retry count.
 
 ### Write Skew Example and Fix
 

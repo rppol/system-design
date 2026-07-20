@@ -160,6 +160,42 @@ xychart-beta
 
 The broken loop issues 1 query for the users plus 100 individual per-user `SELECT`s (101 total); `selectinload` replaces the 100 individual queries with a single batched `SELECT ... WHERE user_id IN (...)` (2 total).
 
+**Put simply.** "The cost of N+1 is not the database's work, it is the network round-trips —
+you pay one full latency hop per row returned by the first query." That reframing is the
+whole reason N+1 is a latency bug rather than a throughput bug, and why it is invisible on a
+local database and catastrophic across an availability zone.
+
+| Symbol | What it is |
+|--------|------------|
+| `1` | The parent query — one round-trip, returns N rows |
+| `N` | Child queries, one per parent row, each a separate round-trip |
+| `RTT` | Round-trip time per query: network hop plus parse plus execute |
+| `1 + N` | Total round-trips in the broken version — grows linearly with the result set |
+| `2` | Round-trips with `selectinload`: parent query plus one batched `IN (...)` query |
+
+**Walk one example.** 100 users, at the ~2 ms per round-trip implied by the case study's
+"101 queries, ~200 ms" figure:
+
+```
+  total latency = round-trips x RTT
+
+  Broken   (1 + N) x RTT = (1 + 100) x 2 ms = 101 x 2 ms = 202 ms
+  Fixed          2 x RTT =        2 x 2 ms  =              4 ms
+
+  Case-study measured  : 200 ms  ->  8 ms   (the fixed query returns more rows,
+                                             so its two hops cost ~4 ms each)
+  Saving               : 192 ms per request, a 25x reduction
+
+  Scale the row count and only the broken side moves:
+      N =   10  ->   11 hops =  22 ms   |  fixed still 2 hops
+      N =  100  ->  101 hops = 202 ms   |  fixed still 2 hops
+      N = 1000  -> 1001 hops = 2,002 ms |  fixed still 2 hops
+```
+
+Note the shape of each column: the fixed version is flat in N, the broken version is linear
+in N. That is why an endpoint tested with 10 seed rows passes review and then times out in
+production — nothing about the code changed, only the row count did.
+
 ### 5.3 Connection pool sizing
 
 ```mermaid
@@ -197,6 +233,46 @@ flowchart TD
 ```
 
 Four Uvicorn workers × (`pool_size=5` + `max_overflow=10`) = 60 connections total, leaving headroom under PostgreSQL's default `max_connections=200` for admin sessions, migrations, and monitoring.
+
+**What the formula is telling you.** "Every worker gets its own private pool, so the number
+the database actually sees is the per-worker pool multiplied by the worker count — never the
+per-worker number you configured." Pool settings look local; their blast radius is global.
+
+| Symbol | What it is |
+|--------|------------|
+| `pool_size` | Persistent connections one worker keeps open — SQLAlchemy default 5 |
+| `max_overflow` | Extra connections one worker may open under burst, closed when idle — default 10 |
+| `num_workers` | Uvicorn/Gunicorn processes; each forks its own engine, hence its own pool |
+| `max_connections` | Server-side hard ceiling; exceeding it is a refused connection, not a queue |
+
+**Walk one example.** Hold `pool_size=5, max_overflow=10` fixed and vary only the worker
+count — the multiplication is where the classic outage lives:
+
+```
+  server-side demand = (pool_size + max_overflow) x num_workers
+                     = (5 + 10) x num_workers
+                     = 15 x num_workers
+
+    4 workers  ->  15 x  4 =  60 connections   fits under 200, fits under 100
+    9 workers  ->  15 x  9 = 135 connections   fits under 200, BREAKS under 100
+   14 workers  ->  15 x 14 = 210 connections   BREAKS even under 200
+   16 workers  ->  15 x 16 = 240 connections   40 over a 200-connection server
+
+  Nothing in the app config changed between these rows. Only the worker count.
+```
+
+Now watch the two formulas collide. The standard Gunicorn heuristic
+sizes workers as `(2 x cores) + 1`, so a 4-core VM asks for 9 workers. Against a
+stock PostgreSQL — whose real default `max_connections` is **100**, not the 200 assumed by
+the diagram above — that is `15 x 9 = 135` connections against a 100-connection server: 35
+over, and the 7th worker is where it first breaks (`floor(100 / 15) + 1 = 7`). The failure
+is not a slow query; it is `FATAL: sorry, too many clients already` at boot, and it appears
+the moment you move from a 2-core dev box to a 4-core production one.
+
+The fix is to size the pool *from* the worker count, not independently of it: with 90 usable
+connections (100 minus superuser and monitoring reservations) and 9 workers, the budget is
+`90 / 9 = 10` per worker, so `pool_size=5, max_overflow=5` is the largest safe setting. Above
+that, put PgBouncer in transaction mode between the app and the server and let it multiplex.
 
 ---
 
@@ -238,6 +314,41 @@ AsyncSessionLocal = async_sessionmaker(
 class Base(DeclarativeBase):
     pass
 ```
+
+**What it means.** "One worker may hold `pool_size` connections permanently and borrow up to
+`max_overflow` more during a burst; request number `pool_size + max_overflow + 1` does not
+fail — it queues, and only raises after waiting `pool_timeout` seconds." The queue is the
+part that gets missed, because it converts a capacity problem into a latency problem first.
+
+| Symbol | What it is |
+|--------|------------|
+| `pool_size=5` | Connections kept open permanently by this worker, reused across requests |
+| `max_overflow=10` | Burst connections opened on demand above `pool_size`, then discarded |
+| checkout ceiling | `pool_size + max_overflow` = 15 concurrent DB operations per worker |
+| `pool_timeout=30` | Seconds a coroutine waits for a free connection before `TimeoutError` |
+| `pool_recycle=1800` | Max connection age; older ones are closed and reopened at checkout |
+
+**Walk one example.** A worker with 15 checkout slots and an 8 ms average query, taking a
+rising number of simultaneous in-flight requests:
+
+```
+  drain rate = 15 slots / 0.008 s = 1,875 queries/s per worker
+
+   in-flight   slots busy   waiting   acquisition wait
+      10          10           0        0 ms      pool never saturates
+      15          15           0        0 ms      exactly at the ceiling
+      20          15           5        8 ms      one query's worth of queueing
+      60          15          45       24 ms      (60/15 - 1) x 8 ms = three rounds
+
+  To actually hit pool_timeout=30 s the backlog must exceed
+  1,875 q/s x 30 s = 56,250 queued queries on ONE worker.
+```
+
+That last line is the practical lesson: a `TimeoutError` from the pool is almost never
+"slightly too much traffic". Reaching a 30-second wait requires queries far slower than 8 ms
+(a missing index, a lock wait) or connections leaked by a handler that never returned them.
+Raising `pool_size` in response usually makes it worse, because it multiplies across workers
+into the server-side limit computed in §5.3.
 
 ### 6.2 Models
 

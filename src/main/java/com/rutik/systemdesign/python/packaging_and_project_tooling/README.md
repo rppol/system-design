@@ -456,6 +456,42 @@ python-semantic-release reads conventional commits to auto-bump:
   BREAKING CHANGE: in footer → MAJOR bump
 ```
 
+#### Decoding the constraint operators
+
+**Stated plainly.** "Pick the digit you are willing to let move, and the operator writes the upper bound for you."
+
+Caret and tilde are not two arbitrary symbols — each is shorthand for a range whose upper bound is computed by one rule. Reading them as ranges rather than memorizing them is what makes the pre-1.0 case stop being surprising.
+
+| Symbol | What it is |
+|--------|------------|
+| `MAJOR` | Incremented on a breaking change — crossing it is what the upper bound exists to prevent |
+| `MINOR` | Incremented on a backward-compatible feature; safe to absorb if the project honors semver |
+| `PATCH` | Incremented on a bug fix; the only digit tilde will let move |
+| `^` (caret) | Upper bound = bump the **left-most non-zero** digit, zero the rest |
+| `~` (tilde) | Upper bound = bump the MINOR digit, zero the PATCH |
+| `>=X` alone | No upper bound at all — the application style, because the lock file supplies the pin |
+
+**Walk one example.** Apply each rule to the exact versions used in this module's `pyproject.toml`:
+
+```
+  caret, post-1.0        ^1.2.0
+    left-most non-zero digit is MAJOR (1)  ->  bump it
+    range = >=1.2.0, <2.0.0        MINOR and PATCH may both move
+
+  caret, pre-1.0         ^0.111.0
+    left-most non-zero digit is MINOR (111), MAJOR is 0  ->  bump MINOR
+    range = >=0.111.0, <0.112.0    only PATCH may move
+
+  tilde                  ~1.2.0
+    always bump MINOR
+    range = >=1.2.0, <1.3.0        only PATCH may move
+
+  note: ^0.111.0 and ~0.111.0 produce the SAME range.
+        Below 1.0 the caret silently becomes a tilde.
+```
+
+That last line is the whole gotcha. `fastapi` sat below `1.0.0` for years, so a team writing `^0.111.0` believing they had signed up for "all compatible 0.x releases" had in fact pinned themselves to `0.111.*` and stopped receiving every feature release. Semver treats a `0.` MAJOR as "nothing here is stable yet", so the caret refuses to cross a MINOR bump — which is why this module recommends plain `>=0.111.0` for applications and lets the lock file, not the operator, do the pinning.
+
 ### Publishing to PyPI
 
 ```bash
@@ -490,6 +526,41 @@ xychart-beta
 ```
 
 *Three unrelated operations — linting CPython (30+s to under 1s), resolving Django's full dependency graph (10-30s to under 100ms), and a warm-cache single-package install (about 200ms to about 10ms) — all land in the same 20-100x band, showing the Rust rewrite is not a one-off win on a single code path.*
+
+**Decoding the speedup numbers.**
+
+**Put simply.** "Speedup is just the old wall-clock divided by the new one — and the reason all three bars land in the same band is that the same fixed overhead was removed from three different code paths."
+
+A speedup figure is meaningless without naming the baseline, which is why every bar above is a ratio against a specific named tool rather than an absolute time.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_old` | Wall-clock of the legacy tool (`flake8`, `pip`) on the same input |
+| `t_new` | Wall-clock of the Rust tool (`ruff`, `uv`) on that same input |
+| `t_old / t_new` | The speedup multiple — the y-axis of the chart above |
+| Warm cache | The `~/.cache/uv/` hit path, where install is a hard-link, not a download |
+
+**Walk one example.** Reproduce each bar from the times quoted in the paragraph above:
+
+```
+  lint CPython (500k+ lines)
+    t_old = 30 s   (flake8)      t_new = under 1 s   (ruff)
+    speedup = 30 / 1 = 30x                             -> chart bar: 30
+
+  resolve Django's full dependency graph
+    t_old = 10 to 30 s (pip)     t_new = under 0.1 s (uv)
+    speedup = 10 / 0.1  = 100x   (fast end of the pip range)
+            = 30 / 0.1  = 300x   (slow end of the pip range)
+                                                       -> chart bar: 100
+
+  warm-cache single-package install
+    t_old = 200 ms (pip)         t_new = 10 ms (uv)
+    speedup = 200 / 10 = 20x                           -> chart bar: 20
+```
+
+The chart plots the **conservative end** of each range: the resolve bar shows `100x`, not the `300x` that the slow end of pip's quoted `10-30 s` would justify. That is the right way to publish a benchmark — quote the number your worst case still beats, so the claim survives someone else's machine.
+
+**What the ratio does not tell you.** A `100x` resolve speedup does not make a cold install `100x` faster, because the network download is unchanged — `uv` cannot make PyPI's bytes arrive sooner. The wins compound only on the paths where the removed work dominated: parsing, solving, and copying. This is why the CI numbers in Section 14 quote a *warm cache* build; on a cold cache the download term reasserts itself and the gap narrows sharply.
 
 **FastAPI itself**: Uses `pyproject.toml` with `hatchling` as the build backend. Has separate optional dependency groups: `[all]`, `[dev]`, `[doc]`, `[test]`. Maintains type stubs and ships `py.typed` so IDE integrations provide full type inference for FastAPI applications.
 
@@ -947,3 +1018,35 @@ CMD ["python", "-m", "uvicorn", "payment_service.main:app", \
 - CI catches type errors, import issues, and style violations before merge.
 - Lock file ensures the staging deployment is byte-for-byte identical to the production deployment.
 - `pre-commit` hooks prevent unformatted or untyped code from entering the repository.
+
+---
+
+#### Decoding the Docker cache arithmetic
+
+**The idea behind it.** "Copy the dependency files in their own layer first, so that editing a source file invalidates only the cheap layer and never the expensive one."
+
+The `Dockerfile` above orders its `COPY` lines deliberately, and that ordering is the entire source of the 8-second rebuild. Docker invalidates every layer from the first changed one downward, so whatever you copy earliest must be whatever changes least.
+
+| Symbol | What it is |
+|--------|------------|
+| `COPY pyproject.toml requirements.lock ./` | The rarely-changing inputs — copied first, so their layer survives source edits |
+| `RUN uv pip install ...` | The expensive layer. Cached as long as the two files above are byte-identical |
+| `COPY src/ ./src/` | The frequently-changing input — copied last, after the expensive layer is already cached |
+| Warm cache | A rebuild where only `src/` changed, so the install layer is reused rather than re-run |
+| Cold cache | A rebuild where `requirements.lock` changed, forcing a full re-resolve and re-install |
+
+**Walk one example.** Compare the two rebuild paths using the times quoted above:
+
+```
+  cold rebuild, pip          t = 90 s   (resolve + download + install + copy source)
+  warm rebuild, uv           t =  8 s   (install layer cached; only source re-copied)
+
+  speedup   = 90 / 8  = 11.25x
+  saved     = 90 - 8  = 82 s per rebuild
+
+  a team pushing 40 builds per weekday
+    per day   = 40 x 82 s = 3,280 s = 0.91 h
+    per week  = 5 x 0.91  = 4.6 h of CI wall-clock removed
+```
+
+**What breaks if you reorder the COPY lines.** Put `COPY src/ ./src/` *above* the install step and every rebuild becomes a cold one — editing a single line in `payments.py` changes the `src/` layer, which invalidates the install layer beneath it, and the 8-second path reverts to 90 seconds. The saving is not a property of `uv`; it is a property of the layer ordering, and `uv` only makes the cold path cheaper when it does have to run. This is why the "copy dependency manifests before source" rule appears in essentially every production Python `Dockerfile`.

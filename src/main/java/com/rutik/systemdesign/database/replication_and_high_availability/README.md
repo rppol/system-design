@@ -227,6 +227,52 @@ Monitoring replication lag:
   FROM pg_stat_replication;
 ```
 
+### Replication Lag Arithmetic
+
+`replication_lag_bytes` is a level, not a rate, and levels obey a conservation law. WAL arrives at the primary's generation rate and leaves at the replica's apply rate:
+
+```
+lag_growth_rate  = W - A                      (bytes/sec; negative means catching up)
+lag_bytes(t)     = lag_0 + (W - A) x t
+lag_seconds      = lag_bytes / W              (how far back in time the replica sits)
+catch_up_time    = lag_bytes / (A - W_new)    (only defined once A > W_new)
+```
+
+**What the formula is telling you.** "Lag is a queue: it grows at exactly the difference between how fast WAL is produced and how fast it is consumed, and it never drains until production drops below consumption." The consequence engineers miss is that a replica 1% too slow does not stay 1% behind — it falls behind forever, linearly, until something changes.
+
+| Symbol | What it is |
+|--------|------------|
+| `W` | Primary WAL generation rate, bytes/sec (`pg_current_wal_lsn()` advance rate) |
+| `A` | Replica apply rate, bytes/sec — single-threaded WAL replay in PostgreSQL, so often below `W` |
+| `W - A` | The leak. Positive means the gap widens every second; zero means lag freezes wherever it is |
+| `lag_0` | Lag already accumulated when the imbalance began |
+| `lag_seconds` | Bytes converted to time by dividing by `W` — this is what `replay_lag` reports |
+| `A - W_new` | Drain rate after the write burst subsides; the denominator of every catch-up estimate |
+
+**Walk one example.** Section 10's incident rates — primary generating 50 GB/hour, replica applying 40 GB/hour:
+
+```
+  W = 50 GB/hr      A = 40 GB/hr      lag_0 = 0
+
+  lag_growth = 50 - 40 = 10 GB/hr
+
+  t = 1 hr   ->  lag =  10 GB    <- the 10GB slot alert fires here
+  t = 3 hr   ->  lag =  30 GB
+  t = 12 hr  ->  lag = 120 GB
+
+  in time units at t = 12 hr:
+    lag_seconds = 120 GB / (50 GB/hr) = 2.4 hr = 8,640 s
+    the replica is serving reads from 2.4 hours ago
+
+  catch-up after the burst, writes fall to W_new = 20 GB/hr:
+    drain rate    = A - W_new = 40 - 20 = 20 GB/hr
+    catch_up_time = 120 GB / 20 GB/hr = 6.0 hr
+```
+
+Twelve hours of a 20% shortfall takes six hours of half-rate traffic to undo. That asymmetry is why the answer to "the replica is lagging" is almost never "wait" — it is reduce `W` (batch writes, throttle the bulk job) or raise `A` (faster replica disk, fewer conflicting queries), and if neither is available, rebuild the replica from a fresh `pg_basebackup`, which resets `lag_0` to zero in one step instead of draining it.
+
+**Why `A` is the harder number to move.** PostgreSQL replays WAL in a single startup process — one core, sequential, no parallelism. The primary generated that WAL using dozens of concurrent backends. So `A < W` is the natural state under a write burst, not a misconfiguration, and it is the reason a replica on identical hardware still falls behind.
+
 ### Replication Slots
 
 A replication slot prevents the primary from discarding WAL that a replica has not yet consumed. Without a slot, if a replica falls behind, the primary may delete WAL before the replica reads it, breaking replication.
@@ -280,6 +326,45 @@ xychart-beta
 
 That roughly 2000x range between the cheapest and most expensive synchronous option is why most teams keep synchronous standbys in the same datacenter and fall back to asynchronous replication for cross-region replicas.
 
+That 2000x is not a tuning failure — it is physics with a fixed floor. A synchronous commit cannot return until a round trip completes:
+
+```
+commit_latency = local_fsync + RTT + remote_fsync
+RTT_floor      = 2 x distance / (c x 0.67)         (0.67 = light speed in fiber)
+max_commits_per_connection = 1000 / commit_latency_ms
+```
+
+**In plain terms.** "Every synchronous commit buys its zero-data-loss guarantee with one network round trip, and no amount of hardware makes light travel faster than fiber allows." The last line is the one that surprises people: synchronous replication does not slow the *server* down, it slows each *connection* down, so the fix is concurrency, not a bigger box.
+
+| Symbol | What it is |
+|--------|------------|
+| `local_fsync` | Primary flushing its own WAL to durable storage, ~0.1ms on NVMe |
+| `RTT` | Round trip to the standby and back — request out, acknowledgment in |
+| `remote_fsync` | Standby's own flush before it may acknowledge; overlaps the return trip |
+| `c x 0.67` | ~200,000 km/s — light in glass, about two thirds of its vacuum speed |
+| `distance` | One-way cable distance, always longer than the map distance (fiber does not run straight) |
+| `max_commits_per_connection` | Hard ceiling on one session's commit rate; total throughput needs many sessions |
+
+**Walk one example.** The same RPO=0 guarantee at three distances:
+
+```
+  configuration          distance    RTT floor              commit latency   commits/sec/conn
+  --------------------   ---------   --------------------   --------------   ----------------
+  no standby                    -    -                      0.1 ms                    10,000
+  standby, same LAN         <1 km    ~0.05 ms (switching     2   ms                       500
+                                      dominates)
+  standby, cross-region  5,500 km    2 x 5500 / 200000      200  ms                         5
+                                      = 55 ms one round
+                                      trip; real links add
+                                      routing + queuing
+
+  ratio, no standby to cross-region : 200 / 0.1 = 2000x
+```
+
+The 55ms floor is what a perfectly engineered New York to Dublin link would cost; the 200ms in the chart is that floor plus real routing, queuing, and the standby's own fsync. You cannot negotiate the 55ms down — which is why the honest cross-region choices are asynchronous replication (accept RPO > 0) or a consensus system that commits within one region and replicates the log, not synchronous PostgreSQL across an ocean.
+
+**What the per-connection ceiling means in practice.** At 200ms per commit, one connection does 5 commits/sec. To sustain 5,000 commits/sec you need 1,000 concurrent connections all blocked in `fsync` at the same time — which is a connection-pool sizing problem, not a database problem, and it is exactly the wall teams hit when they "just turn on" cross-region synchronous replication.
+
 ### Patroni HA and Split-Brain Prevention
 
 Patroni uses a Distributed Configuration Store (DCS — etcd, Consul, or ZooKeeper) as the arbiter. The DCS is itself a 3-node quorum, tolerating 1 node failure. Patroni's leader holds a DCS lease (TTL = 30s). If the leader fails to renew, the lease expires and a new leader is elected.
@@ -332,6 +417,55 @@ Patroni HA              | Seconds  | 15-30s      | None              | Medium
 Cloud HA (RDS Multi-AZ) | 0        | 60-120s     | None (+3ms AZ)    | Low (managed)
 ```
 
+The RTO column converts directly into the availability number the business actually signs up for:
+
+```
+availability     = MTBF / (MTBF + MTTR)         MTTR is the RTO you achieve
+downtime_per_yr  = (1 - availability) x 525,600 minutes
+combined_uptime  = 1 - (1 - p)^n                n independent replicas, each up p
+```
+
+**Read it like this.** "Availability is the fraction of time the thing works, and it is set far more by how fast you recover than by how rarely you break." Halving MTTR improves availability exactly as much as doubling MTBF — and MTTR is the one you control with automation, while MTBF is largely bought from a hardware vendor.
+
+| Symbol | What it is |
+|--------|------------|
+| MTBF | Mean Time Between Failures — how long the system runs before the next incident |
+| MTTR | Mean Time To Recovery — detection plus failover plus reconnection. Equals the RTO you hit |
+| `525,600` | Minutes in a 365-day year; converts an availability fraction into a downtime budget |
+| `p` | Probability a single node is up at a random instant |
+| `(1-p)^n` | Probability all `n` replicas are down *at once*, assuming failures are independent |
+| `n` | Replica count. Each one multiplies the outage probability by `(1-p)` again |
+
+**Walk one example.** Same hardware, four failures a year, three different recovery paths:
+
+```
+  path                     MTTR (RTO)   downtime/yr        availability   "nines"
+  ----------------------   ----------   ----------------   ------------   -------
+  manual failover          40 min       4 x 40  = 160 min    99.96956%    3 nines
+  RDS Multi-AZ             2 min        4 x 2   =   8 min    99.99848%    4 nines
+  Patroni automated        18 s         4 x 0.3 =   1.2 min  99.99977%    4+ nines
+
+  the yearly budget each tier allows:
+    99.9%    ->  525.60 min/yr   (8.8 hours)
+    99.99%   ->   52.56 min/yr
+    99.999%  ->    5.26 min/yr
+
+  manual failover blows the 99.99% budget on its third incident of the year:
+    3 x 40 = 120 min  >  52.56 min
+```
+
+Nothing about the hardware changed across those three rows. Automating the failover — the Section 14 fix — bought two orders of magnitude of downtime reduction, `160 / 1.2 = 133x`, purely by shrinking MTTR.
+
+**Where `1 - (1-p)^n` helps and where it lies.** With each node up 99.9% of the time:
+
+```
+  n = 1  ->  1 - 0.001^1 = 99.9%          8.76 hours down per year
+  n = 2  ->  1 - 0.001^2 = 99.9999%       31.5 seconds per year
+  n = 3  ->  1 - 0.001^3 = 99.9999999%    31.5 milliseconds per year
+```
+
+Those last two numbers are fantasy, and knowing why is the interview answer. The formula assumes **independent** failures, and replicas share a rack, a power feed, an availability zone, a network fabric, a deployment pipeline, and one bad `ALTER TABLE`. Correlated failure sets a floor the exponent cannot cross — which is why real HA designs spend their effort on *decorrelation* (spread across AZs, stagger upgrades, separate the DCS quorum from the database nodes) rather than on adding a fourth replica.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -375,6 +509,46 @@ flowchart TD
 ## 10. Common Pitfalls
 
 **Replication slot causing disk fill**: A replica is offline for maintenance. Its replication slot holds WAL on the primary. A high-write workload generates 50GB/hour of WAL. 12 hours later, the primary's disk fills and PostgreSQL crashes — taking down the entire service. The fix: monitor slot lag aggressively; set a maximum retained WAL size; drop slots for disconnected replicas immediately.
+
+A replication slot turns an offline replica into a countdown timer on the primary's disk:
+
+```
+retained_WAL(t)   = W x t_disconnected            (a slot never forgets)
+time_to_disk_full = free_space / W
+alert_lead_time   = (free_space - alert_threshold) / W
+```
+
+**Put simply.** "An abandoned slot converts your primary's free disk into a stopwatch, and the write rate sets how fast it runs." The dangerous property is that nothing degrades gradually — the primary is perfectly healthy right up to the instant it is not, so the only useful signal is the lead time, not the current level.
+
+| Symbol | What it is |
+|--------|------------|
+| `W` | WAL generation rate — the same primary write rate that drives replication lag |
+| `t_disconnected` | How long the replica has been gone. The slot retains WAL for every second of it |
+| `free_space` | Disk headroom on the primary's `pg_wal/` filesystem when the replica went away |
+| `time_to_disk_full` | Seconds until PostgreSQL crashes with "no space left on device" |
+| `alert_lead_time` | How much warning a threshold alert actually gives you — the number that matters |
+| `max_slot_wal_keep_size` | PG13+ cap that invalidates the slot instead of filling the disk. The real fix |
+
+**Walk one example.** The Section 14 incident's numbers — 50 GB/hour of WAL, two slots, 600 GB of headroom:
+
+```
+  W = 50 GB/hr        free_space = 600 GB
+
+  time_to_disk_full = 600 / 50 = 12.0 hours     <- matches the incident timeline
+
+  lead time from each alert threshold:
+    alert at 10 GB  ->  (600 - 10) / 50 = 11.8 hr of warning   (the recommended rule)
+    alert at 100 GB ->  (600 - 100) / 50 = 10.0 hr
+    alert at 500 GB ->  (600 - 500) / 50 =  2.0 hr             (too late to be useful)
+
+  the same slot on a 1 TB/day workload:
+    W = 1000 GB / 24 hr = 41.7 GB/hr
+    time_to_disk_full = 600 / 41.7 = 14.4 hours
+```
+
+Note how little the threshold changes the *outage* time and how much it changes the *warning* time — a 10GB alert and a 500GB alert both precede the same crash at hour 12, but one gives an on-call engineer most of a working day and the other gives them a lunch break. This is why the rule is "alert at 10GB", a level that is operationally harmless, rather than at some fraction of the disk.
+
+Setting `max_slot_wal_keep_size = 10GB` removes the countdown entirely: past that point PostgreSQL invalidates the slot and resumes recycling WAL. You lose the replica (it must be rebuilt from a base backup) instead of losing the primary — which is always the correct trade.
 
 **Split-brain after network partition**: Primary and replica lose connectivity. HAProxy's health checks detect the primary as down and starts routing writes to the promoted replica. The old primary's health check reconnects and it also starts accepting writes. Data diverges on both. Fix: use Patroni with proper fencing; never run HA without a quorum-based DCS.
 
@@ -488,6 +662,46 @@ timeline
 ```
 
 **Total downtime**: 40 minutes. **Data loss**: 45 seconds of transactions.
+
+Those two numbers are RTO and RPO measured rather than promised, and each decomposes into parts you can attack separately:
+
+```
+RTO = t_detect + t_decide + t_promote + t_reroute + t_reconnect
+RPO = replication_lag at the moment the primary died
+```
+
+**Stated plainly.** "RTO is a sum of steps, so it improves by deleting steps; RPO is a single measurement of how far behind the survivor was, so it improves only by changing the replication mode." Confusing the two leads teams to buy faster failover when what they needed was synchronous replication, or the reverse.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_detect` | Crash to alarm. Bounded by heartbeat interval and lease TTL, not by human speed |
+| `t_decide` | Alarm to "yes, it is really dead." The step humans are worst at |
+| `t_promote` | Running `pg_ctl promote` and waiting for recovery to finish |
+| `t_reroute` | Load balancer or DNS pointed at the new primary |
+| `t_reconnect` | Application pools re-establishing sessions and warming |
+| RPO | Replication lag at failure. `0` under synchronous replication, `= lag` under async |
+
+**Walk one example.** The timeline above, segmented:
+
+```
+  step           span              minutes   automatable?
+  ------------   ---------------   -------   -------------------------
+  t_detect       T+5  -> T+7           2     yes - lease TTL, ~30s
+  t_decide       T+7  -> T+20         13     yes - DCS quorum decides
+  t_promote      T+20 -> T+35         15     yes - Patroni runs promote
+  t_reroute      T+35 -> T+40          5     yes - Patroni REST + HAProxy
+  t_reconnect    T+40 -> T+45          5     partly - pool reconnect
+  ------------   ---------------   -------
+  RTO total                            40
+
+  human-in-the-loop steps: t_decide + t_promote = 13 + 15 = 28 min = 70% of RTO
+
+  after the fixes:
+    RTO  40 min -> 18 s     improvement = (40 x 60) / 18 = 133x
+    RPO  45 s   -> 0 s      not from speed - from synchronous_standby_names
+```
+
+Read the two result lines separately. The 133x RTO win came entirely from removing the two human steps that were 70% of the outage — Patroni cannot fix a slow disk, it just never waits for a pager. The RPO win came from a completely different change (fix 5, synchronous replication to replica-1) and would have applied even if the failover had still taken 40 minutes. The remaining 45 seconds of lost orders in the original incident were unrecoverable no matter how fast the promotion ran, because those transactions had never left the dead machine.
 
 **Post-mortem fixes**:
 1. Installed Patroni + etcd (3-node); automated failover now takes 15–30 seconds

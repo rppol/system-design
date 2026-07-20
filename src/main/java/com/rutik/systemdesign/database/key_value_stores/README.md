@@ -57,6 +57,44 @@ Stream: append-only log with consumer groups
   Use: event sourcing, Kafka-lite, job queues with acknowledgment
 ```
 
+**What this actually says.** The HyperLogLog line reads: "give up exactness and you can count unbounded
+distinct items in a fixed 12KB, because HLL never stores the members — only 16,384 tiny counters."
+The `0.81%` is not a knob you set directly; it falls out of how many registers you allocate, via
+`SE = 1.04 / sqrt(m)`. That framing matters because halving the error costs 4x the memory, so 12KB
+is a deliberate stopping point, not an arbitrary one.
+
+| Symbol | What it is |
+|--------|------------|
+| `m` | Number of registers (buckets) the hashed items are spread across. Redis fixes `m = 16384` |
+| `SE` | Relative standard error — the estimate's spread as a fraction of the true count |
+| `1.04` | Constant from the Flajolet HyperLogLog paper. Fixed, not tunable |
+| 6 bits | Width of one register: enough to store a leading-zero count up to 63 |
+
+**Walk one example.** Both published numbers, `0.81%` and `12KB`, come out of the same `m`:
+
+```
+  registers      m  = 16384                (2^14, hard-coded in Redis)
+
+  error          SE = 1.04 / sqrt(16384)
+                    = 1.04 / 128
+                    = 0.008125             ->  0.81 percent
+
+  memory         16384 registers x 6 bits  = 98304 bits
+                 98304 / 8                 = 12288 bytes  = 12 KB
+
+  counting 1,000,000,000 unique visitors:
+    estimate lands within 1e9 x 0.008125   = +/- 8,125,000 of the true count
+    memory used                            = 12288 bytes -- identical to counting 100
+```
+
+The last two lines are the whole selling point: memory is flat in the cardinality. A `SET` holding
+1e9 members would need tens of gigabytes; PFADD/PFCOUNT stay at 12288 bytes forever.
+
+**Why `sqrt(m)` and not `m`.** The error shrinks with the *square root* of the register count, so
+accuracy is expensive. Drop to `m = 1024` and memory falls 16x to 768 bytes, but the error becomes
+`1.04 / sqrt(1024) = 3.25%` — four times worse. Redis picked `m = 16384` as the point where sub-1%
+error still fits in a cache-friendly 12KB blob.
+
 ### Persistence Modes
 
 **RDB (Redis Database) — Snapshots**:
@@ -207,6 +245,41 @@ flowchart LR
 
 16,384 hash slots split across the primary shards (3 shown here) via `CRC16(key) mod 16384`; each primary has a replica for failover. When a client sends a command, the owning primary executes it directly; if the client's cached slot map is stale, the target node replies `MOVED ip:port` and the client redirects to the correct primary (worked example in Section 5). Key tags such as `{user}.cart` and `{user}.profile` hash only on `{user}`, guaranteeing both land on the same slot so multi-key operations work.
 
+**Read it like this.** `CRC16(key) mod 16384` says: "never ask which node owns this key — ask which
+of 16,384 fixed slots it falls into, then ask who currently owns that slot." The extra level of
+indirection is the entire design: node membership changes reassign *slots*, so a resharding moves a
+bounded set of slots instead of re-hashing every key in the cluster.
+
+| Symbol | What it is |
+|--------|------------|
+| `CRC16(key)` | A 16-bit checksum of the key bytes. Cheap, deterministic, uniform enough for bucketing |
+| `mod 16384` | Folds the checksum into a slot number in `[0, 16383]`. `16384 = 2^14` |
+| slot | The unit of ownership. A node owns a contiguous set of slots, never individual keys |
+| `{tag}` | Key-tag braces: only the text inside them is hashed, forcing co-location |
+
+**Walk one example.** Slot ownership across 3 primaries, then the cost of adding a fourth:
+
+```
+  slots per primary   16384 / 3 = 5461.33  ->  cannot split evenly, so:
+    Node 1  slots     0 - 5460        = 5461 slots
+    Node 2  slots     5461 - 10922    = 5462 slots
+    Node 3  slots     10923 - 16383   = 5461 slots
+    total             5461 + 5462 + 5461 = 16384   (checks out)
+
+  key "user:42:cart"  ->  CRC16(...) mod 16384 = 7890  ->  Node 2 owns it
+
+  now scale 3 -> 4 primaries:
+    new share          16384 / 4 = 4096 slots each   (exact this time)
+    each old node hands over 5461.33 - 4096 = 1365.33 slots
+    slots migrated     3 x 1365.33 = 4096  =  25 percent of the keyspace
+```
+
+Only a quarter of the slots move, and the other 12,288 slots — with every key in them — never leave
+their node. Compare naive `hash(key) mod N` with no slot layer: a key only stays put when
+`h mod 3 == h mod 4`, which holds for exactly 3 of the 12 residues mod 12 — so 25% stay and **75% of
+every key in the cluster relocates**. The fixed 16,384-slot layer is what turns a rehash-everything
+event into a bounded slot migration.
+
 ### Eviction Policies
 
 ```
@@ -302,6 +375,38 @@ Level 1: [10] → [20] → [30] → [50] → [60] → [80] → [90]
 ```
 
 `ZRANGE`/`ZRANGEBYSCORE` are O(log n): navigate the skiplist from the highest level down. `ZSCORE` is O(1): a parallel hashtable maps member to score without touching the skiplist at all.
+
+**In plain terms.** `O(log n)` on a skiplist says: "each level up halves the number of nodes, so the
+number of hops to reach any score is the number of times you can halve `n` before reaching 1." That
+framing is what makes the leaderboard in Section 14 viable — the cost of a rank lookup grows by one
+single hop every time the player base *doubles*.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of members in the sorted set |
+| level | One express lane. Redis promotes each node to the next level with probability `1/4` |
+| `log n` | Expected hops from the top level down to the target node |
+| `+ k` | The `k` elements you actually return, walked sequentially at level 1 |
+
+**Walk one example.** The `O(log(50M) + 100)` claim in the Section 14 case study, spelled out:
+
+```
+  members            n = 50,000,000
+
+  descent cost       log2(50,000,000) = 25.58  ->  about 25 hops to locate the start
+
+  ZREVRANGE 0 99     25 hops (locate)  +  100 sequential steps (emit)
+                     = 125 node visits total
+
+  compare a plain sorted array scan:  50,000,000 visits
+  compare growth:    n = 50M   -> 25.58 hops
+                     n = 100M  -> 26.58 hops   (double the data, ONE extra hop)
+                     n = 1M    -> 19.93 hops
+```
+
+Doubling from 50M to 100M players adds a single hop. That flat curve is why the case study can quote
+"0.3ms regardless of leaderboard size" rather than a size-dependent latency budget — the `+100` term,
+not the `log n` term, dominates the work.
 
 ---
 
@@ -445,6 +550,38 @@ A Redis instance stores Python pickle objects averaging 5MB each (session data).
 
 **Pitfall 2: Hot key in Redis Cluster**
 A Redis Cluster with 6 shards. One product (viral product ID 42) receives 500K GETs/second — all on the same slot (same Redis node). That node: 100% CPU, 200ms latency. Other nodes: idle. Fix: (1) Local in-process cache (Caffeine/Guava) for ultra-hot keys — reads never hit Redis. (2) Read from replicas: `slave-serve-stale-data yes` + client routing to replicas for read-only queries. (3) Key sharding: `GET product:42:shard:{random 0-9}` — 10 copies across different slots, read a random copy.
+
+**Put simply.** Key sharding says: "one key can only ever live on one node, so if the traffic won't
+fit on one node, make more keys." Sharding the cluster does nothing here — the load is concentrated
+by the *key*, not by the key count, and every extra shard you add just gives you another idle node.
+
+| Symbol | What it is |
+|--------|------------|
+| shards | Number of Redis Cluster primaries. Divides the *keyspace*, not the traffic to one key |
+| copies `c` | Number of duplicate keys `product:42:shard:0..c-1` you write the same value into |
+| per-copy QPS | Total hot-key QPS divided by `c` — what each owning node actually sees |
+| node budget | Sustainable ops/second on one Redis primary. ~100K/s is a safe planning figure |
+
+**Walk one example.** The 500K/second viral product against a 6-shard cluster:
+
+```
+  hot key traffic          500,000 GET/s, all on one slot
+
+  what 6 shards buy you    fair share if load were uniform = 500,000 / 6 = 83,333/s
+  what actually happens    hot node 500,000/s, other 5 nodes ~0/s
+  overload factor          500,000 / 100,000 budget = 5.0x over  -> 100% CPU, 200ms
+
+  fix (3): 10 sharded copies
+    per copy               500,000 / 10 = 50,000/s
+    vs node budget         50,000 / 100,000 = 0.5x  -> 50% headroom, back in spec
+
+  fix (1): local Caffeine cache at 95% hit rate, layered on top
+    reaching Redis         500,000 x (1 - 0.95) = 25,000/s total
+```
+
+The two fixes multiply. Note what the copies cost: 10x the memory for that value and 10 writes on
+every update, which is why key sharding is reserved for read-mostly hot keys. Without the extra
+copies, the hot node's 5x overload cannot be relieved by *any* amount of horizontal scaling.
 
 **Pitfall 3: KEYS command in production**
 `KEYS user:*` scans all keys in the keyspace — O(N) where N is total key count. In a Redis with 10M keys, this blocks Redis for 100ms+ (single-threaded command). Fix: use `SCAN 0 MATCH user:* COUNT 100` — iterative, non-blocking (yields after each batch). Never use KEYS in production.
@@ -593,6 +730,37 @@ ZREVRANGE leaderboard:global (rank-10) (rank+10) WITHSCORES
 # 50M players × ~50 bytes (skiplist + hashtable dual encoding) = ~2.5GB
 # Fits comfortably in Redis Cluster shard with 8GB RAM
 ```
+
+**The idea behind it.** The sizing line reads: "a sorted set costs roughly a fixed number of bytes
+per member, so capacity planning is one multiplication, not a simulation." The per-member constant
+(~50 bytes) is what you have to defend in an interview — it is the *dual* encoding, skiplist plus
+hashtable, that makes it 50 rather than the ~16 bytes the raw score and pointer would suggest.
+
+| Symbol | What it is |
+|--------|------------|
+| 50M | Members (players) in the sorted set |
+| ~50 bytes | Per-member cost: skiplist node + forward pointers + hashtable entry + member string |
+| 8GB | RAM on the shard that must hold the whole sorted set — a ZSet is never split across slots |
+| 200/s, 500K/s | Write rate (`ZADD`) and read rate the same single key must absorb |
+
+**Walk one example.** Memory, then whether the shard's read budget actually holds:
+
+```
+  memory       50,000,000 members x 50 bytes = 2,500,000,000 bytes
+                                             = 2.5 GB      (2.33 GiB)
+  headroom     2.5 GB of 8 GB  ->  31 percent used, 5.5 GB spare for
+               COW during BGSAVE, fragmentation, and the daily/weekly ZSets
+
+  reads        500,000/s against ONE key -> one node, exactly the Pitfall 2 shape
+  mitigation   top-100 cached app-side for 5s
+               ZREVRANGE calls surviving to Redis = 1 per 5s per app instance
+               only the per-player ZREVRANK queries stay uncached
+```
+
+Note the tension the case study resolves quietly: the memory math is comfortable, but the 500K/s
+figure lands entirely on a single key, so the design depends on the 5-second app-side cache far more
+than on the shard count. Doubling to 100M players costs 2.5GB more and one extra skiplist hop —
+doubling read traffic without the cache would need the key-sharding fix instead.
 
 **Regional leaderboards** (daily, weekly, monthly with TTL):
 ```bash

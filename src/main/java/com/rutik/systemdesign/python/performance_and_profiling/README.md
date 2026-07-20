@@ -284,6 +284,42 @@ fast = timeit.timeit(lambda: concat_join(1000), number=1000)
 # Typical: slow ~0.28s, fast ~0.028s — 10x speedup
 ```
 
+**Read it like this.** "Strings are immutable, so `+=` cannot extend anything — it allocates a brand
+new string and copies everything you already had into it. Do that `n` times and you have copied the
+prefix `n` times." The quadratic is not in the loop count; it is in the bytes moved.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of fragments appended |
+| `L` | Average fragment length in bytes |
+| `s += frag` | Allocate `len(s) + len(frag)`, copy both in, discard the old `s` |
+| `L * n(n+1)/2` | Total bytes copied by the `+=` loop — the triangular sum, `O(n^2)` |
+| `L * n` | Total bytes copied by `"".join(...)` — one sizing pass, one buffer, `O(n)` |
+
+**Walk one example.** The `n = 1000` case the benchmark above measures, at `L = 10` bytes per
+fragment:
+
+```
+  iteration i copies the whole prefix built so far:
+
+    i =    1  ->     10 bytes
+    i =    2  ->     20 bytes
+    i =    3  ->     30 bytes
+    ...
+    i = 1000  -> 10,000 bytes
+
+  += total  = 10 x (1000 x 1001 / 2) = 10 x 500,500 = 5,005,000 bytes
+  join total= 10 x 1000                             =    10,000 bytes
+
+  ratio = 5,005,000 / 10,000 = 500.5x the bytes moved
+```
+
+The measured gap is only `10x` (0.28s vs 0.028s), not 500x, and the reason is worth knowing: CPython
+has a private optimization that resizes a string in place when the object's refcount is exactly 1, so
+many of those copies are elided at small `n`. The quadratic still wins eventually — double `n` to
+2000 and the byte count quadruples while `join` merely doubles. Never rely on the refcount trick: it
+vanishes the moment any other name, a debugger, or a list holds a second reference to `s`.
+
 **Pattern 2: List append vs pre-allocation**
 
 ```python
@@ -383,6 +419,40 @@ Key properties:
 - Does not require code modification or process restart
 - Handles native extensions — shows C frames if compiled with debug symbols
 - Flamegraph SVG is self-contained and openable in any browser
+
+**The idea behind it.** "A sampling profiler never measures time — it takes a photograph of the stack
+100 times a second and reports what fraction of the photographs each function appeared in." That is
+why its cost is independent of how many function calls your program makes, and also why its accuracy
+depends entirely on how long you let it run.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | Sample rate, `100 Hz` by default (`--rate`). One photograph every `10 ms` |
+| `d` | Recording duration in seconds (`--duration`) |
+| `n = r * d` | Total samples collected — the entire statistical budget |
+| `f` | The true fraction of runtime spent in some frame |
+| `n * f` | Samples that frame is expected to appear in |
+| `1 / sqrt(n*f)` | Relative standard error on that frame's estimate. Fewer hits, noisier answer |
+
+**Walk one example.** The `--duration 30` command shown above, at the default rate:
+
+```
+  n = 100 Hz x 30 s = 3000 samples      (each one covers 10 ms of runtime)
+
+  frame's true share    expected hits    relative error    usable?
+  ------------------    -------------    --------------    -------
+       50%                  1500              2.6%         yes, solid
+       10%                   300              5.8%         yes
+        1%                    30             18.3%         shaky -- record longer
+      0.1%                     3             57.7%         no -- statistically invisible
+```
+
+Two consequences follow directly. First, the fix for a noisy flamegraph is a longer `--duration`, not
+a higher `--rate`: error falls as `1/sqrt(n)`, so quadrupling the recording halves the error either
+way, but a longer run does it without raising overhead. Second, py-spy structurally cannot see the
+long tail — a function that is genuinely 0.1% of runtime gets about 3 hits in 30 seconds and is
+indistinguishable from noise. That blind spot is exactly what `cProfile` covers, and it is the real
+reason the two tools coexist rather than one replacing the other.
 
 ### 6.6 Cython and mypyc
 
@@ -513,6 +583,41 @@ quadrantChart
 
 *Plotting the table above by effort (x) and speedup potential (y) makes the ROI clusters visible at a glance: `orjson` and the free 3.11 upgrade sit in the low-effort/solid-payoff quadrant, while C extensions and Cython demand the most engineering for their gains.*
 
+**What the formula is telling you.** "The Speedup Potential column is what you get on the part you
+touched — what you get on the *whole program* is throttled by how big that part was." A 100x
+optimization on 10% of the runtime is a 1.11x program. This is Amdahl's Law, and it is the reason
+"profile first" is a principle rather than a suggestion.
+
+| Symbol | What it is |
+|--------|------------|
+| `f` | Fraction of total runtime spent in the code you are about to optimize |
+| `k` | Local speedup you achieve there — the table's "Speedup Potential" column |
+| `1 - f` | Everything you did not touch. Unchanged, and it still has to run |
+| `1 / ((1-f) + f/k)` | Overall program speedup |
+| `1 / (1-f)` | The ceiling. Even `k = infinity` cannot beat this |
+
+**Walk one example.** Take `orjson` at its stated `3-5x` and apply it at two different profile
+weights — the same optimization, two different programs:
+
+```
+  k = 5x local speedup
+
+  f = 0.10  ->  1 / (0.90 + 0.10/5) = 1 / 0.92 = 1.09x overall   (ceiling 1.11x)
+  f = 0.50  ->  1 / (0.50 + 0.50/5) = 1 / 0.60 = 1.67x overall   (ceiling 2.00x)
+  f = 0.90  ->  1 / (0.10 + 0.90/5) = 1 / 0.28 = 3.57x overall   (ceiling 10.0x)
+
+  Now push k to infinity -- make the JSON step literally free:
+
+    f = 0.10  ->  1.11x        f = 0.50  ->  2.00x        f = 0.90  ->  10.0x
+```
+
+Read the `f = 0.10` row twice. Making that step *instantaneous* buys 1.11x, so the difference between
+a 5x library swap and perfection is 2 percentage points of program runtime. That is the whole
+argument against optimizing before profiling: without `f` you cannot tell a 3.57x opportunity from a
+1.09x one, and they look identical in the source. It is also why the "Algorithmic improvement" row
+tops the table — changing complexity class raises `k` without bound *and* usually applies to a large
+`f`, which is the only combination that moves the ceiling.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -629,6 +734,36 @@ After profiling reveals a hot function, developers sometimes optimize a secondar
 | `memory_profiler` | Line (memory)    | 5-10x      | No              | No           | Annotated source + MB     |
 | `tracemalloc`     | Allocation site  | 2-3x       | Careful         | No           | Snapshot diff / top allocs|
 | `VizTracer`       | Function + args  | 1-2x       | No              | Yes (JSON)   | Chrome trace viewer       |
+
+**What it means.** "The Overhead column is a multiplier on wall-clock time, not a percentage added to
+it — `3x` means a request that took 100 ms now takes 300 ms while the profiler is attached." Read as
+a multiplier, the Production-Safe column stops being a judgement call and becomes arithmetic.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | True runtime with no profiler attached |
+| `m` | Overhead multiplier from the table (`1.5-3x` for cProfile, `<1.01x` for py-spy) |
+| `m * T` | What users actually experience while profiling is on |
+| `(m - 1) * T` | Pure tax — time added that measures nothing about your code |
+| `<1%` | py-spy's cost, because it samples from outside the process and never hooks a call |
+
+**Walk one example.** A 100 ms endpoint under each tool, against a 200 ms P99 SLO:
+
+```
+  tool               multiplier    100 ms becomes     added tax     SLO (200 ms)
+  ----               ----------    --------------     ---------     ------------
+  py-spy               1.01x           101 ms            1 ms       PASS
+  VizTracer            1-2x         100-200 ms        0-100 ms      borderline
+  cProfile             1.5-3x       150-300 ms       50-200 ms      FAILS at 3x
+  line_profiler        3-5x         300-500 ms      200-400 ms      FAILS
+  memory_profiler      5-10x       500-1000 ms      400-900 ms      FAILS badly
+```
+
+Note that the tax is proportional, so it lands hardest on exactly the endpoints you most want to
+investigate — the slow ones. A 600 ms P99 handler under `line_profiler` becomes 1.8-3.0 seconds,
+which will trip client timeouts and retry storms and change the very behaviour you were measuring.
+That distortion, not just the raw slowdown, is why the workflow in Q10 of Section 12 starts with
+py-spy in production and only escalates to the deterministic profilers on a staging replica.
 
 ```mermaid
 flowchart LR

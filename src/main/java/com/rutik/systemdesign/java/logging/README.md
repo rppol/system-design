@@ -300,6 +300,39 @@ The rule of thumb: parameterized `{}` defers *formatting*, not *argument evaluat
 
 `additivity="false"` on `com.payflow.payments` stops its events from also flowing up to `root`'s appenders — without it, every line under that package would be written twice (once by its own appender, once by root's). `discardingThreshold` and `neverBlock` are a deliberate latency-vs-durability dial, not a default to leave unexamined (§8, §10).
 
+**In plain terms.** "`queueSize` is how many log events may sit un-written at once, and `discardingThreshold` is a percentage of that queue reserved exclusively for WARN and ERROR — so the two numbers together decide, in advance, exactly which events you are willing to lose during an incident."
+
+Reading them as a loss policy rather than a tuning knob is the point. The defaults already encode a decision; the only question is whether the team made it deliberately.
+
+| Symbol | What it is |
+|--------|------------|
+| `queueSize` | Capacity of the bounded queue in events, not bytes. Default 256; 512 above |
+| `discardingThreshold` | Percent of `queueSize` kept free as WARN/ERROR headroom. Default 20 |
+| drop point | `queueSize - (queueSize x threshold/100)` — the depth at which TRACE/DEBUG/INFO start being discarded |
+| `neverBlock` | What happens at 100% full: `false` blocks the caller (durability), `true` drops the event (latency) |
+
+**Walk one example.** The config above (`queueSize=512`, `discardingThreshold=20`):
+
+```
+  reserved headroom   = 512 x 20 / 100 = 102 events   (WARN/ERROR only)
+  drop point          = 512 - 102      = 410 events   (80% full)
+
+  behaviour by queue depth
+      0 - 409 events   -> everything enqueued, all levels
+    410 - 511 events   -> TRACE/DEBUG/INFO silently discarded, WARN/ERROR still queued
+          512 events   -> neverBlock=false: the CALLING thread blocks until a slot frees
+                          neverBlock=true : the event is dropped, whatever its level
+
+  how fast the queue can fill (Section 14's 500 RPS API)
+    at 1 log line per request  =   500 events/second
+      512 events / 500 per sec = 1.02 s of total backlog capacity
+      410 events / 500 per sec = 0.82 s before INFO starts disappearing
+
+  -> a disk stall of ONE SECOND is enough to start losing INFO lines
+```
+
+**Why this is the war story in Section 10.** The queue is sized in events, but the failure is measured in seconds of downstream stall — and 512 events at production rates is under a second of buffer. That is the arithmetic behind alerting on queue *depth* rather than on dropped-event counts: by the time events are being dropped, the evidence you wanted is already gone.
+
 ### Log4j2 Internals — Async Loggers via the LMAX Disruptor
 
 ```xml
@@ -460,6 +493,43 @@ CompletableFuture.supplyAsync(() -> {
 }
 ```
 
+**Stated plainly.** "One log line has a size, and log volume is nothing more than that size multiplied by lines-per-second multiplied by seconds of retention — which is why a structured line's field count is a budget decision, not just a formatting preference."
+
+Doing the multiplication once, up front, is what separates a retention policy from a surprise invoice. Each extra field costs its own bytes on every line, forever.
+
+| Symbol | What it is |
+|--------|------------|
+| line size | Bytes of one serialized event. Fixed field names are paid on every single line |
+| lines/sec | `RPS x lines_per_request` — the multiplier most teams underestimate |
+| `86,400` | Seconds per day, converting a rate into a daily volume |
+| retention | Days kept. Hot (indexed, expensive) and cold (compressed object storage) are budgeted separately |
+
+**Walk one example.** The JSON event above, at the Section 14 scenario's 500 RPS:
+
+```
+  line size (the sample above, compact, no pretty-printing)
+    = 237 bytes
+
+  lines per second
+    at 1 log line per request  = 500 x 1 =   500 lines/sec
+    at 3 log lines per request = 500 x 3 = 1,500 lines/sec
+
+  daily volume at 3 lines/request
+    lines/day  = 1,500 x 86,400 = 129,600,000 lines
+    bytes/day  = 129,600,000 x 237 = 30,715,200,000 bytes
+               = 30.72 GB/day of raw JSON
+
+  against the scenario's stated retention
+    30 days hot   = 30.72 x 30  =    922 GB = 0.92 TB indexed in Elasticsearch
+    365 days cold = 30.72 x 365 = 11,213 GB = 11.2 TB before compression
+    gzipped ~10x  = ~1.1 TB in object storage
+
+  the nightly batch, separately
+    2,000,000 transactions x 1 line x 237 bytes = 474 MB per run
+```
+
+Note what one field costs. Adding a single 40-byte field to every line adds `40 x 129,600,000 = 5.2 GB/day`, or 1.9 TB/year — from one field. That is the concrete reason the `includeCallerData` and level-discipline rules below are framed as cost decisions rather than style preferences.
+
 Every field above is independently indexable by Elasticsearch/Loki the moment it is ingested — no regex parsing at query time. A plaintext line like `2026-07-07 INFO Reconciling txn 88231` would need a fragile grok pattern to recover `orderId=88231` as a queryable field. Field names are typically standardized against Elastic Common Schema (ECS) so logs from unrelated services can be joined on the same field names.
 
 ### Levels — TRACE Through ERROR, and What NOT to Log
@@ -506,6 +576,41 @@ The "proper fix" version is 2.17.1, not 2.15.0, because the incident was actuall
 A **synchronous** appender performs its I/O (disk write, network send) inline, on the calling thread, before the log call returns — meaning a slow disk or a saturated network directly adds to request latency. An **async** appender/logger hands the event to a queue or ring buffer and returns immediately, moving the I/O cost onto a background thread; the trade is a bounded window of potential event loss if the process crashes before the queue drains.
 
 `includeCallerData` (Logback) / equivalent caller-location capture (Log4j2) costs roughly **10-20x** a plain log call, because the only way to recover "which line called this" is to construct a stack-walking `Throwable` and inspect its frames — real, measurable overhead multiplied across every call site. Leave it `false` in production; enable it only while actively debugging.
+
+**What it means.** "A 10-20x multiplier on something that was already cheap is still cheap per call — the reason caller data matters is that you pay it on every log line in the process, so the honest unit is CPU-seconds per second, not microseconds per call."
+
+Multipliers are how this setting gets waved through in review ("it's only microseconds"). Rates are how it shows up in a flame graph a month later.
+
+| Symbol | What it is |
+|--------|------------|
+| base cost | Time for a plain, already-formatted log call — roughly a microsecond on modern hardware |
+| 10-20x | The caller-data multiplier, from constructing a `Throwable` and walking its frames |
+| lines/sec | Total log lines the process emits per second, across all threads and levels |
+| `delta x lines/sec` | Added CPU-seconds per wall-clock second — the same "cores burned" unit used throughout this repo |
+
+**Walk one example.** The Section 14 API at 500 RPS and 3 log lines per request:
+
+```
+  base                = 1 us per log call
+  with caller data    = 10x -> 10 us     |  20x -> 20 us
+  added per call      =       9 us       |        19 us
+
+  lines/sec           = 500 x 3 = 1,500
+
+  added CPU per second
+    at 10x            = 0.000009 x 1,500 = 0.0135 CPU-s/s = 1.4% of one core
+    at 20x            = 0.000019 x 1,500 = 0.0285 CPU-s/s = 2.9% of one core
+
+  the same setting on the batch job, if it logged per transaction at 2,000 lines/sec
+    at 20x            = 0.000019 x 2,000 = 0.038 CPU-s/s
+
+  and the second, hidden cost inside an async appender
+    the stack walk must happen on the CALLING thread before the event can be
+    enqueued -- so caller data drags synchronous work back onto exactly the
+    thread the async appender existed to protect
+```
+
+**Why the stack walk is unavoidable.** There is no cheap JVM lookup for "which line called this method"; the frame information only exists on the live stack, so recovering it means capturing and walking that stack. That is the identical mechanism behind `fillInStackTrace()` discussed next — which is why "caller data is expensive" and "exceptions are expensive in hot loops" are the same fact wearing two hats.
 
 Constructing any `Throwable` invokes `fillInStackTrace()`, which walks and captures every frame on the call stack — a cost that scales with stack depth and is paid whether or not the exception is ever logged or even thrown. This is the same reason "exceptions for control flow" is a classic performance anti-pattern in hot loops. For logging specifically, always pass the full `Throwable` to the dedicated overload (`log.error("charge failed", ex)`) rather than logging only `ex.getMessage()` — the message-only form is marginally cheaper but discards the stack trace, which is usually the only clue to *where* the failure occurred.
 

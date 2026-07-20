@@ -123,6 +123,34 @@ flowchart LR
     class O2 io
 ```
 
+**In plain terms.** "A buffer does not make reads faster — it makes them *fewer*. The speedup is simply how many application-level reads you can now serve out of one trip into the kernel."
+
+That reframing tells you when buffering is worth nothing: if the caller already reads in 8 KB chunks, wrapping in a `BufferedInputStream` adds a copy and saves no system call at all. The win is entirely a function of how small the caller's reads are.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Buffer size — `BufferedInputStream`'s default is 8192 bytes (8 KB) |
+| `r` | Bytes the application asks for per call — 1 for `read()`, ~80 for a line of text |
+| `B / r` | System-call reduction factor: reads served per kernel trip |
+| `F / B` | Total `read(2)` calls to consume a file of `F` bytes through the buffer |
+| unbuffered | `F / r` kernel trips — one per application read, no amortization |
+
+**Walk one example.** Consuming a 1 MB file (`F` = 1,048,576 bytes), `B` = 8192:
+
+```
+  buffered kernel trips   =  F / B  = 1,048,576 / 8,192  =        128   (always)
+
+  reduction factor depends entirely on r = B / r:
+
+    r =    1 B  (read() one byte)    1,048,576 trips -> 128   =  8,192x
+    r =   80 B  (one line of text)      13,107 trips -> 128   =    102x   <- the "~100x"
+    r = 8192 B  (caller already 8 KB)      128 trips -> 128   =      1x   <- no win
+```
+
+The diagram's "~100x" is the line-oriented case: `8192 / 80 = 102.4`. It is not a property of the buffer, it is `B / r` evaluated at a typical text-line size. Byte-at-a-time reading gets the full `8192x`; a caller already reading in 8 KB blocks gets nothing but an extra memory copy.
+
+Why 8 KB and not 64 KB? The buffer is amortization, and amortization has sharply diminishing returns: going 8 KB to 64 KB takes the line-reading case from 102x to 819x, but 128 kernel trips per megabyte were never the bottleneck — while every open stream now holds 8x the memory. Eight kilobytes is roughly two OS pages, large enough that the syscall cost has already vanished into the noise and small enough that ten thousand concurrent streams cost 78 MB rather than 625 MB.
+
 ### try-with-resources and Suppressed Exceptions
 ```
 try (Resource r1 = new Resource1(); Resource r2 = new Resource2()) {
@@ -368,6 +396,40 @@ try (FileChannel channel = FileChannel.open(path, READ, WRITE);
 // channel.tryLock(): non-blocking; returns null if locked by another process
 // Shared lock: channel.lock(position, size, /*shared=*/true)
 ```
+
+**What it means.** "'Zero-copy' does not mean the bytes never move — it means they never enter your process. The 2-10x is the cost of the two copies and two context switches per chunk that `transferTo` deletes."
+
+Naming it that way makes the limit obvious: `transferTo` can only skip user space because you never look at the data. The moment you need to transform bytes mid-copy, you are back to the stream loop by definition, and no flag recovers the difference.
+
+| Symbol | What it is |
+|--------|------------|
+| `F` | File size being copied — 1 GB = 1,073,741,824 bytes in the walk below |
+| `B` | User-space copy buffer, 8192 bytes, as in the manual `in.read(buf)` loop |
+| `F / B` | Chunks, and therefore `read`/`write` syscall *pairs*, in the stream loop |
+| copies per chunk | Stream loop: 4 (disk to page cache, to user buffer, to page cache, to disk) |
+| `transferTo` | Kernel-to-kernel `sendfile(2)`: 2 copies, no user buffer, no per-chunk switches |
+| 4 KB page | OS page size — the granularity of a `MappedByteBuffer` page fault |
+
+**Walk one example.** Copying a 1 GB file three ways:
+
+```
+  Manual stream loop, B = 8 KB:
+    chunks    = 1,073,741,824 / 8,192      = 131,072
+    syscalls  = 131,072 read + 131,072 write = 262,144
+    data copies                             = 131,072 x 4  = 524,288
+
+  transferTo / Files.copy (sendfile):
+    syscalls  = 1                           <- the whole file, one call
+    data copies                             = 2 (disk -> page cache -> disk)
+                                            -----------------------------
+    syscalls saved:  262,144 -> 1;  copies halved:  4 per chunk -> 2 total
+
+  MappedByteBuffer loop over the same 1 GB, 4 KB pages:
+    page faults = 1,073,741,824 / 4,096     = 262,144
+    explicit read() calls                   = 0
+```
+
+The `2-10x` range is that copy-and-switch elimination measured against different workloads: near 2x when the file is already hot in the page cache and the copies are memory-bandwidth-bound, near 10x when per-syscall overhead dominates because the chunks are small. The mmap line is the interesting comparison — it trades 262,144 syscalls for 262,144 page faults, which is only a win because a page fault on cached data is far cheaper than a syscall round trip, and because sequential access lets the OS read ahead and remove most of the faults entirely.
 
 ### WatchService OVERFLOW Event
 

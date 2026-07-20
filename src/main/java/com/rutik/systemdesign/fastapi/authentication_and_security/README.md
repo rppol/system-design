@@ -295,6 +295,46 @@ def verify_password(plain: str, hashed: str) -> bool:
     # Constant-time comparison is built into passlib — no timing oracle
 ```
 
+**In plain terms.** "The cost factor is an exponent, not a dial — each `+1` doubles the work for
+everyone, the attacker and your own login endpoint alike." That symmetry is the whole design: you
+cannot slow an attacker down without paying the identical tax on every legitimate login.
+
+| Symbol | What it is |
+|--------|------------|
+| cost | The bcrypt work factor, `12`. Stored inside the hash string, so it travels with it |
+| `2^cost` | Key-setup rounds bcrypt performs — `2^12 = 4096` |
+| cost `+1` | Exactly 2x the time. `+2` is 4x. The scale is logarithmic in the number you type |
+| hash time | Wall-clock per verify, ~250 ms at cost 12 on a modern server CPU |
+| `1 / hash_time` | Logins per second one CPU core can complete — the ceiling this imposes |
+
+**Walk one example.** Read the cost ladder off the exponent, anchored to the module's ~250 ms:
+
+```
+                 2^cost    relative work    hash time (from 250 ms at cost 12)
+  cost 10         1024          1x                 62.5 ms
+  cost 11         2048          2x                125   ms
+  cost 12         4096          4x                250   ms      <- the recommendation
+  cost 13         8192          8x                500   ms
+  cost 14        16384         16x               1000   ms      <- users notice this
+```
+
+**The throughput ceiling nobody budgets for.** bcrypt is deliberately CPU-bound and cannot be
+`await`ed away — it burns a core for the full 250 ms:
+
+```
+  one core at 250 ms/hash   ->   1 / 0.250   =   4 logins/second
+   4 workers                ->   4 x 4       =  16 logins/second   =    960 logins/minute
+   8 workers                ->   8 x 4       =  32 logins/second   =  1,920 logins/minute
+  16 workers                ->  16 x 4       =  64 logins/second   =  3,840 logins/minute
+```
+
+Two consequences follow directly. First, `/auth/token` is a denial-of-service amplifier: 16 bogus
+login attempts per second saturate a 4-worker deployment with garbage passwords, which is the real
+reason Best Practice 12 rate-limits that one endpoint rather than trusting bcrypt to absorb it.
+Second, moving from cost 12 to cost 14 does not cost "a bit more latency" — it cuts your login
+throughput by 4x, from 16 logins/second to 4. Raise the cost factor and re-check the worker count
+in the same change.
+
 ### 6.5 Broken Secret Storage → Fix
 
 ```python
@@ -337,6 +377,46 @@ def create_access_token(subject: str, settings: Settings) -> str:
         algorithm=settings.jwt_algorithm,
     )
 ```
+
+**Read it like this.** "`exp = iat + lifetime` is not a config value, it is your worst-case breach
+window — the maximum time a stolen token keeps working after you have already noticed." Every
+argument about 15 minutes versus 7 days is really an argument about that one number.
+
+| Symbol | What it is |
+|--------|------------|
+| `iat` | Issued-at, a Unix timestamp. Where the window opens |
+| `exp` | Expiry, a Unix timestamp. Where the window closes and `jwt.decode()` starts raising |
+| `exp - iat` | Token lifetime in seconds — and the exposure window for a stolen copy |
+| `leeway` | Clock-skew tolerance the verifier allows, widening the effective window on both ends |
+| refresh TTL | The refresh token's own lifetime, `7 days`. The bound on how long a session can be renewed silently |
+
+**Walk one example.** The module's `15 min` access + `7 day` refresh pair, in seconds:
+
+```
+  access  : 15 min x 60           =       900 s
+  refresh :  7 x 24 x 3600        =   604,800 s
+
+  ratio   : 604,800 / 900         =       672x
+```
+
+That `672x` is the number to say out loud. It is why the two tokens get different storage rules and
+different transport rules — an attacker who steals the access token owns 900 seconds; one who steals
+the refresh token owns 672 times that, unless rotation catches the reuse first.
+
+```
+  stolen access token  : usable for at most 900 s, then dead. No action required.
+  stolen refresh token : usable for up to 604,800 s -- unless rotation detects the
+                         second use and revokes the family (Section 6.8)
+
+  672 = also the number of access tokens one refresh token can mint across its 7 days
+        (604,800 / 900), i.e. 672 chances for rotation to notice a theft
+```
+
+**Why clock skew has to be small.** Verifiers commonly allow ~30 s of `leeway` so a server whose
+clock drifts does not reject valid tokens. Against a 900-second lifetime that is `30 / 900 = 3.3%`
+of extra window — negligible. Against a 60-second token it would be 50%, which is why very short
+expiries stop being meaningful once skew tolerance is a large fraction of the lifetime. Run NTP and
+keep `leeway` under a few percent of `exp - iat`.
 
 ### 6.6 Full OAuth2 Password Flow Implementation
 
@@ -509,6 +589,41 @@ async def rotate_refresh_token(
     new_refresh = await create_and_store_refresh_token(user_id, redis)
     return new_access, new_refresh
 ```
+
+**What this actually says.** "A token's strength is `log2(alphabet^length)` bits, and 256 of them
+means guessing is not an attack you need to defend against — theft is." The `32` in
+`secrets.token_urlsafe(32)` is bytes of raw entropy, not output characters, which is the detail that
+trips people up.
+
+| Symbol | What it is |
+|--------|------------|
+| `32` | Bytes requested from the OS CSPRNG — the entropy source, before encoding |
+| `alphabet^length` | Size of the space a guesser must search |
+| `log2(...)` | That size expressed in bits, so it fits on a page: `32 x 8 = 256` bits |
+| `G` | Attacker guess rate, in attempts per second the API will actually accept |
+| `2^(bits-1) / G` | Expected wall-clock time to one successful guess |
+
+**Walk one example.** Where the 256 bits comes from, and what it buys:
+
+```
+  raw entropy   : 32 bytes x 8            = 256 bits
+  encoded form  : base64url, 6 bits/char  = ceil(256 / 6) = 43 characters
+                  ^ the STRING is 43 chars; the ENTROPY is 256 bits. Not the same number.
+
+  search space  : 2^256
+  guesses to hit: 2^255
+  at G = 10^9 guesses/second (a billion -- no API serves this):
+                  2^255 / 1e9  ->  ~1.8e60 years
+
+  stored form   : sha256(raw).hexdigest() = 64 hex chars = 256 bits, one-way
+```
+
+**Why the hash, if guessing is already impossible.** The entropy defends against an attacker
+*outside* the system; the SHA-256 defends against one *inside* it. A leaked Redis snapshot, a
+replica dump, or a debug log of the token store hands over raw tokens if you stored them raw —
+storing `sha256(raw)` means the dump is inert, because the lookup path hashes the incoming token and
+compares. Note that a plain SHA-256 is correct here and would be wrong for passwords: 256 bits of
+CSPRNG output has no dictionary to attack, so the slow-hash reasoning of Section 6.4 does not apply.
 
 ### 6.9 Token Blacklisting for Logout
 

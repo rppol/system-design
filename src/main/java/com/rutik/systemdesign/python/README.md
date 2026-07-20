@@ -108,6 +108,44 @@ A ruthless cut to what a **senior Python interview** actually probes, anchored o
 
 **Deliberately deferred to the Full Path** (valuable, lower interview yield): deep CPython/tooling internals (metaclasses & descriptors, packaging & project tooling, performance profiling), string/bytes/regex internals, file I/O & serialization, `threading`/`multiprocessing` (asyncio dominates the async story above), Pythonic design patterns, and stdlib datetime & logging. A niche flagged in an interview is a bonus, not a gate — reach for these once the 13 above are solid.
 
+### Decoding the path arithmetic
+
+**What it means.** "The interview path is not a different curriculum — it is the same ordered list with 8 of its 21 entries removed, which is why the subset must stay in the full path's order."
+
+This section has no formulas to speak of; the only arithmetic worth stating explicitly is how the two paths relate, because that relationship is a maintenance constraint, not just a description.
+
+| Symbol | What it is |
+|--------|------------|
+| Full Path | All **21** modules, in the 3-Phase order above |
+| Interview Path | An ordered **subset** of 13 of those same modules — never a re-ordering |
+| Deferred | `21 - 13 = 8` modules that stay in the Full Path only |
+| `STUDY_ORDER["python"]` | The game's canonical module order; the Full Path must match it |
+| `STUDY_PATHS.python.interview` | The game's 13-module subset; this README's table is its twin |
+
+**Walk one example.** Reconcile every count stated on this page:
+
+```
+  Full Path, by phase
+    Phase 1  Language Core & Data Model        8 modules
+    Phase 2  CPython Internals & Type System   6 modules
+    Phase 3  Concurrency, Async & Quality      7 modules
+                                              -- total 21   matches the module table
+
+  Interview Path, by group
+    Language Core & Data Model                 6 modules
+    CPython Internals & Type System            4 modules
+    Concurrency, Async & Testing               3 modules
+                                              -- total 13   matches the 3-week plan
+                                                            (weeks of 6, 4, 3)
+
+  reduction
+    deferred     = 21 - 13 = 8 modules
+    "~38% fewer" =  8 / 21 = 38.1 %           the page's stated figure checks out
+    coverage     = 13 / 21 = 61.9 % of the section
+```
+
+Both stated totals and the `~38%` figure are internally consistent. The number that matters operationally is the `8`: those modules are dropped, never reordered, which is what keeps the interview list a valid *ordered subset*. If a future edit reorders the interview table to group topics differently, the game's Study toggle breaks its subset invariant even though all 13 modules are still present — the count would still read 13 while the ordering check fails.
+
 ---
 
 ## Knowledge-Question Map

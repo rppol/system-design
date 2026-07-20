@@ -105,6 +105,42 @@ native-image: this work happens ONCE, offline, before anyone runs the binary
 
 The JVM re-does classloading, verification, static initialization, and interpretation on every single process start, and only reaches peak (C2-compiled) throughput after enough invocations warm it up. Native image moved almost all of that into a single offline build step; every process launch after that pays only isolate startup — fast and *flat* from the first instruction, because there is no tier to warm into.
 
+**What this actually says.** "The two rulers are not the same kind of measurement: the JVM's milestones are costs you re-pay per launch, and native-image's are costs you paid once at build time — so the only figures that can be compared directly are the two `0ms` starting points and where useful work begins."
+
+Keeping that distinction straight is what stops the usual wrong conclusion. Native image is not a faster runtime; it is the same total work with almost all of it relocated off the per-launch path.
+
+| Symbol | What it is |
+|--------|------------|
+| load / verify / link | Reading `.class` bytes, verifying `StackMapTable` frames, resolving symbols — repeated every JVM launch |
+| `<clinit>` phase | Running every reachable static initializer, again per launch |
+| JIT warm-up | The climb from interpreted to C2-compiled; needs roughly 15K calls to a method |
+| isolate init | Substrate VM's per-launch setup: heap reservation, thread and isolate structures |
+| flat from t=0 | No tier to climb — the code emitted at build time is the code that runs on instruction one |
+
+**Walk one example.** Read the milestones as intervals rather than timestamps, then apply them to a process that does 50 ms of real work:
+
+```
+  JVM, per launch                         interval        cumulative
+      load                                 120 ms            120 ms
+      verify + link                        180 ms            300 ms
+      run <clinit>                     ~ 100 ms              400 ms   <- main() reachable
+      interpret, then JIT climb        ~1600 ms             2000 ms   <- C2 peak, if reached
+
+  native image, per launch
+      Substrate VM + isolate init           15 ms             15 ms   <- main() reachable
+
+  time to main():   400 ms  vs  15 ms   ->  26.7x less
+
+  a process whose real work is 50 ms
+      on the JVM      400 + 50 = 450 ms total,   400/450 = 88.9 % is startup
+      native           15 + 50 =  65 ms total,    15/65  = 23.1 % is startup
+```
+
+The 2000 ms C2 milestone is the one that never applies to a short process at all:
+a 50 ms workload exits 1,950 ms before the JVM would have reached peak, so the
+throughput that native-image gives up was never going to be collected. That is
+the whole selection rule for this technology, expressed as one comparison.
+
 ### The four+ kinds of dynamic access that need a hint
 
 ```
@@ -425,6 +461,48 @@ PGO feeds a *recorded* execution profile back into the AOT compiler — the clos
 | Runtime bytecode generation (CGLIB, raw ASM, agents) | Fully supported | Not supported at all — no JIT, no runtime classloader to hand new bytecode to |
 | Observability | Mature: JFR, async-profiler, full `jstack`/`jmap` tooling | Improving but narrower — a subset of JFR events via `--enable-monitoring` |
 
+**Read it like this.** "Every row here is a ratio against the JVM baseline, and two of them point in opposite directions — so the decision is whether the startup and memory ratios, multiplied by how often you pay them, outweigh the throughput ratio multiplied by how long you run."
+
+Spelling out the opposing signs is the point. Two rows favour native by a large factor and one penalizes it by a small one, and which dominates is decided by process lifetime, not by which factor is bigger.
+
+| Symbol | What it is |
+|--------|------------|
+| 3-5x smaller | RSS ratio — a per-replica cost paid for the whole life of the process |
+| 70-90 % | Throughput ratio against a *warmed* JVM; the "warmed" qualifier is load-bearing |
+| PGO ~15 % | Reduction in binary size Oracle measures from a profile-guided rebuild |
+| process lifetime | How long one instance runs; decides whether the JVM ever reaches the peak it is being credited with |
+| replica count | How many copies run at once; multiplies the memory ratio into real capacity |
+
+**Walk one example.** Two deployments, identical code, both compared against a 400 MB-RSS warmed JVM:
+
+```
+  a 60-second batch job
+      JVM throughput available   only after warm-up (~2 s of the 60 s)
+      native throughput deficit  60 s x (100 - 80)% = 12 s equivalent, worst case
+      native startup gain        ~385 ms per run
+      memory                     400 MB / 4 = 100 MB
+      verdict  -> the 20 % deficit is real and NOT offset; lifetime is long enough
+                  that the JVM does reach peak. Native wins only on memory here.
+
+  the same code as a 50 ms CLI, 120,000 runs/month
+      JVM never reaches C2 at all -> the 70-90 % row does not apply
+      native startup gain        388 ms x 120,000 = 12.9 hours/month
+      verdict  -> no throughput to lose, enormous startup gain. Native, clearly.
+
+  memory across 40 replicas of a long-lived service
+      JVM      40 x 400 MB = 16,000 MB = 16 GB
+      native   40 x 100 MB =  4,000 MB =  4 GB      -> 12 GB freed
+      set against roughly 20 % less peak throughput, i.e. ~25 % more replicas
+      to serve the same load: 50 replicas x 100 MB = 5,000 MB, still 11 GB better
+```
+
+The last block is the one worth doing before any migration: a throughput deficit
+converts directly into extra replicas, and extra replicas eat back part of the
+memory win. Solving for where it cancels: with 25% more replicas needed, the two
+sides are equal when the memory ratio is `50/40 = 1.25x`. Anywhere in the quoted
+3-5x band the memory win survives comfortably; the row only turns against you if
+your workload's real RSS ratio comes in near 1.25x, which is worth measuring
+rather than assuming.
 | Concern | Oracle GraalVM | GraalVM Community Edition | Mandrel |
 |---------|----------------|----------------------------|---------|
 | Base JDK | Oracle JDK | OpenJDK | OpenJDK (via Community Edition) |
@@ -633,6 +711,47 @@ grep -c SlackTokenRedactor src/main/resources/META-INF/native-image/reflect-conf
 - Build cost: native compilation added **~70 seconds** to the release pipeline, isolated to its own build stage after the points-to analysis peaked at roughly **4GB RSS**, requiring `-J-Xmx6g` on the build agents.
 - The `SlackTokenRedactor` reachability gap was caught by `nativeTest` in CI rather than by a leaked secret reaching a log aggregator in production.
 - Fleet-wide, the eliminated per-invocation startup tax recovered the ~12-15 hours/month of pure JVM-startup CI compute identified in the scenario above.
+
+**In plain terms.** "Per-invocation milliseconds only become a budget line after you multiply them by the invocation count, and the build cost only matters after you multiply it by the release count — so the decision is one subtraction between two products."
+
+That framing is the reusable part. It is also the test that tells you when native image is *not* worth it: shrink the invocation count enough and the same 388 ms saving stops paying for a 70-second build stage.
+
+| Symbol | What it is |
+|--------|------------|
+| invocations | 120,000 CLI runs per month across the CI fleet |
+| startup per run | ~400 ms on the JVM, ~12 ms native — the part that is pure overhead |
+| saving per run | 400 - 12 = 388 ms of CI compute never billed again |
+| build cost | ~70 seconds added to each release pipeline run |
+| releases | How many times per month that 70 seconds is actually paid |
+
+**Walk one example.** Multiply out both sides at the stated volumes:
+
+```
+  monthly startup tax, JVM
+      120,000 x 400 ms = 48,000,000 ms = 48,000 s = 13.3 hours
+      (the 350-450 ms spread gives 11.7 to 15.0 hours -> the quoted "12-15 hours")
+
+  monthly startup tax, native
+      120,000 x  12 ms =  1,440,000 ms =  1,440 s =  0.4 hours
+
+  recovered                             13.3 - 0.4 = 12.9 hours per month
+
+  cost side, at 20 releases per month
+      20 x 70 s = 1,400 s = 0.39 hours of extra build time
+
+  net                     46,560 s saved / 1,400 s spent = 33x return
+```
+
+Thirty-three to one, and the ratio is driven entirely by the 120,000. At 3,600
+invocations a month the two sides meet and native-image is a wash; at a few
+hundred it is a net loss. This is why the same tool can be an obvious win here
+and the wrong call for an internal utility ten engineers run by hand.
+
+The `4GB RSS` figure is the term with no volume multiplier at all — it is a hard
+gate. The analysis has to hold the entire reachable program graph in memory at
+once, so it does not degrade gracefully on a smaller runner; it either fits or
+the build dies, which is why the fix was `-J-Xmx6g` and a dedicated stage rather
+than a tuning exercise.
 
 **Tradeoffs accepted.** The team gave up `javac`-speed builds for this artifact (native compilation is a dedicated, cached CI stage now) and does not get a JIT's adaptive optimization — irrelevant here, since the tool's entire runtime is under 50ms of work per invocation and was never going to live long enough to benefit from warmup in the first place.
 

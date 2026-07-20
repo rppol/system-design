@@ -144,6 +144,39 @@ The asymmetry is the whole story: weakening the key stops a `ThreadLocal` *varia
 
 HotSpot governs `SoftReference` clearing with `-XX:SoftRefLRUPolicyMSPerMB`, defaulting to **1000** (milliseconds per megabyte of free heap). The effective rule: a soft referent survives at least `free_heap_MB x 1000` milliseconds since its last access before it becomes eligible for clearing at the next collection. With 200MB free, an idle soft-referenced entry survives roughly 200 seconds; as free heap shrinks toward zero under pressure, that survival window shrinks toward zero too — `SoftReference`s get cleared more and more aggressively the closer the JVM gets to `OutOfMemoryError`, and the JDK guarantees that *all* softly-reachable objects are cleared before an `OutOfMemoryError` is ever thrown.
 
+**In plain terms.** "A soft entry's grace period is bought with free heap: every free megabyte buys it one more second of idleness, so the cache holds on generously while memory is plentiful and turns ruthless exactly as the heap fills."
+
+The self-tuning is the appeal and also the problem. The same cache is a different cache on a
+2 GB heap than on a 200 MB one, with no code change and no configuration difference.
+
+| Symbol | What it is |
+|--------|------------|
+| `free_heap_MB` | Free heap *at the time of the collection*, not the configured `-Xmx` |
+| `SoftRefLRUPolicyMSPerMB` | Milliseconds of survival granted per free megabyte; default 1000 |
+| Idle time | Milliseconds since the referent was last accessed through `get()` |
+| "Eligible for clearing" | The GC *may* clear it at the next cycle, not that it must |
+| The OOM guarantee | Every softly-reachable object is cleared before `OutOfMemoryError` is thrown |
+
+**Walk one example.** One idle cache entry, watched as the heap fills up, at the default policy of 1000.
+
+```
+  survival window = free_heap_MB x SoftRefLRUPolicyMSPerMB
+
+  free heap 2,000 MB   2,000 x 1000 = 2,000,000 ms   = 2,000 s = ~33 minutes
+  free heap   200 MB     200 x 1000 =   200,000 ms   =   200 s = ~3.3 minutes
+  free heap    20 MB      20 x 1000 =    20,000 ms   =    20 s
+  free heap     2 MB       2 x 1000 =     2,000 ms   =     2 s
+  free heap     0 MB                                  =     0 s -> cleared immediately
+
+  same 200 MB free, but with -XX:SoftRefLRUPolicyMSPerMB=100
+    200 x 100 = 20,000 ms                             =    20 s   (10x more aggressive)
+```
+
+Two orders of magnitude of behaviour change — 33 minutes down to 2 seconds — driven entirely
+by a number the application never sees. That is why the module recommends a bounded cache
+instead: a load test on a roomy staging heap exercises the 2,000-second branch and tells you
+nothing about the 2-second branch production will actually take under pressure.
+
 ```java
 // SoftReference-backed cache entry -- survives while the heap is comfortable.
 final class SoftCacheEntry<V> {
@@ -283,6 +316,42 @@ static class Entry extends WeakReference<ThreadLocal<?>> {
 
 The table starts at 16 slots; `setThreshold(len)` sets the resize threshold to `len * 2 / 3` (~10 of 16 initially) — a tighter effective load factor than `HashMap`'s 0.75, chosen because `ThreadLocalMap` also uses that threshold to trigger opportunistic stale-entry cleanup (`cleanSomeSlots`) before it ever resizes. On a `ThreadLocal` that a pooled worker thread never `remove()`s: the *key* — the `ThreadLocal` instance — can still become weakly unreachable and get cleared by the GC entirely on its own. The *value*, however, survives as a stale entry until some future `set()`/`get()`/`rehash()` on that exact thread happens to probe that exact slot and expunge it. A mostly-idle pooled thread, or one that only ever touches a *different* still-live `ThreadLocal` afterward, can carry that stale value indefinitely — this is the mechanical root of the classic "ThreadLocal leak in a thread pool" (§10).
 
+**What this actually says.** "`ThreadLocalMap` resizes earlier than a `HashMap` would — at two-thirds full rather than three-quarters — because the resize path is also the only reliable moment it gets to sweep out dead entries, so it deliberately buys sweeps more often than it strictly needs capacity."
+
+Reading `2/3` as a *cleanup* schedule rather than a *capacity* schedule is what makes the
+design make sense. Nothing else in the class is guaranteed to run; the threshold is the
+janitor's timetable.
+
+| Symbol | What it is |
+|--------|------------|
+| `len` | Current table length; starts at 16 and doubles |
+| `len * 2 / 3` | The resize threshold, in **integer** arithmetic — it truncates |
+| Load factor | Threshold divided by length: 0.625 here, versus `HashMap`'s 0.75 |
+| Stale entry | Slot whose weak key was cleared by the GC but whose strong value survives |
+| `cleanSomeSlots` | Opportunistic sweep run on the way to a resize, not on a schedule |
+
+**Walk one example.** Trace the threshold across the first few table sizes and compare against `HashMap`.
+
+```
+  ThreadLocalMap, integer arithmetic: threshold = len * 2 / 3
+    len = 16    16 x 2 = 32,  32 / 3  = 10   (truncated from 10.67)
+    len = 32    32 x 2 = 64,  64 / 3  = 21   (truncated from 21.33)
+    len = 64    64 x 2 = 128, 128 / 3 = 42   (truncated from 42.67)
+
+  effective load factor  10 / 16                    = 0.625
+  HashMap for comparison 16 x 0.75                  = 12   -> 0.75
+
+  the gap
+    HashMap resizes on the 12th entry
+    ThreadLocalMap resizes on the 10th
+    -> ~17% earlier, which is 2 extra sweep opportunities per 16 slots
+```
+
+Ten entries, not twelve, is the whole design intent: a pooled thread that touches only a
+handful of `ThreadLocal`s never reaches even 10 and therefore never triggers the sweep at
+all. That is precisely the War Story 1 shape — the cleanup mechanism is load-triggered, and
+an idle or low-variety thread supplies no load, so the stale values just sit there.
+
 ---
 
 ## 7. Real-World Examples
@@ -336,6 +405,42 @@ The table starts at 16 slots; `setThreshold(len)` sets the resize threshold to `
 ### War Story 1: `ThreadLocal` Created Per-Request on a Pooled Thread
 
 A payment-authorization service ran a fixed 128-thread worker pool. A fraud-check servlet filter created a fresh `ThreadLocal<byte[]>` on every request instead of holding one in a `static final` field, then stored a 1MB scratch buffer in it. Each request's `ThreadLocal` *instance* eventually became weakly unreachable and its key was cleared by the GC on its own — but the *value* survived as a stale `Entry` until some unrelated future operation on that exact pooled thread happened to probe that exact slot. Over one day of traffic, MAT's dominator tree showed the pool's 128 live `Thread` objects collectively retaining 3.4GB through stale `ThreadLocalMap` entries — an average of 26.6MB of dead-but-pinned buffers per thread. **Fix**: hold `ThreadLocal` instances in `static final` fields only, and always call `.remove()` in a `finally` block; never construct a `ThreadLocal` per call.
+
+**The idea behind it.** "A per-request `ThreadLocal` turns a thread's map into an append-only log: every request adds one more entry that nothing will ever come back and remove, so the retained memory is `pool_size x buffers_never_expunged x buffer_size` and it only goes up."
+
+The multiplication is what turns a subtle correctness slip into 3.4 GB. Each individual
+leaked buffer is unremarkable; there is simply no term in that product that ever decreases.
+
+| Symbol | What it is |
+|--------|------------|
+| Pool size | 128 worker threads, each with its own private `ThreadLocalMap` |
+| Stale entry | Key already GC-cleared, value still strongly held — invisible to the GC |
+| Buffer | The 1 MB `byte[]` scratch space stored under each per-request `ThreadLocal` |
+| Retained heap | What MAT attributes to the `Thread` object: the whole stale-entry chain |
+| `remove()` | The only reliable expunge; the opportunistic sweep may never probe that slot |
+
+**Walk one example.** The payment service's numbers, run in both directions.
+
+```
+  reported total
+    retained across the pool                        = 3.4 GB = 3,400 MB
+    per thread   3,400 MB / 128 threads             = 26.6 MB    <- matches the text
+
+  what that is, in buffers
+    stale buffers per thread  26.6 MB / 1 MB        = ~27 buffers
+    stale buffers pool-wide   27 x 128              = ~3,456 buffers pinned
+
+  the correct design, for contrast
+    one static final ThreadLocal, remove() in finally
+    live buffers  128 threads x 1 buffer x 1 MB     = 128 MB
+    reduction     1 - 128/3,400                     = 96.2%
+```
+
+27 dead buffers per thread against 1 live one is the entire bug: the working set was always
+128 MB, and 96% of the 3.4 GB was garbage that the GC could see perfectly well but was not
+permitted to touch. Note that the key side worked exactly as designed — every one of those
+`ThreadLocal` keys *was* weakly cleared. The weak key protects the `ClassLoader`; nothing in
+the JDK protects the value.
 
 ### War Story 2: `ClassLoader` Leak via Self-Registering JDBC Driver
 
@@ -503,6 +608,46 @@ jmap -dump:live,format=b,file=heap.hprof <pid>
 #       short-lived reference chain -- objects ARE becoming garbage promptly;
 #       their *native* cleanup, gated on finalize(), just isn't keeping pace.
 ```
+
+**Read it like this.** "A class histogram measures the Java-side wrapper, not the resource it owns — so when a 32-byte object controls a 2 MB native buffer, the histogram under-reports the real footprint by a factor of 65,536 and the leak hides in plain sight."
+
+The general rule this teaches: whenever a Java object is a handle onto something off-heap,
+the only meaningful number is `instance_count x payload_size`, and no JVM tool will compute
+that product for you.
+
+| Symbol | What it is |
+|--------|------------|
+| Live instances | 13,000 `NativeCodec` objects the histogram reports |
+| Shallow size | ~32 bytes — header plus one `long` handle field; all the histogram sees |
+| Native payload | ~2 MB of JNI-`malloc`'d buffer per instance, entirely outside the heap |
+| RSS | Resident set size — the OS's view, which counts the native buffers |
+| `-Xmx4g` | The heap ceiling, which the native memory ignores completely |
+
+**Walk one example.** Multiply the histogram output by the payload the histogram cannot see.
+
+```
+  what the tools showed
+    Java-side  13,000 x 32 B                     = 416,000 B    = 416 KB
+    -> 0.01% of a 4 GB heap; genuinely invisible
+
+  what it actually cost
+    native     13,000 x 2 MB                     = 26,000 MB    = 26 GB
+    ratio      2 MB / 32 B  = 2,097,152 / 32     = 65,536x under-reported
+
+  cross-check against the observed RSS
+    baseline                                     =  2 GB
+    baseline + leaked native  2 + 26             = 28 GB        <- matches the incident
+    growth factor  28 / 2                        = 14x
+
+  after the fix, pooled instances
+    plateau observed                             = ~2.2 GB
+    implied live buffers  (2.2 - 2.0) GB / 2 MB  = ~100 pooled NativeCodec instances
+```
+
+The 2 + 26 = 28 identity is what makes the diagnosis certain rather than plausible: the
+histogram count times the known payload reproduces the observed RSS almost exactly. Note the
+narrative above describes this as growing "13x" while `28 / 2` is 14x — 13x is the increase
+*over* baseline (26 GB added to 2 GB), and both readings point at the same 26 GB.
 
 #### Root cause
 

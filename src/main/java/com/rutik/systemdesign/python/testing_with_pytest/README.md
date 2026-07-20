@@ -298,6 +298,37 @@ def test_role_display(user: dict) -> None:
     assert user["role"] in ("admin", "viewer")
 ```
 
+#### Decoding stacked parametrize
+
+**Put simply.** "Each `@parametrize` decorator multiplies the number of test runs — it does not add to it."
+
+The `2 × 3 = 6` comment above is the whole rule, but the multiplication is what makes stacking dangerous. Two decorators feel like "a bit more coverage"; four decorators quietly become a different order of magnitude.
+
+| Symbol | What it is |
+|--------|------------|
+| `@parametrize("fmt", [...])` | One axis of the matrix. Its length is one factor in the product |
+| `n_i` | The number of values in the `i`-th decorator's list |
+| `n_1 x n_2 x ... x n_k` | Total test runs generated — the Cartesian product over all `k` decorators |
+| `indirect=True` | Routes each value through a fixture instead of straight into the test argument |
+| Test ID | pytest's generated name per combination, e.g. `test_export[10000-json]` |
+
+**Walk one example.** Grow the `test_export` matrix from the code above one decorator at a time:
+
+```
+  1 decorator     fmt in {json, csv}                       n = 2 runs
+
+  2 decorators    fmt {json, csv} x rows {0, 100, 10000}
+                  2 x 3                                    n = 6 runs
+
+  3 decorators    add compression {none, gzip, zstd, lz4, brotli}
+                  2 x 3 x 5                                n = 30 runs
+
+  the boundary suite in Section 14 uses a single list of 4 cases
+                  (1, 10, 11, 20) requests                 n = 4 runs
+```
+
+Going from two decorators to three took the suite from 6 runs to 30 — a `5x` increase from adding one axis. That is why Q14 recommends using stacked parametrize sparingly: the cost is multiplicative in runtime, and a failure report of 30 similar test IDs is far harder to read than 6. When a matrix genuinely needs three or more axes, prefer one explicit list of hand-chosen `(a, b, c)` tuples in a single decorator — you keep the interesting combinations and drop the ones that test nothing new.
+
 ### 6.3 monkeypatch
 
 ```python
@@ -763,6 +794,44 @@ omit    = ["app/migrations/*", "app/tests/*"]
 fail_under = 80
 ```
 
+#### Decoding the coverage gate
+
+**What it means.** "The gate is a ratio, not a count — and a ratio with a big denominator barely moves, which is exactly how untested code slips past a floor that is technically still being met."
+
+`fail_under = 80` looks like a guarantee that no more than 20 % of the code is untested. It is really a guarantee about an *average*, and averages dilute.
+
+| Symbol | What it is |
+|--------|------------|
+| `covered` | Statements executed at least once during the run |
+| `total` | Statements measured, after `omit` filters have removed migrations and test files |
+| `covered / total` | The reported percentage — the number compared against `fail_under` |
+| `fail_under = 80` | The floor. Below it, pytest exits non-zero and CI fails |
+| `omit` | Shrinks `total`, which *raises* the reported percentage without testing anything new |
+| Coverage delta | The per-PR figure: `new_covered / new_lines`, which is what Best Practice 10 asks you to gate on |
+
+**Walk one example.** Take a 5,000-statement codebase sitting at 85 %, then merge the PR described in Best Practice 10 — 200 new lines with zero tests:
+
+```
+  before
+    covered = 4,250     total = 5,000
+    ratio   = 4,250 / 5,000 = 0.8500  =  85.00 %      PASS (floor 80)
+
+  after merging 200 untested lines
+    covered = 4,250     total = 5,200      (covered is unchanged -- no new tests)
+    ratio   = 4,250 / 5,200 = 0.8173  =  81.73 %      PASS (floor 80)
+
+  the PR's own coverage
+    0 covered / 200 new = 0.00 %                      completely untested
+
+  how much untested code the floor actually tolerates here
+    4,250 / (5,000 + n) >= 0.80   ->   n <= 312.5
+    313 new untested lines is the first that fails    (79.99 %)
+```
+
+An entirely untested 200-line feature lands with the build green, and there is room for 112 more such lines before anyone notices. The absolute floor is doing almost nothing at this codebase size, and the larger the repo grows the less it does — that is the arithmetic behind gating on **coverage delta** rather than absolute coverage. A `diff-cover` rule requiring 80 % on *changed lines only* would have rejected this PR at `0 %`, because its denominator is 200 rather than 5,200.
+
+**One more caution on `omit`.** Every path added to `omit` removes statements from `total`, so the reported percentage rises with no test written. Adding a large untested module to `omit` is the fastest way to "fix" a failing coverage gate and the fastest way to make the gate meaningless. Treat edits to `omit` as changes to the gate itself, and review them accordingly.
+
 ---
 
 ## 12. Interview Questions with Answers
@@ -913,6 +982,47 @@ def check_rate_limit(client: CacheClient, user_id: str) -> bool:
         client.expire(key, WINDOW_SECONDS)
     return count <= LIMIT
 ```
+
+**Decoding the window key.**
+
+**In plain terms.** "Chop the epoch clock into fixed 60-second slabs and name the counter after the slab number — when the clock crosses into the next slab, the name changes and the old count is simply left behind."
+
+The single expression `int(time.time()) // WINDOW_SECONDS` is the entire sliding-window implementation. No timer, no cleanup job, no explicit reset: the counter resets because the *key* changes.
+
+| Symbol | What it is |
+|--------|------------|
+| `int(time.time())` | Whole seconds since the Unix epoch — the raw clock |
+| `WINDOW_SECONDS` | `60`. The slab width, and the divisor that does all the work |
+| `//` | Floor division — throws away the position *within* the slab, keeping only the slab number |
+| `rl:{user_id}:{bucket}` | The Redis key. Two different buckets are two unrelated counters |
+| `expire(key, 60)` | Set only when `count == 1`, so each bucket key self-deletes one window after its first hit |
+
+**Walk one example.** Push the exact frozen timestamps from `test_time_window_rollover_allows_new_requests` through the formula:
+
+```
+  frozen_time = 1,700,000,000.0
+
+    int(t)      = 1700000000
+    t // 60     = 28333333          <- bucket number
+    key         = "rl:user-2:28333333"
+
+    this bucket spans  [28333333 x 60, ... + 59]
+                     = [1699999980, 1700000039]
+    t is 1700000000, i.e. 1700000000 - 1699999980 = 20 s into the slab
+    so only 1700000040 - 1700000000 = 40 s remain in this window
+
+  frozen_time += 61   ->  1,700,000,061.0
+
+    int(t)      = 1700000061
+    t // 60     = 28333334          <- bucket number incremented by exactly 1
+    key         = "rl:user-2:28333334"
+
+    different key -> INCR starts from 0 -> returns 1 -> 1 <= LIMIT -> 200 OK
+```
+
+**Why the test advances by 61 and not by 60.** The frozen timestamp sits 20 seconds into its slab, so a `+41` jump would already have crossed the boundary — but the test author cannot know that offset without doing this arithmetic, and picking a value below `WINDOW_SECONDS` would make the test depend on where in the slab the frozen timestamp happens to land. Advancing by `WINDOW_SECONDS + 1 = 61` guarantees a bucket change from *any* starting offset, because any 61-second span must contain a multiple of 60. That is what makes the test deterministic rather than accidentally passing.
+
+This is also the honest limitation of the design worth raising in an interview: these are **fixed** windows, not truly sliding ones. A user can send 10 requests at `1700000039` and 10 more at `1700000040` — 20 requests in two seconds, both allowed, because the bucket number changed between them. Real sliding-window limiters keep a sorted set of timestamps or two adjacent counters with weighted interpolation; this bucket trick is chosen for being one line and O(1), not for being exact.
 
 ```python
 # app/main.py

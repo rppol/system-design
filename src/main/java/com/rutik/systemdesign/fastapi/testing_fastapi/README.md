@@ -460,6 +460,66 @@ quadrantChart
     respx mock transport: [0.9, 0.45]
 ```
 
+### Decoding the per-test costs into suite runtime
+
+The `ms/test` column only matters multiplied by test count, and `pytest-xdist` only divides part
+of the result:
+
+```
+suite_seconds = sum over strategies of ( tests_i x ms_per_test_i ) / 1000
+
+with pytest-xdist -n N:
+  wall_seconds = serial_seconds + suite_seconds / N
+
+speedup = (serial_seconds + suite_seconds) / (serial_seconds + suite_seconds / N)
+```
+
+**The idea behind it.** "Your suite's runtime is a weighted sum, so the few slow tests dominate
+it — and parallelism only shrinks the part that is actually test execution." The second line is
+Amdahl's Law wearing a pytest hat: whatever `-n N` cannot divide sets a floor no worker count
+gets under.
+
+| Symbol | What it is |
+|--------|------------|
+| `tests_i` | How many tests use strategy `i` from the table above |
+| `ms_per_test_i` | That strategy's cost — `<1`, `1-5`, `10-50`, `100+` ms per the table |
+| `suite_seconds` | Pure execution time, summed across strategies. The divisible part |
+| `serial_seconds` | Collection, imports, DB migrations — paid regardless of `N` |
+| `N` | `pytest-xdist` worker count, the `-n` flag |
+| `speedup` | Ratio against `N = 1`. Always below `N`, capped by `serial_seconds` |
+
+**Walk one example.** A 2,000-test suite mixing all four strategies, using the midpoint of each
+table range:
+
+```
+  strategy                       tests   ms/test        total
+  TestClient + overrides         1,600      1        1,600 ms
+  AsyncClient + rollback           300      3          900 ms
+  Separate test DB                  80     30        2,400 ms
+  Full-process E2E                  20    150        3,000 ms
+                                 -----             ----------
+                                 2,000              7,900 ms  = 7.9 s
+
+  Note the inversion: the 20 E2E tests (1% of the suite) cost 3,000 ms, more
+  than the 1,600 TestClient tests (80% of the suite) cost at 1,600 ms.
+
+  Now suppose collection + imports + migrations cost serial_seconds = 4 s:
+
+    -n 1    4 + 7.9 / 1  = 11.90 s     speedup 1.00x
+    -n 2    4 + 7.9 / 2  =  7.95 s     speedup 1.50x
+    -n 4    4 + 7.9 / 4  =  5.98 s     speedup 1.99x
+    -n 8    4 + 7.9 / 8  =  4.99 s     speedup 2.39x
+    -n 16   4 + 7.9 / 16 =  4.49 s     speedup 2.65x
+
+  Doubling 8 -> 16 workers buys 0.5 s. The 4 s serial floor now dominates.
+```
+
+**Where the real win is.** Rewriting the 20 E2E tests as `TestClient` + `dependency_overrides`
+would cut `3,000 ms` to `20 ms` — more than `-n 16` delivers, on one core, with better isolation.
+Strategy choice beats worker count: an all-E2E 2,000-test suite runs `2,000 x 150 ms = 300 s`
+against `2,000 x 1 ms = 2 s` for the all-`TestClient` version, a `150x` spread that no amount of
+parallelism recovers. Reach for `-n N` only after the mix is already right.
+
 | Client | Sync/Async test | Lifespan | BackgroundTasks | WebSocket |
 |---|---|---|---|---|
 | `TestClient` | Sync | Context manager only | Runs synchronously | Yes |

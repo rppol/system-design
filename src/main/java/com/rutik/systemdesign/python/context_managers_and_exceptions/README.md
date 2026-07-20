@@ -272,6 +272,39 @@ with FileLock("/tmp/myapp.lock"):
     perform_critical_section()
 ```
 
+**What the formula is telling you.** The `__exit__` signature is a four-value contract: "here is
+what killed your block (three values), and here is my one-bit verdict on whether it keeps
+travelling." That single returned bit is the only lever a context manager has over control flow —
+everything else it does is bookkeeping.
+
+| Symbol | What it is |
+|--------|------------|
+| `exc_type` | The exception's class, or `None` if the block finished cleanly |
+| `exc_val` | The exception instance itself — the object carrying the message and args |
+| `exc_tb` | The traceback object; the frame chain from `with` down to the `raise` |
+| return value | The verdict. Truthy = swallow the exception; falsy = let it propagate |
+| `return False` | Explicit "never suppress" — same effect as `None`, clearer to a reader |
+
+**Walk one example.** Four exits through the same `FileLock`, with the flock released every time:
+
+```
+  how the block ended       exc_type        __exit__ returns   what the caller sees
+  ---------------------     -------------   ----------------   --------------------
+  fell off the end          None            False              normal completion
+  raised ValueError         ValueError      False              ValueError propagates
+  raised ValueError         ValueError      True               nothing -- swallowed
+  hit `return` mid-func     None            False              the function returns
+
+  In all four rows the fcntl.flock(LOCK_UN) + os.close() pair ran exactly once.
+  Only the last column changed, and only the return value changed it.
+```
+
+Notice the third row is the dangerous one and the only one an author chooses. A `FileLock` that
+returned `True` would release the lock *and* erase the reason the critical section failed — the
+caller would see a clean return from code that never finished. That is why the method ends in an
+explicit `return False` rather than falling off the end into an implicit `None`: both behave
+identically, but one of them states the intent out loud.
+
 ### 6.2 `@contextlib.contextmanager` — timing and DB transaction
 
 ```python
@@ -335,6 +368,44 @@ def merge_files(paths: list[Path], output: Path) -> None:
 ```
 
 `stack.callback(fn)` is equivalent to `__exit__` with no exception handling — the function is always called, receives no arguments, and its return value is ignored.
+
+**Stated plainly.** "However many things you pushed onto the stack, exactly that many teardowns
+run, in exactly the reverse order." The count is not a detail — it is the guarantee that makes
+`ExitStack` safe when `N` is only known at runtime.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of input paths in `paths` — unknown until the function is called |
+| `N + 1` | Open file handles: the `N` inputs plus the single `output` handle |
+| `N + 2` | Total registered teardowns: `N + 1` handles plus the one `stack.callback` |
+| LIFO | Last-in, first-out — teardown `k` fires before teardown `k - 1` |
+| entry index `k` | Position in the push order, `1..N+2`; exit order is `N+2` down to `1` |
+
+**Walk one example.** Merging three files, tracing the push order against the unwind order:
+
+```
+  push order (entry)                        exit order (LIFO)
+  ------------------------------------      ---------------------------
+  1  enter_context(open paths[0])           5  out.__exit__
+  2  enter_context(open paths[1])           4  callback -> "All files closed"
+  3  enter_context(open paths[2])           3  paths[2].__exit__
+  4  callback(print "All files closed")     2  paths[1].__exit__
+  5  enter_context(open output))            1  paths[0].__exit__
+
+  N = 3 inputs  ->  handles open at peak = N + 1 = 4
+                ->  teardowns registered = N + 2 = 5
+                ->  exit index = (N + 3) - entry index      e.g. entry 2 exits 4th
+
+  Scale it: N = 200 inputs -> 201 handles held at once, 202 teardowns, still all released.
+```
+
+**Why the count matters more than the order.** The reason `ExitStack` beats a hand-written
+`try/finally` here is not the LIFO discipline — it is that partial entry is still safe. If
+`enter_context` on `paths[2]` raises (a missing file, a permissions error), the two handles already
+on the stack unwind normally and the remaining ones were never opened. A hand-rolled loop that
+opened all `N + 1` handles first and wrapped the work in one `finally` leaks every handle opened
+before the failure, because the `finally` never armed. With `N = 200`, that is up to 200 leaked
+descriptors from one bad path in the list.
 
 ### 6.4 Async context managers and FastAPI dependencies
 

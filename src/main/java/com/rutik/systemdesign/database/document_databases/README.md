@@ -93,6 +93,44 @@ flowchart LR
 // Query: db.comments.find({post_id: ObjectId("post1")}) — indexed lookup
 ```
 
+**In plain terms.** The 16MB document limit converts the embed/reference decision into arithmetic:
+"a parent document has a fixed byte budget, so `max_children = 16MB / bytes_per_child` — and if your
+cardinality can exceed that, embedding is not a style choice you will get to keep." The limit is a
+hard server-side error, not a warning, so the number you must know is the divisor.
+
+| Symbol | What it is |
+|--------|------------|
+| 16MB | `16 x 1024 x 1024 = 16,777,216` bytes. BSON's hard per-document ceiling |
+| bytes/child | Serialised size of one embedded sub-document, field names included |
+| `max_children` | `16,777,216 / bytes_per_child` — the cardinality at which inserts start failing |
+| "< 16 sub-docs" | The matrix's *embed* heuristic. Unrelated to the 16MB figure despite the shared 16 |
+
+**Walk one example.** The Section 14 e-learning schema, sized before it was built:
+
+```
+  one enrollment sub-document
+    student_id  ObjectId                       12 bytes
+    enrolled_at ISODate                          8
+    progress    double                           8
+    BSON field names + type bytes + overhead   ~170
+    total                                      ~200 bytes
+
+  budget          16,777,216 / 200            =  83,886 enrollments per course
+
+  the actual course              50,000 enrollments
+    projected size  50,000 x 200              =  10,000,000 bytes = 10.0 MB
+    headroom left   16,777,216 - 10,000,000   =   6.78 MB  ->  33,886 more students
+
+  add one field, e.g. a 135-byte "last_quiz_scores" array, to each sub-document:
+    bytes/child     335                       ->  max_children = 50,081
+    the SAME 50,000-student course now sits at 16.75 MB  ->  BSONObjectTooLarge
+```
+
+**Why this is the failure mode teams hit.** The document worked for years at 50,000 x 200 bytes.
+Nothing about the cardinality changed — a *schema* change did, and the limit was breached by adding
+a field, not a student. That is why the practice rule is "switch to referencing at 1MB", far below
+the actual ceiling: the 16x margin absorbs the schema growth you have not thought of yet.
+
 ---
 
 ## 4. Types / Architectures / Strategies

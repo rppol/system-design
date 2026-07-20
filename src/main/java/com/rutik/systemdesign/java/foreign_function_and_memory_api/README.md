@@ -250,6 +250,50 @@ try (Arena arena = Arena.ofConfined()) {
 }
 ```
 
+**Read it like this.** "`ARRAY_X.set(points, 0L, i, v)` is doing one multiplication and one addition — element index times element size, plus the field's offset inside the element — and the whole point of the layout API is that it does that arithmetic for you, once, at handle-construction time."
+
+Worth making explicit because this is the exact arithmetic people hand-write with `Unsafe` and get wrong. A `VarHandle` built from a path is not a lookup; it is a pre-baked affine formula that the JIT folds into a single addressed load or store.
+
+| Symbol | What it is |
+|--------|------------|
+| base | The segment's starting address (`points`) |
+| `i` | Sequence index — which struct in the array |
+| stride | `POINT_LAYOUT.byteSize()`, the size of one element including any padding |
+| field offset | `byteOffset` of the named field within one element, fixed at layout time |
+| `sequenceElement()` | The path step that contributes `i * stride` |
+| `groupElement("x")` | The path step that contributes the constant field offset |
+
+**Walk one example.** `POINT_LAYOUT` is `{ int x; int y; float z; }` and the sequence holds 1000 of them:
+
+```
+  one element
+      x   JAVA_INT     4 bytes   offset 0
+      y   JAVA_INT     4 bytes   offset 4
+      z   JAVA_FLOAT   4 bytes   offset 8
+                       --------
+      stride = POINT_LAYOUT.byteSize() = 12 bytes   (all fields 4-aligned, no padding)
+
+  whole sequence
+      1000 elements x 12 bytes = 12,000 bytes allocated
+
+  address of the x field of element i
+      base + i * 12 + 0
+
+      i =   0  ->  base +      0
+      i =   1  ->  base +     12
+      i = 500  ->  base +  6,000
+      i = 999  ->  base + 11,988      <- last element starts here, ends at 11,999
+
+  bounds check the JVM performs on each set:
+      11,988 + 4 <= 12,000   ->  ok
+      any i >= 1000 gives 12,000 + 4 > 12,000  ->  IndexOutOfBoundsException, not corruption
+```
+
+That last line is the safety difference from `Unsafe`: the same multiply-and-add
+runs either way, but here the result is compared against `byteSize()` before the
+store. Reaching one element past the end throws instead of quietly overwriting
+whatever the allocator put next in the address space.
+
 ### 6.5 Upcall Stub — Native Code Calls Back into Java
 
 ```java
@@ -314,6 +358,32 @@ Apache Arrow Java stores columnar data in native memory (`MemorySegment` backed 
 ### 7.2 TensorFlow / ONNX Runtime Java Bindings
 
 ML inference libraries expose their operators as C/C++ functions. The Java SDK wraps them using JNI today; the Panama migration path is: `Linker.downcallHandle()` for each native function, `MemorySegment` for tensor data, eliminating the JNI layer entirely. This removes the 30–100 ns JNI crossing overhead per operator call — critical for batched inference with thousands of operator calls.
+
+**The idea behind it.** "A per-call overhead measured in nanoseconds only matters once you multiply it by the call count, so the question is never 'is 50 ns a lot' — it is 'what fraction of my inference budget is call count times crossing cost?'"
+
+Framing it as a fraction is what turns this from trivia into a design decision. The same 50 ns is irrelevant for one call per request and dominant for a graph executed operator by operator.
+
+| Symbol | What it is |
+|--------|------------|
+| crossing cost | Fixed per-call price of the Java-to-native transition, 30-100 ns for JNI |
+| call count | Number of native operator invocations per inference |
+| total overhead | crossing cost times call count — pure tax, no useful work |
+| inference budget | Wall-clock target for one inference, e.g. 5 ms for an interactive model |
+| overhead fraction | total overhead divided by inference budget |
+
+**Walk one example.** A model graph executed as 5,000 individual operator calls against a 5 ms budget:
+
+```
+  crossing cost   call count      total overhead      fraction of a 5 ms budget
+      30 ns          5,000          150,000 ns  = 150 us        3.0 %
+     100 ns          5,000          500,000 ns  = 500 us       10.0 %
+
+  the same model fused down to 1,000 operator calls
+      30 ns          1,000           30,000 ns  =  30 us        0.6 %
+     100 ns          1,000          100,000 ns  = 100 us        2.0 %
+```
+
+Ten percent of the budget spent purely on entering and leaving the JVM is the case that justifies rewriting the binding layer. The two levers are visible in the table and independent: cut the crossing cost (Panama, or Panama plus `Linker.Option.critical()`), or cut the call count by fusing operators so fewer, larger calls cross the boundary.
 
 ### 7.3 Direct NIO FileChannel Mapping as MemorySegment
 
@@ -401,6 +471,46 @@ StructLayout LAYOUT = MemoryLayout.structLayout(
     ValueLayout.JAVA_INT.withName("value")
 );
 ```
+
+**In plain terms.** "Padding is not a design choice the C compiler made — it is the smallest number of bytes that pushes the next field up to the next multiple of its own alignment, and you can compute it exactly rather than guessing at `paddingLayout(3)`."
+
+That matters because a guessed padding count is a silent wrong answer: the Java layout still compiles, still allocates, and still reads — it just reads a field the native side never wrote there.
+
+| Symbol | What it is |
+|--------|------------|
+| offset | Running byte position as you lay fields out in declaration order |
+| alignment `a` | A field's natural alignment; on mainstream ABIs it equals its size (1, 2, 4, or 8) |
+| pad | `(-offset) mod a` — bytes inserted before the field so its offset divides evenly by `a` |
+| struct alignment | The largest alignment among all fields; it also governs the struct's total size |
+| trailing pad | Bytes added at the END so `sizeof(struct)` is a multiple of the struct alignment |
+
+**Walk one example.** The broken `{ byte flag; int value; }` above, laid out field by field:
+
+```
+  field   size  align   offset before   pad = (-offset) mod align   final offset
+  flag      1     1           0          (-0) mod 1 = 0                   0
+  value     4     4           1          (-1) mod 4 = 3                   4
+
+  bytes laid out:
+      byte 0        flag
+      bytes 1..3    PADDING (3 bytes)   <- this is where paddingLayout(3) comes from
+      bytes 4..7    value
+
+  struct alignment = max(1, 4) = 4
+  raw end          = 4 + 4 = 8
+  trailing pad     = (-8) mod 4 = 0
+  sizeof           = 8 bytes
+```
+
+The `3` in `paddingLayout(3)` is not a magic constant — it is `(-1) mod 4`. If
+`value` had been a `double` (align 8) the same rule would have given `(-1) mod 8
+= 7` bytes of padding and a 16-byte struct.
+
+Trailing padding is the term most often forgotten, because it changes nothing
+about where any single field lives. It only shows up when the struct is put in
+an array: the stride is `sizeof`, not the sum of the field sizes, so an omitted
+trailing pad makes element 1 onward land at the wrong address while element 0
+reads perfectly.
 
 ### Pitfall 4: Capturing JVM heap objects in a MemorySegment
 You cannot obtain a stable `MemorySegment` address for a heap object because the GC may move it. `MemorySegment.ofArray()` wraps a heap array but the address is only stable inside a native call with `Linker.Option.critical()` or `synchronized`-like pinning. For heap-to-native copies, always copy the data into an off-heap segment first.
@@ -571,6 +681,50 @@ typedef struct {
 } TradeRecord;              // Total: 28 bytes, no padding needed
 ```
 
+**What this actually says.** "This struct was deliberately field-ordered widest-first so that every field already lands on a legal boundary — the 28 is not luck, it is what you get when you sort by descending alignment."
+
+Reading it that way makes it a technique rather than a fact about this one struct: reorder the same seven fields worst-case and the compiler inserts padding between almost every pair.
+
+| Symbol | What it is |
+|--------|------------|
+| declaration order | The order fields are laid out; C never reorders them for you |
+| natural alignment | 8 for `int64_t`/`double`, 4 for `int32_t`, 2 for `int16_t`, 1 for the byte types |
+| inter-field pad | `(-offset) mod align` inserted before a field whose offset does not divide |
+| raw end | Offset after the last field, before any trailing padding |
+| `RECORD_SIZE` | The stride used to walk the mapped file — `fc.size() / RECORD_SIZE` gives the record count |
+
+**Walk one example.** Lay the seven fields out and confirm every pad is zero:
+
+```
+  field           size  align   offset   pad = (-offset) mod align
+  timestamp_ns      8     8        0        (-0)  mod 8 = 0
+  instrument_id     4     4        8        (-8)  mod 4 = 0
+  quantity          4     4       12        (-12) mod 4 = 0
+  price             8     8       16        (-16) mod 8 = 0
+  side              1     1       24        (-24) mod 1 = 0
+  flags             1     1       25        (-25) mod 1 = 0
+  venue_id          2     2       26        (-26) mod 2 = 0
+                                  --
+  raw end                         28        no inter-field padding anywhere
+
+  record count for the 280 MB file:
+      280,000,000 / 28 = 10,000,000 records     <- matches the measured run
+```
+
+Every pad is zero because each field's offset is already a multiple of its
+alignment — `price` needing offset 16 is the tight case, and the two 4-byte
+fields before it happen to fill exactly to 16.
+
+One caveat on the `28`: a C compiler also applies **trailing** padding to round
+`sizeof` up to the struct's own alignment, which here is 8. That gives
+`(-28) mod 8 = 4` bytes of tail padding and `sizeof(TradeRecord) = 32` on a
+standard x86-64 or AArch64 ABI, while `MemoryLayout.structLayout(...).byteSize()`
+of the seven Java fields returns 28. If the producer writes packed 28-byte
+records the numbers above hold; if it writes plain `TradeRecord[]` the stride is
+32 and the Java side must add `MemoryLayout.paddingLayout(4)` at the end. This is
+exactly the `offsetof`/`sizeof` cross-check that best practice 3 asks for, and it
+is the reason to run it rather than trust a comment.
+
 **Before (Java heap, ByteBuffer parsing — ~650 ns/record):**
 ```java
 // Parsed ~1.5M records/sec; GC pressure from 4 allocations per record
@@ -634,6 +788,49 @@ void reconcile(Path logFile) throws IOException {
 - Panama off-heap mapped: 1.8 s; GC time: 12 ms (<1%); peak heap: 45 MB (just metadata)
 - Throughput: 1.5M records/sec → 5.5M records/sec (+267%)
 - GC pause p99: 240 ms → 3 ms
+
+**Put simply.** "Almost the entire speedup is the GC time disappearing plus the per-record allocation work that used to feed it — divide the wall clock by the record count and the 3.6x becomes a per-record budget you can audit line by line."
+
+Converting a benchmark to nanoseconds per record is the step that makes it checkable. It also exposes whether the parser is even the bottleneck, which for a 500 MB/s producer turns out to be the real question.
+
+| Symbol | What it is |
+|--------|------------|
+| records | 10,000,000 fixed-size entries in the 280 MB file |
+| wall clock | Total elapsed parse time, 6.5 s heap versus 1.8 s off-heap |
+| ns/record | `wall clock / records` — the per-record budget quoted earlier in this case study |
+| GC fraction | GC time divided by wall clock |
+| ingest rate | `records/sec x RECORD_SIZE` — what the parser can actually absorb from disk |
+
+**Walk one example.** Push the two rows through the same three divisions:
+
+```
+                            heap ByteBuffer      Panama off-heap mapped
+  wall clock                    6.5   s               1.8   s
+  records                10,000,000            10,000,000
+
+  ns per record       6.5e9/1e7 = 650 ns     1.8e9/1e7 = 180 ns
+  saved per record                             650 - 180 = 470 ns
+
+  GC time                       1.8   s              0.012 s
+  GC fraction              1.8/6.5 = 27.7 %     0.012/1.8 = 0.67 %
+
+  throughput            1e7/6.5 = 1.54 M/s     1e7/1.8 = 5.56 M/s
+  speedup                                     5.56/1.54 = 3.61x  (+261 %)
+
+  bytes absorbed per second
+      1.54 M/s x 28 B =  43 MB/s              5.56 M/s x 28 B = 156 MB/s
+```
+
+The GC arithmetic accounts for most of the win directly: 1.8 s of the 6.5 s was
+collection, and removing it alone would have taken the run to 4.7 s. The rest —
+4.7 s down to 1.8 s — is the allocation and header-writing work that *created*
+that garbage, which is why "zero GC" saves more than the GC timer shows.
+
+The last row is the sobering one. Even at 156 MB/s the parser trails the 500 MB/s
+producer, so a single reconciliation process still falls behind and you need
+about 500/156 = 3.2, i.e. four, parallel readers over disjoint file ranges. The
+`Arena.ofShared()` in the code is what makes that shardable: a confined arena
+would bind the mapped segment to one thread.
 
 **See also:**
 - [JVM Internals](../jvm_internals/README.md) — GC mechanics, heap vs native memory

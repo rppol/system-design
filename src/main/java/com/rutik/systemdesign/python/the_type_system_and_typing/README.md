@@ -545,6 +545,60 @@ flowchart LR
 read-only. `Callable[[Dog], None]` is contravariant in its parameter type — a function that accepts
 `Animal` can safely stand in for one that accepts `Dog` (Liskov substitution).
 
+#### Decoding the variance rule
+
+**Read it like this.** "If a generic only hands values out, you may narrow what is inside it. If it only takes values in, you may widen what is inside it. If it does both, you may do neither."
+
+Variance is not a Python quirk — it is the type-level statement of the Liskov Substitution Principle. Every rule below falls out of asking one question: *could the substitution let someone put the wrong thing in, or get the wrong thing out?*
+
+| Symbol | What it is |
+|--------|------------|
+| `Dog <: Animal` | "Dog is a subtype of Animal" — the direction every rule is stated relative to |
+| `T_co` (`covariant=True`) | Substitution follows the same direction as `T`. Legal only for producers |
+| `T_contra` (`contravariant=True`) | Substitution runs the opposite direction. Legal only for consumers |
+| `T` (default, invariant) | No substitution in either direction. The safe default for read-write containers |
+| Producer | The class only *returns* `T` — `get()`, `list_all()`, `__getitem__` |
+| Consumer | The class only *accepts* `T` — `put()`, `append()`, a function parameter |
+
+**Walk one example.** Take `Dog <: Animal` and test each container shape by asking what could go wrong:
+
+```
+  covariant       ReadOnlyBox[Dog]  ->  ReadOnlyBox[Animal]?      ALLOWED
+    caller can only call .get(), which hands back a Dog
+    a Dog IS an Animal, so the caller's expectation holds
+    nothing can be put in, so nothing wrong can get in         -> safe
+
+  contravariant   WriteOnlyBox[Animal] -> WriteOnlyBox[Dog]?      ALLOWED
+    caller can only call .put(x) where x is a Dog
+    the box accepts any Animal, and a Dog IS an Animal
+    note the direction FLIPPED: the Animal box stands in for the Dog box
+
+  invariant       list[Dog] -> list[Animal]?                      REJECTED
+    caller sees list[Animal], so append(Cat()) is legal for them
+    but the underlying object is really a list[Dog]
+    result: a Cat now sits in a list[Dog]; dogs[1].bark() -> AttributeError
+
+  invariant       list[Animal] -> list[Dog]?                      REJECTED
+    caller sees list[Dog], so dogs[0].bark() is legal for them
+    but the underlying list may hold a Cat
+    result: the same AttributeError from the other direction
+```
+
+`list` fails in **both** directions, and that is precisely what "invariant" means — it is not a stricter version of covariant, it is the absence of any permitted substitution. The `list[Dog]` case above is the Pitfall 1 bug in Section 10, and reading it as "the caller was handed a wider write interface than the object can honour" explains it in one sentence.
+
+**Why `Callable` is contravariant in parameters but covariant in returns.** A function type is a consumer of its arguments and a producer of its result, so it inherits both rules at once:
+
+```
+  Callable[[Animal], Dog]    can stand in for    Callable[[Dog], Animal]
+
+    parameters:  needs to accept Dog; it accepts every Animal  -> accepts more, fine
+    return:      must produce Animal; it produces Dog          -> produces less, fine
+
+  the general shape: safe to accept MORE than required and return LESS than promised
+```
+
+That last line is the sentence to say in an interview. It is also why the `ReadRepository` fix in Section 14 works: `list_all()` only produces, so marking `T_co` covariant lets `Repository[User]` satisfy `ReadRepository[BaseModel]` — while the full read-write `Repository` must stay invariant because `create()` consumes.
+
 ### 6.7 Annotated [3.9]
 
 ```python
@@ -1087,6 +1141,39 @@ def add(x: int, y: int) -> int:
 
 add(1, "2")  # BeartypeCallHintParamViolation raised at runtime
 ```
+
+#### Decoding the runtime-enforcement budget
+
+**What this actually says.** "Runtime type checking is free per call and expensive per loop — the only number that matters is how many decorated calls sit on the path you care about."
+
+The `~1-5 us per call` figure in the tables above is meaningless in isolation. Multiplied by a call count it becomes a decision rule, and the decision flips entirely depending on whether the decorated function is called once per request or once per row.
+
+| Symbol | What it is |
+|--------|------------|
+| `c` | Per-call overhead of a `@beartype`-decorated function: `1-5 us`, depending on hint complexity |
+| `N` | Number of decorated calls on the path being measured |
+| `c x N` | Total added latency — the only figure worth comparing against a budget |
+| O(1) strategy | beartype's default: it spot-checks one element of a container, not all of them |
+| Static checking | mypy / pyright. `c = 0` at runtime because the work happened before execution |
+
+**Walk one example.** Price the same decorator at three very different call counts:
+
+```
+                                     at c = 1 us      at c = 5 us
+  1 call    (one API boundary)          0.001 ms         0.005 ms
+  50 calls  (a request's service layer) 0.05  ms         0.25  ms
+  1,000 calls                           1.0   ms         5.0   ms
+  100,000 calls (per-row in a loop)   100     ms       500     ms
+
+  against a 100 ms request budget:
+    50 decorated calls at 5 us  =  0.25 ms  =  0.25 % of budget   -> negligible
+    100,000 calls      at 5 us  =  500  ms  =  500 % of budget    -> the request
+                                                                     is now 6x slower
+```
+
+The guidance in Best Practice 11 — "use `beartype` for runtime enforcement in critical paths" — is really this arithmetic. Decorate the **boundary** functions where untrusted data enters (one call per request, `0.25 %` of budget, catches every bad input), and never decorate the per-row helper inside the loop it feeds (`100,000` calls, the request budget gone five times over). The overhead is not a property of beartype; it is a property of where you put the decorator.
+
+**Why the O(1) strategy matters here.** Checking `list[str]` exhaustively would cost `O(len(list))`, so a 100,000-element list would make a *single* call expensive and `c` would stop being a constant at all. beartype instead samples one element per call, keeping `c` flat regardless of container size. The trade is that a list whose 40,000th element is an `int` may pass — runtime enforcement is a probabilistic net across many calls, not a proof. That is exactly why it complements `mypy --strict` rather than replacing it: the static checker gives you the proof, beartype catches what crosses the boundary from code the checker never saw.
 
 See `../fastapi/pydantic_v2_deep_dive/README.md` for how Pydantic v2 uses `Annotated` and `TypeVar` for
 validation at a framework level.

@@ -79,6 +79,49 @@ flowchart LR
 
 **Concrete numbers**: Neo4j relationship traversal is ~O(1) per hop (following a stored pointer); a PostgreSQL recursive CTE is O(log n) per hop for an indexed FK lookup. At 6 degrees of separation, Neo4j resolves millions of hops in seconds while the relational equivalent is O(n^6) — impractical for 1M+ nodes.
 
+**In plain terms.** The contrast is between two different variables. A join costs `O(log n)` where
+`n` is **how big the table is**; a pointer hop costs `O(1)` and the traversal costs
+`O(d1 x d2 x ... x dk)` where each `d` is **how many neighbours that node actually has**. Graph
+traversal is priced by the neighbourhood; joins are priced by the whole dataset. That is the entire
+argument for index-free adjacency, and the reason a graph DB's advantage grows with depth.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Total rows/nodes in the store. Drives B+tree height, so it drives join cost |
+| `d` | Degree — the number of relationships attached to one node |
+| `k` | Hop count (traversal depth) |
+| `log2(n)` | Comparisons in one B+tree descent — the per-hop cost of the relational plan |
+| `b` | Average branching factor. Frontier size at depth `k` is roughly `b^k` |
+
+**Walk one example.** Friends-of-friends-of-friends (3 hops) on a 10M-node social graph, average
+degree 50:
+
+```
+  relational (indexed FK join per hop)
+    one index descent    log2(10,000,000) = 23.25 comparisons
+    3 hops               3 x 23.25 = 69.8 comparisons PER PATH...
+    ...and paths explode: hop1 50, hop2 2,500, hop3 125,000 rows
+    total index work     125,000 x 23.25 = 2,906,250 comparisons
+
+  Neo4j (pointer dereference per hop)
+    per hop              O(1) -- read the next relationship record, no search
+    total work           50 + 2,500 + 125,000 = 127,550 pointer hops
+    ratio                2,906,250 / 127,550 = 22.8x less work
+
+  now grow the graph 100x, to 1,000,000,000 nodes, same degree 50:
+    relational           log2(1e9) = 29.90 -> 125,000 x 29.90 = 3,737,500 comparisons
+    Neo4j                127,550 hops -- UNCHANGED
+```
+
+That last pair is the point. Multiply the graph by 100 and the traversal cost does not move at all,
+because no step of it ever consulted the graph's size. The relational plan gets 29% more expensive
+just from the taller B+tree — before counting the row-fetch I/O.
+
+**But notice what did not shrink.** `b^k` is the same 125,000 in both columns. Index-free adjacency
+removes the `log n` factor; it does **not** remove the exponential frontier growth. That is why
+Section 10's supernode problem and the `[:KNOWS*1..6]` depth caps in Best Practices exist — an
+unbounded traversal on a well-connected graph is expensive in *any* engine.
+
 ### Neo4j Record Files
 
 ```
@@ -111,6 +154,45 @@ Why fixed-size records matter:
   Traversal: follow relationship → find node at ID × 15 bytes offset
   This is the "index-free adjacency" — no B+tree lookup needed
 ```
+
+**What this actually says.** `record offset = ID x record_size` says: "the record ID *is* the
+address." Because every record is the same width, the store never needs a lookup table mapping ID to
+file position — it multiplies. This is the mechanical reason index-free adjacency is `O(1)` rather
+than merely "fast": there is no data structure to search, just arithmetic and a page read.
+
+| Symbol | What it is |
+|--------|------------|
+| `ID` | The node or relationship ID — an ordinal, not an opaque key |
+| `record_size` | Fixed width: 15 bytes per node record, 34 bytes per relationship record |
+| offset | Byte position of that record in the store file. Computed, never searched |
+| Chain pointers | The 4 relationship-ID fields that make a node's edges a doubly-linked list |
+
+**Walk one example.** Verify both record widths, then locate one by ID:
+
+```
+  node record        1 + 4 + 4 + 4 + 2                       = 15 bytes   (checks out)
+                     flag, first-rel, first-prop, labels, extra
+
+  relationship rec   1 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 4 + 1   = 34 bytes   (checks out)
+                     flag, src, tgt, type, 4 chain pointers, next-prop, flags
+
+  find node 1,000,000
+    offset           1,000,000 x 15  =  15,000,000 bytes into nodestore.db
+    cost             one multiply + one page read.  No B+tree, no index, no scan.
+
+  find relationship 1,000,000
+    offset           1,000,000 x 34  =  34,000,000 bytes into relationshipstore.db
+
+  storing 1,000,000,000 relationships
+    file size        1e9 x 34 bytes  =  34 GB, exactly and predictably
+```
+
+**What the fixed width costs you.** Properties cannot live in these records — a 15-byte node has no
+room for a name or an age, which is why they are pushed into a separate variable-length
+`propertystore.db` behind a pointer. So a traversal that only follows structure is pure pointer
+arithmetic, but a traversal that *filters on properties* pays an extra random read per node touched.
+This is precisely why Section 10's advice is to pre-filter before hitting a high-degree node, and why
+the `WHERE` clause placement in a Cypher query changes its cost so dramatically.
 
 ---
 
@@ -402,6 +484,44 @@ flowchart LR
 
 A traversal that reaches the 50M-follower supernode unfiltered scans all 50M relationships; pushing a predicate (mutual connections, recency) before the hop — strategy (1) above — shrinks that same hop to hundreds of edges.
 
+**Put simply.** The supernode problem is `b^k` with one enormous `b`: "traversal cost is the product
+of the degrees along the path, so a single 50-million-degree node multiplies the cost of every path
+that touches it." A predicate applied *before* the hop changes `b` itself, and because `b` is a
+factor rather than a term, shrinking it shrinks everything downstream of it too.
+
+| Symbol | What it is |
+|--------|------------|
+| `b` | Branching factor at a hop — the degree of the node you are expanding |
+| `k` | Traversal depth |
+| `b^k` | Frontier size at depth `k`; total work is the sum over all depths |
+| Pre-filter | A predicate evaluated before expanding, replacing `b` with a much smaller `b'` |
+| ~100ns | Rough cost of one pointer dereference against a warm page cache |
+
+**Walk one example.** "Who follows people who follow @celebrity?" — a 2-hop query, with and without
+the pre-filter. Assume the celebrity has 50M followers, each following ~200 accounts:
+
+```
+  naive: expand the supernode first
+    hop 1   b1 = 50,000,000                    edges scanned  50,000,000
+    hop 2   b2 = 200                           edges scanned  50e6 x 200
+                                                            = 10,000,000,000
+    time    1e10 hops x 100 ns                = 1,000 s     = 16.7 minutes
+
+  mitigated: pre-filter to mutual + active-in-last-30-days first
+    hop 1   b1' = 500 (after the predicate)    edges scanned  500
+    hop 2   b2  = 200                          edges scanned  500 x 200 = 100,000
+    time    100,500 hops x 100 ns             = 0.01 s      = 10 ms
+
+  reduction on hop 1        50,000,000 / 500       = 100,000x
+  reduction on total work   10,000,100,000 / 100,500 = 99,504x
+```
+
+Note that the pre-filter's 100,000x cut at hop 1 propagates almost intact to the total, because hop 2
+multiplies whatever hop 1 handed it. This is why the fix must be applied *upstream* of the supernode:
+a `WHERE` clause after the expansion still pays the full 10 billion dereferences and only discards
+the results afterwards. Same Cypher predicate, two very different query plans — which is exactly what
+`PROFILE` is for.
+
 **Pitfall 3: Treating Neo4j as a general database**
 A team replaced their entire PostgreSQL with Neo4j. Simple queries like "count all users by country" required full graph scans (no columnar optimization). Customer reports taking 30 minutes. Graph databases are not good at aggregation over all nodes. Fix: use PostgreSQL for tabular analytics, Neo4j only for relationship-heavy queries.
 
@@ -560,5 +680,46 @@ ORDER BY chain_length DESC LIMIT 5
 - Average query time (3-hop ring): 2ms (vs 500ms+ for equivalent PostgreSQL recursive CTE at 10M accounts)
 - Real-time scoring: each incoming transaction scored in < 10ms
 - Fraud detection rate improved from 2% (rule-based) to 23% (graph patterns)
+
+**The idea behind it.** The `<10ms` real-time budget is really a statement about `b^k`: "a
+variable-length pattern `[:SENT_TO*2..5]` visits `b^2 + b^3 + b^4 + b^5` paths, so the depth bound
+and the branching factor together decide whether this query fits in the transaction path or belongs
+in a batch job." The `*2..5` in the Cypher is not stylistic — it is the cost cap.
+
+| Symbol | What it is |
+|--------|------------|
+| `b` | Out-degree: how many accounts a typical account has sent money to |
+| `*2..5` | Depth bound in the Cypher pattern — the `k` range actually walked |
+| `sum b^k` | Total paths explored across all depths in range |
+| `r.ts > now - 1 day` | The predicate that keeps `b` small by discarding cold edges before expanding |
+
+**Walk one example.** Query 1 (ring detection) under two different branching factors:
+
+```
+  ordinary account, b = 8 (recent SENT_TO edges only, after the 1-day filter)
+    depth 2      8^2 =        64 paths
+    depth 3      8^3 =       512
+    depth 4      8^4 =     4,096
+    depth 5      8^5 =    32,768
+    total                37,440 paths  x 100 ns  =  3.74 ms   -> inside the 10 ms budget
+
+  money-mule hub, b = 20 (no time filter, or a genuinely busy account)
+    total       20^2 + 20^3 + 20^4 + 20^5 = 3,368,400 paths
+                                     x 100 ns  =  336.84 ms   -> 34x over budget
+
+  what one extra hop costs at b = 8
+    extending *2..5 to *2..6:  + 8^6 = 262,144 paths, a 7x jump in total work
+```
+
+The two rows show why the 1-day `r.ts` predicate is load-bearing rather than a business rule: it is
+what holds `b` near 8 instead of 20, and `b` sits under an exponent. The stated `2ms vs 500ms+`
+PostgreSQL comparison is the same story from the other side — a recursive CTE pays `log2(10M) = 23`
+comparisons per expansion on top of the identical path count, a 250x wall-clock gap.
+
+**What the detection-rate numbers mean.** Going from 2% to 23% is an 11.5x improvement in *recall*,
+not in accuracy. On 1M transactions at a 1% true fraud rate: rule-based catches `10,000 x 0.02 = 200`
+fraudulent transactions and misses 9,800; the graph patterns catch `10,000 x 0.23 = 2,300` and still
+miss 7,700. Graph traversal surfaces the structural patterns — rings, shared devices — that no
+single-row rule can express; it does not make the problem solved.
 
 **Result**: Graph traversal found patterns invisible to rule-based systems — particularly ring transactions that span 5+ hops and money mule networks identified by shared device fingerprints across "unrelated" accounts.

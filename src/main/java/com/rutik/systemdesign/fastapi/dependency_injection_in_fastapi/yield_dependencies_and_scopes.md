@@ -379,6 +379,56 @@ async def read_data(conn: asyncpg.Connection = Depends(get_conn)):
 
 **Why it matters**: At 100 req/s the broken version creates and destroys 100 pools per second. Each pool opens 5–20 TCP connections to Postgres. That is 500–2000 TCP handshakes per second instead of 5–20 persistent connections. The fix reduces Postgres connection load by 99%.
 
+#### Decoding the scope mistake
+
+Every number in that paragraph comes from one substitution — swapping *per process* for *per
+request* in the denominator:
+
+```
+request-scoped :  handshakes_per_second = RPS x connections_per_pool
+app-scoped     :  handshakes_total      = connections_per_pool      (once, at startup)
+
+setup_concurrency = RPS x setup_seconds        (Little's Law on the setup itself)
+```
+
+**Stated plainly.** "Putting an app-lifetime resource behind a request-scoped `yield` multiplies
+its startup cost by your traffic." Nothing about the pool changed; only how often the line
+runs. Scope is a multiplier, and the multiplier is your request rate.
+
+| Symbol | What it is |
+|--------|------------|
+| `RPS` | Requests per second — `100` in the comment above |
+| `connections_per_pool` | `min_size=5` to `max_size=20` from `asyncpg.create_pool` |
+| `setup_seconds` | `~0.5` s — what `create_pool()` costs before it can yield |
+| `handshakes_per_second` | New TCP connections to Postgres per second. What the DB feels |
+| `setup_concurrency` | Pool creations in flight at once, by Little's Law |
+
+**Walk one example.** The comment's `100 req/s` against `~500 ms` pool creation:
+
+```
+  BROKEN (request-scoped)
+    pools created per second        = 100
+    handshakes/s at min_size=5      = 100 x  5 =   500
+    handshakes/s at max_size=20     = 100 x 20 = 2,000
+    setup_concurrency               = 100 x 0.5 s = 50 pools being built simultaneously
+    added latency per request       = ~500 ms, paid before the handler even starts
+
+  FIXED (app-scoped, lifespan)
+    pools created total             = 1
+    handshakes total                = 20, once at startup
+    added latency per request       = ~0 ms
+
+  Over a 60-second window, at the conservative min_size=5 end:
+    broken : 500 handshakes/s x 60 s = 30,000 TCP handshakes
+    fixed  :                              20 TCP handshakes
+    reduction = 1 - 20 / 30,000 = 99.93%
+```
+
+The stated "99%" is the floor, not the estimate — the true figure is `99.93%` at `min_size`, and
+higher still at `max_size`. Note also the `~500 ms` is not just throughput cost: it lands on
+p99 latency of every single request, because the dependency must finish setup before `yield`
+hands control to the handler.
+
 ### 6.4 Request-Scoped Caching
 
 ```python
@@ -659,6 +709,52 @@ async def send_email(
 | Use with async libraries | Cannot call `await` | Natural |
 | Overhead | ~0.03ms | ~0.05ms |
 | Use case | Sync ORMs (psycopg2/SQLite) | asyncpg, aioredis, httpx |
+
+#### Decoding the ~0.05 ms overhead figure
+
+A per-dependency cost only becomes interesting once you multiply it by the two things that
+scale — tree size and traffic:
+
+```
+resolution_ms_per_request = distinct_dependencies x overhead_ms
+
+cpu_ms_per_second = resolution_ms_per_request x RPS
+
+core_fraction     = cpu_ms_per_second / 1000
+```
+
+**Read it like this.** "Each distinct dependency in the tree costs about 0.05 ms, so the tax is
+the size of your dependency graph times how often you resolve it." *Distinct* is the load-bearing
+word — the request cache means a dependency referenced five times is resolved once, so the
+multiplier is the node count of the DAG, not the edge count.
+
+| Symbol | What it is |
+|--------|------------|
+| `overhead_ms` | `~0.05` for async yield deps, `~0.03` for sync — the row above |
+| `distinct_dependencies` | Unique callables resolved this request. Cached repeats are free |
+| `resolution_ms_per_request` | DI's slice of one request's latency budget |
+| `RPS` | Requests per second on this worker |
+| `cpu_ms_per_second` | Milliseconds of CPU per wall-clock second spent purely resolving deps |
+| `core_fraction` | `cpu_ms_per_second / 1000` — the share of one core DI consumes |
+
+**Walk one example.** Async yield deps at `0.05 ms`, worker serving `1,000` req/s:
+
+```
+  distinct deps   per-request DI cost      CPU per second       share of one core
+      1           1 x 0.05 = 0.05 ms        0.05 x 1000 =  50 ms        5%
+      3           3 x 0.05 = 0.15 ms        0.15 x 1000 = 150 ms       15%
+      6           6 x 0.05 = 0.30 ms        0.30 x 1000 = 300 ms       30%
+     10          10 x 0.05 = 0.50 ms        0.50 x 1000 = 500 ms       50%
+
+  Sync deps instead (0.03 ms), 6 distinct:
+      6 x 0.03 = 0.18 ms  ->  180 ms/s  ->  18% of a core
+      but any blocking I/O inside them stalls the loop, so the 0.02 ms saved
+      is never the reason to choose sync.
+```
+
+At a 6-dependency tree and 1,000 req/s, DI resolution alone is 30% of a core — invisible in a
+profile of one request (`0.30 ms`), unmissable in aggregate. That is the case for keeping auth
+chains shallow and for never adding a dependency purely to tidy up a signature.
 
 ### use_cache=True vs use_cache=False
 

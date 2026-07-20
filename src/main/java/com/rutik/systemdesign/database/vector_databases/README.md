@@ -39,6 +39,38 @@ Memory per vector:
   100M vectors × 6KB = 600GB RAM (too large for single node → distributed or quantization)
 ```
 
+**In plain terms.** "Your RAM bill is decided before the database is even chosen: it is
+dimensions times bytes-per-number times vector count, and no index can shrink that floor."
+
+This framing matters because engineers habitually budget vector storage by row count. Row
+count is only one of three factors — swapping a 3072-dim model for a 768-dim one cuts memory
+4x without deleting a single row.
+
+| Symbol | What it is |
+|--------|------------|
+| `dimensions` | Numbers in one embedding. Fixed by the model: 384 (MiniLM) to 3072 (text-embedding-3-large) |
+| `4 bytes` | Size of one float32 coordinate. float16 halves it; int8 quantization quarters it |
+| `N` | How many vectors you store — chunks, not documents. A 50-page PDF is often 200+ vectors |
+| `dim x 4 x N` | Total raw payload. Index structures and metadata sit on top of this, never below it |
+
+**Walk one example.** Same 1M chunks, five different embedding models:
+
+```
+  model                       dims   bytes/vector   1M vectors
+  all-MiniLM-L6-v2             384       1536         1.536 GB
+  text-embedding-004           768       3072         3.072 GB
+  Cohere embed-v3             1024       4096         4.096 GB
+  text-embedding-3-small      1536       6144         6.144 GB
+  text-embedding-3-large      3072      12288        12.288 GB
+
+  Same corpus. Same rows. 8x spread in RAM, purely from the model choice.
+```
+
+The 100M-vector line above is the same arithmetic run one step further: 6144 x 100M =
+614.4 GB, which no single commodity node holds — hence the "distributed or quantization"
+fork. Quantization attacks the `4 bytes` term; sharding attacks the `N` term; picking a
+smaller model attacks `dimensions`. Those are the only three levers that exist.
+
 ### Similarity Metrics
 
 ```
@@ -60,6 +92,41 @@ Euclidean Distance (L2): straight-line distance in vector space
 Note: for normalized vectors (||v|| = 1), cosine similarity = dot product
       OpenAI embeddings are normalized → use dot product (avoids division)
 ```
+
+**Read it like this.** "Cosine similarity asks one question only: are these two arrows
+pointing the same way? Divide out both lengths and all that survives is the angle."
+
+That division is the whole point. A long document and a one-line summary about the same
+topic produce vectors of very different magnitude but nearly the same direction — cosine
+calls them similar, raw dot product would not.
+
+| Symbol | What it is |
+|--------|------------|
+| `a · b` | Dot product: multiply matching coordinates, add them up. One number |
+| `\|\|a\|\|` | Length of vector a, i.e. `sqrt(sum of its squared coordinates)` |
+| `(a·b)/(\|\|a\|\| x \|\|b\|\|)` | The dot product with both lengths divided out — leaves `cos(angle)` |
+| `sqrt(sum (ai - bi)^2)` | Euclidean distance: how far apart the arrow *tips* are, lengths included |
+
+**Walk one example.** Two 3-dim vectors, both already unit length:
+
+```
+  a = [0.60, 0.80, 0.00]
+  b = [0.00, 0.80, 0.60]
+
+  dot     : 0.60x0.00 + 0.80x0.80 + 0.00x0.60 = 0.64
+  ||a||   : sqrt(0.36 + 0.64 + 0.00) = sqrt(1.00) = 1.0
+  ||b||   : sqrt(0.00 + 0.64 + 0.36) = sqrt(1.00) = 1.0
+  cosine  : 0.64 / (1.0 x 1.0) = 0.64        -> angle = 50.21 degrees
+  L2 dist : sqrt(0.36 + 0.00 + 0.36) = 0.8485
+
+  Check: sqrt(2 - 2 x 0.64) = 0.8485. Identical.
+```
+
+That last line is why the "technically equivalent for normalized vectors" note in Pitfall 1
+holds: when both lengths are 1, `L2 = sqrt(2 - 2 x cosine)`, a strictly decreasing function
+of cosine. Ranking by smallest L2 and ranking by largest cosine give the *same order*. The
+trap is that the identity needs `||a|| = ||b|| = 1` — feed unnormalized vectors to an L2
+index and long documents drift away from everything, so the ordering silently diverges.
 
 ---
 
@@ -97,6 +164,46 @@ Performance:
   Memory: O(N × M) — extra edges stored in graph
   Typical recall@10: 95-99% vs exact search
 ```
+
+**What this actually says.** "M is how many friends each vector keeps permanently, ef is how
+many leads the search chases before giving up. The first costs memory forever, the second
+costs latency per query."
+
+Keeping the two straight is the single most useful thing to know about HNSW tuning: raising
+`M` requires an index rebuild and permanently enlarges the graph, while `ef` is a session
+variable you can raise for one slow-but-accurate query and drop again.
+
+| Symbol | What it is |
+|--------|------------|
+| `M` | Edges stored per node per layer, default 16. This is the `O(N x M)` memory term |
+| `ef_construction` | Candidate list size while *building*, default 200. Better graph, slower build |
+| `ef` | Candidate list size while *searching*, default 50. Bigger = higher recall, slower query |
+| `N` | Vector count. Appears as `log N` in query time — the "highway layers" payoff |
+| `O(N x M x log N)` | Build cost: every vector navigates `log N` layers wiring `M` edges at each |
+
+**Walk one example.** 1M vectors at 1536 dims, edges stored as 8-byte node IDs:
+
+```
+  raw vector payload : 1536 x 4        = 6144 bytes/vector -> 6.144 GB
+  graph edges, M=16  :   16 x 8        =  128 bytes/vector -> 0.128 GB
+  total                                   6272 bytes/vector -> 6.272 GB
+
+  M =  16  ->  6.272 GB   graph is  2.08% of the payload
+  M =  32  ->  6.400 GB   graph is  4.17% of the payload
+  M =  64  ->  6.656 GB   graph is  8.33% of the payload
+```
+
+The lesson interviewers want: at 1536 dims the graph is *noise* next to the vectors. Even
+quadrupling `M` from 16 to 64 adds 6.1% to total memory. On 384-dim vectors the same M=16
+graph is 8.33% of a 1536-byte payload — the smaller the embedding, the more the graph
+matters. "HNSW uses a lot of memory" is really "HNSW keeps every raw vector resident."
+
+**Why `ef` cannot be smaller than `k`.** `ef` is the size of the candidate frontier; the
+final answer is the best `k` of it. Ask for `k=10` with `ef=5` and there are literally not
+enough candidates to fill the result. The greedy descent is also a local search — with
+`ef=1` it commits to the first improving neighbour and can dead-end in a pocket of the graph
+that has no path to the true nearest neighbour. Enlarging `ef` to 50 keeps 50 escape routes
+open at once, which is exactly how the 95-99% recall above is bought.
 
 ### IVF (Inverted File Index)
 
@@ -164,6 +271,44 @@ flowchart LR
     class Top io
 ```
 
+**Put simply.** "Sort every vector into `nlist` buckets once, then at query time open only
+the `nprobe` buckets closest to the question and ignore the rest."
+
+The tradeoff has a shape worth memorising: recall climbs steeply for the first few probes
+then flattens, while work climbs linearly forever. That gap is where the useful settings
+live.
+
+| Symbol | What it is |
+|--------|------------|
+| `nlist` | Number of k-means clusters built at index time. Typical `sqrt(N)` to `16 x sqrt(N)` |
+| `nprobe` | Clusters actually scanned per query. The only knob you turn at runtime |
+| `N / nlist` | Average vectors per cluster — how much work one probe costs |
+| `nlist + nprobe x (N/nlist)` | Total distance computations: pick the centroids, then scan inside |
+
+**Walk one example.** 1M vectors, `nlist=4000`, so 1,000,000 / 4000 = 250 vectors per cluster:
+
+```
+  nprobe   centroid cmps   vectors scanned   total cmps   vs exact 1,000,000
+       1        4000         1 x 250 =   250      4,250     235x fewer
+       8        4000         8 x 250 = 2,000      6,000     167x fewer
+      32        4000        32 x 250 = 8,000     12,000      83x fewer
+     128        4000       128 x 250 =32,000     36,000      28x fewer
+    4000        4000      4000 x 250 =1,000,000  1,004,000   SLOWER than exact
+```
+
+Two things fall out. First, the `nprobe=4000` row is why the parameter block says searching
+every cluster "defeats the purpose" — you pay the full brute-force scan *plus* 4000 wasted
+centroid comparisons. Second, look at the plateau: going from nprobe=1 to nprobe=32 costs
+under 3x the work (4,250 to 12,000 comparisons) and buys the jump from the ~70% recall of a
+single cluster to the ~95% balance point. Going from 32 to 128 costs another 3x for a few
+recall points. The knee sits around nprobe = 1% of nlist.
+
+**Why nlist near `sqrt(N)` is the default.** Total work is `nlist + nprobe x (N/nlist)`.
+Too few clusters and each one is enormous, so every probe is a long scan; too many and the
+centroid pass alone dominates before you have scanned a single vector. `sqrt(1,000,000)` =
+1000 balances the two halves, and the `16 x sqrt(N)` upper end trades a bigger centroid pass
+for much tighter clusters — which is the recipe the file's `nlist=1000-4000` range encodes.
+
 With `nlist=4000` and `nprobe=32`, only 32 of 4000 clusters are ever linear-scanned — every other centroid's cluster (purple, skipped entirely) plays no part in the answer, which is why nprobe=1 gives the "fastest, lowest recall" behavior above and nprobe=32 lands at the "~95% recall" balance point.
 
 ### Product Quantization (PQ) — Compression
@@ -185,6 +330,48 @@ IVF+PQ: combine for large-scale (>100M vectors)
   - PQ compresses within each cluster (fine quantization)
   - Query: O(nprobe × cluster_size × M) operations (fast, mostly integer ops)
 ```
+
+**The idea behind it.** "Chop the vector into M slices, and replace each slice with the ID
+of the nearest of 256 pre-learned prototype slices. You store the IDs, not the numbers."
+
+The compression is not a clever encoding of the original floats — it is a deliberate
+substitution of a *lookalike*. That is why PQ recall loss is irreducible: the original
+coordinates are gone, and the index only ever sees the prototype it was rounded to.
+
+| Symbol | What it is |
+|--------|------------|
+| `M` | Sub-vectors the embedding is split into, here 96. Each becomes exactly one stored byte |
+| `dim / M` | Dimensions per sub-vector: 1536 / 96 = 16. Wider slices = harsher rounding |
+| `k = 256` | Prototypes learned per sub-space. 256 is chosen so an ID fits in one byte exactly |
+| `codebook` | The `M x 256` prototype table. Stored once for the whole index, not per vector |
+| compression | `(dim x 4) / (M x 1)` — original bytes over code bytes |
+
+**Walk one example.** One text-embedding-3-small vector, then the whole 100M-vector index:
+
+```
+  original : 1536 dims x 4 bytes                    = 6144 bytes
+  split    : 1536 / 96                              =   16 dims per sub-vector
+  encode   : 96 sub-vectors x 1 byte (a centroid ID)=   96 bytes
+  ratio    : 6144 / 96                              =   64x smaller
+
+  at 100M vectors
+    float32 : 6144 x 100,000,000                    = 614.4 GB   -- needs a cluster
+    PQ code :   96 x 100,000,000                    =   9.6 GB   -- fits one big node
+    codebook: 96 x 256 x 16 dims x 4 bytes          =   1.57 MB  -- once, total
+```
+
+The codebook line is the punchline: 1.57 MB of prototypes, shared by all 100 million
+vectors, is what buys the 604.8 GB saving. Amortised over 100M vectors the table costs
+0.016 bytes each, which is why PQ's compression ratio is quoted as a flat 64x with no
+per-vector footnote.
+
+**Why `k = 256` and not 1024.** The ID has to be *stored*, and 256 prototypes is the largest
+set addressable in a single byte. Jump to `k=1024` and each ID needs 10 bits, in practice
+rounded up to 2 bytes — compression halves to 32x while recall improves only slightly,
+because the error is dominated by squeezing 16 real dimensions into one prototype, not by
+having too few prototypes. The 5-15% recall loss quoted above is the price of that
+16-dims-to-1-ID collapse, and it is why production systems rescore PQ's top candidates
+against the full float vectors before returning results.
 
 **Visualizing PQ compression: splitting then quantizing a vector**
 

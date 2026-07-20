@@ -380,6 +380,40 @@ class FontFactory {
 }
 ```
 
+**The idea behind it.** "`[-128, 127]` is not a tuning constant someone benchmarked — it is the range of a signed byte, 256 values, chosen because that is the cheapest set that covers almost every integer a program actually boxes."
+
+Seeing it as `2^8` rather than as two arbitrary numbers is what makes the `==` trap memorable: the boundary is at 127/128 because that is where a byte overflows, and nothing about your program changes at that point — only the identity of the object does.
+
+| Symbol | What it is |
+|--------|------------|
+| `[-128, 127]` | The `byte` range: `-2^7` through `2^7 - 1` |
+| 256 | `2^8` — how many `Integer` instances `IntegerCache` pre-allocates at class init |
+| 16 bytes | One `Integer` on a 64-bit JVM: 12-byte header + 4-byte `int` value, already 8-aligned |
+| `Integer.valueOf(v)` | Returns the cached object when `v` is in range, `new Integer(v)` otherwise |
+| `==` on boxed values | Reference identity — true only when both sides came from the cache |
+
+**Walk one example.** What the cache costs, and what it saves:
+
+```
+  Cache footprint, paid once at IntegerCache class init:
+    256 Integer objects   x 16 bytes  =  4,096 bytes
+    the Integer[] itself  256 x 4 + 16 header  =  1,040 bytes   (compressed oops)
+                                            -----------------
+                                            5,136 bytes  ~ 5 KB
+
+  Boxing 1,000,000 values that all fall inside the range:
+    with cache    :        0 allocations,     0 bytes   (same 256 objects reused)
+    without cache : 1,000,000 allocations,   16 MB churned through eden
+
+  Crossing the boundary changes nothing but identity:
+    Integer a = 127, b = 127;   a == b       ->  true    both are cache[127 + 128]
+    Integer p = 128, q = 128;   p == q       ->  false   two fresh 16-byte objects
+                                a.equals(b)  ->  true
+                                p.equals(q)  ->  true    value never stopped matching
+```
+
+Five kilobytes to eliminate 16 MB of garbage on a hot boxing path is why the cache exists, and the `==` trap is the price. Note that the trap is *worse* than an always-wrong comparison would be: an always-wrong one fails immediately in the first test. This one passes every test written with small numbers and fails the first time production sees an id above 127, which is precisely the shape of bug that reaches customers. Use `.equals()` — or better, do not box at all.
+
 ### Template Method vs Strategy
 
 ```java
@@ -450,6 +484,37 @@ class DataProcessor {
 **Use Builder** when: more than 3 constructor parameters, some optional, need invariant validation at build time. JavaBeans setters are not builders — they allow partially constructed invalid objects.
 
 **Use Decorator** when: you need to add behavior in combinations without subclass explosion. `n` behaviors → `n` decorators combinable in `2^n` ways vs `2^n` subclasses.
+
+**Stated plainly.** "You write one class per *behavior* and get every *combination* for free — the class count grows by adding, the capability count grows by multiplying, and Decorator is the pattern that puts you on the right side of that gap."
+
+The reason this is worth stating as arithmetic rather than as advice: the inheritance alternative is not merely uglier, it is a different growth curve. At `n = 3` the gap is a rounding error and subclassing looks fine; the decision is usually made there and the cost arrives later.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of independent behaviors — buffering, compression, typed reads, encryption, ... |
+| `2^n` | Subsets of those behaviors, i.e. every combination a caller might want |
+| `2^n - 1` | The useful subsets; the empty one is just the undecorated component |
+| classes with Decorator | `n` — one `FilterInputStream` subclass per behavior |
+| classes with subclassing | `2^n - 1` — one named class per combination you want to support |
+
+**Walk one example.** The JDK's own `InputStream` behaviors from §5, `n = 3` (`Buffered`, `GZIP`, `Data`):
+
+```
+  Decorator   :  3 classes                                   ->  2^3 - 1 = 7 combinations
+  Subclassing :  7 classes  (BufferedIS, GzipIS, DataIS,
+                 BufferedGzipIS, BufferedDataIS,
+                 GzipDataIS, BufferedGzipDataIS)             ->  the same 7
+
+  Add ONE behavior (say CipherInputStream), n = 3 -> 4:
+    Decorator   :  3 -> 4 classes        (+1,  additive)
+    Subclassing :  7 -> 15 classes       (+8,  doubles every time)
+
+  n = 8 behaviors:
+    Decorator   :    8 classes
+    Subclassing :  255 classes           <- 32x more code for identical capability
+```
+
+Order is the part the `2^n` figure understates. `new GZIPInputStream(new BufferedInputStream(...))` buffers the compressed bytes; swapping the two buffers the decompressed ones — different performance, both legal. Counting ordered chains instead of subsets gives `sum(P(n,k))` for `k = 1..n`, which is `15` at `n = 3` and `109,600` at `n = 8`. No subclass hierarchy enumerates that, and it is why the chain is assembled at the call site rather than named in a class declaration.
 
 **Use Proxy** when: you need transparent interception (logging, caching, auth, transactions) on an interface. Use CGLIB if the target is a concrete class.
 

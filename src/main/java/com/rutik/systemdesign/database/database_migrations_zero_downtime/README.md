@@ -137,6 +137,33 @@ CREATE INDEX CONCURRENTLY idx_users_email ON users (email);
 ALTER TABLE users ADD INDEX idx_email (email), ALGORITHM=INPLACE, LOCK=NONE;
 ```
 
+**The idea behind it.** "Paying three times the build time to avoid blocking writes is almost always the right trade, because the blocking version's cost is measured in outage minutes while the concurrent version's cost is measured in nobody noticing."
+
+The `3x` is not overhead in the usual sense. `CONCURRENTLY` makes two full passes over the table instead of one and waits out every transaction older than each pass, precisely so it never holds a lock that a writer needs.
+
+| Symbol | What it is |
+|--------|------------|
+| standard `CREATE INDEX` | One pass, holds `ShareLock` — reads proceed, **writes block** for the whole build |
+| `CONCURRENTLY` | Two passes plus two waits for old transactions to drain. Takes `ShareUpdateExclusiveLock`, which blocks no DML |
+| `3x` | Rule-of-thumb multiplier on build time: two passes plus the transaction-drain waits |
+| INVALID index | What a failed `CONCURRENTLY` leaves behind. Not used for queries, but still maintained on every write |
+| blocked-write time | The number that matters. Zero for `CONCURRENTLY`, equal to full build time otherwise |
+
+**Walk one example.** A build that takes 20 minutes the blocking way:
+
+```
+                        build time     writes blocked     effective outage
+  CREATE INDEX             20 min          20 min             20 min
+  CREATE INDEX
+    CONCURRENTLY        20 x 3 = 60 min      0 min              0 min
+
+  cost of the choice:  +40 min of build,  -20 min of outage
+```
+
+Trading 40 extra minutes of background work for 20 minutes of write availability is the entire argument, and it only gets more lopsided as the table grows — build time scales with table size, but so does the outage you avoid.
+
+**What the INVALID-index failure mode actually costs.** A half-finished `CONCURRENTLY` leaves an index that the planner ignores but the storage engine still updates on every `INSERT` and `UPDATE`. You get the full write amplification of the index with none of the read benefit, indefinitely, and nothing errors — which is why Pitfall 2 treats detection via `pg_index.indisvalid` as a routine check rather than an incident response step.
+
 **RENAME COLUMN — dual-write period**:
 ```sql
 -- Dangerous: rename column and deploy app simultaneously = downtime if deploy is partial
@@ -224,6 +251,44 @@ FORWARD:   Old schema can read data written with new schema (old readers, new wr
 FULL:      Both backward and forward compatible
            Only add/remove fields with defaults
 ```
+
+**Stated plainly.** "Compatibility is named after which side is allowed to be new — BACKWARD means the reader may upgrade first, FORWARD means the writer may, and FULL means you no longer have to care about deploy order."
+
+The direction names confuse everyone because they describe *who is reading old data*, not who deploys first. The practical translation is a deployment-ordering constraint, which is the same problem the expand-contract pattern solves at the database level.
+
+| Symbol | What it is |
+|--------|------------|
+| BACKWARD | New schema reads old data. Upgrade **consumers first**, producers after |
+| FORWARD | Old schema reads new data. Upgrade **producers first**, consumers after |
+| FULL | Both directions hold. Any deploy order works — the only mode safe in a rolling deploy |
+| field with default | The reader can fill in a missing value, which is what makes adding a field non-breaking |
+| required field | No default, so a reader that does not find it cannot construct the record. The usual compatibility breaker |
+
+**Walk one example.** One change, evaluated in both directions:
+
+```
+  change: ADD field "phone" WITH default ""
+
+    new reader, old data     phone absent -> substitute ""     BACKWARD  ok
+    old reader, new data     phone unknown -> ignore field      FORWARD  ok
+    -> FULL compatible, deploy in any order
+
+  change: ADD field "phone" REQUIRED, no default
+
+    new reader, old data     phone absent -> cannot construct   BACKWARD  FAIL
+    old reader, new data     phone unknown -> ignore field       FORWARD  ok
+    -> FORWARD only: every producer must ship before any consumer
+
+  change: REMOVE required field "name"
+
+    new reader, old data     extra field -> ignore              BACKWARD  ok
+    old reader, new data     name absent -> cannot construct     FORWARD  FAIL
+    -> BACKWARD only: every consumer must ship before any producer
+```
+
+The default value is doing all the work in the first case. Adding one field with a default gives FULL compatibility and zero coordination; adding the same field without one buys a strict deployment ordering across every team that touches the topic.
+
+**Why this belongs in a database migrations module.** It is the identical constraint as the rolling-deploy problem from Section 2: during the deploy window, both old and new versions run at once, so the format between them must satisfy both. `ADD COLUMN` nullable is the database's FULL-compatible change; `DROP COLUMN` is BACKWARD-only, which is exactly why it must wait for the contract phase.
 
 ---
 
@@ -318,6 +383,44 @@ END$$;
 -- After backfill: add NOT NULL constraint (fast if all values present)
 ALTER TABLE users ALTER COLUMN score SET NOT NULL;  -- PG 11+: validates from stats
 ```
+
+The loop's runtime is fully determined by three knobs:
+
+```
+  batches       = max_id / batch_size
+  total_time    = batches x (batch_exec_time + sleep_time)
+  duty_cycle    = batch_exec_time / (batch_exec_time + sleep_time)
+```
+
+**In plain terms.** "Chop the table into fixed-size slices, and the migration takes as long as one slice does multiplied by the number of slices — with the sleep deciding what fraction of the database you are allowed to consume while it runs."
+
+The batch size is not a performance tuning knob; it is a lock-duration knob. Each `UPDATE` holds row locks and generates WAL for exactly one batch, so the batch size sets the worst-case blocking any concurrent query can suffer. The sleep then sets how much headroom is left for production traffic.
+
+| Symbol | What it is |
+|--------|------------|
+| `v_batch_size` | Rows per `UPDATE` (10,000 here). Caps lock duration and WAL burst per statement |
+| `batches` | Number of loop iterations — `max_id / batch_size`, driven by the **key range**, not the row count |
+| `batch_exec_time` | How long one batched `UPDATE` takes. Depends on index quality and row width |
+| `pg_sleep(0.01)` | Deliberate idle between batches. The throttle that keeps the backfill from starving live traffic |
+| `duty_cycle` | Fraction of wall-clock time the backfill is actually hitting the database. Lower is gentler |
+
+**Walk one example.** A 100M-row table, `batch_size = 10000`, `pg_sleep(0.01)`:
+
+```
+  batches = 100,000,000 / 10,000 = 10,000 iterations
+
+  batch_exec    per-iteration    total time         duty cycle
+    0.05 s      0.05 + 0.01       600 s = 10.0 min     83%
+    0.10 s      0.10 + 0.01      1100 s = 18.3 min     91%
+    0.20 s      0.20 + 0.01      2100 s = 35.0 min     95%
+    0.50 s      0.50 + 0.01      5100 s = 85.0 min     98%
+
+  cost of the sleep itself: 10,000 x 0.01 s = 100 s = 1.7 min total
+```
+
+The sleep adds under two minutes across the entire run, yet it is what keeps the loop interruptible and gives autovacuum room between batches. Notice the duty cycle climbing toward 98% as batches get slower: at `0.5 s` per batch the 10 ms sleep is doing almost nothing, and the throttle needs to scale with `batch_exec_time` rather than stay constant.
+
+**Why the batch key range and the row count are not the same thing.** The loop advances `v_cursor` through `id` values, so `batches` is `max_id / batch_size` — and on a table with heavy deletion history, `max_id` can far exceed the live row count. A table with 100M rows but `max_id = 900M` runs 90,000 iterations, most of them updating nothing, turning a 10-minute backfill into a 90-minute one that looks stalled. Batching by a keyset cursor over actual rows, rather than by an id arithmetic range, is what avoids this.
 
 ---
 
@@ -514,3 +617,61 @@ gh-ost \
 2. Run large gh-ost operations during lowest write periods.
 3. Test gh-ost on a production replica first to validate timing estimates.
 4. Use BIGINT for all ID columns from the start on high-volume tables.
+
+The two numbers driving every decision here are a deadline and a duration:
+
+```
+  runway     = (INT_MAX - MAX(id)) / new_id_rate       how long until keys run out
+  migration  = rows / copy_rate                        how long the fix takes
+```
+
+**What this actually says.** "You are in a race between a counter that only goes up and a migration that takes hours — and the migration must finish, with margin, before the counter lands on 2,147,483,647."
+
+Framing it as a race is what makes the urgency legible. The table is not slow or bloated; it is approaching a hard wall in a fixed-width integer, and past that wall every `INSERT` fails at once with no degradation warning first.
+
+| Symbol | What it is |
+|--------|------------|
+| `INT_MAX` | `2,147,483,647` — the largest signed 32-bit integer. The wall |
+| `MAX(id)` | Highest key issued so far. `1.8B` here, already 84% of the way |
+| `new_id_rate` | Rate of **new id allocation** — inserts per second, not total transactions per second |
+| `runway` | Seconds until exhaustion. The alert in Lesson 1 fires when remaining drops below 100M |
+| `copy_rate` | gh-ost rows copied per second, throttled by `--max-load` and `--chunk-size` |
+
+**Walk one example.** The runway, at several allocation rates:
+
+```
+  remaining = 2,147,483,647 - 1,800,000,000 = 347,483,647 ids left  (16% of the range)
+
+  new_id_rate      runway
+     30,000/s      11,583 s  =   0.13 days      migration cannot finish in time
+      1,000/s     347,484 s  =   4.02 days      tight; one paused run loses it
+        100/s   3,474,836 s  =  40.2  days      workable
+         45/s   7,721,859 s  =  89.4  days      the ~90-day figure above
+
+  The 30,000 TPS write rate is transaction throughput; the id-allocation rate is
+  the subset of those that INSERT a new row, and it is the only rate this formula
+  takes. Conflating the two overstates the emergency by three orders of magnitude.
+
+  The alert threshold: 100,000,000 remaining at 45 ids/s = 25.7 days of warning.
+```
+
+**Put simply.** "gh-ost's runtime is just the row count divided by how fast it is allowed to copy, and every throttle you set to protect production shows up directly as a longer migration."
+
+**Walk one example.** The observed migration, back-solved:
+
+```
+  1.8B rows copied in 3.2 h
+
+    copy rate      1.8e9 / (3.2 x 3600 s)      = 156,250 rows/s
+    data rate      500 GB / (3.2 x 3600 s)     =      44.4 MB/s
+    chunks         1.8e9 / chunk-size 2000     =   900,000 chunks
+    per chunk      3.2 h / 900,000             =      12.8 ms
+
+  estimate vs actual
+    dry run at 30K TPS         4.5 h
+    executed at ~15K TPS       3.2 h        -> 28.9% faster
+```
+
+Halving the concurrent write load cut the migration by 29%, not 50% — the chunk copy itself is unchanged, and only the binlog-replay and `--max-load` pausing got cheaper. That asymmetry is worth internalizing before promising a schedule: running in the quiet window helps materially, but it does not scale the whole job down with the traffic.
+
+**Why 12.8 ms per chunk is the number to watch.** Each chunk is one short transaction holding locks on 2,000 rows; at 12.8 ms, concurrent queries see a lock they can wait out without noticing. Raise `--chunk-size` to 20,000 to finish sooner and the per-chunk lock stretches toward 128 ms, which is long enough to surface as p99 latency on a 30,000 TPS table. The chunk size trades total migration duration against the tail latency of everything running alongside it — the same lock-duration tradeoff the batched backfill in Section 6 makes.

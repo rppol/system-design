@@ -197,6 +197,47 @@ flowchart LR
 
 **noeviction production gotcha**: Redis with `noeviction` in a cache role will return `OOM command not allowed when used memory > 'maxmemory'` errors on writes, causing application errors rather than gracefully degrading. Always pair `noeviction` with monitoring and capacity planning, or use an LRU/LFU policy for caches.
 
+**Stated plainly.** "`maxmemory` is not the size of the machine — it is the size of the data,
+and the machine has to be big enough to hold that data twice while a snapshot is running."
+
+Every eviction policy above only fires once `used_memory` reaches `maxmemory`, so where you
+set that limit relative to physical RAM decides whether the policy protects you or the Linux
+OOM killer gets there first.
+
+| Symbol | What it is |
+|--------|------------|
+| `used_memory` | Bytes Redis currently holds. The value the policies compare against |
+| `maxmemory` | The configured ceiling. Hitting it triggers eviction — or an OOM error under `noeviction` |
+| headroom | `physical RAM - maxmemory`. What is left for copy-on-write, buffers, and the OS |
+| COW growth | Pages dirtied during a fork-based snapshot. Worst case equals the whole dataset |
+| alert threshold | 80% of `maxmemory` — the point where you still have time to act |
+
+**Walk one example.** A 16 GB instance, and where `maxmemory` can safely sit:
+
+```
+  maxmemory   headroom   worst-case COW need   survives a full-churn snapshot?
+     4 GB      12 GB            4 GB                   yes
+     8 GB       8 GB            8 GB                   yes, exactly
+    12 GB       4 GB           12 GB                   no
+    15 GB       1 GB           15 GB                   no -- OOM killer
+
+  Realistic churn during a 60s snapshot on the 8 GB config:
+     5% of pages dirtied  -> 0.4 GB COW  -> 8.4 GB resident
+    10% of pages dirtied  -> 0.8 GB COW  -> 8.8 GB resident
+    50% of pages dirtied  -> 4.0 GB COW  -> 12.0 GB resident
+```
+
+The 50% rule for `maxmemory` on a snapshotting instance falls out of the top block: only at
+`maxmemory <= RAM/2` is a full-churn snapshot survivable. Turn persistence off entirely and
+you can push much closer to the ceiling, which is the real reason pure-cache Redis and
+durable Redis are sized so differently.
+
+**Why 80% is the alert line and not 95%.** The OOM war story below crossed at 7.5 GB of an
+8 GB limit — 93.75% — which left essentially no time between the first page and the first
+failed write. Alerting at `0.8 x 8 = 6.4 GB` buys the gap between "trending badly" and
+"rejecting writes". Under `allkeys-lru` that gap is when you add capacity before eviction
+starts silently dropping hot keys; under `noeviction` it is the only warning you get at all.
+
 ### VoltDB Partitioned Execution Model
 
 VoltDB eliminates traditional locking by assigning each table partition to a single execution thread. Since only one thread ever touches partition N's data, there are no shared-memory data races or mutex overhead. All application logic runs as stored procedures — VoltDB executes the entire procedure as a single atomic unit on the relevant partition(s).
@@ -265,6 +306,51 @@ ACID transactions  | Limited (Redis MULTI/EXEC) | Full ACID
 Complex queries    | Limited (Redis no JOIN)     | Full SQL
 ```
 
+**What the formula is telling you.** "You are buying roughly a 100x latency improvement for
+roughly a 200x storage price — so in-memory only pays off when the dataset is small and every
+request touches it many times."
+
+Both ratios come straight from the table's own ranges, and reading them together is the whole
+decision. Neither number alone tells you anything; their product against your access pattern
+does.
+
+| Symbol | What it is |
+|--------|------------|
+| read latency | ~1-100 us in RAM vs ~1-10 ms on disk. Compare like for like: 100 us vs 10 ms |
+| lookups per request | How many round trips one user action makes. The multiplier on latency |
+| $/GB/month | ~$5-20 for cloud RAM, ~$0.02-0.10 for cloud SSD |
+| working set | Bytes actually touched, not bytes stored. The only figure RAM has to hold |
+| RAM ceiling | ~1TB per node. A hard wall, not a budget line |
+
+**Walk one example.** First the latency side — a request that does several lookups:
+
+```
+  lookups   in-memory (100 us each)   disk-backed (10 ms each)
+       1            0.1 ms                    10 ms
+       5            0.5 ms                    50 ms
+      20            2.0 ms                   200 ms
+      50            5.0 ms                   500 ms
+```
+
+Now the cost side, for a 100 GB working set:
+
+```
+  RAM  : 100 GB x  $5/GB  =    $500/mo      100 GB x $20/GB = $2,000/mo
+  SSD  : 100 GB x  $0.02  =      $2/mo      100 GB x $0.10  =    $10/mo
+  ratio: 5 / 0.02 = 250x            20 / 0.10 = 200x
+```
+
+The 20-lookup row is where in-memory earns its price: 2 ms versus 200 ms is the difference
+between a page that renders and one that times out, and $500/mo is cheap for it. The 1-lookup
+row is where teams waste money — 10 ms was already fine, and they are paying 250x storage
+cost to save 9.9 ms nobody perceives.
+
+**Why "working set" and not "dataset" is the number that matters.** The `< 1TB per node`
+ceiling and the price both apply to what you keep resident, and access is almost never
+uniform. A 10 TB dataset with a 200 GB hot set fits an in-memory tier fine — that is exactly
+what the "cold datasets with infrequent access" warning in Section 9 is about. Size RAM by
+what is touched, and let the eviction policy discussed above keep the cold 9.8 TB out.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -293,7 +379,78 @@ Complex queries    | Limited (Redis no JOIN)     | Full SQL
 
 **Fork pause on RDB snapshot**: Redis uses `fork()` to create an RDB snapshot. The fork call itself causes a pause proportional to the page table size (~1ms per GB of used memory on Linux). For a 20GB Redis instance, the fork pause can be 20ms — long enough to trigger downstream timeouts. Fix: use `jemalloc` (default), enable `transparent_hugepage=never`, or run snapshots on a replica, not the primary.
 
+**Read it like this.** "The pause is not the snapshot — it is the kernel copying the page
+table before the snapshot starts, and that table grows with how much memory you use, not
+how much you write."
+
+This is why the pause is unavoidable on a large instance and why it scales with *dataset
+size* rather than write rate. Nothing about tuning the snapshot itself makes it go away.
+
+| Symbol | What it is |
+|--------|------------|
+| `fork()` | The syscall that clones the process so a child can write the RDB while the parent serves |
+| page table | The kernel's map of virtual to physical pages. Its size tracks `used_memory` |
+| ~1 ms per GB | Empirical Linux cost of duplicating that table. The whole pause, in one constant |
+| pause budget | Your downstream client timeout. If the pause exceeds it, requests fail |
+
+**Walk one example.** Fork pause against a 50 ms downstream client timeout:
+
+```
+  used_memory   pause = 1 ms/GB   vs 50 ms client timeout
+      4 GB           4 ms         fine
+     20 GB          20 ms         fine, but visible in p99
+     64 GB          64 ms         EXCEEDS the timeout -- requests fail
+    200 GB         200 ms         four timeouts' worth of stall
+```
+
+The 20 GB row is the one the war story above describes, and the 64 GB row is why "just add
+RAM" is not a free operation on a snapshotting primary: doubling memory doubles the stall.
+
+**Why running snapshots on a replica fixes it completely.** The replica forks and stalls, but
+no client traffic is waiting on the replica's command thread — the pause lands where nobody
+is measuring. `transparent_hugepage=never` helps for a different reason: with 2 MB huge pages,
+a single dirtied byte forces a 2 MB copy instead of a 4 KB one, inflating copy-on-write memory
+by up to 512x per touched page and stretching the whole snapshot window.
+
 **Key expiration avalanche**: 10M keys set with the same TTL (e.g., 3600 seconds, loaded at startup). An hour later, all 10M keys expire simultaneously, causing a cache stampede. Fix: add random jitter to TTL (e.g., `3600 + rand(0, 300)`) when setting keys.
+
+**Put simply.** "Keys loaded together expire together, so the jitter term converts one
+catastrophic second into a few hundred boring ones."
+
+The insight is that the failure was created at *write* time, an hour before anything broke.
+Nothing about the read path or the backing database was misconfigured — the keys were simply
+given a shared deadline.
+
+| Symbol | What it is |
+|--------|------------|
+| `3600` | Base TTL in seconds. Shared by every key, hence the shared expiry instant |
+| `rand(0, 300)` | Jitter window. Each key draws its own offset, spreading the deadline |
+| key count | Keys sharing the base TTL. 10M here, all loaded in one warm-up pass |
+| `keys / window` | Average expirations per second once jitter is applied |
+
+**Walk one example.** 10,000,000 keys, loaded in one startup pass:
+
+```
+  without jitter, TTL = 3600
+    all 10,000,000 expire inside the same second
+    -> 10,000,000 backing-store reads in ~1 second
+
+  with jitter, TTL = 3600 + rand(0, 300)
+    deadlines spread across a 300-second window
+    -> 10,000,000 / 300 = 33,333 expirations per second
+    -> 300x reduction in peak miss rate
+```
+
+33,333 misses per second is a load a database can absorb; 10 million in one second is an
+outage. The jitter did not reduce the total work by a single request — it only changed *when*
+each one arrives, which is the entire mechanism.
+
+**Why the window should scale with the herd, not be a fixed 300.** The peak is
+`keys / window`, so the window is the only lever once key count is fixed. If your backing
+store sustains 5,000 reads/second, a 10M-key herd needs `10,000,000 / 5,000 = 2,000` seconds
+of jitter, not 300. Pick the window from what the database downstream can actually take, then
+check that the resulting staleness (up to `window` seconds of extra cache lifetime) is
+acceptable — the same tension the caching module frames as TTL versus staleness.
 
 **Memcached multi-get amplification**: Application issues a `get_multi` for 1000 keys across 10 Memcached nodes. Each node receives a sub-request; the client waits for the slowest node. Under load, the slowest node determines p99 latency. Fix: limit batch size, use connection pooling, and monitor per-node latency independently.
 

@@ -269,6 +269,53 @@ sequenceDiagram
 
 *The per-request cache dict makes `get_db` execute once no matter how many sub-dependencies reference it within request R1; request R2 starts with an empty cache, so `get_db` runs again and produces `session_2`.*
 
+#### Decoding what the cache actually saves
+
+"Called once per request" is a claim about a count, and the count has a formula:
+
+```
+calls_without_cache = R          (one call per reference site in the tree)
+calls_with_cache    = U          (one call per distinct callable)
+
+saved_per_request   = R - U
+saved_per_second    = (R - U) x RPS
+```
+
+**Put simply.** "Without the cache you pay for a dependency once for every arrow pointing at it;
+with the cache you pay once for the node." The tree is a DAG, not a tree — sub-dependencies
+*share* children — so `R` counts edges into a node while `U` counts the node itself.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Reference sites: how many times `Depends(get_db)` appears anywhere in the request's tree |
+| `U` | Distinct callables. `get_db` is one callable however many places reference it |
+| `saved_per_request` | Redundant invocations the per-request cache dict eliminates |
+| `RPS` | Requests per second on this worker |
+| `(callable, use_cache)` | The cache key from Section 6.2 — why `use_cache=False` opts back out |
+
+**Walk one example.** Diagram 3 shows `get_db` reached from three places in request R1:
+
+```
+  reference sites for get_db in R1:
+    1. resolve(get_db)                    direct
+    2. get_current_user -> get_db         via the auth chain
+    3. other sub-dep needing db           the third arrow in the diagram
+  R = 3,  U = 1
+
+  calls_without_cache = 3  ->  3 sessions opened, 3 pool checkouts, 3 closes
+  calls_with_cache    = 1  ->  1 session, 1 checkout, 1 close
+  saved_per_request   = 3 - 1 = 2 redundant sessions
+
+  At 100 RPS:  saved_per_second = 2 x 100 = 200 pool checkouts/second avoided
+  Pool pressure:  3x fewer connections held per in-flight request.
+```
+
+**Why sharing the object matters more than the saved calls.** Three separate sessions would mean
+three separate transactions inside one request, so a write made by `get_current_user` would be
+invisible to the handler's own reads, and a rollback would only undo one third of the work. The
+cache is what makes "one request, one transaction" true — the performance saving is the smaller
+half of the benefit.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -392,6 +439,62 @@ async def get_async_db() -> AsyncGenerator[AsyncSession, None]:
             await session.rollback()
             raise
 ```
+
+#### Decoding `pool_size=10, max_overflow=20`
+
+Those two numbers are a hard ceiling, and whether you hit it is Little's Law:
+
+```
+max_connections   = pool_size + max_overflow  =  10 + 20  =  30   (per worker process)
+
+connections_in_use = RPS x held_seconds
+
+safe  while  RPS x held_seconds <= max_connections
+max_sustainable_RPS = max_connections / held_seconds
+```
+
+**What the formula is telling you.** "How many connections you need is your request rate times
+how long each request *holds* one — not how long the query takes." That gap is the whole trap: a
+`yield` dependency hands the session to the handler at `yield` and only reclaims it after the
+response is sent, so the session is held for the **entire request**, query time included and
+everything else besides.
+
+| Symbol | What it is |
+|--------|------------|
+| `pool_size` | `10` — connections kept open permanently by this worker's engine |
+| `max_overflow` | `20` — extra connections opened under load, discarded when returned |
+| `max_connections` | `30` — the real ceiling. Request 31 waits, then raises `TimeoutError` |
+| `held_seconds` | How long one request keeps a session checked out. Set by dependency *scope* |
+| `connections_in_use` | Average concurrent checkouts. Little's Law applied to the pool |
+| `max_sustainable_RPS` | Where the pool saturates: `30 / held_seconds` |
+
+**Walk one example.** A 200 ms request that spends only 5 ms in SQL, session held for the whole
+request because that is what `yield` scope means:
+
+```
+  held_seconds = 0.200 s  (whole request)          max_connections = 30
+
+    RPS      connections_in_use = RPS x 0.200      verdict
+     50       50 x 0.200 =  10                     pool_size alone covers it
+    100      100 x 0.200 =  20                     10 pooled + 10 overflow
+    150      150 x 0.200 =  30                     exactly at the ceiling
+    200      200 x 0.200 =  40                     10 over -- requests queue, then time out
+
+  max_sustainable_RPS = 30 / 0.200 = 150 req/s per worker.
+
+  Now scope the session to the QUERY only (held_seconds = 0.005 s):
+    200 RPS  ->  200 x 0.005 = 1 connection in use
+    max_sustainable_RPS = 30 / 0.005 = 6,000 req/s
+
+  Same pool, same traffic: 150 req/s vs 6,000 req/s -- a 40x difference bought
+  purely by holding the session for 5 ms instead of 200 ms.
+```
+
+**Why the ceiling is per worker, not per service.** Each Uvicorn worker imports the module and
+builds its own engine, so the pools do not share. Four workers means `4 x 30 = 120` connections
+opened against the database from one pod — multiply again by pod count. The number to compare
+against your database's connection limit is `pool_size + max_overflow` times workers times pods,
+never the `10` you typed.
 
 ### 6.6 Dependency caching: `use_cache=False`
 

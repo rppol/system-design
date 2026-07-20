@@ -43,6 +43,65 @@ Internal: [G | M | T]
 - Supports: `=`, `<`, `>`, `<=`, `>=`, `BETWEEN`, `LIKE 'prefix%'`, `ORDER BY`, `GROUP BY`
 - Does NOT support: `LIKE '%suffix'`, regex, full-text, arbitrary expressions (without expression index)
 
+**What this actually says.** "Height 3-4, fan-out 100-400" is not folklore — it is one division
+and one exponent: `fanout = page_size / entry_size`, and `rows_addressable = fanout ^ height`.
+This is the single most useful piece of arithmetic in indexing, because it is what lets you say
+"a point lookup on a billion-row table is four page reads" without measuring anything.
+
+| Symbol | What it is |
+|--------|------------|
+| `page_size` | The fixed block a B+tree node occupies. 8192 bytes (8 KB) in PostgreSQL and InnoDB |
+| `entry_size` | Bytes for one key plus its child pointer plus per-tuple header, in an internal node |
+| `fanout` | `page_size / entry_size` — how many children one node can point at |
+| `height` | Number of levels traversed root to leaf. Each level costs one page read |
+| `fanout ^ height` | Rows the tree can address. The exponent is why height grows so slowly |
+
+**Walk one example.** First the division, then the exponent:
+
+```
+  fanout = 8192 / entry_size
+
+    entry_size = 20 bytes (bigint key, tight)   ->  8192 / 20 = 409
+    entry_size = 40 bytes (uuid key)            ->  8192 / 40 = 204
+    entry_size = 80 bytes (wide composite key)  ->  8192 / 80 = 102
+
+  This is exactly the quoted "fan-out ~100-400" -- it is a key-width statement.
+
+  Now compound it. Take fanout = 400:
+
+    level 1  root       1 page       ->            400 pointers
+    level 2             400 pages    ->        160,000 pointers
+    level 3  leaf     160,000 pages  ->     64,000,000 rows      height = 3
+    level 4  leaf  64,000,000 pages  -> 25,600,000,000 rows      height = 4
+
+  And the pessimistic wide-key case, fanout = 100:
+
+    height 3  ->       1,000,000 rows
+    height 4  ->     100,000,000 rows
+    height 5  ->  10,000,000,000 rows
+```
+
+Read the last two blocks together: anywhere between 64 million and 25.6 *billion* rows, the tree
+is 4 levels deep. Going from 64M rows to 25.6B rows -- 400x more data -- costs you exactly one
+extra page read. That is the whole reason indexes scale, and it is why "how big is the table"
+is almost never the interesting question about a point lookup.
+
+**The idea behind it.** In practice a height-4 lookup is not 4 disk reads. The root is one page
+and the second level is 400 pages (3.2 MB) — both live in the buffer pool permanently under any
+real workload, so only the leaf (and sometimes level 3) is a physical read:
+
+```
+  logical page reads per lookup :  4   (root, L2, L3, leaf)
+  pages that must be cached     :  1 + 400 = 401 pages = 3.2 MB   <- trivially resident
+  physical reads in steady state:  1 - 2
+
+  vs sequential scan of the same 64,000,000-row table at 40 rows/page:
+      64,000,000 / 40 = 1,600,000 page reads
+```
+
+1-2 physical reads against 1,600,000. The `O(log n)` in Section 2 is a logarithm with base 400,
+not base 2 — that base is the entire engineering achievement of the B+tree over a binary tree.
+
 ### Hash Index
 
 - PostgreSQL: WAL-logged since PostgreSQL 10 (previously crashed unsafe). Only for equality (`=`).
@@ -108,6 +167,54 @@ CREATE INDEX idx_brin_ts ON logs USING BRIN (created_at) WITH (pages_per_range =
 -- B+tree equivalent: ~5-10GB
 ```
 
+**Read it like this.** A BRIN index stores one small summary per *block range*, not one entry per
+*row* — so its size is driven by `table_pages / pages_per_range`, a number thousands of times
+smaller than the row count. Everything surprising about BRIN falls out of that one substitution.
+
+| Symbol | What it is |
+|--------|------------|
+| `table_pages` | `table_size / 8192` — how many 8 KB blocks the heap occupies |
+| `pages_per_range` | Blocks summarized by one index entry. Default 128 |
+| `n_ranges` | `table_pages / pages_per_range` — the number of index entries that exist |
+| range summary | min and max of the column plus header, roughly 32 bytes per range |
+| correlation | How well physical row order tracks column order. BRIN's entire premise |
+
+**Walk one example.** The "few MB vs 5-10GB" claim above, computed:
+
+```
+  table  = 100 GB                     = 107,374,182,400 bytes
+  pages  = 107,374,182,400 / 8,192    =      13,107,200 pages
+  ranges =      13,107,200 / 128      =         102,400 ranges
+
+  BRIN size = 102,400 x 32 bytes      =       3,276,800 bytes = 3.1 MB
+
+  B+tree on the same column, 512-byte rows:
+    rows       = 107,374,182,400 / 512          = 209,715,200 rows
+    entry      = 24 bytes, leaf pages ~70% full
+    index size = 209,715,200 x 24 / 0.70        = 6.7 GB
+
+  ratio = 6.7 GB / 3.1 MB = 2,194x smaller
+```
+
+Now the skip. The index does not find rows; it eliminates ranges whose `[min, max]` cannot
+overlap the predicate:
+
+```
+  query window touches 1,024 of the 102,400 ranges
+
+  ranges read  = 1,024
+  pages read   = 1,024 x 128 = 131,072 pages
+  pages skipped= 13,107,200 - 131,072 = 12,976,128
+
+  fraction read = 131,072 / 13,107,200 = 1%      -> "skip 99% of blocks"
+```
+
+**Why correlation is load-bearing.** Every number above assumes `min` and `max` per range are
+*tight*. Scatter the data — random inserts, or updates relocating rows — and each range's
+`[min, max]` widens until nearly every range overlaps every predicate. The index is still 3.1 MB
+and still gets consulted; it just stops excluding anything, and you pay a full 13-million-page
+scan plus the index read. BRIN has no partial failure mode: it is either ~99% skip or ~0%.
+
 ### Covering Index (Include Columns)
 
 A covering index contains all columns referenced by a query, enabling index-only scans (no heap fetch).
@@ -131,6 +238,45 @@ EXPLAIN SELECT name, email FROM users WHERE last_name = 'Smith' AND active = tru
 ```
 
 The `INCLUDE` clause (PostgreSQL 11+, SQL Server) adds columns to leaf nodes only — not used for sorting, can contain types not sortable.
+
+**In plain terms.** "2 I/Os per row versus 1 I/O per row" undersells it, because the two I/Os are
+not the same kind of I/O. The index-leaf read is *sequential and shared across rows*; the heap
+fetch is *random and one per row*. Cover the query and you delete the per-row term entirely.
+
+| Symbol | What it is |
+|--------|------------|
+| matched rows | Rows satisfying the `WHERE` clause — the multiplier on heap fetches |
+| leaf entry size | Bytes per index tuple. Key columns plus `INCLUDE` columns plus header |
+| leaf pages read | `matched_rows x leaf_entry_size / 8192`, rounded up. Read sequentially |
+| heap fetches | One random page read per matched row, unless the index covers the query |
+| `random_page_cost` | Planner's price for a random read. Default 4.0, tune to 1.1 on SSD |
+
+**Walk one example.** 500 rows match `last_name = 'Smith' AND active = true`:
+
+```
+  leaf entry = 24 bytes (last_name, active, name, email, header)
+
+  WITHOUT covering index
+    leaf pages   : 500 x 24 / 8,192  = 1.46  -> 2 sequential page reads
+    heap fetches : 500 random page reads      <- one per matched row
+    total I/Os   : 502
+
+  WITH covering index (INCLUDE name, email)
+    leaf pages   : 2 sequential page reads
+    heap fetches : 0
+    total I/Os   : 2
+
+    502 / 2 = 251x fewer I/Os
+
+  At 0.1 ms per random SSD read:
+    without : 500 x 0.1 ms = 50.0 ms
+    with    :   2 x 0.1 ms =  0.2 ms
+```
+
+The saving scales with the *result set*, not the table. Cover a query returning 5 rows and you
+save 5 reads; cover one returning 50,000 and you save 50,000. This is why Section 9 says to add
+`INCLUDE` columns for a specific high-frequency query rather than reflexively — the payoff is
+proportional to how many rows that particular query drags out of the heap.
 
 ### Partial Index
 
@@ -459,8 +605,81 @@ SELECT * FROM orders WHERE customer_id = '42'; -- May cause seq scan
 **Pitfall 4: Index not used due to low selectivity**
 A `status` column with values ('active', 'inactive') — 90% active. Query: `WHERE status = 'active'`. Planner sees that returning 90% of rows via index scan (random I/O for each row) is slower than sequential scan. Fix: partial index `WHERE status = 'active'` only if queried in isolation. Or accept sequential scan as the right choice.
 
+**Put simply.** The planner is not "refusing to use your index" — it is comparing two costs and
+picking the smaller: `seq_cost = table_pages x seq_page_cost` against
+`index_cost ~ matched_rows x random_page_cost`. One term is bounded by the table's *pages*, the
+other grows with *rows returned*, and rows always outnumber pages. That asymmetry is the whole
+story of index selectivity, and it produces a hard crossover percentage you can compute.
+
+| Symbol | What it is |
+|--------|------------|
+| selectivity | Fraction of rows the predicate keeps. `0.9` = returns 90% of the table |
+| cardinality | Distinct values in the column. A 2-value column can never be selective |
+| `table_pages` | `rows / rows_per_page`. The ceiling on sequential-scan cost |
+| `seq_page_cost` | Price of one sequential page read. Default 1.0 |
+| `random_page_cost` | Price of one random page read. Default 4.0 (HDD-era), 1.1 on SSD |
+
+**Walk one example.** A 10M-row table, 200-byte rows, so 40 rows per 8 KB page:
+
+```
+  table_pages = 10,000,000 / 40 = 250,000 pages
+  seq_cost    = 250,000 x 1.0   = 250,000        <- fixed, whatever the predicate is
+
+  selectivity   rows returned    index_cost = rows x 4.0     verdict
+    90%          9,000,000          36,000,000               144x worse than seq
+    10%          1,000,000           4,000,000                16x worse than seq
+     1%            100,000             400,000               1.6x worse than seq
+     0.625%         62,500             250,000               exactly tied
+
+  crossover = 250,000 / (10,000,000 x 4.0) = 0.00625 = 0.625%
+```
+
+Below ~0.6% of the table the index wins; above it, the sequential scan wins — and at 90%
+selectivity it is not close, it is 144x. A two-value `status` column can *at best* return 10% of
+this table, which is still 16x worse than just reading the whole thing. The index is not
+underperforming; it is being asked to do something a random-access structure cannot do.
+
+**What `random_page_cost` actually moves.** Re-run the crossover with the SSD-tuned value from
+Best Practice 5: `250,000 / (10,000,000 x 1.1) = 0.0227 = 2.27%`. Dropping the constant from 4.0
+to 1.1 widens the index-friendly window 3.6x. That single setting is the most common reason the
+same query plans differently on two servers holding identical data.
+
 **Pitfall 5: Too many indexes on write-heavy tables**
 A table receiving 50,000 INSERTs/second had 12 indexes. Each insert updated all 12 indexes — 600,000 index writes/second on top of the table writes. Write throughput dropped 70% vs baseline. Fix: audit indexes, drop unused ones (check `idx_scan = 0` in `pg_stat_user_indexes`), consolidate similar indexes.
+
+**Stated plainly.** One logical INSERT is not one write. It is `1 + n_indexes` structure
+modifications, so index count is a straight multiplier on every write path — WAL bytes, dirty
+pages, buffer-pool churn, and checkpoint volume all scale by the same factor. Section 3's "every
+index has a maintenance cost" is that multiplier, and it is linear with no discount for volume.
+
+| Symbol | What it is |
+|--------|------------|
+| `n_indexes` | Number of indexes the engine must keep consistent on this table |
+| write amp | `(1 + n_indexes)` — physical structure writes per one logical row write |
+| effective TPS | `budget / write_amp` — rows/sec you get from a fixed write budget |
+| `idx_scan` | Reads served by an index since stats reset. `0` means pure cost, zero benefit |
+
+**Walk one example.** The incident above, and what dropping to 3 indexes buys:
+
+```
+  12 indexes:
+    write amp    = 1 + 12 = 13x
+    at 50,000 rows/sec -> 50,000 heap writes + 600,000 index writes = 650,000 total
+
+  Hold the engine's write budget fixed at 650,000 structure-writes/sec:
+
+    n_indexes    write amp      effective rows/sec = 650,000 / amp
+       12           13x                50,000
+        6            7x                92,857
+        3            4x               162,500
+        1            2x               325,000
+        0            1x               650,000
+```
+
+Halving the index count from 12 to 6 nearly doubles ingest, without touching hardware. The
+converse is what bites in production: the 13th index is not "8% more work" on the index layer,
+it is a permanent 7.7% tax on *every* write to that table, charged forever, and charged even
+if `idx_scan` for it stays at 0 for the index's entire life.
 
 **Pitfall 6: VACUUM not running → index-only scans degraded**
 A covering index was added expecting Index Only Scans. EXPLAIN showed `Heap Fetches: 50000` despite an index-only query. The visibility map had not been updated — every row required a heap check for MVCC visibility. Fix: `VACUUM ANALYZE table_name`. After VACUUM, Heap Fetches dropped to 0.

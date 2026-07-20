@@ -300,6 +300,51 @@ When a coroutine hits `await asyncio.sleep(1)`, `asyncio.sleep` creates a `Futur
 receives the Future, notes its callback, and moves on to other Tasks. After 1 second the timer
 fires, resolves the Future, and the original coroutine is re-queued on `_ready`.
 
+### Turning the 5-50 microsecond iteration into a capacity number
+
+Section 3 states one loop iteration costs roughly 5–50 µs. That figure is not trivia — it is the
+entire capacity model of an asyncio service, and it converts into throughput by one division.
+
+**The idea behind it.** "The loop is a single cashier. Its ceiling is not how long customers shop,
+it is how many seconds it spends per customer at the register."
+
+| Symbol | What it is |
+|--------|------------|
+| `t_step` | Loop CPU spent per task resumption — the 5–50 µs figure, pure Python overhead |
+| `1 / t_step` | Ceiling on task-steps per second. The register's throughput |
+| `L` | Wall-clock latency of one request, almost all of it I/O the loop does not pay for |
+| `C` | Concurrent in-flight requests the single loop is carrying at any instant |
+| `C = RPS x L` | Little's Law — the count of things in flight is arrival rate times how long each stays |
+
+**Walk one example.** Take a mid-range `t_step` of 20 µs and a 100 ms downstream call:
+
+```
+  step-rate ceiling      1 / 20e-6            =  50,000 task-steps/sec
+  request cost           1 step in, 1 step out (rounded to 1 for the estimate)
+
+  RPS ceiling            50,000 req/s         <- CPU-side limit of ONE loop
+  in-flight at ceiling   50,000 x 0.100 s     =  5,000 concurrent connections
+
+  same math, pessimistic t_step = 50 us
+  RPS ceiling            1 / 50e-6            =  20,000 req/s
+  in-flight              20,000 x 0.100       =  2,000 concurrent connections
+
+  actual service doing 500 req/s at 100 ms
+  loop CPU consumed      500 x 20 us          =  0.010 s of CPU per wall second  = 1%
+  in-flight              500 x 0.100          =  50 coroutines parked on I/O
+```
+
+The last three lines are the point: a real 500 req/s service spends about 1% of one core inside
+the loop and parks 50 coroutines. At ~2–5 KB per Task (Section 8's table), those 50 coroutines cost
+roughly 100–250 KB — which is why the "thousands of concurrent connections on a single thread"
+claim in Section 2 is arithmetic, not marketing.
+
+**Why `C = RPS x L` is the formula to carry into an interview.** It is Little's Law, and it answers
+capacity questions in one step in either direction. Given a semaphore limit and a latency, it gives
+throughput (`RPS = C / L`). Given a target throughput and a measured latency, it gives the
+concurrency you must permit. Every `Semaphore(n)` value in this module is really an assertion about
+this equation.
+
 ### get_event_loop() vs get_running_loop()
 
 ```python
@@ -343,6 +388,46 @@ asyncio.run(main())
 A `Task` is a `Future` subclass. It drives its wrapped coroutine by calling `coro.send(None)` in
 `Task.__step`. Each time the coroutine yields a Future, the Task adds itself as a callback on that
 Future.
+
+**What this actually says.** "Awaiting one thing at a time makes the clock add. Starting everything
+first makes the clock stop at the slowest one." The comment above compresses the single most
+important rule in async programming into two expressions: `0.3 + 0.1` versus `max(0.3, 0.1)`.
+
+| Symbol | What it is |
+|--------|------------|
+| `sum(latency_i)` | Wall time when each `await` happens *after* the previous one returns |
+| `max(latency_i)` | Wall time when every coroutine is already a Task before the first `await` |
+| `create_task(coro)` | The thing that moves you from the first column to the second |
+| `await t1, await t2` | Two *collection* points, not two start points — both were started earlier |
+
+**Walk one example.** Push the module's own workers `A` (0.3 s) and `B` (0.1 s) through both shapes,
+then scale to the ten 1-second URLs from Section 14:
+
+```
+  shape                       arithmetic                     wall time
+  --------------------------- ------------------------------ ----------
+  await worker(A)             0.3                            0.3 s
+  then await worker(B)        0.3 + 0.1                      0.4 s
+
+  t1 = create_task(A)         both already running
+  t2 = create_task(B)         when the first await lands
+  await t1; await t2          max(0.3, 0.1)                  0.3 s
+
+  ten 1-second fetches
+    sequential                1 + 1 + ... + 1  (10 terms)    10.0 s
+    all as Tasks              max(1, 1, ..., 1)              1.0 s
+```
+
+Sequential-to-concurrent buys `0.4 -> 0.3` here, only 1.33x, because one task dominates. The same
+change buys `10.0 -> 1.0`, a 10x cut, when the ten latencies are equal. That is the general shape:
+the payoff of concurrency is `sum / max`, so it is largest when the work is *uniform* and shrinks
+toward 1x when a single straggler already sets the floor.
+
+**Why `max` and not something smaller.** Nothing here makes any individual call faster — B still
+takes its full 0.1 s of network time. The event loop only removes the *waiting-in-line* portion.
+The slowest call is therefore an irreducible floor: no amount of extra concurrency beats
+`max(latency_i)`, which is why tail-latency work (timeouts, hedging) is the only lever left once
+you are already concurrent.
 
 ### gather vs TaskGroup
 
@@ -1251,6 +1336,44 @@ finished in time.*
 | gather (unlimited) | ~1.0s | 10 | First exception cancels all |
 | TaskGroup + Semaphore(3) | ~4.0s | 3 (rate-limited) | All exceptions collected |
 | TaskGroup + Semaphore(3) + timeout(2s) | ~2.0s | 3 | Partial results, deadline enforced |
+
+**Stated plainly.** Every wall time in that table comes out of one expression:
+`ceil(N / k) x L` — "how many full rounds of `k` does it take to clear `N` items, times how long a
+round lasts." The semaphore does not slow any single request; it converts a fan-out into rounds.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total awaitables to run — 10 supplier URLs here |
+| `k` | Semaphore permits. The width of one round |
+| `L` | Latency of a single call, ~1.0 s for these URLs |
+| `ceil(N / k)` | Number of rounds. `ceil`, not `/`, because a partial final round still costs a full `L` |
+| `D` | Outer deadline (`asyncio.timeout`). Caps rounds at `floor(D / L)` |
+
+**Walk one example.** Reproduce all four rows of the table from that one expression:
+
+```
+  row                       k    ceil(10/k)   x L      wall time
+  ------------------------- ---- ------------ -------- ----------
+  sequential                 1    10           x 1.0    10.0 s
+  gather, unlimited         10     1           x 1.0     1.0 s
+  TaskGroup + Semaphore(3)   3     4           x 1.0     4.0 s
+  + timeout(2.0s)            3     4 -> capped at floor(2.0/1.0) = 2 rounds
+                                                         2.0 s
+
+  what the deadline costs you
+    rounds completed in 2 s      2
+    results returned             2 rounds x 3 permits  =  6 of 10 FetchResults
+    the other 4 were cancelled mid-flight by the TaskGroup
+```
+
+Note `ceil(10 / 3) = 4`, not `3.33`. The tenth URL runs alone in a fourth round while two permits
+sit idle — a 25% waste of the last round that is invisible if you divide instead of rounding up.
+Choosing `k` so that `N / k` is close to a whole number is the cheapest tuning win available.
+
+**Why the deadline row is the one that ships.** The first three rows trade only speed against
+politeness. The fourth changes the *contract*: it converts "however long 10 fetches take" into
+"whatever finished in 2 seconds", which is the only form a user-facing SLA can take. The cost is
+explicit and computable — `floor(D / L) x k` results instead of `N`.
 
 The production pattern is the last row: structured concurrency scope (`TaskGroup`) ensures no task
 outlives the request, a `Semaphore` enforces the API rate limit, `asyncio.timeout` enforces the

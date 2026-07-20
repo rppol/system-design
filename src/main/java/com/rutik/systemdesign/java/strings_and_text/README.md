@@ -172,6 +172,43 @@ flowchart TD
   Java 9+ ("Héllo"):   [ 0,72, 0,233, ... ]      → 10 bytes for value (UTF16 coder, 2 bytes/char)
 ```
 
+**In plain terms.** "Compact Strings halve the *character data*, not the whole object — the header, the array header and the cached hash are the same size either way, so the real saving depends on how long your strings are."
+
+That distinction is why the reported saving varies between roughly 40 and 50 percent. For long strings the array dominates and you approach the full 50; for a five-character string the fixed overhead dominates and one non-Latin1 character wipes the saving out entirely.
+
+| Symbol | What it is |
+|--------|------------|
+| `coder` | 1 byte: `LATIN1 = 0` (1 byte/char) or `UTF16 = 1` (2 bytes/char) |
+| `byte[] value` | The character data. Its own object, with its own 16-byte array header |
+| array header | 12-byte object header + 4-byte length field, then the data, padded to 8 |
+| `String` object | Header 12 + `value` reference 4 + `coder` 1 + `hash` 4 + `hashIsZero` 1, padded |
+| whole-object size | `String` object + `byte[]` object — two allocations per string |
+| the trigger | One code point above 255 flips the whole string to UTF16; there is no mixing |
+
+**Walk one example.** `"Hello"` as two objects, Java 8 versus Java 9+:
+
+```
+  Java 9+ (LATIN1)
+    String object   12 + 4 + 1 + 4 + 1 = 22  -> padded to 24 bytes
+    byte[5]         12 + 4 + 5 = 21          -> padded to 24 bytes
+    total                                     = 48 bytes
+
+  Java 8 (char[])
+    String object                             = 24 bytes (no coder field, same size after pad)
+    char[5]         12 + 4 + 10 = 26          -> padded to 32 bytes
+    total                                     = 56 bytes
+                                                saving = 8 of 56 = 14 percent
+
+  A realistic 40-character log token
+    Java 8: 24 + (12 + 4 + 80 -> 96)          = 120 bytes
+    Java 9: 24 + (12 + 4 + 40 -> 56)          =  80 bytes
+                                                saving = 40 of 120 = 33 percent
+
+  One million such strings: 114.4 MB -> 76.3 MB, i.e. 38.1 MB reclaimed.
+```
+
+The value array itself does halve exactly — 80 bytes to 40 — which is the number the JEP quotes. Everything below 50 percent in the totals above is fixed overhead you cannot compact away, so the practical lesson is that Compact Strings pay best on long strings and barely register on a heap full of two-character keys. And because the coder is per-string, a single emoji in a field promotes that entire string back to 2 bytes per character, including all its ASCII.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics

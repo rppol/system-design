@@ -208,6 +208,36 @@ System.out.println("jvm args  = " + runtime.getInputArguments());
 `ManagementFactory` is the single entry point; each getter returns a live bean
 whose values reflect the current JVM state on every call.
 
+**In plain terms.** "`>> 20` is division by a megabyte done the cheap way — shifting a binary number right by 20 places divides it by 2^20, which is exactly 1,048,576, the real number of bytes in a MiB."
+
+Worth decoding because the near-miss is so tempting: dividing by 1,000,000 instead looks
+right and is off by nearly 5%, which is enough to make a dashboard disagree with `jcmd`.
+
+| Symbol | What it is |
+|--------|------------|
+| `heap.getUsed()` | Live heap bytes right now, as a `long` |
+| `heap.getMax()` | The `-Xmx` ceiling in bytes, or `-1` if unbounded |
+| `>> 20` | Arithmetic right shift 20 bits = integer divide by 2^20 = 1,048,576 |
+| MiB vs MB | 1,048,576 bytes vs 1,000,000 bytes — the source of the ~4.9% discrepancy |
+
+**Walk one example.** A JVM launched with `-Xmx8g`, currently holding 3 GiB of live heap.
+
+```
+  2^20                        = 1,048,576 bytes per MiB
+
+  used  3,221,225,472 >> 20   = 3,221,225,472 / 1,048,576   = 3,072 MiB
+  max   8,589,934,592 >> 20   = 8,589,934,592 / 1,048,576   = 8,192 MiB
+  occupancy 3,072 / 8,192                                   = 37.5%
+
+  the wrong-unit version
+    3,221,225,472 / 1,000,000                               = 3,221.2 "MB"
+    error (3,221.2 - 3,072) / 3,072                         = 4.86% too high
+```
+
+37.5% occupancy on an 8 GiB heap is the number to alert on, not the raw byte count. Also
+note `getMax()` returns `-1` when no maximum is defined, so any ratio you compute has to
+guard that case or it silently reports a negative occupancy.
+
 ### 6.2 Detecting a deadlock programmatically
 
 ```java
@@ -265,6 +295,43 @@ ObjectName name = new ObjectName("com.example:type=CacheStats,name=userCache");
 server.registerMBean(new CacheStats(), name);
 // Now JConsole shows getHitRatio() live and offers a "clear" button.
 ```
+
+**What this actually says.** "Hit ratio is the share of all lookups that the cache answered — hits over everything you asked it, not hits over misses — and it is undefined rather than zero until the cache has been asked at least once."
+
+The distinction between "hits/(hits+misses)" and "hits/misses" is where people go wrong:
+the first is bounded in `[0, 1]` and reads as a percentage, the second is unbounded and
+means nothing on a dashboard.
+
+| Symbol | What it is |
+|--------|------------|
+| `h` | `hits` — lookups the cache satisfied from its own storage |
+| `m` | `misses` — lookups that fell through to the backing store |
+| `h + m` | Total lookups; the denominator, not `m` |
+| `(h + m) == 0 ? 0.0` | The guard for a cold cache — no lookups means no ratio exists yet |
+| `(double) h` | The cast that stops integer division from collapsing every ratio to `0` |
+
+**Walk one example.** One hour of traffic through `userCache`.
+
+```
+  observed                 h = 920,000 hits
+                           m =  80,000 misses
+
+  total lookups   h + m  = 920,000 + 80,000    = 1,000,000
+  hit ratio       h / (h + m) = 920,000 / 1,000,000 = 0.92    -> 92%
+  miss ratio      1 - 0.92                          = 0.08    -> 8%
+
+  without the (double) cast, in pure integer arithmetic
+    920000 / 1000000 = 0                              <- every cache reports 0.0
+
+  cold cache, first millisecond of startup
+    h = 0, m = 0  ->  h + m = 0  ->  0/0 = NaN        <- guard returns 0.0 instead
+```
+
+Both guards earn their place. Drop the `(double)` cast and integer division floors every
+ratio below 1.0 to exactly zero, so the metric is permanently broken but never throws.
+Drop the zero check and a freshly started JVM publishes `NaN`, which JConsole renders as a
+blank and most time-series databases reject outright — a metric that disappears at the
+exact moment you are watching a deploy.
 
 The `MXBean` suffix is load-bearing: rename the interface to `CacheStatsManager`
 and registration throws `NotCompliantMBeanException` unless you add the `@MXBean`

@@ -18,6 +18,55 @@ A database is a filing cabinet: reliable, complete, but slow to access. A cache 
 
 **Cache hit rate is the primary metric**: A 90% hit rate means 10% of requests hit the database. A 99% hit rate means 1%. Going from 90% to 99% reduces database load by 10x.
 
+**What it means.** "Your average latency is a weighted blend of the fast path and the slow
+path — and because the slow path is ~40x more expensive, the misses dominate the average long
+after they stop dominating the request count."
+
+Written out, effective latency is `L_eff = h x L_hit + (1 - h) x L_miss`. The framing matters
+because engineers read "90% hit rate" as "90% of the win" and it is not close: at h = 0.90 the
+10% of requests that miss still contribute 82% of the average latency (2.05 ms of the 2.50 ms).
+
+| Symbol | What it is |
+|--------|------------|
+| `h` | Hit rate as a fraction. 0.90, not 90 |
+| `L_hit` | Latency of a cache hit. ~0.5 ms per the numbers above |
+| `L_miss` | Latency of a miss: the failed cache probe *plus* the database read. ~0.5 + 20 = 20.5 ms |
+| `1 - h` | Miss rate. Multiplied by request volume, this is the QPS your database actually sees |
+| `L_eff` | The blended average one request experiences |
+
+**Walk one example.** `L_hit = 0.5 ms`, `L_miss = 20.5 ms`, 100,000 requests/second:
+
+```
+    h       L_eff = h x 0.5 + (1-h) x 20.5        DB QPS      speedup vs no cache
+  0.00      0.00 +  20.50               = 20.50 ms   100,000        1.00x
+  0.50      0.25 +  10.25               = 10.50 ms    50,000        1.95x
+  0.80      0.40 +   4.10               =  4.50 ms    20,000        4.56x
+  0.90      0.45 +   2.05               =  2.50 ms    10,000        8.20x
+  0.95      0.475+   1.025              =  1.50 ms     5,000       13.67x
+  0.99      0.495+   0.205              =  0.70 ms     1,000       29.29x
+  0.999     0.4995+  0.0205             =  0.52 ms       100       39.42x
+```
+
+Read the last two columns together. Going 0.90 to 0.99 is only 9 percentage points of hit
+rate, but it cuts database QPS by 10x (10,000 to 1,000) and latency by 3.6x (2.50 to 0.70 ms).
+That is the nonlinear payoff: the same 9-point move from 0.00 to 0.09 would barely register.
+Every point of hit rate is worth more than the one before it, which is why cache work that
+looks like chasing diminishing returns is usually the opposite.
+
+**Why the "100x load" claim in Cold cache is exactly this formula.** A cold cache is `h = 0`,
+so the database sees `(1 - 0) x QPS = 100,000`. A warm cache at `h = 0.99` sees
+`(1 - 0.99) x 100,000 = 1,000`. The ratio is `1 / 0.01 = 100`. Nothing about the traffic
+changed — the database was simply sized for the 1% and now receives all of it. The higher your
+steady-state hit rate, the more violent your cold start, which is the uncomfortable corollary
+nobody plans for.
+
+**What actually sets `h`: working-set coverage, not cache size.** `h` is the fraction of
+requests whose key is resident, so it is decided by how much of the *frequently requested* key
+space fits. Access is typically heavily skewed, so the first slice of memory buys the first
+0.90 cheaply and every point after that reaches further into a flatter tail — pushing 0.90 to
+0.99 can cost several times the memory that bought the original 0.90. Size the cache against
+measured key frequency, and read the table above to decide whether that memory is worth it.
+
 **TTL is the consistency dial**: A shorter TTL keeps data fresher but increases cache miss rate and database load. A longer TTL reduces database load but increases the stale data window.
 
 **Cache invalidation is one of the hardest problems in CS**: Invalidating a cache entry at exactly the right time without missing invalidations or over-invalidating is fundamentally hard. Design for bounded staleness (TTL) rather than exact invalidation when possible.
@@ -312,6 +361,44 @@ flowchart LR
 
 Without protection, 10K requests per second hit the database at once when a popular page's TTL expires (versus a normal load of 100 req/s), overwhelming it; mutex locking, background refresh, and TTL jitter each prevent the pile-up in a different way.
 
+**In plain terms.** "The size of the herd is not the request rate — it is the request rate
+multiplied by how long the database takes to answer, because every request that arrives during
+that window also misses."
+
+The multiplication is the part people miss. A slow query does not just cost you one slow
+query; it widens the window in which duplicates pile up, so herd size and query latency grow
+together.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Requests per second for the one expired key. 10,000 here, against a normal 100 |
+| `T_db` | How long the repopulating query takes. The width of the vulnerable window |
+| `R x T_db` | Concurrent duplicate queries — the herd. All computing the identical answer |
+| mutex | Lets exactly 1 of them through; the other `R x T_db - 1` wait on the winner |
+| jitter | `base + random(0, base x 0.2)` — spreads expiry so the herd never forms |
+
+**Walk one example.** One popular key expiring at 10,000 req/s:
+
+```
+  T_db = 50 ms  ->  10,000 x 0.05 = 500 duplicate queries in flight
+  T_db = 500 ms ->  10,000 x 0.50 = 5,000 duplicate queries in flight
+
+  with a mutex, either case ->  1 query. The other 499 (or 4,999) wait.
+
+  499 of the 500 queries computed an answer that was already being computed.
+```
+
+Note the feedback loop hiding in the first two lines: the 500 duplicate queries themselves
+slow the database, which raises `T_db`, which admits more duplicates. That is the mechanism
+behind "DB overwhelmed, cascade failure" — a stampede is self-amplifying, not a fixed spike.
+
+**Why the three fixes are not interchangeable.** The mutex caps the herd at 1 but converts the
+other 499 requests' latency into `T_db` of waiting, so it trades a database outage for a
+latency spike. Background refresh removes the herd entirely by repopulating *before* expiry,
+at the cost of refreshing keys nobody will ask for. Jitter does not shrink any single herd —
+it prevents a million keys from herding *simultaneously*, which is a different failure. In
+production you usually want jitter plus one of the other two.
+
 ### Hot Key Problem
 
 A hot key is a cache key accessed at a rate far exceeding what a single Redis node can handle (typically > 100K ops/second per key).
@@ -346,6 +433,47 @@ flowchart LR
 ```
 
 A single key at 500K ops/second exceeds one Redis node's ~100K ops/second limit and makes that node CPU-bound; a local L1 cache, key replication across shards, and reading from replicas each redistribute the load differently.
+
+**The idea behind it.** "Once an L1 cache is in front of it, the traffic Redis sees for a hot
+key stops depending on how often the application asks and starts depending only on how many
+processes are asking and how fast their local copies expire."
+
+That substitution is the whole trick. `application QPS` is set by your users and you cannot
+control it; `processes / L1_ttl` is set by your deployment and you can.
+
+| Symbol | What it is |
+|--------|------------|
+| app QPS | Reads of the hot key across the fleet. 500,000/s here. Not under your control |
+| node limit | ~100,000 ops/second for one Redis node before it becomes CPU-bound |
+| `P` | Application processes, each holding its own L1 copy (Caffeine, Guava) |
+| `t` | L1 TTL. 100 ms in the diagram — the freshness you are willing to give up |
+| `P / t` | Redis ops/second after L1. Each process refreshes at most once per `t` |
+
+**Walk one example.** The hot key at 500,000 app reads/second, with different fleet shapes:
+
+```
+  no L1                                   -> 500,000 ops/s   5x over the node limit
+
+  P =   100 processes, t = 100 ms         ->   1,000 ops/s   500x reduction
+  P =   100 processes, t = 1 s            ->     100 ops/s
+  P = 1,000 processes, t = 100 ms         ->  10,000 ops/s   50x reduction
+  P = 1,000 processes, t = 1 s            ->   1,000 ops/s
+
+  Every row is independent of the 500,000. Ten times the user traffic
+  changes nothing -- the L1 absorbs it.
+```
+
+The `P = 1,000, t = 100 ms` row is the diagram's "1M app-level hits, 10K Redis hits" case, and
+it is also why the flash-sale-flag pitfall in Section 10 reports a 99% reduction from one line
+of Caffeine config. The staleness you buy this with is bounded and explicit: at most `t`
+seconds, or 100 ms.
+
+**Why L1 is the first fix and replication the last.** Key replication across 10 shards divides
+read load by 10 but multiplies storage by 10 and introduces a window where the copies disagree
+after a write. Replica reads spread load without extra storage but inherit replication lag.
+The L1 cache costs almost nothing, scales with the fleet, and its staleness window is a number
+you choose — so it is the default answer, and the other two are for when even `P / t` exceeds
+the node limit.
 
 ### Cache Invalidation Strategies
 
@@ -480,6 +608,45 @@ A quick decision path from the guidance above: tolerance for write loss favors w
 ## 10. Common Pitfalls
 
 **Cache stampede on Black Friday**: A popular product page cached for 5 minutes. At midnight, the TTL was set identically for all products loaded in one batch. At exactly 00:05, all 1 million product cache entries expire simultaneously. 50K requests/second all miss cache and query the database. Database saturates. Fix: TTL jitter (`base_ttl + random(0, base_ttl * 0.2)`) prevents synchronized expiration.
+
+**Read it like this.** "Give every key its own randomly-offset deadline, so a batch loaded in
+one instant does not die in one instant."
+
+The failure was authored at load time, not at expiry time. One batch write with one constant
+TTL is a scheduled outage set five minutes into the future.
+
+| Symbol | What it is |
+|--------|------------|
+| `base_ttl` | The freshness you actually want. 300 s (5 minutes) here |
+| `0.2` | Jitter fraction. Sets the spread width as a share of the base |
+| `random(0, base_ttl x 0.2)` | Per-key offset, drawn independently. 0 to 60 s in this case |
+| spread window | `base_ttl x 0.2` = 60 s. The interval expirations land in |
+| `keys / window` | Average misses per second once spread |
+
+**Walk one example.** 1,000,000 product entries loaded in one batch at midnight,
+`base_ttl = 300 s`:
+
+```
+  without jitter
+    every key expires at 00:05:00 exactly
+    -> 1,000,000 entries expire in the same instant
+    -> the observed 50,000 requests/second all miss -> database saturates
+
+  with jitter: 300 + random(0, 300 x 0.2) = 300 to 360 s
+    spread window                 = 60 seconds
+    average expirations/second    = 1,000,000 / 60 = 16,667
+    peak miss rate falls to       = 50,000 / 3 = 16,667 req/s
+
+  Total misses: unchanged. Peak misses: one third.
+```
+
+**Why 20% and not 200%.** The jitter fraction is bounded above by how much extra staleness you
+will tolerate: at 20%, a key may live 360 s instead of 300 s. Widen it to 200% and the spread
+window becomes 600 s — a 10x lower peak — but some entries now serve data 15 minutes old,
+which for the product prices in this story is a pricing bug rather than a cache policy. Choose
+the fraction from the staleness budget first, then check whether the resulting
+`keys / window` is a rate the database can absorb. If it is not, the real answer is fewer keys
+sharing a batch, not more jitter.
 
 **Thundering herd after Redis restart**: Redis is restarted for maintenance. All 10M cache keys are gone. Application traffic continues at full rate. Every request hits the database. Database saturates within seconds. Fix: pre-warm cache before cutting traffic back; use blue-green Redis with data migration; implement circuit breaker on DB if Redis is unavailable.
 

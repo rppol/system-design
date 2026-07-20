@@ -89,6 +89,44 @@ Problem: N=10,000 concurrent clients means 10,000 held threads x ~1 MB stack =
 ~10 GB memory, plus OS context-switch overhead across 10,000 threads. Virtual
 threads (Java 21) make this thread-per-connection model affordable again.
 
+**In plain terms.** "In the thread-per-connection model your concurrency limit is not CPU
+or bandwidth — it is `concurrent_connections x stack_size`, a memory bill you pay for
+threads that are doing nothing but waiting."
+
+That framing matters because it explains why NIO does not make the network faster (see the
+Key Insight in Section 2). Both models move the same bytes; only the per-waiting-connection
+cost changes.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Concurrent connections held open at once — the number the server must survive, not requests/sec |
+| `stack_size` | Memory reserved per thread for its call stack. Platform thread ~1 MB; virtual thread starts at ~few KB |
+| `N x stack_size` | Total stack memory, paid whether the threads are running or parked on `read()` |
+| carrier threads | The small pool of real OS threads that virtual threads mount onto — sized to CPU count, not to `N` |
+
+**Walk one example.** The 10,000-client figure above, both ways:
+
+```
+  platform threads
+    N                = 10,000 connections
+    stack_size       = 1 MB  (1,048,576 bytes)
+    stack memory     = 10,000 x 1 MB
+                     = 10,000 MB
+                     = 9.77 GB          <- before a single byte of heap or app data
+
+  virtual threads (Java 21)
+    stack_size       = ~4 KB initial, grown on demand
+    stack memory     = 10,000 x 4 KB
+                     = 40,000 KB
+                     = 39.1 MB          <- 256x less for the same 10,000 connections
+
+  the ratio          = 1,048,576 / 4,096 = 256
+```
+
+The 256x is the whole argument. NIO reaches the same place by a different route: it drives
+`N` threads down to 1 instead of driving `stack_size` down, which is why it buys the same
+memory win at the cost of a hand-written state machine per channel.
+
 ### NIO Reactor Pattern
 ```mermaid
 flowchart TD
@@ -143,6 +181,40 @@ flowchart LR
 All 4 requests are in flight simultaneously over ONE connection: HTTP/2 frames
 carry a stream ID (1, 3, 5, 7...) to demultiplex responses, and `HttpClient`
 manages the connection pool and multiplexing automatically.
+
+**What this actually says.** "The number of TCP connections you need is your in-flight
+request count divided by how many requests one connection can carry at once — and that
+divisor is 1 for HTTP/1.1 and many for HTTP/2."
+
+The whole HTTP/2 win falls out of that one divisor. Nothing about the bytes on the wire got
+faster; the connection count collapsed, and with it the handshake and file-descriptor bill.
+
+| Symbol | What it is |
+|--------|------------|
+| `C` | Requests in flight at the same instant against one host |
+| `S` | Requests one connection can carry concurrently. HTTP/1.1: 1. HTTP/2: the server's `MAX_CONCURRENT_STREAMS` |
+| `ceil(C / S)` | Connections actually opened — each one costing a TCP handshake plus a TLS handshake |
+| pool limit | The client-side cap on open connections. When `ceil(C / S)` exceeds it, requests queue instead of running |
+
+**Walk one example.** The Section 14 case study's 50 concurrent calls, and War Story 4's
+20-request fan-out against a pool limit of 10:
+
+```
+  case study, C = 50 concurrent calls
+    HTTP/1.1   S = 1     -> ceil(50 / 1)  = 50 connections, 50 TCP+TLS handshakes
+    HTTP/2     S = many  -> ceil(50 / S)  =  1 connection,   1 TCP+TLS handshake
+                                              (matches the Concrete Numbers table below)
+
+  war story 4, C = 20 parallel sendAsync calls, pool limit = 10
+    negotiated HTTP/1.1  -> S = 1
+    connections wanted   = ceil(20 / 1) = 20
+    connections allowed  = 10
+    waves required       = ceil(20 / 10) = 2       <- latency roughly doubles
+    with HTTP/2 (S > 20) = ceil(20 / S)  = 1 connection, 1 wave, no queueing
+```
+
+The 2 waves are exactly why that team saw "no improvement over sequential calls." The
+`sendAsync()` calls were issued in parallel; the transport serialized them anyway.
 
 ---
 
@@ -375,6 +447,43 @@ A team created `new HttpClient.newHttpClient()` for every outbound request. `Htt
 ### War Story 3: Blocking inside a NIO event loop
 A developer added a database call inside the `isReadable()` handler of a Selector event loop to validate an incoming request. One slow DB query blocked the thread for 500ms — during which NO other connections could be served. For 100ms per query average, the server maxed out at 2 requests/second per selector thread. **Fix**: Hand off work to a separate thread pool immediately; only do minimal parsing in the event loop.
 
+**Read it like this.** "A Selector event loop is a single server in a queue, so its
+throughput is just one divided by however long the slowest handler holds it — a blocking
+call inside the loop turns thousands of connections into one serial queue."
+
+That reframing is why "never block in the event loop" is a hard rule rather than a
+performance tip. The cost is not proportional to how many connections block; one blocked
+handler stalls every channel that thread owns.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_handler` | Wall-clock time one handler holds the event-loop thread, including any blocking call it makes |
+| `1 / t_handler` | Throughput ceiling in requests/second for that one selector thread |
+| `N_channels` | Connections registered on the thread — they all wait behind the blocked handler |
+| `N_channels x t_handler` | Worst-case wait for the last connection in the round |
+
+**Walk one example.** The 500 ms blocked query from this war story:
+
+```
+  t_handler        = 500 ms = 0.500 s   <- the DB call, inside the loop
+  throughput       = 1 / 0.500
+                   = 2 requests/second per selector thread
+
+  with 1,000 channels registered on that thread:
+    last connection waits = 1,000 x 0.500 s
+                          = 500 s        <- over 8 minutes; clients time out first
+
+  after the fix (parse only, hand off to a pool):
+    t_handler      = 0.05 ms = 0.00005 s
+    throughput     = 1 / 0.00005
+                   = 20,000 requests/second per selector thread
+```
+
+Note the arithmetic mismatch in the paragraph above: `2 requests/second` is what the stated
+500 ms blocking time produces, whereas a 100 ms average query would give `1 / 0.100 = 10`
+requests/second. Both numbers are plausible descriptions of the same incident (worst-case
+vs average query), but the `2 req/s` figure is the one that follows from 500 ms.
+
 ### War Story 4: HTTP/2 multiplexing misconfigured
 A service made 20 parallel `HttpClient.sendAsync()` calls but response times didn't improve over sequential calls. Investigation revealed `HttpClient` was negotiating HTTP/1.1 (server didn't support HTTP/2 or TLS was not configured). HTTP/1.1 doesn't multiplex — each request needed its own connection, and the connection pool limit was 10. **Fix**: Ensure server supports HTTP/2; enable TLS (HTTP/2 typically requires HTTPS); set `HttpClient.Version.HTTP_2`.
 
@@ -591,6 +700,45 @@ public final class EnrichmentClient {
 | TLS handshakes/day | ~50,000 (no reuse) | a handful (pooled) |
 | connection-leak incidents/month | ~2 | 0 |
 | API style | blocking only | sync `send` + async `sendAsync` |
+
+**Put simply.** "50,000 calls a day sounds like nothing until you notice the traffic is not
+spread evenly — the average rate is under one call per second, but the burst rate is 69x
+that, and it is the burst that decides how many connections you must hold."
+
+Sizing against the daily total is the classic mistake. Connections, file descriptors, and
+ephemeral ports are all sized by the peak concurrency, never by the daily average.
+
+| Symbol | What it is |
+|--------|------------|
+| `calls/day` | Total request volume over 24 hours — the number that shows up in a bill, not in a capacity plan |
+| `86,400` | Seconds in a day (`24 x 60 x 60`), the divisor that turns a daily total into an average rate |
+| peak / burst rate | Highest instantaneous requests/second, which is what the connection pool must absorb |
+| burst factor | `burst_rate / average_rate` — how far the real shape of traffic departs from the flat average |
+
+**Walk one example.** The scenario's stated numbers, pushed through:
+
+```
+  average rate     = 50,000 calls / 86,400 s
+                   = 0.58 calls/second        <- "less than one per second"
+
+  stated peak      = 5 calls/second
+  peak factor      = 5 / 0.58    = 8.6x above average
+
+  stated burst     = 40 calls/second
+  burst factor     = 40 / 0.58   = 69.1x above average
+
+  connections needed at burst (from the ceil(C / S) rule in Section 5):
+    HTTP/1.1, S = 1        -> ceil(40 / 1) = 40 connections + 40 TLS handshakes
+    HTTP/2,  S = many      -> ceil(40 / S) =  1 connection,   already established
+
+  handshakes/day:
+    HttpURLConnection: one per call     = 50,000        <- table row above
+    HttpClient pooled: one per pool refresh = a handful
+```
+
+The `~50,000 TLS handshakes/day` row is the leak's real cost. Each handshake is a fresh
+ephemeral port that lingers in `TIME_WAIT` after close, which is the mechanism behind the
+`Too many open files` failure described in the scenario — not a bug in the request logic.
 
 ### Common Pitfalls
 

@@ -112,6 +112,41 @@ Formats slide from human-readable and slow (JSON, CSV, TOML/YAML) toward compact
 - **Default**: Python picks 8 KB blocks for regular files; use `flush()` or `fsync()` when
   durability matters (e.g., writing a checksum file after copying data)
 
+**What this actually says.** The buffer size is a dial that trades RAM for syscalls: every
+`buffer_size` bytes you accumulate is one trip into the kernel you did not take. The relationship
+is a plain division, which is why doubling the buffer always halves the syscall count.
+
+| Symbol | What it is |
+|--------|------------|
+| `bytes` | Total size of the file being read or written |
+| `buffer_size` | The `buffering=N` argument; bytes accumulated before one kernel call |
+| `syscalls` | `bytes / buffer_size` — how many times you cross the user/kernel boundary |
+| `buffering=0` | `buffer_size = 1` byte: one syscall per write. Binary mode only |
+| `buffering=1` | Line-buffered: `syscalls` = line count, not a byte division |
+| peak RAM | `buffer_size` per open handle — the cost you pay for the reduction |
+
+**Walk one example.** A 500 MB file (the case-study upload size) at three buffer sizes:
+
+```
+  bytes = 500 MB = 500 * 1024 * 1024 = 524,288,000
+
+  buffer_size          syscalls = bytes / buffer_size      RAM per handle
+  ----------------     ------------------------------      --------------
+   8 KB  (default)     524,288,000 /   8,192 =  64,000       8 KB
+  64 KB  (CHUNK_SIZE)  524,288,000 /  65,536 =   8,000      64 KB
+   1 MB                524,288,000 / 1,048,576 =    500       1 MB
+
+  8 KB -> 64 KB :  64,000 -> 8,000 syscalls,  8x fewer, for 56 KB more RAM
+  64 KB -> 1 MB :   8,000 ->   500 syscalls, 16x fewer, for 960 KB more RAM
+```
+
+**Why the case study stops at 64 KB.** The returns are geometric but the risk is linear. Going
+8 KB -> 64 KB removes 56,000 syscalls for 56 KB of RAM — an obvious win. Going 64 KB -> 1 MB removes
+only 7,500 more, but multiply that 1 MB by 20 concurrent workers and you have added 20 MB of
+resident memory to shave a few thousand syscalls off a request that is already dominated by network
+transfer time. `CHUNK_SIZE = 65_536` in §14 sits at the knee of that curve, which is also why the
+comment there notes it fits in L2 cache.
+
 ### 4.4 Path Strategy: `pathlib` vs `os.path`
 
 ```
@@ -446,6 +481,48 @@ def parse_png_dimensions(path: str) -> tuple[int, int]:
     width, height = struct.unpack(">II", ihdr[:8])
     return width, height
 ```
+
+**The idea behind it.** A `struct` format string is a byte-budget written in shorthand: each letter
+costs a fixed, known number of bytes, and the total is the record size — no framing, no field names,
+no separators. That is the entire reason it beats JSON on the wire.
+
+| Symbol | What it is |
+|--------|------------|
+| `>` | Big-endian byte order — network order; costs 0 bytes, just fixes the layout |
+| `I` | Unsigned 4-byte integer |
+| `H` | Unsigned 2-byte short |
+| `B` | Unsigned 1-byte |
+| `d` | IEEE-754 double, 8 bytes |
+| `.size` | Sum of the field widths — the exact bytes one record occupies |
+| `.size + len(payload)` | Full framed message: fixed header plus variable body |
+
+**Walk one example.** Price the two record formats used above against a JSON encoding of the same
+two fields:
+
+```
+  HEADER_FORMAT = Struct(">IH")   ->  I(4) + H(2)  =  6 bytes
+  ENTRY_FMT     = Struct(">dI")   ->  d(8) + I(4)  = 12 bytes
+
+  Same log entry as JSON:
+    {"timestamp": 1705315800.5, "event_id": 4242}    = 45 bytes
+
+    45 / 12 = 3.75x   -- JSON is nearly 4x the bytes for identical information
+
+  Scale to 1,000,000 telemetry entries:
+    struct :  12 B x 1e6 =  11.44 MB
+    json   :  45 B x 1e6 =  42.92 MB
+    saved  :               31.47 MB per million records
+```
+
+The framed message in `frame_message` is `6 + len(payload)` bytes, so a 18-byte body like
+`b"hello binary world"` goes on the wire as 24 bytes — a 33% framing tax on a tiny message that
+falls to 0.6% at a 1 KB payload. Fixed headers are cheap exactly when payloads are not tiny.
+
+**Why the header must be fixed-width.** `unframe_message` reads `HEADER_FORMAT.size` bytes *before*
+it knows anything about the message — that is only possible because 6 is a compile-time constant. A
+self-describing format cannot do this: you would have to scan for a delimiter, which means the
+parser's cost depends on the data rather than on a single `read(6)`. This is the property that makes
+`struct` the right tool for TCP framing and the wrong tool for a config file.
 
 ### 6.8 `tempfile` — Safe Scratch Space
 
@@ -960,6 +1037,49 @@ async def upload_transactions_broken(file: UploadFile):
 - `await file.read()` loads the entire file into memory before any processing begins.
 - At 20 concurrent uploads of 500 MB each, the worker pool requires 10 GB RAM.
 - If the upload is interrupted mid-read, all work is discarded and no partial progress is logged.
+
+**What it means.** Peak memory for a naive upload handler is "file size times concurrency" — it
+scales with your *traffic*, not with your code. Chunking replaces the file-size term with a
+constant, which is the only reason the endpoint survives a traffic spike.
+
+| Symbol | What it is |
+|--------|------------|
+| `F` | Size of one uploaded file — attacker- or customer-controlled, not yours |
+| `W` | Concurrent uploads in flight; roughly the worker count |
+| `W * F` | Peak RAM of the BROKEN version — `await file.read()` holds all of `F` |
+| `W * CHUNK_SIZE` | Peak RAM of the FIX — bounded by the 64 KB buffer, independent of `F` |
+| `MAX_FILE_BYTES` | The 600 MB guard; caps `F` *after* the bytes already landed on disk |
+| `F / throughput` | Time to parse, from the §11 table (json ~100 MB/s, orjson ~800 MB/s) |
+
+**Walk one example.** The same 20-worker pool, before and after, at `F = 500 MB`:
+
+```
+                       BROKEN                          FIX
+                       await file.read()               64 KB chunks -> tempfile
+  ------------------   -----------------------------   --------------------------
+  RAM per worker       F        = 500 MB               CHUNK_SIZE = 64 KB
+  W = 20 workers       20 x 500 MB = 10,000 MB         20 x 64 KB = 1.25 MB
+                       = 9.77 GiB of RSS               = 0.001 GiB
+  reduction                                            8,000x
+
+  Disk instead of RAM: the FIX moves 500 MB per upload to /tmp, so the new
+  ceiling is free disk space, which is far cheaper to provision than RSS.
+```
+
+And the parse cost, once the bytes are on disk, straight from the §11 throughput column:
+
+```
+  F / throughput
+
+    json  (stdlib) ~100 MB/s   ->  500 / 100 = 5.00 s
+    orjson         ~800 MB/s   ->  500 / 800 = 0.62 s     -- 8x faster, one import away
+```
+
+**Why the 600 MB guard cannot be the memory fix.** `MAX_FILE_BYTES` is checked inside the chunk
+loop, after `total += len(chunk)` — so it bounds how much you *keep*, not how much you hold at once.
+In the BROKEN version the single `await file.read()` has already materialized the whole body before
+any guard could run, which is why a size limit alone never rescues a non-streaming handler. The
+guard and the chunking solve different problems: one caps disk and work, the other caps RAM.
 
 ---
 

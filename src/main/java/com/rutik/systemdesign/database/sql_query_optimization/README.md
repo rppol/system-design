@@ -88,6 +88,61 @@ merge(sorted_outer, sorted_inner)
 
 Best when: both inputs are already sorted (index scan output), or sort is cheap. CPU efficient, minimal memory.
 
+**What the formula is telling you.** The three join costs have three different *shapes*, and that
+is the only thing you need to remember: nested loop is `outer_rows x lookup_cost` (grows with the
+outer row count), hash join is `pages(A) + pages(B)` (grows with table size but is scanned once
+each), merge join is `n log n` sorting plus one linear pass. Because one shape is per-row and the
+others are per-table, they always cross at a specific outer-row count — which you can compute.
+
+| Symbol | What it is |
+|--------|------------|
+| `outer_rows` | Rows the outer (driving) side feeds into the join, after its own filters |
+| `lookup_cost` | Pages touched per inner index probe. About 4 for a height-4 B+tree |
+| `pages(T)` | `rows(T) / rows_per_page` — sequential pages a full scan of `T` reads |
+| build side | The smaller input a hash join loads into memory. Must fit in `work_mem` |
+| probe side | The larger input streamed past the hash table, one pass, no memory held |
+
+**Walk one example.** The exact tables from the `EXPLAIN ANALYZE` output above — `users` at
+40,000 rows / 400 pages, `orders` at 200,000 rows / 5,000 pages:
+
+```
+  NESTED LOOP  (users outer, index on orders.user_id)
+    scan users        :       400 pages
+    inner probes      : 40,000 x 4  = 160,000 pages
+    total             : 160,400 pages
+
+  HASH JOIN  (build on users, probe with orders)
+    scan users        :       400 pages
+    scan orders       :     5,000 pages
+    total             :     5,400 pages
+
+    160,400 / 5,400 = 29.7x  -> the planner picks the hash join. Correctly.
+```
+
+Now shrink the outer side and watch it flip:
+
+```
+  outer_rows      nested loop pages      hash join pages     winner
+       100        400 + 100x4 =   800         5,400          nested loop
+     1,000        400 + 1,000x4 = 4,400       5,400          nested loop
+     1,350        400 + 1,350x4 = 5,800       5,400          tie-ish
+    40,000        160,400                     5,400          hash join
+
+  crossover: outer_rows = 5,400 / 4 = 1,350 rows
+```
+
+That 1,350 is where the quoted heuristic "nested loop when outer is under ~1,000 rows" comes
+from. It is not a magic constant — it is `pages(inner_table) / lookup_cost`, so it moves whenever
+the inner table grows or the index gets deeper. Double the `orders` table and the crossover
+roughly doubles too.
+
+**Why merge join exists at all.** Its sort term is the expensive part:
+`200,000 x log2(200,000) = 3,521,928` comparisons for `orders` alone. Pay that and merge join
+loses to hash join almost always. But if *both* inputs already arrive sorted — an index scan on
+the join key on each side — the sort cost is zero and merge join becomes a single linear pass
+with no hash table and no `work_mem` exposure at all. That is the entire condition for choosing
+it, which is why the planner picks it far less often than the other two.
+
 The three algorithms are not interchangeable — the planner routes to whichever fits the join's size and sort profile, and a hash join that outgrows `work_mem` degrades into slow, multi-batch disk spilling:
 
 ```mermaid
@@ -133,6 +188,50 @@ WHERE tablename = 'orders' AND attname = 'customer_id';
 ALTER TABLE orders ALTER COLUMN customer_id SET STATISTICS 500; -- More histogram buckets
 ANALYZE orders;
 ```
+
+**In plain terms.** Every `rows=` you see in an `EXPLAIN` plan comes from one formula:
+`rows = rows(A) x rows(B) / max(n_distinct_A, n_distinct_B)`. Read it as "the bigger key space
+wins" — the side with more distinct values sets how finely the join splits. `n_distinct` is a
+*single sampled number*, so the whole plan hangs off one statistic, and that is exactly why
+Section 2 calls the planner a cost estimator rather than a mind reader.
+
+| Symbol | What it is |
+|--------|------------|
+| `rows(A)`, `rows(B)` | Estimated input rows on each side, after each side's own filters |
+| `n_distinct` | Distinct values in the join column. Sampled by `ANALYZE`, not counted exactly |
+| `max(...)` | The larger key space. Divides the cross product down to the real join size |
+| `1 / max(...)` | Join selectivity — the fraction of all possible pairs that actually match |
+| `SET STATISTICS n` | Histogram buckets, default 100. More buckets = better `n_distinct` and MCVs |
+
+**Walk one example.** Reproduce the `rows=200000` on the `Hash Left Join` node above:
+
+```
+  rows(users after filter) = 40,000       n_distinct(users.id)       = 40,000  (unique)
+  rows(orders)             = 200,000      n_distinct(orders.user_id) = 40,000
+
+  selectivity = 1 / max(40,000, 40,000) = 1 / 40,000
+
+  rows = 40,000 x 200,000 / 40,000 = 200,000     <- matches the plan exactly
+```
+
+Now break one statistic and watch the plan follow it off a cliff:
+
+```
+  stale ANALYZE reports n_distinct(orders.user_id) = 400,000   (10x too high)
+
+  rows = 40,000 x 200,000 / 400,000 = 20,000     <- 10x UNDER-estimate
+
+  Planner reasoning at 20,000 estimated rows:
+    "small result, small outer side -> nested loop is cheap"
+    actual outer rows delivered = 200,000
+    actual probes = 200,000 x 4 = 800,000 pages, against 5,400 for a hash join
+```
+
+**Why estimation error compounds, not adds.** Each join multiplies its inputs, so an error in an
+input propagates multiplicatively. A single join off by 10x makes a three-table join off by up to
+`10 x 10 = 100x`. This is the mechanism behind Pitfall 5's rule of thumb — once `actual rows`
+exceeds the `rows` estimate by more than 10x at any node, every node *above* it in the plan tree
+was chosen on fiction, and re-running `ANALYZE` is a cheaper first move than rewriting the query.
 
 ### CTEs as Optimization Fences (PostgreSQL < 12)
 
@@ -229,6 +328,46 @@ LIMIT 20;
 CREATE INDEX idx_posts_cursor ON posts (created_at DESC, id DESC);
 ```
 
+**Read it like this.** `OFFSET` is not a seek, it is a *count*. The engine has no way to jump to
+row 100,000 — it must produce rows 1 through 100,000, throw them away, and then start returning
+results. So the work per page is `page_number x page_size + page_size`, while keyset pagination
+does one `O(log n)` index descent and then reads exactly `page_size` rows, forever.
+
+| Symbol | What it is |
+|--------|------------|
+| `page_size` | Rows per page, the `LIMIT`. 20 here |
+| `page_number` | Which page is being requested. The multiplier `OFFSET` cannot escape |
+| rows touched | `page_number x page_size + page_size` for OFFSET; `page_size` for keyset |
+| cursor | The last row's sort-key values, `(created_at, id)`. Replaces the counter with a seek |
+| row-value compare | `(a, b) < (x, y)` — one index seek, not `a < x OR (a = x AND b < y)` |
+
+**Walk one example.** The numbers behind the chart above, then the cost of a full crawl:
+
+```
+  page     OFFSET rows touched            keyset rows touched
+     1     0      + 20 =      20                 20
+   100     1,980  + 20 =   2,000                 20
+ 1,000     19,980 + 20 =  20,000                 20
+ 5,000     99,980 + 20 = 100,000                 20
+
+  Reading ALL 1,000 pages in sequence:
+    OFFSET : sum of 20p for p = 1..1,000 = 20 x 1,000 x 1,001 / 2 = 10,010,000 rows
+    keyset : 1,000 x 20                                          =     20,000 rows
+
+    10,010,000 / 20,000 = 500.5x more work for the identical output
+```
+
+The per-page cost is linear, so the cost of *paginating through the whole set* is quadratic —
+`O(P^2)` in page count. This is why OFFSET pagination feels fine in testing (page 1-5) and melts
+in production the moment a crawler or an export job walks to page 5,000.
+
+**Why the cursor must include `id`.** Sorting on `created_at` alone is not a total order — two
+posts sharing a timestamp have no defined relative position, so a page boundary landing between
+them can repeat or skip rows on the next request. Appending the unique `id` makes the sort key
+unique, which makes `(created_at, id) < (cursor_ts, cursor_id)` a well-defined seek point. Drop
+`id` from either the ORDER BY or the index and the pagination silently loses rows under
+concurrent inserts.
+
 The gap compounds with depth: at page 1,000, OFFSET has already discarded 20,000 rows to serve one 20-row page, while keyset pagination touches roughly the same handful of rows no matter how deep the page:
 
 ```mermaid
@@ -266,6 +405,45 @@ private Product product;
 ```
 
 Detection: enable `spring.jpa.show-sql=true` or use DataDog APM with N+1 detection. Look for the same query repeated N times with different ID parameters.
+
+**What it means.** N+1 is a latency problem, not a database problem. Total time is
+`(1 + N) x round_trip`, and `round_trip` is dominated by network and statement overhead, not by
+the work the database does. Each of those N queries may be a sub-millisecond indexed lookup and
+the request still takes seconds — which is why "the queries are all fast" is the most misleading
+observation in an N+1 investigation.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Rows in the parent result set. The loop count, entirely data-dependent |
+| `round_trip` | Network latency + parse + plan + execute + result transfer for one query |
+| `(1 + N) x rt` | N+1 total. Linear in the parent row count |
+| `1 x rt_join` | JOIN FETCH total. One round trip, larger result payload |
+| `@BatchSize(k)` | Middle ground: `1 + ceil(N/k)` round trips instead of `1 + N` |
+
+**Walk one example.** The Django incident from Section 7 — 500 queries, 2.5s:
+
+```
+  round_trip = 2,500 ms / 500 queries = 5.0 ms per query
+
+  N+1        : (1 + 499) x 5.0 ms   = 2,500 ms
+  JOIN FETCH :  1 query, measured   =    50 ms
+  speedup    : 2,500 / 50           =    50x
+
+  Same query cost, different round-trip count:
+    N =    10  ->  (1 + 10)  x 5.0 =    55 ms   feels fine in dev
+    N =   100  ->  (1 + 100) x 5.0 =   505 ms   noticeable
+    N =   500  ->  (1 + 500) x 5.0 = 2,505 ms   the production incident
+    N = 5,000  ->  (1 + 5000) x 5.0 = 25 s      timeout
+
+  With @BatchSize(size = 100) at N = 500:
+    round trips = 1 + ceil(500 / 100) = 6
+    total       = 6 x 5.0 ms = 30 ms
+```
+
+Note what the batch row buys: it does not remove a single row of database work, only 494 round
+trips. That is also why the same code is fast on a developer laptop — a local socket has a
+`round_trip` near 0.2 ms, so the identical N=500 loop costs 100 ms and never gets noticed until
+the app runs across a network.
 
 ### Window Functions
 
@@ -334,6 +512,49 @@ ps.executeBatch();
 - **N+1 in production**: A Python/Django app making 500 queries per request — 1 for the order list + 499 for related data. Query time: 2.5s. After `select_related()`: 1 query, 50ms.
 - **Statistics failure**: A SaaS app bulk-imported 50M new rows. Planner still thought the table had 500K rows (stats from before load). After ANALYZE: query plan changed from seq scan to index scan, latency dropped 10x.
 - **work_mem too low**: A hash join query was spilling to disk (HashJoin node showing "Batches: 8"). Setting `SET work_mem = '512MB'` for the session: Batches dropped to 1, query time from 45s to 3s.
+
+**Stated plainly.** `Batches: N` is a division you can do yourself: `N = build_side_bytes /
+work_mem`, rounded up to a power of two. `Batches: 1` means the hash table fit in memory and
+nothing touched disk; anything above 1 means the engine partitioned *both* sides, wrote
+`(N-1)/N` of each to temp files, and read them all back. The jump from 1 to 2 is where a query
+changes character, not the jump from 8 to 16.
+
+| Symbol | What it is |
+|--------|------------|
+| `work_mem` | Per-operation memory budget. Default 4 MB. One plan can use it many times over |
+| build side | Smaller input, hashed into memory. Its size alone decides the batch count |
+| probe side | Larger input, streamed. Never sized against `work_mem`, but spills alongside |
+| `Batches: N` | Partitions the join was split into. `1` = fully in memory, no temp files |
+| `(N-1)/N` | Fraction of each side written to temp files and read back |
+
+**Walk one example.** A build side of 1,000,000 rows at 32 bytes per hash entry, probed by
+10,000,000 rows, under the default `work_mem`:
+
+```
+  build side = 1,000,000 x 32 =  32,000,000 bytes =  30.5 MiB
+  probe side = 10,000,000 x 32 = 320,000,000 bytes = 305.2 MiB
+
+  AT work_mem = 4 MB
+    batches      = ceil(30.5 / 4) = 8           <- the "Batches: 8" in the plan
+    spilled      = (8-1)/8 = 87.5% of each side
+    written      = 0.875 x (30.5 + 305.2) = 293.7 MiB
+    read back    = 293.7 MiB
+    extra disk I/O                          = 587.5 MiB
+
+  AT work_mem = 512 MB
+    batches      = ceil(30.5 / 512) = 1
+    extra disk I/O                          = 0 MiB
+```
+
+587.5 MiB of temp-file traffic that did not need to exist — which is what 45s versus 3s buys.
+Note the asymmetry worth remembering: the *build* side is what you must size `work_mem` against
+(30.5 MiB here), but the *probe* side is what dominates the spill volume (305.2 MiB, 91% of it).
+Sizing on the small number protects you from the big one.
+
+**Why `work_mem` is not just "set it high".** As Section 9 notes, the budget is per *operation*,
+not per query. This plan has a hash join and a sort; at `work_mem = 512MB` one session can hold
+1 GB, and 100 concurrent sessions can request 100 GB. That is why the fix here is `SET work_mem`
+for the one heavy session rather than an edit to `postgresql.conf`.
 
 ---
 

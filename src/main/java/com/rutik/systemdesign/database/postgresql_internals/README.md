@@ -86,6 +86,29 @@ For a 10M-row table: 50 + 0.2 × 10,000,000 = 2,000,050 dead tuples before autov
 
 This means a table receiving 200K updates/day won't trigger autovacuum for 10 days — 2M dead tuples accumulate.
 
+**What this actually says.** "Do not vacuum a table until roughly one fifth of its rows are dead — and measure that fifth against the table's whole row count, not against how fast it is churning." The gate scales with table size, so the larger the table the longer the wait, which is exactly backwards from what a hot table needs.
+
+| Symbol | What it is |
+|--------|------------|
+| `dead_tuples` | Current count of dead row versions — `n_dead_tup` in `pg_stat_user_tables` |
+| `autovacuum_vacuum_threshold` | Flat floor, default `50` rows. Only decisive on tiny tables |
+| `autovacuum_vacuum_scale_factor` | Fraction of the table, default `0.2` — that is 20% |
+| `reltuples` | Planner's estimate of live rows, refreshed by the last ANALYZE |
+
+**Walk one example.** The same 10M-row table, at the default scale factor and at the tuned one:
+
+```
+                        threshold  +  scale x reltuples      =  dead tuples needed
+  default (0.2)              50    +   0.2  x 10,000,000     =  2,000,050
+  tuned   (0.01)            100    +   0.01 x 10,000,000     =    100,100
+
+  At 200,000 updates/day, time between autovacuum runs:
+    default : 2,000,050 / 200,000  =  10.0 days
+    tuned   :   100,100 / 200,000  =   0.5 days  --  roughly twice a day
+```
+
+The scale factor exists so autovacuum's cost stays proportional to table size rather than firing constantly on a busy small table. The trap is that proportional-to-size is the wrong shape for a large hot table: a 10M-row table and a 10-row table both wait for 20% dead, but the 10M-row table has to carry two million dead tuples to get there. That is why the per-table override below is the standard remedy — it turns the fraction back into something close to an absolute cap.
+
 *The trigger is a single threshold gate: bloat keeps growing until the dead-tuple count crosses it, then autovacuum fires:*
 
 ```mermaid
@@ -120,9 +143,59 @@ ALTER TABLE high_write_table SET (
 );
 ```
 
+**The idea behind it.** "Autovacuum pays a toll for every page it touches, and once its toll bill reaches the limit it must sit out the delay before it is allowed to work again." Cost-based throttling is a rate limiter with an unusual meter: it charges by how expensive the page was, not by how many pages there were.
+
+| Symbol | What it is |
+|--------|------------|
+| `vacuum_cost_page_hit` | `1` unit — page was already in `shared_buffers`, nearly free |
+| `vacuum_cost_page_miss` | `10` units — page had to be read from disk |
+| `vacuum_cost_page_dirty` | `20` units — page was modified and must be written back |
+| `autovacuum_vacuum_cost_limit` | Toll budget spendable per cycle, default `200` |
+| `autovacuum_vacuum_cost_delay` | Sleep once the budget is spent, default `20` ms |
+
+**Walk one example.** A workload where half the pages are already cached and half are not:
+
+```
+  average cost per page  =  0.5 x 10 (miss)  +  0.5 x 1 (hit)   =    5.5 units
+
+  defaults  :  200 / 5.5           =      36.4 pages per cycle
+               1000 ms / 20 ms     =        50 cycles per second
+               36.4 x 50           =     1,818 pages/sec  =  14.2 MB/sec of heap
+
+  tuned     :  2000 / 5.5          =     363.6 pages per cycle
+               1000 ms / 2 ms      =       500 cycles per second
+               363.6 x 500         =   181,818 pages/sec (ceiling, if I/O allows)
+
+  budget x10 and delay /10  ->  100x more pages per second
+```
+
+The tuned figure is a permission ceiling, not a promise — real throughput stops at whatever the disk delivers. What the arithmetic does show is why the two knobs must move together: raising `cost_limit` alone widens each burst but leaves the same 20 ms of sleep between them, so the sustained rate barely improves. Multiply the budget and divide the delay, and the rate multiplies by both factors at once.
+
 ### XID Wraparound
 
 PostgreSQL transaction IDs (XIDs) are 32-bit unsigned integers cycling after ~2.1 billion transactions. If a table's relfrozenxid falls more than 2 billion XIDs behind the current XID, PostgreSQL forcibly shuts down to prevent wraparound (catastrophic data corruption). Autovacuum's `--freeze` mode (`autovacuum_freeze_max_age = 200M` XIDs by default) ensures tables are frozen before the danger zone.
+
+**Read it like this.** "A 32-bit counter gives you about 2.1 billion transactions of runway; freeze the old rows before that runway ends, or the server stops accepting writes to protect itself." XID comparison is modular, so only half the 32-bit space is usable — the other half is what "in the past" means.
+
+| Symbol | What it is |
+|--------|------------|
+| `2^31` | `2,147,483,648` — usable XID space, half of `2^32` because comparisons are modular |
+| `relfrozenxid` | Oldest still-unfrozen XID in one table |
+| `age(datfrozenxid)` | How many XIDs have burned since the oldest unfrozen row in the database |
+| `autovacuum_freeze_max_age` | `200,000,000` default — forces a freeze vacuum regardless of dead-tuple count |
+
+**Walk one example.** Every threshold in this module, as a fraction of the runway:
+
+```
+  usable XID space                     2^31 = 2,147,483,648      100.0%
+
+  autovacuum_freeze_max_age             200,000,000                9.3%   routine freeze
+  alert threshold (Pitfall 5)         1,000,000,000               46.6%   page someone
+  emergency threshold (Pitfall 5)     1,800,000,000               83.8%   347,483,648 left
+  hard stop                          ~2,100,000,000               97.8%   writes refused
+```
+
+The freeze trigger sits at 9.3% for a reason: it must fire early enough that even a slow freeze pass over a multi-terabyte table finishes with the remaining 90% of the runway to spare. Pitfall 5's 72-hour `VACUUM FREEZE` on a 10 TB database is exactly the scenario that headroom is sized for — a database that only starts freezing at the alert threshold may not finish before the hard stop.
 
 *Autovacuum's freeze pass should cycle every table back to Healthy long before the alert thresholds monitored in Pitfall 5 are ever reached:*
 
@@ -248,6 +321,29 @@ Hash Join  (cost=1200.50..9800.20 rows=50000 width=32)
 -- "Rows Removed by Filter" >> "rows" → missing index on created_at
 ```
 
+**In plain terms.** "A sequential scan pays once for each page it streams past; an index scan pays a much steeper random-jump price for every page it has to seek to — so the index wins only while the number of pages it must seek stays small." Every cost number in an EXPLAIN plan is quoted in units of one sequential page read.
+
+| Symbol | What it is |
+|--------|------------|
+| `seq_page_cost` | Cost of reading one page in sequence. Default `1.0` — the unit everything else is priced in |
+| `random_page_cost` | Cost of one random page seek. Default `4.0` (spinning disk); set `1.1` on SSD |
+| `cpu_index_tuple_cost` | Per-index-entry CPU charge, default `0.005` |
+| `pages_to_fetch` | Heap pages the index scan must visit — at worst one per matching row, capped at the table's page count |
+
+**Walk one example.** The `orders` scan in the plan above: 8,000 pages, 48,921 matching rows, 1,500,000 removed by the filter, so 1,548,921 rows total and 3.16% selectivity.
+
+```
+  seq scan    :  1.0 x 8,000 pages                                =   8,000
+  index scan  :  0.005 x 48,921  +  4.0 x min(48,921, 8,000)
+                 =  244.6  +  32,000                              =  32,245   4.03x worse
+  same on SSD :  244.6  +  1.1 x 8,000                            =   9,045   1.13x worse
+
+  Now a far more selective predicate -- only 500 matching rows:
+  index scan  :  0.005 x 500  +  4.0 x 500  =  2.5 + 2,000        =   2,003   4.0x better
+```
+
+At 3.16% selectivity the planner is right to pick the Seq Scan even though an index exists — 48,921 random seeks cost four times what streaming the whole table costs. Notice what changes the verdict: dropping `random_page_cost` to `1.1` for SSD storage shrinks the gap from 4.03x to 1.13x, and cutting the matching rows to 500 flips it outright. This is why "Rows Removed by Filter" being 30.7x the returned rows is the signal to add an index — it means the predicate could be far more selective than the plan is currently able to exploit.
+
 ### Query Plan Node Types
 
 | Node | Meaning | Best When |
@@ -279,6 +375,33 @@ TOAST overhead:
 ```
 
 Performance pitfall: `SELECT *` on a table with large JSONB columns reads all TOAST values. `SELECT id, status` does not.
+
+**Put simply.** "Anything wider than a quarter of a page gets shipped off to a side table, so a fat column costs you nothing until a query actually asks for it." The threshold is not a tuning knob you pick — it falls out of PostgreSQL's requirement that at least four rows fit on every 8 KB page.
+
+| Symbol | What it is |
+|--------|------------|
+| 8 KB page | `8,192` bytes — PostgreSQL's fixed block size, the unit all I/O is done in |
+| ~2 KB threshold | `2,048` bytes, exactly one quarter of a page — the point where TOAST engages |
+| out-of-line | Value moved to `pg_toast_<oid>`; the heap row keeps only a small pointer |
+| TOAST fetch | The extra read to reassemble the value, paid only when the column is selected |
+
+**Walk one example.** The `events` table from Section 7, with 200 KB average JSONB payloads:
+
+```
+  page size                                  8,192 bytes
+  TOAST threshold        8,192 / 4       =   2,048 bytes
+
+  payload JSONB  200 KB  =  204,800 bytes
+     204,800 / 8,192     =  25 pages' worth of data per row, all out-of-line
+     204,800 / 2,048     =  100x the TOAST threshold -- never stored inline
+
+  SELECT *           ->  heap row  +  full TOAST reassembly   =  50.0 ms
+  SELECT id, status  ->  heap row only, TOAST never touched   =   0.5 ms
+                                                                 --------
+  speedup from not selecting the TOASTed column                     100x
+```
+
+The quarter-page rule is why the threshold exists at all: PostgreSQL cannot chain a row across pages, so without out-of-line storage a single 200 KB document would be unstorable. What the 100x gap shows is that TOAST is not a tax you pay for having a wide column — it is a tax you pay for `SELECT *`. The column is free to own and expensive only to read.
 
 ### Partitioning
 

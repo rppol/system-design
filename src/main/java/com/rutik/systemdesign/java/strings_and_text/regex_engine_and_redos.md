@@ -194,6 +194,48 @@ Both the inner `a+` and the outer `(...)+` can each absorb any number of `a`s, s
 the engine tries every way to partition the run of `a`s into groups — 2ⁿ⁻¹ of
 them — and only fails at the trailing `X` each time. This is the canonical ReDoS.
 
+**What this actually says.** "Count the ways you can chop a run of n identical
+characters into consecutive non-empty pieces — that count *is* the number of
+match attempts the engine must make before it can say no."
+
+That framing matters because it turns a vague "regex can be slow" into an exact
+combinatorial quantity you can compute from the pattern alone. Nothing about the
+input is special: the `a`s are interchangeable, and it is purely the *number of
+ways to draw the group boundaries* that explodes.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of repeated characters the ambiguous quantifier can absorb (the run length) |
+| `k` | How many groups the outer `(...)+` splits that run into, from 1 to n |
+| `C(n-1, k-1)` | Number of ways to choose k-1 boundaries out of the n-1 gaps between characters |
+| `2ⁿ⁻¹` | The total over all k — every gap is independently a boundary or not |
+| the trailing `X` | The failure trigger; it forces the engine to exhaust *all* splits, not stop early |
+
+**Walk one example.** The `"aaaa" + "X"` case drawn in the diagram, n = 4:
+
+```
+  4 a's  ->  3 gaps between them:   a | a | a | a
+             each gap is independently "boundary" or "no boundary"
+
+  k = 1 group    C(3,0) = 1     (aaaa)
+  k = 2 groups   C(3,1) = 3     (a)(aaa)  (aa)(aa)  (aaa)(a)
+  k = 3 groups   C(3,2) = 3     (a)(a)(aa)  (a)(aa)(a)  (aa)(a)(a)
+  k = 4 groups   C(3,3) = 1     (a)(a)(a)(a)
+                 ---------
+  total          1 + 3 + 3 + 1 = 8  =  2^3  =  2^(4-1)
+
+  Every one of the 8 reaches the trailing 'X', fails the $ anchor, and backtracks.
+```
+
+Four characters cost 8 attempts, which is invisible. But the exponent is the run
+length, so the same pattern at n = 24 costs 2^23 = 8,388,608 attempts and at
+n = 32 costs 2^31 = 2,147,483,648 — from adding eight characters to the input.
+
+The trailing `X` is the load-bearing term. Without it the very first split
+(`(aaaa)`) matches, the engine returns immediately, and the pattern looks
+perfectly fast in every test you write with valid input. ReDoS is a
+*failing*-match cost, which is exactly why it survives code review.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -357,6 +399,48 @@ n=32  matched=false  8900 ms
 n=34  matched=false 36000 ms   <- 36 seconds from a 35-byte string
 ```
 
+**What the formula is telling you.** "Runtime doubles for every single character
+you add to the input, so the honest unit for this table is not milliseconds per
+byte — it is a multiplier per byte."
+
+Reading it as a multiplier is what makes the table predictive. Once you know the
+ratio between two adjacent rows, you can extrapolate to any n without running
+the program, which is how you decide whether a length cap is a real fix.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Length of the run of `a`s (the input is n a's plus one non-matching char) |
+| `2ⁿ⁻¹` | Match attempts the engine makes before returning false |
+| step rate | Attempts the JVM retires per second on this machine — a roughly fixed constant |
+| row ratio | Measured time of a row divided by the row above it |
+| `matched=false` | Confirms every run walked the *whole* tree; a true match would exit early |
+
+**Walk one example.** Turn the measured times into ratios, then into a step rate:
+
+```
+    n     time      2^(n-1)          measured ratio      predicted ratio
+   20      2 ms       524,288             -                   -
+   24     35 ms     8,388,608        35/2    = 17.5        2^4 = 16
+   28    560 ms   134,217,728       560/35   = 16.0        2^4 = 16
+   30   2200 ms   536,870,912      2200/560  =  3.93       2^2 =  4
+   32   8900 ms 2,147,483,648      8900/2200 =  4.05       2^2 =  4
+   34  36000 ms 8,589,934,592     36000/8900 =  4.04       2^2 =  4
+
+   step rate from the last row:
+       8,589,934,592 attempts / 36.0 s = 2.39e8 attempts per second
+
+   sanity-check n = 32 against that rate:
+       2,147,483,648 / 2.39e8 = 9.0 s     (measured 8.9 s)
+```
+
+Measured and predicted agree to within a few percent, which is the proof that
+this is genuinely 2ⁿ and not merely "slow." The +2 rows quadruple and the +4 rows
+sixteen-fold because the base is 2 and only the exponent moves.
+
+Extrapolating with the same 2.39e8 attempts/second rate is what makes the threat
+concrete: n = 40 needs 2^39 = 549,755,813,888 attempts, which is 2,304 seconds —
+just over 38 minutes of one pinned core, bought with a 41-byte HTTP field.
+
 The three classic ReDoS shapes:
 - **Nested quantifiers**: `(a+)+`, `(a*)*`, `(.+)+` — inner and outer both flexible.
 - **Overlapping alternation under a quantifier**: `(a|a)*`, `(a|ab)*` — multiple ways to match the same text.
@@ -398,6 +482,43 @@ quantifier possessive so a failed tail cannot force a re-split.
 
 1. **Cap input length before matching.** `if (input.length() > 256) reject();` —
    exponential in n is harmless when n is bounded to a small constant.
+
+**Stated plainly.** "A length cap does not remove the exponent — it only fixes
+the value you raise 2 to, so the cap is safe exactly when 2 to that cap is a
+number of steps your CPU can finish inside your request timeout."
+
+That reframing is the whole reason this mitigation is so often misapplied. A cap
+feels like a bound, but it is only a bound on n; the work is still 2ⁿ⁻¹, so the
+cap has to be chosen against the step rate, not against what "looks like a
+reasonable field length."
+
+| Symbol | What it is |
+|--------|------------|
+| cap | The maximum input length you accept before the regex ever runs |
+| `2^(cap-1)` | Worst-case attempts a truly exponential pattern can still make under that cap |
+| step rate | Attempts per second, measured above as 2.39e8 on the reference machine |
+| budget | The stall you are willing to tolerate on a request thread, e.g. 100 ms |
+
+**Walk one example.** Push several candidate caps through `2^(cap-1) / 2.39e8`:
+
+```
+   cap    worst-case attempts 2^(cap-1)    time at 2.39e8/s    verdict
+    24                    8,388,608            0.035 s         safe
+    32                2,147,483,648            9.0   s         already a stall
+    40              549,755,813,888        2,304     s         38 minutes
+    64    9,223,372,036,854,775,808        1,225     years     unbounded in practice
+   256                        2^255        7.7e60    years     no bound at all
+```
+
+Only the 24-character row lands inside a 100 ms budget. The commonly written
+`> 256` cap reduces the worst case by a factor no human cares about: it is still
+`2^255` attempts.
+
+So the cap is a genuine fix only for **polynomial** blowups — a quadratic
+`(\w+\s?)*`-style pattern at n = 256 is 256^2 = 65,536 steps, which really is
+free. Against a truly exponential shape a length cap buys nothing, and the term
+that has to change is the *pattern*: make the inner quantifier possessive or
+de-nest it, which is items 2 and 3 in this list rather than item 1.
 2. **Prefer possessive/atomic** wherever the sub-expression should match greedily
    and never reconsider (most validation patterns qualify).
 3. **Anchor both ends** (`^...$` or `matches()`) to prune the search space.
@@ -445,6 +566,39 @@ matcher = pattern.matcher(new InterruptibleCharSequence(userInput));
 | Capture-group semantics | Leftmost-greedy, familiar | Leftmost-longest (RE2 semantics differ) |
 | Memory | Small compiled graph | Can build a large DFA for big alternations |
 | Use when | Trusted patterns needing rich features | Untrusted patterns / DoS-sensitive paths |
+
+**Put simply.** "The first row of this table is not a 2x or 10x difference —
+O(2ⁿ) versus O(n) means the gap itself grows with every character, so at any
+input length worth attacking the two engines are not on the same scale."
+
+Worth spelling out because "exponential vs linear" reads as an abstract
+complexity-class remark, and engineers discount it the way they discount O(n log
+n) versus O(n). Here the constant factors are irrelevant and only the shape matters.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(2ⁿ)` | Backtracking NFA worst case — attempts double per added character |
+| `O(n)` | RE2/DFA guarantee — one pass, state count bounded by the compiled automaton |
+| `n` | Input length in characters |
+| speedup | `2ⁿ⁻¹ / n` — how many times more work the backtracker does at that n |
+
+**Walk one example.** The same 35-byte string the section above measured, n = 34:
+
+```
+  backtracking NFA (java.util.regex):  2^33  = 8,589,934,592 attempts
+  DFA (com.google.re2j):                  34            char transitions
+
+  ratio = 8,589,934,592 / 34 = 252,645,135x
+
+  in wall time at 2.39e8 attempts/s:
+      java.util.regex   36     s     <- request thread pinned
+      re2j              ~1     us    <- 34 transitions, below timer resolution
+```
+
+A quarter of a billion times more work for the same 35 bytes. And the ratio is
+not a fixed penalty you could tune away: at n = 40 it is 2^39/40 = 13.7 billion.
+That is why the "use when" row is a *security* decision rather than a
+performance one — no amount of faster hardware closes a gap that widens per byte.
 
 ### Quantifier strategy
 

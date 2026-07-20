@@ -224,6 +224,37 @@ xychart-beta
 
 Raw SHA-256 lets a commodity GPU try ~10^10 candidates/second; PBKDF2 at 600k iterations drops that to ~10^4, and memory-hard Argon2id to ~10^1.7. The whole point of a password hash is to be *deliberately slow* — the opposite of a fast digest.
 
+**The idea behind it.** "Time to crack a password is the size of the search space divided by the attacker's guess rate — you cannot control the first term, because users choose the passwords, so the work factor exists purely to shrink the second."
+
+That split is the entire design rationale for password hashing. Every iteration count, memory cost, and parallelism parameter is a lever on the denominator and nothing else.
+
+| Symbol | What it is |
+|--------|------------|
+| search space | How many candidate passwords exist — `charset_size ^ length` for brute force |
+| guess rate | Candidates/second the attacker's hardware can test, set almost entirely by the hash's cost |
+| work factor | The tunable that divides the guess rate: PBKDF2 iterations, bcrypt `cost`, Argon2 time+memory |
+| `space / rate` | Seconds to exhaust the space. Halving the rate doubles this; nothing else in the equation moves |
+
+**Walk one example.** One 8-character lowercase-alphanumeric password against each bar in the chart above:
+
+```
+  search space = 36^8 = 2,821,109,907,456 candidates   (~41.4 bits of entropy)
+
+  algorithm        guess rate        seconds to exhaust      in human terms
+  ---------------  ----------------  ----------------------  ---------------
+  SHA-256 raw      10^10   = 1e10                     282    under 5 minutes
+  PBKDF2-600k      10^4    = 10,000         282,110,991      8.9 years
+  bcrypt cost 12   10^2.3  = ~200        14,139,042,703      448 years
+  scrypt           10^2    = 100         28,211,099,075      895 years
+  Argon2id         10^1.7  = ~50         56,288,542,847      1,785 years
+
+  the ratio that matters
+    SHA-256 -> PBKDF2-600k = 1e10 / 1e4 = 1,000,000x slower for the attacker
+    and roughly 600,000x slower for YOU, once, per legitimate login
+```
+
+**Why bcrypt's `cost` is written 10-12 and not as an iteration count.** The `cost` parameter is an exponent: bcrypt runs `2^cost` key-expansion rounds, so cost 10 is 1,024 rounds, cost 11 is 2,048, and cost 12 is 4,096. Each `+1` doubles the attacker's work *and* your own login latency, which is why the recommended band is narrow — you tune `cost` until a single hash takes roughly 100 ms on your production hardware, then re-tune it upward every few years as hardware improves. Moving from cost 10 to cost 12 is a 4x slowdown (`4,096 / 1,024`), not a 20% one.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -299,6 +330,45 @@ The GCM output layout is a byte map — store all three parts together:
   \_ public, unique per key _/                          \_ verified on decrypt _/
 ```
 
+**Stated plainly.** "GCM does not change the size of your data — the ciphertext is exactly as long as the plaintext — so the entire storage cost of authenticated encryption is a flat 28 bytes of nonce plus tag per record, no matter how big or small the record is."
+
+Flat overhead is the key word. On a 1 MB blob it is invisible; on a 9-byte SSN it triples the stored size, which is why field-level encryption is a schema decision and not a drop-in change.
+
+| Symbol | What it is |
+|--------|------------|
+| nonce | 12 bytes (96 bits), the GCM standard size. Public, stored in the clear, must be unique per key |
+| ciphertext | Byte-for-byte the same length as the plaintext — GCM is a stream mode, so there is no padding |
+| tag | 16 bytes (128 bits) of authenticator. Truncating it below 128 bits weakens forgery resistance |
+| `12 + 16` | The fixed 28-byte overhead, independent of plaintext length |
+
+**Walk one example.** The Section 14 fintech schema: an SSN column across 40 million rows:
+
+```
+  one SSN record
+    plaintext        =  9 bytes  ("123456789")
+    ciphertext       =  9 bytes  <- same length, no padding
+    nonce            = 12 bytes
+    tag              = 16 bytes
+    stored total     = 37 bytes
+    overhead         = 28 / 9 = 311% of the payload
+
+  plus the wrapped DEK stored alongside (Section 14's "~60 B"):
+    wrap nonce       = 12 bytes
+    AES-256 DEK      = 32 bytes
+    wrap tag         = 16 bytes
+    wrapped DEK      = 60 bytes
+    per-row crypto overhead = 28 + 60 = 88 bytes
+
+  across the whole table
+    40,000,000 rows x 28 bytes  = 1,120 MB = 1.04 GiB of nonce+tag alone
+    40,000,000 rows x 88 bytes  = 3,520 MB = 3.28 GiB including wrapped DEKs
+
+  contrast, a 1 MB document
+    overhead = 28 / 1,048,576 = 0.0027%   <- the same 28 bytes, now invisible
+```
+
+**Why the tag is not optional and why the nonce is stored in the clear.** Dropping the tag to save 16 bytes converts GCM into unauthenticated CTR mode, where any attacker with write access can flip arbitrary plaintext bits without detection. The nonce, by contrast, is *designed* to be public — it only has to be unique, never secret, which is why storing it beside the ciphertext costs nothing in security and is the only way decryption can work at all.
+
 ### AES-CBC done correctly — Encrypt-then-MAC
 
 If you must use CBC (legacy interop), never ship it unauthenticated — that is a padding-oracle waiting to happen.
@@ -333,6 +403,39 @@ byte[] wrapped = enc.doFinal(aesKey.getEncoded());       // payload must be < ~k
 ```
 
 RSA can only encrypt a payload smaller than the modulus, so it is used to wrap a symmetric key, not to encrypt records. `"ECB"` here is a historical misnomer — RSA has no block chaining; OAEP padding is what matters.
+
+**What the formula is telling you.** "RSA's maximum payload is not a policy limit you can raise — it is the modulus size minus the padding the security proof requires, and what is left over is just large enough to carry a symmetric key and nothing more."
+
+Reading it that way reframes the whole hybrid-encryption pattern. RSA is not "too slow for bulk data"; it is *structurally incapable* of it, and the AES key it wraps is the only payload it was ever sized for.
+
+| Symbol | What it is |
+|--------|------------|
+| `keysize / 8` | Modulus size in bytes — the absolute ceiling on one RSA operation's output |
+| `hLen` | Output length of the OAEP hash. 32 bytes for SHA-256 |
+| `2 x hLen + 2` | OAEP's fixed overhead: a seed, a masked data-block hash, and one leading zero byte |
+| `keysize/8 - 2*hLen - 2` | Bytes of actual payload you may pass to `doFinal` before it throws |
+
+**Walk one example.** The 3072-bit key from the snippet above, with SHA-256 OAEP:
+
+```
+  modulus bytes     = 3072 / 8            = 384
+  OAEP overhead     = 2 x 32 + 2          =  66
+  max payload       = 384 - 66            = 318 bytes
+
+  what actually fits
+    AES-256 key     = 32 bytes            -> fits, with 286 bytes to spare
+    a 10 MB record  = 10,485,760 bytes    -> 32,975 RSA operations, one per 318-byte
+                                             chunk, each one slow and each one a
+                                             separate ciphertext to manage
+                                          -> this is why nobody does it
+
+  the same math at 2048 bits
+    modulus bytes   = 2048 / 8            = 256
+    max payload     = 256 - 66            = 190 bytes
+    -> still comfortably larger than a 32-byte AES key, which is the point
+```
+
+**Why the overhead is not negotiable.** The `2 x hLen + 2` is what makes OAEP randomized and chosen-ciphertext secure — the seed is what ensures encrypting the same AES key twice produces different ciphertexts, and the hash of the data block is what lets decryption detect tampering. PKCS#1 v1.5 padding leaves more room for payload precisely because it does less, and that "less" is exactly the gap Bleichenbacher's attack walks through.
 
 ### ECDH — derive a shared symmetric key
 
@@ -465,6 +568,43 @@ try (SSLSocket s = (SSLSocket) sf.createSocket("api.example.com", 443)) {
 | Sign speed | Slow | Fast |
 | Verify speed | **Fast** | Slower than RSA verify |
 | Use when | Interop with RSA-only peers | New systems, mobile, TLS default |
+
+**In plain terms.** "Key size and security level are two different numbers, and the conversion rate between them is wildly different for RSA than for elliptic curves — a 3072-bit RSA key and a 256-bit EC key buy exactly the same 128 bits of security, at 12x the storage."
+
+The gap exists because the best attack on RSA (the number field sieve, sub-exponential) is far better than the best attack on EC (Pollard's rho, fully exponential). RSA has to be enormous to stay ahead of a much stronger attack.
+
+| Symbol | What it is |
+|--------|------------|
+| security level | Bits of work an attacker must do, expressed as an exponent. "128-bit" means ~`2^128` operations |
+| key size | Bits actually stored and transmitted. Only meaningful relative to the algorithm's attack |
+| `2^n` | The actual work count. Every `+1` bit of security doubles the attacker's cost |
+| bandwidth cost | Key and signature bytes on the wire, paid on every single handshake |
+
+**Walk one example.** The two rows of the table above, at equal security:
+
+```
+  both provide the SAME security level
+    128-bit security = 2^128 = 3.40e38 operations to break
+
+  what that costs to store and send
+    RSA-3072   key  = 3072 bits / 8 = 384 bytes
+    EC P-256   key  =  256 bits / 8 =  32 bytes
+    ratio           = 384 / 32      = 12x more bytes for RSA
+
+    RSA-3072   signature = ~384 bytes
+    ECDSA P-256 signature = ~64-72 bytes
+    ratio                 = 384 / 64 = 6x more bytes for RSA
+
+  the conversion rates, side by side
+    RSA: 3072 key bits -> 128 security bits   (24 key bits per security bit)
+    EC :  256 key bits -> 128 security bits   ( 2 key bits per security bit)
+
+  and the scaling is worse than linear for RSA
+    RSA-2048 -> ~112-bit security
+    RSA-3072 -> ~128-bit security   (+1024 bits bought only +16 security bits)
+```
+
+That last line is the real argument for EC. To reach 256-bit security an EC key grows to 512 bits while an RSA key would need roughly 15,000 — the curve flattens for RSA and stays linear for EC, which is why every modern TLS default is elliptic.
 
 ### Password Hashing Algorithms
 
@@ -882,6 +1022,42 @@ DB write amplification        full PII columns          one small blob column
 ```
 
 Because rotation is O(number of DEKs to re-wrap) and each re-wrap moves ~60 bytes instead of decrypting-and-re-encrypting the payload, the KEK rotation window drops from hours to minutes and no plaintext ever materializes.
+
+**What it means.** "Envelope encryption changes what rotation is proportional to — from the size of your data to the number of your keys — and since a wrapped DEK is 60 bytes regardless of how large the record it protects is, that swap is what turns a multi-hour operation into a multi-minute one."
+
+The requirement in the scenario ("rotatable in under an hour") is not a performance target that tuning could have met. It is a constraint that only a change in complexity class satisfies.
+
+| Symbol | What it is |
+|--------|------------|
+| naive rotation | `O(bytes of data)` — unwrap, decrypt, re-encrypt, re-wrap every field of every row |
+| envelope rotation | `O(number of DEKs)` — unwrap and re-wrap a 60-byte blob; ciphertext is never touched |
+| crypto ops per row | 4 for naive (unwrap, decrypt, encrypt, wrap) vs 2 for re-wrap (unwrap, wrap) |
+| plaintext exposure | Whether cleartext PII ever exists in process memory during the operation |
+
+**Walk one example.** The measured-impact table above, pushed through:
+
+```
+  naive full re-encrypt
+    rows            = 40,000,000
+    time            = 3.5 hours = 12,600 seconds
+    throughput      = 40,000,000 / 12,600 = 3,175 rows/second
+    ops per row     = 4 (unwrap DEK, decrypt PII, re-encrypt PII, re-wrap DEK)
+    plaintext in memory = yes, ~64 bytes of PII per row, 40M times
+
+  envelope re-wrap only
+    rows            = 40,000,000
+    time            = 7 minutes = 420 seconds
+    throughput      = 40,000,000 / 420 = 95,238 rows/second
+    ops per row     = 2 (unwrap DEK, re-wrap DEK)
+    plaintext in memory = never — only the 32-byte DEK is ever in the clear
+
+  speedup           = 12,600 / 420 = 30x
+  requirement       = "under an hour" = 3,600 seconds
+    naive:    12,600 s -> MISSES by 3.5x
+    envelope:    420 s -> meets it with 8.5x headroom
+```
+
+**Why the per-row nonce budget also depends on this.** GCM's safety margin is roughly `2^32` messages per key. At the scenario's 8,000 operations/sec, a *single* table-wide key would exhaust `2^32 = 4,294,967,296` nonces in about 6.2 days — so one shared key was never viable at this scale regardless of rotation speed. A fresh DEK per row makes the per-key message count exactly 1, which places the nonce-collision risk at zero rather than merely low.
 
 #### Why each design choice matters (interview discussion)
 

@@ -632,6 +632,75 @@ gunicorn main:app \
 `--workers 1` is the correct default for async apps; multiple workers multiply memory
 usage without improving concurrency for I/O-bound workloads unless CPU is the bottleneck.
 
+### 6.9 Decoding the Worker-Count and Concurrency Formulas
+
+The `--workers 4` above is not arbitrary. Two formulas govern it — one for how many
+processes to run, one for how many requests each can hold at once.
+
+**Read it like this.** "Give the CPU roughly two workers per core so a worker waiting on
+the database never leaves a core idle, plus one spare to absorb scheduling jitter." The
+formula is a rule of thumb for *processes*, and it says nothing at all about how many
+requests one process can serve — that is the second formula's job.
+
+| Symbol | What it is |
+|--------|------------|
+| `cores` | Physical or cgroup-visible CPU count the process may schedule on |
+| `2 x cores` | Two workers per core: while one blocks on I/O the other keeps the core busy |
+| `+ 1` | Spare worker covering scheduler jitter and worker restarts |
+| `RSS per worker` | Resident memory of one forked process — app code, imports, pools, caches |
+
+**Walk one example.** A 4-core VM, 80 MB resident per worker, under two container limits:
+
+```
+  Formula        workers = (2 x cores) + 1
+  4-core VM      (2 x 4) + 1 = 9 workers
+
+  Memory         9 workers x 80 MB = 720 MB total RSS
+
+  limit 1024Mi = 1073.7 MB   ->  720 MB fits, 353.7 MB headroom
+  limit  512Mi =  536.9 MB   ->  720 MB is OOMKilled, over by 183.1 MB
+                                 max workers = floor(536.9 / 80) = 6
+
+  So on a 4-core box with a 512Mi limit the CPU formula and the memory limit
+  disagree: the formula says 9, the container can only hold 6. Memory wins.
+```
+
+The memory limit is the binding constraint far more often than the core count, which is
+why `--workers` should always be recomputed after a base-image or dependency change that
+moves per-worker RSS.
+
+**What this actually says.** For concurrency the governing rule is Little's Law:
+"the number of requests in flight equals arrival rate multiplied by how long each one
+takes." It is an identity, not an estimate — it holds for any stable queue.
+
+| Symbol | What it is |
+|--------|------------|
+| `concurrency` | Requests simultaneously in flight — suspended coroutines or busy threads |
+| `RPS` | Arrival rate, requests per second |
+| `latency` | Wall-clock seconds one request occupies a slot, including I/O wait |
+| anyio pool | The fixed thread pool FastAPI runs `def` handlers on — 40 tokens by default |
+
+**Walk one example.** The same 500 req/s, first on the event loop, then through the
+40-thread pool that every `def` handler is routed into:
+
+```
+  Little's Law:  concurrency = RPS x latency
+
+  500 req/s x 0.040 s = 20 requests in flight
+      -> one event loop holding 20 suspended coroutines. Trivial.
+
+  Same 500 req/s served by `def` handlers on the 40-thread anyio pool:
+      40 threads / 0.050 s per call = 800 req/s ceiling per worker   -> fits
+      40 threads / 0.200 s per call = 200 req/s ceiling per worker   -> queue grows
+
+  The pool is a hard token bucket. Request 41 waits for a thread; it does not
+  get one. Only latency moves the ceiling, since the thread count is fixed.
+```
+
+This is the arithmetic behind the `def` vs `async def` choice in Section 3: an `async def`
+handler's concurrency is bounded by memory and file descriptors, a `def` handler's is
+bounded at 40 no matter how much hardware you add.
+
 ---
 
 ## 7. Real-World Examples
@@ -797,6 +866,40 @@ async def get_product(product_id: int) -> dict:
     conn.close()
     return {"id": row[0], "name": row[1]}
 ```
+
+**Put simply.** "A blocking call inside `async def` converts your entire worker into a
+single-threaded, one-request-at-a-time server for the duration of the call." The throughput
+ceiling that produces is exact and easy to compute, which is why this pitfall is a favourite
+interview question.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_block` | Seconds the synchronous call holds the event-loop thread and yields nothing |
+| `1 / t_block` | Requests per second one worker can finish — the hard ceiling |
+| `workers` | Number of pre-forked processes, each with its own independent loop |
+| `1000 / t_await` | Same call as an `await`: capacity scales with concurrent coroutines |
+
+**Walk one example.** One `psycopg2` query taking 50 ms, first blocking, then awaited:
+
+```
+  Blocking psycopg2 inside `async def`:
+
+    loop frozen per request       : 0.050 s
+    requests one worker finishes  : 1 / 0.050    =     20 req/s   <- the ceiling
+    with a 9-worker pre-fork pool : 9 x 20       =    180 req/s
+
+  Swap in asyncpg; the same 50 ms is now an await, not a freeze:
+
+    1 worker holding 1,000 concurrent awaits at 50 ms each
+                                  : 1000 / 0.050 = 20,000 req/s of loop capacity
+
+  Same query, same 50 ms, same hardware: 180 req/s vs 20,000 req/s.
+  The 111x gap is entirely "did the 50 ms yield control or not".
+```
+
+Note what does *not* change: the query still takes 50 ms, and a single user still waits
+50 ms. Blocking costs you nothing at concurrency 1 — which is exactly why it survives
+local testing and only surfaces as collapsing throughput under production load.
 
 ```python
 # FIX — use asyncpg (native async PostgreSQL driver)

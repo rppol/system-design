@@ -29,6 +29,37 @@ This module is the most critical for senior Java interviews. Expect questions on
 - **CAS (Compare-And-Swap)**: Hardware instruction; atomically: if value == expected, set to new; return success/failure. Foundation of all lock-free algorithms.
 - **Amdahl's Law**: Maximum speedup from parallelism = 1 / (S + (1-S)/N) where S = serial fraction. Even 10% serial code limits speedup to 10× regardless of cores.
 
+**What this actually says.** "The part of your program that cannot run in parallel sets a hard ceiling on speedup, and you hit most of that ceiling with surprisingly few cores — so the serial fraction, not the core count, is the thing worth attacking."
+
+The framing matters because it inverts the instinct. Adding cores has sharply diminishing returns, while shaving the serial fraction raises the ceiling itself. A lock held across a critical section *is* your serial fraction.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Serial fraction — the share of total work that cannot be parallelised at all |
+| `1 - S` | The parallelisable share |
+| `N` | Number of cores (more precisely, parallel workers) |
+| `(1 - S) / N` | Time the parallel part takes once spread over `N` cores |
+| `S + (1 - S)/N` | Total time as a fraction of single-threaded time |
+| speedup | Its reciprocal — how many times faster than one core |
+
+**Walk one example.** A workload that is 10 percent serial, so `S = 0.10`:
+
+```
+  N cores   S + (1-S)/N              speedup   efficiency (speedup / N)
+  1         0.10 + 0.90/1  = 1.000    1.00x     100 %
+  2         0.10 + 0.90/2  = 0.550    1.82x      91 %
+  4         0.10 + 0.90/4  = 0.325    3.08x      77 %
+  8         0.10 + 0.90/8  = 0.213    4.71x      59 %
+  16        0.10 + 0.90/16 = 0.156    6.40x      40 %
+  64        0.10 + 0.90/64 = 0.114    8.77x      14 %
+  infinity  0.10                     10.00x       0 %
+
+  Halving the serial fraction instead (S = 0.05) at only 8 cores:
+    0.05 + 0.95/8 = 0.169  ->  5.93x   (vs 4.71x at S = 0.10 on the same 8 cores)
+```
+
+Compare the two levers on equal terms. Quadrupling the cores from 16 to 64 multiplies speedup by only 8.77 / 6.40 = 1.37x and drops efficiency from 40 percent to 14 percent. Halving the serial fraction on the *same* 8 cores multiplies it by 5.93 / 4.71 = 1.26x while buying no hardware at all — and it also lifts the infinite-core ceiling from 10x to 20x, which extra cores can never do. This is the whole argument for `ConcurrentHashMap` over a `synchronized` map, for `LongAdder` over `AtomicLong`, and for shrinking critical sections — every one of them is an attack on `S`.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -623,6 +654,36 @@ AQS is the framework underlying all major JUC synchronizers. Core structure: `vo
 9. **Detect deadlocks** in production with `ThreadMXBean.findDeadlockedThreads()` in a scheduled health check.
 10. **Use virtual threads + `ReentrantLock`** for new I/O-bound code on Java 21+.
 
+**Read it like this.** "Size the pool so that, at any instant, enough threads are blocked on I/O that the cores still have work — which means the multiplier is simply how many times longer a task waits than it computes."
+
+The formula is doing one job: keeping every core busy. For CPU-bound work the wait time is zero, the multiplier collapses to 1, and one thread per core is already optimal — extra threads only add context switches.
+
+| Symbol | What it is |
+|--------|------------|
+| `N_threads` | Pool size to configure (`corePoolSize`) |
+| `N_cores` | Available cores, `Runtime.getRuntime().availableProcessors()` |
+| wait time | Per-task time blocked and *not* using a core: network, disk, DB round-trip |
+| compute time | Per-task time actually burning CPU |
+| `wait / compute` | The blocking ratio — how many extra threads one core can usefully feed |
+| `1 +` | The thread that is computing right now, on top of the blocked ones |
+
+**Walk one example.** 8 cores, three different task shapes:
+
+```
+  task shape           wait    compute   wait/compute   N = 8 x (1 + ratio)
+  pure CPU (parsing)     0ms     10ms        0.0          8   (+1 spare -> 9)
+  cache-ish call        30ms     10ms        3.0         32
+  typical DB query      90ms     10ms        9.0         80
+  slow external API    190ms     10ms       19.0        160
+
+  Sanity check on the DB row:
+    80 threads x 10ms compute per 100ms task
+      = 800ms of CPU work demanded per 100ms wall clock
+      = 8 cores fully saturated, exactly the target.
+```
+
+Two cautions the formula does not state. First, the answer is only as good as your measured ratio — instrument the task, do not guess, because the ratio moves when the downstream slows down. Second, 160 platform threads at ~1MB of stack each is 160MB of memory before any work is done, which is exactly the wall virtual threads remove: with a virtual thread per task the sizing question disappears and the bounded resource becomes the connection pool instead.
+
 ---
 
 ## 14. Case Study
@@ -674,6 +735,41 @@ The atomicity of `computeIfAbsent` per key is what makes this safe: even with 1,
 no coalesce            1000                            900ms (pool exhausted)
 coalesce                  1                            70ms  (1 query + future wake)
 ```
+
+**Put simply.** "Coalescing does not make the database faster — it changes how many queries the database is asked to run, and the 900ms figure is just the queue-time arithmetic of forcing 1,000 queries through a 10-connection pool."
+
+Seeing the 900ms as *queueing*, not as slowness, is what makes the fix obvious. Nothing about the query changed; the only variable was how many copies of it were in flight.
+
+| Symbol | What it is |
+|--------|------------|
+| miss rate | Share of requests not served from cache — 5 percent here (95 percent hit) |
+| concurrent misses | Requests that miss the *same* key in the same instant — 1,000 at expiry |
+| pool size | HikariCP connections available; default 10 |
+| service time | How long one DB query occupies one connection, ~10ms here |
+| queue depth | `concurrent misses / pool size` — waves of queries the pool must serialise |
+| p99 under stampede | roughly `queue depth x service time` |
+
+**Walk one example.** The 100k RPS fleet at the moment key `P-42` expires:
+
+```
+  steady state:
+    100,000 req/s x 5 percent miss     = 5,000 DB queries/s across the fleet
+
+  stampede instant, WITHOUT coalescing:
+    concurrent misses on one key       = 1,000
+    connections available              = 10
+    waves = 1,000 / 10                 = 100 waves
+    p99   = 100 waves x 10ms           = 1,000ms   (measured: ~900ms)
+    every other endpoint also stalls -- the pool is fully occupied by one key
+
+  stampede instant, WITH coalescing:
+    DB queries issued                  = 1
+    connections used                   = 1 of 10
+    p99   = 10ms query + future wake    = ~70ms
+    reduction                          = 900 / 70 = 12.9x
+```
+
+The number to internalise is 100 waves. The pool is not merely slow during a stampede, it is *entirely consumed* by a single key for a hundred consecutive service times, which is why the failure cascades to unrelated endpoints. Coalescing takes the 1,000 back down to 1 and hands 9 of the 10 connections back to everyone else.
 
 #### Why the entry must be removed on completion (negative cache hazard)
 

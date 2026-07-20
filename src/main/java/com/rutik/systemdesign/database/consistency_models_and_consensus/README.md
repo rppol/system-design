@@ -175,6 +175,47 @@ Raft was designed to be understandable. It decomposes consensus into three sub-p
 - A log entry is committed once N/2+1 nodes have it in their logs
 - Leader applies committed entries to the state machine and responds to the client
 
+`N/2+1` is the single most-quoted expression in distributed systems, and the number it *doesn't* produce is the interesting one:
+
+```
+quorum(N)             = floor(N/2) + 1
+failures_tolerated(N) = N - quorum(N) = ceil(N/2) - 1
+overlap guarantee     : any two quorums share at least 1 node
+```
+
+**What it means.** "A majority is the smallest group that cannot be assembled twice from disjoint nodes, so any two decisions ever made must have consulted at least one node in common." That overlap is the entire safety argument — not the voting, not the terms. It is why a partitioned minority can never commit anything the majority does not know about.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total nodes in the consensus group — a fixed configured membership, not "nodes currently up" |
+| `floor(N/2)` | Half the cluster, rounded down |
+| `quorum(N)` | Smallest set that is strictly more than half. `3` for `N=5` |
+| `failures_tolerated` | `N - quorum`. Nodes that may die while the cluster still commits |
+| Overlap | Two majorities of the same `N` must intersect (pigeonhole): `2 x quorum > N` |
+
+**Walk one example.** Every cluster size, and the reason odd counts are the standard advice:
+
+```
+   N   quorum   tolerates   note
+  ---  ------   ---------   -------------------------------------------
+   1      1         0       no redundancy at all
+   2      2         0       WORSE than 1: needs both, either death stops it
+   3      2         1       the minimum useful cluster
+   4      3         1       one extra machine, ZERO extra tolerance
+   5      3         2       the common production default
+   6      4         2       again: one extra machine, no extra tolerance
+   7      4         3       for clusters that must survive a rack loss
+
+  the overlap proof, N = 5:
+    two quorums of 3 from 5 nodes -> 3 + 3 = 6 > 5
+    by pigeonhole at least 6 - 5 = 1 node is in both
+    that node remembers the earlier decision and blocks the conflicting one
+```
+
+Read the `N=4` and `N=6` rows again. Adding a node to an odd cluster buys nothing but cost and one more thing that can break — every even size tolerates exactly the same number of failures as the odd size below it, while needing one more vote to make progress. That is the whole argument behind Section 13's "run odd node counts."
+
+**Why growing the cluster is not how you get availability.** Quorum size rises with `N`, so a bigger cluster needs *more* nodes reachable, and every commit waits on a larger set. Going from 3 to 7 nodes doubles tolerance from 1 to 3 but also means every write must reach 4 machines instead of 2. Consensus clusters are sized for fault tolerance and then stop; read throughput is scaled with followers or leases, never by widening the voting membership.
+
 **Safety**:
 - A leader never overwrites its log; it only appends
 - A committed entry will always be present in the logs of future leaders (log matching property)
@@ -192,6 +233,49 @@ record LogEntry(
 // Applied index: the highest index applied to the state machine
 // commitIndex >= appliedIndex always holds
 ```
+
+Commit latency follows from the quorum rule, and it is an order statistic rather than an average or a maximum:
+
+```
+commit_latency = leader_fsync + kth_fastest(follower_RTT + follower_fsync)
+where k = quorum(N) - 1                       (the leader votes for itself)
+
+Paxos rounds:  classic = 2 RTT (prepare + accept)
+               multi-Paxos with a stable leader = 1 RTT (accept only)
+               Raft with a stable leader        = 1 RTT (AppendEntries)
+```
+
+**The idea behind it.** "A write commits the moment the `k`-th quickest follower answers — the slowest members of the cluster are not on the critical path at all." This is the property that makes geographically spread consensus viable: you can place a replica somewhere far away for durability without every write paying that distance.
+
+| Symbol | What it is |
+|--------|------------|
+| `leader_fsync` | Leader durably writing its own log entry before it can count itself, ~0.1-1ms on NVMe |
+| `follower_RTT` | Network round trip leader to follower and back |
+| `k` | `quorum - 1` acknowledgments needed from followers; the leader supplies the last vote |
+| `kth_fastest(...)` | The `k`-th smallest response time, not the mean and not the max |
+| RTT per decision | `1` once a leader is established; `2` for classic Paxos, which re-runs Prepare every time |
+
+**Walk one example.** A 5-node Raft group spread across regions — `quorum = 3`, so `k = 2`:
+
+```
+  node             role       RTT + fsync
+  --------------   --------   -----------
+  leader (A)       self         0.5 ms      (its own fsync)
+  follower B       same AZ      1.0 ms
+  follower C       same region  2.0 ms
+  follower D       far region  80.0 ms
+  follower E       far region  95.0 ms
+
+  sort follower responses : 1.0, 2.0, 80.0, 95.0
+  k = quorum - 1 = 2      -> take the 2nd fastest = 2.0 ms
+
+  commit_latency = 0.5 + 2.0 = 2.5 ms
+
+  D and E are 40x and 47x slower than the deciding follower and cost the write NOTHING.
+  Kill B and C, though, and k = 2 now lands on 80.0 ms  ->  commit = 80.5 ms, a 32x jump.
+```
+
+The lesson placement engineers act on: keep `quorum` nodes close together and the rest wherever durability demands. A 5-node group with 3 nodes in one region commits at regional speed while the two distant replicas still hold full copies for disaster recovery — but note the flip side the example shows. The moment the two nearby followers are down, the far replicas *become* the quorum and latency jumps 32x. That cliff is not a bug; it is the system correctly choosing consistency over latency, and it is what a PC/EC system in Section 12's PACELC answer feels like in production.
 
 ### CRDTs — Conflict-Free Replicated Data Types
 
@@ -250,6 +334,58 @@ Used in             | Google Spanner, Chubby       | etcd, CockroachDB, TiKV
 ### Read Repair and Anti-Entropy
 
 In leaderless systems (Cassandra, DynamoDB), replicas can diverge. Two mechanisms reconcile divergence:
+
+Whether divergence is even *visible* to a reader is governed by one inequality:
+
+```
+w + r > n              <- read set and write set must intersect
+
+overlap        = w + r - n          (nodes guaranteed common to both sets)
+write_tolerance = n - w             (replicas that may be down and writes still succeed)
+read_tolerance  = n - r             (replicas that may be down and reads still succeed)
+```
+
+**What this actually says.** "Write to enough copies and read from enough copies that the two groups cannot avoid each other; the shared node is the one holding the newest value." Nothing here is about time or clocks — the guarantee is purely set-theoretic, which is why it survives arbitrary delays that a lag-based argument would not.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Replication factor — how many copies of each key exist |
+| `w` | Replicas that must acknowledge a write before the client is told "committed" |
+| `r` | Replicas contacted for a read before answering |
+| `w + r - n` | Size of the guaranteed intersection. Must be at least `1` |
+| `n - w` | Failure headroom for writes. Higher `w` means stronger reads and weaker write availability |
+| `n - r` | Failure headroom for reads. `w` and `r` trade against each other along a fixed budget |
+
+**Walk one example.** Every configuration a 3-replica Cassandra keyspace can be set to:
+
+```
+   n   w   r   w+r   overlap   safe?   write survives   read survives
+  ---  --  --  ----  -------   -----   --------------   -------------
+   3   1   1     2      -1     NO      2 down           2 down     <- fastest, stale reads
+   3   2   1     3       0     NO      1 down           2 down     <- ties, still broken
+   3   1   2     3       0     NO      2 down           1 down     <- ties, still broken
+   3   2   2     4      +1     yes     1 down           1 down     <- QUORUM/QUORUM
+   3   3   1     4      +1     yes     0 down           2 down     <- write-all, read-one
+   3   1   3     4      +1     yes     2 down           0 down     <- write-one, read-all
+
+  n = 5, watch the same boundary move:
+   5   2   2     4      -1     NO      3 down           3 down
+   5   2   3     5       0     NO      3 down           2 down     <- EXACTLY equal, breaks
+   5   3   3     6      +1     yes     2 down           2 down     <- QUORUM/QUORUM
+```
+
+**Why `>` and not `>=` — the row that catches everyone.** Look at `n=5, w=2, r=3`. The sum is 5, which *feels* like full coverage, and it is not:
+
+```
+  replicas : R1 R2 R3 R4 R5
+  write goes to  {R1, R2}
+  read comes from {R3, R4, R5}
+  intersection = {} -> the reader sees none of the nodes that took the write
+```
+
+Two disjoint sets can exactly partition `n` nodes when `w + r = n`. Only strict inequality forces them to share a member. That off-by-one is the most common quorum bug in configuration files, and it is why Cassandra's `QUORUM` is defined as `floor(RF/2) + 1` on *both* sides — `2+2 > 3` and `3+3 > 5` are satisfied by construction.
+
+**What `w + r > n` still does not give you.** It guarantees the reader *touches* a node with the newest value; it does not guarantee the reader can *tell* which value is newest. That job falls to the conflict-resolution rule — LWW timestamps in Cassandra, version vectors in Dynamo — which is exactly the clock-skew failure mode Section 10 describes. Quorum overlap and conflict resolution are two separate guarantees, and you need both.
 
 **Read repair**: When a coordinating node reads from multiple replicas (quorum read), it detects differences and asynchronously writes the most recent value back to the lagging replica. No additional read latency in the happy path.
 
@@ -349,6 +485,49 @@ Plotting the Latency/Complexity ratings from the table above onto coordination c
 
 **Raft split-vote delaying election**: In a 5-node Raft cluster, all nodes have the same election timeout (bad configuration). All 5 become candidates simultaneously. None gets a majority. Election repeats. System is unavailable for seconds. Fix: randomize election timeouts (Raft's design assumes randomization, e.g., 150–300ms random range). Production: etcd uses 1000–2000ms randomized range.
 
+Raft's own paper states the condition that makes split votes rare, as a chain of inequalities rather than a single constant:
+
+```
+broadcastTime  <<  electionTimeout  <<  MTBF
+
+P(split vote per election)  ~  (N - 1) x broadcastTime / randomization_range
+expected elections to elect =  1 / (1 - P_split)
+```
+
+**Put simply.** "Detect a dead leader far slower than you can talk to a live one, and far faster than machines actually fail." Both inequalities are load-bearing in opposite directions, and violating either produces a different outage: too small a timeout gives you constant spurious elections, too large a one gives you a long unavailability window on every real failure.
+
+| Symbol | What it is |
+|--------|------------|
+| `broadcastTime` | Time for the leader to reach every follower and get replies, ~0.5-20ms |
+| `electionTimeout` | Follower's patience before declaring the leader dead, 150-300ms in the paper |
+| `randomization_range` | Width of the random window (`300 - 150 = 150ms`). The split-vote antidote |
+| MTBF | How long a node runs between failures — days to months |
+| `P_split` | Chance two or more candidates start close enough together to divide the vote |
+| `(N-1)` | Every other node is another chance to collide; larger clusters split more easily |
+
+**Walk one example.** The 5-node cluster from this pitfall, at four settings:
+
+```
+  randomization    broadcast    P_split                    expected
+  range            time         = (N-1) x B / range        elections
+  --------------   ----------   ------------------------   ---------
+  0 ms (bug)         20 ms      4 x 20 / 0     -> 1.000    never converges
+  150 ms (paper)     20 ms      4 x 20 / 150   = 0.533     1 / 0.467 = 2.14
+  150 ms             0.5 ms     4 x 0.5 / 150  = 0.013     1 / 0.987 = 1.01
+  1000 ms (etcd)     20 ms      4 x 20 / 1000  = 0.080     1 / 0.920 = 1.09
+
+  the misconfiguration in this pitfall is the first row: identical timeouts, so all
+  5 nodes fire together, every term, forever.
+
+  the full inequality with etcd's production numbers:
+    broadcastTime      20 ms
+    electionTimeout  1000 ms      1000 / 20 = 50x  larger        OK
+    MTBF          90 days = 7,776,000 s
+                                 7,776,000 / 1.0 = 7.8M x larger  OK
+```
+
+Row 2 versus row 4 is the reason etcd widened the range beyond the paper's suggestion: the paper's 150ms window assumes a fast local network, and on a 20ms cloud network it still splits the vote in half of all elections. Randomization does not have to make collisions impossible — each retry redraws, so a 0.533 split rate still elects a leader in 2.14 elections on average. It only has to make the collision probability strictly less than 1, which a zero-width range fails to do.
+
 **Monotonic reads violated by load balancer round-robin**: A user submits a form. The POST goes to replica 1. The redirect reads from replica 2 (next request in round-robin). Replica 2 has not received the update yet. User sees stale data. Fix: sticky sessions (route all requests from one session to one replica) or read from primary for write-following reads.
 
 ---
@@ -433,6 +612,43 @@ DynamoDB replicates each item to 3 storage nodes across 3 Availability Zones. Fo
 ## 14. Case Study
 
 **Scenario**: A collaborative document editing service uses a single PostgreSQL database for document storage. Multiple users can edit simultaneously. The team uses optimistic locking (version counter). As the service scales to 10K concurrent editors, PostgreSQL's serializable isolation causes 40% transaction abort rates on popular documents due to write-write conflicts. The team evaluates alternatives.
+
+A 40% abort rate does not cost 40% more work — retries retry, and the multiplier is nonlinear:
+
+```
+expected_attempts_per_commit = 1 / (1 - p)
+db_write_load                = commit_rate x expected_attempts
+```
+
+**Read it like this.** "Every aborted transaction comes back and competes again, so the database load is the useful work divided by the fraction of attempts that survive." The division is what bites: abort rate climbs slowly and load climbs slowly with it, right up to the knee, after which a few more percent of contention multiplies the load without bound.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Probability a transaction aborts on conflict, `0.40` here |
+| `1 - p` | Success probability per attempt — the fraction of work that is not thrown away |
+| `1/(1-p)` | Expected attempts to land one commit (geometric distribution mean) |
+| `commit_rate` | Useful throughput the application actually needs |
+| `db_write_load` | What the database sees, including every doomed retry |
+
+**Walk one example.** The abort-rate curve, and where 10K concurrent editors sat on it:
+
+```
+   abort rate p    1/(1-p)     attempts per successful commit
+   ------------    -------     ------------------------------
+     0.40           1.67       the measured state at 10K editors
+     0.50           2.00
+     0.90          10.00
+     0.95          20.00
+     0.99         100.00       one commit costs a hundred attempts
+
+  the wasted fraction at p = 0.40:
+    attempts       = 1.67 per commit
+    wasted work    = 1.67 - 1.00 = 0.67 attempts, i.e. 40% of all DB work discarded
+```
+
+The measured result (`40K/s` of PostgreSQL writes collapsing to `1K/s`, a `40x` reduction) is bigger than retries alone explain — retry elimination accounts for the `1.67x`, and the remaining reduction comes from the architectural change: with Yjs, edits no longer touch PostgreSQL at all, and a background worker persists merged state periodically instead of once per keystroke. That is why the same change also cut edit latency `200ms -> 5ms`, a `40x` win on a completely different axis.
+
+**Why contention is the variable that matters, not concurrency.** `p` is not set by editor count directly — it is set by how many editors touch the *same* document. Two thousand editors on two thousand documents abort almost never; ten editors on one popular document abort constantly. CRDTs win here because they drive `p` to exactly `0` by construction: the merge is commutative, associative, and idempotent, so there is no such thing as a conflicting pair of edits to abort on.
 
 **Analysis of consistency options**:
 

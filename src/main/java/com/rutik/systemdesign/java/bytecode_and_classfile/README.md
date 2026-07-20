@@ -150,6 +150,49 @@ Offset  Raw bytes        Field (JVMS ClassFile)     Meaning / example
 
 Every structural field is a fixed-width big-endian integer; only the constant pool and the `*_info` arrays are variable-length. The count fields (`constant_pool_count`, `methods_count`) always precede the array they size — a self-describing, forward-only format.
 
+**In plain terms.** "The offset column is not documentation — it is a running total of the widths above it, which is why a class file can be parsed with a cursor and no lookahead at all."
+
+That framing matters because it explains the format's one real constraint: nothing can be skipped. To find `access_flags` you must have walked every constant-pool entry byte by byte, since the pool's size is not stored anywhere — it is only implied by its contents.
+
+| Symbol | What it is |
+|--------|------------|
+| `u1` / `u2` / `u4` | Unsigned big-endian integers of 1, 2, and 4 bytes — the only primitive widths in the format |
+| `magic` | The `u4` at offset 0; `0xCAFEBABE` or the parse aborts immediately |
+| `major_version` | The `u2` at offset 6; equals the Java feature release plus 44 |
+| `constant_pool_count` | The `u2` at offset 8; one MORE than the number of usable indices, because index 0 is reserved |
+| `cp_info[]` | Variable-width entries starting at offset 10; each begins with a `u1` tag that determines its own length |
+
+**Walk one example.** Size the fixed header, then the eight-entry pool from the `javap` dump in section 6:
+
+```
+  fixed header, offset by offset
+      0x00   u4  magic                4 bytes    running total  4
+      0x04   u2  minor_version        2 bytes                   6
+      0x06   u2  major_version        2 bytes                   8
+      0x08   u2  constant_pool_count  2 bytes                  10
+                                                 -> pool always starts at 0x0A
+
+  major_version decoded:   feature = major - 44
+      45 -> Java 1.1     52 -> Java 8      61 -> Java 17     65 -> Java 21
+
+  the eight pool entries of Adder, each sized from its own tag
+      #1  Methodref     1 tag + 2 + 2                        =  5    5
+      #2  Class         1 tag + 2                            =  3    8
+      #3  NameAndType   1 tag + 2 + 2                        =  5   13
+      #4  Utf8          1 tag + 2 len + 16 "java/lang/Object" = 19   32
+      #5  Utf8          1 tag + 2 len +  6 "<init>"          =  9   41
+      #6  Utf8          1 tag + 2 len +  3 "()V"             =  6   47
+      #7  Class         1 tag + 2                            =  3   50
+      #8  Utf8          1 tag + 2 len +  5 "Adder"           =  8   58
+
+  constant_pool_count for this class = 9   (8 real entries, plus the reserved 0)
+  access_flags therefore begins at    = 10 + 58 = byte 68
+```
+
+Half of this two-line class is the string `java/lang/Object` and its wrappers. That is the constant pool's whole point: those 19 bytes are written once and every `Methodref`, `Class`, and `NameAndType` that needs the name spends only 2 bytes pointing at it.
+
+The `+ 44` offset exists purely for history — major 45 was Java 1.1, and the counter simply kept incrementing. It is why `UnsupportedClassVersionError` messages read "class file version 65.0" rather than "Java 21", and subtracting 44 is the whole translation.
+
 ### `invokedynamic` — Bootstrap-Method Linkage
 
 ```mermaid
@@ -265,6 +308,48 @@ Constant pool:
 ```
 
 `(II)I` is the **method descriptor** — two ints in, one int out. Note `locals=3` even though `add` takes two parameters: slot 0 is the implicit `this`. Every reference in `Code` (`#1`, `#7`) is a 1-based constant-pool index; nothing is inlined.
+
+**Read it like this.** "`stack=2, locals=3, args_size=3` is a frame budget measured in 32-bit slots, not in variables — so the count you get depends on the *types*, and `long` and `double` each cost two."
+
+Getting this wrong is not a style issue: `max_locals` and `max_stack` are what the JVM uses to size the frame it allocates on every call, and the verifier rejects the class outright if the declared numbers are too small for what the code actually does.
+
+| Symbol | What it is |
+|--------|------------|
+| slot | One 32-bit cell; `int`, `float`, and every reference take 1, `long` and `double` take 2 |
+| `locals` (`max_locals`) | Total slots the local variable array needs — `this` plus parameters plus declared locals |
+| `stack` (`max_stack`) | Deepest the operand stack ever gets at any point in the method |
+| `args_size` | Slots consumed by the incoming arguments alone, including `this` for instance methods |
+| descriptor | `(params)return` in type letters: `I` int, `J` long, `D` double, `Z` boolean, `L...;` reference |
+
+**Walk one example.** Compare the `add` above with a wide-typed instance method, `public double blend(long a, double b, int c)`, descriptor `(JDI)D`:
+
+```
+  public int add(int a, int b)                 descriptor (II)I
+
+      slot 0   this      reference   1 slot
+      slot 1   a         int         1 slot
+      slot 2   b         int         1 slot
+                                     -------
+      args_size = max_locals =        3 slots
+
+      deepest stack:  iload_1 -> 1,  iload_2 -> 2,  iadd -> 1   =>  max_stack = 2
+
+
+  public double blend(long a, double b, int c) descriptor (JDI)D
+
+      slot 0   this      reference   1 slot
+      slot 1   a         long        2 slots   <- slot 2 is the unusable second half
+      slot 3   b         double      2 slots   <- slot 4 likewise
+      slot 5   c         int         1 slot
+                                     -------
+      args_size = max_locals =        6 slots   (four values, six slots)
+
+      loading a and b onto the stack:  2 + 2 = 4  =>  max_stack = 4
+```
+
+Four arguments, six slots — the count is off by two the moment a `long` or `double` appears. This is the same two-slot rule that bites constant-pool parsers, showing up in a second place, and it is why the bytecode has separate `lload_1`/`iload_1` opcode families: the instruction, not the slot, declares how wide the read is.
+
+Note that the second half of a wide slot is genuinely unaddressable — nothing may `iload` slot 2 in `blend`. The verifier tracks that half-slot as a distinct "top" type precisely so a hand-written transform cannot smuggle a 32-bit read into the upper half of a `long`.
 
 ### The Stack Machine, Step by Step
 
@@ -416,6 +501,47 @@ A `@Transactional` annotation on a `final` service method did nothing — no tra
 
 ### War Story 5: Off-by-one constant-pool parser
 A homegrown `.class` reader iterated the constant pool as a simple loop `for (i=1; i<count; i++)`, corrupting on the first `long`/`double`. Those entries **occupy two slots**, so the loop must skip an index after each. **Fix**: increment the index by 2 for `CONSTANT_Long`/`CONSTANT_Double`; this is the most infamous class-parsing bug.
+
+**What it means.** "`constant_pool_count` counts index numbers, not entries — so once a `long` appears, the number of things you must read stops equalling the number of times you may increment the cursor."
+
+The reason this bug is so durable is that it is silent. The loop does not crash on the wide entry; it crashes one, two, or ten entries later, when a stale index makes a `Methodref` point at a `Utf8` and the parser reports a corrupt class that is in fact perfectly valid.
+
+| Symbol | What it is |
+|--------|------------|
+| `constant_pool_count` | The declared `u2`; highest valid index plus 1 |
+| index | The 1-based number an instruction writes to refer to an entry |
+| entry | An actual `cp_info` structure in the byte stream |
+| the phantom slot | The index a `Long`/`Double` consumes but never fills; referring to it is a `ClassFormatError` |
+| `i += 2` | The correction — advance the index by 2 whenever the tag read was 5 or 6 |
+
+**Walk one example.** A pool declaring `constant_pool_count = 9`, where entry #3 is a `CONSTANT_Long`:
+
+```
+  true    tag                       entry?     naive loop i++       correct loop
+  index                                        files it under...
+    1     Utf8 "Adder"              yes        1   ok              1
+    2     Class -> #1               yes        2   ok              2
+    3     Long  8-byte literal      yes        3   ok              3, then i += 2
+    4     (phantom second half)     no         -                   skipped
+    5     Utf8 "()V"                yes        4   WRONG           5
+    6     NameAndType #1:#5         yes        5   WRONG           6
+    7     Methodref #2.#6           yes        6   WRONG           7
+    8     Utf8 "value"              yes        7   WRONG           8
+    -     (nothing left)            -          8   reads past end  -
+
+  indices declared         = 9 - 1   = 8
+  phantom slots            =           1
+  entries actually present = 8 - 1   = 7
+
+  the naive loop wants 8 entries but the stream holds 7, so from index 4 on it
+  files every entry under an index one too low and then reads past the pool
+```
+
+Concretely: the bytes of the real `Utf8 "()V"` get stored under index 4 instead
+of 5, so the `NameAndType` that legitimately points at `#5` now resolves to the
+wrong thing — and the parser blames the class file.
+
+Eight indices, seven entries. The off-by-one is not in the loop bound but in the assumption that those two numbers are the same, which they are for every class file that happens to contain no `long` or `double` constant — which is most small test classes, and exactly why the bug ships.
 
 ---
 

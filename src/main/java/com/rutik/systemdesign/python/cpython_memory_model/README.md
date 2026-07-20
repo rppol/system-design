@@ -294,6 +294,58 @@ xychart-beta
 ```
 *A plain C `int` costs 4 bytes; the same value as a CPython `PyLongObject` costs 24 bytes just for the header — the 6x overhead Q13 warns about for numeric-heavy workloads — and grows to 232 bytes for an empty `dict` before a single key is stored.*
 
+**What the formula is telling you.** "An integer's size is a header plus four bytes per 30-bit chunk of the number — so Python charges you a fixed 24-byte entry fee before it stores a single bit of the value."
+
+The header is the part that never amortizes. It is why a numeric workload in pure Python is memory-bound long before it is CPU-bound.
+
+| Symbol | What it is |
+|--------|------------|
+| `ob_refcnt` | The reference count, 8 bytes. Present on literally every Python object |
+| `ob_type` | Pointer to the type object, 8 bytes. Also on every object |
+| `ob_size` | Digit count for `PyLongObject`; negative encodes a negative integer |
+| digit | One 30-bit chunk of the value, stored in a 4-byte `uint32_t` slot |
+| 24 bytes | `PyVarObject` header total — the floor, paid before any digits |
+
+**Walk one example.** Header plus `4 x ndigits`, checked against `sys.getsizeof`:
+
+```
+  size(int) = 24 (PyVarObject header) + 4 x (number of 30-bit digits)
+
+    value          digits needed                        bytes
+    0              0                                    24 +  0  = 24
+    1              1                                    24 +  4  = 28
+    2**30 - 1      1   (the largest one-digit value)    24 +  4  = 28
+    2**30          2   (digit[0]=0, digit[1]=1)         24 +  8  = 32
+    2**60 - 1      2                                    24 +  8  = 32
+    2**60          3   (digit[0]=0, digit[1]=0, [2]=1)  24 + 12  = 36
+```
+
+**Now push it through a container.** A `list` stores pointers, not values, so the header cost
+is paid once per distinct integer *on top of* the pointer array:
+
+```
+  list(range(1_000_000))
+
+    list header                                     56 bytes
+    pointer array   1,000,000 x 8 bytes  =   8,000,000 bytes
+    sys.getsizeof(the list)              =   8,000,056 bytes   <- shallow, all it reports
+
+    boxed integers    999,743 x 28 bytes =  27,992,804 bytes   <- invisible above
+      (values -5..256 are pre-allocated singletons: 257 of them are free)
+
+    true resident cost                   =  35,992,860 bytes = 34.3 MiB
+
+  array.array('l', range(1_000_000))     ~=   8,000,000 bytes =  7.6 MiB
+
+  ratio: 4.5x -- and 78% of the list's bytes are PyObject headers, not data
+```
+
+Check that last figure against the mental model: `27,992,804 / 35,992,860 = 78%` of the
+memory is header-and-refcount bookkeeping, and only the 8 MB pointer array plus the 4-byte
+digit inside each integer is payload. This is the concrete form of the guidance in Q1 and
+Q13 — reach for `array.array` or `numpy` for bulk numerics not because Python integers are
+slow, but because 78% of what you paid for was never your data.
+
 ### 6.2 Reference Counting Mechanics
 
 Every object assignment calls `Py_INCREF` on the target; every variable going out of scope
@@ -382,6 +434,49 @@ gc.freeze()
 print(gc.get_freeze_count())   # number of objects frozen
 ```
 
+**In plain terms.** "Scan the newest objects after every 700 net allocations; only escalate to the older, slower generations once you have done a lot of those cheap scans."
+
+The trap in `(700, 10, 10)` is that the three numbers are not in the same units. The first counts *objects*; the second and third count *collections*. Read them as one unit and you will mis-tune the server.
+
+| Symbol | What it is |
+|--------|------------|
+| `700` | Gen0 threshold, in **net allocations** — tracked objects created minus destroyed |
+| first `10` | Gen1 threshold, in **Gen0 collections** since the last Gen1 pass |
+| second `10` | Gen2 threshold, in **Gen1 collections** since the last Gen2 pass |
+| net allocation | An allocation that was not matched by a deallocation; refcounted deaths do not count |
+| tracked | Only container types have a `tp_traverse` slot; `int` and `str` never enter this count |
+
+**Walk one example.** Convert the whole tuple into a single unit — net allocations:
+
+```
+  gc.get_threshold() -> (700, 10, 10)
+
+    gen0 collection : every    700 net allocations
+    gen1 collection : every     10 gen0 collections =  10 x 700 =  7,000 net allocations
+    gen2 collection : every     10 gen1 collections = 100 x 700 = 70,000 net allocations
+
+  Now put a request rate on it. Take the case-study service in Section 14:
+  200 requests/minute, and suppose each request nets 350 surviving tracked objects.
+
+    gen0 fires every    700 / 350 =   2 requests   ->  100 times per minute
+    gen1 fires every  7,000 / 350 =  20 requests   ->   10 times per minute
+    gen2 fires every 70,000 / 350 = 200 requests   ->    1 time  per minute
+
+  Cost of that gen2 pass, at the 50-200 ms figure quoted just below:
+    1 pause/minute x 50-200 ms = 0.08% to 0.33% of wall-clock spent in gen2 GC,
+    but it lands on ONE unlucky request, which sees a 50-200 ms latency spike.
+```
+
+That last line is the whole reason GC tuning is a tail-latency topic and not a throughput
+topic. The total overhead is a rounding error; the p99.9 is not.
+
+**Reading the tuning knob.** `gc.set_threshold(400, 10, 10)` changes only the first number,
+so by the same arithmetic gen2 now fires every `400 x 100 = 40,000` net allocations —
+one pass per 114 requests instead of per 200. Gen0 passes get 75% more frequent (every 400
+allocations instead of 700) but each scans a smaller young set, so individual pauses shrink
+while the total GC time rises slightly. That is the exact trade Best Practice 8 describes:
+you are buying a shorter tail with a little more throughput.
+
 Typical GC pause times (CPython 3.11, 64-bit Linux, single-threaded):
 - Gen0 collection: ~0.5–2 ms for heaps with tens of thousands of objects
 - Gen2 collection: ~50–200 ms for heaps with millions of tracked objects
@@ -408,6 +503,56 @@ Block:
   - When allocated: removed from the pool's free-list
   - When freed: returned to the pool's free-list (NOT to the OS)
 ```
+
+**The idea behind it.** "Buy memory from the OS in big slabs and hand it out in fixed-size slots — but you can only give a slab back when every single slot in it is free."
+
+The three-level nesting is not the interesting part. The *release condition* is: freeing is per-block, but returning is per-arena, and those two granularities are 8,000x apart.
+
+| Symbol | What it is |
+|--------|------------|
+| arena | 256 KB bought from the OS via `mmap`/`malloc`; the only unit ever given back |
+| pool | 4 KB slice of an arena, pinned to exactly one size class for its lifetime |
+| block | One fixed-size slot inside a pool — what a Python object actually occupies |
+| size class | The rounded-up allocation size: 8, 16, 24, ... 512 bytes |
+| free-list | Singly-linked list of freed blocks inside a pool, reused before any new block |
+
+**Walk one example.** Every count in the diagram above, derived:
+
+```
+  Pools per arena     262,144 bytes / 4,096 bytes  =  64 pools
+
+  Size classes        512 / 8                      =  64 classes (8, 16, 24, ... 512)
+
+  Blocks in one 4 KB pool (4,096 - 48-byte pool header = 4,048 usable bytes):
+
+      size class    8 B  ->  4,048 /   8  =  506 blocks
+      size class   32 B  ->  4,048 /  32  =  126 blocks
+      size class   64 B  ->  4,048 /  64  =   63 blocks
+      size class  512 B  ->  4,048 / 512  =    7 blocks
+```
+
+**Now the release condition, which is where RSS goes wrong:**
+
+```
+  One surviving 32-byte object holds its 4 KB pool open.
+  One non-empty pool holds its whole 256 KB arena open.
+
+      bytes actually live         32
+      bytes held from the OS  262,144
+      amplification            8,192x
+
+  Allocate 1,000,000 short-lived 32-byte objects, free all but 64 of them,
+  and if those 64 survivors land in 64 different arenas:
+
+      live data      64 x 32       =      2,048 bytes
+      RSS retained   64 x 262,144  = 16,777,216 bytes  = 16 MiB
+```
+
+This is the arithmetic behind the Key Insight in Section 2 and the `big_list` example above:
+a transient allocation spike does not inflate RSS because the memory is still in use, but
+because *fragmentation* leaves one stubborn survivor in each arena. It also explains why the
+fix is a process restart rather than a `gc.collect()` — the GC frees blocks, and blocks are
+not the unit the OS gets back.
 
 ```python
 import ctypes
@@ -521,6 +666,42 @@ def deep_size(obj: object, seen: set[int] | None = None) -> int:
             pass
     return size
 ```
+
+**Put simply.** "`getsizeof` measures the box, not the contents — it tells you how big the container's own bookkeeping is, and stops at the first pointer."
+
+Every memory investigation that starts by printing `sys.getsizeof(my_big_structure)` and concludes "it's fine, only 232 bytes" has made this mistake.
+
+| Symbol | What it is |
+|--------|------------|
+| `__sizeof__()` | Raw struct bytes the object occupies, GC header excluded |
+| `sys.getsizeof()` | `__sizeof__()` plus 24 bytes of GC header, if the type is GC-tracked |
+| shallow | Stops at pointers — the pointed-at objects are not counted |
+| deep | Follows every reference transitively, deduplicating by `id()` |
+| `seen` set | The dedup guard; without it, a cycle makes `deep_size` recurse forever |
+
+**Walk one example.** The `nested` list from the code above, taken apart:
+
+```
+  nested = [[1, 2, 3], [4, 5, 6]]
+
+    outer list header + 2 pointer slots            =  72 bytes  <- getsizeof stops here
+    inner list [1, 2, 3]   (56 header + 4 slots)   =  88 bytes
+    inner list [4, 5, 6]   (56 header + 4 slots)   =  88 bytes
+    six integers           6 x 28 bytes            = 168 bytes
+
+    deep_size(nested)                              = 416 bytes
+
+    shallow understates by  416 / 72  =  5.8x
+```
+
+The 24-byte gap between the two APIs is worth naming, because it also shows up in the
+`lst.__sizeof__()` vs `sys.getsizeof(lst)` pair above (32 vs 56): `getsizeof` adds the
+`PyGC_Head` that GC-tracked types carry, so it is the more honest of the two — and still
+5.8x short on a structure this trivial. On a real payload the multiplier is far worse: a
+dict of 10,000 string keys reports the same 232-byte header as an empty one, per Pitfall 3.
+Use `deep_size` or `pympler.asizeof` whenever the question is "how much RAM does this cost",
+and reserve `getsizeof` for the question it actually answers: "how much does this one object
+header cost".
 
 ### 6.7 `tracemalloc` — Memory Profiling
 

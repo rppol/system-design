@@ -129,6 +129,51 @@ The NAME "name"/"age" never appears. Field number 1 and 2 are the identity.
 => rename name->fullName: wire-compatible. reuse number 1 for a new field: CORRUPTION.
 ```
 
+**What it means.** "Every protobuf field is one small integer that packs the field number
+and the decoder choice into a single byte, followed by the value — which is why the format
+is both self-describing enough to skip unknown fields and small enough to beat JSON."
+
+That packing is the reason field numbers 1-15 are worth guarding for hot fields: they are
+the only ones whose tag still fits in a single byte.
+
+| Symbol | What it is |
+|--------|------------|
+| field number | The field's permanent identity, the only name the wire carries |
+| wire type | 3-bit code (0, 1, 2, 5 from the Section 4 table) telling the decoder how to read the next bytes |
+| `(field << 3) \| wiretype` | The tag byte — shift the number up 3 bits, drop the wire type into the vacated low 3 bits |
+| varint | Value encoding: 7 payload bits per byte, top bit = "another byte follows" |
+
+**Walk one example.** The exact `User { name = "Al", age = 30 }` bytes shown above:
+
+```
+  field 1, string "Al"   (wire type 2 = LEN)
+    tag   = (1 << 3) | 2 = 8 + 2 = 10 = 0x0A
+    len   = 2                          = 0x02
+    data  = 'A' 'l'                    = 0x41 0x6C
+    bytes spent = 1 + 1 + 2 = 4
+
+  field 2, int32 30      (wire type 0 = VARINT)
+    tag   = (2 << 3) | 0 = 16 + 0 = 16 = 0x10
+    value = 30 < 128, so one varint byte = 0x1E
+    bytes spent = 1 + 1 = 2
+
+  protobuf total = 4 + 2                = 6 bytes
+  JSON  total    = {"name":"Al","age":30} = 22 bytes
+  saving         = 1 - 6/22             = 72.7%
+
+  why field numbers 1-15 are special:
+    field 15 -> tag = (15 << 3) | 0 = 120  -> fits in one byte (max varint byte = 127)
+    field 16 -> tag = (16 << 3) | 0 = 128  -> needs TWO bytes
+```
+
+**Why the varint exists.** A fixed 4-byte int32 would spend 4 bytes on the value 30. The
+varint spends 1 byte for anything under 128, 2 bytes up to 16,383, 3 up to 2,097,151, and
+so on — so realistic small values (counts, ids, enums, booleans) cost the minimum. The cost
+is that a genuinely large number can take 5 bytes instead of 4, which is exactly why
+`fixed32`/`fixed64` exist for fields you know are always large, and why `sint32` (zigzag)
+exists for negatives — two's-complement `-1` sign-extends to 64 one-bits, which at 7 payload
+bits per varint byte is `ceil(64 / 7) = 10` bytes, the maximum length, every single time.
+
 ### One HTTP/2 connection multiplexes many gRPC streams
 
 ```mermaid
@@ -177,6 +222,42 @@ sequenceDiagram
 A single absolute deadline set by the client travels downstream and shrinks at each
 hop; once it is exceeded, cancellation propagates back up the call tree so no
 service keeps working for a caller that has already given up.
+
+**Stated plainly.** "A deadline is one fixed pot of milliseconds that the whole call tree
+spends out of, and every hop hands the next hop only what is left — so the budget shrinks
+monotonically instead of resetting."
+
+The contrast with per-hop timeouts is the point. Give each of three hops its own 300 ms
+timeout and the worst case is 900 ms of work for a client who gave up at 300 ms.
+
+| Symbol | What it is |
+|--------|------------|
+| deadline | An absolute instant (`now + budget`), computed once by the client, never re-derived downstream |
+| `grpc-timeout` header | What actually travels: the *remaining* duration, recomputed at each hop from the shared deadline |
+| `t_hop` | Time a service spends before calling the next one — pure subtraction from the remaining budget |
+| remaining | `budget - sum(t_hop so far)`. When it reaches 0, every waiting hop gets `DEADLINE_EXCEEDED` |
+
+**Walk one example.** The 300 ms client budget from the diagram, extended one hop further:
+
+```
+  client sets     budget    = 300 ms   -> deadline = T0 + 300ms
+  hop A           t_hop     =  50 ms
+                  remaining = 300 - 50 = 250 ms   <- what A sends to B
+  hop B           t_hop     = 250 ms
+                  remaining = 250 - 250 =  0 ms   -> DEADLINE_EXCEEDED at B
+                  B stops, A stops waiting, client is told at T0 + 300ms
+
+  total work done by the tree = 300 ms   (never more than the budget)
+
+  contrast: per-hop 300ms timeouts, no propagation
+    A waits up to 300ms, B waits up to 300ms, C waits up to 300ms
+    worst-case work = 3 x 300 = 900 ms
+    client gave up at 300 ms  -> 600 ms of pure waste per failed call
+```
+
+At the catalog service's 200 ms `GetProduct` budget in Section 14, that waste multiplies by
+the request rate: every millisecond a downstream keeps grinding past the client's deadline
+is a thread, a DB connection, and a pool slot held for a result nobody will read.
 
 ---
 
@@ -399,6 +480,42 @@ independent of the RPC layer.
 7. **Forgetting blocking stubs can't stream client/bidi.** Reaching for the blocking
    stub then discovering it cannot do client-streaming. *Fix:* use the async stub for
    anything beyond unary + server-streaming.
+
+**The idea behind it.** On pitfall 6: "the 4 MB limit is not a size cap on your data, it is
+a cap on how much memory one call may hold at once — so the fix is to change how many
+messages carry the data, not to raise the number."
+
+Framing it as a memory bound rather than a payload bound is what makes the streaming answer
+obvious. Raising the limit does not remove the memory; it just moves the failure to OOM.
+
+| Symbol | What it is |
+|--------|------------|
+| max inbound message size | Default 4 MB per message, enforced per call on the receiving side |
+| `payload / max_size` | How many times over the limit a single unary response is — the multiple you would have to raise the cap by |
+| chunk size | Bytes per message when server-streaming; sets the real peak memory per call |
+| `ceil(payload / chunk)` | Number of streamed messages — memory stays flat at one chunk regardless of total size |
+
+**Walk one example.** Pitfall 6's 200 MB list, both ways:
+
+```
+  one unary message
+    payload        = 200 MB
+    default limit  =   4 MB
+    over by        = 200 / 4 = 50x
+    to "fix" by raising the cap you must hold 200 MB per concurrent call:
+      10 concurrent callers = 10 x 200 MB = 2,000 MB = 1.95 GB of live heap
+      -> this is the OOM described in the pitfall
+
+  server streaming, 1 MB chunks
+    messages       = ceil(200 MB / 1 MB) = 200 messages
+    peak memory    = 1 MB per call, regardless of the 200 MB total
+    10 concurrent callers = 10 x 1 MB = 10 MB
+    -> 200x less peak memory, and the client can start processing message 1
+       before message 200 exists
+```
+
+The limit is doing exactly its job here: it converted an unbounded-memory design into a
+loud, early failure instead of an OOM under production load.
 
 ---
 
@@ -628,6 +745,52 @@ message Product {
   sub-100ms.
 - The reserved-number discipline (enforced by `buf breaking` in CI) prevented any
   repeat of the staging corruption after it was caught.
+
+**What the formula is telling you.** "Two independent wins are stacked here — each request
+got ~4.5x smaller, and the number of requests collapsed because polling was replaced by a
+push stream — so the bandwidth reduction is the product of the two, not the sum."
+
+Separating them matters when you argue the migration. The payload win is protobuf; the
+request-count win is HTTP/2 streaming. Either alone would have been worth far less.
+
+| Symbol | What it is |
+|--------|------------|
+| payload ratio | `protobuf_bytes / json_bytes` — the per-message compression from dropping field names and text numbers |
+| poll interval | Seconds between polls. Request rate is `workers / interval`, independent of whether anything changed |
+| propagation latency | Worst case under polling is one full interval; under streaming it is one network hop |
+| instances removed | CPU freed on the hot path, expressed as capacity you can hand back |
+
+**Walk one example.** The three measured outcomes, each pushed through:
+
+```
+  payload
+    JSON      = 4.1 KB = 4,100 bytes
+    protobuf  =            900 bytes
+    ratio     = 900 / 4,100 = 0.220
+    saving    = 1 - 0.220   = 78.0%     <- matches the stated ~78%
+    shrink    = 4,100 / 900 = 4.56x
+
+  request rate from polling
+    workers        = 12
+    poll interval  = 2 s
+    rate           = 12 / 2 = 6 requests/second
+    per day        = 6 x 86,400 = 518,400 requests/day
+    after migration = 12 long-lived streams, 0 polling requests
+
+  propagation latency
+    polling worst case = one full interval = 2,000 ms
+    streaming          = sub-100 ms
+    improvement        = 2,000 / 100 = 20x faster, worst case
+
+  capacity
+    instances before = 8
+    instances after  = 6
+    removed          = 2 / 8 = 25% of the fleet
+```
+
+Note what the 518,400 daily polls were mostly buying: nothing. Prices do not change 6 times
+a second, so nearly every poll returned "no change." Streaming does not make those requests
+faster — it deletes them.
 
 **Tradeoffs accepted.** Loss of curl-ability (mitigated with `grpcurl` + server
 reflection) and the need for an Envoy gRPC-Web hop for one browser-based internal

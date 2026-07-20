@@ -292,6 +292,43 @@ sys.setswitchinterval(0.020)  # 20ms
 sys.setswitchinterval(0.001)  # 1ms — more thrashing, more overhead
 ```
 
+**What this actually says.** "A GIL-holding thread gets at most this many seconds of uninterrupted
+bytecode before it is told to hand the lock over." The knob does not change how much work gets done —
+it only changes how finely that work is chopped up, and every chop costs a handoff.
+
+| Symbol | What it is |
+|--------|------------|
+| `sys.getswitchinterval()` | Current ceiling on one thread's GIL tenure, in seconds. Default `0.005` |
+| `0.005` | 5 milliseconds — the Python 3.2+ default, replacing Python 2's "every 100 bytecodes" |
+| `1 / interval` | Forced handoffs per second per running thread. The cost driver |
+| handoff | Drop the mutex, signal a waiter, wake it, reload its stack/cache. Not free |
+
+**Walk one example.** Convert the interval into a handoff budget, then price it using this module's own
+6.3 benchmark (single-threaded `1.80s` vs two threads `2.10s`):
+
+```
+  interval        forced handoffs per second
+  --------        --------------------------
+   1 ms                    1000
+   5 ms  (default)          200
+  20 ms                      50
+
+  Two-thread CPU run measured at 2.10s, single-thread at 1.80s:
+    extra wall time      = 2.10 - 1.80          = 0.30 s
+    handoffs in 2.10 s   = 2.10 / 0.005         = 420
+    amortized cost each  = 0.30 / 420           = 0.000714 s  = 714 us
+
+  Linear model, same work at a different interval:
+     1 ms -> 2.10/0.001 = 2100 handoffs -> 1.80 + 2100 x 0.000714 = 3.30 s  (worse)
+    20 ms -> 2.10/0.020 =  105 handoffs -> 1.80 +  105 x 0.000714 = 1.88 s  (better)
+```
+
+714 microseconds is far more than a pthread mutex handoff actually costs — a raw uncontended
+acquire/release is a few microseconds at most. The rest is convoy effect and cache damage: the
+outgoing thread's working set is evicted while the incoming thread reloads its own. That is why the
+fix for CPU-bound code is never "tune the interval" but "stop sharing the lock" — and why Q9 in
+Section 12 warns that *lowering* the interval makes thrashing worse.
+
 ### 6.2 Benchmark: GIL does NOT hurt I/O-bound work
 
 ```python
@@ -371,6 +408,40 @@ if __name__ == "__main__":
     print(f"Two threads:     {dual:.2f}s")    # e.g. 2.10s — SLOWER due to GIL contention
     print(f"Ratio:           {dual / single:.2f}x")  # > 1.0 means threads hurt
 ```
+
+**Read it like this.** "Threads let waiting overlap; they do not let *computing* overlap. So I/O time
+collapses to the slowest task, while CPU time still adds up." That single sentence is the whole GIL
+decision rule, and it is a difference between `max()` and `sum()`.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_i` | Wall time of task `i` run alone |
+| `T_serial` | `sum(t_i)` — one task after another, the baseline |
+| `T_threads` (I/O) | `max(t_i)` — GIL is dropped for the whole syscall, so waits overlap |
+| `T_threads` (CPU) | `sum(t_i) + handoff cost` — bytecode never overlaps, so nothing is saved |
+| `T_procs` (CPU) | `sum(t_i)/W + spawn` — `W` separate interpreters, `W` separate GILs |
+| `W` | Worker processes, capped by physical cores |
+
+**Walk one example.** Four tasks, 2 seconds each, on a 4-core machine — once as I/O waits, once as
+pure-Python compute:
+
+```
+                        I/O-bound (sleep on socket)      CPU-bound (pure Python loop)
+  ----------------      ---------------------------      ---------------------------
+  serial                4 x 2.0        = 8.00 s          4 x 2.0        = 8.00 s
+  4 threads             max(2,2,2,2)   = 2.00 s          8.00 + handoffs > 8.00 s
+  4 processes           ~2.00 s (overkill)               8.00/4 + 0.10  = 2.10 s
+
+  speedup vs serial     threads 8.00/2.00 = 4.0x         threads       < 1.0x  (slower)
+                                                         processes 8.00/2.10 = 3.81x
+
+  Handoffs the CPU threads must pay for: 8.00 / 0.005 = 1600 forced GIL drops.
+```
+
+The same four threads are a 4x win in the left column and a loss in the right one, with no code
+difference except what the task does inside. The process column pays a one-time `~0.10 s` spawn and
+still returns 3.81x — this is exactly the trade Section 6.4 makes, and it is why the Section 4
+decision tree branches on "I/O-bound or CPU-bound?" before anything else.
 
 ### 6.4 Fix CPU-bound work with multiprocessing
 
@@ -1016,6 +1087,44 @@ xychart-beta
 Threading only makes this CPU-bound pipeline slower (36.2s at 4 threads, 38.5s at 8 — up to 11% worse
 than sequential); `ProcessPoolExecutor(4)` is the sweet spot at 10.8s (3.2x speedup, meeting the
 sub-12s target), with 8 workers gaining almost nothing once JPEG writes become I/O-bound.
+
+**Stated plainly.** "Speedup is just old time divided by new time — and Amdahl's Law says the part you
+could not parallelize sets a hard ceiling no number of workers can break through." Running the pool
+numbers through Amdahl turns "8 workers barely helped" from a shrug into a measurement.
+
+| Symbol | What it is |
+|--------|------------|
+| `S(W)` | Speedup with `W` workers: `T(1) / T(W)`. `3.25` means the job finished 3.25x sooner |
+| `p` | Fraction of the work that genuinely parallelizes |
+| `1 - p` | Serial fraction — setup, spawn, the single-threaded tail. Never shrinks |
+| `S(W) = 1 / ((1-p) + p/W)` | Amdahl's Law: the best `W` workers can do |
+| `1 / (1-p)` | The ceiling at infinite workers. `p = 0.923` caps you at 13x, forever |
+
+**Walk one example.** Fit `p` from the measured 4-worker run, then use it to predict 8 workers and
+compare against what was actually observed:
+
+```
+  measured:  Pool(1) = 35.1s   Pool(2) = 17.9s   Pool(4) = 10.8s   Pool(8) = 10.6s
+
+  S(4) = 35.1 / 10.8 = 3.25
+
+  solve 3.25 = 1 / ((1-p) + p/4)
+        (1-p) + p/4 = 1/3.25 = 0.3077
+        1 - 0.75p   = 0.3077
+                  p = 0.9231        ->  serial fraction 1-p = 0.0769  (2.70 s of 35.1 s)
+
+  predict         observed      verdict
+  S(2) = 1.86     1.96          close -- model holds
+  S(4) = 3.25     3.25          fitted here by construction
+  S(8) = 5.20     3.31          MISSES BY 1.89x -- a second bottleneck appeared
+  S(inf)= 13.0    --            ceiling: 2.70 s of serial work can never be removed
+```
+
+The 8-worker gap is the finding. If the GIL were the only constraint, Amdahl predicts `5.20x`; the
+run delivers `3.31x`. Something that was not a bottleneck at 4 workers became one at 8 — here, eight
+processes writing JPEGs to the same disk. This is the standard way to use Amdahl in practice: not to
+predict speedup, but to detect the moment your measured curve *stops* following the prediction, which
+is the moment your bottleneck moved.
 
 **Key lessons:**
 1. Threading for CPU-bound Pillow work is slower than sequential due to GIL contention.

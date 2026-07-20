@@ -377,6 +377,39 @@ IntStream.range(0, 5)
 IntStream.range(0, 5).boxed()  // IntStream -> Stream<Integer>
 ```
 
+**In plain terms.** "Boxing does not cost you a little extra memory, it costs you five times the memory and replaces a contiguous array scan with a pointer chase — the CPU cost is mostly cache misses, not the allocation."
+
+That reframing is what makes `mapToInt` worth reaching for. The allocation is cheap (a TLAB pointer bump); the damage is that 4 bytes of payload now arrive in a 16-byte object somewhere else in the heap.
+
+| Symbol | What it is |
+|--------|------------|
+| `int` slot | 4 bytes, stored inline in the array or on the stack |
+| `Integer` object | 12-byte header + 4-byte value = 16 bytes, allocated on the heap |
+| reference | The 4-byte compressed-oops pointer in the array that finds that object |
+| per-element cost | 16 + 4 = 20 bytes for a boxed element, versus 4 for a primitive |
+| `Integer` cache | Values -128 to 127 are pre-allocated and shared — 256 objects, never re-boxed |
+| cache line | 64 bytes: holds 16 `int`s, but only 16 *references* when boxed |
+
+**Walk one example.** Summing 10,000,000 values, primitive versus boxed:
+
+```
+  IntStream over int[]
+    memory  = 10,000,000 x 4 bytes            = 38.1 MB, one contiguous block
+    scan    = sequential; the prefetcher sees a stride and stays ahead
+
+  Stream<Integer> over Integer[]
+    references  = 10,000,000 x 4 bytes        =  38.1 MB
+    objects     = 10,000,000 x 16 bytes       = 152.6 MB
+    total                                     = 190.7 MB   (5.0x)
+    scan    = read reference, dereference to wherever the object landed,
+              read 4 useful bytes out of a 64-byte cache line
+
+  Objects allocated:  9,999,744 of them
+    (the 256 values in -128..127 come from the Integer cache and allocate nothing)
+```
+
+The last line is why microbenchmarks over small ranges mislead: box 0 to 100 and the `Integer` cache hands you shared instances, so the benchmark measures almost no allocation and you conclude boxing is free. Push the same code over real IDs or timestamps and every single element allocates. Instrument with realistic values or you will measure the cache, not your pipeline.
+
 ### Java 9+ Stream Additions
 
 ```java
@@ -465,6 +498,40 @@ Stream.of("hello world", "foo bar")
 - Non-associative reduce (`subtraction`, `String.format`)
 - Collection is a `LinkedList` or custom iterator (poor splitting)
 - Thread-local state is assumed (e.g., MDC logging context, `SecurityContextHolder`)
+
+**What this actually says.** "Going parallel is worth it only when the total work in the pipeline clears the fork/join setup cost — and total work is element count times per-element cost, so a small collection of expensive operations qualifies just as well as a huge collection of cheap ones."
+
+The 10,000-element rule of thumb above is really the N x Q heuristic with Q assumed to be 1. Stating both factors explicitly is what stops you from parallelising a million trivial `filter`s and refusing to parallelise a thousand expensive ones.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of elements in the source |
+| `Q` | Per-element cost, in rough units of "one simple operation" |
+| `N x Q` | Total work in the pipeline; the quantity the threshold applies to |
+| threshold | About 10,000 work units — below it, coordination outweighs the win |
+| fork/join overhead | Splitting, task submission, work stealing, merging partial results |
+| parallelism | `ForkJoinPool.commonPool()` size, which is `cores - 1` |
+
+**Walk one example.** Four pipelines against the same 10,000-unit threshold on 8 cores:
+
+```
+  pipeline                        N            Q      N x Q         verdict
+  filter 1,000 ints                1,000        1      1,000        sequential
+  regex-match 1,000 strings        1,000      100    100,000        parallel wins
+  filter 10,000,000 ints      10,000,000        1 10,000,000        parallel wins
+  sorted() over 10,000,000    10,000,000        1 10,000,000        parallel, but see below
+
+  Why 10,000 is the crossover, in time:
+    10,000 elements x ~5ns of trivial work  = 50 microseconds of real work
+    fork/join split + submit + steal + merge = tens of microseconds
+    -> below this, you are timing the framework, not your pipeline
+
+  Ceiling even when it wins:
+    commonPool parallelism = cores - 1 = 7 workers + the calling thread = 8
+    so the best case is ~8x, and Amdahl's law caps it lower
+```
+
+The fourth row is the trap. `sorted()` clears the work threshold easily but is a stateful barrier: every worker must finish before the merge sort begins, so the parallel speedup applies only to the stages upstream of it. Clearing `N x Q > 10,000` is necessary, not sufficient — the pipeline also has to be splittable, stateless, and non-blocking, which is exactly the four-item list above.
 
 ---
 
@@ -676,6 +743,42 @@ static Collector<LogLine, ?, Map<Integer, Long>> toCodeHistogram() {
 }
 ```
 
+**Read it like this.** "The reason a 100GB job fits in a 6GB heap is that the accumulator is sized by the number of *distinct keys*, not the number of lines — the stream is O(n) in time but O(k) in space, and k here is about forty."
+
+Every streaming aggregation stands or falls on that distinction. Swap the histogram for `collect(toList())` and the space term becomes O(n), which is 100GB, and the job dies immediately.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Lines processed — 100,000,000 over the run |
+| `k` | Distinct keys in the accumulator — HTTP status codes, roughly 40 |
+| supplier | Creates one `HashMap` per worker thread; there are 8 workers |
+| accumulator | Folds one line into the map — does not retain the line |
+| combiner | Merges the per-thread maps once, at the end |
+| peak heap | `threads x k x entry size` plus one line in flight per thread |
+
+**Walk one example.** Where the 6GB heap actually goes:
+
+```
+  input size
+    100 GB / 100,000,000 lines            = 1,074 bytes per line on average
+
+  IF the pipeline collected to a list:
+    100,000,000 String objects, ~1,074 B each  = 100 GB  -> OOM on a 6GB heap
+
+  What the histogram actually holds, per worker thread:
+    entries                                =  ~40 status codes
+    per entry: HashMap.Node 32B + Integer key 16B + Long value 16B  = 64 B
+    per-thread map                         =  40 x 64  =  2,560 bytes
+    8 worker threads                       =  8 x 2,560 = 20,480 bytes = 20 KB
+
+    plus one line in flight per thread     =  8 x ~1,074 B  =  ~8.6 KB
+
+  Total live accumulator state             =  well under 32 KB
+  Fraction of the 6 GB heap                =  about 0.0005 percent
+```
+
+Twenty kilobytes of state to summarise a hundred gigabytes is the entire argument for a fold over a materialise. It is also why the `LineSpliterator` returns `null` from `trySplit()` without hurting correctness: parallelism comes from sharding the input files upstream, while the memory guarantee comes from never holding more than one line per thread at a time.
+
 #### Running on a dedicated pool (not the common pool)
 
 ```java
@@ -819,3 +922,44 @@ public class SalesReport {
 - [Performance & Tuning](../performance_and_tuning/README.md) — parallel stream benchmarking with JMH, common allocation pitfalls
 
 **Performance**: One pass O(n) vs four passes O(4n). For 1M sales records, this matters — measured with JMH at ~4× faster than 4 separate stream passes due to better cache utilization (data touched once instead of 4 times).
+
+**Put simply.** "Four passes and one pass do the same arithmetic; the difference is that four passes drag the same 30MB of records past the CPU four times, and after the first pass none of it is still in cache."
+
+Big-O calls `O(n)` and `O(4n)` the same complexity, and for a constant factor of 4 that is exactly the wrong conclusion. Constant factors are the entire content of this optimisation.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Records in the input — 1,000,000 `Sale` values |
+| pass | One full traversal of the source, touching every record once |
+| working set | `n x` record size — how much memory a single pass streams through |
+| L3 cache | Last-level cache, typically 8-32MB on a server core complex |
+| combiner | What makes the single pass parallel-safe; merges partial accumulators |
+| teeing | The Java 12 alternative when you need exactly two collectors, not four |
+
+**Walk one example.** Sizing the `Sale` record and the memory traffic:
+
+```
+  record Sale(String region, String product, int qty, double price)
+
+    12 B  object header (mark word + class pointer)
+     4 B  region    reference (compressed oops)
+     4 B  product   reference
+     4 B  qty       int
+     8 B  price     double
+    ----
+    32 B  per Sale, already 8-byte aligned -- no padding needed
+
+  Working set for 1,000,000 sales   = 1,000,000 x 32 B = 30.5 MB
+
+  Four separate passes:
+    memory streamed  = 4 x 30.5 MB  = 122.1 MB
+    30.5 MB does not stay resident in an 8-32 MB L3, so each pass
+    re-reads from RAM -- 4 cold traversals, not 1 cold plus 3 warm
+
+  Single pass with the custom Collector:
+    memory streamed  = 30.5 MB
+    accumulators (2 small maps + 2 scalars) stay in L1/L2 the whole time
+    speedup measured with JMH: ~4x
+```
+
+The measured 4x matching the pass count exactly is the tell that this workload is memory-bound, not compute-bound: if the arithmetic per record dominated, cutting traversals would have bought far less than 4x. That is also the condition under which `teeing` or a hand-written `Collector` is worth the loss of readability — check that your working set exceeds L3 before paying that price.

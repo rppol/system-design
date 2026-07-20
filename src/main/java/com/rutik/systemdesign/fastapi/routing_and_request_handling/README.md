@@ -302,6 +302,50 @@ flowchart LR
     class Stall lossN
 ```
 
+#### Decoding the "~40 threads" ceiling
+
+That `~40` is not a soft guideline — it is a hard concurrency ceiling, and it converts into a
+throughput number by Little's Law:
+
+```
+max_concurrent_sync_requests = thread_pool_size = 40
+
+sync_throughput = thread_pool_size / handler_seconds
+
+queue_wait = (arrival_rate - sync_throughput) -> unbounded once arrival exceeds it
+```
+
+**What this actually says.** "A sync route can only be running in 40 places at once, so your
+sync request rate is 40 divided by how long one handler takes." Async handlers have no such
+divisor — one event loop interleaves thousands of awaits — which is the entire reason the
+`async def` branch of the diagram scales and the `def` branch does not.
+
+| Symbol | What it is |
+|--------|------------|
+| `thread_pool_size` | `40` — Starlette/AnyIO's default worker threads for `def` handlers |
+| `handler_seconds` | Wall-clock time of one sync handler, dominated by blocking I/O |
+| `sync_throughput` | Requests per second the pool can retire. Threads / seconds-per-thread |
+| `arrival_rate` | Requests per second actually arriving at this worker |
+| `queue_wait` | Time a request spends waiting for a free thread. Zero until saturation |
+
+**Walk one example.** Same 40 threads, three different handler durations:
+
+```
+  handler time        sync_throughput = 40 / handler_seconds
+     5 ms  (0.005 s)     40 / 0.005  =  8,000 req/s   pool is a non-issue
+    50 ms  (0.050 s)     40 / 0.050  =    800 req/s   comfortable for most services
+   200 ms  (0.200 s)     40 / 0.200  =    200 req/s   a slow SQL query caps you here
+     2 s   (2.000 s)     40 / 2.000  =     20 req/s   the pool is now the bottleneck
+
+  At 200 ms per handler the ceiling is 200 req/s. Send 300 req/s and 100 of them
+  per second have nowhere to go -- the pool is full, so they queue, and queue
+  depth grows by 100 every second until clients time out.
+```
+
+The lesson the diagram encodes: making a handler `def` is safe for *blocking* code but buys a
+fixed budget of 40. Making it `async def` removes the divisor entirely — provided nothing inside
+it blocks, which is exactly the failure in Pitfall 2.
+
 ### 5.5 Route Matching Order — First Match Wins
 
 FastAPI/Starlette is a static router: it tests routes strictly in registration order and
@@ -331,6 +375,56 @@ flowchart LR
     class H1,H2,H3 train
     class NotFound lossN
 ```
+
+#### Decoding the cost of a linear route scan
+
+"Tests routes in registration order" is an `O(routes)` linear scan, and it has a cost formula:
+
+```
+comparisons(route at position k, 1-based) = k
+comparisons(404, no match)                = R          (every route tested)
+average over uniform traffic              = (R + 1) / 2
+
+regex_ops_per_second = comparisons_per_request x RPS
+```
+
+**Read it like this.** "Every request pays one pattern match per route it walks past before
+finding its own, and a 404 pays for all of them." Two consequences fall straight out: route
+*order* is a performance knob, not just the correctness knob Pitfall 1 makes it, and unmatched
+traffic is the most expensive traffic your router handles.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Total routes registered on the app, across every mounted `APIRouter` |
+| `k` | 1-based registration position of the route that finally matches |
+| `comparisons` | Compiled-regex tests performed. The unit of routing work |
+| `(R + 1) / 2` | Expected comparisons if every route is equally likely to be the target |
+| `RPS` | Requests per second arriving at this worker |
+| `regex_ops_per_second` | Total router work per second — what the scan actually costs you |
+
+**Walk one example.** A service with `R = 200` routes, serving `20,000` req/s (the
+single-worker figure from Section 11), for three different placements of one hot endpoint:
+
+```
+  placement of the hot route      comparisons     regex ops/sec at 20,000 RPS
+  position   1  (registered 1st)        1          1 x 20,000 =     20,000
+  position 100  (middle)              100        100 x 20,000 =  2,000,000
+  position 200  (registered last)     200        200 x 20,000 =  4,000,000
+  no match at all (404)               200        200 x 20,000 =  4,000,000
+
+  Average over uniform traffic:  (200 + 1) / 2 = 100.5 comparisons per request
+                                 100.5 x 20,000 = 2,010,000 regex ops/sec
+
+  Moving one hot route from last to first:  4,000,000 -> 20,000 ops/sec,
+  a 200x reduction in router work for that endpoint's share of traffic.
+```
+
+**Why the 404 case is the one to watch.** A matched request stops early; an unmatched one is
+guaranteed to test all `R` patterns before Starlette gives up. So a scanner spraying random
+paths, or a client hammering a URL you just deleted, drives your router to its worst case on
+every request — the reason a `404` flood costs measurably more CPU than the same volume of
+legitimate traffic. Registration order is the only lever: put high-traffic and static routes
+first, deep parameterised catch-alls last.
 
 ---
 
@@ -711,6 +805,61 @@ async def slow_endpoint() -> dict:
         response = await client.get("http://api/data")
     return {"result": response.json()}
 ```
+
+#### Decoding the "~20k req/s to ~0.5 req/s" collapse
+
+The comment's numbers are not hyperbole; they are division. A blocked event loop is a loop of
+size one:
+
+```
+blocked worker throughput = 1 request / block_seconds
+
+collapse_factor = normal_throughput / blocked_throughput
+
+backlog after t seconds = arrival_rate x t     (nothing drains while blocked)
+```
+
+**The idea behind it.** "While one handler sits in `time.sleep(2)`, the worker is a single-file
+queue that retires exactly one request every two seconds — everything else just piles up."
+The event loop is cooperative: it can only switch tasks at an `await`, and `time.sleep` never
+offers one, so concurrency drops from thousands to literally one.
+
+| Symbol | What it is |
+|--------|------------|
+| `block_seconds` | How long the blocking call holds the loop — `2` for `time.sleep(2)` |
+| `normal_throughput` | `~20,000` req/s, the healthy single-worker figure from Section 11 |
+| `blocked_throughput` | `1 / block_seconds`. Requests retired per second while blocked |
+| `collapse_factor` | How many times worse the blocked path is. The headline number |
+| `arrival_rate` | Requests per second still arriving — the block does not slow the clients |
+| `backlog` | Requests queued and unserved. Grows linearly for the whole block |
+
+**Walk one example.** `time.sleep(2)` on a worker that normally does `~20,000` req/s:
+
+```
+  blocked throughput   =  1 / 2         =    0.5 req/s     (matches the comment)
+  collapse factor      =  20,000 / 0.5  =   40,000x
+
+  Requests that WOULD have been served during those 2 seconds:
+      20,000 req/s x 2 s = 40,000 requests
+  Requests actually served during those 2 seconds:
+      1
+  Requests stranded:  40,000 - 1 = 39,999
+
+  With the 50 req/s arrival rate in the comment instead:
+      backlog after 2 s = 50 x 2 = 100 requests queued behind ONE sleeping handler
+      the 100 concurrent clients in the comment are, all of them, waiting
+
+  After the FIX (await asyncio.sleep(2)):
+      the loop yields at the await, all 100 requests progress concurrently,
+      total wall time ~2 s for the whole batch instead of 2 s each.
+```
+
+**Why one blocking line is worse than a slow endpoint.** A genuinely slow *async* endpoint costs
+only its own latency; other routes keep flowing. A blocking call costs the worker's entire
+throughput for the duration — `/health` stops answering too, so Kubernetes readiness probes
+fail and the pod gets cycled. That is why the sync-vs-async choice in Section 5.4 is a
+blast-radius decision, not a style preference: `def` confines the block to one of 40 threads,
+`async def` with a blocking call inside takes down everything.
 
 ### Pitfall 3: Duplicate Path Parameter Names (Router + Handler)
 

@@ -252,6 +252,36 @@ both tools resolve the *version number* conflict correctly and deterministically
 but neither one asks whether the version it picked still has every method every
 caller in the graph compiled against.
 
+**Read it like this.** "Both tools collapse a two-version conflict down to a single number and pick the winner by comparing it — Maven compares distance from the root, Gradle compares the version itself."
+
+Neither number has anything to do with whether the surviving jar still contains the methods its callers were compiled against. That is the whole reason a green build proves nothing here.
+
+| Symbol | What it is |
+|--------|------------|
+| `depth(v)` | Hops from your POM down to the node that declares version `v`; your own POM is depth 0 |
+| declaration order | Position of the direct dependency inside your `<dependencies>` block — 1st, 2nd, ... |
+| "nearest wins" | Maven's rule: smallest `depth` wins; a tie falls back to declaration order |
+| "highest wins" | Gradle's rule: largest version number wins; `depth` and declaration order ignored |
+| `NoSuchMethodError` | Thrown at call time, not build time — the loser's callers are already compiled |
+
+**Walk one example.** The diamond above, resolved by each rule:
+
+```
+  path to 1.0.0 :  App -> lib-a:3.1.0 -> common-utils:1.0.0     depth = 2
+  path to 2.4.0 :  App -> lib-b:2.0.0 -> common-utils:2.4.0     depth = 2
+
+  Maven  : min(2, 2) is a tie          -> fall back to declaration order
+           lib-a declared 1st          -> 1.0.0 wins
+           lib-b's bytecode calls Formatter.baz(), absent from 1.0.0 -> NoSuchMethodError
+
+  Gradle : max(1.0.0, 2.4.0)           -> 2.4.0 wins
+           lib-a's bytecode calls Formatter.bar(), removed in 2.4.0  -> NoSuchMethodError
+
+  Same graph, opposite winners, both broken at runtime.
+```
+
+The tie-break is why this class of bug is so unstable: add one unrelated direct dependency above `lib-a` and nothing changes, but *reorder* `lib-a` and `lib-b` and Maven silently flips the winner. Declaring `common-utils` yourself pulls it to `depth = 1`, which beats every transitive path outright and makes the choice explicit instead of emergent.
+
 ### Gradle build cache: reruns nothing, restores the last run's output
 
 ```mermaid
@@ -268,6 +298,39 @@ build into 2.1 seconds, a 96% reduction. A teammate's machine that has never
 run this task before still gets a 93% reduction (3.4 seconds) from a shared
 remote cache, because the cache key depends only on task inputs, never on
 which machine produced the output (§6.7).
+
+**What this actually says.** "The cache changes the question from 'how much work does this project need' to 'how much of that work has anyone already done' — so the number worth tracking is the hit rate, not the wall clock."
+
+A wall-clock number is only meaningful once you know which bar it came from. The same CI job can post 2.1 s or 48 s with no code change at all, purely on whether the cache was warm.
+
+| Symbol | What it is |
+|--------|------------|
+| cold build, 48 s | Every task actually executes; nothing is reused |
+| 1 file changed, 9 s | Incremental, not a cache — same workspace, only stale tasks rerun |
+| local cache hit, 2.1 s | Outputs fetched from this machine's cache directory by input hash |
+| remote cache hit, 3.4 s | Same fetch, plus network transfer from the shared HTTP cache |
+| `h` | Cache hit rate — the fraction of task executions served from the cache |
+
+**Walk one example.** Push the four measured times through the reduction formula:
+
+```
+  reduction = (cold - cached) / cold
+
+  local   : (48 - 2.1) / 48 = 0.9562  ->  95.6% off,  48 / 2.1 = 22.9x faster
+  remote  : (48 - 3.4) / 48 = 0.9292  ->  92.9% off,  48 / 3.4 = 14.1x faster
+  1 file  : (48 - 9.0) / 48 = 0.8125  ->  81.2% off,  48 / 9.0 =  5.3x faster
+
+  Blended build time at hit rate h:   h x 2.1 + (1 - h) x 48
+
+    h = 0.90  ->  0.90 x 2.1 + 0.10 x 48  =   6.7 s
+    h = 0.70  ->  0.70 x 2.1 + 0.30 x 48  =  15.9 s
+    h = 0.50  ->  0.50 x 2.1 + 0.50 x 48  =  25.1 s
+
+  Slipping from h = 0.90 to h = 0.70 costs 9.2 s per build -- more than the
+  entire local-vs-remote difference (1.3 s) is worth arguing about.
+```
+
+That blend is why hit rate is the health signal (§13) and average build time is not. The misses dominate: at `h = 0.90` a single missing build already contributes 4.8 s of the 6.7 s average, so one non-cacheable task — one that reads a timestamp, an absolute path, or an undeclared environment variable — can erase most of the cache's value while every dashboard still shows the cache as "enabled."
 
 ---
 

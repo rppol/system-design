@@ -527,6 +527,67 @@ xychart-beta
 
 *Pickling round-trips the full 100 MB through serialization (about 0.5s); attaching to an existing `SharedMemory` buffer costs only one kernel-level copy, effectively 0s. This gap is why the rule above switches to `SharedMemory` once a task's data passes 1 MB.*
 
+**In plain terms.** "Every byte you hand a worker process gets serialized, copied through a pipe, and
+deserialized — so IPC has a throughput, measured in MB per second, exactly like a disk." Once you
+know that rate, the 1 MB rule of thumb above stops being folklore and becomes a division.
+
+| Symbol | What it is |
+|--------|------------|
+| `100 MB / 0.5 s` | The measured round-trip above, restated as a rate |
+| `R` | Pickle throughput, about `200 MB/s` for a dense float64 array on one core |
+| `size / R` | Time to move one task's payload across the process boundary |
+| `2x` | Round trip: `dumps` in the parent, `loads` in the child. The 0.5s already includes both |
+| SharedMemory | Rate does not apply — the worker maps the same physical pages, so cost is O(1) |
+
+**Walk one example.** Turn the single measurement into a per-payload lookup:
+
+```
+  R = 100 MB / 0.5 s = 200 MB/s   ->   5.0 ms per MB
+
+  payload per task     pickle cost      verdict
+  ----------------     -----------      -------
+     0.1 MB              0.5 ms         invisible, ignore it
+     1.0 MB              5.0 ms         the rule-of-thumb boundary
+    10.0 MB             50.0 ms         now comparable to a whole task
+   100.0 MB            500.0 ms         dominates -- use SharedMemory
+```
+
+**What the formula is telling you.** "Spinning up processes only pays off when the compute you moved
+off the main core is worth more than the spawn plus the serialization you added." Below that
+crossover a process pool is strictly slower than a plain `for` loop, which is the single most common
+way `multiprocessing` disappoints people.
+
+| Symbol | What it is |
+|--------|------------|
+| `K` | Number of tasks |
+| `t` | Compute seconds per task |
+| `W` | Worker processes |
+| `spawn` | One-time pool startup, `~0.1-0.3 s` on macOS/Windows `spawn` (Section 3) |
+| `K * t` | Sequential total — what you are trying to beat |
+| `spawn + K*(MB/R) + K*t/W` | Pool total: startup, then serialization, then divided compute |
+
+**Walk one example.** Ten tasks, four workers, 1 MB of arguments each, worst-case `spawn = 0.3 s`.
+Solve for the task duration at which the pool finally breaks even:
+
+```
+  break-even:  K*t  =  spawn + K*(1/200) + K*t/4
+               10t  =  0.3 + 10(0.005) + 2.5t
+             7.5t   =  0.35
+                t   =  0.0467 s  =  46.7 ms per task
+
+  t per task    sequential      pool of 4                      result
+  ----------    ----------      ---------                      ------
+     5 ms         0.050 s       0.3 + 0.05 + 0.013 = 0.363 s   7.3x SLOWER
+    46.7 ms       0.467 s       0.3 + 0.05 + 0.117 = 0.467 s   exactly break-even
+   820 ms         8.200 s       0.3 + 0.05 + 2.050 = 2.400 s   3.4x faster
+```
+
+Note where the case study in Section 14 sits: `0.82 s` per image, seventeen times past the crossover,
+which is why processes win there so comfortably. Flip the task to 5 ms of work and the identical code
+is seven times *slower* than a `for` loop — the spawn cost is fixed, so short tasks can never earn it
+back. Raising `K` helps (spawn amortizes over more tasks) but raising `W` does not; `W` only divides
+the one term that was already small.
+
 ---
 
 ## 7. Real-World Examples
@@ -606,6 +667,37 @@ def run_ffmpeg(input_path: str, output_path: str) -> tuple[int, str, str]:
 | Debugging | Hard (race conditions) | Hard (IPC) | Medium (traceable) |
 | GIL interaction | Blocked for bytecode | Independent GIL | Single GIL, coop yield |
 | Best use case | I/O-bound + legacy sync | CPU-bound batch | I/O-bound async |
+
+**Put simply.** "Each concurrency model charges a fixed rent per unit of concurrency, and the three
+rents differ by three orders of magnitude." The memory row above is not a tiebreaker — at high
+concurrency counts it is usually the row that decides the architecture outright.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of concurrent units you need in flight |
+| `8 MB / thread` | Default stack reservation per OS thread (`ulimit -s`, typical Linux) |
+| `~30 MB / process` | Per-worker RSS: a full interpreter plus its imported modules |
+| `~2 KB / coroutine` | A `Task` object plus its frame. No stack reservation at all |
+| `N x rent` | Total footprint — linear in `N`, which is what makes it a hard wall |
+
+**Walk one example.** Price 10,000 concurrent connections three ways:
+
+```
+  model            rent each     N = 10,000            verdict
+  -----            ---------     ----------            -------
+  threads            8 MB        78.1 GB               impossible on any normal host
+  processes         30 MB       292.9 GB               absurd
+  coroutines         2 KB        19.5 MB               fits in a container's spare RAM
+
+  threads vs coroutines: 8 MB / 2 KB = 4096x more memory per unit of concurrency.
+```
+
+The thread stack is *reserved* address space, not resident memory, so a real 10,000-thread process
+will not actually touch 78 GB of RAM — but the scheduler cost and the reservation still make it
+unworkable, which is why the Section 9 rule sends high-fan-out I/O to `asyncio` rather than to a
+larger thread pool. At the other end, `N = 20` changes nothing: 160 MB of threads versus 40 KB of
+coroutines is a rounding error, and you should pick on code simplicity instead. The memory argument
+only bites once `N` reaches the hundreds.
 
 **`Pool.map` vs `Pool.imap`**:
 

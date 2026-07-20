@@ -403,6 +403,58 @@ next page.
 the same timestamp (common under load). Adding `id` (monotonic in Postgres sequences) breaks
 ties deterministically.
 
+#### Decoding the pagination arithmetic
+
+The two queries above look equally cheap. They are not, and the difference is a formula:
+
+```
+Rows the database must touch to serve page N (page size = limit)
+
+  offset/limit :  rows_scanned(N) = offset + limit = (N - 1) x limit + limit = N x limit
+  keyset       :  rows_scanned(N) = limit + 1                (constant, index seek)
+```
+
+**Stated plainly.** "Offset makes the database count its way to your page from row one on
+every single request; keyset hands it the exact index position to resume from, so page 2,500
+costs the same as page 1." Offset cost grows *linearly with page number*; keyset cost is flat.
+That single difference is why the section above warns off `OFFSET` past ~10,000 rows.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Which page the client asked for, 1-based. Page 1 is the first `limit` rows |
+| `limit` | Page size — `20` in the code above, capped at `100` by `Query(le=100)` |
+| `offset` | Rows to skip, `(N - 1) x limit`. Postgres *reads and discards* every one of them |
+| `limit + 1` | The keyset fetch. The `+1` is the probe row that answers "is there a next page?" |
+| `(created_at, id)` | The composite cursor — the exact row page `N-1` ended on |
+| `rows_scanned` | Row-fetch work, not result size. Both return `limit` rows to the client |
+
+**Walk one example.** A 100,000-row feed, `limit = 20`, so `100000 / 20 = 5000` pages:
+
+```
+                        offset/limit                 keyset (cursor)
+  page    1        1 x 20  =      20 rows          20 + 1 =  21 rows
+  page   50       50 x 20  =   1,000 rows          20 + 1 =  21 rows
+  page 2500     2500 x 20  =  50,000 rows          20 + 1 =  21 rows   <- OFFSET 50000
+  page 5000     5000 x 20  = 100,000 rows          20 + 1 =  21 rows
+
+  Page 2500 alone:  50,020 rows scanned  vs  21 rows  ->  2,382x more work
+                    for the identical 20 rows of output.
+
+  Walking the WHOLE feed once, page 1 -> 5000:
+    offset :  20 x (1 + 2 + ... + 5000)  =  20 x 5000 x 5001 / 2  =  250,050,000 rows
+    keyset :  5000 pages x 21 rows                                =     105,000 rows
+    ratio  :  250,050,000 / 105,000                               =  2,381x
+```
+
+The offset column is a triangular number — `limit x N(N+1)/2` — so a full crawl is quadratic
+in page count while keyset stays linear. This is the real reason cursor pagination wins on
+large collections; the consistency-under-insert argument in Pitfall 2 is the *second* reason.
+
+**What the `+1` buys you.** Without the probe row, "is there more?" needs a second query —
+a `COUNT(*)` over the whole filtered set, which is exactly the full scan keyset just avoided.
+Fetching `limit + 1` answers it for the cost of one extra row: get `21` back and page 2,500
+exists; get `20` or fewer and the feed ended.
+
 ### 6.3 Filtering and sorting with a Pydantic query model
 
 ```python
@@ -752,6 +804,46 @@ limiter = Limiter(
 With 4 Gunicorn workers each having an independent in-process counter, a user can send
 4× the intended limit (one full limit per worker before hitting the cap). Under Kubernetes
 with 10 pods, the multiplier is 10×.
+
+The multiplier has a formula, and it multiplies rather than adds:
+
+```
+effective_limit = configured_limit x pods x workers_per_pod
+```
+
+**In plain terms.** "Every process that keeps its own counter gets to hand out the full quota
+by itself, so your real limit is the configured one times the number of counters." The number
+of *counters* — not replicas, not CPUs — is the multiplier, and Redis storage collapses it to
+one shared counter, which is why `storage_uri` is the whole fix.
+
+| Symbol | What it is |
+|--------|------------|
+| `configured_limit` | What you wrote in the decorator — `100/minute` in Section 6.5 |
+| `pods` | Kubernetes replicas of the service. Each is a separate memory space |
+| `workers_per_pod` | Gunicorn `-w`. Each `UvicornWorker` is a separate OS process |
+| `pods x workers_per_pod` | Total independent in-process counters — the actual multiplier |
+| `effective_limit` | What an attacker can actually send before being throttled |
+
+**Walk one example.** Using the `100/minute` default limit from Section 6.5:
+
+```
+  deployment                        counters      effective limit per minute
+  1 pod,  1 worker                   1 x 1 = 1     100 x  1 =   100   (as intended)
+  1 pod,  4 workers                  1 x 4 = 4     100 x  4 =   400   (4x, per the text)
+  10 pods, 1 worker                 10 x 1 = 10    100 x 10 = 1,000   (10x, per the text)
+  10 pods, 4 workers                10 x 4 = 40    100 x 40 = 4,000   (40x -- the real one)
+
+  10 pods x 4 workers is an ordinary production shape. The limit you believe is
+  100/min is really 4,000/min: 40x your intended ceiling, silently.
+
+  With storage_uri="redis://redis:6379":
+    counters = 1 regardless of pods or workers  ->  effective limit = 100/min
+```
+
+Note the two multipliers **compose**. The `4×` and `10×` above are each stated for a single
+axis held at one; a realistic deployment runs both at once, and `4 x 10 = 40`. Load-balancer
+round-robin makes this trivially exploitable — a client need not even target specific pods,
+since spreading requests across them is the default behaviour.
 
 ### Pitfall 4: Leaking internal field names through URLs and query params
 

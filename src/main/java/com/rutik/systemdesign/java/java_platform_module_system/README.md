@@ -122,6 +122,43 @@ module com.b declares three packages at three different visibility levels:
 
 Row A is the whole lesson in four cells: `api-call=Y` but `api-refl=N` (exported is not opened), while `ent-refl=Y` but `ent-call=N` (opened is not exported) — the two directives grant *opposite* things. Row C shows readability is a prerequisite gate: a module that never reads `com.b` gets nothing, not even the exported API. The last row shows `--add-opens` is narrowly scoped — it flips exactly the one named package, for exactly the caller named on the command line, and nothing else.
 
+**In plain terms.** "Every cell in this grid is one AND of two independent conditions — does the caller *read* the module at all, and is this specific package released at the specific *depth* the caller is asking for — so a `N` never tells you which of the two failed."
+
+That is why JPMS access errors are so confusing in practice. `InaccessibleObjectException` and "package is not visible" are the same underlying gate reporting from different sides, and the fix is different depending on which condition was false.
+
+| Symbol | What it is |
+|--------|------------|
+| readability | Does the caller declare `requires com.b` (or is it the unnamed module, which reads everything)? |
+| `exports` | Releases a package at *call* depth — public members of public types only |
+| `opens` | Releases a package at *reflect* depth — `setAccessible(true)` on any member |
+| `to <module>` | Narrows either directive from "everyone" to one named module |
+| the AND | Both conditions must hold; neither directive implies readability, and readability implies neither directive |
+
+**Walk one example.** Evaluate the two conditions separately for four of the grid's cells:
+
+```
+  cell                    readability?   package released at that depth?   result
+  A / api-call            Y (requires)   Y (exports com.b.api)              Y
+  A / api-refl            Y (requires)   N (exported, never opened)         N
+  A / ent-refl            Y (requires)   Y (opens com.b.entity to A)        Y
+  C / api-call            N (no requires) Y (exports com.b.api)             N
+
+  the two failures have DIFFERENT fixes:
+      A / api-refl  ->  add  opens com.b.api to A;        (change the depth)
+      C / api-call  ->  add  requires com.b;              (change the readability)
+
+  note ent-call is N even though ent-refl is Y:
+      opens grants reflect depth WITHOUT granting call depth -- the two
+      directives are not nested, they are orthogonal
+```
+
+The last note is the counter-intuitive one. It is natural to assume reflective
+access is strictly stronger than a normal call, so `opens` should imply
+`exports`, but the module system deliberately keeps them separate: a package can
+be handed to a serialization library for reflection while remaining
+uncompilable-against for everyone, which is exactly what you want for a DTO
+package.
+
 ### `jlink` Pipeline
 
 ```mermaid
@@ -590,6 +627,44 @@ Deployed image size      ~450 MB                   ~95 MB
 Cold start (cache miss)  ~2.4 s                     ~1.1 s
 Plugin discovery         META-INF/services file    provides...with (ServiceLoader unchanged)
 ```
+
+**Read it like this.** "Two of these rows shrank by very different factors — the image by about 4.7x but cold start by only about 2.2x — and that gap is the useful signal, because it says image pull was never the whole of cold start."
+
+Reading the ratios against each other rather than each row on its own is what turns a results table into a next step. A single row tells you the change worked; the gap between rows tells you what is left.
+
+| Symbol | What it is |
+|--------|------------|
+| modules shipped | Platform modules present in the image — ~95 (the whole JDK) versus 5 |
+| image size | Bytes pulled onto a node that does not already have the layer cached |
+| cold start | Image pull plus JVM start plus application init, on a cache-miss node |
+| size ratio | 450 / 95 — how much less there is to pull |
+| the residual | The part of cold start that does not scale with image size at all |
+
+**Walk one example.** Take the three quantitative rows and reduce each to a ratio, then reconcile them:
+
+```
+  JDK modules      95  ->   5      -90 modules,  (95-5)/95   = 94.7 % fewer
+  image size    450 MB  -> 95 MB   -355 MB,      (450-95)/450 = 78.9 % smaller
+                                                  450/95      =  4.74x ratio
+  cold start      2.4 s -> 1.1 s   -1.3 s,       (2.4-1.1)/2.4 = 54.2 % faster
+                                                  2.4/1.1     =  2.18x ratio
+
+  if cold start were PURELY image pull, it would have fallen by the same 4.74x:
+      2.4 / 4.74 = 0.51 s        but the measured figure is 1.1 s
+
+  so split cold start into a pull term P that scales and a fixed term F:
+      P + F                = 2.4
+      P/4.74 + F           = 1.1
+      P (1 - 0.211)        = 1.3   ->  P = 1.65 s,  F = 0.75 s
+
+  cross-check:  1.65/4.74 + 0.75 = 1.10 s   matches
+```
+
+So roughly 0.75 s of the remaining 1.1 s is JVM start plus application init and
+will not move no matter how small the image gets. Shrinking the image further —
+another `--compress` level, more `--strip` flags — is chasing a term that is
+already down to 0.35 s. If cold start still matters after this, the next lever is
+the 0.75 s residual, which is where AOT and class-data sharing live, not `jlink`.
 
 Deployed image size dropped roughly 80% (~450MB to ~95MB); modules shipped dropped from the full ~95-module platform to 5 JDK modules plus the team's own 6. The `--bind-services` incident cost about three hours of partially-broken PDF export before the missing flag was identified — after that, `--bind-services` (or an explicit `--add-modules` list of every provider module) became a mandatory line item on the team's `jlink` build-review checklist.
 

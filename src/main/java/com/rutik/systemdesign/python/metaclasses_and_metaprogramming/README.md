@@ -202,6 +202,42 @@ Data descriptors are checked first and win even over `instance.__dict__`; only w
     functions         → non-data descriptor (bound via __get__)
 ```
 
+### 5.5 Decoding the lookup order
+
+**What this actually says.** "Ask the class first, but only about the attributes the class insisted on owning; anything else, ask the instance; and only if both come up empty, ask the class again about the leftovers."
+
+The whole priority rule is one sentence: *defining `__set__` is how a class attribute buys the right to be consulted before the instance*. That is why `property` can never be shadowed by an instance attribute while a plain method can.
+
+| Symbol | What it is |
+|--------|------------|
+| `type(obj).__mro__` | The class's linearized ancestor tuple — the exact order the class-side scan walks |
+| `obj.__dict__` | The instance's own attribute dictionary — one flat hash lookup, no walking |
+| `__get__` | Makes an object a descriptor at all; without it the attribute is returned as-is |
+| `__set__` / `__delete__` | Either one promotes a descriptor to *data* descriptor, which wins over `obj.__dict__` |
+| Data descriptor | Checked in pass 1, before the instance dict. `property`, `__slots__` members, ORM fields |
+| Non-data descriptor | Checked in pass 3, after the instance dict. Plain functions, `classmethod`, `staticmethod` |
+
+**Walk one example.** Count the dictionary probes for the case-study `Product` class, whose MRO is `(Product, Model, object)` — three entries:
+
+```
+  MRO = (Product, Model, object)          depth d = 3
+
+  p1.price          -- data descriptor, found in Product.__dict__ (MRO slot 1)
+    pass 1 probe Product.__dict__   -> HIT, has __set__  -> data descriptor
+    total probes = 1                -> short-circuits, instance dict never read
+
+  p1.name           -- same shape
+    total probes = 1
+
+  p1.missing        -- worst case, attribute exists nowhere
+    pass 1  Product, Model, object  = 3 probes  (data-descriptor scan)
+    pass 2  p1.__dict__             = 1 probe   (instance dict)
+    pass 3  Product, Model, object  = 3 probes  (non-data / plain scan)
+    total probes = 3 + 1 + 3 = 7    -> AttributeError -> __getattr__ fires
+```
+
+A hit on a data descriptor costs `1` probe; a total miss costs `2d + 1 = 7`. This is the arithmetic behind the guidance that `__getattr__`-based proxies are cheap: the fallback only runs after the miss path has already failed, so it is never on the hot path for attributes that actually exist. It is also why deep inheritance chains are measurably slower on *misses* only — `d` grows the `2d + 1`, but a found data descriptor still costs one probe regardless of depth.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -1177,6 +1213,43 @@ d = DiscountedProduct(name="Keyboard", price=79, quantity=10, discount_pct=15)
 print(d.to_dict())
 # {'name': 'Keyboard', 'price': 79, 'quantity': 10, 'discount_pct': 15}
 ```
+
+---
+
+#### Decoding the cost model
+
+**Read it like this.** "Pay for discovering the fields once, when the class is written down; pay for checking a value once, every time somebody assigns one."
+
+Two costs live at two different lifetimes here, and conflating them is the classic ORM performance bug. The metaclass cost is per *class*; the descriptor cost is per *assignment*.
+
+| Symbol | What it is |
+|--------|------------|
+| `ModelMeta.__new__` | Runs exactly once per `class` statement, at import time, never again |
+| `cls._fields` | The finished registry — a plain dict, so later reads are one hash lookup |
+| `inherited_fields` | Merged from bases once, which is why `DiscountedProduct` needs no rescan of `Product` |
+| `Field.__set__` | Runs once per attribute assignment — this is the only genuinely per-instance cost |
+| `N` | Number of instances created at runtime |
+
+**Walk one example.** Two model classes, then a bulk load of 100,000 `Product` rows:
+
+```
+  class-definition time (import, happens once)
+    ModelMeta.__new__ for Product            -> 3 fields found  (name, price, quantity)
+    ModelMeta.__new__ for DiscountedProduct  -> 3 inherited + 1 own = 4 fields
+    total registry builds = 2                -> then never again
+
+  runtime, N = 100,000 Product instances
+    Field.__set__ calls = N x 3 = 300,000    -> one validate() per assigned attribute
+    field-discovery work  = 0                -> the registry is already built
+
+  the naive alternative: rediscover fields inside __init__ on every instance
+    extra namespace scans = N x 3 = 300,000  -> 150,000x more discovery work
+                                                than the 2 scans above
+```
+
+The 300,000 `validate()` calls are irreducible — that is the feature. The 300,000 *rediscovery* scans are pure waste, and moving that work into `ModelMeta.__new__` is what deletes them. This is the general shape of every metaclass-based framework: hoist all per-class work to class-creation time so the per-instance path does nothing but the work that is genuinely per-instance.
+
+**Why `_fields` must be merged, not recomputed.** Without the `inherited_fields` merge, `DiscountedProduct._fields` would hold only `discount_pct`, and `Model.__init__` would silently skip `name`, `price`, and `quantity` — no error, just three attributes that are never set. Silent data loss is the failure mode, which is why the merge is not an optimization but a correctness requirement.
 
 ---
 

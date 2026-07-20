@@ -295,6 +295,34 @@ numbers.stream().mapToInt(x -> x + 1)  // returns IntStream (primitive)
 IntStream.of(1, 2, 3).boxed()  // IntStream -> Stream<Integer>
 ```
 
+**Put simply.** "Divide both timings by the million elements that produced them and the benchmark says one thing: boxing costs about 73 nanoseconds per element, and that is the entire difference between the two pipelines."
+
+Framing it per element is what makes the rule actionable. The absolute numbers only apply to a 1M-element run; the 73 ns applies to *every* element you box, so you can price the choice for whatever size your hot path actually handles.
+
+| Symbol | What it is |
+|--------|------------|
+| `Stream<Integer>` | Each element is a heap-allocated `Integer` object; every arithmetic step unboxes and reboxes |
+| `IntStream` | Elements stay as bare 32-bit `int` values in the pipeline — no allocation, no indirection |
+| 1M elements | The benchmark's fixed workload; dividing wall time by it yields nanoseconds per element |
+| 7x | The stated ratio, which is the boxed cost divided by the primitive cost |
+
+**Walk one example.** The same map-and-sum over 1,000,000 elements:
+
+```
+                                  wall time    per element
+  Stream<Integer>.map().reduce()     85 ms        85 ns
+  IntStream.map().sum()              12 ms        12 ns
+
+  boxing tax    =  85 ns - 12 ns  =  73 ns per element
+  speedup       =  85 / 12        =  7.08x         (the stated "7x")
+
+  Price it for your own hot path:
+    10,000 elements   ->  10,000 x 73 ns  =   0.73 ms   (invisible)
+    1,000,000         ->  73 ms                          (a real p99 contributor)
+```
+
+The 73 ns is not spent on arithmetic — the `x * 2` is a single machine instruction either way. It is the allocation of a fresh `Integer`, the pointer chase to read its `value` field, and the garbage those million short-lived objects hand to the collector. That last part is why the effect shows up as GC pressure in a profiler rather than as time inside `map()`, and why the fix is a type change (`mapToInt`) rather than a faster lambda.
+
 ---
 
 ## 7. Real-World Examples
@@ -442,6 +470,35 @@ A variable captured by a lambda must be effectively final — either explicitly 
 
 **Scenario.** A user-profile service ingests **10M profile records/day** (~115 records/sec sustained, ~2,000/sec peak during nightly batch). The legacy enrichment job is a 200-line imperative ETL: nested `for` loops, manual null checks at every level (`profile -> address -> city -> zipCode`), and a hand-rolled `HashMap` grouping by country. It throws ~4,000 `NullPointerException`s/day (profiles with partial addresses) which abort whole batches, forcing reruns. The rewrite to Java 8 (LTS) Streams + Optional eliminates the NPEs and cuts the code to ~40 lines.
 
+**What this actually says.** "Ten million records a day is a small number pretending to be a big one — spread across 86,400 seconds it is 115 records/sec, so nothing here is throughput-bound; the failure rate is what makes it a problem."
+
+Converting a daily volume to a per-second rate before designing anything is the habit worth taking from this. It tells you immediately that stream overhead is irrelevant at this scale, and redirects the whole rewrite toward correctness — which is exactly where the payoff turned out to be.
+
+| Symbol | What it is |
+|--------|------------|
+| 10M/day | Daily record volume, the number the business quotes |
+| 86,400 | Seconds in a day (24 x 60 x 60) — the divisor that turns a daily figure into a rate |
+| Sustained rate | Records/sec if arrivals were perfectly even; the floor the system must always handle |
+| Peak rate | The stated 2,000/sec nightly-batch burst — what the system must actually be sized for |
+| 4,000 NPEs/day | Malformed records, expressed as a rate they can be compared against |
+
+**Walk one example.** The stated volumes, reduced to rates and a failure fraction:
+
+```
+  sustained   =  10,000,000 / 86,400        =   115.7 records/sec
+  peak        =  (stated)                       2,000 records/sec
+  burst ratio =  2,000 / 115.7              =    17.3x over sustained
+
+  failure fraction:
+    4,000 NPEs / 10,000,000 records         =  0.0004  =  0.04% of records
+
+  What that 0.04% costs before the rewrite:
+    each NPE aborts the whole batch, so 4 malformed records in 10,000
+    force a full rerun -- the blast radius is 100% of the run, not 0.04%.
+```
+
+That last line is the entire case for the rewrite. A 0.04% data-quality rate is unremarkable and will never go to zero; the defect was that the code let a per-record fault escalate to a per-batch failure. The `Optional` chain does not fix the data — it converts each of those 4,000 faults into one `"UNKNOWN"` field, so the blast radius drops from 10,000,000 records to 1.
+
 ```mermaid
 flowchart TD
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -547,6 +604,35 @@ Address a = list.stream().filter(Address::isPrimary).findFirst()
 ```
 
 **2. `parallel()` on an I/O-bound stage.** Someone parallelized the enrichment stage, which made a blocking REST call per record. All tasks ran on the shared common `ForkJoinPool` (size = cores - 1, ~7 threads), so the unrelated nightly report stream — also using the common pool — starved and missed its SLA. Fix: keep I/O off the common pool; use a dedicated `ExecutorService` or `CompletableFuture` with your own pool.
+
+**The idea behind it.** "The common pool is sized for CPUs, not for waiting — `cores - 1` threads is exactly enough to keep every core busy and nowhere near enough to absorb even a handful of blocking calls."
+
+The sizing rule is the whole explanation for the outage. Once you know the pool is 7 threads wide on this box and is shared by every `parallelStream()` in the JVM, "8 blocking REST calls" and "the entire application's parallel work stops" become the same sentence.
+
+| Symbol | What it is |
+|--------|------------|
+| `cores - 1` | The common pool's default parallelism; the calling thread joins in and does work too, so the total is back to one worker per core |
+| Common pool | A single JVM-wide static instance — every `parallelStream()` anywhere in the process shares these threads |
+| CPU-bound task | Holds a thread only while it computes; more threads than cores would just add context switches |
+| Blocking task | Holds a thread while it computes *nothing*, which is what the sizing rule assumes never happens |
+
+**Walk one example.** The 8-core box in this war story:
+
+```
+  cores                         8
+  common pool parallelism  =  8 - 1  =  7 worker threads
+  plus the calling thread            =  8 effective workers
+
+  CPU-bound work: 8 workers saturate 8 cores.        Sizing is correct.
+
+  Blocking work, ~7 concurrent REST calls in flight:
+    workers busy waiting            7 of 7
+    workers left for everything     0
+    cores actually doing work       ~0
+    nightly report stream           queued behind them -> missed SLA
+```
+
+Seven is not a small pool for its intended job — it is the right size for work that never waits. The rule breaks the moment a task blocks, because a blocked worker occupies a slot while contributing nothing to the core it was sized for. That is why the fix is a separate pool rather than a bigger common one: raising `java.util.concurrent.ForkJoinPool.common.parallelism` would hide this instance and leave the next blocking caller to rediscover it.
 
 **3. `Collectors.toMap()` throwing on duplicate keys.** Grouping profiles into `toMap(Profile::userId, p -> p)` threw `IllegalStateException: Duplicate key` because a few user IDs appeared twice in a day's feed.
 

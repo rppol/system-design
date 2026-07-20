@@ -187,6 +187,53 @@ flowchart LR
 
 The `~2 ms` construction cost from the priority-resolution walk above is paid once per worker process; every later `Depends(get_settings)` call in the DI graph returns the identical cached object (see Q2).
 
+#### Decoding what `@lru_cache` is worth
+
+"Once per process" versus "once per call" is a difference of one word and several CPU cores:
+
+```
+without lru_cache :  construction_ms_per_second = RPS x construct_ms
+with lru_cache    :  construction_ms_total      = construct_ms   (once, at first call)
+
+cores_burned = construction_ms_per_second / 1000
+```
+
+**What it means.** "Without the cache, every request re-reads the environment, re-parses `.env`,
+and re-runs every Pydantic validator — so a 2 ms one-off becomes a 2 ms tax multiplied by your
+traffic." The construction cost never changes; only its frequency does, and frequency is the
+term the decorator deletes.
+
+| Symbol | What it is |
+|--------|------------|
+| `construct_ms` | `~2` ms — one `Settings()` call: read env, read `.env`, validate every field |
+| `RPS` | Requests per second on this worker process |
+| `construction_ms_per_second` | CPU milliseconds per wall-clock second spent rebuilding config |
+| `cores_burned` | `construction_ms_per_second / 1000`. Whole CPU cores doing nothing useful |
+| `construction_ms_total` | The cached case. A constant, independent of traffic entirely |
+
+**Walk one example.** The `~2 ms` figure at three traffic levels:
+
+```
+    RPS      without lru_cache            cores burned      with lru_cache
+     100      100 x 2 ms =    200 ms/s      0.2 cores        2 ms, once
+   1,000    1,000 x 2 ms =  2,000 ms/s      2.0 cores        2 ms, once
+   5,000    5,000 x 2 ms = 10,000 ms/s     10.0 cores        2 ms, once
+
+  One worker at 1,000 req/s for one hour:
+    uncached : 1,000 x 3,600 = 3,600,000 constructions x 2 ms = 7,200,000 ms
+               = 7,200 CPU-seconds = 2 full cores, permanently
+    cached   : 1 construction, 2 ms, at process start
+
+  Cache hit rate over that hour: 3,599,999 / 3,600,000 = 99.99997% hits.
+  A 4-worker deployment pays 4 x 2 ms = 8 ms of startup cost in total, forever.
+```
+
+**Why it also fixes correctness, not just cost.** An uncached `get_settings()` re-reads
+`os.environ` on every call, so a variable changed mid-process would take effect halfway through
+a request — two handlers in the same request could disagree about the database URL. The cache
+makes configuration immutable for the process lifetime, which is exactly why the test-side fix
+is `dependency_overrides` (replace the provider) rather than mutating env vars and hoping.
+
 ### Layered environment override diagram
 
 ```mermaid

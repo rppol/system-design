@@ -77,6 +77,47 @@ Write the event to an `outbox` table in the same database transaction as the bus
 
 All consumers sharing the same `group_id` collaborate: each partition is assigned to exactly one consumer in the group. Adding consumers up to the partition count scales throughput linearly. Consumers in different groups each receive all messages independently (fan-out).
 
+The "up to the partition count" clause is the whole scaling law:
+
+```
+  effective_consumers = min(consumers_in_group, partitions)
+  group_throughput    = effective_consumers x per_consumer_rate
+```
+
+**Read it like this.** "Partitions are the seats. You can hire as many consumers as you like, but
+anyone who does not get a seat stands idle — the topic's partition count is a hard ceiling on how
+much parallelism the group can ever reach."
+
+Partition count is chosen at topic creation and is expensive to change afterwards (raising it
+rehashes key-to-partition assignment and breaks per-key ordering across the split point), so it
+is the one capacity decision made *before* you know your load.
+
+| Symbol | What it is |
+|--------|------------|
+| `partitions` | Independent ordered logs in the topic. The unit of parallelism and of ordering |
+| `consumers_in_group` | Processes sharing one `group_id`. Each is assigned whole partitions |
+| `min(...)` | The ceiling. Consumer number `partitions + 1` is assigned nothing and idles |
+| `per_consumer_rate` | One process's sustained throughput, e.g. ~500 msg/s for an I/O-bound handler |
+
+**Walk one example.** Scale the Section 5.1 topic (6 partitions) and the Section 14 topic
+(12 partitions) against the same 500 msg/s-per-consumer handler:
+
+```
+  consumers   partitions   effective   partitions/consumer   group throughput
+  ---------   ----------   ---------   -------------------   ----------------
+      3            6           3            2 each               1,500 msg/s
+      6            6           6            1 each               3,000 msg/s
+      9            6           6            1 each (3 idle)      3,000 msg/s   <- ceiling hit
+     12           12          12            1 each               6,000 msg/s
+
+  Going 6 -> 9 consumers on a 6-partition topic adds 50% cost and 0% throughput.
+```
+
+The linear region ends exactly at the partition count, and the cost curve does not. This is why
+Discussion Question 4 scales the topic to 30 partitions *first* and only then puts 10 consumers
+per group behind it — 10 consumers on the original 12 partitions would already work, but 10 on a
+6-partition topic would leave four processes permanently unassigned.
+
 ### 4.6 Dead-Letter Queue (DLQ)
 
 Messages that repeatedly fail processing are moved to a dead-letter destination after `N` retries. In Kafka this is a dedicated topic (`orders.DLT`). In RabbitMQ it is a DLX (dead-letter exchange) binding. DLQ contents should trigger alerts, be inspectable, and support replay after the bug is fixed.
@@ -578,6 +619,55 @@ xychart-beta
 
 A 30-minute outage lets the entire producer rate pile up as backlog; draining those 18 million messages at normal throughput then takes 10 hours — 20x longer than the outage itself, and invisible to anyone watching only HTTP error rates.
 
+Lag and its drain time are two applications of the same subtraction:
+
+```
+  lag(t)     = (lambda - mu) x t          <- while consumers are behind
+  drain_time = lag / (mu_max - lambda)    <- once they are ahead again
+```
+
+**What this actually says.** "A backlog accumulates at the *gap* between produce and consume
+rates, and it drains at the *spare capacity* left over after ongoing traffic is served — which is
+almost always the much smaller of the two numbers."
+
+That asymmetry is the entire reason lag alerts must fire early. Recovery is not paid for at the
+consumer's full rate; it is paid for out of whatever is left after the live stream is handled.
+
+| Symbol | What it is |
+|--------|------------|
+| `lambda` | Producer rate into the topic, messages/s, summed across partitions |
+| `mu` | Actual consumer group throughput during the incident, messages/s |
+| `mu_max` | The group's healthy ceiling — `min(consumers, partitions) x per_consumer_rate` |
+| `mu_max - lambda` | Spare capacity. If this is <= 0 the backlog never drains, at any lag value |
+| `lag(t)` | Committed-offset gap. What `records-lag-max` reports and what you page on |
+
+**Walk one example.** Take the paragraph's own figures — 6 partitions, a healthy handler at
+500 msg/s, one degraded to 400 msg/s:
+
+```
+  lambda  = 6 x 500 msg/s (matched to healthy capacity)   =  3,000 msg/s
+  mu      = 6 x 400 msg/s (degraded)                      =  2,400 msg/s
+
+  gap     = 3,000 - 2,400                                 =    600 msg/s
+          x 60 s                                          = 36,000 msg/min   <- as stated above
+          x 30 min                                        =  1.08 M messages of lag
+
+  drain, once handlers recover to 500 msg/s each:
+    spare = mu_max - lambda = 3,000 - 3,000                =      0 msg/s
+    drain_time = 1.08 M / 0                                =  never
+```
+
+The sting is in the last line. A group provisioned to exactly match the producer rate has zero
+spare capacity, so a backlog built during *any* degradation is permanent until you add consumers
+(bounded by partition count — see Section 4.5) or the producer slows down. Provision `mu_max` at
+1.5-2x `lambda` and the same 1.08 M backlog drains in `1.08e6 / 1500 = 720 s = 12 minutes`.
+
+**Why 20% slower consumers are not a 20% problem.** A handler regressing from 500 to 400 msg/s
+sounds like a minor efficiency story. It is not: the *deficit* went from 0 to 600 msg/s, so the
+derivative of lag went from flat to 36,000/min. Small degradations in `mu` produce unbounded
+growth in lag whenever they cross `lambda` — which is why lag, not handler latency, is the
+alerting signal.
+
 ---
 
 ## 11. Technologies & Tools
@@ -844,6 +934,48 @@ async def create_order(
         )
     return {"order_id": order_id, "status": "accepted"}
 ```
+
+### Sizing the Poller
+
+`LIMIT 100` and `asyncio.sleep(0.5)` are not arbitrary — together they set a hard throughput
+ceiling and the event's worst-case delay:
+
+```
+  poller_ceiling = batch_size / poll_interval
+  added_latency  = 0 .. poll_interval        (uniform; mean = poll_interval / 2)
+```
+
+**Put simply.** "The two knobs trade against each other: the batch size decides how many events
+per second the outbox can move at all, and the sleep decides how long an event waits before
+anyone looks at it."
+
+Raising `LIMIT` buys throughput for free; shortening the sleep buys latency but costs a query
+against the primary database on every tick, whether or not there is anything to publish.
+
+| Symbol | What it is |
+|--------|------------|
+| `batch_size` | The `LIMIT 100` — rows claimed per poll under `FOR UPDATE SKIP LOCKED` |
+| `poll_interval` | The `asyncio.sleep(0.5)` — 500 ms between polls |
+| `poller_ceiling` | Maximum sustainable events/s. Exceed it and the outbox table grows without bound |
+| `added_latency` | Delay between the DB commit and the Kafka publish, on top of send time |
+
+**Walk one example.** Check the ceiling against both load targets in this case study:
+
+```
+  ceiling = 100 rows / 0.5 s                         =  200 events/s
+
+  at  50,000 orders/hr:  50,000 / 3600  =  13.9 ev/s  ->  200 / 13.9  = 14.4x headroom
+  at 500,000 orders/hr: 500,000 / 3600  = 138.9 ev/s  ->  200 / 138.9 =  1.44x headroom
+
+  latency added by polling: 0 to 500 ms, mean 250 ms
+```
+
+The 10x scale-up in Discussion Question 4 quietly eats 90% of the poller's headroom: 1.44x is
+inside normal burst variance, so the same `LIMIT 100 / sleep(0.5)` that looked generous at 50 k
+orders/hour is a bottleneck at 500 k. Raise `LIMIT` to 500 (ceiling 1,000 events/s, 7.2x
+headroom) before scaling the topic, or move to CDC — Debezium's ~50 ms commit-to-Kafka latency
+removes both the ceiling and the polling load on the primary, which is exactly the trade
+Discussion Question 2 is asking you to price.
 
 ### BROKEN / FIX Recap
 

@@ -314,6 +314,42 @@ def make_validator(kind: str) -> Validator:
 
 FastAPI's `Depends()` is itself a registry pattern — it maps a callable to a resolved dependency and caches results within the request scope.
 
+**Read it like this.** "An `if/elif` chain asks up to `k` questions to find one answer; a dict asks
+one, no matter how big `k` gets." The registry's payoff is not really speed — it is that the number
+of things you must edit to add a type drops from one to zero.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Number of registered kinds — 2 above (`email`, `phone`), growing over time |
+| `_registry[kind]` | One hash + one bucket probe: O(1), independent of `k` |
+| `if/elif` chain | Sequential string comparisons: O(k), worst case all `k` |
+| avg comparisons | `(k + 1) / 2` for a uniformly-distributed lookup that hits |
+| edit sites per new kind | Registry: 0 (the `@register` line lives with the class). Chain: 1 |
+
+**Walk one example.** Comparisons needed to dispatch one call, as the catalogue grows:
+
+```
+  k kinds      if/elif avg = (k+1)/2      dict lookup      files you edit to add kind k+1
+  ---------    ---------------------      -----------      ------------------------------
+     2                 1.5                     1            chain: 1 (the dispatcher)
+     5                 3.0                     1            registry: 0
+    20                10.5                     1
+    50                25.5                     1
+
+  At k = 2 the chain is genuinely fine -- 1.5 comparisons is nothing, and §9 says
+  so outright: "Do NOT use it for two-type switches."
+  At k = 50 the chain averages 25.5 comparisons AND 50 accumulated edits to one
+  function -- 50 chances to merge-conflict, forget a branch, or mis-order a case.
+```
+
+**Why the edit count matters more than the comparison count.** Twenty-five extra string comparisons
+is perhaps a microsecond — nobody ships a bug over that. The column that actually decides the
+design is the last one. Every `elif` added to a shared dispatcher is a write to a file someone else
+owns, which is precisely what Open/Closed forbids. The registry moves that write next to the class
+being added, so `k` can grow without any single function growing with it. Note the tradeoff the
+table in §8 names: a typo in `make_validator("emial")` is now a runtime `ValueError` instead of a
+silently-unreachable branch — which is why the factory raises with `sorted(_registry)` attached.
+
 ---
 
 ### 6.3 Strategy — Callables as Strategies
@@ -440,6 +476,45 @@ def send_email(address: str, subject: str) -> None:
 ```
 
 `functools.lru_cache` is the canonical stdlib example: it wraps a function, intercepts calls, checks a cache, and either returns the cached result or forwards the call — pure GoF Decorator.
+
+**Put simply.** "Keep the timestamps of recent calls, throw away the ones that aged out of the
+window, and refuse if what's left is already full." The rolling window is the whole design: the
+limit applies to any `period`-long stretch, not to fixed clock intervals.
+
+| Symbol | What it is |
+|--------|------------|
+| `max_calls` | Calls permitted inside any one window — 5 above |
+| `period` | Window width in seconds — 1.0 above |
+| `now - period` | Left edge of the window; anything older is evicted |
+| `call_times` | Sorted list of accepted call timestamps still inside the window |
+| `len(call_times)` | Calls already spent in the current window |
+| sustained rate | `max_calls / period` = 5/s — the long-run ceiling |
+| burst | Up to `max_calls` back-to-back, since an empty window admits all 5 at once |
+
+**Walk one example.** Seven calls to `send_email` against `max_calls=5, period=1.0`:
+
+```
+  t (s)   evict < t-1.0      len(call_times)   verdict
+  -----   ---------------    ---------------   -----------------------
+   0.00   nothing                    0         allow   -> [0.00]
+   0.10   nothing                    1         allow   -> [0.00, 0.10]
+   0.20   nothing                    2         allow   -> 3 entries
+   0.30   nothing                    3         allow   -> 4 entries
+   0.40   nothing                    4         allow   -> 5 entries  (window full)
+   0.50   nothing                    5         RAISE   5 >= 5
+   1.05   drop 0.00 (0.00 < 0.05)    4         allow   -> 5 entries again
+
+  Sustained ceiling = max_calls / period = 5 / 1.0 = 5 calls per second.
+  Delivering 1,000,000 emails at that rate: 1e6 / 5 = 200,000 s = 55.6 hours.
+```
+
+**Why the eviction is `pop(0)` and why that is the flaw.** `call_times` is kept in arrival order, so
+the expired entries are always at the front — hence `pop(0)`. But `list.pop(0)` shifts every
+remaining element left, making eviction O(len) rather than O(1); at `max_calls = 5` that is
+irrelevant, at `max_calls = 10_000` it is a real cost paid on every single call. The stdlib fix is
+`collections.deque`, whose `popleft()` is O(1) — the same rolling-window logic with the right data
+structure underneath. This is a good instance of the general rule that a pattern being correct says
+nothing about its container choices being correct.
 
 ---
 

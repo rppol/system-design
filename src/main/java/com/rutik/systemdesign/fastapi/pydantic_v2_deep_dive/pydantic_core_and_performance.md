@@ -153,6 +153,43 @@ The speedup from `model_validate_json` comes from two sources:
 1. Pydantic-core uses a Rust JSON parser (based on `sonic-rs`) that is faster than CPython's `json.loads` for payloads over ~500 bytes.
 2. The parsed JSON is never materialised as a Python `dict` — values are read directly from the JSON token stream into field slots.
 
+**In plain terms.** "Two aggregate timings over the same 100 000 events divide down to a per-event price, and the difference between those two prices — 2.1 microseconds — is what one avoided Python `dict` allocation costs you."
+
+Benchmark totals are unbudgetable; per-event costs are. Convert first, then decide whether the change is worth making.
+
+| Symbol | What it is |
+|--------|------------|
+| `E` | Events in the benchmark — `100 000` |
+| `T_two` | Total for the two-step path (`json.loads` then validate), `420` ms |
+| `T_one` | Total for the single Rust pass (`model_validate_json`), `210` ms |
+| `T / E` | Per-event cost, in microseconds |
+| `T_two / T_one` | The speedup multiplier the section claims |
+
+**Walk one example.** The measured pair, reduced to a per-event price:
+
+```
+  two-step :  420 ms / 100 000 = 4.2 us per event
+  one-pass :  210 ms / 100 000 = 2.1 us per event
+  delta                          2.1 us saved per event
+  speedup  :  420 / 210        = 2.0x
+```
+
+Push that per-event delta through a throughput target to see whether it is worth
+a code change:
+
+```
+  ingest rate      CPU-seconds saved per wall-clock second   cores freed
+     1 000 /s      1 000 x 2.1 us = 0.0021 s                 ~0.002
+    50 000 /s     50 000 x 2.1 us = 0.105  s                 ~0.10
+   500 000 /s    500 000 x 2.1 us = 1.05   s                 ~1.05
+```
+
+At 1 000 events/s the change buys back two thousandths of a core and is not worth
+a migration on its own. At the 50 000 events/s of the Section 14 pipeline it is a
+tenth of a core per worker; at half a million it is a whole core. This is the
+number that decides whether "2x faster" is a headline or a rounding error — the
+multiplier is constant, but the money it represents scales entirely with volume.
+
 ### 4.5 model_construct: Bypassing Validation
 
 ```python
@@ -487,6 +524,46 @@ class AuditedModel(BaseModel):
 | `@dataclass(slots=True)` | ~220–260 bytes | No | No | Yes |
 | `TypedDict` | ~240 bytes (dict) | No | No | Yes |
 | `NamedTuple` | ~200–240 bytes | No | Yes | No |
+
+**What it means.** "Multiply bytes-per-instance by how many you hold live at once — that product, not the per-instance number, is what shows up as resident memory."
+
+A 600-versus-240-byte difference reads as trivial until you attach a count to it. The table's units are bytes; production's units are how many you are holding when the GC looks.
+
+| Symbol | What it is |
+|--------|------------|
+| `b` | Bytes per instance, from the table (400–600 for `BaseModel`, 220–260 slotted) |
+| `L` | Live instances held simultaneously — not instances created, instances *retained* |
+| `b x L` | Resident bytes attributable to the container choice |
+| `R x d` | How `L` arises in a stream: ingest rate `R` times retention window `d` |
+
+**Walk one example.** The same three containers at three live-set sizes:
+
+```
+   live set     BaseModel 600B     dataclass 300B     slots 240B
+     10 000         5.72 MB            2.86 MB          2.29 MB
+    100 000        57.22 MB           28.61 MB         22.89 MB
+  1 000 000       572.20 MB          286.10 MB        228.88 MB
+```
+
+At 10 000 live objects the whole argument is worth 3.4 MB and you should ignore
+it. At a million it is 343 MB — the difference between fitting in a 512 MB
+container and not.
+
+Now derive `L` rather than assuming it. The Section 14 pipeline ingests 50 000
+events/s, so the live set is set entirely by how long each event is retained:
+
+```
+  L = R x d
+  R = 50 000 /s, d = 1 ms   ->  L =     50 instances  ->    0.03 MB   ignore it
+  R = 50 000 /s, d = 100 ms ->  L =  5 000 instances  ->    2.86 MB   ignore it
+  R = 50 000 /s, d = 1 s    ->  L = 50 000 instances  ->   28.61 MB   noticeable
+  R = 50 000 /s, d = 10 s   ->  L =    500 000        ->  286.10 MB   act on it
+```
+
+The lever is `d`, not `b`. A pipeline that validates and forwards immediately
+holds 50 instances no matter which container it uses; one that batches for ten
+seconds holds half a million. Shrinking the per-instance footprint is the second
+thing to try — shortening the retention window is the first.
 
 For high-throughput serialization pipelines where millions of model instances are created and discarded (e.g., event processing), prefer:
 1. `model_validate_json()` + `model_dump_json()` to keep data in Rust as long as possible.
@@ -880,6 +957,43 @@ response_bytes = event.model_dump_json()
 ```
 
 **Final throughput**: ~38 000 events/s per worker at 85% CPU — a 2.1x improvement over the v1 baseline with no additional hardware. The engineering team reduced worker count from 6 to 3 processes to handle the same peak load, saving approximately $1 400/month in EC2 costs.
+
+**Stated plainly.** "Percentage gains stack by multiplying, not by adding — +33%, +29% and +23% do not make +85%, they make 2.1x. And each successive percentage is worth less real time than the one before it."
+
+Both halves matter. The first is why the four steps beat what you would guess from the headline numbers; the second is why the team stopped after four.
+
+| Symbol | What it is |
+|--------|------------|
+| `R_0 … R_3` | Throughput after each step: 18k, 24k, 31k, 38k events/s |
+| `R_i / R_i-1` | The step's multiplier — the "+33%", "+29%", "+23%" quoted above |
+| `prod(R_i / R_i-1)` | Total speedup; equals `R_3 / R_0` |
+| `1e6 / R` | CPU microseconds spent per event at throughput `R` |
+| `d(1e6 / R)` | Microseconds actually removed by a step — the thing that shrinks |
+
+**Walk one example.** The four steps, in multipliers and then in real time:
+
+```
+  step                       throughput      multiplier    us per event   us removed
+  baseline (v1, untagged)     18 000 /s          --           55.56          --
+  1  model_validate_json      24 000 /s        1.333x         41.67         13.89
+  2  discriminated union      31 000 /s        1.292x         32.26          9.41
+  3  Annotated constraints    38 000 /s        1.226x         26.32          5.94
+
+  total = 1.333 x 1.292 x 1.226 = 2.11x        (check: 38 000 / 18 000 = 2.11x)
+  additive would have said 33 + 29 + 23 = +85%, i.e. only 1.85x -- wrong
+```
+
+The right-hand column is the one that ends the project. Step 1 removed 13.89 us
+per event, step 3 removed 5.94 us — less than half as much — for what the section
+calls "the most tedious" work. A hypothetical step 4 at another +20% would return
+only `26.32 - 26.32/1.2 = 4.39 us`. Percentages flatter late optimizations; the
+microsecond column tells you the truth, and it is monotonically shrinking.
+
+This is also the Amdahl trap in miniature. Once the four steps are done, `26.32 us`
+per event is what remains, and any *further* Pydantic work is bounded by the share
+of that which is still validation. Making the validator infinitely fast would
+change the total only by whatever fraction it still occupies — which is why the
+team moved on to reducing worker count instead of chasing a fifth step.
 
 **Key lessons**:
 - The single highest-impact change was switching to `model_validate_json` (+33%).

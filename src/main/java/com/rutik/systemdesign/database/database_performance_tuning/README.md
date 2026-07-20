@@ -73,6 +73,42 @@ Hardware: SSD        | 5-20×   | I/O bound     | HDD → NVMe SSD
 Hardware: RAM        | 2-5×    | Memory bound  | Increase shared_buffers
 ```
 
+**In plain terms.** Speedups multiply, but only until the bottleneck moves. Two fixes on the same
+query give `s1 x s2` — and then Amdahl's law caps you: if a fix only touches a fraction `p` of
+total time, the best it can ever return is `1 / (1 - p)`, no matter how large its own multiplier
+is. That ceiling is the arithmetic behind Section 2's "change the route first, then tune the car."
+
+| Symbol | What it is |
+|--------|------------|
+| `s` | Speedup of one fix, as a multiplier. `10x` means the fixed part runs 10x faster |
+| `p` | Fraction of total time the fix actually touches. The term everyone omits |
+| `1 / ((1-p) + p/s)` | Overall speedup. The real return on a fix worth `s` applied to `p` |
+| `1 / (1 - p)` | Hard ceiling as `s` goes to infinity. Reached by making that part free |
+
+**Walk one example.** Use the plan tree from Section 6 — the Seq Scan is 180.4 ms of a 234.128 ms
+query, so `p = 0.77`:
+
+```
+  INDEX THE SEQ SCAN  (s = 100x, the table's top row)
+    overall = 1 / ((1 - 0.77) + 0.77/100) = 1 / (0.23 + 0.0077) = 4.2x
+    ceiling even if the scan became instant: 1 / 0.23 = 4.3x
+
+  TUNE CONFIGURATION INSTEAD  (s = 10x, but on the same 77%)
+    overall = 1 / (0.23 + 0.077) = 3.3x
+
+  DO BOTH, index first, then config on what remains:
+    after indexing, total = 234.128 - 180.4 + 1.804 = 55.5 ms
+    the 53.7 ms of non-scan work is now 96.8% of the query
+    -> config work is now the dominant term, and worth doing
+```
+
+Two lessons fall out. First, a 100x fix returned only 4.2x — because 23% of the query was never
+in scope, and no amount of index quality touches it. Second, the *order* matters: the config fix
+was worth 3.3x before indexing and becomes the main lever after, because removing the biggest
+term promotes whatever was second. This is why the methodology diagram loops back to
+"remeasure" — the bottleneck relocates after every fix, and the `p` you measured is stale the
+moment the fix lands.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -116,6 +152,54 @@ xychart-beta
 
 A shared_buffers hit costs 0.01ms; a full miss cascading down to a spinning disk costs up to 1,000× more per page (10ms) — parsing and planning (up to 1ms) barely register next to a disk seek, which is why avoiding disk I/O dominates every other optimization.
 
+**The idea behind it.** Effective per-page latency is a weighted average:
+`latency = hit_rate x hit_cost + (1 - hit_rate) x miss_cost`. Because `miss_cost` is 10x to
+1,000x `hit_cost`, the second term dominates long before the hit rate looks bad — the number
+that governs your latency is the *miss* rate, not the hit rate, and reporting "99% hit rate"
+hides the fact that the remaining 1% is doing most of the waiting.
+
+| Symbol | What it is |
+|--------|------------|
+| `hit_rate` | Fraction of page requests served from `shared_buffers` / `innodb_buffer_pool` |
+| `1 - hit_rate` | Miss rate. The term that actually sets the average, because of its weight |
+| `hit_cost` | Cost of a buffer-pool hit. 0.01 ms — a pointer chase in RAM |
+| `miss_cost` | Cost of the fallback tier. 0.1 ms on SSD, 10 ms on HDD |
+| MySQL hit rate | `1 - (Innodb_buffer_pool_reads / Innodb_buffer_pool_read_requests)` |
+
+**Walk one example.** Same buffer pool, two different storage tiers, using the latencies from
+the chart above:
+
+```
+  ON SSD  (hit 0.01 ms, miss 0.1 ms)
+    hit_rate   effective latency                       vs 99%
+      99.9%    0.999x0.01 + 0.001x0.1  = 0.01009 ms     0.93x
+      99.0%    0.990x0.01 + 0.010x0.1  = 0.01090 ms     1.00x  (baseline)
+      95.0%    0.950x0.01 + 0.050x0.1  = 0.01450 ms     1.33x
+      90.0%    0.900x0.01 + 0.100x0.1  = 0.01900 ms     1.74x
+      50.0%    0.500x0.01 + 0.500x0.1  = 0.05500 ms     5.05x
+
+  ON HDD  (hit 0.01 ms, miss 10 ms)
+      99.9%    0.999x0.01 + 0.001x10   = 0.01999 ms
+      99.0%    0.990x0.01 + 0.010x10   = 0.10990 ms     5.5x worse than 99.9%
+      98.0%    0.980x0.01 + 0.020x10   = 0.20980 ms     10.5x worse
+      95.0%    0.950x0.01 + 0.050x10   = 0.50950 ms     25x worse
+      90.0%    0.900x0.01 + 0.100x10   = 1.00900 ms     50x worse
+```
+
+Read the HDD column carefully: dropping from 99.9% to 99.0% — a change most dashboards would
+render as a flat green line — makes every page read **5.5x slower**. On SSD the same drop costs
+8%. This is why "what is a good buffer pool hit rate" has no answer independent of storage: the
+identical hit rate is fine on NVMe and catastrophic on spinning disk.
+
+**Why `shared_buffers` is 25% and not 90%.** The formula above has three tiers, not two, and the
+middle one is free. A `shared_buffers` miss usually lands in the OS page cache (0.1 ms), not on
+disk — so RAM handed to `shared_buffers` is removed from a cache that was already helping you.
+Past roughly 25% you are shuffling pages between two RAM caches and paying double-buffering for
+it. That is also why `effective_cache_size = 24GB` on a 32GB box is not a contradiction with
+`shared_buffers = 8GB`: it is a *planner hint* describing both tiers combined, and PostgreSQL
+allocates none of it. Discourse's `shared_buffers = 256MB` in Section 7 is the same reasoning
+taken to its limit — with a sub-100GB dataset, the OS cache was already doing the job.
+
 **PostgreSQL Memory Hierarchy**
 
 ```mermaid
@@ -153,6 +237,47 @@ maintenance_work_mem = 64MB (default)
   Used for: VACUUM, CREATE INDEX, REINDEX, ALTER TABLE ADD FOREIGN KEY
   Set higher during index builds: SET maintenance_work_mem = '1GB';
 ```
+
+**What this actually says.** `work_mem` is not a budget, it is a *unit price*, and the quantity
+is out of your control: `peak = connections x operations_per_query x parallel_workers x
+work_mem`. PostgreSQL enforces no global cap on the product, so the setting is safe or fatal
+depending entirely on three numbers set by your workload rather than by your config file.
+
+| Symbol | What it is |
+|--------|------------|
+| `work_mem` | Memory ceiling for ONE sort, hash join, or hash aggregate node |
+| operations | Sort/hash nodes in a single plan. Read them off `EXPLAIN` — often 3-5 |
+| connections | Concurrent backends actually running queries, bounded by `max_connections` |
+| parallel workers | `max_parallel_workers_per_gather`. Each worker gets its own `work_mem` |
+| safe value | `RAM x 0.25 / (connections x operations)` — invert the product to solve for price |
+
+**Walk one example.** Solve the formula forward, then invert it, on a 32 GB server:
+
+```
+  SOLVE FOR A SAFE PRICE  (the config comment's formula)
+    32,000 MB x 0.25 / (100 connections x 2 operations) = 40 MB max safe work_mem
+
+  NOW PRICE IT WRONG  (the Section 10 OOM incident)
+    200 connections x 5 operations x 512 MB = 512,000 MB = 500 GB demanded
+    server has                                                32 GB
+    -> OOM killer terminates the postmaster
+
+  SAME SETTING, ONE SESSION  (SET LOCAL work_mem = '512MB')
+    1 session x 5 operations x 512 MB = 2,560 MB = 2.5 GB
+    -> 8% of RAM. Completely safe.
+```
+
+The same 512 MB is a 500 GB request or a 2.5 GB request depending only on how many sessions hold
+it. That is the entire argument for GitLab's pattern in Section 7 — global `work_mem = 8MB`,
+`SET LOCAL work_mem = '256MB'` inside the one transaction that needs it. The global value pays
+the multiplier; the local value does not.
+
+**Why parallel workers are the hidden third factor.** The config comment's formula uses two
+terms, but the earlier `5 x 20 x 3 x 4MB = 1.2GB` example uses three. With
+`max_parallel_workers_per_gather = 4`, one parallel sort can consume `5 x work_mem`, not
+`work_mem` — the leader plus four workers. A `work_mem` you validated on a serial plan can
+therefore quintuple the moment the planner decides the table got big enough to parallelize,
+which is why `work_mem` OOMs so often appear after data growth rather than after a config change.
 
 ---
 
@@ -507,7 +632,91 @@ Parallel query workers | Faster large scans    | CPU-bound queries may thrash
 
 **Checkpoint I/O spike**: `max_wal_size = 1GB` (default) with a write workload generating 500MB/minute of WAL. Checkpoint fires every 2 minutes, flushing 1GB of dirty pages in a 1-second burst. Disk I/O saturates; all queries stall. Fix: set `max_wal_size = 4GB`, `checkpoint_completion_target = 0.9` — checkpoints spread I/O over 9 minutes, eliminating spikes.
 
+**Put simply.** Two independent numbers control checkpoints, and they do different jobs.
+`interval = min(checkpoint_timeout, max_wal_size / wal_rate)` sets *how often* a checkpoint
+fires; `checkpoint_completion_target` sets *how thin* the resulting write is spread. Raising only
+the first makes each checkpoint bigger; raising only the second smooths a burst that still
+arrives too often. The pathology is a large volume delivered over a short window, so you have to
+move both.
+
+| Symbol | What it is |
+|--------|------------|
+| `wal_rate` | WAL bytes the workload generates per minute. Measure it, do not guess |
+| `max_wal_size` | WAL accumulated before a checkpoint is forced. Default 1 GB |
+| `checkpoint_timeout` | Time-based trigger. Default 5 min. Whichever fires first, wins |
+| `checkpoint_completion_target` | Fraction of the interval used to write dirty pages. 0.5 -> 0.9 |
+| write rate | `dirty_bytes / (interval x completion_target)` — the number the disk actually feels |
+
+**Walk one example.** The incident's own 500 MB/min WAL rate:
+
+```
+  WAL-size trigger:
+    max_wal_size = 1 GB -> 1,024 / 500 = 2.05 min   <- the "checkpoint every 2 minutes"
+    max_wal_size = 4 GB -> 4,096 / 500 = 8.19 min
+
+  But checkpoint_timeout = 5 min also fires, and the earlier one wins:
+    at 1 GB : min(5.00, 2.05) = 2.05 min   -> WAL size is the trigger
+    at 4 GB : min(5.00, 8.19) = 5.00 min   -> the TIMEOUT now becomes the trigger
+
+  Sustained write rate seen by the disk, flushing ~1 GB of dirty pages:
+
+    before : 1,024 MB in 1 second                        = 1,024 MB/s   <- saturates
+    after  : 1,024 MB over 0.9 x 5 min = 270 s           =   3.8 MB/s
+
+    1,024 / 3.8 = 270x lower peak write rate
+```
+
+**Why raising `max_wal_size` alone would not have fixed it.** At 4 GB the WAL trigger moves out
+to 8.19 min, past `checkpoint_timeout`, so checkpoints now fire on the 5-minute clock instead —
+the headroom stops mattering the moment the timeout becomes the binding constraint. What
+actually flattened the disk was `checkpoint_completion_target` going 0.5 to 0.9, turning a
+1-second burst into a 270-second trickle. The `max_wal_size` bump earns its keep by making the
+timeout the trigger, which is the stable, predictable one. As Section 8 notes, the price is crash
+recovery: more WAL between checkpoints means more WAL to replay after an unclean shutdown.
+
 **Index bloat from UPDATE-heavy workload**: A table with 10M rows undergoes 1M updates/day. Each UPDATE creates a new row version (dead tuple + new tuple). Without sufficient VACUUM, dead tuples and index entries accumulate. After 6 months: table is 4× larger than data, index is 3× larger. Reads slow because pages are sparse. Fix: increase autovacuum frequency for that table, use REINDEX CONCURRENTLY to rebuild bloated indexes.
+
+**Read it like this.** Autovacuum fires when
+`n_dead_tup > autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor x n_live_tup`. Because
+the trigger is a *fraction of live rows*, it sets a ceiling on steady-state bloat all by itself:
+the table can never exceed `1 + scale_factor` times its useful size, as long as autovacuum is
+actually running. Any bloat larger than that ratio is not a tuning problem — it is evidence
+autovacuum never completed.
+
+| Symbol | What it is |
+|--------|------------|
+| `n_dead_tup` | Dead row versions awaiting reclamation. From `pg_stat_user_tables` |
+| `n_live_tup` | Live rows. The useful size the ratio is measured against |
+| scale factor | Fraction of live rows tolerated as dead. Default `0.20` |
+| threshold | Flat floor added on top, default 50 rows. Irrelevant on big tables |
+| bloat ceiling | `1 + scale_factor` — the largest the table gets if vacuum keeps up |
+
+**Walk one example.** The 10M-row table taking 1M updates/day:
+
+```
+  DEFAULT scale_factor = 0.20
+    trigger at   0.20 x 10,000,000 = 2,000,000 dead tuples
+    time to hit  2,000,000 / 1,000,000 per day = 2.0 days between vacuums
+    bloat ceiling                     12,000,000 / 10,000,000 = 1.20x
+
+  TUNED scale_factor = 0.01  (the per-table setting shown earlier)
+    trigger at   0.01 x 10,000,000 =   100,000 dead tuples
+    time to hit    100,000 / 1,000,000 per day = 0.1 day = 2.4 hours
+    bloat ceiling                     10,100,000 / 10,000,000 = 1.01x
+
+  OBSERVED after 6 months: 4x
+    implied dead tuples = 3 x 10,000,000 = 30,000,000
+    implied scale_factor = 30,000,000 / 10,000,000 = 3.0
+
+    No setting produces 3.0. Autovacuum was not completing at all.
+```
+
+That last line is the diagnostic worth carrying into an interview: compare measured bloat against
+`1 + scale_factor`, and if measured is larger, stop tuning the scale factor and go find out why
+the worker never finished — a long-running transaction holding back the xmin horizon, a vacuum
+cost delay throttling it below the dead-tuple arrival rate, or too few `autovacuum_max_workers`
+for the number of hot tables. Pinning `autovacuum_vacuum_cost_delay = 2` per-table, as the
+settings above do, addresses the throttling case specifically.
 
 **Query plan regression after PostgreSQL upgrade**: After upgrading from PG 13 to PG 15, a critical query plan changes from index scan to sequential scan. Throughput drops 10×. Root cause: PG 15 improved the cost model; now accurately estimates the table is larger and planner switches to seq scan. Fix: use `pg_hint_plan` extension to pin the old plan temporarily while investigating. Long term: add a more selective index or rewrite the query to use a covering index.
 

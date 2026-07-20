@@ -60,6 +60,31 @@ Availability (A)------Partition Tolerance (P)
 
 **Real production scenario**: A Cassandra cluster with RF=3 and CL=QUORUM experiences a network partition. Two nodes are on one side, one on the other. QUORUM requires 2/3 responses. The minority side (1 node) cannot serve QUORUM reads/writes — it sacrifices availability for consistency at QUORUM. Switch to CL=ONE and you get AP behavior with potential stale reads.
 
+**Stated plainly.** "Consistency is not a property of the database — it is an overlap test between how many replicas you write to and how many you read from." If those two sets are guaranteed to share at least one node, a read cannot miss the latest write; if they are not, it can.
+
+| Symbol | What it is |
+|--------|------------|
+| `RF` | Replication factor — copies of each row. `3` in the scenario above |
+| `CL` | Consistency level a single query demands: `ONE`, `QUORUM`, or `ALL` |
+| `QUORUM` | `floor(RF/2) + 1` replicas must answer. That is `2` when `RF = 3` |
+| `W`, `R` | Replicas that must acknowledge a write / answer a read |
+| `W + R > RF` | The overlap test — true means the read set must contain a replica that saw the write |
+
+**Walk one example.** The same RF=3 cluster, at two consistency levels and then split by a partition:
+
+```
+  RF = 3   ->   QUORUM = floor(3/2) + 1 = 2 replicas
+
+  CL=QUORUM :  W + R  =  2 + 2  =  4   >  3   ->  sets must overlap, no stale read
+  CL=ONE    :  W + R  =  1 + 1  =  2  <=  3   ->  no overlap guaranteed, stale read possible
+
+  Partition splits the ring into [2 nodes] and [1 node], at CL=QUORUM:
+    majority side :  2 reachable  >=  2 needed  ->  keeps serving      (stays consistent)
+    minority side :  1 reachable   <  2 needed  ->  returns an error   (gives up availability)
+```
+
+This is CAP made arithmetic. Nothing about the cluster changed between the two rows — same nodes, same partition, same data. Only `W + R` changed, and that single inequality is what decides whether the minority side behaves as CP (errors out) or AP (answers with possibly stale data). It also explains why `CL=ALL` is rarely used: `W + R = 3 + 3` certainly overlaps, but any single node failure takes the whole cluster down for that key.
+
 ### PACELC Extension
 
 CAP only covers behavior during partitions. PACELC adds the else case: even when no partition, there is a tradeoff between **Latency** and **Consistency**.
@@ -128,6 +153,27 @@ flowchart TD
 
 Each rung down this ladder drops a guarantee to buy back latency: linearizability forces a coordination round-trip on every read (etcd, ZooKeeper, Spanner), while eventual consistency (DNS, S3, Cassandra at CL=ONE) gives no ordering promise at all in exchange for never blocking.
 
+**In plain terms.** "Linearizability means every operation waits for a majority of nodes to agree before it counts — so the network round-trip to that majority becomes a hard floor under how fast a single key can change." The cost is not CPU or disk; it is the speed of light between your nodes.
+
+| Symbol | What it is |
+|--------|------------|
+| `RTT` | Round-trip time from the leader to a majority of nodes and back |
+| majority | `floor(N/2) + 1` nodes that must acknowledge before the write is visible |
+| `1000 / RTT` | Ceiling on strictly ordered operations per second against one key |
+| contended key | A single row every request must serialize on — a lock, a counter, a seat |
+
+**Walk one example.** The RTT figures quoted in Section 12, turned into a throughput ceiling:
+
+```
+  RTT to majority       1000 / RTT  =  serial ops/sec on ONE key    typical topology
+      1 ms                              1,000                       same rack (etcd)
+     10 ms                                100                       same region, across AZs
+     50 ms                                 20                       two nearby regions
+    200 ms                                  5                       cross-continent quorum
+```
+
+Read the bottom row carefully: a globally distributed linearizable store can serve enormous aggregate throughput and still permit only five updates per second to any *one* contended row. That is why linearizability is reserved for coordination primitives — leader election, distributed locks, config — where the key count is small and the write rate is naturally low, and why putting a hot counter behind it is the classic way to discover this number the hard way.
+
 ---
 
 ## 5. Transaction Isolation Levels
@@ -194,6 +240,28 @@ PostgreSQL Row Header:
 - When a row is updated: old row gets `xmax = current_txn_id`, new row gets `xmin = current_txn_id`
 - A read at snapshot time T sees rows where `xmin <= T` and (`xmax = 0` or `xmax > T`)
 - No locks required for reads — readers never block writers, writers never block readers
+
+**What the formula is telling you.** "Of all the versions of this row sitting in the heap, show me the one that was already born and not yet dead as of the instant my snapshot was taken." Two comparisons against a single number replace what locking databases need an actual lock to decide.
+
+| Symbol | What it is |
+|--------|------------|
+| `xmin` | XID of the transaction that created this row version |
+| `xmax` | XID of the transaction that deleted or superseded it; `0` means still live |
+| `T` | The reading transaction's snapshot horizon — work committed after it is invisible |
+| `xmin <= T` | Birth test: this version already existed when the snapshot was taken |
+| `xmax = 0 or xmax > T` | Death test: not deleted, or deleted only after the snapshot |
+
+**Walk one example.** Four versions of the same logical row, read at snapshot `T = 500`:
+
+```
+  version   xmin   xmax     xmin <= 500 ?        xmax = 0 or > 500 ?      visible?
+  v1         100    250     yes                  no  (250 <= 500)         no  - superseded
+  v2         250    480     yes                  no  (480 <= 500)         no  - superseded
+  v3         480      0     yes                  yes (still live)         YES - this one
+  v4         620      0     no  (620 > 500)      yes                      no  - from the future
+```
+
+Exactly one version passes both tests, and it does so without consulting any other transaction. That is the whole trick: the reader never blocks, because visibility is decided by integer comparison against a snapshot rather than by waiting for a lock to clear. The price appears in the first two rows — `v1` and `v2` are dead to every current reader but still occupy heap space until VACUUM removes them, which is why MVCC buys concurrency with storage and a background cleanup job.
 
 ### Isolation Level Anomaly: Write Skew
 

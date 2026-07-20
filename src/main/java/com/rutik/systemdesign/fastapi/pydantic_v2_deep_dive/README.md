@@ -557,6 +557,56 @@ For deeply nested models with complex validators the speedup narrows to ~5x; for
 
 Model construction cost is paid once at class definition, not per validation call.
 
+#### Decoding the benchmark table
+
+**What this actually says.** "Divide one second by the throughput and you get the price of a single validation — v1 charged 3.2 microseconds per model, v2 charges 0.18."
+
+Throughput and per-call latency are the same number read from opposite ends. The table hands you one; the reciprocal hands you the other, and the reciprocal is the form you actually budget a request with.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Validations in the benchmark run — `1 000 000` here |
+| `T` | Wall-clock seconds the whole run took: `3.2` s for v1, `0.18` s for v2 |
+| `N / T` | Throughput — validations per second, the table's right-hand column |
+| `T / N` | Per-validation cost — what one `model_validate` call charges you |
+| `T_v1 / T_v2` | The speedup, `17.8x` — how many v1 validations fit in one v2 validation's time |
+
+**Walk one example.** The same benchmark read both directions:
+
+```
+  v1:  T/N = 3.2 s  / 1 000 000 = 3.2  us per validation
+       N/T = 1 000 000 / 3.2    =   312 500 /s   -> the table's "~312 k/s"
+
+  v2:  T/N = 0.18 s / 1 000 000 = 0.18 us per validation
+       N/T = 1 000 000 / 0.18   = 5 555 556 /s   -> the table's "~5.6 M/s"
+
+  speedup = 3.2 / 0.18 = 17.78x   (identical to 5 555 556 / 312 500)
+```
+
+Now spend that against a real request budget. The `User` model benchmarked above
+carries 3 fields, so the per-field price is `0.18 / 3 = 0.06 us` in v2 and
+`3.2 / 3 = 1.07 us` in v1. A batch endpoint validating a list of items with 10
+fields each scales linearly in total field count:
+
+```
+                                                       share of a 20 ms
+   items   fields    v2 = 0.06us x f   v1 = 1.07us x f   request budget
+                                                          v2        v1
+       1       10         0.6 us            10.7 us      0.003%     0.05%
+      50      500        30.0 us           533.3 us      0.15 %     2.67%
+     200    2 000       120.0 us         2 133.3 us      0.60 %    10.67%
+   1 000   10 000       600.0 us        10 666.7 us      3.00 %    53.33%
+```
+
+Read the bottom row: on a 1 000-item bulk import, v1 burned over half the entire
+20 ms budget inside the validator, which is why v1 services felt "slow for no
+reason" on batch endpoints. In v2 the same work is 3% — annoying but no longer
+the bottleneck. Read the top row instead and the opposite lesson lands: for a
+single small model, validation is 0.003% of the budget in v2 and was still only
+0.05% in v1. Optimizing Pydantic on a single-object endpoint is optimizing a
+component that cannot pay you back; the win only exists where field count is
+large.
+
 ### 6.10 Discriminated Unions
 
 Without a discriminator, Pydantic tries every branch in order (O(n) worst case). With a discriminator on a `Literal` field, it does a single O(1) dict lookup:
@@ -592,6 +642,36 @@ flowchart LR
 ```
 
 *Plain `Union` validation retries each branch in sequence until one matches (Cat fails, Dog succeeds) — O(n) attempts. A discriminated union reads the `type` field once and jumps straight to the matching model — O(1), with a clearer error when nothing matches.*
+
+**Read it like this.** "A plain union is a linear search through your model list; on average you pay for half of it, and in the worst case you pay for all of it. A discriminator turns that search into a dictionary lookup."
+
+The "O(n)" label hides the constant that actually matters in production: the *expected* number of branches attempted, which is `(n + 1) / 2` when the correct type is uniformly distributed across the union.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of branches in the `Union` |
+| `k` | Position (1-based) of the branch that finally matches |
+| `(n + 1) / 2` | Expected attempts when every branch is equally likely to be the right one |
+| `n` | Worst case — the matching branch sits last |
+| `1` | Attempts under a discriminator, regardless of `n` |
+
+**Walk one example.** How the cost grows as you add event types:
+
+```
+   union size n     avg attempts (n+1)/2     worst case n     discriminated
+        2                  1.5                    2                1
+        3                  2.0                    3                1
+        5                  3.0                    5                1
+       20                 10.5                   20                1
+```
+
+The 3-branch `MessageContent` union below is cheap either way — 2 attempts on
+average. The reason to reach for `Field(discriminator="type")` anyway is that
+the cost is not just attempts: each failed branch builds and discards a partial
+validator state, and the failure error you get back is "none of the union
+variants matched" rather than a pointer at the one field that was wrong.
+
+
 
 ```python
 from typing import Literal, Union, Annotated

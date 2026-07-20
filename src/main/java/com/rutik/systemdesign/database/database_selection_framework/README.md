@@ -246,6 +246,38 @@ xychart-beta
 ```
 The distributed-SQL tax is not linear — both CockroachDB options land near $300K/year, roughly 4-7x the boring PostgreSQL and DynamoDB options, which is why Section 9 says avoid the added complexity until a proven requirement demands it. (CockroachDB Dedicated's $100-500K/year range is plotted at its midpoint.)
 
+**The idea behind it.** "The invoice is only part of the bill — the engineer time spent operating a database is a real, recurring line item, and on small deployments it is the largest one." TCO comparisons that stop at the hosting cost systematically favour self-hosting, which is exactly why self-hosting keeps getting chosen and then regretted.
+
+| Symbol | What it is |
+|--------|------------|
+| Compute + storage | The monthly invoice — the only figure most comparisons look at |
+| FTE fraction | Share of one engineer's year the database consumes. `0.25` for self-hosted here |
+| Loaded engineer cost | Fully loaded annual cost of that engineer, `$250K` |
+| TCO | `12 x monthly infra  +  FTE fraction x loaded cost` |
+
+**Walk one example.** Self-hosted against RDS, at the same 4-core / 32 GB / 2 TB workload:
+
+```
+  self-hosted PostgreSQL
+    compute $500-800/mo  +  storage $200/mo          ->    $700 - $1,000 /mo
+    infra per year       12 x $700  ..  12 x $1,000   =    $8.4K  ..  $12.0K
+    ops time             0.25 FTE x $250K             =    $62.5K
+                                                           ----------------
+    total                                                  $70.9K ..  $74.5K
+
+  RDS PostgreSQL Multi-AZ
+    instance $1,500/mo x 2 (Multi-AZ)  +  storage $460/mo  =  $3,460 /mo
+    infra per year       12 x $3,460                        =  $41.5K
+    ops time             none required                      =  $0
+                                                               -------
+    total                                                      $41.5K
+
+  RDS costs 3.5x - 4.9x more per month and still wins on TCO, because the
+  $62.5K of ops time is 84% of the self-hosted total.
+```
+
+That 84% is the whole lesson. The infrastructure line items differ by a few thousand dollars a year; the operational line item differs by sixty thousand. It also tells you when the comparison flips: the ops cost is roughly fixed regardless of instance size, so as the fleet grows the managed-service premium (a percentage of compute) eventually overtakes a fixed 0.25 FTE. Run this arithmetic with your own numbers rather than inheriting the conclusion — the crossover point is specific to your scale and your loaded engineer cost.
+
 ### Evaluation Scorecard
 
 ```
@@ -267,6 +299,39 @@ Context: Strong consistency required, SQL queries, moderate scale, no NoSQL expe
 Same scorecard with: no consistency requirement, 1M writes/second, managed cloud
 → DynamoDB might score higher (flip operational and scale weights)
 ```
+
+**What this actually says.** "Make each candidate earn its score on the dimensions you actually care about, weighted by how much you care — so the decision is settled by the requirements you agreed on before anyone had a favourite." The scorecard's value is not the number it produces; it is that it forces the weights to be argued first, in the abstract, rather than reverse-engineered to justify a preferred answer.
+
+| Symbol | What it is |
+|--------|------------|
+| Weight | Share of the decision one dimension owns. The five must sum to `100%` |
+| Score `1-5` | How well a candidate meets that dimension. `5` = fully meets, `1` = does not |
+| `weight x score` | One dimension's contribution to the total |
+| Weighted score | Sum of the contributions — lands back on the same `1-5` scale |
+| Ranking gap | Distance between the top two totals. Under ~0.3 means the scorecard did not decide |
+
+**Walk one example.** PostgreSQL's column, term by term, then the two NoSQL candidates:
+
+```
+  dimension                    weight    score     weight x score
+  consistency model match       0.30       5           1.50
+  query pattern match           0.25       5           1.25
+  scale to requirements         0.20       3           0.60
+  operational complexity        0.15       4           0.60
+  team expertise                0.10       5           0.50
+                                ----                   ----
+                                1.00                   4.45
+
+  same arithmetic, other candidates:
+    DynamoDB   0.90 + 0.50 + 1.00 + 0.75 + 0.30   =   3.45
+    Cassandra  0.90 + 0.75 + 1.00 + 0.30 + 0.20   =   3.15
+
+  gap between 1st and 2nd:  4.45 - 3.45  =  1.00   ->  decisive, not a coin flip
+```
+
+(The table above publishes 4.55 / 3.55 / 3.20; the term-by-term sums come to 4.45 / 3.45 / 3.15. The ranking and the ~1.0 winning margin are identical either way.)
+
+The gap is the part worth reading. A 1.00 spread on a 1-5 scale means no single scoring judgement flips the outcome — PostgreSQL could lose a full point on scale and still win. Compare that to the sensitivity noted just above: change the *context* rather than the scores, weighting scale at 30% and consistency at 10%, and DynamoDB overtakes. That is the honest reading of any scorecard — it is a record of which requirements you decided mattered, not an objective measurement of the databases.
 
 ---
 
@@ -313,6 +378,28 @@ xychart-beta
     bar [116, 11500, 50000, 100000]
 ```
 Today's 116 writes/second is a rounding error against PostgreSQL's ~50K TPS ceiling, and even the 1B/day-sustained case (11.5K/s) stays under it — only the 1B/day peak (100K/s) crosses the line, the one scenario worth benchmarking Cassandra for.
+
+**Read it like this.** "Divide the daily number by 86,400 before you let it frighten you — a figure that sounds enormous per day is usually unremarkable per second." Almost every premature-scaling decision starts with someone quoting a per-day number in a room where nobody converted it.
+
+| Symbol | What it is |
+|--------|------------|
+| `86,400` | Seconds in a day. The only conversion this entire argument needs |
+| sustained rate | Daily total spread evenly. The smaller and less interesting of the two numbers |
+| peak rate | The actual burst. Commonly 5-10x sustained for consumer traffic |
+| PostgreSQL ceiling | ~`50,000` simple INSERTs/second on one well-provisioned node |
+
+**Walk one example.** Every write figure in this section, converted and measured against that ceiling:
+
+```
+                             per day        / 86,400   =   per second     % of 50K ceiling
+  today                   10,000,000                          115.7            0.23%
+  1B/day sustained     1,000,000,000                       11,574.1           23.1%
+  1B/day peak (stated)            --                      100,000.0          200.0%
+
+  Only the last row exceeds 100% -- and it is a peak, not a sustained load.
+```
+
+Two things fall out of the table. First, the current workload uses under a quarter of one percent of a single node — the gap to the ceiling is a factor of 432, which is years of growth, not months. Second, the 1B/day *sustained* case still fits, at 23% utilization; it is only the peak that breaks through, and peaks have cheaper answers than a database migration (queueing, batching, a write-through buffer). Reach for Cassandra when the *sustained* number crosses the line, because that is the one you cannot smooth out.
 
 ### When Distributed SQL Outweighs PostgreSQL + Read Replicas
 
@@ -474,6 +561,33 @@ Team expertise:  SQL (all 8 engineers)
 Compliance:     HIPAA (encryption, access controls, audit logging)
 Budget:         $5-10K/month database budget
 ```
+
+**What the formula is telling you.** "Users times actions per user per day, divided by 86,400 — that is the entire capacity estimate, and when it lands three orders of magnitude below the engine's ceiling, the selection question has already answered itself." The purpose of this arithmetic is not precision; it is to establish that precision does not matter here.
+
+| Symbol | What it is |
+|--------|------------|
+| patients / DAU | The population generating load |
+| actions/user/day | Writes or reads a single user causes in a day |
+| `/ 86,400` | Converts a daily total into a sustained per-second rate |
+| headroom | Ceiling divided by required rate — what buys years without re-architecting |
+
+**Walk one example.** Day one and the three-year projection, against the same single PostgreSQL node:
+
+```
+  writes   50,000 patients  x   5 writes/day  =    250,000/day  /86,400  =    2.9 /sec
+  reads    50,000 DAU       x  20 reads/day   =  1,000,000/day  /86,400  =   11.6 /sec
+                                                                            --------
+  combined day-one load                                                       14.5 /sec
+
+  3-year projection: 5,000,000 patients at the same ratios  ->  100x everything
+     writes  289.4 /sec     reads  1,157.4 /sec     combined  1,446.8 /sec
+
+  PostgreSQL single-node ceiling ~50,000 TPS
+     headroom on day one    50,000 /    14.5   =   3,456x
+     headroom at year three 50,000 / 1,446.8   =      34.6x
+```
+
+Thirty-four times headroom *after* a hundredfold growth is what "boring choice, correct choice" looks like as a number. It also frames the deferred decisions honestly: the Citus sharding milestone noted below is not a hedge, it is the point where headroom finally becomes single-digit. Notice too what dominates the estimate — reads outnumber writes 4 to 1, which is why a read replica appears in the chosen architecture and sharding does not.
 
 **Decision: PostgreSQL (RDS Multi-AZ)**
 

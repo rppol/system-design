@@ -121,6 +121,39 @@ xychart-beta
 
 Without PgBouncer, 50 pods at HikariCP pool size 10 already sit at PostgreSQL's `max_connections=500` limit, and scaling to 200 pods during peak drives 2000 connections — a crash. With PgBouncer (DaemonSet or sidecar), the same 50-to-200 pod scale-out only grows PgBouncer's client-side connections; `server_pool_size=50` keeps actual PostgreSQL connections flat at 50.
 
+The two bars come from two different arithmetics:
+
+```
+  without PgBouncer :  db_connections = pods x pool_size_per_pod
+  with PgBouncer    :  db_connections = pgbouncer_instances x server_pool_size
+```
+
+**Stated plainly.** "Without a pooler, every pod you add multiplies straight through to the database; with one, the database sees a constant that has nothing to do with your pod count."
+
+| Symbol | What it is |
+|--------|------------|
+| `pods` | Application replicas, set by the HPA — a number that changes on its own during traffic spikes |
+| `pool_size_per_pod` | HikariCP `maximum-pool-size` inside each pod |
+| `pgbouncer_instances` | PgBouncer processes, typically one per Kubernetes node (DaemonSet) — grows with nodes, not pods |
+| `server_pool_size` | PgBouncer's cap on real PostgreSQL connections per user+database pair |
+| `max_connections` | The PostgreSQL-side ceiling both formulas are measured against |
+
+**Walk one example.** The scale-out drawn in the chart, `pool_size = 10` and `max_connections = 500`:
+
+```
+                    pods    pool     db connections     vs max_connections = 500
+  without PgBouncer   50  x   10  =        500          exactly at the limit
+  without PgBouncer  200  x   10  =       2000          4x over -> refused, crash
+
+  with PgBouncer (server_pool_size = 50, one instance per node)
+                      50      --            50          10% of the limit
+                     200      --            50          unchanged
+```
+
+The difference is not that PgBouncer is more efficient. It is that `pods` left the equation entirely. The first formula has an input the platform's autoscaler controls; the second has only inputs you control.
+
+**Why the sidecar variant fails.** Running PgBouncer inside each pod rather than per node puts `pods` right back into the formula — `200 pods x server_pool_size 5 = 1000` connections, still double the limit. The multiplexing only pays off when the pooler is *shared*, which is what the DaemonSet placement in Section 6 buys.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -174,6 +207,73 @@ Note: This is per-database-instance, not per-app-instance.
   → Justify using PgBouncer instead of per-app pools
 ```
 
+**In plain terms.** "A database can only genuinely run as many queries at once as it has cores to run them on, plus a couple more to keep the disks busy while the others wait on I/O."
+
+The formula sizes the pool to the *server's* capacity to execute, not to the application's desire to submit. That inversion is the whole point: a pool is a throttle protecting the database, not a buffer serving the app.
+
+| Symbol | What it is |
+|--------|------------|
+| `pool_size` | Total connections the pool will ever hold open to one database instance |
+| `cpu_cores` | Physical cores on the **database** server — not the application server |
+| `× 2` | Oversubscription factor. One query runs while a second waits on I/O, so a core sustains about two in-flight queries |
+| `effective_spindle_count` | Number of independent disks that can seek in parallel. `1` for a single SSD or an EBS volume |
+| `+ spindle_count` | The extra connections that stay useful purely because storage can overlap with compute |
+
+**Walk one example.** Three server shapes, same arithmetic:
+
+```
+                        cpu_cores x 2      + spindles      pool_size
+  8-core, single SSD       8 x 2 = 16          + 1            17      -> round to 20
+  4-core, single SSD       4 x 2 =  8          + 1             9      -> round to 10
+ 16-core, single SSD      16 x 2 = 32          + 1            33
+
+  A 16-core database wants about 33 connections. Not 500.
+```
+
+Note how slowly the answer grows: quadrupling the cores from 4 to 16 moves the pool only from 9 to 33. This is why "we added more pods so we raised the pool size" is always the wrong reflex — pool size tracks the database, and the database did not change.
+
+**Why the `× 2` and not `× 1`.** With exactly one connection per core, every time a query blocks on a disk read the core sits idle. The second connection gives the scheduler something to run during that stall. Push to `× 4` or `× 8` and the reverse happens: the runnable set exceeds what the scheduler can usefully rotate, and context-switching plus per-backend memory (PostgreSQL forks a 5-10MB process per connection) eats the capacity you were trying to buy.
+
+### Sizing From Demand — Little's Law
+
+The formula above caps the pool from the database's side. The workload sets the floor from the application's side, and the two must be reconciled:
+
+```
+  connections_needed = QPS x avg_query_duration_seconds
+
+  Then apply headroom:
+    pool_size = connections_needed x 1.5 to 2.0
+```
+
+**What the formula is telling you.** "The number of connections busy at any instant equals how fast requests arrive multiplied by how long each one holds a connection."
+
+This is Little's Law (`L = lambda x W`) applied to a pool: `L` is connections in use, `lambda` is arrival rate, `W` is holding time. Nothing about it is database-specific, which is exactly why it is trustworthy — it is a conservation identity, not a heuristic.
+
+| Symbol | What it is |
+|--------|------------|
+| `QPS` | Queries per second reaching the database — `request_rate × queries_per_request`, not request rate alone |
+| `avg_query_duration_seconds` | How long a connection stays checked out, in seconds. Use p99, not the mean, when the distribution has a slow tail |
+| `connections_needed` | Average number of connections in flight. The floor, before any burst headroom |
+| `× 1.5 to 2.0` | Headroom multiplier absorbing arrival bursts and duration variance |
+
+**Walk one example.** The same traffic, with a fast query and then a slow one:
+
+```
+  Traffic: 1000 req/s, 2 queries per request  ->  QPS = 2000
+
+  fast queries, 5 ms each
+    L = 2000 x 0.005 s              =  10 connections busy on average
+    pool = 10 x 1.5 .. 10 x 2.0     =  15 to 20
+
+  slow queries, 50 ms each          (10x slower, identical traffic)
+    L = 2000 x 0.050 s              = 100 connections busy on average
+    pool = 100 x 1.5 .. 100 x 2.0   = 150 to 200
+```
+
+Query duration and pool demand move together, one for one. A 10x regression in query latency creates a 10x increase in connection demand from traffic that never changed — which is why a single un-indexed query can exhaust a pool that was correctly sized last week.
+
+**Where the two numbers collide.** The 8-core server above supports about 17 connections; the slow-query workload demands 150. There is no pool size that satisfies both, and raising the pool only moves the queue from the application into the database. The only real fixes are to shrink `W` (fix the query) or add database capacity — a lesson the case study in Section 14 pays for the hard way.
+
 ### Pool Exhaustion Diagnosis
 
 ```java
@@ -196,6 +296,43 @@ Note: This is per-database-instance, not per-app-instance.
 2. Slow queries holding connections for too long
 3. Connection leak (connection not returned to pool after use)
 4. Database slow-down causing queries to take longer, pooling up connections
+
+**Why exhaustion arrives suddenly rather than gradually.** Pool utilization and acquisition wait are related by a queueing law, not a straight line:
+
+```
+  utilization  rho = (QPS x avg_query_duration) / pool_size
+
+  acquisition wait grows roughly as   1 / (1 - rho)
+```
+
+**Read it like this.** "As the pool approaches fully busy, the wait to get a connection does not creep up — it runs away, because the last sliver of free capacity has to absorb every arrival that shows up at a bad moment."
+
+| Symbol | What it is |
+|--------|------------|
+| `rho` | Fraction of the pool busy on average. `0.5` = half the connections in use |
+| `pool_size` | Connections available to hand out |
+| `1 / (1 - rho)` | The blow-up term. At `rho = 0.9` it is `10`; at `rho = 0.99` it is `100` |
+| acquisition wait | Time a thread sits in `hikaricp_connections_pending` before it gets a connection |
+| total latency | Acquisition wait + the query's own duration — what the caller actually experiences |
+
+**Walk one example.** A 10-connection pool serving 5 ms queries, driven to progressively higher utilization:
+
+```
+   rho      busy conns     acquisition wait     total latency (wait + 5 ms query)
+  0.50         5.0             0.04 ms                 5.04 ms
+  0.70         7.0             0.37 ms                 5.37 ms
+  0.80         8.0             1.02 ms                 6.02 ms
+  0.90         9.0             3.34 ms                 8.34 ms
+  0.95         9.5             8.26 ms                13.26 ms
+  0.99         9.9            48.19 ms                53.19 ms
+
+  0.50 -> 0.90 : utilization x1.8, latency x1.7    (feels linear, looks fine)
+  0.90 -> 0.99 : utilization x1.1, latency x6.4    (cliff)
+```
+
+The last 9% of utilization costs more latency than the first 90% did. This is why a pool dashboard that looks healthy at 90% is not reassuring, and why `hikaricp_connections_pending > 0` is treated as an alert rather than a metric to watch trend upward — by the time the trend is visible, you are already past the knee.
+
+**What breaks without headroom.** Sizing a pool to exactly `connections_needed` puts `rho` at `1.0`, where the formula divides by zero and reality produces an unbounded queue. The `1.5-2.0x` headroom multiplier from Little's Law above exists precisely to hold `rho` near `0.5-0.65`, on the flat part of this curve, where a traffic spike costs microseconds instead of tens of milliseconds.
 
 **Leak detection**:
 ```java
@@ -596,3 +733,35 @@ PostgreSQL backend count: 1000 processes × 8MB RAM = 8GB RAM consumed by connec
 - Database CPU: 90% → 35%
 - Connection timeout errors: 0 (during normal operations)
 - P99 query latency: 450ms → 25ms (context switching eliminated)
+
+**Put simply.** "Every number in this incident falls out of one multiplication — pods times pool size — and every fix is an attempt to take one of those two factors out of the application's hands."
+
+| Symbol | What it is |
+|--------|------------|
+| `pods × pool_size` | Connections the database is asked to hold. `50 × 20 = 1000` here |
+| `backends × RAM_per_backend` | Memory PostgreSQL burns on connection state alone, before caching a single page |
+| `pgbouncers × server_pool_size` | Connections the database actually holds after the fix. `4 × 25 = 100` |
+| multiplexing ratio | Client connections ÷ server connections. How many app-side connections each real backend serves |
+| `idle_in_txn × stall_duration` | Connection-seconds destroyed by holding a transaction open across a remote API call |
+
+**Walk one example.** The before and after, one line at a time:
+
+```
+  BEFORE
+    connections   50 pods x 20 pool          = 1000   vs max_connections 500  -> 2x over
+    memory        1000 backends x 8 MB       = 8000 MB = 7.81 GiB of pure connection state
+    scheduling    1000 processes on 4 cores  =  250 runnable per core
+    of those 1000 : 300 active, 600 idle, 100 idle-in-transaction
+
+  AFTER
+    connections   4 PgBouncer x 25           =  100   vs max_connections 200  -> 50% headroom
+    memory        100 backends x 8 MB        =  800 MB = 0.78 GiB
+    multiplexing  1000 client / 100 server   =   10:1
+
+  DELTA
+    connections   1000 -> 100                = 90% fewer
+    memory        7.81 -> 0.78 GiB           = 7.03 GiB returned to the buffer cache
+    p99 latency   450 ms -> 25 ms            = 18x faster
+```
+
+**Where the 100 stalled connections came from.** Each `@Transactional` method calling a payment API with a 30 s timeout holds its connection for the full 30 s, so `100 connections × 30 s = 3000 connection-seconds` are consumed per stall wave. Against a healthy pool that only ever needed `2000 QPS × 0.005 s = 10` connections, those 100 stalled connections represent ten times the entire legitimate working set — held by code that is not talking to the database at all. This is why moving the external call outside the transaction boundary mattered as much as PgBouncer did: PgBouncer shrinks the connection count, but only the application fix shrinks `W`, and Little's Law says `W` is half the product.

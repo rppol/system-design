@@ -951,6 +951,40 @@ It must in parallel: (1) fetch firmographic data from Clearbit (~300 ms), (2) ch
 tech stack from BuiltWith (~500 ms), (3) query an internal graph DB for connections (~150 ms). The
 SLA is p99 < 800 ms. Prior implementation used sequential `await` calls, giving p99 of ~1100 ms.
 
+**Stated plainly.** The whole scenario is one comparison: `sum` versus `max`. Sequential `await`
+makes the three enrichment calls add up; a `TaskGroup` makes them overlap so only the slowest one is
+visible. Nothing gets faster — the ordering of the waits changes.
+
+| Symbol | What it is |
+|--------|------------|
+| `L_clearbit`, `L_builtwith`, `L_graph` | Per-provider latencies: 300, 500, 150 ms |
+| `sum(L_i)` | Sequential wall time — every `await` waits for the previous one to return |
+| `max(L_i)` | Concurrent wall time — all three started before the first suspension |
+| `sum - max` | Milliseconds the restructure removes. Pure waiting, no work |
+| `sum / max` | The speedup factor. Bounded by how uniform the latencies are |
+
+**Walk one example.** Push the three stated provider latencies through both shapes:
+
+```
+  provider                latency
+  ----------------------- --------
+  Clearbit                 300 ms
+  BuiltWith                500 ms   <- the straggler
+  internal graph DB        150 ms
+
+  sequential   300 + 500 + 150      =  950 ms of pure waiting
+  concurrent   max(300, 500, 150)   =  500 ms
+  removed      950 - 500            =  450 ms
+  speedup      950 / 500            =  1.9x
+
+  measured p99: 1,100 ms -> 540 ms   (560 ms cut, 50.9% reduction)
+```
+
+The measured `540 ms` sits just above the arithmetic floor of `500 ms`; the extra ~40 ms is
+serialization, framework overhead, and p99 tail on the straggler. And note the ceiling: BuiltWith's
+500 ms is irreducible. Making Clearbit twice as fast changes nothing at all, because `max` does not
+care about the non-dominant terms. The only remaining lever on this endpoint is BuiltWith itself.
+
 **Problem.** The engineering team replaced sequential calls with `asyncio.gather` — latency dropped
 to ~550 ms. However, production revealed two issues: when the Clearbit API returned HTTP 429, the
 exception was silently swallowed by `gather(return_exceptions=True)`, and the response was returned
@@ -1034,6 +1068,44 @@ async def enrich_company(domain: str) -> EnrichmentResult:
         connections=connections,
     )
 ```
+
+**What it means.** The inline comment `# Total SLA: 700 ms (leaves 100 ms for serialization +
+overhead)` is a budget subtraction, not a round number someone liked. The deadline handed to
+`asyncio.timeout()` is the SLA *minus* everything the SLA must also pay for — so the timeout value
+is derived, and it must be re-derived whenever the SLA or the overhead estimate moves.
+
+| Symbol | What it is |
+|--------|------------|
+| `SLA` | The externally promised p99 ceiling — 800 ms |
+| `O` | Non-network overhead inside the budget: Pydantic serialization, framework, response write |
+| `D = SLA - O` | The deadline passed to `asyncio.timeout()`. 700 ms here |
+| `max(L_i)` | Fastest the fan-out can possibly finish — 500 ms |
+| `D - max(L_i)` | Slack: how much a provider may degrade before the deadline starts firing |
+
+**Walk one example.** Lay the budget out end to end, then find the breaking point:
+
+```
+  SLA promise                                       800 ms
+  minus overhead reserve (O)                      - 100 ms
+  ----------------------------------------------- --------
+  deadline D given to asyncio.timeout(0.7)          700 ms
+
+  fastest possible fan-out  max(300, 500, 150)      500 ms
+  slack before timeouts begin   700 - 500           200 ms
+
+  breaking point
+    BuiltWith degrades 500 -> 700 ms   deadline exactly met, zero margin
+    BuiltWith degrades 500 -> 701 ms   TimeoutError; TaskGroup cancels all three
+    Clearbit degrades  300 -> 700 ms   also fires -- ANY task can blow the budget
+```
+
+**Why the slack number is worth writing down.** `200 ms` is the endpoint's real tolerance for
+downstream degradation, and it is 40% of the current fan-out time — a provider can get 1.4x slower
+before customers see errors. That single figure tells you how urgent a "BuiltWith p99 is creeping
+up" alert is. Note also that the deadline is shared, not per-task: it wraps the whole `TaskGroup`,
+so the three tasks compete against one 700 ms budget rather than getting 700 ms each. The per-task
+alternative discussed in Section 12 changes this materially — there, one slow provider fails alone
+instead of cancelling its siblings.
 
 **Results after migration.**
 - p99 latency: 540 ms (down from 1,100 ms sequential; comparable to `gather` but with correct error semantics).

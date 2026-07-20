@@ -337,6 +337,42 @@ product = reduce(mul, [1, 2, 3, 4, 5]) # 120
 
 `itemgetter("score")` compiles to a single C function call. `lambda r: r["score"]` requires bytecode interpretation (LOAD_FAST, LOAD_CONST, BINARY_SUBSCR). The difference is measurable at scale: for a sort of 1 million records, `itemgetter` is roughly 25-30% faster.
 
+**The idea behind it.** "A sort does not call your key function once per record — it calls it on the
+order of `N log N` times, so a per-call cost you would never notice gets multiplied by twenty."
+The saving is not that `itemgetter` is dramatically faster per call; it is that the call count is
+enormous.
+
+| Symbol | What it is |
+|---|---|
+| `N` | Records being sorted — 1,000,000 in the claim above |
+| `log2(N)` | Roughly how many comparison rounds a merge-based sort needs. `log2(1,000,000)` = 19.93 |
+| `N x log2(N)` | Upper bound on comparisons, hence on key-function invocations without caching |
+| `itemgetter` | One C-level `__getitem__`. No Python frame is pushed |
+| `lambda r: r["score"]` | A Python function: frame setup, `LOAD_FAST`, `LOAD_CONST`, `BINARY_SUBSCR`, return |
+
+**Walk one example.** Multiply the per-call gap by the call count for `N = 1,000,000`:
+
+```
+  log2(1,000,000)              =        19.93
+  comparisons  N x log2(N)     = 19,931,568        about 20 million
+
+  a per-call gap of only 20 nanoseconds:
+      19,931,568 x 20 ns       = 0.399 seconds of pure key-function overhead
+
+  scaled down, the same gap is invisible:
+    N =     1,000  ->      9,966 calls  x 20 ns = 0.0002 s    unmeasurable
+    N =   100,000  ->  1,660,964 calls  x 20 ns = 0.033 s     barely visible
+    N = 1,000,000  -> 19,931,568 calls  x 20 ns = 0.399 s     shows up in a p99
+```
+
+There is a second, larger effect Python hides here: `sorted(key=...)` actually applies the key
+**once per element** (the decorate-sort-undecorate strategy), then sorts the extracted keys — so the
+key runs `N` times, not `N log N`, and it is the *comparison* of the extracted values that runs
+`N log N` times. Both counts are far larger than `N` feels like it should be, and both are the
+reason the same 25-30% shows up reliably in benchmarks. The practical takeaway is unchanged and
+worth stating that way in an interview: **in a sort, the key function sits inside the hottest loop
+in the program, so it is the one place a C callable is always worth reaching for.**
+
 ### 6.6 Immutability Patterns
 
 ```python
@@ -477,6 +513,44 @@ timeit.timeit("sum(x*x for x in range(1_000_000))", number=5)
 # Generator wins when: large data, single pass, or chained lazy ops
 # List comprehension wins when: multiple passes needed, random access, or small N
 ```
+
+**What the formula is telling you.** "The list's size is a function of `N`; the generator's is not a
+function of anything." Both lines above compute the same 1,000,000 squares — the only difference is
+whether all of them have to exist at the same instant.
+
+| Symbol | What it is |
+|---|---|
+| `N` | Elements the sequence will produce — 1,000,000 here |
+| `8 x N` | The list's pointer array: one 8-byte slot per element on 64-bit CPython |
+| `~8.4 MB` | What `getsizeof(list_comp)` reports — the 8.0 MB array plus growth over-allocation |
+| `28-32 B` | Size of each `int` object the pointers point at; `x*x` past 2^30 needs the wider 32 B |
+| `200 B` | The generator object. No `N` term — it holds a code pointer, a frame, and flags |
+
+**Walk one example.** Account for both halves of the list, not just the part `getsizeof` shows:
+
+```
+  list comprehension  [x*x for x in range(1_000_000)]
+    pointer array (reported by getsizeof)        8,448,728 B    ~ 8.4 MB
+    the 1,000,000 int objects it points at      31,868,928 B    ~31.9 MB   (invisible to getsizeof)
+                                               ------------
+    true cost                                   40,317,656 B    ~40.3 MB
+
+  generator expression  (x*x for x in range(1_000_000))
+    generator object                                   200 B
+    one int alive at a time                          28-32 B
+                                               ------------
+    true cost                                    about 230 B
+
+  ratio: 40,317,656 / 230 = about 175,000x
+```
+
+The `getsizeof` figure understates the list by about 4.8x, because a Python list stores *references*
+and `getsizeof` is not recursive. Whenever you size a list of boxed objects, add the objects. Scale
+the same arithmetic and the shape holds: at `N = 10,000` the list is about 360 KB and nobody cares;
+at `N = 100,000,000` it is about 3.6 GB and the process dies, while the generator is still 230
+bytes. That is
+why the rule of thumb below draws its line at size *and* access pattern — the memory term only
+matters once `N` is large enough for `8N` to be a real number.
 
 Rule of thumb: use a generator expression when the sequence is large (> 100,000 elements) and consumed in a single forward pass. Use a list comprehension when you need to iterate multiple times, index into it, check `len()`, or pass it to a function that requires a sequence.
 
@@ -715,6 +789,47 @@ product = reduce(operator.mul, numbers, 1)  # 120
 import math
 product = math.prod(numbers)  # 120
 ```
+
+**In plain terms.** "`reduce` re-enters the Python interpreter once for every pair it folds, while
+`sum` never leaves C." A fold over `N` items performs `N-1` binary combinations either way — the
+question is only whether each of those crossings pays Python's function-call tax.
+
+| Symbol | What it is |
+|---|---|
+| `N` | Length of the sequence being folded |
+| `N - 1` | Binary combinations any fold must perform. Identical for `reduce` and for `sum` |
+| `reduce` cost | `N-1` Python-level calls: frame push, argument bind, execute, return, frame pop |
+| `sum` cost | `N-1` combinations inside one C loop. Zero Python frames pushed |
+| short-circuit | `any`/`all` stop at the first decisive element; `reduce` cannot — it always folds all `N-1` |
+
+**Walk one example.** Fold 1,000,000 integers, measured with `timeit` on CPython 3.13:
+
+```
+  approach                       Python calls      per-run time     vs sum()
+  sum(d)                                    0        0.0025 s        1.0x
+  reduce(operator.add, d)             999,999        0.0159 s        6.3x slower
+  reduce(lambda a, b: a + b, d)       999,999        0.0318 s       12.7x slower
+```
+
+The two `reduce` rows do the same 999,999 additions; the second is twice as slow again purely
+because a Python `lambda` frame costs more to enter than `operator.add`'s C entry point.
+
+**Where the short-circuit gap hides.** The timing table understates the worst case, because
+`reduce` also loses the ability to stop early:
+
+```
+  flags = [True] + [False] * 999,999      # answer is decided by element 0
+
+  any(flags)                       -> examines          1 element
+  reduce(lambda a, b: a or b, ...) -> examines  1,000,000 elements
+
+  work ratio: 1,000,000x, for the same True
+```
+
+This is the part worth saying out loud: the `reduce` version is not merely slower by a constant, it
+has a **different complexity in the best case** — `O(1)` becomes `O(N)`. That is why the guidance
+above is "reserve `reduce` for genuinely custom folds": every built-in it replaces is not just a C
+loop but also, for `any`/`all`/`min`/`max`, an early exit that `reduce` structurally cannot express.
 
 ### Pitfall 4: Consuming a Generator Twice
 

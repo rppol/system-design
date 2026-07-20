@@ -299,6 +299,40 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RequestSizeLimitMiddleware, max_bytes=1_048_576)
 ```
 
+### Decoding the 1 MB cap
+
+**Stated plainly.** "Read the size the client claims *before* reading the body, and if that number
+is bigger than one megabyte, answer `413` and never allocate the memory." The cap is not about
+bandwidth — it is a bound on how much RAM one request can force the process to hold at once.
+
+| Symbol | What it is |
+|--------|------------|
+| `max_bytes` | The ceiling, `1_048_576` = `1024 x 1024` = exactly 1 MiB |
+| `content-length` | The byte count the client declares in the header, before any body arrives |
+| `413` | "Payload Too Large" — the correct status; `400` hides why the request failed |
+| `call_next` | The rest of the stack. Returning before this is what makes the rejection free |
+| peak RAM | `max_bytes x concurrent uploads` — the number the cap actually controls |
+
+**Walk one example.** The same 1000 concurrent uploads, capped and uncapped:
+
+```
+  uncapped, attacker sends 500 MB bodies
+    1000 concurrent x 500 MB  = 500 GB of buffered body   -> OOM kill, instantly
+
+  capped at max_bytes = 1_048_576
+    1000 concurrent x 1 MiB   = 1.05 GB                   -> survivable
+     500 concurrent x 1 MiB   = 0.52 GB
+     100 concurrent x 1 MiB   = 0.10 GB
+
+  cost of a rejected request : parse one header, return 413. No body read, no DB call.
+```
+
+The cap converts an unbounded number into a multiplication you can actually plan capacity against.
+Note that `content-length` is attacker-supplied: a client that lies about it, or uses chunked
+transfer encoding with no `content-length` at all, slips past this check — the ASGI server's own
+body limit (Uvicorn `--limit-max-request-size`, or the reverse proxy's `client_max_body_size`) is
+the layer that catches those, which is why this middleware is one of several, not the only one.
+
 ### Security Headers Middleware
 
 ```python
@@ -506,6 +540,52 @@ flowchart LR
 ```
 *Three workers each capping at `5/minute` in-process still let 15 requests per minute through in total; routing every worker's `INCR`/`EXPIRE` through one Redis instance enforces a single global `5/minute` limit.*
 
+### Reading `5/minute` as token-bucket arithmetic
+
+**In plain terms.** "Give every IP a bucket holding 5 tokens that refills at a steady drip; a
+request spends one token, and an empty bucket means `429`." The two halves of the string do
+different jobs: the `5` sets the burst you tolerate, the `/minute` sets the rate you allow forever.
+
+| Symbol | What it is |
+|--------|------------|
+| capacity | Bucket size, `5` — the largest burst a fresh caller can fire at once |
+| `r` | Refill rate, `5 tokens / 60 s = 0.0833 tokens/s`, i.e. one token every 12 s |
+| cost | Tokens one request spends, `1` |
+| tokens | Current bucket contents; the request passes only while `tokens >= 1` |
+| `key_func` | What the bucket is keyed on — `get_remote_address` gives one bucket per IP |
+
+**Walk one example.** A scripted registration attack against `@limiter.limit("5/minute")`:
+
+```
+  t = 0 s   bucket full                    tokens = 5
+            5 requests fired back to back  tokens = 5 - 5 = 0   all 5 accepted (the burst)
+            6th request, same instant      tokens = 0           rejected with 429
+
+  refill r = 5 / 60 s = 0.0833 tokens/s   ->   1 token every 12 s
+
+  t = 12 s  tokens = 1    1 request accepted
+  t = 24 s  tokens = 1    1 request accepted
+  t = 60 s  5 tokens have accrued since t = 0
+
+  burst rate     :   5 requests in the first instant
+  sustained rate : 300 requests/hour  (5 x 60), however the attacker paces them
+```
+
+**Why the worker count is not a detail.** The sustained rate above is per bucket, and an in-process
+bucket exists once per worker. Multiply it out and the limit you configured is not the limit you get:
+
+```
+  in-process : 3 workers x 5 tokens/min = 15 requests/min = 900 requests/hour
+  shared     : 1 Redis bucket, 5 tokens/min              = 300 requests/hour
+                                                            ^^^ a 3x gap, silently
+
+  the gap scales with the worker count -- 8 Uvicorn workers = 8x your intended limit
+```
+
+Nothing in the `@limiter.limit("5/minute")` decorator hints at this; the multiplier is the deploy
+topology, not the code. That is why `storage_uri=<redis>` is not an optimization but the thing that
+makes the number mean what it says.
+
 ---
 
 ## 7. Real-World Examples
@@ -548,6 +628,40 @@ flowchart LR
 **When `403` vs `404` for missing or unauthorized objects:** return `403` when the object exists but the caller is not authorized. Return `404` only when the object does not exist for any caller. This prevents existence leakage through the distinction.
 
 **When to use UUIDs vs integer IDs for public resource identifiers:** use UUIDs (v7 for sortability) for resources exposed in API paths. Integer IDs are trivially enumerable. UUIDs do not eliminate BOLA but significantly raise the bar for automated enumeration.
+
+**What the formula is telling you.** "The cost of guessing an ID is `2^(random bits)` attempts, so
+the only question that matters is how many bits of the identifier an attacker cannot predict." A
+sequential integer has effectively zero unpredictable bits — the next ID is the previous ID plus one.
+
+| Symbol | What it is |
+|--------|------------|
+| `log2(N)` | Bits of entropy in an identifier drawn uniformly from `N` possibilities |
+| random bits | Bits an attacker cannot derive from a known ID. UUIDv4: 122. UUIDv7: 74 |
+| `2^(bits-1)` | Expected guesses to find one valid ID — half the space, on average |
+| `G` | Attacker guess rate, requests per second the API will actually serve |
+| `2^(bits-1) / G` | Wall-clock time to a single successful guess |
+
+**Walk one example.** One million invoices, integer IDs vs UUIDv7, at `G = 10^9` guesses/second
+(wildly generous — no real API serves a billion requests a second):
+
+```
+  sequential integers, 1M rows
+    entropy       log2(1,000,000) = 19.9 bits    (and only if IDs were random, which they are not)
+    real attack   for id in range(1, 1_000_001)  -- 100% hit rate, no guessing at all
+
+  UUIDv7, 74 unpredictable bits
+    guesses to hit   2^73          = 9.4e21
+    time at G = 1e9  9.4e21 / 1e9  = 9.4e12 s  = about 299,000 years
+
+  UUIDv4, 122 unpredictable bits
+    guesses to hit   2^121         = 2.7e36    -- astronomically further still
+```
+
+The gap is not "harder", it is a different category of problem: enumeration stops being a loop and
+becomes a search. Note the direction of the guarantee — this only removes the attacker's cheap way
+to *find* object IDs. If the ownership check is missing, an attacker who legitimately learns one
+UUID (a shared link, a log, a referrer header) still reads that object. Entropy buys you protection
+from enumeration, never from a missing authorization check.
 
 **When `extra="forbid"` creates friction:** in internal service-to-service APIs where the schema evolves faster than both services can be deployed simultaneously, `extra="ignore"` (the default) is acceptable. Never use `extra="allow"` in user-facing APIs.
 

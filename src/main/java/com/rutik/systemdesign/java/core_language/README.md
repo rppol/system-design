@@ -167,6 +167,33 @@ public int hashCode() {
 }
 ```
 
+**What the formula is telling you.** "`Objects.hash(x, y)` folds the listed fields into one `int` by repeatedly multiplying a running total by 31 and adding the next field's hash, so any two objects with the same field values are guaranteed to land on the same number."
+
+The framing that matters: the hash is a *pure function of the fields you list*. If that list differs from the fields `equals()` compares, the contract is broken by construction, not by accident — which is why the fix above passes `x, y`, the exact pair `equals()` uses.
+
+| Symbol | What it is |
+|--------|------------|
+| `result` | The running accumulator, seeded at 1 (not 0, so leading zero-valued fields still shift the total) |
+| `31` | Odd prime multiplier; the JIT turns `31 * r` into `(r << 5) - r`, a shift and a subtract |
+| `e` | The next field's own `hashCode()` — for an `int` field, `Integer.hashCode(n)` is just `n` |
+| `x`, `y` | The two `Point` fields, the same pair `equals()` compares |
+
+**Walk one example.** `new Point(1, 2).hashCode()`:
+
+```
+  seed                        result = 1
+  fold x = 1                  result = 31 * 1  + 1  =   32
+  fold y = 2                  result = 31 * 32 + 2  =  994
+
+  Point(1, 2).hashCode() = 994     <- BOTH p1 and p2 compute this, so same bucket
+  Point(2, 1).hashCode() = 31 * (31 * 1 + 2) + 1 = 31 * 33 + 1 = 1024
+
+  Swapping the fields changes the hash, because each fold multiplies the
+  accumulated total again -- position is baked into the result.
+```
+
+Order sensitivity is the point of the multiply. A plain `x + y` would give `Point(1,2)` and `Point(2,1)` the same hash, piling unrelated keys into one bucket; the `31 *` step spreads them apart. Without the fold, `HashMap` degenerates toward a linear scan of a single bucket.
+
 ### Correct equals() Implementation (Full Recipe)
 ```java
 @Override
@@ -200,6 +227,37 @@ Comparator<Employee> combined = byName.thenComparing(bySalaryDesc);
 
 employees.sort(combined);
 ```
+
+**Read it like this.** "`return a - b` only reports the correct sign while the true difference still fits inside 32 bits; the moment it does not, the value wraps around and `compareTo` confidently states the opposite order."
+
+This is why the bug is invisible in tests. Every small salary, every small id, every difference under two billion sorts perfectly — the wrap only fires when the two values straddle a wide range, which test fixtures almost never do and production data eventually does.
+
+| Symbol | What it is |
+|--------|------------|
+| `int` | 32-bit two's-complement integer: 4,294,967,296 distinct values, from -2,147,483,648 to 2,147,483,647 |
+| `a - b` | The true mathematical difference, which may need more than 32 bits to hold |
+| Wraparound | What the JVM stores instead: the true value shifted by 4,294,967,296 back into range, silently and without an exception |
+| `Integer.compare(a, b)` | Branches on `<` / `>` and returns -1, 0, or +1; it never computes a difference, so it cannot overflow |
+
+**Walk one example.** Two salaries at the extremes of the `int` range:
+
+```
+  int range                 -2,147,483,648  ..  2,147,483,647
+
+  a = Integer.MAX_VALUE  =   2,147,483,647
+  b = -1
+
+  true a - b             =   2,147,483,648        <- exactly one past the top
+  wrap by 2^32           =   2,147,483,648 - 4,294,967,296
+  what gets stored       =  -2,147,483,648        <- NEGATIVE
+
+  compareTo returns a negative number, so the sort concludes "a comes before b"
+  even though a is the largest int there is and b is -1.
+
+  Integer.compare(a, b)  =  +1                    <- correct, and overflow-proof
+```
+
+Nothing throws. `TreeMap` and `Collections.sort` simply build an order that violates transitivity, and downstream code reads a wrong "smallest" or, on a large enough list, gets an `IllegalArgumentException: Comparison method violates its general contract!` from TimSort — thrown far from the real cause.
 
 ### Covariant Return Types & Bridge Methods
 
