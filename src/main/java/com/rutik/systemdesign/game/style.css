@@ -2200,7 +2200,6 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
 /* reboarding card: calm and distinct from .topic-card — deliberately NOT
    red/warn-tinted, since a gap is never treated as a failure. */
 .topic-card.reboard { border-color: color-mix(in srgb, var(--good) 38%, var(--glass-brd)); }
-.topic-card.reboard h2 { text-transform: none; }
 
 /* debrief-ready card: same family as .review-card, violet-tinted so it reads
    distinct from the good (review) / warn (weak-spot) / accent (resume) cards. */

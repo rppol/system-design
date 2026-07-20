@@ -430,14 +430,24 @@ class MainActivity : ComponentActivity() {
                 // anything else is invisible and can never be clobbered.
                 val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
                 var existing: Uri? = null
-                contentResolver.query(
-                    collection,
-                    arrayOf(MediaStore.Downloads._ID),
-                    "${MediaStore.Downloads.DISPLAY_NAME} = ?",
-                    arrayOf(fileName),
-                    null
-                )?.use { c ->
-                    if (c.moveToFirst()) existing = ContentUris.withAppendedId(collection, c.getLong(0))
+                try {
+                    // Guarded separately: overwriting is a convenience, and an
+                    // OEM MediaStore that throws here must not take down the
+                    // export itself — fall through to the plain insert.
+                    // IS_PENDING = 0 skips a row orphaned by an export that
+                    // died mid-write; reusing one would write a file that
+                    // never becomes visible in Files.
+                    contentResolver.query(
+                        collection,
+                        arrayOf(MediaStore.Downloads._ID),
+                        "${MediaStore.Downloads.DISPLAY_NAME} = ? AND ${MediaStore.Downloads.IS_PENDING} = 0",
+                        arrayOf(fileName),
+                        null
+                    )?.use { c ->
+                        if (c.moveToFirst()) existing = ContentUris.withAppendedId(collection, c.getLong(0))
+                    }
+                } catch (e: Exception) {
+                    existing = null
                 }
                 existing?.let { uri ->
                     try {

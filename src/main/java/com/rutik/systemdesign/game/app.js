@@ -89,16 +89,20 @@ const ACRONYMS = new Map(Object.entries({
   sycl: "SYCL", hip: "HIP", vllm: "vLLM", dsa: "DSA", dsls: "DSLs",
   junit: "JUnit", mysql: "MySQL", oci: "OCI", idp: "IdP", crds: "CRDs",
   url: "URL", uri: "URI", os: "OS", io: "I/O", id: "ID", ids: "IDs",
+  lcel: "LCEL", ab: "A/B", saas: "SaaS", paas: "PaaS", iaas: "IaaS",
   mcp: "MCP", vla: "VLA", solid: "SOLID", gof: "GoF", tls: "TLS", ssl: "SSL",
   xss: "XSS", csrf: "CSRF", ddd: "DDD", tdd: "TDD", etl: "ETL", kv: "KV",
   fastapi: "FastAPI", graphql: "GraphQL", postgresql: "PostgreSQL",
   javascript: "JavaScript", devops: "DevOps", github: "GitHub", openai: "OpenAI",
   pytorch: "PyTorch", tensorflow: "TensorFlow", numpy: "NumPy", k8s: "K8s",
 }));
-// Touch layouts drop the hover-only prerequisite chords and the multi-column
-// serpentine, so any copy describing rows, hovering, or drawn links is false
-// there and reads as a half-finished screen.
+// Touch layouts drop the hover-only prerequisite chords, and narrow ones drop
+// the multi-column serpentine, so copy describing rows, hovering, or drawn
+// links is false there and reads as a half-finished screen. The column
+// threshold must match layoutPath()'s `W < 520` test — a landscape phone or a
+// tablet really does get rows, and should be told so.
 const coarsePointer = () => window.matchMedia("(pointer: coarse)").matches;
+const singleColumnPath = () => window.innerWidth < 520;
 
 // Small words stay lowercase inside a title, but never as the first word.
 const TITLE_STOPWORDS = new Set(["a", "an", "and", "as", "at", "by", "for", "from",
@@ -110,7 +114,7 @@ function titleize(s) {
     if (hit) return hit;
     if (at > 0 && TITLE_STOPWORDS.has(lower)) return lower;
     return w.charAt(0).toUpperCase() + w.slice(1);
-  }).replace(/\bTCP IP\b/g, "TCP/IP");
+  }).replace(/\bTCP IP\b/g, "TCP/IP").replace(/\bCI CD\b/g, "CI/CD");
 }
 
 // Phase-order for the Study browser. Derived from each section's README learning path.
@@ -3951,7 +3955,7 @@ async function openStudySection(sectionPath) {
   app.innerHTML = `
     <div class="path-screen">
     <div class="hero">${bookScope ? `<p class="eyebrow">${esc(label(section))}${bookMeta.author ? " &middot; " + esc(bookMeta.author) : ""}</p>` : ""}<h1>${esc(bookScope ? bookLabel(bookScope) : label(section))}</h1>
-      <p>${mods.length} ${bookScope ? "chapters" : "topics"}${onInterview ? " &middot; interview-specific path" : ""} &middot; start at 01 &mdash; ${coarsePointer()
+      <p>${mods.length} ${bookScope ? "chapters" : "topics"}${onInterview ? " &middot; interview-specific path" : ""} &middot; start at 01 &mdash; ${singleColumnPath()
         ? `follow them top to bottom in the ${bookScope ? "book's chapter order" : "section's learning order"}.`
         : `the path snakes across each row in the ${bookScope ? "book's chapter order" : "section's learning order"}.`}</p>
       ${graph && !coarsePointer() ? `<p class="path-legend">${crossLinks
@@ -5401,13 +5405,13 @@ function resolvePath(baseFile, rel) {
   return stack.join("/");
 }
 
-// Human title from a content path: ".../module/README.md" -> "module";
-// ".../module/sub_file.md" -> "sub file".
+// Human title from a content path: ".../module/README.md" -> "Module";
+// ".../module/sub_file.md" -> "Sub File".
 function titleFromPath(path) {
   const parts = path.split("/");
   let name = parts.pop();
   if (/^readme\.md$/i.test(name)) name = parts.pop() || name;
-  return name.replace(/\.md$/i, "").replace(/[_-]+/g, " ");
+  return titleize(name.replace(/\.md$/i, "").replace(/-+/g, " "));
 }
 
 // Drag-to-resize: pointer-capture on the grip so move/up fire even off-element.

@@ -57,6 +57,12 @@ for sec in sections:
         continue
     if not qs:
         fail.append(f"empty bank {bank}")
+    # index.json already records the expected count per section, so a truncated
+    # bank (1 question where 537 belong) is catchable for free — "non-empty" on
+    # its own would wave it through.
+    expected = index["sections"].get(sec)
+    if isinstance(expected, int) and len(qs) != expected:
+        fail.append(f"{bank} has {len(qs)} questions, index.json says {expected}")
     total += len(qs)
 
     graph = f"graph/{sec}.json"
@@ -77,9 +83,9 @@ for sec in sections:
 want_banks = {f"{s}.json" for s in sections} | {"index.json"}
 have_banks = {f for f in os.listdir("questions") if f.endswith(".json")}
 for extra in sorted(have_banks - want_banks):
-    fail.append(f"stale bank questions/{extra} (no such section)")
+    fail.append(f"stale bank questions/{extra} (no such section) — delete it: rm questions/{extra}")
 for extra in sorted({f for f in os.listdir("graph") if f.endswith(".json")} - {f"{s}.json" for s in sections}):
-    fail.append(f"stale graph graph/{extra} (no such section)")
+    fail.append(f"stale graph graph/{extra} (no such section) — delete it: rm graph/{extra}")
 
 if fail:
     print("BANK VERIFICATION FAILED:", file=sys.stderr)

@@ -43,7 +43,9 @@ rsync -a \
 # app.js and the APK re-vendors to match automatically.
 VENDOR_DIR="$DEST/game/vendor"
 mkdir -p "$VENDOR_DIR"
-MERMAID_VERSION=$(grep -oE 'mermaid@[0-9]+\.[0-9]+\.[0-9]+' "$SRC/game/app.js" | sort -u)
+# `|| true`: under `set -e` a no-match grep would kill the script here, and the
+# zero-match branch below (the useful error message) could never run.
+MERMAID_VERSION=$(grep -oE 'mermaid@[0-9]+\.[0-9]+\.[0-9]+' "$SRC/game/app.js" | sort -u || true)
 if [ "$(printf '%s\n' "$MERMAID_VERSION" | grep -c .)" -ne 1 ]; then
   echo "ERROR: expected exactly one pinned mermaid@x.y.z in game/app.js, found:" >&2
   printf '  %s\n' ${MERMAID_VERSION:-"(none)"} >&2
