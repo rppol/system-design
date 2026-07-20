@@ -250,6 +250,44 @@ absorb the read traffic.
 - **High availability.** By replicating data across different locations, your website remains in
   operation even if a database is **offline** — you can access data stored in another database server.
 
+**What the formula is telling you.** "If reads outnumber writes `k` to one and you spread them over
+`R` slaves, each slave carries `k / R` units of work for every one unit the master carries."
+
+That single ratio is why the book says the slave count is "usually larger than the number of master
+databases" — the slave fleet is sized by the *read* side of the ratio, and the master only ever sees
+the `1`. The chapter states the ratio qualitatively; the arithmetic below makes the sizing rule
+explicit.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Reads per write — the read:write ratio the chapter calls "much higher" |
+| `R` | Number of slave (replica) databases in the pool |
+| `k / R` | Read units each slave absorbs per one write unit hitting the master |
+| `(k/R) / (k+1)` | Each slave's share of *total* database traffic (reads + writes) |
+| `k + 1` | Total query units per write, i.e. the whole workload in one unit |
+
+**Walk one example.** A 9:1 read:write workload against the chapter's figure (1 master, 2 slaves):
+
+```
+  k = 9 reads per 1 write        R = 2 slaves (the figure's Slave DB 1 and 2)
+
+  total query units       :  k + 1        = 9 + 1  = 10 units
+  master takes            :  1 unit       =  1 / 10 = 10.0% of all traffic
+  slaves take together    :  9 units      =  9 / 10 = 90.0% of all traffic
+  per slave               :  k / R        = 9 / 2  = 4.5 read units
+  per slave, as a share   :  4.5 / 10     = 45.0% of all traffic
+
+  Add a 3rd slave: k / R = 9 / 3 = 3.0 read units  -> 3.0 / 10 = 30.0% each.
+
+  Meaning: adding replicas divides ONLY the 90% read half. The 10% write half is
+  stuck on one master forever -- which is exactly why sharding (1.12) exists.
+```
+
+Notice what the term `R` cannot do: it never appears on the write side. Replication is a read-scaling
+tool only. Drop `R` to zero (no slaves) and the whole `k + 1` lands on the master; raise `R` to a
+hundred and the master still absorbs its full `1`. When writes are the bottleneck, more slaves buy
+nothing — that is the wall Section 1.12 walks into.
+
 ### Failure scenarios — what happens when a database goes down
 
 **If a slave goes offline:**
@@ -329,6 +367,45 @@ SECONDS = 1
 cache.set('myKey', 'hi there', 3600 * SECONDS)
 cache.get('myKey')
 ```
+
+**In plain terms.** "The database no longer sees your read traffic — it sees only the fraction the
+cache *missed*, so database load is `(1 - h) x reads`, not `reads`."
+
+The chapter states the benefit qualitatively ("ability to reduce database workloads"); the one-line
+formula behind it is worth making explicit because the payoff is **non-linear**. What you care about
+is not the hit ratio `h` but the miss ratio `1 - h`, and the miss ratio is what shrinks by factors,
+not by percentage points.
+
+| Symbol | What it is |
+|--------|------------|
+| `h` | Cache hit ratio — fraction of reads answered from memory without touching the DB |
+| `1 - h` | Miss ratio — the only fraction of reads that reaches the database |
+| `reads` | Total read requests arriving at the web tier per second |
+| `(1 - h) x reads` | Read queries the database actually has to serve per second |
+| `1 / (1 - h)` | Load-reduction factor — how many times lighter the DB got |
+
+**Walk one example.** 100,000 reads/second arriving at the web tier, at four hit ratios:
+
+```
+  h = 0%    ->  (1 - 0.00) x 100,000 = 100,000 DB reads/s   factor 1 / 1.00 =  1x
+  h = 50%   ->  (1 - 0.50) x 100,000 =  50,000 DB reads/s   factor 1 / 0.50 =  2x
+  h = 90%   ->  (1 - 0.90) x 100,000 =  10,000 DB reads/s   factor 1 / 0.10 = 10x
+  h = 99%   ->  (1 - 0.99) x 100,000 =   1,000 DB reads/s   factor 1 / 0.01 = 100x
+
+  The trap: 90% -> 99% is "9 percentage points" but the DB load ratio is
+      (1 - 0.90) / (1 - 0.99) = 0.10 / 0.01 = 10.0
+  i.e. a 10x cut in database work, not a 10% one. Going 50% -> 90% is only 5x
+      (1 - 0.50) / (1 - 0.90) = 0.50 / 0.10 = 5.0
+
+  Meaning: every "nine" you add to the hit ratio removes an ORDER OF MAGNITUDE
+  of database load. The last few percent of hit ratio are worth more than the
+  first ninety.
+```
+
+This is also why the chapter's expiration advice cuts both ways. A TTL that is too short does not
+just "reload data more frequently" — it drives `h` down, and because the database sees `1 - h`,
+dropping the hit ratio from 99% to 90% multiplies the database's read load by 10x. Read the tuning
+advice in the next list as *hit-ratio* management, not staleness management alone.
 
 ### Considerations for using a cache
 
@@ -530,6 +607,45 @@ stops handing out the dead data center's addresses and sends **all** traffic to 
 In the event of any significant data center **outage**, all traffic is directed to a **healthy data
 center.** The dead data center is taken out of rotation and the remaining one absorbs 100% of the load.
 
+**Read it like this.** "In steady state a data center serves its geoDNS slice; on the day its twin
+dies it must serve *everything*, so its surge factor is `100 / x` — and you have to have bought that
+capacity in advance."
+
+The chapter writes the split as `x%` and `(100 - x)%` without pinning `x`, and that is the point:
+the failover sentence above ("all traffic is directed to a healthy data center") is a **capacity
+requirement**, not just a routing rule. The steady-state split tells you nothing about how big to
+build each site.
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | Percent of users geoDNS sends to data center 1 (US-East in the figure) |
+| `100 - x` | Percent geoDNS sends to data center 2 (US-West) |
+| `100 / x` | Surge multiplier DC1 absorbs when DC2 dies and it takes all traffic |
+| `100 / (100 - x)` | Surge multiplier DC2 absorbs when DC1 dies |
+
+**Walk one example.** An uneven split, `x = 60` (60% US-East, 40% US-West):
+
+```
+  steady state        :  DC1 = 60% of peak traffic     DC2 = 40% of peak traffic
+
+  DC2 dies, DC1 takes 100%
+      surge factor    :  100 / x       = 100 / 60  = 1.67x more than it was serving
+  DC1 dies, DC2 takes 100%
+      surge factor    :  100 / (100-x) = 100 / 40  = 2.50x more than it was serving
+
+  So BOTH sites must be built for 100% of peak, never for their own slice:
+      provisioned capacity :  100% + 100%  = 200% of peak
+      steady-state usage   :  100 / 200    = 50.0% average utilisation
+
+  Meaning: two-data-center failover costs you a 2x capacity bill and a permanent
+  50% idle fleet. That is the real price of the availability the section promises.
+```
+
+The term that is easy to drop is the surge factor itself. Size DC2 for its own 40% slice and the
+failover sentence becomes a lie: on a DC1 outage it is handed 2.5x its build, browns out, and the
+"healthy data center" fails too. Geographic redundancy without the `100 / x` headroom is a plan to
+fail both sites in sequence rather than one at a time.
+
 ### Technical challenges of multi-data-center
 
 Achieving a multi-data-center setup requires solving several problems:
@@ -652,6 +768,42 @@ for instance, in 2013 **Stack Overflow** had over **10 million monthly unique vi
 - **Greater risk of single point of failure.**
 - The overall cost is **high.** Powerful servers are **much more expensive.**
 
+**Put simply.** "The Stack Overflow anecdote is a *rate* argument in disguise — 10 million monthly
+uniques is only a few visitors per second, which is why one master survived it."
+
+The chapter drops "10 million monthly unique visitors on 1 master database" as evidence that a big
+box goes a long way. Converting that headline number into a per-second rate is what makes it usable
+as a calibration point rather than an impressive-sounding statistic.
+
+| Symbol | What it is |
+|--------|------------|
+| `U` | Monthly unique visitors (the book's 10 million for Stack Overflow, 2013) |
+| `30 x 86,400` | Seconds in a 30-day month (86,400 s/day, the constant used throughout the book) |
+| `U / (30 x 86,400)` | Average unique visitors arriving per second |
+| `p` | Page views per visitor per month — the multiplier that turns visitors into queries |
+
+**Walk one example.** The chapter's Stack Overflow figure, converted to a rate:
+
+```
+  U = 10,000,000 monthly uniques
+
+  seconds per month     :  30 x 86,400        = 2,592,000 s
+  visitors per second   :  10,000,000 / 2,592,000  = 3.86 visitors/s
+  at p = 30 page views  :  3.86 x 30              = 115.7 page views/s
+
+  Compare against the ceiling the same section names:
+      Amazon RDS max     :  24 TB of RAM in ONE box
+
+  Meaning: ~116 page views/s is a rate a single well-tuned master genuinely
+  serves. The anecdote is not "one master scales forever" -- it is "10M monthly
+  uniques is a SMALL number once you divide by 2,592,000 seconds."
+```
+
+The missing term in most readings of this anecdote is the denominator. Quote the monthly figure and
+one master sounds heroic; divide by 2,592,000 seconds and it is under four visitors per second, well
+inside one machine. Always convert a headline user count into a per-second rate before deciding
+whether a tier needs to scale out — that conversion is the whole habit Chapter 2 teaches.
+
 ### Horizontal scaling of the database — sharding
 
 **Horizontal scaling, also known as sharding,** is the practice of adding more servers. It
@@ -680,6 +832,41 @@ shard 1 is used; and so on.
 Caption: the sharding key `user_id` is hashed with `% 4` to pick one of four shards; every shard has
 the identical schema but holds a disjoint slice of the users, so read/write load spreads across four
 machines instead of one.
+
+**What this actually says.** "Divide the user id by the shard count and throw away the quotient —
+the remainder that is left over *is* the machine number, so routing costs one arithmetic operation
+and zero lookups."
+
+That is the whole appeal of `%`: no directory, no metadata service, no round trip. Any client that
+knows `user_id` and `N` computes the destination locally. The price of that free routing is paid
+later, in the resharding block below.
+
+| Symbol | What it is |
+|--------|------------|
+| `user_id` | The sharding key — the value being hashed (the chapter's choice) |
+| `N` | Number of shards (`4` in the chapter's example) |
+| `%` | Modulo — the remainder after integer division; always lands in `0 .. N-1` |
+| `shard_id` | Which of the `N` machines stores and serves that user's row |
+| `total / N` | Data each shard holds when the key distributes evenly |
+
+**Walk one example.** The chapter's `user_id % 4`, plus the capacity that follows from it:
+
+```
+  N = 4 shards
+
+  user_id 1001  ->  1001 % 4 = 1   -> Shard 1
+  user_id   42  ->    42 % 4 = 2   -> Shard 2
+  user_id    7  ->     7 % 4 = 3   -> Shard 3
+  user_id    4  ->     4 % 4 = 0   -> Shard 0   (wraps back to the start)
+
+  Capacity, for an 800 GB user table:
+      one box        :  800 / 1  = 800 GB   <- the single-master case
+      4 shards       :  800 / 4  = 200 GB per shard
+      8 shards       :  800 / 8  = 100 GB per shard
+
+  Meaning: N divides BOTH the data volume and the query load, which is the one
+  thing replication (above) could not do for writes.
+```
 
 ### The sharding key (partition key)
 
@@ -710,6 +897,47 @@ introduces complexities and new challenges:
    **de-normalize** the database so that queries can be performed in a **single table.** (In the
    book's evolving figure, some non-relational functionality is moved to a **NoSQL data store** to
    reduce the load on the relational database as well.)
+
+**The idea behind it.** "Adding one shard to a modulo scheme does not move one shard's worth of data
+— it changes the answer for almost every key at once, so nearly the whole dataset relocates."
+
+This is the number that justifies the chapter's pointer to **consistent hashing**. "Updating the
+sharding function and moving data around" sounds like a proportional chore; it is not, and the gap
+between what you *should* have to move and what modulo *makes* you move is the entire motivation for
+Chapter 5.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Shard count before resharding (`4` in the chapter) |
+| `N + 1` | Shard count after adding one machine (`5`) |
+| `user_id % N != user_id % (N+1)` | Test for "this key must physically move to a different box" |
+| `1 / (N+1)` | The *ideal* fraction to move — just enough to fill the new shard |
+
+**Walk one example.** Resharding the chapter's 4-shard layout to 5, measured over 100,000 user ids:
+
+```
+  before :  shard_id = user_id % 4      after :  shard_id = user_id % 5
+
+  user_id 4   ->  4 % 4 = 0  becomes  4 % 5 = 4   MOVES
+  user_id 6   ->  6 % 4 = 2  becomes  6 % 5 = 1   MOVES
+  user_id 20  -> 20 % 4 = 0  becomes 20 % 5 = 0   stays
+
+  keys where the two disagree, over ids 0..99,999 :  80,000 / 100,000 = 80.0%
+
+  ideal movement (just enough to populate the new shard) :  1 / 5 = 20.0%
+  modulo's actual movement                               :          80.0%
+  waste factor                                           :  80 / 20 = 4x
+
+  Meaning: 4x more data crosses the network than the job requires, and every
+  moved key is a cache miss and a stale read while it is in flight. On the
+  800 GB table above that is 640 GB moved instead of 160 GB.
+```
+
+Consistent hashing exists precisely to delete that `4x`. It replaces "recompute every key against a
+new `N`" with "only the keys in the new node's arc move," pulling the moved fraction back down
+toward the ideal `1 / (N+1)`. The celebrity problem in the next bullet is the *other* failure of a
+plain remainder: `%` distributes ids evenly, but it knows nothing about how much traffic each id
+attracts, so an even split of keys can still be a wildly uneven split of load.
 
 ---
 

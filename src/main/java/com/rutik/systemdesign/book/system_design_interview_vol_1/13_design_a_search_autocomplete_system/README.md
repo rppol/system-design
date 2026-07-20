@@ -86,6 +86,67 @@ QPS = 2,000,000,000 / (24 × 3600)
 peak QPS ≈ 2 × 24,000 = 48,000 QPS
 ```
 
+**In plain terms.**
+
+> "Autocomplete is not a search system with a dropdown bolted on — it is a system that receives
+> one request per *character*, so it runs at roughly the length of an average query times the
+> traffic of the search box it decorates."
+
+That single multiplier is the chapter's signature number and the reason autocomplete is harder
+to serve than search itself: the same users, the same intent, twenty times the requests.
+
+| Symbol | What it is |
+|--------|------------|
+| DAU | daily active users — 10,000,000 |
+| `s` | searches per user per day — 10 |
+| `Q` | finished searches per day = DAU x `s` |
+| `L` | average query length in characters — 4 words x 5 chars = 20 |
+| `A` | keystroke amplification: requests per finished search = `L` |
+| `QPS` | average autocomplete requests/second = `Q` x `A` / 86,400 |
+| `P` | peak factor — the chapter assumes 2x |
+
+**Walk one example.**
+
+```
+Step 1  finished searches per day
+        DAU                             = 10,000,000 users
+        s                               = 10 searches/user/day
+        Q   = 10,000,000 x 10           = 100,000,000 searches/day
+
+Step 2  what search alone would cost
+        100,000,000 / 86,400            = 1,157 searches/second
+        (this is the number you get if you FORGET the keystroke multiplier)
+
+Step 3  the keystroke amplification
+        L                               = 20 characters/query
+        A   = one request per character = 20 requests/search
+        typing "dinner" (6 chars)       = 6 requests: d, di, din, dinn, dinne, dinner
+
+Step 4  autocomplete request volume
+        100,000,000 x 20                = 2,000,000,000 requests/day
+
+Step 5  average autocomplete QPS
+        seconds/day = 24 x 3600         = 86,400 s/day
+        2,000,000,000 / 86,400          = 23,148 requests/second
+        the chapter rounds this to      = 24,000 QPS
+
+Step 6  peak
+        P                               = 2x
+        2 x 24,000 (chapter's rounding) = 48,000 requests/second
+        2 x 23,148 (unrounded)          = 46,296 requests/second
+
+Meaning: search QPS is 1,157/s and autocomplete QPS is 23,148/s off the SAME user
+behaviour -- exactly 20x. Size the read tier from the 1,157 and you under-provision
+by a factor of twenty, which is a launch-day outage rather than a slow dropdown.
+```
+
+`A` is the term that has no analogue in an ordinary search system, and it is the one people
+drop. Without it the whole design looks over-engineered: 1,157 QPS against a frequency table is
+a workload a single indexed relational database handles comfortably, and there is no reason to
+build a trie, cache a top-k on every node, or shard anything. Put `A` back and the same
+workload is 23,148 QPS with a 100 ms budget — which is precisely the pressure that forces every
+optimization in the deep dive.
+
 **New-data / storage growth:** assume **20% of daily queries are new** (never seen before, so they add to the corpus):
 
 ```
@@ -97,6 +158,55 @@ new data/day = queries/day × bytes/query × new-query rate
 ```
 
 So roughly **24k QPS average, 48k QPS peak, and ~0.4 GB of new query text added to storage every day.** These three numbers justify (a) needing a data structure faster than a SQL prefix scan, (b) needing a cache in front of it, and (c) needing an offline pipeline and eventual sharding as the corpus grows.
+
+**What it means.**
+
+> "The corpus does not grow with traffic — it grows with *novelty*, so the only queries that
+> cost storage are the 20 percent nobody has ever typed before."
+
+Notice which multiplier is deliberately absent: the storage chain uses **searches**
+(100,000,000/day), not **requests** (2,000,000,000/day). Keystroke prefixes are traffic, not
+data; only the finished, submitted query is ever recorded.
+
+| Symbol | What it is |
+|--------|------------|
+| `Q` | finished searches per day — 100,000,000 (NOT the 2 billion requests) |
+| `z` | bytes per query string — 20 (4 words x 5 chars, 1 byte/char in ASCII) |
+| `n` | new-query rate: the share never seen before — 20 percent |
+| `G_day` | new query bytes added per day = `Q` x `z` x `n` |
+
+**Walk one example.**
+
+```
+Step 1  the right input                            (searches, not requests)
+        Q   = 10,000,000 DAU x 10       = 100,000,000 searches/day
+
+Step 2  bytes per query
+        4 words x 5 characters          = 20 characters/query
+        at 1 byte/character (ASCII)     = 20 bytes/query
+
+Step 3  raw text volume if we stored everything
+        100,000,000 x 20 bytes          = 2,000,000,000 bytes/day = 2 GB/day
+
+Step 4  only the NEW queries add to the corpus
+        n                               = 0.20
+        G_day = 2,000,000,000 x 0.20    = 400,000,000 bytes/day
+                                        = 0.4 GB/day
+
+Step 5  the corpus over a year
+        0.4 GB/day x 365 days           = 146 GB/year of new query text
+                                        = 0.146 TB/year
+
+Meaning: 0.4 GB/day is a rounding error next to 23,148 QPS -- the corpus is tiny
+and the read rate is enormous. That asymmetry is the entire argument for spending
+memory freely (cached top-k on every node) to buy read latency.
+```
+
+The `n` = 20 percent term is what keeps this number small, and it is a statement about language
+rather than about the system: query distributions are heavily head-weighted, so four out of five
+searches are repeats of something already in the frequency table and cost an increment, not a
+row. If `n` were 100 percent the corpus would grow at 2 GB/day — five times faster — and the
+weekly rebuild would be chasing a corpus that keeps changing shape.
 
 ---
 
@@ -271,6 +381,65 @@ Now a request for prefix `t` returns `[true, try, toy, tree]` by reading the `t`
 
 **The tradeoff — space.** Caching the top 5 at *every* node multiplies storage: each node now carries up to 5 query strings (plus frequencies) in addition to its character and child pointers. This is the classic **space-for-time trade**: we accept a much larger trie in memory to buy constant-time reads. For an autocomplete system — read-dominated, latency-critical, and only rebuilt weekly — that trade is exactly right.
 
+**What the formula is telling you.**
+
+> "A trie's size is unique queries times their average length, discounted by how much prefix
+> the queries share — and the top-k cache then multiplies whatever that comes to."
+
+Working the two halves separately is the point: the base trie is small enough to be
+uninteresting, and the cache is what actually decides whether the structure fits in RAM.
+
+| Symbol | What it is |
+|--------|------------|
+| `U` | unique query strings in the corpus |
+| `L` | average query length — 20 characters |
+| `sigma` | prefix-sharing factor: fraction of `U` x `L` that survives as distinct nodes |
+| `V` | trie nodes = `U` x `L` x `sigma` |
+| `bpn` | bytes per bare node: the character, the word flag, and the child map |
+| `k` | cached completions per node — 5 |
+| `c` | bytes of cache per node = `k` x (query string + frequency) |
+
+**Walk one example.**
+
+```
+Step 1  upper bound on nodes                       (U and sigma are assumptions)
+        U                               = 100,000,000 unique queries
+        L                               = 20 characters/query
+        U x L = 100,000,000 x 20        = 2,000,000,000 nodes if NOTHING is shared
+
+Step 2  discount for shared prefixes
+        sigma (every prefix is reused)  = 0.30
+        V = 2,000,000,000 x 0.30        = 600,000,000 actual trie nodes
+
+Step 3  the bare trie
+        bpn: 1 B char + 1 B word flag + ~38 B child map/pointers
+                                        = 40 bytes/node
+        600,000,000 x 40 bytes          = 24,000,000,000 bytes = 24 GB
+
+Step 4  the top-k cache on top of it
+        per cached entry: 20 B string + 4 B frequency
+                                        = 24 bytes/entry
+        c = 5 entries x 24 bytes        = 120 bytes/node
+        600,000,000 x 120 bytes         = 72,000,000,000 bytes = 72 GB
+
+Step 5  the total, and what the cache cost
+        24 GB + 72 GB                   = 96 GB of trie
+        overhead factor = 160 / 40      = 4x the bare trie
+
+Meaning: caching the top 5 everywhere makes the structure FOUR TIMES larger --
+24 GB becomes 96 GB -- and buys, in exchange, the removal of an O(c log c) sort
+from a path executed 23,148 times per second. At 96 GB the trie no longer fits
+one commodity box, which is exactly how the space-for-time trade leads directly
+into the sharding section.
+```
+
+Two things are worth noticing about where the memory actually goes. First, `sigma` is doing real
+work: without prefix sharing the trie would be 2 billion nodes and 320 GB, and sharing is the
+only reason a trie beats storing every query independently. Second, the cache is **3x the bare
+structure**, not a rounding on top of it — 72 GB versus 24 GB — because a 24-byte cache entry
+dwarfs a 1-byte character. That is why the top-k is capped at 5 and not 50: `k` scales the
+dominant term linearly, so `k` = 50 would mean 1,200 bytes/node and roughly 744 GB.
+
 ### Data gathering service (deep dive)
 
 The naive idea is to **update the trie in real time on every search.** It is wrong for two reasons:
@@ -396,6 +565,61 @@ Caption: on the common path the request never leaves memory — browser cache, t
   - `max-age=3600` — the cached suggestions are valid for **3600 seconds = 1 hour**, so repeated prefixes within the hour are answered locally with **zero network cost**.
 - **Data sampling.** Logging *every* one of the 2 billion daily requests is wasteful in CPU and storage. Instead, **log only 1 out of every N requests** (sampling). The popularity ranking is statistical, so a representative sample is enough and the analytics-log volume drops by a factor of N.
 
+**Read it like this.**
+
+> "Ranking is a question about *proportions*, and proportions survive sampling intact — so
+> keeping 1 row in `N` costs you nothing you were going to use and saves you a factor of `N`."
+
+The framing matters because sampling feels like data loss until you notice what the trie
+actually consumes: an ordering, not a count. A query that is twice as popular as another is
+still twice as popular in a 1-in-1000 sample.
+
+| Symbol | What it is |
+|--------|------------|
+| `R_day` | raw autocomplete requests per day — 2,000,000,000 |
+| `N` | sampling denominator: keep 1 request in every `N` |
+| `r` | bytes per analytics-log row — `(query, timestamp)`, ~30 B |
+| `L_day` | logged rows per day = `R_day` / `N` |
+| `B_day` | analytics-log bytes per day = `L_day` x `r` |
+
+**Walk one example.**
+
+```
+Step 1  the unsampled firehose
+        R_day                           = 2,000,000,000 requests/day
+        r: 20 B query + ~10 B timestamp = 30 bytes/row
+        B_day = 2,000,000,000 x 30      = 60,000,000,000 bytes/day = 60 GB/day
+
+Step 2  sample 1 in 10
+        L_day = 2,000,000,000 / 10      = 200,000,000 rows/day
+        B_day = 200,000,000 x 30        = 6,000,000,000 bytes/day = 6 GB/day
+
+Step 3  sample 1 in 100
+        L_day = 2,000,000,000 / 100     = 20,000,000 rows/day
+        B_day                           = 600,000,000 bytes/day = 0.6 GB/day
+
+Step 4  sample 1 in 1000
+        L_day = 2,000,000,000 / 1,000   = 2,000,000 rows/day
+        B_day                           = 60,000,000 bytes/day = 0.06 GB/day
+
+Step 5  the yearly bill, unsampled versus 1-in-1000
+        60 GB/day x 365                 = 21,900 GB/year = 21.9 TB/year
+        0.06 GB/day x 365               = 21.9 GB/year
+        saved                           = 999/1000 of the volume
+
+Meaning: 1-in-1000 sampling turns a 21.9 TB/year analytics log into a 21.9 GB one
+-- small enough that the weekly aggregation job reads it in minutes -- while the
+head queries, which are searched millions of times, still land thousands of rows
+each and rank in exactly the same order.
+```
+
+Where sampling does bite is the **tail**, and it is worth being precise about the failure mode.
+A query searched 1,000 times a day contributes 1 row at `N` = 1000 — enough to know it exists,
+not enough to rank it stably; a query searched twice a day almost certainly contributes zero and
+vanishes from the corpus entirely. That is acceptable here because the product only ever shows
+the **top 5**, which are drawn from the head by construction — but it is exactly why the same
+trick would be wrong for a system that has to report exact search counts.
+
 ### Trie operations — create, update, delete
 
 **Create.** The trie is **created by the workers** from the aggregated data (Analytics Logs → aggregated table → worker build). Nothing builds it on the request path.
@@ -474,6 +698,68 @@ First-letter volume (historical)  ->  shard assignment via shard-map manager
 ```
 
 Caption: the map assigns hot single letters their own shards and folds many cold letters together, so every shard carries a comparable slice of the total — the balance a first-letter hash can never achieve.
+
+**Put simply.**
+
+> "Shard count is not a design preference — it is the trie's size divided by what one box can
+> hold, cross-checked against peak QPS divided by what one box can serve, and you take whichever
+> number is larger."
+
+Computing both bounds separately is the habit that matters: a memory-bound trie and a
+QPS-bound trie want different shard counts, and sizing on only one of them silently
+under-provisions the other.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | total trie size — 96 GB from the top-k arithmetic above |
+| `mem_box` | usable trie memory per shard server, after OS and process overhead |
+| `S_mem` | memory-bound shard count = ceil(`T` / `mem_box`) |
+| `peak` | peak autocomplete QPS — 48,000 |
+| `qps_box` | requests/second one shard can serve within the 100 ms budget |
+| `S_qps` | throughput-bound shard count = ceil(`peak` / `qps_box`) |
+| `S` | shards actually provisioned = max(`S_mem`, `S_qps`) |
+
+**Walk one example.**
+
+```
+Step 1  the memory bound
+        T                               = 96 GB of trie (24 GB base + 72 GB cache)
+        mem_box                         = 16 GB usable/shard
+        S_mem = ceil(96 / 16)           = 6 shards
+        cross-check: 32 GB boxes        -> ceil(96/32) = 3 shards
+                     64 GB boxes        -> ceil(96/64) = 2 shards
+
+Step 2  the throughput bound
+        peak                            = 48,000 requests/second
+        qps_box (in-memory top-k read)  = 10,000 requests/second/shard
+        S_qps = ceil(48,000 / 10,000)   = 5 shards
+        if a shard only holds 5,000/s   -> ceil(48,000/5,000) = 10 shards
+
+Step 3  take the larger
+        S = max(S_mem = 6, S_qps = 5)   = 6 shards       (memory-bound here)
+
+Step 4  what each shard then carries
+        nodes: 600,000,000 / 6          = 100,000,000 trie nodes/shard
+        bytes: 96 GB / 6                = 16 GB/shard
+        load:  48,000 / 6               = 8,000 requests/second/shard
+
+Step 5  what naive first-letter sharding would do to that
+        target per shard (even split)   = 16 GB and 8,000 requests/second
+        the 's' shard, at ~15x the 'x' shard's share, takes multiples of its
+        target while the 'x' shard idles -- the fleet is sized for the hottest
+        shard, so the other five are bought and not used
+
+Meaning: six balanced shards is a 16 GB, 8,000 QPS machine each -- ordinary
+hardware. Six LETTER-based shards is one machine on fire and five asleep, and
+you still have to buy the whole fleet. The shard-map manager is what converts
+the first arithmetic into the second's cost.
+```
+
+The `max()` in step 3 is the term people skip. Size on memory alone and a 2-shard 64 GB layout
+looks efficient right up until 48,000 QPS lands on two boxes rated for 10,000 each. Size on QPS
+alone and 5 shards fits the traffic but not the 96 GB of trie, so every shard starts spilling to
+the Trie DB and the cache-miss path — the one the design works hardest to avoid — becomes the
+common path.
 
 ---
 

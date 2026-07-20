@@ -77,6 +77,40 @@ The book's single most important framing number:
   ≈ 10 TPS  (rounded — the book's working figure)
 ```
 
+**Read it like this.** "Spread a day's worth of orders evenly over a day's worth of seconds, and you
+get the number of payments arriving in any one second." The whole point of the division is to convert
+a business-sounding number (a million a day) into the only number an engineer can size hardware
+against (arrivals per second) — and the answer is small enough to end the scale conversation.
+
+| Symbol | What it is |
+|--------|------------|
+| `1,000,000 transactions / day` | The business volume the interviewer gives you — checkouts, not requests |
+| `86,400 seconds / day` | `60 x 60 x 24` — the constant you should be able to produce from memory |
+| `÷` | Averaging: total work spread across the window it arrives in |
+| `≈ 11.6 TPS` | The exact quotient — the *average* arrival rate |
+| `≈ 10 TPS` | The book's rounded working figure, used everywhere downstream |
+
+**Walk one example.** Push the numbers through, then sanity-check the rounding:
+
+```
+  seconds per day :  60 x 60 x 24            = 86,400 s
+
+  average rate    :  1,000,000 / 86,400      = 11.574...  TPS
+                                             ~ 11.6 TPS
+
+  book's figure   :  ~10 TPS  (rounded down for headroom-free arithmetic)
+
+  single Postgres node, short OLTP txns      ~ 1,000 TPS
+  headroom        :  1,000 / 11.6            = 86x
+
+  Meaning: one ordinary database node is roughly 86x oversized for this load.
+  Nothing in this chapter can be justified by throughput.
+```
+
+The `86,400` constant is worth memorizing precisely because this division is the first thing you do
+in any capacity question. Skip it and you argue for Kafka, sharding, and caching on a workload one
+laptop could serve — which is exactly the trap this chapter is built to disarm.
+
 Ten TPS. A single well-provisioned database handles that without breaking a sweat. So the design
 does **not** optimize for high QPS. The book states it plainly: **"payment systems don't have high
 throughput; instead, correctness is the most important consideration."** Every design decision that
@@ -196,6 +230,47 @@ the caller sent through every hop, and the receiving service parses it into a fi
 (or an integer number of minor units — cents) at the edge. Precision and serialization are the two
 reasons; never model money as a float.
 
+**What it means.** "A binary fraction cannot spell most decimal amounts exactly, so every float
+operation on money leaks a sliver — and slivers compound into missing cents." The reason to care is
+that the ledger's balanced-to-zero invariant is checked by *exact* comparison: a single stray
+`0.00000000000000004` makes debits and credits disagree and trips a reconciliation alarm on a
+transaction that was actually fine.
+
+| Symbol | What it is |
+|--------|------------|
+| IEEE-754 `double` | 64-bit binary float — sign, 11-bit exponent, 52-bit fraction |
+| A binary fraction | A sum of `1/2, 1/4, 1/8, ...` — can represent `0.5` and `0.25` exactly, never `0.1` |
+| `"19.99"` (string) | The caller's exact characters, unchanged by any hop that just forwards them |
+| Minor units (cents) | The same amount as the integer `1999` — exact, and closed under `+` and `-` |
+| Fixed-precision decimal | `BigDecimal` / `Decimal` / `NUMERIC(19,4)` — base-10 arithmetic, exact for money |
+
+**Walk one example.** Three ways the same amounts behave, all real interpreter output:
+
+```
+  float, adding a dime ten times
+    0.1 + 0.1 + ... (10 times)      = 0.9999999999999999
+    expected                        = 1.0
+    error (sum - 1.0)               = -1.1102230246251565e-16   <- a dollar is not a dollar
+
+  float, converting dollars to cents
+    4.35 * 100                      = 434.99999999999994
+    int(4.35 * 100)                 = 434                   <- truncation eats one cent
+
+  integer minor units (the fix)
+    435 cents + 0 cents             = 435 cents = $4.35     exact
+    1999 * 3                        = 5997 cents = $59.97   exact
+
+  fixed-precision decimal (the other fix)
+    Decimal("0.1") + Decimal("0.2") = 0.3                   exact, base-10
+    float  0.1  +  0.2              = 0.30000000000000004
+```
+
+The `int(4.35 * 100) = 434` case is the one that actually bites in production: the code looks like a
+correct dollars-to-cents conversion, passes every hand-written test with tidy amounts, and quietly
+under-charges by a cent on the amounts that happen to fall just below a representable boundary.
+Carrying the amount as a string end-to-end and parsing once, at the edge, into a decimal or an
+integer cent count removes the whole class of bug.
+
 ### Data model
 
 Two tables carry the pay-in flow: a **payment event** table (one row per checkout) and a **payment
@@ -272,6 +347,46 @@ seller A, \$40 to seller B). The double-entry ledger records:
 | | **Total** | **\$100** | **\$100** |
 
 Debits (\$100) equal credits (\$100); the transaction nets to zero. ✓
+
+**In plain terms.** "Money is never created or destroyed — it only changes owner, so if you sign each
+side and add them all up you must land on exactly zero." That framing turns an accounting convention
+into a machine-checkable invariant: a single `SUM()` over the ledger is a continuous, cheap proof that
+no bug anywhere upstream has invented or lost a cent.
+
+| Symbol | What it is |
+|--------|------------|
+| Debit | Money leaving an account — written with a negative sign in the invariant |
+| Credit | Money arriving at an account — written with a positive sign |
+| `sum(debits) = sum(credits)` | The golden rule, stated as an equality of two totals |
+| `sum(signed entries) = 0` | The same rule stated as one number, which is what you actually assert in code |
+| Entry | One immutable ledger row: `(transaction_id, account, signed_amount, currency, timestamp)` |
+| Reversing entry | A new appended row that negates an earlier one — how corrections happen without editing history |
+
+**Walk one example.** The \$100 two-seller cart from the table above, written with signs:
+
+```
+  entry   account     signed amount
+    1     Buyer          -100.00        (debit: money leaves the buyer)
+    2     Seller A        +60.00        (credit)
+    3     Seller B        +40.00        (credit)
+                       ----------
+        transaction sum    0.00         <- balanced, the transaction is well-formed
+
+  the same rule as two totals
+    sum(debits)   = 100.00
+    sum(credits)  =  60.00 + 40.00 = 100.00
+    difference    =   0.00
+
+  now corrupt it: seller B's credit is written as +40.01 by a rounding bug
+    transaction sum = -100.00 + 60.00 + 40.01 = +0.01
+    non-zero  ->  one cent was created  ->  reconciliation raises the alarm
+```
+
+Note *what* the invariant catches and what it does not. A non-zero sum proves something is wrong, but
+a zero sum does not prove everything is right — you can debit the wrong buyer for the right amount and
+still balance perfectly. That is precisely why the ledger is not the last line of defense: the nightly
+reconciliation against the PSP's settlement file, below, is what checks the entries against an
+*external* reality rather than against themselves.
 
 **Why append-only immutability is the audit foundation.** Ledger entries are **never updated or
 deleted** — corrections are made by *appending a reversing entry*, not by editing history. This makes
@@ -388,6 +503,47 @@ every transaction they processed, with amounts and statuses. A reconciliation jo
 settlement file line by line against the internal ledger.** For each transaction it asks: does our
 ledger agree with the PSP's record?
 
+**Stated plainly.** "Reconciliation is a nightly full outer join between their file and your ledger,
+and the only numbers that matter are how many rows it has to join and how many of those come out
+unmatched." Sizing it matters because reconciliation is the one job whose work scales with *total*
+daily volume rather than with instantaneous TPS — 10 TPS is nothing, but a million rows every night
+is a real batch job with a real deadline.
+
+| Symbol | What it is |
+|--------|------------|
+| Settlement file | The PSP's nightly batch dump — one line per transaction it processed, with amount and status |
+| Ledger rows/day | Your side of the join; **two** signed rows per transaction (one debit, one credit) |
+| Mismatch rate | Fraction of joined transactions where the two sides disagree — the job's actual output |
+| Compare throughput | How many lines/second the reconciliation job can join, after both sides are sorted by transaction id |
+| Batch window | Wall-clock time between the file landing and the finance team arriving |
+
+**Walk one example.** The chapter's own 1,000,000 transactions/day, run through a night:
+
+```
+  join inputs
+    PSP settlement lines / day   = 1,000,000          (one per transaction)
+    internal ledger rows  / day  = 2 x 1,000,000
+                                 = 2,000,000          (debit + credit per transaction)
+    transactions to compare      = 1,000,000
+
+  batch runtime, at a modest 20,000 line-comparisons / second
+    1,000,000 / 20,000           = 50 seconds
+
+  mismatch volume (assumed rates -- the book states none; substitute your own)
+    at 0.1%   -> 1,000,000 x 0.001  = 1,000 mismatches / day
+    at 0.01%  -> 1,000,000 x 0.0001 =   100 mismatches / day
+
+  who handles 1,000 mismatches?  class-1 auto-adjust absorbs most of them;
+  what is left is the finance team's manual queue. If class-2 plus class-3 is
+  even 10% of that, one analyst is triaging 100 items before lunch, every day.
+```
+
+The runtime number is the reassuring one and the mismatch number is the alarming one: the *compute*
+is trivial (50 seconds), so reconciliation is never a scaling problem — it is a **staffing** problem.
+That is why the three-class triage table exists at all. Its entire purpose is to keep the human queue
+(classes 2 and 3) small enough that a finance team can actually clear it daily, because a mismatch
+backlog that grows faster than it is worked is indistinguishable from having no reconciliation at all.
+
 **The three classes of mismatch the book gives, and how each is handled:**
 
 | Class | Description | Handling |
@@ -485,6 +641,50 @@ Payments fail — cards decline, PSPs time out, networks drop. The book's failur
   reprocess or resolve each stuck payment. The DLQ is what guarantees a failed payment is never lost —
   it always ends up somewhere a human can see it.
 
+**The idea behind it.** Exponential backoff says "each time you fail, wait twice as long as last
+time" — so the first few retries ride out a hiccup within seconds, while a genuinely broken PSP is
+probed rarely instead of being hammered. The doubling is what makes a *fixed* retry budget cover a
+*wide* time range: five retries reach half a minute out, not five seconds out.
+
+| Symbol | What it is |
+|--------|------------|
+| `base` | The first wait after the first failure — here `1s` |
+| `factor` | The multiplier per attempt, conventionally `2` (hence "exponential") |
+| `n` | Which retry this is, counting from 0 |
+| `delay(n) = base x factor^n` | The wait before retry `n` |
+| `cap` | A ceiling on any single delay, so the sequence stops doubling forever |
+| Jitter | A random spread applied to each delay so N clients retrying the same outage do not resynchronize |
+| Total budget | `sum` of all delays — how long a payment can sit in the retry queue before the DLQ |
+
+**Walk one example.** `base = 1s`, `factor = 2`, six attempts (one original plus five retries):
+
+```
+  retry n    delay = 1 x 2^n        cumulative wait
+     0            1 s                     1 s
+     1            2 s                     3 s
+     2            4 s                     7 s
+     3            8 s                    15 s
+     4           16 s                    31 s        <- retries exhausted here
+    (5)         (32 s)                  (63 s)       <- if you allow a sixth
+
+  total retry budget, 5 retries = 1+2+4+8+16 = 31 s
+  total retry budget, 6 retries = 1+2+4+8+16+32 = 63 s
+
+  the doubling geometry: sum of the first k delays = base x (2^k - 1)
+    k=5 -> 1 x (32 - 1) = 31 s     one more retry roughly doubles the whole budget
+
+  with full jitter, each delay becomes uniform(0, delay):
+    the 16 s step averages 16 / 2 = 8 s, and 1,000 clients that failed at the
+    same instant now spread across a 16 s window instead of all firing at t=16 s.
+```
+
+**Why jitter exists, and what breaks without it.** Without it, every client that failed during the
+same PSP outage computes the *same* delay sequence, so all of them retry at exactly `t = 1s`, `3s`,
+`7s`, `15s`, `31s` — synchronized thundering herds that re-break the PSP the moment it recovers, which
+fails them all again, which re-synchronizes them. Randomizing each delay decorrelates the fleet and
+turns a spike into a smooth ramp. And the reason any of this retrying is safe in a *payment* system is
+the idempotency key below: without it, "retry until it lands" is just "charge the card up to six times."
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -553,6 +753,99 @@ Combine them — retry until it happens (at-least-once) *and* dedupe so it happe
   same idempotency key.** The server recognizes the key, sees the payment already succeeded, and
   **returns the stored success** without charging again. At-least-once retry + at-most-once idempotency
   = charged once.
+
+**What the formula is telling you.** The birthday bound — `P(collision) ≈ n² / 2N` — says "the chance
+that two of your `n` keys land on the same value grows with the *square* of how many keys you have
+issued, not with how many you issue per second." It matters here because the entire exactly-once
+guarantee rests on idempotency keys being unique: if two different checkouts ever share a
+`checkout_id`, the unique constraint deduplicates a payment that was never a duplicate, and a real
+customer's second order is silently swallowed.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | How many idempotency keys you have generated so far, in total, ever |
+| `N` | Size of the key space — for a UUIDv4, `2^122` (128 bits minus 4 version and 2 variant bits) |
+| `n²` | The number of *pairs* of keys, roughly — every pair is an independent chance to collide |
+| `2N` | The `2` comes from `n(n-1)/2 ≈ n²/2` pairs; each pair collides with probability `1/N` |
+| `P ≈ n²/2N` | First-order approximation of `1 - e^(-n²/2N)`, accurate whenever `P` is tiny |
+| `√(2N ln 2)` | The 50%-collision point — how many keys before it is a coin flip |
+
+**Walk one example.** This system's own volume, against a UUIDv4 key space:
+
+```
+  key space
+    UUIDv4 random bits              = 128 - 4 (version) - 2 (variant) = 122
+    N = 2^122                       = 5.3169e+36
+    2N                              = 1.0634e+37
+
+  keys issued (one per checkout, at 1,000,000 checkouts/day)
+    one day    n =   1,000,000      n^2 = 1.0000e+12
+    one year   n = 365,000,000      n^2 = 1.3322e+17
+    ten years  n = 3,650,000,000    n^2 = 1.3322e+19
+
+  P(any collision) = n^2 / 2N
+    one day    = 1.0000e+12 / 1.0634e+37 = 9.404e-26   (1 in 1.06e+25)
+    one year   = 1.3322e+17 / 1.0634e+37 = 1.253e-20   (1 in 7.98e+19)
+    ten years  = 1.3322e+19 / 1.0634e+37 = 1.253e-18   (1 in 7.98e+17)
+
+  when does it become a coin flip?
+    n at P = 0.5   = sqrt(2N x ln 2)    = 2.7149e+18 keys
+    at 365,000,000 keys/year            = 7.44e+09 years
+
+  Meaning: at this volume a UUIDv4 collision is not a risk you mitigate.
+  It is a risk you outlive by a factor of roughly the age of the universe.
+```
+
+**Why the square is the part people get wrong.** The intuition that trips candidates is thinking the
+risk scales with `n` — it scales with `n²`, so ten years of traffic is a hundred times riskier than
+one year, not ten times. Even so, the numbers above are so far below any hardware-failure or
+cosmic-ray-bit-flip rate that the practical conclusion inverts: **your idempotency keys will never
+collide by chance, but they collide constantly by construction** — a client that reuses a key across
+two genuinely different checkouts, or derives it from a non-unique field like `user_id + timestamp`
+truncated to the second. Every real "idempotency collision" incident is a key *generation* bug, never
+a birthday-paradox event, which is why the key must be a real random UUID minted per checkout and
+never a hash of business fields that can repeat.
+
+**Put simply.** The dedup layer's value is "the number of retried requests that would otherwise have
+become second charges, times what each of those charges costs you." Framing it as a rate rather than a
+possibility is what turns idempotency from a nice-to-have into a line item — the exposure is
+continuous and it is denominated in refunds, chargebacks, and support hours.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Transactions per day — 1,000,000 here |
+| `r` | Fraction of requests that get retried (lost ack, client timeout, user double-click) |
+| `T x r` | Retried requests per day — each one a duplicate charge if nothing dedupes it |
+| Average ticket | Mean order value, used to convert duplicate charges into dollars |
+| Chargeback cost | The bank's fee for a disputed charge, on top of refunding the amount |
+| Post-dedup rate | Zero — the unique constraint makes the second request a read, not a charge |
+
+**Walk one example.** Assume a 0.1% retry rate (lost acks plus double-clicks) and a \$50 average order
+— the book states neither, so substitute your own measured figures:
+
+```
+  duplicate charges per day, WITHOUT idempotency
+    T x r          = 1,000,000 x 0.001        = 1,000 double charges / day
+
+  dollar exposure
+    per day        = 1,000 x $50              = $50,000 / day
+    per year       = $50,000 x 365            = $18,250,000 / year
+    plus ~$15-25 chargeback fee each          = another $15,000-25,000 / day
+
+  duplicate charges per day, WITH idempotency
+    the second request hits the unique constraint on checkout_id,
+    the server returns the FIRST request's stored result,
+    the PSP is never called a second time
+                                              = 0 double charges / day
+
+  the delta is not a percentage improvement. It is 1,000 -> 0, every day,
+  bought with one UNIQUE index and one stored response.
+```
+
+Notice the asymmetry that makes this the cheapest correctness win in the chapter: the retry rate `r`
+is not something you control — it is set by the internet, by phone networks, and by nervous users
+double-clicking. You cannot drive `r` to zero. You can only make the consequence of a retry free, and
+a unique constraint on `checkout_id` does exactly that for the cost of one index.
 
 ### Consistency
 

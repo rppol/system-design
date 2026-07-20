@@ -42,6 +42,45 @@ A huge fraction of "ML system" outages have nothing to do with ML. They are the 
 
 The humbling statistic Huyen cites: a **2020 Google study of 96 real pipeline outages** found that **60 of the 96 (about two-thirds) were caused by problems NOT specific to ML** — dependency issues, deployment mistakes, and especially **data-join failures** (a join in the feature pipeline silently producing wrong or empty rows). The lesson is a dose of humility: before you reach for exotic drift theory, check whether your "model problem" is really a plain engineering bug. These failures dominate partly *because* they are more visible and more studied for non-ML software, but also because ML pipelines are long chains of data plumbing where any link can quietly corrupt the input. Good software-engineering practice — versioning, testing, staged rollout, monitoring of the plumbing — prevents most production ML incidents.
 
+**The idea behind it.** "Of every three ML pipeline outages you will ever debug, two of them are not ML outages at all." The statistic is worth converting into a ratio rather than remembering as a fraction, because the ratio is what should order your debugging checklist: it says the *prior* on any new incident being a plumbing bug is nearly 2:1 before you have looked at a single chart.
+
+| Symbol | What it is |
+|--------|------------|
+| 96 | Total pipeline outages in the 2020 Google study |
+| 60 | Outages whose cause was NOT ML-specific (dependency, deploy, data-join) |
+| 36 | The remainder — outages genuinely caused by the ML |
+| 60/96 | The non-ML share of failures |
+| 60/36 | The odds ratio: non-ML causes per ML cause |
+
+**Walk one example.**
+
+```
+  non-ML share   = 60 / 96 = 0.625     -> 62.5% of outages
+  ML share       = 36 / 96 = 0.375     -> 37.5% of outages
+  odds ratio     = 60 / 36 = 1.667     -> 1.67 plumbing bugs per real ML bug
+
+Turn it into a triage rule. Your model's accuracy just fell off a cliff and you
+have two hypotheses on the table:
+    H1: a pipeline bug (bad deploy, broken join, schema change)
+    H2: genuine distribution shift
+
+Before looking at any evidence, the study's base rates say
+    P(H1) = 0.625      P(H2) = 0.375      P(H1)/P(H2) = 1.67
+
+so H1 starts 1.67x ahead. And that is the *unconditioned* prior. Condition on
+"the drop was ABRUPT -- overnight, not gradual" and the gap widens sharply,
+because genuine covariate/concept drift is usually a slow-moving population
+effect while a bad deploy lands in one release. Abruptness is evidence FOR H1.
+
+Expected payoff of checking the pipeline first, per 96 incidents:
+    check pipeline first : 60 incidents resolved on the cheap first step
+    check drift first    : 36 incidents resolved first, and the other 60 pay
+                           the full cost of a drift investigation before you
+                           circle back to a one-line join bug
+```
+
+The reason this number belongs in a distribution-shift chapter at all is that it is the counterweight to everything after it. The shift taxonomy below is genuinely important and genuinely the harder problem — but it applies to roughly 37.5% of your incidents, and reaching for it first is how teams spend a week theorizing about concept drift over a feature that silently started logging nulls.
+
 ### ML-specific failures
 
 These are failures that *do* originate in the ML nature of the system. Huyen calls out several; each gets its own sub-heading below.
@@ -86,6 +125,69 @@ Statistically, the model learns a joint distribution P(X, Y) of inputs X and lab
 
 The three named shifts each freeze one factor and change the other. Keeping the decomposition straight is the entire game — and the single most common interview question.
 
+**What this actually says.** "The same joint distribution can be told as two different stories — *first pick an input, then look up its label* (P(Y|X)·P(X)), or *first pick an outcome, then look at what it looks like* (P(X|Y)·P(Y)) — and each shift is one of those four factors moving while its partner stays frozen." The framing matters because it turns a vague "the data changed" into a four-way multiple-choice question with a different fix behind each answer: move P(X) and you can reweight, move P(Y|X) and you need new labels.
+
+| Symbol | What it is |
+|--------|------------|
+| P(X, Y) | The joint distribution — the probability of seeing input X *and* label Y together |
+| X | The model's input (here: a patient's age bucket) |
+| Y | The label (here: 1 = has cancer, 0 = does not) |
+| P(X) | The input distribution — what mix of inputs shows up |
+| P(Y) | The label/prior distribution — what mix of outcomes occurs |
+| P(Y\|X) | The rule: given this input, how likely is each label (what the model learns) |
+| P(X\|Y) | The appearance: given this outcome, what do its inputs look like |
+| · | Ordinary multiplication — the chain rule of probability |
+
+**Walk one example.**
+
+```
+Joint P(X,Y) over X = age bucket, Y = has cancer. The four cells always sum to 1.
+
+SOURCE (training: clinic study, old-skewed)
+  P(X):   old 0.70   young 0.30
+  P(Y|X): P(1|old) 0.10        P(1|young) 0.02
+                      Y=1        Y=0     row = P(X)
+    X=old            0.070      0.630       0.70
+    X=young          0.006      0.294       0.30
+    col = P(Y)       0.076      0.924       1.000
+
+COVARIATE SHIFT -- move P(X) to young-skewed, keep P(Y|X) byte-for-byte identical
+  P(X):   old 0.30   young 0.70
+  P(Y|X): P(1|old) 0.10        P(1|young) 0.02      <- unchanged
+                      Y=1        Y=0     row = P(X)
+    X=old            0.030      0.270       0.30
+    X=young          0.014      0.686       0.70
+    col = P(Y)       0.044      0.956       1.000
+  -> P(X) moved (0.70 -> 0.30 old), the rule never moved, and P(Y) fell
+     0.076 -> 0.044 as a pure byproduct. That byproduct is why the chapter
+     says covariate shift usually drags label shift along with it.
+
+LABEL SHIFT -- halve P(Y=1) to 0.038 (the preventive drug), freeze P(X|Y)
+  P(old|Y=1) = 0.070/0.076 = 0.921     P(old|Y=0) = 0.630/0.924 = 0.682
+                      Y=1        Y=0     row = P(X)
+    X=old            0.035      0.656       0.691
+    X=young          0.003      0.306       0.309
+    col = P(Y)       0.038      0.962       1.000
+  -> P(Y) halved, P(X|Y) identical, and P(X) barely budged: 0.700 -> 0.691.
+
+CONCEPT DRIFT -- keep P(X) at the source mix, change the rule itself
+  P(X):   old 0.70   young 0.30            <- unchanged
+  P(Y|X): P(1|old) 0.10 -> 0.12    P(1|young) 0.02 -> 0.06
+                      Y=1        Y=0     row = P(X)
+    X=old            0.084      0.616       0.70
+    X=young          0.018      0.282       0.30
+    col = P(Y)       0.102      0.898       1.000
+  -> the input column is identical to SOURCE, yet the same age now carries a
+     different risk. Input statistics alone can never see this one.
+
+Reading the three blocks as a diagnostic: compare the row margins (P(X)) and the
+per-row ratios (P(Y|X)) against SOURCE. Rows moved but ratios held -> covariate.
+Ratios and rows both essentially held but the column margin moved -> label.
+Rows held but ratios moved -> concept drift.
+```
+
+One honest wrinkle the arithmetic exposes: the label-shift block could not hold P(X) *perfectly* fixed. If P(X|Y) is frozen and P(Y) moves, P(X) is forced to move too — unless positives and negatives happen to look identical, which would make the label useless. It moved only 0.700 → 0.691 here because positives are just 7.6% of the mass, which is exactly why the chapter can say P(X) "may also be unchanged": for a rare label the induced move is small enough to be invisible to any detector. Concept drift is the genuinely undetectable one, because the input column above is bit-identical to the source.
+
 | Shift type | What changes | What stays stable | One-line intuition |
 |-----------|--------------|-------------------|--------------------|
 | **Covariate shift** | P(X) — input distribution | P(Y\|X) — the input→label mapping | The *kinds of inputs* change; the rule stays the same |
@@ -104,6 +206,48 @@ The three named shifts each freeze one factor and change the other. Keeping the 
 - **Changing real-world population** — a **new marketing campaign** brings in a younger (or otherwise different) demographic, so the live input mix moves even though nothing about the input→label rule changed.
 
 **The fix when the target P(X) is known — importance weighting.** If you can estimate the production (target) input distribution, reweight training examples by the ratio `P_target(x) / P_source(x)` so that training effectively over-weights the input regions that are common in production and under-weights the ones that are over-represented in training. This corrects covariate shift *without needing new labels* — the label rule P(Y|X) is assumed intact, so re-balancing the input mix is enough. The catch is you must be able to estimate the target P(X), which is not always possible.
+
+**Read it like this.** "Count how many times more often production sees this kind of input than training did, and let that ratio be how loudly the training example gets to speak." The framing matters because it says you never have to *collect* new data to fix covariate shift — you already have the right examples, you are just listening to them in the wrong proportions.
+
+| Symbol | What it is |
+|--------|------------|
+| x | One training example's input (here: a patient's age bucket) |
+| P_source(x) | How often that input appears in the **training** data |
+| P_target(x) | How often that input appears in **production** |
+| P_target(x) / P_source(x) | The importance weight — the multiplier applied to that example's loss |
+| weight > 1 | Production sees this input more than training did — amplify it |
+| weight < 1 | Training over-collected this input — quiet it down |
+| weight = 1 | The two distributions agree here — leave the example alone |
+
+**Walk one example.** The breast-cancer case: the clinic study over-enrolled older women, the app population skews young. Bucket age three ways and take the ratio bucket by bucket.
+
+```
+Training set: 10,000 labeled clinic records. Labels are NOT re-collected.
+
+  age bucket   P_source   P_target   weight = P_target/P_source   raw n   effective n
+  ----------   --------   --------   --------------------------   -----   -----------
+  20-40          0.10       0.50        0.50 / 0.10 =  5.0000      1,000       5,000
+  40-60          0.30       0.35        0.35 / 0.30 =  1.1667      3,000       3,500
+  60+            0.60       0.15        0.15 / 0.60 =  0.2500      6,000       1,500
+  ----------   --------   --------   --------------------------   -----   -----------
+  total          1.00       1.00                                  10,000      10,000
+
+Sanity check the reweighting is a valid distribution:
+  0.10 x 5.0000 + 0.30 x 1.1667 + 0.60 x 0.2500
+  =      0.50   +      0.35     +      0.15      = 1.00      OK
+
+What changed. Before: 60% of the gradient signal came from 60+ women, 10% from
+20-40 women. After: 50% comes from 20-40 and only 15% from 60+ -- the training
+set now *behaves* like the app population without a single new label.
+
+The cost is variance. The 20-40 bucket carries weight 5.0 on only 1,000 real
+records, so those 1,000 rows now drive half the loss: the effective sample size
+collapses even though the nominal count is still 10,000. Push the weight higher
+-- say production were 90% young, giving 0.90/0.10 = 9.0 -- and you are training
+almost entirely on 1,000 rows wearing a 10,000-row costume.
+```
+
+The weight ratio is also the built-in warning about when *not* to do this. A bucket with `P_source(x) = 0` and `P_target(x) > 0` gives an infinite weight — production is serving inputs the training set never contained, and no amount of reweighting invents evidence you never collected. That case is not covariate shift you can correct; it is a gap you have to go label.
 
 ### Label shift
 
@@ -155,9 +299,53 @@ When labels are unavailable, detect shift by comparing the **distribution of a r
 - **Kolmogorov–Smirnov (KS) test** — the workhorse two-sample test. It is **non-parametric** (assumes no particular distribution shape) but has two serious limitations:
   - **Univariate only** — KS works on one dimension at a time. For high-dimensional feature vectors you must run it per-feature (missing multivariate shifts where each marginal looks fine but the joint moved) or reduce dimensionality first.
   - **False-alarm sensitivity at scale** — with large samples, KS becomes so statistically powerful that it flags *tiny, practically meaningless* differences as "significant." At production data volumes it fires constantly, so a raw KS p-value is a poor alerting signal — you drown in false alarms. You must threshold on *effect size*, not just significance.
+
 - **Maximum Mean Discrepancy (MMD)** — a kernel-based test that *can* handle high-dimensional / multivariate data, measuring the distance between distributions in a reproducing-kernel space. More capable than KS for multivariate shift but more expensive.
 - **Least-Squares Density Difference** — another density-difference-based test Huyen mentions as an alternative in the same family.
 - **The dimensionality advice: reduce dimensions first.** Because per-feature KS misses joint shifts and full multivariate tests are costly, a standard practice is to **reduce dimensionality** (e.g. PCA, or run tests on model predictions / embeddings rather than raw high-dim features) and then run a two-sample test on the lower-dimensional representation. Testing the *prediction distribution* (a 1-D or low-dim output) is often the most practical shift detector of all.
+
+**What the formula is telling you.** "A two-sample test does not ask *is this difference big?* — it asks *is this difference bigger than the noise I'd expect at this sample size?*, and noise shrinks as the sample grows, so a fixed difference becomes 'significant' purely by collecting more rows." That framing is the whole reason a KS alert storms: at production volume the noise floor drops below every difference you have, real or trivial, so significance stops carrying information.
+
+| Symbol | What it is |
+|--------|------------|
+| n | Number of samples in each window being compared (source vs target) |
+| p_source, p_target | The statistic being compared — here a feature's rate in each window |
+| effect size | The raw gap you actually care about, `p_target - p_source` |
+| SE | Standard error — the noise floor, which shrinks like 1/sqrt(n) |
+| z | Effect size divided by the noise floor: how many noise-widths the gap spans |
+| p-value | The chance of seeing a gap this large if the two windows really matched |
+| significance level (0.05) | The p-value threshold below which you declare "shift" |
+
+**Walk one example.** Hold the *difference* absolutely constant at 0.2 percentage points — a gap no product manager would act on — and vary only the window size.
+
+```
+Same feature, same trivially small drift, three window sizes.
+  p_source = 0.100   p_target = 0.102   effect size = 0.002  (FIXED throughout)
+
+  n per window     noise floor SE     z = 0.002/SE     p-value      alert at 0.05?
+  --------------   ---------------    -------------    ----------   --------------
+       1,000          0.01349            0.148          0.882            no
+     100,000          0.001349           1.484          0.138            no
+   1,000,000          0.0004265          4.693          0.0000027        YES
+
+The effect size never moved. Only the noise floor did -- it fell 31.6x from
+n=1,000 to n=1,000,000, because SE shrinks like 1/sqrt(n) and sqrt(1000) = 31.6.
+The identical 0.2pp drift goes from "obviously nothing" to p = 2.7e-06, which is
+roughly 18,000x below the 0.05 threshold.
+
+Now scale it out. Run this per-feature across 500 features every hour:
+  500 features x 24 windows/day = 12,000 tests/day
+At 1,000,000 samples per window essentially every feature clears p < 0.05, so
+the on-call gets thousands of "shift detected" pages per day, none actionable.
+Even with NO drift at all, a 5% significance level alone would fire on about
+  12,000 x 0.05 = 600 tests/day  purely by chance.
+
+The fix in numbers: alert on effect size, not p. A rule like "page only if the
+gap exceeds 2 percentage points" leaves the 0.2pp case silent at every n above,
+and stays silent on all 600 chance firings too.
+```
+
+The term that causes the trouble is the `1/sqrt(n)` in the noise floor, and it is not a flaw — it is the test doing its job. A hypothesis test was designed to answer "could this be chance?", and at a million samples per window the honest answer is genuinely "no." The mistake is asking it a question it was never built to answer: "does this matter?" Effect size answers that one, and it is the only quantity in the table above that stayed put when the sample grew.
 
 ### Time-window considerations
 
@@ -168,8 +356,50 @@ Shifts have **timescales**, and how you window the data dramatically changes wha
   - A **cumulative window** aggregates statistics from a fixed start point onward, accumulating all data. Because early "good" data keeps diluting the average, a cumulative metric **masks a recent dip** — a bad day gets averaged away by weeks of prior good data.
   - A **sliding window** (e.g. last 24 h, last N samples) discards old data, so it reflects *current* behavior and reveals the dip immediately.
   - Huyen's figure: an **hourly-accuracy** time series where a real drop on **day 15** is clearly visible in the sliding-window view but is **completely hidden** in the cumulative-window view, which keeps trending flat because the accumulated history swamps one bad day. The lesson: **use sliding windows to detect recent shifts; cumulative windows lag and hide dips.**
+
 - **Short vs long windows — the fundamental trade-off.** Shorter windows detect shifts **faster** (less data to dilute the signal) but produce **more false alarms** (small windows are noisier, so normal fluctuation looks like a shift). Longer windows are more stable but slower to react. There is no free lunch; you tune window length to the shift timescale you must catch.
 - **Granularity and seasonality traps** — the window must respect the data's natural periodicity. Comparing a Monday window against a Sunday reference will "detect a shift" that is just the weekly cycle. Choosing the wrong granularity (per-minute when the signal is daily, or per-week when you need per-hour) either buries real shifts or invents fake ones. Always window in a way that controls for known seasonality.
+
+**Put simply.** "A cumulative metric is an average whose denominator keeps growing, so each new day of data counts for less than the day before it — and by day 15 a catastrophe gets divided by 15." The framing matters because it means a cumulative dashboard does not merely *lag*; it gets structurally more blind to incidents the longer it has been running, which is precisely backwards from what you want.
+
+| Symbol | What it is |
+|--------|------------|
+| d | The day the drop happens (15 in Huyen's figure) |
+| a_good | The accuracy that held on every prior day (94% here) |
+| a_bad | The accuracy on the bad day itself (70% in the sliding-window view) |
+| cumulative(d) | The running average over all d days: `((d-1)·a_good + a_bad) / d` |
+| sliding(d) | The last-24h average — just `a_bad`, with no history in the denominator |
+| (d-1) | The count of prior good days that dilutes the bad one |
+| 1/d | The weight the newest day gets in a cumulative average |
+
+**Walk one example.** Take the chapter's own figure: 94% accuracy through day 14, a crash to 70% on day 15, equal hourly volume every day.
+
+```
+SLIDING (last 24 h)   = 70.0%
+  visible drop        = 94.0 - 70.0 = 24.0 percentage points
+
+CUMULATIVE (all 15 days)
+  = (14 x 94.0 + 1 x 70.0) / 15
+  = (1316.0 + 70.0) / 15
+  = 1386.0 / 15
+  = 92.4%
+  visible drop        = 94.0 - 92.4 = 1.6 percentage points
+
+Detection ratio       = 24.0 / 1.6 = 15.0x
+  The sliding window shows the same incident 15x larger. That 15 is not a
+  coincidence -- it is d, the number of days in the denominator.
+
+Now watch it get worse with age. Same 70% crash day, later in the run:
+  day  30:  (29 x 94 + 70)/30  = 93.20%   ->  drop 0.80 pp   (30x dilution)
+  day  90:  (89 x 94 + 70)/90  = 93.73%   ->  drop 0.27 pp   (90x dilution)
+  day 365: (364 x 94 + 70)/365 = 93.93%   ->  drop 0.07 pp  (365x dilution)
+
+A 24-point accuracy collapse registers as SEVEN HUNDREDTHS of a point on a
+dashboard that has been running a year. No threshold you would ever set --
+and no human eye on a chart -- catches that.
+```
+
+This is why the fix is a *window*, not a smarter threshold. The alert rule "page if accuracy drops 5 points" works perfectly on the sliding view (24 > 5) and can never fire on the cumulative one past day ~5, no matter how badly the model breaks. The dilution is in the metric's definition, so it cannot be tuned away downstream.
 
 ## 8.4 Addressing Data Distribution Shifts
 

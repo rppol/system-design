@@ -102,6 +102,121 @@ trap the next step walks into and then rejects. Message *volume* is the other ax
 WhatsApp/Messenger scale the system ingests on the order of **60 billion messages per day**,
 which is why storage (not connection memory) becomes the hard scaling problem.
 
+**What this actually says.**
+
+> "A stateful chat server pays rent in memory for every socket it holds open, whether that user
+> is mid-conversation or asleep — so the sizing question is not 'how many messages per second'
+> but 'how many sockets can one box hold at once.'"
+
+That framing matters because a stateless request/response tier sizes on QPS and sheds idle
+users for free, while a WebSocket tier cannot: the idle user still owns a file descriptor, a
+receive buffer, and a slot in the server's connection table.
+
+| Symbol | What it is |
+|--------|------------|
+| DAU | daily active users — 50,000,000 for this design |
+| `f` | concurrency fraction: the share of DAU holding a live socket at the same instant |
+| `C` | concurrent connections = DAU x `f` |
+| `m` | memory per WebSocket connection — the chapter's ~10 KB of buffers and bookkeeping |
+| `c_box` | connections one server can hold, capped by RAM and the file-descriptor limit |
+| `S` | chat servers needed = `C` / `c_box` |
+
+**Walk one example.**
+
+```
+Step 1  from DAU to concurrent sockets            (f is an assumption, not a book figure)
+        DAU                             = 50,000,000 users
+        f   (20 percent online at once) = 0.20
+        C   = 50,000,000 x 0.20         = 10,000,000 concurrent connections
+
+Step 2  the chapter's per-box number
+        m                               = 10 KB/connection = 10,240 bytes/connection
+        one box, book's thought expt.   = 1,000,000 conns x 10 KB
+                                        = 10,000,000 KB of connection memory
+                                        = 10 GB (the chapter's rounding)
+
+Step 3  how many boxes the real fleet needs
+        c_box                           = 1,000,000 connections/server
+        S   = 10,000,000 / 1,000,000    = 10 chat servers, with zero headroom
+
+Step 4  fleet-wide connection memory
+        10,000,000 conns x 10,240 bytes = 102,400,000,000 bytes
+                                        = 102.4 GB of pure socket state
+
+Meaning: the entire 50M-DAU chat tier is only about 102 GB of connection memory
+spread over roughly 10 boxes -- cheap in bytes, but those 10 boxes are 10 places
+a failure can drop a million users at once, which is why the chapter refuses to
+let the memory-fits argument justify a single server.
+```
+
+What sets `c_box` is worth naming, because it is never the CPU. Two ceilings bind first: the
+**file-descriptor limit** (every socket is an fd, so a box configured with a 65,536 fd ceiling
+tops out at ~65,000 connections no matter how much RAM it has), and **memory per connection**
+(at `m` = 10 KB, a 64 GB box could in principle hold 64,000,000,000 / 10,240 ≈ 6,250,000
+sockets — so RAM is the *looser* constraint and the fd limit is usually the one you hit).
+Note also that `10,000,000 KB` is exactly 10.24 GB in decimal bytes; the chapter rounds it to
+"10 GB," and the rounding is harmless because the conclusion (it fits on one box) is unchanged.
+
+**Read it like this.**
+
+> "Sockets are a one-time RAM cost that stops growing once everyone is online; messages are a
+> cost that accumulates every single day for the whole retention window."
+
+That is why the two halves of the estimate answer different questions — the connection chain
+sizes the *fleet*, the message chain sizes the *disks*.
+
+| Symbol | What it is |
+|--------|------------|
+| DAU | daily active users — 50,000,000 |
+| `u` | messages sent per user per day (an assumption; the chapter does not state one) |
+| `M` | messages per day = DAU x `u` |
+| `QPS` | average message writes per second = `M` / 86,400 |
+| `P` | peak factor — the multiple of average that the busiest hour reaches |
+| `b` | bytes per stored message: body plus metadata, not the 100,000-character cap |
+| `R` | retention window — **1 year** per the requirements dialogue |
+
+**Walk one example.**
+
+```
+Step 1  messages per day                          (u = 20 is an assumption)
+        DAU                             = 50,000,000 users
+        u                               = 20 messages/user/day
+        M   = 50,000,000 x 20           = 1,000,000,000 messages/day
+
+Step 2  average write rate
+        seconds/day = 24 x 3600         = 86,400 s/day
+        QPS = 1,000,000,000 / 86,400    = 11,574 messages/second
+
+Step 3  peak write rate                           (P = 2 is an assumption)
+        P                               = 2x
+        peak QPS = 2 x 11,574           = 23,148 messages/second
+
+Step 4  bytes per stored message
+        body, average real message      = 100 bytes
+        metadata: message_id, from, to, created_at
+                                        = 40 bytes
+        b   = 100 + 40                  = 140 bytes/message
+
+Step 5  storage added per day
+        1,000,000,000 msgs/day x 140 B  = 140,000,000,000 bytes/day
+                                        = 140 GB/day
+
+Step 6  storage over the retention window
+        R                               = 365 days
+        140 GB/day x 365 days           = 51.1 TB of message data
+        at replication factor 3         = 153.3 TB of raw disk
+
+Meaning: connections cost about 102 GB of RAM once and then stop growing; messages
+cost 51 TB of disk for every retention year you keep. Storage is the axis that
+actually scales, which is precisely the chapter's argument for a KV store.
+```
+
+Two multipliers in that chain are easy to drop and expensive to drop. Without the **peak
+factor** you provision for 11,574 writes/second and brown out at the evening peak, when the
+real arrival rate is roughly double. Without the **retention multiplier** you size the cluster
+for 140 GB and discover eleven months later that you needed 365 times that — retention is a
+product promise ("1 year of history") that silently multiplies every daily number.
+
 ---
 
 ## 12.2 Step 2 — Propose High-Level Design and Get Buy-In
@@ -318,6 +433,53 @@ The chapter chooses a **key-value store** for chat history, for four reasons:
    grows, random access becomes expensive; the long tail of old messages drags performance down.
 4. **Proven in production** — Facebook Messenger uses **HBase**; Discord uses **Cassandra** —
    both key-value/wide-column stores chosen for exactly this workload.
+
+**Stated plainly.**
+
+> "'60 billion messages a day' is not a boast — converted into a sustained write rate and a
+> petabyte count, it is the number that makes a single relational primary arithmetically
+> impossible."
+
+Turning the headline figure into writes/second and bytes/year is what turns "that's a lot" into
+"that is N shards," which is the only form of the argument an interviewer can check.
+
+| Symbol | What it is |
+|--------|------------|
+| `M_ind` | industry-scale message volume — 60,000,000,000 messages/day |
+| `b` | bytes per stored message — the same 140 B/message used above |
+| `R` | retention window in days |
+| `w_rdbms` | sustained write throughput one tuned relational primary can hold |
+| `N_shard` | shards needed just to absorb the average write rate = write QPS / `w_rdbms` |
+
+**Walk one example.**
+
+```
+Step 1  the headline figure as a write rate
+        M_ind                           = 60,000,000,000 messages/day
+        seconds/day                     = 86,400 s/day
+        60,000,000,000 / 86,400         = 694,444 writes/second (average)
+        at a 2x peak factor             = 1,388,889 writes/second (peak)
+
+Step 2  the same figure as bytes
+        60,000,000,000 x 140 bytes      = 8,400,000,000,000 bytes/day
+                                        = 8.4 TB/day
+
+Step 3  across a one-year retention window
+        R                               = 365 days
+        8.4 TB/day x 365 days           = 3,066 TB
+                                        = 3.07 PB of message data
+
+Step 4  how many relational primaries that would take
+        w_rdbms (well-tuned, generous)  = 10,000 writes/second
+        N_shard = 694,444 / 10,000      = 70 shards for the AVERAGE rate alone
+        at peak: 1,388,889 / 10,000     = 139 shards
+
+Meaning: you would have to hand-shard a relational database ~70 ways before it
+even keeps up on an average day, and each of those 70 primaries would still carry
+a multi-terabyte index whose random-access cost is the long-tail problem the
+chapter names. A KV store absorbs the same load by adding nodes, which is why
+Messenger runs HBase and Discord runs Cassandra.
+```
 
 ### Data models & message ID generation
 
@@ -542,6 +704,66 @@ unacceptable when membership is huge — a 100,000-member group would fan one me
 100,000 inbox writes. (That is when systems switch to fan-out-on-read: store once, let readers
 pull.) For this design's ≤ 100-member groups, fan-out-on-write is the right call.
 
+**Put simply.**
+
+> "One send is not one write — in a group of `G` members it is `G - 1` deliveries and `G - 1`
+> inbox rows, so the group size *is* the write-amplification factor."
+
+Naming the amplification as a factor rather than a description is what makes the small-group /
+large-group boundary a number you can defend instead of a feeling.
+
+| Symbol | What it is |
+|--------|------------|
+| `G` | group size — total members, including the sender |
+| `G - 1` | deliveries per send: every member except the sender receives a copy |
+| `A` | write amplification = (`G - 1`) inbox writes per 1 send |
+| `M_g` | group messages per day across the whole system |
+| `W` | total inbox writes per day = `M_g` x `A` |
+
+**Walk one example.**
+
+```
+Step 1  the rule
+        1 send into a group of G  ->  G - 1 deliveries  ->  G - 1 inbox rows
+
+Step 2  a small group
+        G = 10 members
+        deliveries = 10 - 1             = 9
+        A          = 9 / 1 send         = 9x
+
+Step 3  this design's stated cap
+        G = 100 members
+        deliveries = 100 - 1            = 99
+        A          = 99 / 1 send        = 99x
+
+Step 4  WeChat's cap
+        G = 500 members
+        deliveries = 500 - 1            = 499
+        A          = 499 / 1 send       = 499x
+
+Step 5  the regime where the model breaks
+        G = 100,000 members
+        deliveries = 100,000 - 1        = 99,999
+        A          = 99,999 / 1 send    = ~100,000x
+
+Step 6  what A = 99 costs this system      (group share is an assumption)
+        total messages/day              = 1,000,000,000 messages/day
+        group share                     = 10 percent
+        M_g = 1,000,000,000 x 0.10      = 100,000,000 group messages/day
+        W   = 100,000,000 x 99          = 9,900,000,000 inbox writes/day
+        as a rate: 9,900,000,000/86,400 = 114,583 inbox writes/second
+
+Meaning: at G <= 100 the amplification is a two-digit multiplier a horizontally
+scaled KV store absorbs; at G = 100,000 it is a five-digit one, and a single send
+becomes a hundred thousand writes. That gap is the exact reason the design caps
+group size rather than trusting fan-out-on-write to keep working.
+```
+
+The `- 1` in `G - 1` exists because the sender already has the message locally and does not need
+a copy delivered back. Drop it and every group message writes one redundant row per send — a
+1 percent waste at `G` = 100, but it also breaks the client, which would render its own message
+twice once the echo arrives.
+
 **The recipient side:** a recipient can receive messages from *many* senders, so each
 recipient's inbox (message sync queue) **aggregates messages from different senders** into one
 ordered stream that the client reads.
@@ -600,6 +822,61 @@ t=75s  30s elapsed since t=45s -> OFFLINE
 Caption: the 30-second window is what separates a bad-signal pause from a real disconnect — a
 single missed heartbeat at t=15s never flips the indicator, but a full 30-second silence after
 t=45s does, so users stop flickering offline on the subway.
+
+**The idea behind it.**
+
+> "Every online user is a metronome ticking at 1/`H` hertz, so the presence tier's load is set
+> entirely by how many people are online divided by how far apart the ticks are — nobody has to
+> say a word for it to be the busiest service you run."
+
+Framing presence as a fixed background rate rather than user-driven traffic is what explains
+why it gets its own server tier: the load does not fall when conversation stops.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | online users — the same concurrent-connection count computed earlier |
+| `H` | heartbeat interval in seconds — the chapter's **5 s** |
+| `W` | grace window before marking offline — the chapter's **30 s** |
+| `HB` | heartbeat QPS = `N` / `H` |
+| `W / H` | consecutive missed heartbeats the window absorbs before a flip to offline |
+
+**Walk one example.**
+
+```
+Step 1  the rule
+        HB = N online users / H seconds between heartbeats
+
+Step 2  this design at peak concurrency
+        N (from the connection chain)   = 10,000,000 online users
+        H (the chapter's interval)      = 5 seconds
+        HB = 10,000,000 / 5             = 2,000,000 heartbeats/second
+
+Step 3  what a slower heartbeat buys
+        H = 10 s  ->  10,000,000 / 10   = 1,000,000 heartbeats/second   (half)
+        H = 30 s  ->  10,000,000 / 30   =   333,333 heartbeats/second   (one sixth)
+
+Step 4  what a faster heartbeat costs
+        H = 1 s   ->  10,000,000 / 1    = 10,000,000 heartbeats/second  (5x worse)
+
+Step 5  what the grace window tolerates
+        W / H = 30 / 5                  = 6 consecutive missed heartbeats absorbed
+
+Step 6  presence load versus message load
+        2,000,000 heartbeats/s  vs  11,574 messages/s
+        2,000,000 / 11,574              = 173x more events than actual chat
+
+Meaning: presence is ~173 times heavier in event count than messaging, and it is
+constant -- it does not drop when people stop talking. Shrinking H makes the
+indicator crisper and the load worse in exact inverse proportion, which is the
+whole reason presence lives on dedicated servers.
+```
+
+`H` and `W` are two separate knobs and it is worth seeing why both exist. `H` sets the **cost**
+(halve it and you double the QPS); `W` sets the **tolerance** (the 6-miss budget above). If you
+collapsed them into one value — flip offline after a single missed heartbeat, `W` = `H` = 5 s —
+you would get the chapter's naive design back: zero tolerance, and a subway rider strobing
+online/offline every few seconds. Keeping `W` = 6`H` is what buys stability without paying six
+times the heartbeat traffic.
 
 #### Online status fan-out
 

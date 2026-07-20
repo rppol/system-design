@@ -216,6 +216,80 @@ features on a comparable range. Three common forms:
   Huyen flags it as one of the highest-leverage, most under-used transforms — but warns it
   is not a silver bullet and should be validated, not applied blindly.
 
+**In plain terms.** "Min-max asks *where does this value sit between the smallest and largest
+I ever saw*; standardization asks *how many standard deviations is this from typical*."
+
+That difference decides which one survives an outlier. Min-max pins its whole output range to
+two single observations (the min and the max), so one freak value compresses everything else;
+standardization uses the mean and spread of *all* the data, so a freak value moves the scale
+only a little.
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | The raw feature value for one example (one person's income) |
+| `min`, `max` | Smallest and largest value of that feature **in the training split only** |
+| `mean` | Average of the feature over the training split |
+| `std` | Standard deviation — the typical distance of a value from the mean |
+| `x'` | The rescaled value the model actually receives |
+| `[a, b]` | The target range for min-max; `[0,1]` by default, `[-1,1]` often better |
+
+**Walk one example.** Six training incomes, one of them a `1,000,000` outlier:
+
+```
+  income      min-max: (x - 30,000) / 970,000     z-score: (x - 229,166.7) / 346,896.0
+  ---------   -------------------------------     ---------------------------------
+     30,000            0.0000                             -0.574
+     45,000            0.0155                             -0.531
+     60,000            0.0309                             -0.488
+     90,000            0.0619                             -0.401
+    150,000            0.1237                             -0.228
+  1,000,000            1.0000                             +2.222
+
+  min-max range used by the bottom five values : 0.0000 -> 0.1237  (12.4% of the range)
+  z-score   range used by the bottom five values: -0.574 -> -0.228 (a real, readable spread)
+```
+
+The single millionaire eats 87.6% of the min-max range, so the five ordinary incomes are
+squeezed into a sliver the model can barely distinguish. Standardization keeps them separated
+and simply marks the outlier as "+2.2 sigma." That is why min-max is for bounded, outlier-free
+features and standardization is for anything with a tail.
+
+**What this actually says.** "Take the logarithm and you turn *how many times bigger* into
+*how much further along* — multiplication becomes addition, so a long right tail folds up."
+
+Income, view counts, and prices are multiplicative quantities: the interesting step is 10x,
+not +10,000. A log transform hands the model the axis the data actually lives on.
+
+| Symbol | What it is |
+|--------|------------|
+| `log(x)` | Logarithm of the value; here base 10, so each `+1.0` means "10x bigger" |
+| `log(1 + x)` | The variant used when `x` can be `0` — `log(0)` is undefined, `log(1+0) = 0` |
+| Right skew | A distribution with a long tail of rare huge values dragging the mean up |
+
+**Walk one example.** The same six incomes, logged and *then* min-max scaled:
+
+```
+  income      log10(x)    min-max AFTER log      min-max on RAW x (from above)
+  ---------   --------    -----------------      -----------------------------
+     30,000    4.4771           0.0000                    0.0000
+     45,000    4.6532           0.1156                    0.0155
+     60,000    4.7782           0.1977                    0.0309
+     90,000    4.9542           0.3133                    0.0619
+    150,000    5.1761           0.4590                    0.1237
+  1,000,000    6.0000           1.0000                    1.0000
+
+  gap between the 30k and the 150k earner:  0.4590 logged   vs   0.1237 raw
+```
+
+Logging first spreads the five ordinary earners across 46% of the range instead of 12%. The
+model can now see the difference between a 30k and a 150k earner, which is the difference that
+carries the signal — the millionaire is still the maximum, just no longer the whole axis.
+
+For a count feature that can be zero, `log(x)` blows up and `log(1+x)` does not: counts
+`0, 1, 5, 20, 100, 5000` become `0.0000, 0.6931, 1.7918, 3.0445, 4.6151, 8.5174` under
+natural `log(1+x)` — finite everywhere, still monotone, tail still folded. That `+1` is the
+whole reason the `log1p` form exists.
+
 **Two warnings the chapter stresses:**
 
 1. **Scaling is a leakage source.** The min, max, mean, and std you use MUST be computed on
@@ -311,6 +385,58 @@ Properties that make this beloved in production:
   or be re-fit when new categories arrive, models that retrain continuously on a stream of
   fresh data (Ch 9) can keep a *stable* feature schema. This stability is why teams doing
   online/continual learning reach for the hashing trick specifically.
+
+**Read it like this.** "Throw every category name into a fixed row of `m` numbered boxes and
+let it land wherever the hash sends it — you never add a box, so the schema can never grow."
+
+The whole design is a trade: you give up the guarantee that each category owns a private
+column, and in exchange you get a feature vector whose width is a constant you chose, not a
+number the world gets to increase behind your back.
+
+| Symbol | What it is |
+|--------|------------|
+| `category_string` | The raw category text, e.g. `"Reebok"` — known or brand-new, it makes no difference |
+| `hash(...)` | A function turning that string into a large integer, spread evenly over its output |
+| `m` | Size of the fixed output space; here `2^18 = 262,144` slots, chosen in advance |
+| `mod m` | Remainder after dividing by `m` — folds any integer into `0 .. m-1` |
+| `index` | The slot this category occupies in the feature vector |
+| Collision | Two different categories landing on the same `index` |
+
+**Walk one example.** Where does the "~1% collision" number come from? Hash `n = 5,000`
+distinct brands into `m = 2^18 = 262,144` slots. Each brand picks a slot uniformly, so this is
+the birthday problem: the expected number of *occupied* slots is `m x (1 - (1 - 1/m)^n)`, and
+every brand beyond that count had to share.
+
+```
+  m = 2^18 = 262,144 slots          n = 5,000 distinct brands
+
+  expected occupied slots = 262,144 x (1 - (1 - 1/262,144)^5000) =  4,952.6
+  brands that had to share = 5,000 - 4,952.6                     =     47.4
+  collision rate           = 47.4 / 5,000                        =    0.947%   <- the "~1%"
+
+  Now vary only the number of bits (same 5,000 brands):
+
+     bits    m           colliding brands    rate
+     ----    ---------   ----------------    -------
+      16        65,536         185.9          3.719%
+      17       131,072          94.1          1.883%
+      18       262,144          47.4          0.947%   <- Huyen's 18-bit choice
+      19       524,288          23.8          0.475%
+      20     1,048,576          11.9          0.238%
+
+  Each extra bit doubles m and halves the collision rate. That is the memory-for-accuracy dial.
+```
+
+47 of 5,000 brands share a slot with someone. Those 47 get a slightly muddied representation;
+the other 4,953 are unaffected — versus the UNKNOWN bucket, where *every* unseen brand shares
+one slot with spam. Note what the trade actually is: 262,144 columns is far *more* than the
+5,000 a one-hot encoder would use today. You are not buying a smaller vector, you are buying a
+vector that is **262,144 columns tomorrow too**, no matter how many brands onboard overnight.
+
+The `mod m` is the term doing all the work. Without it the hash output is a 64-bit integer and
+you would need `2^64` columns; `mod m` is what collapses an unbounded name space onto a
+bounded index space, and it is exactly the step that creates collisions. Collisions are not a
+bug in the trick — they are the price of the boundedness, and the bit count is how you set it.
 
 ```mermaid
 flowchart LR
@@ -580,6 +706,45 @@ anything from the data, and fit every statistic on the training partition alone*
 de-duplicating and group-splitting *before* the split so no example or group straddles the
 boundary.
 
+**What it means.** "AUC is the probability the model ranks a random positive above a random
+negative — so `0.5` is a coin flip, and only the distance *above* `0.5` is skill."
+
+That reframing is what makes the `0.99 -> 0.71` collapse legible. Reading it as "we lost 28
+points out of 99" badly understates it; the honest denominator is the skill above chance, not
+the raw score.
+
+| Symbol | What it is |
+|--------|------------|
+| AUC | P(model scores a random positive higher than a random negative) |
+| `0.50` | The floor — a model that ranks at random |
+| `1.00` | The ceiling — every positive ranked above every negative |
+| `AUC - 0.5` | The part that is actual discriminating skill |
+| Test AUC `0.99` | The leaky offline score, measured with the leak intact |
+| Production AUC `0.71` | The same model measured after the leak vanished at serving time |
+
+**Walk one example.** Split each score into "chance" and "skill":
+
+```
+                         AUC     skill above chance (AUC - 0.50)
+  leaky offline test     0.99            0.49
+  real production        0.71            0.21
+  honestly-built model   0.83            0.33
+
+  fraction of the offline skill that was REAL  : 0.21 / 0.49 = 42.9%
+  fraction that was the LEAK talking           : 0.28 / 0.49 = 57.1%
+
+  Ranking errors (share of positive/negative pairs put in the wrong order):
+      at AUC 0.99  ->   1% of pairs wrong
+      at AUC 0.71  ->  29% of pairs wrong        29x more wrong orderings
+```
+
+More than half the model's apparent ability was the leak, not the model — and in production it
+misorders 29x as many pairs as the test set promised. Note the last row of the comparison: the
+*honestly built* model (0.83, skill 0.33) is meaningfully **better in production** than the
+leaky one (0.21), which is the practical punchline. The leak did not merely inflate a number;
+it caused the team to ship the weaker model, because the leaky candidate looked unbeatable
+offline.
+
 ---
 
 ## 5.4 Engineering Good Features
@@ -617,6 +782,47 @@ feature importance, while the bottom ~90% together contribute less than 10%.** I
 extremely *concentrated* — a small head of features does most of the work, and a long tail of
 features contributes almost nothing. The practical lesson: measure importance, keep the
 high-impact head, and aggressively prune the low-impact tail (it's mostly cost and noise).
+
+**Put simply.** "Rank your features by importance and the curve is a cliff, not a slope —
+almost all the predictive work is done by a handful, and the rest is payroll."
+
+The reason this matters is that cost scales with the *count* of features (storage, pipelines,
+latency, drift surface) while accuracy scales with their *importance share*. Those two things
+are wildly out of proportion, which is exactly what makes pruning nearly free.
+
+| Symbol | What it is |
+|--------|------------|
+| Feature rank | Position after sorting all features by importance, highest first |
+| Importance share | This feature's contribution as a percentage of the total across all features |
+| Head | The top-ranked few features that carry most of the share |
+| Tail | The long run of low-rank features each contributing near zero |
+| Cumulative share | Importance retained if you keep everything down to a given rank |
+
+**Walk one example.** Take the chart's buckets and a model with 2,000 features:
+
+```
+  rank bucket   features   % of all features   importance %   cumulative features   cumulative
+  -----------   --------   -----------------   ------------   -------------------   ----------
+  Top 10             10          0.5%               50              10  (0.5%)          50%
+  11-50              40          2.0%               25              50  (2.5%)          75%
+  51-200            150          7.5%               12             200 (10.0%)          87%
+  201-1000          800         40.0%                8           1,000 (50.0%)          95%
+  Tail 1000+      1,000         50.0%                5           2,000 (100%)          100%
+
+  Prune the bottom 1,000 features -> keep 95% of the importance, run 50% of the pipelines.
+  Prune the bottom 1,800 features -> keep 87% of the importance, run 10% of the pipelines.
+```
+
+Ten features out of two thousand — **0.5% of the schema** — do half the work. Deleting the
+entire bottom half of the feature list costs 5 points of importance share and halves everything
+you have to compute, store, monitor, and keep from drifting. That asymmetry is the whole
+argument for pruning, and it is why "we might need it later" is an expensive instinct.
+
+One honest note on the chart below: its bars are labeled *illustrative*, and on those bars the
+bottom 90% of features (1,800 of 2,000) sum to `8 + 5 = 13%`, slightly above the "less than
+10%" the surrounding text quotes for Facebook's real curve. The shape — a steep head, a
+near-flat tail — is the point; treat the bar heights as a sketch of that shape, not as
+Facebook's measured numbers.
 
 ```mermaid
 xychart-beta

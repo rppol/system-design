@@ -117,6 +117,76 @@ the local disk of a single server is hopeless and why S3 + dedup + cold storage 
 a **modest ~240 QPS average / ~480 QPS peak** for uploads (which is why the *storage* — not
 the request rate — is the bottleneck, unlike the read-heavy YouTube design in Ch 14).
 
+**In plain terms.** "Five hundred petabytes is what you *promised*, not what you will *store* — the promise is 50 million users times their 10 GB quota, and almost nobody fills it."
+
+That distinction is the single most useful thing in this estimate. Quota is a liability you must be able to honour; actual bytes are what you provision this year. Confusing them makes you buy 500 PB on day one, which is why the chapter says "nominal."
+
+| Symbol | What it is |
+|--------|------------|
+| `signed-up users` | 50,000,000 — the whole registered base, not the active one |
+| `quota` | 10 GB allocated free space per user; an upper bound, not a measurement |
+| `DAU` | 10,000,000 — the fifth of the base that actually shows up on a given day |
+| `files/day` | 2 uploads per active user per day |
+| `avg file size` | 500 KB — small, because most synced files are documents and photos |
+
+**Walk one example.** The promise and the reality, with units on every line:
+
+```
+  Nominal (allocated) storage
+    signed-up users            50,000,000   users
+    x  quota                           10   GB/user
+    =  nominal storage        500,000,000   GB
+    /  1,000,000 GB per PB    ->      500   PB allocated
+
+  Actual new storage per day
+    DAU                        10,000,000   users
+    x  files per day                    2   uploads/user/day
+    =  uploads                 20,000,000   uploads/day
+    x  avg file size                  500   KB/upload
+    =  new bytes           10,000,000,000   KB/day
+    /  1,000,000,000 KB per TB  ->     10   TB/day
+
+  Accumulate it
+    10 TB/day  x  365 days  =  3,650 TB/year  =  3.65 PB/year
+
+  Meaning: real growth is 3.65 PB/year against a 500 PB allocation -- at this
+  rate the promised space would take ~137 years to fill.
+```
+
+**Why "nominal" is doing so much work.** The 500 PB figure justifies the *architecture* (S3 instead of local disks, dedup, cold storage tiering) because you must be able to grow into it. The 3.65 PB/year figure justifies the *purchase order*. An interviewer who hears you quote 500 PB without distinguishing the two will ask which one you would actually provision — and the answer is neither in isolation: you provision for measured growth plus headroom, and you architect for the ceiling.
+
+**What this actually says.** "Twenty million uploads a day sounds enormous, but spread across 86,400 seconds it is only a couple of hundred requests a second — a single well-tuned server's worth."
+
+This is the inversion that makes Drive interesting. YouTube's arithmetic produced a terrifying bandwidth number; Drive's produces a trivial one, and the difficulty migrates entirely to storage and sync correctness.
+
+| Symbol | What it is |
+|--------|------------|
+| `uploads/day` | DAU x files per day = 20,000,000 |
+| `24 x 3600` | 86,400 seconds in a day — converts a daily count into a rate |
+| `average QPS` | Uploads per second averaged flat across the whole day |
+| `peak factor` | 2x — traffic is never flat; the busy hour runs roughly double the mean |
+| `peak QPS` | What you must actually provision the API tier for |
+
+**Walk one example.** The QPS chain, then the peak:
+
+```
+  DAU                         10,000,000   users
+  x  files per day                     2   uploads/user/day
+  =  uploads                  20,000,000   uploads/day
+  /  86,400 s/day             ->   231.5   uploads/sec  average
+
+  x  2 peak factor            ->   463.0   uploads/sec  peak
+  +  1:1 read-to-write ratio  ->   463.0   downloads/sec peak
+  =  total peak request rate  ->   925.9   requests/sec
+
+  Meaning: under 1,000 req/s at peak. The load balancer plus a handful of
+  stateless API servers absorb this -- the request rate is never the problem.
+```
+
+The chapter rounds these to **~240 and ~480 QPS**; the exact quotients are **231.5** and **463.0**. Rounding up is the right instinct for a capacity number, but say so rather than presenting the rounded figure as the computed one.
+
+**Why the peak factor cannot be dropped.** Provision for the 231.5 QPS average and the service browns out every evening, because uploads cluster in waking hours and in the minutes after people finish working on a document. The 2x multiplier is a crude stand-in for that diurnal shape, and it is the cheapest possible insurance — doubling a number this small costs almost nothing, whereas being wrong about it is a visible outage.
+
 ---
 
 ## 15.2 Step 2 — Propose High-Level Design and Get Buy-In
@@ -366,6 +436,37 @@ Caption: a file is nothing more than an ordered list of hash-addressed blocks; s
 not know or care what a "file" is, which is what makes per-block dedup and delta sync
 possible.
 
+**Read it like this.** "Divide the file size by the block size, round up, and that is both how many objects land in S3 and how many rows land in the `block` table."
+
+Every block is simultaneously a storage object and a metadata row, so the block size is a dial that trades metadata volume against sync granularity. That double role is what makes 4 MB a considered choice rather than an arbitrary one.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | File size |
+| `b` | Maximum block size — 4 MB, Dropbox's reference value |
+| `ceil(S / b)` | Number of blocks; rounded *up* because the last block is a partial remainder |
+| `block rows` | One `block` table row per block per file version, each carrying a hash |
+| `10 GB` | The chapter's per-file upload limit — the worst case for block count |
+
+**Walk one example.** Three file sizes against the 4 MB block:
+
+```
+  File size                blocks = ceil(S / 4 MB)      note
+  -------------------------------------------------------------------------------
+     500 KB  (avg upload)  ceil(0.488 / 4)  =     1     smaller than one block
+      50 MB  (a document)  ceil(50 / 4)     =    13     12 full + one 2 MB remainder
+   10 GB = 10,240 MB       ceil(10240 / 4)  = 2,560     the per-file worst case
+
+  Metadata volume implied by the average case
+    20,000,000 uploads/day  x  1 block each  =  20,000,000 block rows/day
+    x  365 days                              =   7.3 billion block rows/year
+
+  Meaning: the average 500 KB upload is a single block, so at typical sizes the
+  block table grows one row per upload -- but a single 10 GB file alone adds 2,560.
+```
+
+**Why the block size is a real tradeoff, not a detail.** Halve it to 2 MB and delta sync gets finer — an edit re-sends 2 MB instead of 4 MB — but every file doubles its row count and its S3 object count, so metadata storage, lookup cost, and per-object request overhead all double. Double it to 8 MB and metadata halves while every small edit costs twice the bandwidth. 4 MB sits where a typical edit is still cheap and the row count stays manageable; this is exactly the question to raise when an interviewer asks what you would tune.
+
 #### Delta sync — only changed blocks are transferred
 
 When a file is modified, **only the modified blocks are synced** to cloud storage — the rest
@@ -389,6 +490,44 @@ Left untouched in cloud:        b1, b3, b4, b6
 Caption: only `b2'` and `b5'` cross the network; the four unchanged blocks are already
 stored, so editing one paragraph of a large file costs a few KB of upload instead of the
 whole file — exactly the bandwidth win the design targets.
+
+**What it means.** "You pay for the edit, not for the file — the reduction factor is simply the file size divided by the bytes you actually changed, rounded to whole blocks."
+
+The rounding is the catch. Delta sync cannot bill you for the 40 bytes you typed; it bills you for every block those 40 bytes landed in. That quantization is why the block size and the saving are the same conversation.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Full file size — what a naive sync would re-upload on every save |
+| `b` | Block size, 4 MB — the granularity at which change is detected |
+| `c` | Number of blocks the edit actually touched |
+| `c x b` | Bytes transferred under delta sync |
+| `S / (c x b)` | Reduction factor — how many times cheaper the sync got |
+
+**Walk one example.** The book's 6-block figure first, then a realistic large document:
+
+```
+  The chapter's own example -- 6 blocks, b2 and b5 changed
+    transferred     2 of 6 blocks   =  33.3%  of the file
+    reduction factor      6 / 2     =   3.0x
+    bandwidth saved                 =  66.7%
+
+  A 50 MB document, one block edited
+    blocks          ceil(50 / 4)    =    13   blocks
+    transferred          1 x 4 MB   =     4   MB
+    instead of                            50   MB
+    reduction factor      50 / 4    =  12.5x
+    bandwidth saved   1 - (4/50)    =  92.0%
+
+  Across the whole user base, if every daily write were such an edit
+    full-file sync   20,000,000 writes x 50 MB  =  1,000  TB/day
+    delta sync       20,000,000 writes x  4 MB  =     80  TB/day
+    saved                                       =    920  TB/day  =  0.92 PB/day
+
+  Meaning: the same 20 million daily writes cost either 1 PB or 80 TB of upload
+  bandwidth, decided entirely by whether sync is block-aware.
+```
+
+**Where delta sync stops helping — worth saying out loud.** The chapter's own average file is 500 KB, which is **12.2% of a single 4 MB block**. Any edit to it re-sends the whole block, so delta sync saves *nothing* on typical uploads; its entire value shows up on files larger than one block. That is not a flaw in the estimate — it is why the feature is justified by the 10 GB file-size limit rather than by the 500 KB average, and it is a sharp thing to notice in an interview.
 
 #### Compression
 
@@ -609,6 +748,33 @@ techniques keep it in check:
    months) is moved to **cold storage** such as **Amazon S3 Glacier**, which costs a fraction of
    standard storage. Retrieval is slower, but for genuinely inactive files that trade is right.
 
+**Put simply.** "If a fraction `d` of your blocks are byte-identical copies of blocks you already hold, you store `1 - d` of what users uploaded — and the hash is what lets you find out which ones without comparing any bytes."
+
+Dedup is the only one of the three techniques that is *free of user-visible tradeoffs*: capping versions loses history and cold storage slows retrieval, but storing one copy of an identical block costs the user nothing at all. That is why it is listed first.
+
+| Symbol | What it is |
+|--------|------------|
+| `d` | Fraction of uploaded blocks that duplicate a block already stored |
+| `1 - d` | Fraction actually written to cloud storage — the dedup retention rate |
+| `hash` | The block's content fingerprint; equal hashes mean identical blocks, by definition |
+| `reference count` | How many file versions point at one stored block; dedup replaces copies with references |
+| `3.65 PB/year` | The real growth rate from the estimation section — what `d` is applied to |
+
+**Walk one example.** Apply the retention rate to actual growth, not to the 500 PB nominal:
+
+```
+  Growth before dedup                        3.65  PB/year
+
+    d = 0.10   keep 90%   ->   3.285 PB/year    saved  0.365 PB/year
+    d = 0.25   keep 75%   ->   2.737 PB/year    saved  0.912 PB/year
+    d = 0.50   keep 50%   ->   1.825 PB/year    saved  1.825 PB/year
+
+  Meaning: dedup is a straight multiplier on the growth rate. At d = 0.5 you buy
+  storage half as fast forever -- the saving compounds every year, it is not one-off.
+```
+
+**Why hashing is what makes this affordable.** The naive way to find duplicates is to compare every incoming block against everything stored — impossible at this scale. Hashing turns the question into a single index lookup: compute the block's hash, check whether that hash already exists in the `block` table, and if it does, write a reference instead of the bytes. The cost of dedup is therefore one hash computation plus one index probe per block, which is why it can run inline on the upload path rather than as a nightly batch job.
+
 ### Failure handling
 
 The book closes the deep dive with a per-component failure table — this is high-value
@@ -629,6 +795,39 @@ interview material because it demonstrates operational thinking.
 The notification-server row is the one to remember: at ~1M+ persistent connections per server,
 losing a server is not a lost message but a **reconnection storm** — each client re-establishes
 its long-poll connection, which is fast per client but slow in aggregate.
+
+**The idea behind it.** "Divide your online users by the connections one server can hold and you get a startlingly small fleet — which is exactly why losing one box hurts so much."
+
+Long polling means the notification tier is sized by *concurrent connections held*, not by requests per second. That is a different capacity currency from every other tier in this design, and it is why a failure there behaves unlike a failure anywhere else.
+
+| Symbol | What it is |
+|--------|------------|
+| `DAU` | 10,000,000 — the ceiling on how many clients could be connected at once |
+| `connections/server` | Over 1,000,000 — Dropbox's real figure, cited in the failure table |
+| `servers` | `DAU / connections per server` — the fleet size, if every active user is online |
+| `blast radius` | Connections lost when one server dies — one server's entire share |
+| `drain time` | `blast radius / reconnect throughput` — how long the storm takes to clear |
+
+**Walk one example.** Fleet size, then what one failure costs:
+
+```
+  DAU                          10,000,000   clients
+  /  connections per server     1,000,000   connections/server
+  =  notification servers              10   servers
+
+  One server fails
+    connections dropped         1,000,000   clients must re-open a long poll
+    share of the fleet             1 / 10   =  10% of all online users at once
+
+  Drain time = dropped connections / reconnect throughput
+    at  10,000 reconnects/sec   ->   100  seconds to fully recover
+    at  50,000 reconnects/sec   ->    20  seconds to fully recover
+
+  Meaning: no messages are lost, but 1 in 10 users is unsynced for tens of
+  seconds -- and the reconnect burst runs 43x to 216x the normal 231.5 QPS baseline.
+```
+
+**Why this is a capacity-planning problem and not a correctness one.** Every client reconnects on its own and resumes the download flow, so no change is dropped — the offline backup queue covers anything that happened while the client was disconnected. What you must plan for is the *burst*: a fleet sized for a steady trickle of reconnections will refuse the thundering herd that follows a single server loss. The standard mitigations are randomized reconnect backoff on the client (so the million clients spread themselves over a window instead of arriving together) and spare connection headroom on the surviving nine servers.
 
 ---
 

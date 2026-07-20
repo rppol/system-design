@@ -34,6 +34,37 @@ nine cuts your allowed annual downtime by 10×.
 | 99.99%  | four nines  | 52.6 min    | 8.6 s    |
 | 99.999% | five nines  | 5.26 min    | 0.86 s   |
 
+**In plain terms.** "Availability is just the fraction of a period you were *up*; the 'nines' are that
+fraction written as a decimal, and *unavailability* — `1 − A` — is the number that actually buys you
+downtime." Every row of that table is one arithmetic step: multiply `1 − A` by the length of the period.
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Availability as a fraction in `[0, 1]`. `99.9%` is `0.999` |
+| `1 − A` | Unavailability — the fraction of time you are down. `0.999` → `0.001` |
+| period | Seconds in the window you care about: year `31,536,000`, month (30 d) `2,592,000`, day `86,400` |
+| downtime | `(1 − A) × period`. That is the whole calculation |
+| "a nine" | One factor of 10 in `1 − A`. Each nine you add cuts downtime by exactly 10× |
+
+**Walk one example.** Push `1 − A` through four periods, so the same target reads differently
+depending on the window your on-call rotation actually feels:
+
+```
+  A          1-A        per YEAR      per 30-DAY MO   per WEEK      per DAY
+  99%        0.01       3.65 d        7.20 h          1.68 h        14.40 min
+  99.9%      0.001      8.76 h        43.20 min       10.08 min     1.44 min
+  99.99%     0.0001     52.56 min     4.32 min        60.5 s        8.64 s
+  99.999%    0.00001    5.26 min      25.9 s          6.05 s        0.86 s
+
+  check: 99.9% per year = 0.001 x 31,536,000 s = 31,536 s = 8.76 h        <- table row
+         99.9% per 30-day month = 0.001 x 2,592,000 s = 2,592 s = 43.2 min
+```
+
+The month column is the one that matters operationally: **43.2 minutes is the entire 30-day error
+budget of a three-nines service** — a single bad deploy that takes 45 minutes to roll back has spent
+the whole month. That number reappears verbatim in Part V's error-budget arithmetic, because an
+error budget *is* this same `1 − A` multiplied by a window.
+
 The second brutal fact: **the availability of a chain is the product of its links.** If your
 service is a hard dependency on N downstream services, and each is independently available with
 probability *A*, then your availability is at most *A^N*. Ten hard dependencies each at a
@@ -43,6 +74,40 @@ a *month*), and fifty to ≈ 99.5% — the erosion is relentless because each fa
 whole part: you cannot reach high availability by making each component reliable; you must
 **reduce the number of hard dependencies** (Part V's control-plane split, §4.5's constant
 work) and **stop failures from propagating** (all of §4.3–§4.5).
+
+**What this actually says.** "Multiply a number smaller than 1 by itself often enough and it shrinks
+toward zero — so a service that *needs* all of its N dependencies is strictly less available than the
+worst of them." The counter-intuitive corollary interviewers love: **a microservice can be less
+available than every single one of its parts**, and no amount of polishing an individual part fixes it.
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Availability of one dependency, as a fraction. `99.9%` → `0.999` |
+| `N` | Number of **hard** dependencies on the request path — ones whose failure fails you |
+| `A^N` | System availability. `A` multiplied by itself `N` times |
+| "hard" | No fallback exists. A dependency you can degrade around is *soft* and does not enter `N` |
+| `A^N < A` | Always true for `A < 1` and `N > 1` — the product can only go down |
+
+**Walk one example.** Same dependency quality, more of them. Watch the nines evaporate:
+
+```
+  each dependency at 99.9% (three nines)      each dependency at 99.99% (four nines)
+  N     A^N          nines   down/30d          N     A^N          nines   down/30d
+  1     99.9000%     3.00    43.2 min          1     99.9900%     4.00    4.3 min
+  5     99.5010%     2.30    215.6 min         5     99.9500%     3.30    21.6 min
+  10    99.0045%     2.00    430.1 min         10    99.9005%     3.00    43.2 min
+  30    97.0431%     1.53    1277.4 min        30    99.7004%     2.52    129.4 min
+  100   90.4792%     1.02    50041 min/yr      100   99.0049%     2.00    429.9 min
+
+  0.999^10  = 0.990045   -> you spent a full nine buying ten "reliable" dependencies
+  0.9999^10 = 0.999000   -> exactly the same trade one nine higher up
+```
+
+The pattern is clean: **ten dependencies costs you exactly one nine.** Going from a monolith (`N = 1`)
+to a 30-service call graph at three nines each drops you from 99.9% to 97.0% — from 43 minutes of
+monthly downtime to over 21 hours — without a single service getting worse. This is why the fix is
+architectural (fewer hard dependencies, fallbacks that turn hard into soft) and never "make each
+service more reliable."
 
 **TL;DR:**
 - Most catastrophic outages are *self-inflicted*: bad error handling, bad config, and retry
@@ -273,6 +338,38 @@ flowchart LR
 
 Caption: the loop is the whole disease — each failure *raises the load* on the survivors, which causes the *next* failure. Break the arrow from "failure" back to "more load" (shed load, open a circuit breaker, cap capacity per node) and the cascade cannot sustain itself.
 
+**Read it like this.** The replica story has an exact formula hiding in it: with `k` nodes each at
+utilization `u`, losing one node pushes the survivors to `u · k / (k − 1)`, so the safe steady-state
+utilization is `u ≤ (k − 1) / k`. "How much headroom do I need?" has a number, not a vibe.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Number of nodes sharing the load |
+| `u` | Steady-state utilization of each node, as a fraction of its capacity |
+| `u · k` | Total offered load, expressed in units of "one node's capacity" |
+| `u · k / (k − 1)` | Per-node utilization *after* one node dies — the same load over fewer nodes |
+| `(k − 1) / k` | The utilization ceiling. Above it, losing one node guarantees the survivors overload |
+
+**Walk one example.** The book's two-replica scenario, then what more replicas buy you:
+
+```
+  k    load = u*k     after losing 1: u*k/(k-1)     safe ceiling (k-1)/k
+  2    0.50*2 = 1.0   1.0 / 1 = 100.0%  <- at the edge, any jitter tips it over
+  3    0.50*3 = 1.5   1.5 / 2 =  75.0%      66.7%
+  5    0.50*5 = 2.5   2.5 / 4 =  62.5%      80.0%
+  10   0.50*10 = 5.0  5.0 / 9 =  55.6%      90.0%
+
+  The book's case: k=2, u=50% -> survivor lands at EXACTLY 100% of capacity.
+  "Just handle it" and "overloaded" are the same point -- there is zero margin.
+```
+
+Two replicas at 50% is the worst possible design: it *looks* like 2× redundancy but the survivor
+inherits precisely 100% of its capacity, so any variance at all — a GC pause, a cache miss storm —
+tips it into the cascade. **The number of replicas is what buys headroom cheaply:** at `k = 10` you
+can run each node at 50% and a death only takes survivors to 55.6%, or run them at 90% and still
+survive one loss. This is redundancy prerequisite #3 ("operate without the faulty component") turned
+into an inequality you can put on a dashboard.
+
 ### Managing risk
 
 You cannot eliminate every failure mode — that's economically and physically impossible. So
@@ -378,6 +475,41 @@ promise of redundancy in one line — **but** it holds *only* if the failures ar
 are correlated, the `(1−A)^k` factorization is invalid, and you get far less than the math
 suggests. Correlated redundancy is the difference between "two nines added" and "no nines added."
 
+**What it means.** "Series asks *what is the chance everything works* and multiplies availabilities;
+parallel asks *what is the chance everything is broken* and multiplies **un**availabilities. Same
+operation, opposite quantity — which is why one destroys nines and the other manufactures them."
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Availability of one replica. `99%` → `0.99` |
+| `1 − A` | Unavailability of one replica. `0.99` → `0.01` |
+| `(1 − A)^R` | Chance all `R` replicas are down **at the same time** — requires independence |
+| `1 − (1 − A)^R` | System availability: anything other than "all down" is a serve |
+| `R` | Number of redundant replicas where **one** suffices to serve |
+| `A^N` (contrast) | The series case — `N` things that must **all** work |
+
+**Walk one example.** Start from the 99% component in the text and add copies:
+
+```
+  R    (1-A)^R           A_system       nines   down / year
+  1    0.01              99.000000%     2.00    5256.0 min  (87.6 h)
+  2    0.01^2 = 1e-4     99.990000%     4.00      52.56 min
+  3    0.01^3 = 1e-6     99.999900%     6.00       0.5256 min (31.5 s)
+
+  Each replica multiplies unavailability by 0.01 -- i.e. ADDS TWO NINES per copy,
+  because the component's own unavailability (0.01) is itself two decimal places.
+
+  General rule: R replicas of an "m nines" component give you m x R nines
+               -- IF and ONLY IF the failures are independent.
+```
+
+The "if and only if" is where real systems lose. Suppose 20% of your two replicas' failure modes are
+correlated (shared rack, shared config push, shared deploy). Then `P(both down)` is no longer
+`0.01 × 0.01 = 1e-4` but is dominated by the correlated term `0.2 × 0.01 = 2e-3` — twenty times
+worse, landing you at 99.8% instead of the 99.99% the formula promised. **Correlation does not
+degrade the answer gracefully; it replaces the exponent with a constant.** That single fact is why
+the chapter spends more words on failure domains (racks, AZs, regions) than on the equation itself.
+
 ---
 
 ## 4.3 Fault Isolation (Ch 26)
@@ -400,6 +532,37 @@ they exhaust **only X's bulkhead** — the threads dedicated to X — while call
 dependencies Y and Z keep flowing through their own pools. Contrast with the §4.1 thread-pool
 exhaustion story: with *one* shared pool, X's slowness consumed *all* threads and took down
 *everything*; with per-dependency bulkheads, the damage is walled off to X.
+
+**Put simply.** A bulkhead turns "one dependency can take `100%` of my threads" into "one dependency
+can take `1/D` of my threads." The arithmetic is a single division — `share = pool / D` for `D`
+dependencies — and that fraction is the *entire* blast radius of a gray failure.
+
+| Symbol | What it is |
+|--------|------------|
+| `pool` | Total worker threads (or connections) the service has. Tomcat's default is ~200 |
+| `D` | Number of downstream dependencies you partition the pool across |
+| `pool / D` | Threads any single dependency can ever hold hostage |
+| `1 / D` | The fraction of your service one gray-failing dependency can consume |
+| shared pool | The `D = 1` degenerate case: one dependency can take everything |
+
+**Walk one example.** The §4.1 exhaustion story with and without bulkheads, `pool = 200`, `D = 3`:
+
+```
+  shared pool:      X goes gray -> X's blocked calls hold 200/200 threads = 100%
+                    calls to healthy Y and Z get NO thread -> whole service down
+
+  bulkheaded:       X gets 66, Y gets 67, Z gets 67   (200 / 3 = 66.7)
+                    X goes gray -> X holds 66/200 = 33% of threads, permanently
+                    Y and Z still have 67 threads each -> both stay fully healthy
+                    service survives at 2/3 capacity with one feature degraded
+
+  weighted variant: size by traffic share, not evenly -- X:100  Y:60  Z:40 (=200)
+                    the hot dependency gets more, and the cap is still hard
+```
+
+The cost is **utilization**: partitioned pools cannot lend each other idle threads, so a bulkheaded
+service needs more total threads than a shared-pool one to serve the same peak. You are deliberately
+buying isolation with efficiency — the same trade cells make one level up.
 
 ### Shuffle sharding
 
@@ -441,6 +604,43 @@ Shuffle sharding is exactly how **AWS** isolates tenants in services like Route 
 Gateway — thousands of customers, each on a random small subset of a large fleet, so one abusive
 tenant can't take down more than a sliver of the others. (See the ASCII combination grid in
 Visual Intuition for the full picture.)
+
+**The idea behind it.** "Count how many *different* teams of `k` you can pick from `n` people. That
+count is how many customers you can isolate from each other — and it grows combinatorially while your
+hardware bill grows linearly." Plain sharding gets you `n / k` groups; shuffle sharding gets you
+`C(n, k)`, and the gap explodes with `n`.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Total nodes in the fleet |
+| `k` | Nodes assigned to each customer — their virtual shard |
+| `n!` | Factorial: `n × (n−1) × … × 1`. Counts every ordering of all `n` nodes |
+| `k!` | Divides out the orderings *within* a chosen team — `{1,4}` and `{4,1}` are one shard |
+| `(n − k)!` | Divides out the orderings of the nodes you did **not** pick |
+| `C(n, k)` | The result: distinct unordered `k`-node subsets = number of virtual shards |
+| `1 / C(n, k)` | Chance a random other customer shares your *exact* shard — the full-blast fraction |
+
+**Walk one example.** The text's `n = 8, k = 2`, then what a real fleet buys:
+
+```
+  C(8,2) = 8! / (2! x 6!) = (8 x 7) / (2 x 1) = 56 / 2 = 28
+
+  plain sharding:   8 / 2                = 4 shards   -> 1 poison kills 1/4 = 25% of customers
+  shuffle sharding: C(8,2)               = 28 shards  -> full kill only 1/28 = 3.6%
+                                                          7x more isolation, SAME 8 nodes
+
+  scale it up -- the fleet grows linearly, the isolation grows combinatorially:
+  n=8,   k=2  ->  C = 28
+  n=100, k=2  ->  C = 4,950            (1/4950 = 0.02% fully affected)
+  n=100, k=5  ->  C = 75,287,520       (75 million virtual shards from 100 boxes)
+```
+
+Note what `k` does: raising it from 2 to 5 on the same 100 nodes multiplies the shard count by
+~15,200. That is the reason shuffle sharding feels like free money — **isolation is bought with
+`k`, not with hardware.** The catch is that a larger `k` means each customer touches more nodes, so
+a poison customer *partially* degrades more of the fleet even as the *fully* affected fraction
+collapses; and the whole result assumes client-side retry across the `k` nodes, without which a
+one-node overlap is a real outage rather than a routed-around blip.
 
 ### Cellular architecture
 
@@ -492,6 +692,41 @@ it, so legitimate slow-but-normal responses succeed while genuinely-stuck calls 
 and you abort healthy requests (and turn a slow-but-fine dependency into failures, possibly
 triggering needless retries — a self-inflicted cascade); too long and you don't protect against
 hangs. Measure, don't guess.
+
+**Stated plainly.** "Setting a timeout at percentile `p` is a promise that you will kill `1 − p` of
+your *healthy* requests." Picking the percentile is not a latency question, it is a budget question:
+`p99` sounds strict until you notice it converts 1% of perfectly good traffic into errors — ten
+thousand failures per million requests, self-inflicted.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | The percentile you set the timeout at, as a fraction. `p99.9` → `0.999` |
+| `1 − p` | Fraction of *healthy* requests slower than the timeout — the ones you abort |
+| `f` | Fan-out: how many downstream calls one user request makes |
+| `1 − p^f` | Chance a user request trips **at least one** timeout across its fan-out |
+| `(1 − p)^2` | Residual failure rate if you allow one retry (the second try is independent) |
+
+**Walk one example.** The same latency distribution, four candidate timeouts:
+
+```
+  timeout set at   1-p        healthy requests killed, per MILLION
+  p95              0.05       50,000     <- absurd; you manufactured a 5% error rate
+  p99              0.01       10,000
+  p99.9            0.001       1,000     <- the chapter's recommendation
+  p99.99           0.0001        100     <- barely protects; a hung call waits ages
+
+  now fan it out (one user request -> f downstream calls, timeout at p99.9):
+  f = 1    P(>=1 timeout) = 1 - 0.999^1  =  0.10%
+  f = 5                    = 1 - 0.999^5  =  0.50%
+  f = 10                   = 1 - 0.999^10 =  1.00%
+  f = 50                   = 1 - 0.999^50 =  4.88%    <- 1 in 20 user requests hit it
+```
+
+The fan-out row is the trap: **a p99.9 timeout on each of 50 calls is a p95 experience for the
+user.** This is the same `A^N` erosion from the Chapter Map wearing a latency costume. It is also the
+argument for pairing a tight timeout with *one* budgeted retry: at `p99.9`, a single independent
+retry drops the residual failure rate from `0.001` to `0.001^2 = 0.000001` (one per million) while
+adding only `0.1%` extra load. A tight timeout plus one retry beats a loose timeout with none.
 
 **Two timeouts, not one.** A network call actually has *two* distinct timeouts, and both must be
 set: the **connection timeout** (how long to wait to *establish* the connection — should be short,
@@ -552,6 +787,63 @@ Full jitter spreads the retries *uniformly* over the window, so the herd is smea
 arriving in one spike — AWS's own experiments showed full jitter both *reduces* the load on the
 downstream and *completes work faster* than plain exponential backoff.
 
+**What the formula is telling you.** "Double the wait every time you fail, stop doubling at the cap
+— then throw the result away and wait a *random* amount up to it instead." The doubling controls
+*how much* pressure you apply; the randomization controls *when it lands*, and only the second one
+prevents a thundering herd.
+
+| Symbol | What it is |
+|--------|------------|
+| `base` | The first delay. `0.1 s` in the code above |
+| `attempt` | Retry number, counting from `0`. The exponent |
+| `2^attempt` | Doubling factor: `1, 2, 4, 8, 16, …` |
+| `cap` | Ceiling on a single delay (`2.0 s` above), so backoff can't grow to minutes |
+| `min(cap, …)` | Whichever is smaller — the cap wins once the exponential passes it |
+| `random(0, backoff)` | Full jitter: a uniform draw over the whole window, mean `backoff / 2` |
+
+**Walk one example.** `base = 0.1 s`, `cap = 2.0 s`, seven attempts:
+
+```
+  attempt   base*2^a    min(cap, ...)   cumulative wait   full-jitter mean draw
+    0        0.1 s        0.1 s             0.1 s            0.05 s
+    1        0.2 s        0.2 s             0.3 s            0.10 s
+    2        0.4 s        0.4 s             0.7 s            0.20 s
+    3        0.8 s        0.8 s             1.5 s            0.40 s
+    4        1.6 s        1.6 s             3.1 s            0.80 s
+    5        3.2 s        2.0 s  <- capped  5.1 s            1.00 s
+    6        6.4 s        2.0 s  <- capped  7.1 s            1.00 s
+
+  uncapped total for 7 attempts = base x (2^7 - 1) = 0.1 x 127 = 12.7 s
+  capped total                                                 =  7.1 s
+```
+
+**Why the cap exists.** Without it the wait doubles forever — attempt 10 is `0.1 × 1024 = 102 s`, and
+a caller with a 1-second deadline is long gone. The cap converts exponential backoff into "back off
+fast, then poll steadily," which is what you actually want against an outage measured in minutes.
+
+**Why jitter exists — the collision arithmetic.** Take 10,000 clients that all failed at the same
+instant (a downstream restart). With plain exponential backoff every one of them computes the *same*
+`0.8 s` and retries in the *same* millisecond: a 10,000-request instantaneous spike onto a service
+that just came up. Full jitter spreads them uniformly over `[0, 0.8]`, averaging `12,500 req/s`
+across the window instead of one vertical wall. Discretize the window into 10 ms slots and the
+de-synchronization is visible:
+
+```
+  N clients retrying into a window chopped into slots -- P(a given client lands alone):
+
+  window     slots    N=10 clients      N=100 clients
+  0.1 s        10     38.7%             ~0.0%          <- narrow window, still colliding
+  0.8 s        80     89.3%             28.8%
+  2.0 s       200     95.6%             60.9%          <- wider window, herd dissolves
+
+  no jitter at all:   every client lands in the SAME slot -> P(alone) = 0 for N > 1
+```
+
+The jitter window is doing the same job as the exponential: **backoff decides the total pressure,
+jitter decides whether that pressure arrives as a wall or a drizzle.** Note the two also interact —
+because backoff grows, the jitter window grows with it, so each successive retry wave is spread over
+a wider interval exactly when the herd most needs thinning.
+
 **2. Retry only the right errors — and only idempotent operations.** Retry **transient** failures
 (connection errors, timeouts, HTTP `503 Service Unavailable`, `429 Too Many Requests` — usually
 honoring its `Retry-After`). **Never retry** deterministic client errors (`4xx` like `400 Bad
@@ -577,6 +869,44 @@ closest to the user, or one designated layer — and let every other layer fail 
 retrying.** Better still, pair retries with a **retry budget**: cap retries to a small percentage
 (e.g. 10%) of total requests, so retries can never more than slightly amplify load no matter what.
 (See the broken→fix walkthrough below.)
+
+**In plain terms.** "Retries at one layer *add*; retries at stacked layers *multiply* — so the cost
+of 'making each service resilient independently' is exponential in the depth of your call graph."
+The number to carry into an interview: retries compose as `r^n`, and `n` is your architecture, which
+you rarely control after the fact.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | Total attempts each layer makes (1 original + its retries). "Retry 3×" here means `r = 3` |
+| `n` | Number of layers in the chain that independently retry |
+| `r^n` | Calls that reach the bottom service per one user request |
+| retry budget | Cap on retries as a fraction of request volume — e.g. `10%` |
+| `1 + b` | Amplification under a budget of `b`. Additive, not multiplicative — this is the fix |
+
+**Walk one example.** Watch the exponent, not the base:
+
+```
+  r=3 retries per layer            r=2 per layer        r=4 per layer
+  n=1  ->  3^1  =  3 calls          2^1 =  2             4^1 =   4
+  n=2  ->  3^2  =  9 calls          2^2 =  4             4^2 =  16
+  n=3  ->  3^3  = 27 calls          2^3 =  8             4^3 =  64
+
+  The book's three-tier case: Edge x App x Backend = 3 x 3 x 3 = 27 DB calls
+  per ONE client request -- delivered to a database that was already saturated.
+
+  the fix, as arithmetic:
+    single retry level, r=3            ->      3.0x worst case
+    single level + 10% retry budget    ->      1.1x worst case   (1 + 0.10)
+    amplification cut 27x -> 1.1x      ->   24.5x less load than the broken design
+```
+
+The retry budget is the load-bearing idea, and it is worth seeing *why* it is a different kind of
+guarantee. `r^n` is a **worst-case multiplier** that fires exactly when everything is failing — i.e.
+at the worst possible moment. A budget expressed as a fraction of *total request volume* is a
+**ceiling on absolute added load**: at 1,000,000 requests, a 10% budget permits at most 100,000
+retries no matter how catastrophic the failure, so retries can never add more than a tenth of your
+normal traffic. Adding a bounded 10% to a struggling service is survivable; multiplying it by 27
+never is.
 
 ### Circuit breakers
 
@@ -604,6 +934,47 @@ trip the breaker for healthy dependency Y — the bulkhead idea applied to break
 failure threshold, the open-state duration, and the half-open probe rate to the downstream's
 behavior. The circuit breaker is what mechanically *breaks the retry feedback loop* of a cascading
 failure: once open, it stops the amplified traffic dead.
+
+**What this actually says.** The trip condition is a ratio over a sliding window — `failures in the
+last N calls / N > threshold` — and its two knobs pull against each other: `N` buys you confidence,
+the threshold buys you speed. Get them wrong and the breaker either flaps on a two-request blip or
+sits closed through an outage.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Rolling window size — how many recent calls the breaker judges on |
+| `threshold` | Failure fraction that trips the breaker. `0.5` = "more than half of the last N failed" |
+| `N × threshold` | Absolute number of failures needed to trip |
+| cool-down | How long Open lasts before a Half-open probe. Must exceed the downstream's restart time |
+| probe count | Trial calls allowed in Half-open. Small — 1 to 5 — so a still-broken downstream is barely touched |
+| `T` | The per-call timeout. This is what an *un*-broken breaker costs you per failing call |
+
+**Walk one example.** What the breaker is actually saving, `pool = 200`, `T = 1 s`:
+
+```
+  breaker CLOSED against a fully-dead downstream:
+    each failing call holds 1 thread for the full timeout T = 1 s
+    200 threads / 1 s        ->  max 200 calls/s, ALL failing, ALL threads busy
+    the service is 100% occupied producing errors -- healthy work gets no thread
+
+  breaker OPEN:
+    each call returns in ~0 ms (no network, no wait)
+    thread held ~1/1000 as long as the 1 s timeout case
+    the 200 threads stay free for the requests that DON'T touch this dependency
+
+  trip sensitivity, threshold = 50%:
+    N = 4    -> trips after 2 failures     flaps on any transient blip
+    N = 20   -> trips after 10 failures    ~1 s of a 10 rps stream. Reasonable.
+    N = 1000 -> trips after 500 failures   at 10 rps that is 50 s of full outage
+                                           before the breaker even notices
+```
+
+**Why Half-open exists and what breaks without it.** Without a probe state the breaker has only two
+choices when the cool-down expires: stay open forever (you never recover automatically) or slam the
+full traffic back on. The second is a cascade generator — a service that *just* restarted has cold
+caches, empty connection pools, and a JIT that hasn't warmed, so full production load is precisely
+what re-kills it. Half-open sends a handful of calls and asks the cheapest possible question: is one
+request enough to hurt you again?
 
 **Fallbacks — what to return when the breaker is open.** Failing fast is only half the answer; the
 other half is *what* you serve instead of the missing downstream response. Good fallbacks, roughly
@@ -727,6 +1098,73 @@ crudest to best:
   previous window still inside the rolling window)`. This is **memory-bounded** (two integers per
   client) and accurate enough, trading a little precision for a lot of efficiency, and it smooths out
   the abrupt reset that let fixed windows leak 2×.
+
+**Read it like this.** A token bucket says: "you may always spend what's in the bucket, and the
+bucket refills at a fixed drip." Depth `B` is *how big a burst you forgive*; refill rate `R` is *what
+you'll tolerate forever*. Separating those two knobs is the entire reason token bucket beats a fixed
+window — a fixed window smears them into one number.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Bucket depth in tokens — the maximum burst admitted from a full bucket |
+| `R` | Refill rate, tokens/second — the enforced long-run average |
+| `1 / R` | Seconds between tokens. The steady-state spacing once the bucket is empty |
+| `B / R` | Seconds to refill from empty to full — how long until burst capacity returns |
+| `A` | The client's actual arrival rate |
+| `B / (A − R)` | Time until a client arriving at `A > R` drains the bucket and starts getting 429s |
+
+**Walk one example.** `B = 100` tokens, `R = 50/s` — "50 per second sustained, forgive a 100 burst":
+
+```
+  refill drip     : 1 / 50          = 20 ms per token
+  empty -> full   : B / R = 100/50  = 2.0 s before a full burst is available again
+
+  a client arrives at rate A; bucket drains at (A - R):
+  A = 50/s    never empties (A <= R)         -> 0% rejected, forever
+  A = 100/s   100/(100-50)  = 2.00 s to empty -> then 50/s admitted,  50% rejected
+  A = 200/s   100/(200-50)  = 0.67 s to empty -> then 50/s admitted,  75% rejected
+  A = 1000/s  100/(1000-50) = 0.11 s to empty -> then 50/s admitted,  95% rejected
+
+  note the shape: a burst is forgiven ONCE and briefly; sustained abuse converges
+  to exactly R regardless of how hard the client pushes.
+```
+
+That last line is the property you want from a limiter: **the steady-state admitted rate is `R` no
+matter what the attacker does** — the bucket only ever bought them `B` extra requests, once. Compare
+the fixed-window flaw the text names: a limit of 100/min lets a client send 100 at `t = 59 s` and
+another 100 at `t = 61 s`, delivering 200 requests in a 2-second span — a genuine 2× breach the token
+bucket structurally cannot produce.
+
+**What it means.** The sliding-window counter is a weighted average of two numbers you already have:
+"count this window fully, and count the previous window in proportion to how much of it is still
+inside the rolling view." It is one multiply and one add per check, with two integers of state.
+
+| Symbol | What it is |
+|--------|------------|
+| `current` | Requests counted so far in the window currently in progress |
+| `previous` | Final count of the window that just ended |
+| `f` | Fraction of the previous window still inside the rolling window — `1 − (elapsed / window)` |
+| `current + previous · f` | The estimated rolling-window rate, compared against the limit |
+| state cost | Two integers per client, regardless of traffic — the reason this beats storing timestamps |
+
+**Walk one example.** Limit 100/min. The previous minute saw 90 requests, this minute has seen 40 so
+far. Watch the estimate decay as the old window slides out of view:
+
+```
+  elapsed in current window   f = 1 - elapsed/60s   estimate = 40 + 90*f    vs limit 100
+  15 s                        0.75                  40 + 67.5 = 107.5       REJECT
+  30 s                        0.50                  40 + 45.0 =  85.0       allow
+  45 s                        0.25                  40 + 22.5 =  62.5       allow
+
+  a fixed-window counter would have said "40 < 100, allow" at ALL THREE points --
+  it forgot the 90 requests from 15 seconds ago the instant the clock ticked over.
+```
+
+The approximation assumes the previous window's requests were spread *uniformly* across it, which is
+why it is an estimate and not a measurement — a client that sent all 90 in the first second of the
+previous minute is over-counted, one that sent them in the last second is under-counted. You are
+trading that bounded inaccuracy for `O(1)` memory per client instead of `O(requests)`, and at
+millions of clients that trade is not close.
 
 **Distributed rate limiting** is where it gets hard. When requests for one client spread across
 many server instances, each instance's *local* count isn't the client's *global* count — you need a

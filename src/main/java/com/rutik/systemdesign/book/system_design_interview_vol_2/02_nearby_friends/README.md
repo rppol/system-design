@@ -107,6 +107,37 @@ location-update QPS = concurrent users / report interval
                     ≈ 334K QPS of writes
 ```
 
+**In plain terms.** "Ten million phones are each on a 30-second alarm clock, and the alarms are
+scattered evenly across the interval — so at any instant one thirtieth of them are firing."
+
+The `/ 30` is the freshness knob, and it is the only knob in this formula. Nothing else in the
+system's write load is adjustable: user count is a business outcome, but the report interval is a
+product decision that trades battery and backend cost directly against how live the screen feels.
+
+| Symbol | What it is |
+|--------|------------|
+| `concurrent users` | 10,000,000 — the 10% of 100 M DAU with the nearby-friends screen open |
+| `report interval` | 30 seconds between one client's location reports |
+| `location-update QPS` | Writes per second arriving at the WebSocket tier, before any fan-out |
+
+**Walk one example.** The base figure, then what moving the freshness knob costs:
+
+```
+  10,000,000 users / 30 s  =  333,333 updates/s   (the book's ~334K)
+
+  over a full day:  333,333 x 86,400 s  =  28,800,000,000 location writes/day
+
+  turning the freshness knob:
+    report every 10 s  ->  10,000,000 / 10  = 1,000,000 updates/s     (3.0x)
+    report every 30 s  ->  10,000,000 / 30  =   333,333 updates/s     (baseline)
+    report every 60 s  ->  10,000,000 / 60  =   166,667 updates/s     (0.5x)
+```
+
+The relationship is inverse-linear, which is why the chapter's wrap-up suggests "only send updates
+when the location actually changes." A stationary user reporting the same coordinate 2,880 times a
+day is pure waste, and suppressing those reports cuts the 334K figure without touching freshness for
+anyone who is actually moving.
+
 That is 334K writes per second *before* any fan-out — every one of them hits a WebSocket
 server, the location cache, the history DB, and a pub/sub publish. It is a **write-heavy**
 system, which will steer the storage choices (Redis for the hot path, Cassandra for
@@ -120,6 +151,37 @@ pub/sub message deliveries ≈ publish QPS × subscribers per channel
                            ≈ 334K/s × ~100
                            ≈ 33.4 million message deliveries/second
 ```
+
+**What this actually says.** "Publishing is not the expensive part — *delivering* is. Every message
+you accept at the door has to be handed to a hundred people before it is done."
+
+The multiplication by ~100 is the single most important number in the chapter, because it is the one
+place where the system's cost is not proportional to its users. Double the average friend count and
+the write load does not move at all, but the pub/sub tier doubles.
+
+| Symbol | What it is |
+|--------|------------|
+| `publish QPS` | 334K/s — one publish per location report, from the estimate above |
+| `subscribers per channel` | ~100 — the average friend count, since each friend subscribes to your channel |
+| `message deliveries` | Individual hand-offs Redis must perform per second, the pub/sub tier's real workload |
+
+**Walk one example.** Separate the two costs and watch them diverge:
+
+```
+                              publishes/s      deliveries/s      ratio
+  friends per user =   0        333,333                0          0x
+  friends per user =  10        333,333        3,333,333         10x
+  friends per user = 100        333,333       33,333,333        100x   <- the book's case
+  friends per user = 500        333,333      166,666,667        500x
+
+  the publish column NEVER changes -- only the delivery column grows.
+```
+
+This is why the WebSocket tier and the pub/sub tier scale on completely different curves and must be
+provisioned separately. The WebSocket servers see 334K messages/s no matter how social the user base
+is; the pub/sub fleet sees 100x that today and would see 500x under the Facebook friend cap. The
+chapter's later claim that pub/sub is "CPU-bound on fan-out" is exactly this column: 33.3 million
+deliveries per second is roughly 33 deliveries every microsecond across the fleet.
 
 Tens of millions of deliveries per second is far past a single machine — this number is why
 the pub/sub tier must be sharded (deep dive §2.3).
@@ -357,6 +419,41 @@ Why a **cache and not a database** is the source of truth for current location:
   separate "user went offline" signal for the cache. (The TTL is comfortably longer than the
   30 s report interval so a couple of missed updates do not evict an active user.)
 
+**The idea behind it.** "The TTL is not a memory-reclamation setting — it is a liveness detector, and
+its length is a bet on how many reports in a row a real user is allowed to miss before you declare
+them gone."
+
+Both numbers in that bet are already on the page; the ratio between them is what nobody states.
+
+| Symbol | What it is |
+|--------|------------|
+| `TTL` | ~10 minutes (600 s) before an unrefreshed cache entry vanishes |
+| `report interval` | 30 s — how often an active client refreshes the entry |
+| `TTL / interval` | Consecutive reports a user may miss and still be considered active |
+
+**Walk one example.** Convert the two stated numbers into the tolerance they actually encode:
+
+```
+  TTL / report interval  =  600 s / 30 s  =  20 reports
+
+  so an active user may miss 20 CONSECUTIVE location reports -- a full 10 minutes
+  in a subway tunnel or with a dead radio -- and still hold their cache entry.
+
+  the cost of that generosity, at the other end:
+    a user who closes the app is shown as "nearby" for up to 10 more minutes
+    (their last position is stale but not yet expired)
+
+  tightening the TTL to 2 min  ->  120 / 30 =  4 missed reports tolerated
+  loosening it   to 30 min     ->  1800 / 30 = 60 missed reports tolerated
+```
+
+Twenty is a deliberately generous margin, and it is the right direction to err. A false eviction is
+visible and annoying — a friend flickers off your screen because a tunnel ate three updates — while
+a false *retention* is merely stale, and the UI already shows an "updated Ns ago" timestamp that lets
+the user judge staleness themselves. The timestamp requirement from Step 1 is what makes the generous
+TTL safe: the system does not have to be precise about liveness because the client can display
+exactly how old the data is.
+
 The durable copy lives in the history DB instead — so "source of truth for the *current*
 position" is intentionally the ephemeral cache, and "source of truth for the *record*" is the
 history table.
@@ -400,6 +497,50 @@ current in-memory position for each connected user. Scaling *out* is easy — sp
 and the load balancer routes new connections to them. The hard part is **scaling in and
 deploying new releases**, because you cannot just kill a node that has thousands of live
 connections without dropping all those users.
+
+**Put simply.** "One active user is one open socket that never closes, so the fleet is sized by how
+many sockets a box can hold — not by how many requests per second arrive."
+
+This is the mental switch that trips people coming from stateless web tiers. A REST fleet is sized by
+QPS; a WebSocket fleet is sized by *concurrency*. Here the two numbers are wildly different: 10
+million simultaneous connections carrying only 334K messages/second between them, which works out to
+one message per connection every 30 seconds. Each socket is almost always idle, and yet each one
+still costs a file descriptor, kernel socket buffers, TLS session state, and the handler's in-memory
+position — none of which the message rate tells you anything about.
+
+| Symbol | What it is |
+|--------|------------|
+| `concurrent connections` | 10,000,000 — one per active user, from the 10%-of-100M-DAU assumption |
+| `connections per server` | How many open sockets one node sustains; the sizing lever |
+| `servers needed` | `concurrent connections / connections per server` |
+| `per-connection memory` | Socket buffers + TLS state + handler position; the chapter does not state a figure |
+
+**Walk one example.** The connection count is fixed by the requirements; the fleet size is not:
+
+```
+  concurrent connections = 100,000,000 DAU x 10%  =  10,000,000 sockets
+  message rate per socket = 1 update / 30 s       =  0.033 msg/s  (near-idle)
+
+  fleet size at various per-node connection ceilings:
+
+    10,000 conns/node   ->  10,000,000 /  10,000  =  1,000 nodes
+    50,000 conns/node   ->  10,000,000 /  50,000  =    200 nodes
+   100,000 conns/node   ->  10,000,000 / 100,000  =    100 nodes
+   500,000 conns/node   ->  10,000,000 / 500,000  =     20 nodes
+
+  at 200 nodes, each carries  333,333 / 200  =  1,667 messages/s
+```
+
+Note that the connection ceilings above are illustrative, not the book's — the chapter gives the
+10 M connection count but never states a per-node capacity or a per-connection byte cost. The shape
+is what matters: the fleet spans a **50x range** purely on how many sockets you can pack per box,
+while the per-node *message* rate stays trivial (1,667/s is nothing for one server). That asymmetry
+is why the tuning work on a WebSocket tier is all file-descriptor limits, socket buffer sizing, and
+TLS session memory rather than request throughput.
+
+It also explains why draining is slow. At 50,000 connections a node, you are waiting for 50,000
+independent users to close an app you do not control. Nothing about the message rate helps; the
+connections simply have to age out.
 
 The solution is **connection draining**:
 
@@ -478,6 +619,45 @@ pub/sub memory ≈ 1,000,000,000 × 200 bytes
               ≈ 200 GB
 ```
 
+**Read it like this.** "You are not paying for users and you are not paying for channels — you are
+paying for *edges*. Every friendship between two online people is a row Redis has to keep."
+
+The trap this defuses is the instinct to count channels. There are ~100 million channels (one per
+user) and they contribute essentially nothing; the bill comes from the ~1 billion subscription edges
+laid over them. Channels are names, subscriptions are state.
+
+| Symbol | What it is |
+|--------|------------|
+| `online users` | 10,000,000 — the 10% concurrent figure again |
+| `friends per user` | ~100, and each friendship means one subscription |
+| `live subscriptions` | `online users x friends per user` — the edge count Redis actually stores |
+| `~200 bytes` | Per-subscription bookkeeping: hash-table entry, client pointer, list node |
+| `~100 GB` | Usable memory on a large Redis box, the divisor for node count |
+
+**Walk one example.** Reproduce the 200 GB, then find what it costs per user:
+
+```
+  live subscriptions = 10,000,000 users x 100 friends  = 1,000,000,000 edges
+
+  memory   = 1,000,000,000 x 200 B  = 200,000,000,000 B
+           = 200 GB (decimal)  =  186 GiB (binary)
+
+  nodes needed = 200 GB / 100 GB usable per box  =  2 nodes for MEMORY alone
+
+  per-user cost = 100 friends x 200 B  =  20,000 B  =  20 KB per online user
+```
+
+Twenty kilobytes per online user is the number worth carrying out of this section, because it scales
+the estimate to any user base without redoing the arithmetic. It also shows how thin the memory
+headroom is: 2 nodes is the *floor*, and nobody runs a 2-node tier at 100% memory utilisation.
+
+**Why memory is the wrong constraint to size on anyway.** The 200 GB says you need 2 nodes. The 33.3
+million deliveries/second from the fan-out estimate says you need far more, because delivery is CPU
+work and 33 M/s across 2 boxes is ~16.7 M deliveries/second each — nowhere near achievable. Size the
+tier on the delivery rate and the memory takes care of itself; size it on memory and you will
+provision a tier that fits but cannot keep up. This is precisely the asymmetry the book means when it
+says the tier is "both memory- and CPU-bound" but that CPU is the tighter of the two.
+
 - **Conclusion:** ~200 GB of subscription state does not fit on one machine (a large Redis
   box is on the order of 100 GB usable), so you need **multiple pub/sub servers** just for
   memory. And memory is not even the tightest constraint — the **CPU** cost of delivering
@@ -550,6 +730,45 @@ because of two facts:
   tens of millions of *followers*. Here the relationship is symmetric and capped: you cannot
   have a million-friend account, so no single channel ever has a runaway subscriber count. The
   worst case is bounded by the friend cap, which the sharded pub/sub tier handles comfortably.
+
+**Stated plainly.** "The cap turns fan-out from an unbounded risk into a number you can multiply —
+the worst channel in the system is only fifty times the average one, and fifty is survivable."
+
+Bounded is doing more work in that sentence than *small*. Fifty times the average is not a small
+multiplier; the point is that it is a *finite, known* multiplier, which is what lets you provision.
+An asymmetric follow graph offers no such number — the ceiling is however many followers the largest
+account happens to have acquired, and it grows without warning.
+
+| Symbol | What it is |
+|--------|------------|
+| `~100` | Average friends per user — the number the 33.3 M/s fan-out estimate is built on |
+| `5,000` | Facebook-style hard cap on friends; the worst-case subscriber count for one channel |
+| `10,000` | The looser cap the chapter also mentions; still a hard bound |
+| `cap / average` | How much worse the worst channel is than a typical one |
+
+**Walk one example.** Price the worst channel in the system against a typical one:
+
+```
+  typical channel:      100 subscribers  ->    100 deliveries per publish
+  worst channel  :    5,000 subscribers  ->  5,000 deliveries per publish
+  looser cap     :   10,000 subscribers  -> 10,000 deliveries per publish
+
+  worst / typical  =  5,000 / 100  =    50x
+                   = 10,000 / 100  =   100x
+
+  a max-cap user moving every 30 s costs:
+      5,000 deliveries / 30 s  =  167 deliveries/s  from that one user
+
+  compare the ENTIRE system:  33,333,333 deliveries/s
+      one worst-case user is  167 / 33,333,333  =  0.0005% of total load
+```
+
+That last line is the whole argument. Even the most-connected possible user generates five ten-
+thousandths of one percent of the delivery load — they are a rounding error, not a hot spot. Contrast
+a follow graph where one account with 50 million followers publishing once would generate 50 million
+deliveries, or **1.5x the entire steady-state load of this system**, from a single event. Symmetry
+plus a cap is what removes that failure mode, which is why the chapter can shard pub/sub by a plain
+hash of the channel id with no hot-key special-casing at all.
 
 ### Nearby random person (opt-in extension)
 

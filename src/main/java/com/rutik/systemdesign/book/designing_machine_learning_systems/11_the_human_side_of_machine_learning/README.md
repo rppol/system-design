@@ -133,6 +133,53 @@ returned by the budget, serve the backup. This is the ML analog of the resilienc
 distributed systems — a fallback path so a single slow component never becomes a user-visible
 outage.
 
+**Read it like this.** "Once you accept a hard latency budget, the model's accuracy stops being the quantity users experience — what they experience is accuracy *conditioned on arriving in time*, and a great answer that misses the deadline scores zero." That reframing is the whole argument for a backup: it moves the design question from "how accurate is the model?" to "what is served during the tail?", and the honest answer for a timeout policy is *nothing*.
+
+| Symbol | What it is |
+|--------|------------|
+| budget | The hard latency SLA (100 ms in the chapter's example) |
+| t_main | The main model's response time, with a long tail |
+| tail rate | Fraction of requests where t_main exceeds the budget |
+| t_backup | The fallback's response time — simpler model, cache, or heuristic |
+| effective accuracy | Accuracy over all requests, counting a miss as a failure |
+| graceful degradation | Serving the backup on a tail miss instead of an error |
+
+**Walk one example.** Use the chapter's own numbers: a 100 ms budget, a main model whose tail requests take 300 ms. Assume the tail is 5% of traffic, the main model is 92% accurate, and the backup is 80% accurate but always returns in 20 ms.
+
+```
+  budget   = 100 ms      t_main (tail) = 300 ms      overrun = 300 - 100 = 200 ms
+  the tail request is 300 / 100 = 3.0x over budget -- not marginal, a hard miss
+
+  Over 1,000,000 requests, 5% of them (50,000) land in the tail.
+
+  POLICY A -- TIME OUT AND ERROR
+    950,000 served by main   : 0.95 x 0.92 = 0.8740 correct-and-on-time
+     50,000 served nothing   : 0.05 x 0.00 = 0.0000
+    effective accuracy       =              87.40%
+    users shown an error page: 50,000
+
+  POLICY B -- GRACEFUL DEGRADATION TO THE BACKUP
+    950,000 served by main   : 0.95 x 0.92 = 0.8740
+     50,000 served by backup : 0.05 x 0.80 = 0.0400
+    effective accuracy       =              91.40%
+    users shown an error page: 0
+
+  delta = 91.40 - 87.40 = 4.00 percentage points of effective accuracy,
+  bought without touching the model at all -- and 50,000 error pages removed.
+
+Now the point the arithmetic makes that prose does not. The backup is 12 points
+WORSE than the main model (80% vs 92%), and adding it still raised the number
+users actually experience. That is because on those 50,000 requests the real
+comparison was never 80% vs 92% -- the main model had already lost. It was
+80% vs 0%.
+
+Latency of what users actually receive, under Policy B:
+    0.95 x (main, within budget) + 0.05 x 20 ms backup
+  -- every single request answered inside the 100 ms budget, none dropped.
+```
+
+The reason this belongs in a chapter about *humans* rather than a chapter about serving is the asymmetry in the last block. Engineers instinctively protect the 92% number, because that is the number on the model card and the one the team is evaluated on. Users never see it. They see whether an answer appeared, and a 12-point-worse answer delivered on time beats a perfect one that never arrives — which is only obvious once the zero in `0.05 x 0.00` is written down.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold

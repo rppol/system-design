@@ -112,6 +112,32 @@ Traffic is not flat, so assume a **2× peak factor**:
 Peak QPS = 2 × 400 = 800 pages per second
 ```
 
+**Read it like this.** The throughput estimate is a unit conversion followed by a safety margin: *"turn a monthly page budget into a per-second rate, then multiply by a peak factor because traffic is never flat."* The peak number, not the average, is what every downloader-sizing decision downstream is measured against.
+
+| Symbol | What it is |
+|--------|------------|
+| `1,000,000,000 pages/month` | The crawl budget fixed in the requirements dialogue. |
+| `30 days/month` | Assumed month length (the chapter's simplification). |
+| `2,592,000 sec/month` | `30 days x 24 h/day x 3600 s/h` — the conversion constant. |
+| `average QPS` | Pages fetched per second if traffic were perfectly flat. |
+| `2x` | Assumed peak factor covering diurnal and burst variation. |
+| `peak QPS` | The rate the downloader fleet must actually be able to sustain. |
+
+**Walk one example.** The conversion with units carried on every line:
+
+```
+step 1  seconds per month  30 days/month x 24 h/day x 3600 s/h  = 2,592,000 s/month
+step 2  average rate       1,000,000,000 pages/month
+                           / 2,592,000 s/month                  = 385.8 pages/s
+step 3  peak rate          385.8 pages/s x 2                    = 771.6 pages/s
+step 4  chapter's rounding 385.8 -> ~400 pages/s
+                           771.6 -> ~800 pages/s
+Meaning: the fleet must sustain roughly 800 fetches per second, and every politeness,
+DNS, and timeout decision in Step 3 is sized against that 800, not against the 385.8.
+```
+
+The exact arithmetic is `385.8` average and `771.6` peak; the chapter rounds both up to `400` and `800`, which is the right instinct in an interview — the rounded `400 pages/s` implies `1,036,800,000 pages/month`, a 3.7 percent cushion over the requirement rather than a shortfall. Drop the `2x` peak factor entirely and you build a fleet that is exactly saturated at the daily average, meaning every evening peak silently falls behind and the Frontier grows without bound.
+
 **Storage:**
 
 ```
@@ -125,6 +151,34 @@ Over 5 years = 500 TB × 12 months × 5 years
              = 30,000 TB
              = 30 PB
 ```
+
+**What the formula is telling you.** Storage is the throughput number multiplied twice: *"pages per month times bytes per page gives bytes per month, and bytes per month times the retention window gives the total you must actually buy."* Both multipliers are assumptions, so both are places the estimate can be off by an order of magnitude.
+
+| Symbol | What it is |
+|--------|------------|
+| `1,000,000,000 pages/month` | Crawl volume from the requirements dialogue. |
+| `500 KB/page` | Assumed average HTML page size (stated by the chapter). |
+| `12 months/year` | Months per year. |
+| `5 years` | The retention window fixed in Step 1 ("store up to 5 years"). |
+| `60 months` | `12 months/year x 5 years` — the full retention multiplier. |
+| `1 TB` | `1,000,000,000 KB` in the decimal convention the chapter uses. |
+| `1 PB` | `1,000 TB`. |
+
+**Walk one example.** The storage chain with units carried on every line:
+
+```
+step 1  bytes per month    1,000,000,000 pages/month x 500 KB/page
+                                                       = 500,000,000,000 KB/month
+step 2  in terabytes       500,000,000,000 KB/month
+                           / 1,000,000,000 KB/TB       = 500 TB/month
+step 3  retention window   12 months/year x 5 years    = 60 months
+step 4  total at rest      500 TB/month x 60 months    = 30,000 TB
+step 5  in petabytes       30,000 TB / 1,000 TB/PB     = 30 PB
+Meaning: 30 PB is roughly 3 x 10^16 bytes -- far past any single machine's RAM, which
+is exactly what forces the disk-primary, memory-cache-for-popular-pages split.
+```
+
+The `500 KB/page` multiplier is the fragile one: it is an assumption about the *average* HTML document, and it is what lets the "HTML only" scope hold. Admit images or PDFs into the crawl and the per-page figure moves by an order of magnitude, taking the 30 PB with it — which is why "what content types?" is asked in Step 1 and not discovered in Step 3. Drop the `60 months` retention multiplier and you size storage for a single month's 500 TB, under-provisioning by 60x on a system whose whole point is keeping five years of snapshots.
 
 So the storage subsystem must plan for **30 PB of HTML** to hold five years of crawl — the
 number that later justifies "most content lives on disk, only popular content in memory."
@@ -218,6 +272,35 @@ hostname `www.example.com` into an IP address — that is DNS resolution. This t
   periodically by a background job. Because a crawler hits the same host thousands of times
   (most links on a page point back to the same domain), the cache hit rate is very high and
   DNS stops being the bottleneck.
+
+**In plain terms.** "DNS is a bottleneck" is a concurrency statement, not a latency one: *"if each lookup blocks for a fixed time, the lookups you can finish per second is your thread count divided by that time."* Written that way, the cache stops looking like an optimization and starts looking like the only affordable option.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Latency of one synchronous DNS lookup, 10 ms to 200 ms. |
+| `1 / L` | Lookups per second a single blocked thread can complete. |
+| `800 pages/s` | The peak fetch rate the crawler must sustain. |
+| `800 x L` | Threads needed if every fetch pays a full lookup. |
+| `h` | DNS cache hit rate — fraction of fetches that skip the lookup entirely. |
+| `800 x (1 - h)` | Lookups per second that actually reach a resolver. |
+
+**Walk one example.** Take the midpoint latency, `L = 100 ms`:
+
+```
+WITHOUT a cache
+  per-thread capacity   1 / 0.100 s per lookup           = 10 lookups/s/thread
+  threads required      800 lookups/s / 10 lookups/s     = 80 threads blocked on DNS
+                        at the 200 ms worst case: 800 / 5 = 160 threads
+
+WITH a cache at 99 percent hit rate
+  lookups that escape   800 pages/s x (1 - 0.99)         = 8 lookups/s
+  threads required      8 lookups/s / 10 lookups/s       = 0.8 threads
+  reduction             80 threads -> 0.8 threads        = 100x fewer
+Meaning: uncached DNS demands a pool of ~80 threads doing nothing but waiting; the
+cache shrinks that below one, which is why it is mandatory rather than optional.
+```
+
+The hit rate is high for a structural reason, not a lucky one: most links on a page point back to the same host, and the back-queue design deliberately funnels every URL for one host to one worker. The same hostname is therefore resolved once and reused across thousands of fetches — the crawler's access pattern and its politeness mechanism are what make the DNS cache effective.
 
 ### Content Parser
 
@@ -407,6 +490,40 @@ The mechanism that guarantees this is the **back-queue tier**:
   once, and the delay spaces out consecutive fetches. That is politeness, structurally
   guaranteed.
 
+**What this actually says.** The politeness rule is a hard rate cap: *"one connection per host with a delay of d seconds between fetches means that host can never be crawled faster than 1/d pages per second, no matter how large your fleet is."* Total throughput therefore comes from the *number of hosts in flight*, not from adding threads — which is the single most counter-intuitive consequence of the back-queue design.
+
+| Symbol | What it is |
+|--------|------------|
+| `d` | Politeness delay between consecutive fetches to the same host, in seconds. |
+| `1 / d` | Maximum pages per second obtainable from one host. |
+| `M` | Number of distinct hosts currently pinned to back queues. |
+| `N` | Number of worker threads (one per back queue, so `N = M`). |
+| `N x (1 / d)` | Aggregate crawl throughput in pages per second. |
+| `800 pages/s` | The peak rate the whole crawler must reach. |
+
+**Walk one example.** How many back queues 800 pages/s actually requires:
+
+```
+per-host ceiling      d = 1 s   -> 1 / 1  = 1.0 pages/s/host
+                      d = 2 s   -> 1 / 2  = 0.5 pages/s/host
+                      d = 5 s   -> 1 / 5  = 0.2 pages/s/host
+                      d = 10 s  -> 1 / 10 = 0.1 pages/s/host
+
+back queues (= workers = distinct hosts) needed for 800 pages/s:
+  d = 1 s    800 pages/s / 1.0 pages/s/host   =   800 hosts in flight
+  d = 2 s    800 pages/s / 0.5 pages/s/host   = 1,600 hosts in flight
+  d = 5 s    800 pages/s / 0.2 pages/s/host   = 4,000 hosts in flight
+  d = 10 s   800 pages/s / 0.1 pages/s/host   = 8,000 hosts in flight
+
+At d = 1 s and 100 worker threads per crawl server:
+  800 workers / 100 threads/server            = 8 downloader servers
+Meaning: throughput scales with HOSTS, not threads. Adding a second worker to a
+back queue would double that host's rate and break politeness, so the only legal
+way to go faster is to hold more hosts open at once.
+```
+
+This is why the two tiers cannot be collapsed. If you doubled the politeness delay to be safer, you would need twice as many back queues — and therefore twice as broad a host mix in the Frontier — to hold the same 800 pages/s. A crawl that discovers deep, narrow sites (few hosts, many pages each) is throughput-starved by politeness no matter how much hardware you throw at it; a crawl seeded broadly across many domains is not. That is the quantitative case for the "partition the URL space by locality or topic" seed strategy from Step 2.
+
 This is exactly the fix for plain BFS's impoliteness: no matter how many `wikipedia.org` links
 BFS discovers in a burst, they all funnel into `b1` and get drained slowly by one worker.
 
@@ -436,6 +553,37 @@ its copy fresh. Recrawling everything constantly is wasteful, so the strategies 
   news homepage might be recrawled hourly, a static "about" page monthly.
 - **Prioritize important pages** — recrawl important pages (high PageRank/traffic) more
   frequently and earlier, so the most-visited pages are the freshest.
+
+**Put simply.** Recrawl frequency is a budget division, not a policy preference: *"the interval between visits to any page is the size of the corpus divided by the crawl rate you are willing to spend on revisits."* The moment you write that ratio down, uniform recrawling is visibly impossible and selective recrawling becomes forced.
+
+| Symbol | What it is |
+|--------|------------|
+| `C` | Corpus size — pages already crawled and being kept fresh. |
+| `R` | Crawl rate spent on recrawling, in pages per month. |
+| `C / R` | Sweep interval — months to revisit every page once. |
+| `1,000,000,000 pages/month` | The total crawl budget, shared between discovery and recrawl. |
+| `f` | Fraction of the budget allocated to recrawl rather than new pages. |
+| `f x 1,000,000,000` | Recrawl throughput available per month. |
+
+**Walk one example.** Sweep interval for a five-year corpus of `60,000,000,000` pages:
+
+```
+corpus after 5 years   1,000,000,000 pages/month x 60 months  = 60,000,000,000 pages
+
+spend the ENTIRE budget on recrawl (f = 1.0, discover nothing new):
+  60,000,000,000 pages / 1,000,000,000 pages/month            = 60 months per sweep
+  at 400 pages/s: 60,000,000,000 / 400 pages/s               = 4.76 years per sweep
+
+split the budget instead:
+  f = 0.5   recrawl at 500,000,000 pages/month  -> sweep every 120 months
+  f = 0.3   recrawl at 300,000,000 pages/month  -> sweep every 200 months
+  f = 0.1   recrawl at 100,000,000 pages/month  -> sweep every 600 months
+Meaning: even spending 100 percent of a billion pages/month on revisits gives every
+page a 5-year refresh -- useless for a news homepage. Uniform recrawl is arithmetically
+dead, so the budget must be aimed at the pages that actually change.
+```
+
+That is the entire justification for "recrawl based on update history" and "prioritize important pages." A news homepage recrawled hourly costs `720 fetches/month`; giving that treatment to all 60 billion pages would need `43,200,000,000,000` fetches per month — exactly 43,200 times the crawler's whole budget. The recrawl policy is not tuning — it is what makes freshness fit inside the same 800 pages/s the discovery crawl is already saturating.
 
 #### Storage for the URL Frontier
 
@@ -642,6 +790,45 @@ False positive => a genuinely-new URL is wrongly skipped (lost coverage),
 Caption: a Bloom filter answers "have I seen this URL?" in O(k) time using a bit array far
 smaller than storing the URLs themselves; the price is a tunable false-positive rate, where a
 false positive silently drops a new URL but never causes a re-crawl.
+
+**Stated plainly.** The false-positive formula `(1 - e^(-k n / m))^k` reads as a two-step story: *"after inserting n URLs, each bit has some chance of already being 1; a false positive happens when all k of a new URL's bits are 1 by coincidence."* The whole tuning exercise is a straight trade of bits per URL against how much crawl coverage you are willing to lose.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of URLs inserted into the filter. |
+| `m` | Size of the bit array, in bits. |
+| `m / n` | Bits of memory spent per URL — the knob you actually turn. |
+| `k` | Number of hash functions per URL (the `h1, h2, h3` above). |
+| `e^(-k n / m)` | Probability a given bit is still 0 after all insertions. |
+| `(1 - e^(-k n / m))^k` | False-positive rate: all `k` bits happen to be 1. |
+| `(m/n) x ln 2` | The `k` that minimizes the false-positive rate for a given `m/n`. |
+
+**Walk one example.** The chapter's billion URLs, at 10 bits per URL:
+
+```
+n = 1,000,000,000 URLs
+m = 1,000,000,000 x 10 bits             = 10,000,000,000 bits
+memory                                  = 10,000,000,000 / 8 = 1,250,000,000 bytes
+                                        = 1.25 GB
+optimal k       10 x ln 2 = 6.93        -> k = 7 hash functions
+false positive  (1 - e^(-7 x 1e9 / 1e10))^7
+                = (1 - e^(-0.7))^7      = 0.00819  = 0.82 percent
+coverage lost   1,000,000,000 x 0.00819 = 8,193,722 URLs silently skipped
+
+Bits-per-URL sweep (n = 1 billion, k chosen optimally each time):
+  8 bits/URL    m = 1.00 GB   k = 6    false positive = 2.16 percent
+ 10 bits/URL    m = 1.25 GB   k = 7    false positive = 0.82 percent
+ 12 bits/URL    m = 1.50 GB   k = 8    false positive = 0.31 percent
+ 16 bits/URL    m = 2.00 GB   k = 11   false positive = 0.046 percent
+
+Exact hash set for comparison, storing the URLs themselves at ~100 bytes each:
+  1,000,000,000 URLs x 100 bytes        = 100,000,000,000 bytes = 100 GB
+  ratio  100 GB / 1.25 GB               = 80x more memory
+Meaning: the Bloom filter fits a billion-URL seen-set in 1.25 GB instead of 100 GB --
+80x less -- and the bill is 8.2 million pages the crawler will never discover.
+```
+
+That last line is the cost the pitfalls section warns about, made concrete. Because a false positive means "I think I have seen this URL," a *genuinely new* page is dropped and never enters the Frontier — and since the filter has no false negatives, nothing ever re-discovers it. Doubling from 8 to 16 bits per URL costs 1 GB of RAM and cuts the loss from about 21.6 million pages to about 459 thousand, which is why the memory knob is worth turning even when the filter "already works."
 
 ---
 

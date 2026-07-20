@@ -138,6 +138,59 @@ alone does not prevent this. Solutions:
 - (In replicated/multi-leader databases, locks and CAS don't suffice; you need conflict resolution
   / version vectors / commutative operations from Ch 5.)
 
+### Decoding how likely a lost update actually is
+
+The chapter describes lost update as a race without quantifying it, which is why engineers talk
+themselves out of fixing it ("the window is only milliseconds"). The window is milliseconds; the
+collision rate is not small. Two transactions on the same object collide when their execution
+windows overlap, and for a transaction of duration `T` under Poisson arrivals at rate `lambda`:
+
+```
+  expected concurrent transactions on the object      = lambda * T
+  expected overlapping partners for a given one       = 2 * lambda * T
+  P(at least one overlaps) = 1 - e^(-2 * lambda * T)
+```
+
+**What this actually says.** "Multiply how often the object is written by how long a write takes.
+That product *is* your concurrency, and once it approaches 1 the race is not an edge case — it is
+what normally happens."
+
+The `2 *` is the part people miss: a transaction is exposed to writes that start during it *and*
+to writes already running when it started, so the exposure window is `2T`, not `T`.
+
+| Symbol | What it is |
+|--------|------------|
+| `lambda` | Arrival rate of read-modify-write transactions on the same object, per second |
+| `T` | How long one transaction holds that object — read, compute, write back |
+| `lambda * T` | Expected number of transactions in flight on the object at any instant |
+| `2 * lambda * T` | Expected overlapping partners, counting arrivals both before and during |
+| `1 - e^(-x)` | Poisson chance of at least one such partner. Small `x` -> approximately `x`; large `x` -> 1 |
+
+**Walk one example.** A read-modify-write on one row taking `T` = 20 ms:
+
+```
+  lambda     lambda*T   2*lambda*T   P(>=1 overlap) = 1 - e^-(2*lambda*T)
+    5/s        0.10        0.20            18.13%
+   25/s        0.50        1.00            63.21%
+   50/s        1.00        2.00            86.47%
+  100/s        2.00        4.00            98.17%
+
+  same 50/s but a slow transaction, T = 100 ms:
+   50/s        5.00       10.00            99.99%
+```
+
+At a modest 50 writes/second on one hot row, **86% of transactions run concurrently with another
+one** — every one of those is a lost update unless something prevents it. This is why the chapter
+insists you cannot leave lost update to chance, and why the last row matters most operationally:
+holding `lambda` fixed and letting `T` grow from 20 ms to 100 ms takes the collision rate from
+86% to essentially certain. Transaction *duration* is the variable you control; an app-side
+read-modify-write with a network round-trip in the middle is what inflates it.
+
+The same arithmetic governs **write skew**, with one difference: there the transactions need not
+touch the same row, only the same *premise*. So `lambda` is the rate of transactions reading that
+shared query result — typically higher than the rate hitting any single row, which is why write
+skew is both more likely and harder to notice than lost update.
+
 ### Write skew and phantoms
 
 The hardest anomaly. **Write skew** generalizes lost update: two transactions read the *same set*
@@ -227,6 +280,90 @@ including ones that don't exist yet) — usually approximated by **index-range l
 locking)** for efficiency. Correct but with **poor performance**: low concurrency (lots of waiting),
 and **deadlocks** are frequent (transactions waiting on each other's locks), forcing aborts and
 retries — so latency is unpredictable and throughput suffers.
+
+### Decoding "poor performance" and "frequent deadlocks"
+
+Those two phrases carry the chapter's whole case against 2PL, and both are arithmetic. A lock is
+a single-server queue: transactions arrive at rate `lambda` and each occupies the lock for `T`.
+
+```
+  utilization        rho = lambda * T
+  queueing delay     W_q = T * rho / (1 - rho)
+  total time         W   = T / (1 - rho)
+  slowdown vs. an uncontended transaction = 1 / (1 - rho)
+```
+
+**Put simply.** "The fraction of time the lock is already taken is just arrival rate times hold
+time. As that fraction climbs toward 1, waiting time does not rise gently — it blows up, because
+the divisor `1 - rho` is heading for zero."
+
+| Symbol | What it is |
+|--------|------------|
+| `lambda` | Transactions per second wanting that lock |
+| `T` | How long a transaction holds it — under 2PL, **until commit**, not until the write |
+| `rho` | Utilization: the share of time the lock is occupied. Must stay below 1 or the queue grows forever |
+| `1 / (1 - rho)` | The blow-up factor. `rho = 0.9` means every transaction takes 10x as long |
+| `W_q` | Time spent waiting to acquire, before any useful work happens |
+
+**Walk one example.** One contended row, transactions holding the lock `T` = 20 ms:
+
+```
+  lambda    rho = lambda*T    W_q wait      W total     slowdown
+   10/s         0.20            5 ms         25 ms        1.25x
+   25/s         0.50           20 ms         40 ms        2.00x
+   40/s         0.80           80 ms        100 ms        5.00x
+   45/s         0.90          180 ms        200 ms       10.00x
+   49/s         0.98          980 ms       1000 ms       50.00x
+ 49.5/s         0.99         1980 ms       2000 ms      100.00x
+```
+
+Read the last two rows together: **a 1% increase in arrival rate, from 49 to 49.5 per second,
+doubles latency from 1 s to 2 s.** Nothing about the workload changed qualitatively. That cliff
+is what "latency is unpredictable" means — a 2PL system looks healthy right up until it does not,
+because the interesting region is the last few percent before `rho = 1`.
+
+It also explains why 2PL's "hold locks until the transaction ends" rule is so costly. `T` is not
+the duration of the write; it is the whole remaining transaction, including any application
+round-trips. Doubling `T` doubles `rho`, and near the cliff that is the difference between a
+working system and a stalled one — which is exactly the argument for the stored-procedure model
+used by actual serial execution.
+
+**The idea behind it.** Deadlock needs two transactions to hold locks the other wants, so its
+frequency tracks how likely two transactions touch a shared row at all. For transactions each
+locking `k` rows out of `L` candidates:
+
+```
+  P(two transactions share at least one row) = 1 - C(L - k, k) / C(L, k)
+
+  where C(n, k) counts the ways to choose k rows from n, and C(L-k, k) / C(L, k)
+  is the chance the second transaction avoids all k rows the first one took
+```
+
+**Walk one example.** `L` = 1000 candidate rows:
+
+```
+  locks per txn (k)     P(a given pair shares a row)
+       2                       0.400%
+       5                       2.480%
+      10                       9.603%
+      20                      33.501%
+
+  with k = 10 and C concurrent transactions, there are C(C,2) pairs:
+
+    C =  2      1 pair      expected conflicting pairs  0.096    P(>=1) =  9.60%
+    C =  5     10 pairs                                 0.960    P(>=1) = 63.56%
+    C = 10     45 pairs                                 4.321    P(>=1) = 98.94%
+    C = 20    190 pairs                                18.246    P(>=1) > 99.99%
+```
+
+Two things compound here, and that is the point. Conflicts grow **quadratically** in the
+transaction count (`C(C,2)` pairs), and steeply in the locks each transaction takes — doubling
+`k` from 10 to 20 more than triples the per-pair collision rate. So a 2PL system degrades on two
+axes at once: more concurrency and longer transactions each make conflict likelier, and every
+conflict resolved as a deadlock costs a full abort and retry, which re-enters the same queue. SSI
+attacks the same numbers from the other side — it lets all `C` transactions run and pays only for
+the pairs that genuinely conflicted, which is why its advantage is largest when contention is low
+and evaporates when it is high.
 
 ### Serializable snapshot isolation (SSI)
 

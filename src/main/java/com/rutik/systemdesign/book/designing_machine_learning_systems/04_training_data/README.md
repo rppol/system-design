@@ -52,6 +52,33 @@ Give every item in the population an **equal probability** of selection — e.g.
 
 The failure mode is **rare-class erasure**: a class that is 0.01% of the population will be ~0.01% of a uniform 1% sample — which for a modest sample size may be **zero examples**. If you uniformly sample 1,000 rows and a fraud class is 1-in-100,000, you'll very likely draw *none* of it, and the model can never learn it. Simple random sampling silently deletes the rare, often most-important, classes.
 
+**In plain terms.** "A uniform sample faithfully preserves each class's *share* of the population — which is precisely the disaster when the share you care about is already near zero." The number that decides whether a class survives is not its expected count but the probability of drawing **zero** of it.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | The rare class's share of the population (1-in-100,000 = 0.00001) |
+| `m` | How many rows you draw uniformly at random |
+| `r x m` | Expected number of rare rows in the draw |
+| `(1 - r)^m` | Probability the draw contains *none* of the rare class |
+
+**Walk one example.** The same fair sampler, applied to a 10% class and to a 1-in-100,000 class:
+
+```
+  common class   r = 0.10 (a "10% class"),  draw m = 100 rows
+    expected rare rows  = 0.10 x 100                 = 10.0
+    spread              = sqrt(100 x 0.10 x 0.90)    =  3.0    -> roughly 7 to 13, never absent
+    P(draw contains 0)  = 0.90^100                   =  0.0000266
+
+  fraud class    r = 0.00001 (1 in 100,000), draw m = 1,000 rows
+    expected rare rows  = 0.00001 x 1,000            =  0.01   -> one row per 100 such draws
+    P(draw contains 0)  = (1 - 0.00001)^1000         =  0.99005
+
+  Same sampler, same fairness. The 10% class is always there.
+  The 1-in-100,000 class is missing from 99 draws out of 100.
+```
+
+Stratified sampling changes the question being asked: instead of "what fraction of the *population* is fraud" it asks "how many rows do I want *from the fraud stratum*," and the answer can be 500 even when fraud is 0.001% of the whole. That decoupling of sample size from population share is the entire point of the method.
+
 ### Stratified sampling
 
 Fix the rare-class erasure by first **dividing the population into groups (strata)** — one per class — and sampling from *each group separately*, so every group is guaranteed representation. You might sample 1% within the common class and 1% within the rare class independently, or deliberately over-sample the rare stratum, but either way no group can vanish. It preserves (or intentionally reshapes) the ratio between groups.
@@ -91,6 +118,34 @@ reservoir_sampling(stream, k):
 
 A tiny worked instance (k = 1, so we keep a single item — this is "pick a uniformly random item from a stream"): item 1 is kept with prob 1; item 2 replaces it with prob 1/2 (so each is now 1/2); item 3 replaces the survivor with prob 1/3 (so each of the three ends at 1/3). Every item ends equally likely — exactly what the induction guarantees.
 
+**What this actually says.** "Each new arrival shrinks an incumbent's survival odds by exactly the fraction needed to keep every item's probability equal to the reservoir's share of the stream so far." The recurrence `k/(n-1) x (1 - 1/n) = k/n` is a telescoping cancellation: the `(n-1)` you divided by is the same `(n-1)` the survival term hands back.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Reservoir size — how many items you keep at any moment |
+| `n` | How many items the stream has produced so far (unknown in advance) |
+| `k/n` | The invariant: every item seen so far is in the reservoir with this probability |
+| `1/k` | Chance a *specific* incumbent slot is the one overwritten, given the newcomer was accepted |
+| `(k/n) x (1/k) = 1/n` | Probability the n-th item both enters AND evicts one specific incumbent |
+| `1 - 1/n` | Probability an incumbent survives step n |
+
+**Walk one example.** The k = 1 case beside a k = 3 case, step by step:
+
+```
+  k = 1  (keep a single item)              k = 3  (keep three)
+  -------------------------------------    ------------------------------------------
+  n=1: item1 present with prob 1.000       n=3: items 1-3 present with 3/3 = 1.000
+  n=2: survive 1 - 1/2 = 0.500             n=4: 1.000 x (1 - 1/4) = 0.750 = 3/4
+       item1 = 1.000 x 0.500 = 0.500       n=5: 0.750 x (1 - 1/5) = 0.600 = 3/5
+       item2 accepted with   = 0.500       n=6: 0.600 x (1 - 1/6) = 0.500 = 3/6
+  n=3: survive 1 - 1/3 = 0.667
+       item1 = 0.500 x 0.667 = 0.333       and the newcomer at n=6 is accepted
+       item2 = 0.500 x 0.667 = 0.333       with k/n = 3/6 = 0.500 -- identical
+       item3 accepted with   = 0.333
+```
+
+Every item, no matter when it arrived, sits at exactly `k/n` — 0.333 for all three at n=3, 0.500 for all six at n=6. The invariant is exact at every step, not approximate in the limit, which is why the algorithm can be stopped at any moment and still hand you a uniform sample.
+
 ### Importance sampling
 
 Lets you **sample from a distribution q (the proposal) when you actually want expectations under a different distribution p (the target)** — because sampling from p is impossible or expensive, but sampling from q is easy. You draw from q and **reweight each sample by the ratio p(x)/q(x)** (the *importance weight*), and the reweighted average is an unbiased estimate of the expectation under p:
@@ -98,6 +153,31 @@ Lets you **sample from a distribution q (the proposal) when you actually want ex
 ```
 E_p[f(x)]  =  Σ  p(x)·f(x)  =  Σ  q(x)·[ p(x)/q(x) ]·f(x)  =  E_q[ (p(x)/q(x))·f(x) ]
 ```
+
+**Read it like this.** "Draw from the distribution you can actually afford, then pay each sample back by the ratio of how often the target would have produced it to how often the proposal did." The identity is pure bookkeeping — multiply and divide by q(x) — but it converts an impossible expectation into an affordable one.
+
+| Symbol | What it is |
+|--------|------------|
+| `p(x)` | Target distribution — the one you want the expectation under, but can't sample |
+| `q(x)` | Proposal distribution — the one you can actually draw from cheaply |
+| `p(x)/q(x)` | The importance weight; > 1 means q under-draws this outcome, < 1 means it over-draws |
+| `f(x)` | The quantity you're averaging (a reward, a loss, any function of the sample) |
+| `E_q[...]` | A plain average over samples drawn from q, of the reweighted values |
+
+**Walk one example.** Three outcomes, a proposal that badly mismatches the target:
+
+```
+  outcome    p(x)    q(x)    w = p/q    f(x)     q(x) x w x f(x)
+  --------------------------------------------------------------
+  A          0.1     0.5       0.2        10     0.5 x 0.2 x 10 =  1.0
+  B          0.3     0.3       1.0        20     0.3 x 1.0 x 20 =  6.0
+  C          0.6     0.2       3.0        30     0.2 x 3.0 x 30 = 18.0
+  --------------------------------------------------------------
+  reweighted estimate under q                                   = 25.0
+  direct expectation under p: 0.1x10 + 0.3x20 + 0.6x30          = 25.0
+```
+
+The two agree exactly. Read the weights as a correction ledger: q draws outcome A five times too often, so each A is discounted to 0.2 of its face value; q draws C three times too rarely, so each C counts triple. Outcome B is drawn at the right rate and passes through at weight 1.0.
 
 The only requirement is that q(x) > 0 wherever p(x) > 0 (the proposal must cover the target's support). **Reinforcement learning** is the flagship use case Huyen cites: in **policy-based methods**, the policy that generated the trajectories (the behavior/old policy, q) differs from the updated policy you want to evaluate (the new policy, p); rather than re-collecting fresh trajectories after every tiny policy update — which is enormously expensive — you reuse the old samples and reweight them by the ratio of the new policy's action probabilities to the old policy's. That's importance sampling, and it's why off-policy RL and algorithms like PPO can learn from data a slightly different policy generated.
 
@@ -255,6 +335,39 @@ The first and most important fix isn't to the data or model — it's to **stop m
 
 **Threshold selection** — most classifiers output a probability, and you choose a decision **threshold** to convert it to a label. The default 0.5 is arbitrary; under imbalance and asymmetric costs you deliberately move it (e.g. lower the threshold to catch more cancers, accepting more false alarms — a recall-favoring choice). The PR curve is the tool for picking the operating point that best trades precision against recall for your cost structure.
 
+**Stated plainly.** "Recall and the false-positive rate divide by the *true* class sizes, so under imbalance the FPR denominator is astronomically large and hides the damage; precision divides by what the model *flagged*, so it cannot hide anything." The three metrics differ only in their denominator, and the denominator is the whole argument.
+
+| Symbol | What it is |
+|--------|------------|
+| `TP` | True positives — real positives the model flagged |
+| `FN` | False negatives — real positives the model missed |
+| `FP` | False positives — negatives the model wrongly flagged (the alerts that waste a human's time) |
+| `TN` | True negatives — negatives correctly left alone; under imbalance this number is enormous |
+| `recall = TP/(TP+FN)` | Of the actual positives, the fraction caught. Denominator = all real positives |
+| `FPR = FP/(FP+TN)` | The ROC x-axis. Denominator = all real negatives — the huge one |
+| `precision = TP/(TP+FP)` | Of what you flagged, the fraction that was real. Denominator = predicted positives |
+
+**Walk one example.** A million transactions, 100 of them fraud (0.01% positive):
+
+```
+  1,000,000 transactions;  100 fraud (positives),  999,900 legitimate (negatives)
+
+  operating point A:  TP = 80   FN = 20   FP = 8,000   TN = 991,900
+    recall (TPR) = 80 / 100                = 0.800
+    FPR          = 8,000 / 999,900         = 0.0080   <- ROC point (0.008, 0.800): top-left
+    precision    = 80 / (80 + 8,000)       = 0.0099   <- 1 real fraud per 101 alerts
+    F1           = 2 x 0.0099 x 0.800 / (0.0099 + 0.800)  = 0.0196
+    accuracy     = (80 + 991,900) / 1,000,000          = 0.99198
+
+  operating point B (threshold lowered to chase recall): TP = 95   FP = 50,000
+    recall = 0.950     FPR = 50,000 / 999,900 = 0.0500   <- ROC still looks fine
+    precision = 95 / 50,095                   = 0.0019   <- 1 real fraud per 527 alerts
+```
+
+One model, one confusion matrix, two stories. Accuracy says 99.198% and the ROC point sits in the flattering top-left corner, while precision says 99 of every 100 alerts are noise. Moving from A to B buys 15 extra caught frauds at the cost of 42,000 extra false alarms — a trade the PR curve makes visible and the ROC curve does not, because the FPR only crept from 0.008 to 0.050.
+
+The 0.5 default threshold has no special status here: it is simply the point where the model's own probability crosses one half, which has nothing to do with your cost of a missed fraud versus a wasted investigator-hour. Pick the operating point from the PR curve using those costs, then read off the threshold that produces it.
+
 ### Data-level methods: resampling
 
 Rebalance the training distribution by changing *how many* of each class the model sees.
@@ -289,6 +402,36 @@ Leave the data alone; change the **loss function** so the model *pays more* for 
   | Hard (near boundary) | 0.50 | 0.693 | 0.25 | 0.173 | **~165×** |
 
   Under plain cross-entropy the hard example's loss is only ~6.6× the easy one's; focal loss with γ = 2 stretches that gap to ~165×, so a flood of easy majority-class examples no longer drowns out the few hard rare-class ones in the gradient.
+
+  **What the formula is telling you.** "Keep the usual cross-entropy penalty, but scale it down by how confident-and-correct the model already was, so examples it has already mastered stop consuming gradient." The per-example ratio above is only half the story; what matters in practice is the share of the *batch* loss the rare class commands.
+
+  | Symbol | What it is |
+  |--------|------------|
+  | `p_t` | The probability the model assigned to the *true* class. Near 1 = easy, near 0 = hard |
+  | `-log(p_t)` | Plain cross-entropy. 0 when perfectly confident and right, unbounded when confidently wrong |
+  | `γ` | The focusing parameter. 0 = plain cross-entropy; 2 is the common setting |
+  | `(1 - p_t)^γ` | The modulating factor. Multiplies the loss down toward 0 as the model gets confident |
+  | `(1 - p_t)^γ · log(p_t)` | The product: full penalty on hard examples, near-zero penalty on easy ones |
+
+  **Walk one example.** A single realistic batch — 1,000 easy majority examples and 10 hard rare ones:
+
+  ```
+    batch: 1,000 easy examples (p_t = 0.90) + 10 hard examples (p_t = 0.50), gamma = 2
+
+    plain cross-entropy
+      easy total = 1,000 x 0.10536              = 105.361
+      hard total =    10 x 0.69315              =   6.931
+      hard share of batch loss = 6.931 / 112.292          = 6.2%
+
+    focal loss, gamma = 2
+      easy total = 1,000 x 0.01 x 0.10536       =   1.054
+      hard total =    10 x 0.25 x 0.69315       =   1.733
+      hard share of batch loss = 1.733 / 2.787            = 62.2%
+  ```
+
+  The 10 examples that actually need learning go from commanding 6.2% of the gradient to 62.2% — a roughly 10x reallocation of the model's attention, achieved without touching a single row of data or duplicating a single minority example. That is why focal loss is an *algorithm-level* fix: the training distribution is untouched, so the model still sees (and stays calibrated to) the real class frequencies.
+
+  Setting γ = 0 collapses `(1 - p_t)^γ` to 1 for every example and you are back to plain cross-entropy — the term exists purely to make "already solved" examples cheap. Without it, the 1,000 easy examples above contribute 105 of the batch's 112 loss units, and the gradient spends almost all its budget re-confirming what the model already knows.
 
 ---
 

@@ -79,6 +79,42 @@ combination is what forces the ladder.
 | **Correctness (atomicity)** | No double-spend, no lost money, no created money | A transfer touches two wallets → cross-partition atomicity |
 | **Reproducibility (audit)** | Recompute any wallet's balance as of any past instant | In-place `UPDATE` destroys history — model-breaking |
 
+**Read it like this.** "An availability target is just a permitted-downtime budget wearing a
+percentage costume — subtract it from 1 and multiply by the year." Converting the nines into minutes
+is what makes the number negotiable in an interview: 99.99% sounds like a slogan, but "52 minutes a
+year, total, including deploys" is a concrete constraint that immediately rules out any design with a
+manual failover step.
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Availability as a fraction — `0.9999` for four nines |
+| `1 - A` | The unavailability fraction — the part of the year you are allowed to be down |
+| `525,600` | Minutes in a year: `365 x 24 x 60` — the other constant worth memorizing |
+| `(1 - A) x 525,600` | Permitted downtime in minutes per year |
+| MTTR | Mean time to recover — how long one incident lasts; the budget divided by MTTR is how many incidents you get |
+
+**Walk one example.** The nines ladder, with the chapter's target in the middle:
+
+```
+  minutes in a year : 365 x 24 x 60 = 525,600
+
+     A          1 - A        downtime / year
+   99%        0.01           5,256.00 min   =  87.60 h
+   99.9%      0.001            525.60 min   =   8.76 h
+   99.99%     0.0001            52.56 min   =   0.88 h    <- the requirement
+   99.999%    0.00001            5.26 min   =   0.09 h
+
+  what 52.56 minutes actually buys you
+    at MTTR = 30 min (human paged, diagnoses, fails over)
+        52.56 / 30  = 1.75 incidents per year -- fewer than two, all year
+    at MTTR = 5 s   (Raft detects leader loss and elects automatically)
+        52.56 x 60 / 5 = 630 failovers per year
+
+  Meaning: with a human in the loop you get one incident a year and no margin.
+  Only automatic leader election makes the budget comfortable -- which is the
+  reason each partition is a Raft group rather than a primary with a runbook.
+```
+
 The reproducibility requirement is the subtle one and the reason the chapter does not end at
 Saga. Correctness alone (rungs 2–4 provide it) is not enough: a regulator or internal auditor
 must be able to point at any date and ask "what was this balance then, and which transactions
@@ -104,6 +140,48 @@ Per-node capacity:          a well-tuned single relational node handles
 Nodes / partitions needed:  2,000,000 ops/s ÷ 1,000 ops/s per node
                             ≈ 2,000 partitions
 ```
+
+**In plain terms.** "Every transfer is really two writes, so double the headline number first — then
+divide by what one box can actually do, and the quotient is how many boxes you need." The doubling is
+the step candidates skip, and skipping it under-sizes the cluster by exactly 2x while also hiding the
+fact that the two writes land in *different* places, which is the whole problem of the chapter.
+
+| Symbol | What it is |
+|--------|------------|
+| `1,000,000 TPS` | Transfers per second — the requirement, counted in business operations |
+| `x 2` | A transfer = one debit + one credit; two account rows are touched, not one |
+| `2,000,000 ops/s` | Account-level write operations per second — the number hardware actually sees |
+| `~1,000 TPS/node` | What one well-tuned relational node sustains on short OLTP transactions |
+| `÷` | Sizing: total work divided by per-unit capacity |
+| `~2,000 partitions` | Independent shards needed, each carrying an equal slice of the load |
+
+**Walk one example.** Push it through, then ask what each partition actually carries:
+
+```
+  step 1  transfers/s                     = 1,000,000
+  step 2  account ops per transfer        = 2            (debit sender, credit receiver)
+  step 3  account ops/s                   = 2,000,000
+
+  step 4  per-node capacity               = 1,000 ops/s
+  step 5  partitions = 2,000,000 / 1,000  = 2,000
+
+  what each partition then sees
+    transfers/s per partition   = 1,000,000 / 2,000 = 500
+    account ops/s per partition = 2,000,000 / 2,000 = 1,000    <- exactly one node's worth
+
+  how far past a single node are we?
+    2,000,000 / 1,000 = 2,000x
+
+  Meaning: this is not "scale it later." One node is off by three orders of
+  magnitude, so partitioning is a day-one structural decision.
+```
+
+**Why the `x 2` is load-bearing beyond capacity.** It is not merely a sizing correction. It is the
+proof that a transfer is a *two-row* operation, and once the rows are hashed across ~2,000 partitions,
+the odds that both land on the same partition are about `1/2,000` — so roughly **99.95% of transfers
+are cross-partition** and therefore distributed transactions. That single consequence of the doubling
+is what makes rungs 2 through 5 necessary; without it the design would be one `UPDATE` in a
+transaction and the chapter would be a page long.
 
 Two conclusions fall straight out of that arithmetic, and they define the rest of the chapter:
 
@@ -347,6 +425,52 @@ Saga is simpler per step and needs no reservation bucket, but because it is **se
 latency grows with the number of steps — bad when a transfer or a fan-out involves many hops.
 TCC parallelizes the Try phase but pays in business-logic pollution.
 
+**What this actually says.** "Saga latency is `steps x hop`; TCC latency is `hop x 2` no matter how
+many participants there are — one parallel Try round plus one Confirm round." The distinction is
+`O(n)` versus `O(1)` in the number of participants, and it is the only quantitative difference between
+the two rungs; everything else in the table is a code-structure preference.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Number of steps / participants in the transaction |
+| `h` | Cost of one hop — a local commit plus the network round trip to reach it |
+| Saga: `k x h` | Steps run one after another, so hops add up |
+| TCC: `2 x h` | All `k` Trys fire in parallel (one hop), then all Confirms fire in parallel (one more) |
+| 2PC: `2 x h` locked | Same two rounds as TCC, but the row locks are held for the whole `2h` |
+| `1000 / lock_ms` | Ceiling on transactions per second against a single contended row |
+
+**Walk one example.** Take `h = 5 ms` (a local commit plus one intra-datacenter round trip):
+
+```
+  Saga -- sequential, latency grows with chain length
+    k = 2  steps (debit A, credit B)     2 x 5 =  10 ms
+    k = 3                                3 x 5 =  15 ms
+    k = 5                                5 x 5 =  25 ms
+    k = 10 (fan-out to 10 sellers)      10 x 5 =  50 ms
+
+  TCC -- parallel Try, then Confirm; flat in k
+    k = 2                                2 x 5 =  10 ms
+    k = 10                               2 x 5 =  10 ms    <- unchanged
+
+  crossover: TCC and Saga tie at k = 2, and TCC wins for every k > 2.
+
+  2PC -- same 10 ms, but the rows stay LOCKED for all 10 ms
+    max transfers/s against one hot wallet row = 1000 ms / 10 ms = 100 /s
+    if the lock were held only 1 ms                = 1000 ms /  1 ms = 1,000 /s
+
+  Meaning: at k = 2 all three protocols cost the same wall-clock time. They
+  differ in what they hold while spending it -- and 2PC's 100 transfers/s per
+  hot row is the number that ends its candidacy at 1,000,000 TPS.
+```
+
+**Why the lock-hold column, not the latency column, kills 2PC.** All three protocols pay two hops for
+a two-participant transfer, so latency alone would not separate them. What separates them is
+*contention*: TCC and Saga release their locks at the end of each short local transaction, so a hot
+wallet row is free within a millisecond, while 2PC pins that row for the entire distributed protocol.
+A popular merchant wallet receiving thousands of transfers a second is capped at roughly 100/s under
+2PC and is unconstrained under TCC or Saga — which is why the chapter climbs past 2PC even though its
+correctness is impeccable.
+
 **The verdict that ends rungs 2–4.** At 1M TPS with tight latency budgets, neither TCC nor Saga
 is *free* — both add coordination cost, and choosing a coordination style is choosing which cost
 to pay. But the deeper problem is shared by **all** of rungs 1–4: they **mutate the balance in
@@ -402,6 +526,49 @@ the log to any point and recomputes any wallet's exact historical balance, plus 
 of transactions that produced it. Reproducibility is not a feature we bolted on — it is a
 **free consequence** of making events the source of truth. This is the single reason the chapter
 climbs past Saga to here.
+
+**Put simply.** `state = fold(events)` says "the balance is not a thing you store — it is the running
+total you get by adding up every signed event in order, starting from zero." Reading it that way makes
+the audit property obvious rather than clever: if the balance is a *function* of a prefix of the log,
+then every historical balance is just the same function applied to a shorter prefix.
+
+| Symbol | What it is |
+|--------|------------|
+| `fold(f, init, events)` | Sweep the list left to right, carrying an accumulator — a running total |
+| `init` | The starting accumulator, `0` for a fresh wallet |
+| `f(acc, event)` | The apply function — for balances, `acc + event.signed_amount` |
+| `events up to t` | The log prefix with `timestamp <= t` — the only input a historical query needs |
+| Determinism | `f` must be a pure function, so the same prefix always folds to the same balance |
+| Conservation | Every transfer emits `-x` and `+x`, so the sum over *all* wallets never changes |
+
+**Walk one example.** Wallet A's whole life as a fold, landing on the `41.00` the balance API returns:
+
+```
+  event log for wallet A            signed     running balance = fold
+    1  WalletOpened / funded         +50            0 + 50  =  50
+    2  MoneyDebited  (A pays B $1)    -1           50 -  1  =  49
+    3  MoneyDebited  (A pays C $8)    -8           49 -  8  =  41
+                                                            ------
+    current balance                                            41
+
+  historical query: "what was A's balance after event 2?"
+    fold(events[1..2]) = 0 + 50 - 1 = 49        <- no extra machinery needed
+    the in-place UPDATE model can only answer "41" -- the 49 was overwritten
+
+  conservation, across the two wallets in one transfer
+    before:  A = 42,  B = 10,  sum = 52
+    events:  MoneyDebited(A, -1),  MoneyCredited(B, +1)
+    after :  A = 41,  B = 11,  sum = 52
+    delta of the sum = 0        <- no money created or destroyed
+```
+
+**Why determinism is the term that cannot be dropped.** If `f` were impure — if applying an event
+consulted the wall clock, a random number, or a mutable config — two replicas folding the identical
+log would compute different balances, and a replay six months later would not reproduce today's
+answer. The whole edifice rests on it: Raft replicates *events*, not state, precisely because it
+assumes every replica's state machine is deterministic (the replicated-state-machine pattern), and the
+auditor's replay is trustworthy only because the fold is guaranteed to return the same number every
+time it is run.
 
 **CQRS (Command Query Responsibility Segregation).** The write side (commands → events) is
 optimized for appending facts; the read side (balance inquiries) wants fast point lookups. CQRS
@@ -473,6 +640,53 @@ failure, Raft elects a follower that already holds the full committed log, and i
 no lost events. Raft gives us durability (majority-replicated appends) and availability
 (automatic failover) without 2PC's in-doubt blocking.
 
+**Stated plainly.** A quorum of `floor(n/2) + 1` means "more than half" — and the reason consensus
+insists on *more than half* is that any two such groups must overlap in at least one node, so two
+different majorities can never independently commit two different things. The overlap is the entire
+safety argument; the failure tolerance is a side effect of it.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Nodes in the Raft group (the replication factor for one wallet partition) |
+| `q = floor(n/2) + 1` | Quorum — the smallest group that is strictly a majority |
+| `n - q` | How many nodes may fail while the group still commits and elects |
+| Overlap | Any two quorums share `2q - n >= 1` nodes — the pigeonhole that prevents split-brain |
+| Commit | An event is durable once `q` replicas have appended it, not once the leader has |
+| Election | A candidate becomes leader on `q` votes, so at most one leader can exist per term |
+
+**Walk one example.** The three standard group sizes, plus what the even sizes teach:
+
+```
+    n     q = floor(n/2)+1     tolerates n-q failures     overlap 2q-n
+    3            2                     1                       1
+    5            3                     2                       1
+    7            4                     3                       1
+
+    4            3                     1        <- same tolerance as n=3, one more machine
+    6            4                     2        <- same tolerance as n=5, one more machine
+
+  why even sizes are wasteful: going 3 -> 4 raises the quorum from 2 to 3 but
+  still tolerates only 1 failure. You paid for a node and bought nothing.
+  Odd n is always the efficient choice.
+
+  what a 3-node group does for availability, at 99% per node
+    group is up when at least 2 of 3 are up
+      = C(3,2) x 0.99^2 x 0.01 + C(3,3) x 0.99^3
+      = 0.999702                    -> 156.6 min downtime / year
+
+  that misses the 52.56 min budget, so either harden the nodes or widen the group
+    nodes at 99.5%, n = 3     -> 0.999925   ->  39.3 min / year   PASSES
+    nodes at 99%,   n = 5     -> 0.999990   ->   5.2 min / year   PASSES
+```
+
+**Why "more than half" and not "any two"**. Suppose a group of 5 accepted a commit on any 2 nodes. A
+network partition splitting it 2 | 3 would let *both* sides gather 2 votes, elect two leaders, and
+append two conflicting events to what is supposed to be one log — a wallet debited twice, or a
+double-spend. Requiring 3 makes that arithmetically impossible: `3 + 3 = 6 > 5`, so the two would-be
+quorums must share a node, and that node refuses the second one. This is why the wallet's event log
+can be replicated for availability without reopening the correctness hole that rung 1's Redis sharding
+left open.
+
 **3. Scalability with bounded recovery — snapshots.** Replaying an event log from the beginning
 of time to rebuild state would take longer and longer as the log grows — a wallet with a billion
 events would take forever to recover after a restart. Fix: take a **snapshot** of the in-memory
@@ -481,6 +695,92 @@ follower catch-up, load the **latest snapshot** and **replay only the events aft
 cost is bounded by the snapshot interval, not the full history. Snapshots are an *optimization*;
 the events remain the source of truth, so auditing is unaffected (you can still replay from zero
 if you ever need to).
+
+**The idea behind it.** Recovery time is `events to replay ÷ replay rate`, and the snapshot interval
+is the only knob that changes the numerator — so snapshotting converts recovery time from "grows
+forever with the age of the system" into "a constant you choose." That reframing is what makes event
+sourcing operable: without it, an event-sourced system gets slower to restart every single day it
+runs, which is a failure mode that arrives quietly and never goes away.
+
+| Symbol | What it is |
+|--------|------------|
+| `E` | Event append rate for one partition, in events/second |
+| `S` | Snapshot interval, in seconds |
+| `E x S` | Events written since the last snapshot — the tail that must be replayed |
+| `R` | Replay rate: how fast a node can fold events back into state (memory-speed, no network) |
+| `T = (E x S) / R` | Recovery time after a restart or a follower catch-up |
+| Snapshot cost | Writing the full in-memory state to disk — the price paid for a smaller `S` |
+
+**Walk one example.** Per-partition rates fall out of the chapter's own numbers: `2,000,000` account
+ops/s across `2,000` partitions is `1,000` events/s per partition. Take `R = 500,000` events/s:
+
+```
+  E = 2,000,000 / 2,000 = 1,000 events/s per partition
+  R = 500,000 events/s  (in-memory fold of a memory-mapped local log)
+
+  snapshot interval S     events to replay = E x S      recovery T = (E x S) / R
+     60 s (1 min)                 60,000                     0.12 s
+    300 s (5 min)                300,000                     0.60 s
+  3,600 s (1 hour)             3,600,000                     7.20 s
+
+  no snapshots at all, after one year of running
+    events = 1,000 x 86,400 x 365     = 31,536,000,000 events
+    T      = 31,536,000,000 / 500,000 = 63,072 s = 17.5 hours
+
+  Meaning: 17.5 hours to restart one partition, against a 52.56 min/year
+  downtime budget for the whole service. Snapshots are not a tuning detail --
+  without them the design cannot meet its own availability requirement.
+```
+
+**Read the table as a dial, not a default.** Halving `S` halves recovery time and doubles snapshot
+write volume, and there is no universally right setting — you pick `S` from the recovery-time target
+the availability budget implies. Note also what snapshots do *not* cost you: because a snapshot is
+purely `fold(events up to that point)`, it is a cache of a computation, never a second source of
+truth, so it can be deleted, recomputed, or distrusted at any moment without touching the audit story.
+
+**What it means.** Storage per day is `events/s x bytes/event x seconds/day x replication factor` —
+an append-only log never overwrites, so unlike the mutable-balance model its footprint is a pure
+function of *traffic and retention*, with no steady state. This is the bill event sourcing sends you
+in exchange for reproducibility, and it is worth sizing before you promise an auditor anything.
+
+| Symbol | What it is |
+|--------|------------|
+| Event rate | `2,000,000` events/s cluster-wide — two events per transfer, same doubling as before |
+| Bytes/event | Serialized size of one event: ids, signed amount, currency, timestamp, `transaction_id` |
+| `86,400` | Seconds per day |
+| Replication factor | `3` for a 3-node Raft group — every event is stored three times |
+| Retention | How far back the log is kept online; the audit requirement pushes this toward "forever" |
+
+**Walk one example.** At `100` bytes per event, which is a realistic packed binary record:
+
+```
+  raw append rate
+    2,000,000 events/s x 100 B      = 200,000,000 B/s = 200 MB/s
+
+  per day, one copy
+    200 MB/s x 86,400 s             = 17.28 TB / day
+  per day, x3 Raft replication      = 51.84 TB / day
+
+  per partition, one copy
+    17.28 TB / 2,000                = 8.64 GB / day / partition
+
+  per year, x3 replication
+    51.84 TB x 365                  = 18.9 PB / year
+
+  double the event to 200 bytes and every number above doubles:
+    400 MB/s, 34.56 TB/day, 103.68 TB/day replicated.
+
+  Meaning: event size is not a micro-optimization here. Each extra byte per
+  event costs about 0.19 PB/year of replicated storage.
+```
+
+Two consequences follow directly from these numbers. First, the event encoding matters — this is why
+production event stores use packed binary formats rather than JSON, since a JSON envelope can easily
+triple the per-event size and therefore triple a petabyte-scale bill. Second, "keep every event
+forever, online" is not affordable at 18.9 PB/year, so real systems tier: recent events stay on local
+SSD for replay and recovery, older segments move to object storage where an auditor's occasional
+time-travel query can still reach them at higher latency. The log stays complete; only its access
+speed is tiered.
 
 #### The final architecture
 

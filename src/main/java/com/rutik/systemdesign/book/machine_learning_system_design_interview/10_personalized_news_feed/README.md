@@ -114,6 +114,52 @@ hide is *negative* so predicted-likely-to-be-hidden posts are pushed down.
 | share | 20 | strongest positive — user vouches to their own network |
 | hide | −20 | explicit negative — user does not want this |
 
+**What this actually says.** "Ask the model how likely each reaction is, multiply each probability
+by how much the business says that reaction is worth, and add it all up — that sum is the post's
+rank." The framing matters because it cleanly separates two jobs: the model only has to answer
+*how likely*, and the product only has to answer *how valuable*. Nothing in the formula requires
+the two to be tuned together, which is exactly why the weights can change without retraining.
+
+| Symbol | What it is |
+|---|---|
+| `engagement_score(user, post)` | the single number the feed sorts by, descending |
+| `P(click)`, `P(like)`, `P(comment)`, `P(share)` | per-reaction probabilities from the multi-task heads for this `<user, post>` pair |
+| `P(hide)` | probability the user actively suppresses the post; the one negative term |
+| `w_click`, `w_like`, `w_comment`, `w_share` | business-chosen value of each positive reaction (1, 5, 10, 20) |
+| `w_hide` | business-chosen penalty for a negative reaction (−20) |
+
+**Walk one example.** Two candidate posts for the same active user, using the book's weights.
+
+```
+Post A: a friend's photo — modest click rate, but people talk about it
+  reaction   weight   P(reaction)   contribution = weight x P
+  click        1        0.300          0.300
+  like         5        0.120          0.600
+  comment     10        0.020          0.200
+  share       20        0.005          0.100
+  hide       -20        0.001         -0.020
+                                   ---------
+  engagement_score(A)                   1.180
+
+Post B: a clickbait headline — nearly 2x the click rate, but hollow
+  reaction   weight   P(reaction)   contribution = weight x P
+  click        1        0.5500         0.550
+  like         5        0.0600         0.300
+  comment     10        0.0030         0.030
+  share       20        0.0005         0.010
+  hide       -20        0.0200        -0.400
+                                   ---------
+  engagement_score(B)                   0.490
+
+Post B wins on clicks (0.550 vs 0.300) and loses the feed (0.490 vs 1.180).
+```
+
+The result means the weights, not the model, are what refuse the clickbait: B's click term is the
+largest single positive contribution anywhere in the table, yet a comment probability 6.7x lower
+and a hide probability 20x higher sink it. Delete the `w_hide` term and B rises to 0.890, still
+behind A but close; set `w_click` to 10 instead of 1 and B jumps to 5.44 and wins outright. That
+is the whole "chase clicks and you ship clickbait" pitfall visible as arithmetic.
+
 ### The weights are a business decision, not a learned parameter
 
 This is the single most important framing point in the chapter, and a favorite interview trap.
@@ -396,6 +442,43 @@ Each head has its own loss appropriate to its output:
 - **Dwell-time head** — **regression** loss, **MAE** (robust to the heavy right tail of dwell
   times) or MSE.
 
+**Put simply.** "MAE charges you the number of seconds you were off by; MSE charges you the square
+of it." The framing matters because dwell time is heavy-right-tailed — most impressions are a few
+seconds, a few are minutes — and squaring turns those rare long dwells into the only examples the
+head really trains on.
+
+| Symbol | What it is |
+|---|---|
+| `n` | number of impressions in the batch |
+| `y_i` | logged dwell time on impression `i`, in seconds |
+| `ŷ_i` | the dwell head's predicted seconds for that impression |
+| `MAE` | `(1/n) · Σ abs(ŷ_i − y_i)` — average absolute error, reported in seconds |
+| `MSE` | `(1/n) · Σ (ŷ_i − y_i)²` — average squared error, in seconds-squared |
+
+**Walk one example.** Five impressions from one passive user's session.
+
+```
+  post   predicted  actual   |error|   error^2
+  A         18        15        3          9
+  B          6         9        3          9
+  C         40        31        9         81     <- the long-dwell outlier
+  D          3         4        1          1
+  E         12        20        8         64
+                            --------   -------
+  sum                            24        164
+  MAE = 24 / 5 = 4.8 seconds        MSE = 164 / 5 = 32.8 seconds^2
+
+  the C outlier is 9/24  = 37.5% of MAE
+                   81/164 = 49.4% of MSE
+```
+
+The result means the head is off by about 4.8 seconds per impression — directly readable, in the
+same unit as the label, which is why MAE is what you report. The last two lines are why the book
+prefers it as the *loss* too: one nine-second miss on a single long-dwell post supplies roughly
+half of MSE's gradient but only about a third of MAE's, so MSE would bend the whole head toward
+the rare marathon readers and away from the short-dwell bulk that actually separates a passive
+user's posts.
+
 The **total loss** is a **weighted sum of the per-task losses**:
 
 ```
@@ -404,6 +487,48 @@ L_total = Σ_tasks  λ_task · L_task
         + λ_share·BCE_share + λ_hide·BCE_hide + λ_skip·BCE_skip
         + λ_dwell·MAE_dwell
 ```
+
+**Read it like this.** "Every head computes its own error on its own labels, and the shared bottom
+is trained on a blend of those errors, mixed in proportions the ML engineer picks." The framing
+matters because gradients flowing into the shared bottom are the *sum* of the per-head gradients,
+so whichever term is numerically largest quietly decides what the shared representation learns —
+regardless of which reaction the product actually cares about.
+
+| Symbol | What it is |
+|---|---|
+| `L_total` | the single scalar backprop minimizes; the only thing the shared bottom ever sees |
+| `Σ_tasks` | sum over all seven heads (five reactions + skip + dwell) |
+| `λ_task` | training-time loss weight for one head; a hyperparameter, not learned |
+| `L_task` | that head's own loss value on the current batch |
+| `BCE_<reaction>` | binary cross-entropy for a classification head, in nats — typically 0.0–1.0 |
+| `MAE_dwell` | mean absolute error of the dwell regressor, in **seconds** — unbounded |
+
+**Walk one example.** Per-head losses on one batch, mixed two ways.
+
+```
+head      L_task    lambda=1 (naive)                 tuned lambdas
+                    contrib    share of L_total      lambda  contrib  share
+click      0.52      0.520        6.4%                1.00    0.520   24.4%
+like       0.28      0.280        3.5%                1.00    0.280   13.1%
+comment    0.11      0.110        1.4%                1.00    0.110    5.2%
+share      0.04      0.040        0.5%                5.00    0.200    9.4%
+hide       0.02      0.020        0.2%                5.00    0.100    4.7%
+skip       0.60      0.600        7.4%                1.00    0.600   28.1%
+dwell      6.50      6.500       80.5%                0.05    0.325   15.2%
+                   --------                                 -------
+L_total               8.070                                   2.135
+
+Naive: 80.5% of the gradient signal is the dwell head. Tuned: dwell drops to
+15.2% and the rare share + hide heads rise from 0.7% combined to 14.1%.
+```
+
+The result means that with `λ = 1` everywhere the network is effectively a dwell-time regressor
+that happens to have six classification heads bolted on — not because dwell matters most, but
+because its loss is measured in seconds while the others are measured in nats. The `λ` term exists
+precisely to undo that unit mismatch and the base-rate mismatch on top of it. Without it, the
+share head contributes 0.5% of the gradient and the hide head 0.2%, so the shared bottom never
+learns a representation that distinguishes a share-worthy post from a hide-worthy one — the two
+reactions the business weights most heavily at serving time.
 
 Note the **two different weight sets** — a classic point of confusion:
 
@@ -474,6 +599,43 @@ evaluates **each head on its own**:
   where AUC-ROC is optimistic under imbalance). Each head is a binary classifier; measure its
   ranking quality independently.
 - **Dwell-time head** → **MAE / MSE** (regression error in seconds).
+
+**The idea behind it.** "ROC-AUC asks how often you rank a real reactor above a random
+non-reactor; PR-AUC asks, of the posts you actually flagged, how many were right." The framing
+matters because the two questions diverge violently once positives are rare: ROC's denominator is
+the enormous negative pool, so a huge absolute number of false positives is still a tiny false-
+positive *rate*, and the curve looks healthy while the predictions are mostly wrong.
+
+| Symbol | What it is |
+|---|---|
+| TP / FN | shares correctly predicted / real shares the head missed |
+| FP / TN | non-shares wrongly flagged / non-shares correctly passed over |
+| TPR (recall) | `TP / (TP + FN)` — the fraction of real shares caught; the y-axis of both curves |
+| FPR | `FP / (FP + TN)` — the ROC x-axis; denominator is the whole negative pool |
+| Precision | `TP / (TP + FP)` — the PR y-axis; denominator is only what you flagged |
+| Base rate | fraction of impressions that are positive; 0.2% for share, far lower for hide |
+
+**Walk one example.** The share head at one threshold, on 100,000 held-out impressions.
+
+```
+share base rate = 200 positives / 100,000 impressions = 0.2%
+
+                     predicted share    predicted no-share
+  actually shared          TP =   120        FN =    80        200 positives
+  did not share            FP = 4,880        TN = 94,920     99,800 negatives
+
+  ROC view                              PR view
+    TPR = 120 / 200        = 0.600        precision = 120 / 5,000 = 0.024
+    FPR = 4,880 / 99,800   = 0.0489       recall    = 120 /   200 = 0.600
+    "60% recall at 4.9% FPR"              "2.4% of flagged posts were shared"
+```
+
+The result means the same threshold reads as a strong classifier on ROC and a weak one on PR. The
+4,880 false positives barely move FPR because they are diluted by 99,800 negatives, but they
+dominate precision because only 5,000 posts were flagged in total. Precision of 2.4% is still a
+**12x lift** over the 0.2% base rate, which is genuinely useful for ranking — but PR-AUC is the
+metric that reports the 2.4%, which is why the book pairs it with ROC-AUC on the rare share and
+hide heads and not on the abundant click head.
 
 Why per-head rather than one number? Because a single offline aggregate would need the business
 weights baked in, and (a) those are exactly what you tune online, and (b) an offline aggregate can't
@@ -665,6 +827,40 @@ Same viral post, two different viewers
 
 Caption: the post's own content embedding is identical for both viewers; the affinity features are
 what split the ranking, which is why the book calls user–author affinity the most predictive family.
+
+**Stated plainly.** "Feed the same post through the same score formula twice, changing only the
+affinity features, and watch the number move." The framing matters because it shows the affinity
+family is not a small additive nudge on top of a content score — it is the term that decides the
+sign of the result.
+
+| Symbol | What it is |
+|---|---|
+| Affinity engagement rate | fraction of this author's past posts this viewer reacted to (0.62 vs 0.01 above) |
+| Close-friend flag | explicit or inferred strong-tie designation feeding the shared bottom |
+| `P(reaction)` per viewer | the multi-task heads' output for the *same* post, different viewer |
+| `engagement_score` | the weighted sum from §10.2, unchanged — only its inputs differ |
+
+**Walk one example.** One viral post, the two viewers above, the book's weights.
+
+```
+                      Viewer 1 (close friend)        Viewer 2 (stranger)
+                      affinity rate 0.62             affinity rate 0.01
+  reaction  weight    P        contribution          P         contribution
+  click        1      0.450        0.450             0.060         0.060
+  like         5      0.380        1.900             0.020         0.100
+  comment     10      0.120        1.200             0.002         0.020
+  share       20      0.050        1.000             0.001         0.020
+  hide       -20      0.002       -0.040             0.030        -0.600
+                              ---------                       ---------
+  engagement_score                  4.510                        -0.400
+
+  Identical post. Identical content embedding. Score swing: +4.51 vs -0.40.
+```
+
+The result means Viewer 2's score is *negative* — the hide term alone (−0.600) outweighs every
+positive term combined (0.200), so the post does not merely rank low, it ranks below a post with
+no predicted engagement at all. That sign flip is what "buried" means mechanically, and no content
+feature produced it: the two columns share every post feature and differ only in affinity.
 
 ---
 

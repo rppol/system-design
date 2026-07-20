@@ -247,6 +247,40 @@ Given early-fused features, how do we emit a probability *per category*? Four op
 - **Extensible** — add a new category by adding a head and fine-tuning, rather than retraining a
   monolithic multi-label output.
 
+**In plain terms.** The compute of any of these four options is `cost = (copies of the bottom) x B
++ (number of heads) x H`, which says *"you are choosing how many times to pay for the expensive
+part."* That framing matters because `B` (the pretrained encoders + fusion + shared layers) and `H`
+(a two-or-three-layer head) differ by roughly two orders of magnitude — so the head count is nearly
+free and the bottom count is the entire bill.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Cost of one forward pass through the shared bottom — encoders, fusion, shared hidden layers |
+| `H` | Cost of one small per-category head |
+| `N` | Number of harm categories — **8** in the list above (violence, nudity, hate, bullying, self-harm, misinformation, spam, terrorism) |
+| copies of `B` | 1 for options 1, 3, 4; **N** for option 2 (each model re-runs the whole stack) |
+
+**Walk one example.** Set `B = 100` units and `H = 1` unit (a 100:1 ratio, conservative when the
+bottom is DistilmBERT + CLIP + VideoMoCo), with `N = 8`:
+
+```
+  option                     bottoms x B    heads x H    total    vs multi-task
+  1. single binary            1 x 100          1 x 1       101         0.94x
+  2. model per category       8 x 100          8 x 1       808         7.48x
+  3. multi-label              1 x 100          1 x 1       101         0.94x
+  4. multi-task (chosen)      1 x 100          8 x 1       108         1.00x
+
+  multi-task cost split:  bottom 100/108 = 92.6%   heads 8/108 = 7.4%
+  multi-task vs multi-label overhead:  108/101 - 1 = 6.9%
+```
+
+That 6.9% is the whole price of the book's choice. For a **7% compute premium** over the
+cheapest-possible multi-label head, multi-task buys per-category losses, per-category thresholds,
+and independent extensibility. Meanwhile option 2 pays **7.48x** for the same category-level output
+— and the extra 707 units are pure duplication, because all N copies of the bottom are computing
+the same DistilmBERT/CLIP/VideoMoCo embeddings of the same post. That is the "N forward passes"
+objection stated as arithmetic: the redundancy is not N heads, it is N *bottoms*.
+
 **Multi-task vs multi-label — the precise distinction interviewers want:** a multi-label
 classifier is a *single* output layer with multiple outputs sharing one representation and one loss;
 a multi-task classifier is *multiple separate heads* (each potentially several layers), each with
@@ -356,6 +390,49 @@ Each head outputs a probability; each uses **binary cross-entropy** against its 
 L_total = Σ_c  BCE( head_c(x), y_c )      for each category c
 ```
 
+Expanding the BCE term for one head:
+
+```
+  BCE(p, y) = -[ y * log(p) + (1 - y) * log(1 - p) ]
+
+  y = 1 (category applies)  ->  loss = -log(p)        punished for a LOW p
+  y = 0 (category does not) ->  loss = -log(1 - p)    punished for a HIGH p
+```
+
+**What the formula is telling you.** *"Every category grades the post independently, and the model
+pays the sum of all eight report cards."* The framing matters because summing (rather than a
+softmax over categories) is what makes the categories **non-competing**: a post can be violence
+*and* hate speech at once, and raising one head's probability never mechanically lowers another's.
+
+| Symbol | What it is |
+|--------|------------|
+| `c` | A harm category — one per head |
+| `head_c(x)` | That head's output probability `p` for the fused feature vector `x` |
+| `y_c` | The 0/1 label for category `c` on this post |
+| `BCE(p, y)` | Binary cross-entropy — `-log(p)` when `y=1`, `-log(1-p)` when `y=0` |
+| `Σ_c` | Sum over categories; each head's gradient reaches the shared bottom independently |
+
+**Walk one example.** One post, correctly flagged as hate speech, using the probabilities from 5.2
+(`P(violence)=0.03, P(hate)=0.81, P(nudity)=0.01`) plus a self-harm head at 0.02:
+
+```
+  category     p       y     term                       BCE
+  violence    0.03     0     -log(1 - 0.03)           0.0305
+  hate        0.81     1     -log(0.81)               0.2107
+  nudity      0.01     0     -log(1 - 0.01)           0.0101
+  self-harm   0.02     0     -log(1 - 0.02)           0.0202
+                                                     -------
+                                       L_total =      0.2714
+
+  Where the loss lives:  0.2107 / 0.2714 = 77.6% of it is the single y=1 head.
+```
+
+The three correct-and-confident negatives contribute 0.0608 between them; the one positive
+contributes 0.2107. Now drop the hate head to 0.10 and the term jumps to `-log(0.10) = 2.3026`,
+sending `L_total` to **2.3633** — an 8.7x increase from one head being wrong. Push it to 0.99
+instead and the term falls to 0.0101, on par with a confident negative. That asymmetry is the whole
+mechanism: `-log(p)` is unbounded as `p -> 0`, so a missed positive dominates the sum.
+
 **The training challenge the book highlights:** the per-task datasets are **imbalanced and of very
 different sizes**. Overall, harmful content is <1% of posts, and *within* harm, nudity may have
 orders of magnitude more examples than self-harm. Naively summing losses lets data-rich, easy tasks
@@ -399,6 +476,68 @@ miss-cost — the same features and encoders, a correct head/metric/threshold st
 - **ROC curve + ROC-AUC** — reported too, but ROC-AUC can look deceptively good under extreme
   imbalance (the huge true-negative count inflates it), which is why PR-AUC is the primary offline
   metric here.
+
+The three competing quantities, written against the same confusion matrix:
+
+```
+  accuracy  = (TP + TN) / (TP + TN + FP + FN)     <- denominator dominated by TN
+  precision =  TP / (TP + FP)                     <- TN does not appear at all
+  recall    =  TP / (TP + FN)     (= TPR)         <- TN does not appear at all
+  FPR       =  FP / (FP + TN)                     <- TN in the DENOMINATOR: divides FP away
+```
+
+**The idea behind it.** *"Accuracy and FPR both let the enormous safe-content pool into the
+arithmetic; precision and recall refuse to look at it."* That single structural difference — where
+`TN` appears — is the entire reason PR-AUC is the primary metric and ROC-AUC is a decoration.
+
+| Symbol | What it is |
+|--------|------------|
+| `TP` | Harmful posts correctly flagged |
+| `FP` | Safe posts wrongly flagged — the reviewers' and appeals queue |
+| `FN` | Harmful posts missed — what prevalence measures downstream |
+| `TN` | Safe posts correctly left alone — **99% of everything**, and therefore free to inflate |
+| `FPR` | `FP / (FP + TN)`; the ROC x-axis. Huge `TN` makes any `FP` count look microscopic |
+| precision | `TP / (TP + FP)`; the PR y-axis. Same `FP`, but now measured against `TP`, not `TN` |
+
+**Walk one example.** One million posts at the chapter's **1% prevalence**, so 10,000 harmful and
+990,000 safe. First the trivial always-safe classifier, then a real model swept across thresholds:
+
+```
+  always-safe classifier:  TP = 0, FP = 0, FN = 10,000, TN = 990,000
+      accuracy = (0 + 990,000) / 1,000,000 = 0.9900     <- "99% accurate", catches nothing
+      recall   = 0 / 10,000                = 0.0000
+
+  real model, one row per threshold (P = 10,000, N = 990,000):
+
+  recall     TP       FP      precision      FPR       accuracy
+   0.2     2,000       41       0.9799     0.00004      0.9920
+   0.4     4,000      444       0.9001     0.00045      0.9936
+   0.6     6,000    2,333       0.7200     0.00236      0.9937
+   0.8     8,000    8,000       0.5000     0.00808      0.9900
+   1.0    10,000   25,714       0.2800     0.02597      0.9743
+
+  PR-AUC  = 0.7460      <- the honest number
+  ROC-AUC = 0.9952      <- the flattering number
+```
+
+Read the `recall = 0.8` row on its own. **ROC says** the model is superb: it catches 80% of harm at
+a false-positive rate of 0.00808, a point that sits hard against the top-left corner. **Precision
+says** the model is a coin flip: of the 16,000 posts it flags, 8,000 are innocent, so every second
+enforcement action is wrong. Both statements come from the same 8,000 false positives — ROC divides
+them by 990,000 true negatives and gets 0.008; PR divides them by 8,000 true positives and gets
+0.50. The true-negative pool is what launders the errors.
+
+Note also that this row's **accuracy is 0.9900 — exactly the always-safe classifier's score**. A
+model catching 80% of harm and a model catching none are indistinguishable on accuracy. That is the
+"<1% prevalence" argument in one line, and the reason the broken walkthrough's "99.4% accuracy"
+told the team nothing.
+
+**Why PR-AUC drops so much faster.** ROC-AUC compresses to 0.9952 because its x-axis is scaled by
+the majority class, so the whole interesting region of the curve is squeezed into the leftmost 2.6%
+of the plot. PR-AUC's 0.7460 has room to move: precision falls from 0.9799 to 0.2800 across the
+same sweep, a 3.5x collapse that is fully visible. Under balanced classes the two metrics broadly
+agree; at 1% prevalence they disagree by 0.25 AUC, and only one of them is answering the question a
+reviewer queue cares about.
 
 ```mermaid
 xychart-beta
@@ -446,6 +585,42 @@ Prevalence counts every harmful impression **equally**. It therefore ignores:
 So prevalence must be **paired with severity-weighting and the absolute harmful-impression count**
 (and category breakdowns) to be meaningful. Optimizing prevalence alone can push a team to clean up
 lots of trivial low-reach content while a few catastrophic viral items dominate real harm.
+
+**Stated plainly.** `prevalence = harmful impressions / total impressions` says *"of every hundred
+things people looked at, how many should never have been shown"* — a **view-weighted** measure, not
+a content-weighted one. That framing matters because it means prevalence has already multiplied
+each harmful post by its reach before you see the number, and multiplication destroys the
+distinction between "one post seen ten million times" and "ten million posts seen once."
+
+| Symbol | What it is |
+|--------|------------|
+| harmful impressions | Views of harmful content that slipped through = (harmful posts) x (views each) |
+| total impressions | All content views on the platform in the period |
+| prevalence | The ratio; what Meta publishes. Lower is better |
+| severity weight | An optional per-category multiplier the raw ratio does **not** have |
+
+**Walk one example.** The chapter's two worlds, against a platform serving 1e10 impressions in the
+period:
+
+```
+  world                          harmful posts   views each   harmful impr.   prevalence
+  A: 1 viral terror video               1         10,000,000     1.0e+07        0.100%
+  B: 10M borderline posts       10,000,000                 1     1.0e+07        0.100%
+
+  Identical prevalence. The inputs differ by a factor of 1e7 in content count.
+
+  Add severity weights (terror = 10, borderline = 1):
+    world A weighted = 1.0e+07 x 10 / 1e10 = 0.01000   <- 10x world B
+    world B weighted = 1.0e+07 x  1 / 1e10 = 0.00100
+```
+
+The severity-weighted version separates the two worlds by exactly the severity ratio you chose,
+which is the point: the weight is where a policy judgement gets to enter the metric. Note the
+perverse incentive the unweighted metric creates. Both worlds cost 0.100% prevalence, but world B
+is **10 million enforcement actions** and world A is **one**. A team measured on prevalence alone
+gets identical credit for either, so the rational move is to chase whichever is cheaper per point
+of prevalence — and mass-removing low-reach trivia is almost always cheaper than catching the one
+viral item early. The metric quietly pays you to ignore the thing that matters most.
 
 ```mermaid
 flowchart LR

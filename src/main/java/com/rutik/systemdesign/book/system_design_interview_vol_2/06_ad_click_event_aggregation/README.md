@@ -74,6 +74,47 @@ Takeaways the numbers hand you for free:
 - **100 GB/day, ~3 TB/month of raw data** ⇒ raw storage is large but not absurd; storing it is affordable, which is what makes "keep the raw data" (§6.2) a viable design rather than a luxury.
 - **2 million ads** bounds the aggregation cardinality — a per-minute, per-ad count is at most ~2M rows/minute before you multiply by filter dimensions.
 
+**What this actually says.** "A daily event count is not a rate until you divide by the seconds in a
+day — and the number you must *build for* is not that rate but the peak multiple of it." Every line
+of the estimate is one of two operations: divide a per-day total by 86,400 to get a rate, or
+multiply a size by a count to get bytes. Keeping those two operations separate is what stops
+back-of-envelope math from drifting.
+
+| Symbol | What it is |
+|--------|------------|
+| 86,400 | Seconds in a day (60 x 60 x 24) — the only constant that turns per-day into per-second |
+| average QPS | clicks per day / 86,400 — the sustained rate, useful for cost |
+| peak factor | ~5x — the burst multiple over average that capacity must actually absorb |
+| peak QPS | average QPS x peak factor — the number that sizes partitions, nodes, and buffers |
+| event size | 0.1 KB per raw click record (the serialized `{ad_id, ts, user_id, ip, country}`) |
+| daily storage | clicks per day x event size — raw bytes landing per day |
+
+**Walk one example.** Run the two operations end to end:
+
+```
+  rate path
+    1,000,000,000 clicks / 86,400 s   =   11,574 QPS   (average, exact)
+    rounded for design                =   10,000 QPS
+    x 5 peak factor                   =   50,000 QPS   (peak, what you provision)
+
+  bytes path
+    1,000,000,000 events x 0.1 KB     =  100,000,000 KB  =  100 GB / day
+    x 30 days                         =        3,000 GB  =    3 TB / month
+    x 365 days                        =       36,500 GB  =   36.5 TB / year
+```
+
+Meaning: **peak QPS sizes the pipeline, daily bytes size the wallet**, and they answer different
+design questions. 50,000 QPS is what decides Kafka partition count and aggregate-node count; 100
+GB/day is what decides whether "keep all raw data forever" is a viable policy — and at 36.5 TB/year
+on object storage, it plainly is, which is the premise the entire Kappa/reconciliation design rests
+on.
+
+**A note on the rounding.** The exact average is 11,574 QPS; the book rounds *down* to 10,000
+before applying the 5x peak factor, giving 50,000. Carrying the unrounded figure through instead
+would give 11,574 x 5 = 57,870 QPS. The 50,000 headline is therefore about 14% below the
+unrounded peak — fine as an interview figure, but when you actually provision partitions, size
+against the higher number so the rounding is not silently eating your headroom.
+
 ---
 
 ## 6.2 Step 2 — Propose High-Level Design and Get Buy-In
@@ -171,6 +212,49 @@ Now the aggregation service, for each click, emits counts into every filter buck
 
 The design chooses pre-aggregation because the queries are known in advance and must be fast; ad-hoc filtering, when needed, falls back to raw data.
 
+**The idea behind it.** "Pre-aggregation buys read speed by paying it forward in writes: one click
+becomes as many counter increments as it has matching filters." The cost is a straight multiplier
+on the write path, which means the filter table is not a free lookup table — it is a knob that
+directly scales your database's ingest requirement.
+
+| Symbol | What it is |
+|--------|------------|
+| F | Filters a single click matches (grand total + its country + its ip + ...) |
+| write amplification | F — the number of counter upserts one raw click produces |
+| effective write QPS | peak click QPS x F — what the aggregation DB must actually sustain |
+| rows/minute | distinct ads x F — the aggregated table's per-minute row production |
+| read cost | 1 row lookup, regardless of F — this is what the amplification is buying |
+
+**Walk one example.** Take one click that matches the grand total, `country=USA`, its `ip` filter,
+and its `user_id` filter (F = 4), at the 50,000 QPS peak:
+
+```
+  F = 1  (grand total only)
+    writes   50,000 x 1  =    50,000 upserts/s
+    rows/min  2,000,000 x 1  =  2,000,000 rows per minute
+
+  F = 4  (total + country + ip + user_id)
+    writes   50,000 x 4  =   200,000 upserts/s
+    rows/min  2,000,000 x 4  =  8,000,000 rows per minute
+
+  F = 10 (a filter table someone kept adding to)
+    writes   50,000 x 10 =   500,000 upserts/s
+    rows/min  2,000,000 x 10 = 20,000,000 rows per minute
+
+  read cost at every value of F:  1 row lookup
+```
+
+Meaning: going from F = 1 to F = 10 turns a comfortable 50K-QPS ingest into a 500K-QPS ingest — a
+different database sizing entirely — while every query stays a single row read. That asymmetry is
+the whole bargain, and it is also the failure mode: filters are cheap to *add* to a config table
+and expensive to *serve*, so an unreviewed filter table grows until the write path buckles.
+
+**Why the filter set must be pre-defined and bounded.** If callers could pass ad-hoc predicates, F
+would be unbounded — every distinct predicate any user ever asked for would need its own counter,
+maintained on every click forever. Fixing the filter table to a small reviewed set is what keeps F
+a constant you can multiply by, rather than a quantity that grows with query traffic. Ad-hoc
+questions go to raw data, where they cost a scan once instead of a write increment forever.
+
 ### Database choice
 
 Two stores, matched to two access patterns:
@@ -260,6 +344,43 @@ Caption: **map** nodes parse and partition events by `hash(ad_id)` so a given ad
 1. **Aggregate clicks by `ad_id`.** Map partitions by `ad_id` → each aggregate node counts its ads per minute → reduce merges to the final per-minute count table. Because partitioning already groups an ad onto one aggregate node, the reduce for a simple count is often just a pass-through/union.
 
 2. **Top 100 most-clicked ads.** This is a distributed top-N. Map partitions events → each aggregate node maintains a **local heap** of the top 100 ads *it* has seen this minute (a bounded min-heap of size 100) → the **reduce node merges the per-node heaps** into a single global top-100. Merging heaps is cheap: you only need each node's top 100, not its full distribution, because a global top-100 ad must be top-100 on at least the node that owns it (ads are partitioned by `ad_id`, so each ad's full count lives on exactly one node — the per-node heaps are over *disjoint* ad sets, and the reduce is a straight merge of the union's top 100).
+
+**Put simply.** "Because each ad's full count lives on exactly one node, the global top 100 is
+hiding somewhere inside the union of the per-node top 100s — so the reduce node only ever has to
+look at nodes x N candidates, never at all 2 million ads." The correctness argument and the cost
+argument are the same argument: disjoint partitioning is what makes the local heaps sufficient.
+
+| Symbol | What it is |
+|--------|------------|
+| N | Size of the requested top list — 100 here |
+| nodes | Number of aggregate nodes the ads are partitioned across |
+| local heap | A bounded min-heap of size N per node, over that node's own disjoint ad set |
+| candidates | nodes x N — everything the reduce node must consider |
+| disjointness | The property (from `hash(ad_id)` partitioning) that makes local heaps sufficient |
+
+**Walk one example.** Twenty aggregate nodes, 2,000,000 ads, top N = 100, 32 bytes per entry:
+
+```
+  ads per node        2,000,000 / 20        =   100,000 ads
+  local heap kept            N              =       100 entries per node
+  candidates sent to reduce  20 x 100       =     2,000 entries
+
+  vs shipping every ad count to the reduce node
+                             2,000,000      = 2,000,000 entries
+    reduction                2,000,000 / 2,000  =   1,000x less data
+
+  network per minute
+    heaps only     2,000 x 32 B             =     64 KB
+    full counts    2,000,000 x 32 B         =     64 MB
+```
+
+Meaning: the reduce node moves 64 KB per minute instead of 64 MB, a 1,000x cut, and it is *exact* —
+no approximation is involved. Contrast this with a top-N over a *randomly* partitioned stream, where
+one ad's clicks are scattered across all 20 nodes: there, an ad ranked 101st on every node could
+still be globally 1st, so local heaps are unsound and you would need either full counts or an
+approximate algorithm. **Partitioning by `ad_id` is what converts an approximate distributed problem
+into an exact one** — that is the point of the map node's `hash(ad_id)` routing, and it is the
+answer interviewers are listening for.
 
 3. **Data filtering (the star-schema, applied in the DAG).** To make `filter_id` queries fast, the aggregate nodes **pre-aggregate per filter**: for each event, increment the count for every filter bucket it matches (`country=USA`, `ip=...`, grand total). The pre-defined filter table drives which buckets exist. This is the star-schema pre-aggregation from §6.2 realized inside the aggregate node.
 
@@ -384,6 +505,52 @@ flowchart LR
 
 Caption: the per-minute count uses a tumbling window (one event, one window), while the top-100-over-last-M-minutes ranking uses a sliding window that overlaps its neighbors and is recomputed every minute.
 
+**Read it like this.** "How much memory a windowing scheme costs is decided by how many windows are
+*open at once*, and that count is set by the watermark for tumbling windows and by the window span
+for sliding ones." Window size does not drive memory; window *overlap* does — which is why the
+tumbling count is nearly free and the sliding top-N is the expensive one.
+
+| Symbol | What it is |
+|--------|------------|
+| W | Window size — 60 s for the per-minute count, M minutes for the top-N |
+| watermark | Grace period a closed window stays open for stragglers (15 s here) |
+| open windows (tumbling) | 1 + ceil(watermark / W) — the current window plus any still draining |
+| open windows (sliding) | M — one per overlapping M-minute span, each re-emitted every minute |
+| state per window | distinct keys in the window x bytes per counter entry |
+
+**Walk one example.** Size both window types against 2,000,000 ads at 32 bytes per counter entry:
+
+```
+  TUMBLING, W = 60 s, watermark = 15 s
+    open windows   1 + ceil(15/60)  =  1 + 1  =  2
+    entries        2 x 2,000,000            =  4,000,000
+    memory         4,000,000 x 32 B         =  128 MB      <- cheap
+
+  SLIDING, M = 5 min (top-100 over last 5 minutes)
+    open windows   M                        =  5
+    entries        5 x 2,000,000            = 10,000,000
+    memory         10,000,000 x 32 B        =  320 MB
+
+  SLIDING, M = 60 min (someone asks for "top ads this hour")
+    open windows   M                        =  60
+    entries        60 x 2,000,000           = 120,000,000
+    memory         120,000,000 x 32 B       =  3.84 GB     <- 12x the 5-min case
+
+  watermark as a fraction of the window:  15 / 60 = 25% extra latency on every result
+```
+
+Meaning: the tumbling per-minute count needs only **two** live windows no matter how long you run,
+because a window's cost ends 15 seconds after it closes. The sliding top-N's cost scales *linearly
+with M*, so stretching the ranking question from "last 5 minutes" to "last hour" is a 12x memory
+change on the aggregate nodes — a product decision with an infrastructure price tag, which is the
+kind of link worth naming out loud in an interview.
+
+**What the watermark actually costs.** A 15-second watermark on a 60-second window means every
+per-minute result is published 25% later than it could be. That is the entire tradeoff: you are
+buying late-event coverage with latency, at a fixed exchange rate of `watermark / W`. Push the
+watermark to 60 s and you double your end-to-end latency to catch a thin tail of stragglers — which
+is why the design keeps it short and lets the nightly reconciliation job catch the rest.
+
 ### Delivery guarantees — exactly-once
 
 The correctness requirement forces the strongest delivery guarantee. Three levels:
@@ -432,6 +599,55 @@ The 6-step dedup walkthrough, with its failure points:
 ```
 
 The key idea: **the dedup store (record-id checkpoint in HDFS/S3) is the memory that survives a crash**, so a replayed event is recognized and dropped. This is a distributed-systems classic — you cannot make "process + emit + commit offset" a single atomic step across Kafka and your processor, so you make the operation **idempotent** via a durable dedup marker instead.
+
+**In plain terms.** "Deduplication costs you one remembered key per event, for as long as a
+duplicate could still show up — so the memory bill is the arrival rate multiplied by how long you
+choose to remember." The dedup horizon is a design parameter, not a constant, and it is what
+separates a 60 MB problem from a 16 GB problem.
+
+| Symbol | What it is |
+|--------|------------|
+| n | Distinct record-ids you must remember = peak QPS x dedup horizon (seconds) |
+| dedup horizon | How far back a replay can reach — bounded by window + watermark, not by the day |
+| bytes/key | Cost of one remembered id: ~16 B for the id itself, ~64 B inside a real hash map |
+| exact set | A hash map of every id — no false positives, full memory cost |
+| Bloom filter | A probabilistic set: ~14.4 bits/element at p = 0.001, but *can* say "seen" wrongly |
+| p | Bloom false-positive rate — here, the probability a genuine click is wrongly skipped |
+
+**Walk one example.** Size the dedup set over the window-plus-watermark horizon (60 s + 15 s):
+
+```
+  n = peak QPS x horizon
+      50,000 /s x 75 s                 =  3,750,000 record-ids in flight
+
+  EXACT hash map
+    ids only        3,750,000 x 16 B   =     60 MB
+    real hash map   3,750,000 x 64 B   =    240 MB   (entry overhead dominates)
+
+  BLOOM FILTER over one minute of ids (n = 50,000 x 60 = 3,000,000)
+    p = 0.01     9.59 bits/elem  ->    3.59 MB   k = 7 hashes
+    p = 0.001   14.38 bits/elem  ->    5.39 MB   k = 10 hashes
+    p = 0.0001  19.17 bits/elem  ->    7.19 MB   k = 13 hashes
+
+    exact hash map for the same 3M ids:  3,000,000 x 64 B = 192 MB
+    bloom at p=0.001 is 192 / 5.39       =  36x smaller
+
+  IF you naively remembered a whole day instead of the horizon
+    1,000,000,000 x 16 B               =     16 GB per node    <- the trap
+```
+
+Meaning: the correct dedup horizon is **75 seconds, not 24 hours**. Bounding it to window +
+watermark turns dedup from a 16 GB per-node liability into a 240 MB hash map — and anything older
+than the horizon is not dedup's job at all, it is the nightly reconciliation job's.
+
+**Why a Bloom filter is the wrong tool on the money path.** The 36x memory saving is tempting until
+you read the failure direction. A Bloom filter's false positive says *"I have seen this id"* about
+an id it has never seen — so the aggregator **skips a real click**. At p = 0.001 and 3,000,000
+clicks per minute that is 3,000 clicks silently dropped every minute, roughly 4.32 million per day
+— under-billing at scale. Bloom filters are safe where a false positive means "do extra work"
+(cache admission, disk-read avoidance); here it means "lose revenue," so the exact hash map is worth
+its 36x. If you do use one, use it only as a *negative* pre-filter — a Bloom "no" is always truthful,
+so let a "no" fast-path straight to processing and send every "maybe" to the exact store.
 
 #### (b) Atomic commit of aggregation result + Kafka offset
 

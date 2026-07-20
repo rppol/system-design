@@ -67,6 +67,48 @@ step and it makes the multiplication doable in your head. The table's real job i
 million, billion, trillion, quadrillion — and read off "≈ 55 PB." That translation, not
 bit-exact accuracy, is what the table buys you.
 
+**What this actually says.** "Every storage unit is the same jump — ten more bits of address — so
+KB, MB, GB, TB and PB are not five separate facts, they are five rungs of one ladder, each 1,024×
+the last."
+
+Naming the rungs is the whole point of the table. Once "one rung per ×1,000" is reflexive, any raw
+byte count collapses into a unit you can reason about — and that translation step is the one place
+an estimate most often goes wrong.
+
+| Symbol | What it is |
+|--------|------------|
+| `bit` | One binary digit, 0 or 1 — the smallest unit of information |
+| `byte` | 8 bits; holds one ASCII character. Every storage estimate is counted in bytes |
+| `2^10` | 1,024 — one rung of the ladder. Ten more bits of address buys 1,024× more space |
+| the step of 10 in the exponent | Why the table lists 2^10, 2^20, 2^30, 2^40, 2^50 and never 2^15 |
+| `≈ 10^3` | The estimation shortcut: pretend 1,024 is 1,000 so the multiplication is mental |
+| KB / MB / GB / TB / PB | The five names for 2^10, 2^20, 2^30, 2^40, 2^50 bytes |
+
+**Walk one example.** Take the chapter's own Twitter answer, 54,750 TB, and climb the ladder:
+
+```
+  54,750 TB          x 10^12 bytes/TB      = 54,750,000,000,000,000 bytes
+                                           = 5.475 x 10^16 bytes
+
+  climb the ladder:    10^3   thousand      KB
+                       10^6   million       MB
+                       10^9   billion       GB
+                       10^12  trillion      TB
+                       10^15  quadrillion   PB   <- divide by this one
+
+  5.475 x 10^16 / 10^15                    = 54.75          ~ 55 PB
+
+  what the shortcut cost you:
+    true binary size  = 5.475 x 10^16 / 2^50 = 48.63 PiB
+    decimal answer                           = 54.75 "PB"
+    overstatement     = 54.75 / 48.63        = 1.126        -> 12.6% high
+```
+
+The decimal answer runs 12.6% above the true binary size because the 2.4%-per-rung error compounds
+five times (`1.024^5 = 1.1259`). For an order-of-magnitude estimate that is invisible — you were
+rounding 3,472 to 3,500 anyway. On a procurement spreadsheet it is a real 6 PB, which is exactly
+why the two unit systems (PB vs PiB) exist at all.
+
 ```
 byte ladder (each rung ×1000 for estimation, exactly ×1024 in truth)
   bit  ─┐
@@ -113,6 +155,53 @@ change.
 
 Units recap so you never fumble the conversions: **1 ns = 10^-9 s**, **1 µs = 10^-6 s = 1,000 ns**,
 **1 ms = 10^-3 s = 1,000 µs = 1,000,000 ns**.
+
+**Read it like this.** "No entry in this table is 'fast' or 'slow' on its own — every number only
+means something next to another number, and what you are memorizing is the two hundred-fold cliffs
+between the plateaus."
+
+The reason the table refuses to stick in memory is that human beings have no intuition for a
+nanosecond. Stretch the whole ladder by one constant factor until its smallest rung is something
+you can feel, and the ratios become impossible to forget.
+
+| Symbol | What it is |
+|--------|------------|
+| `ns` | Nanosecond, 10^-9 s — the CPU's own unit. One clock tick on a 3 GHz core is ~0.33 ns |
+| `µs` | Microsecond, 10^-6 s = 1,000 ns — the unit of local I/O and memory copies |
+| `ms` | Millisecond, 10^-3 s = 1,000,000 ns — the unit of disks and networks |
+| "sequentially" | Reading contiguous bytes, no seeking. The fast case; random access is far worse |
+| "round trip" | Out and back — a request plus its response, not one direction |
+| "seek" | Physically repositioning a disk head before any data flows. Pure overhead |
+| the ratio between two rows | The only durable content of the table; absolute values drift yearly |
+
+**Walk one example.** Stretch one L1 cache hit (0.5 ns) into 1 second — a factor of 2 × 10^9 — and
+read the whole table on a human clock:
+
+```
+  scale factor = 1 s / 0.5 ns = 2,000,000,000x   (apply to every row)
+
+  operation                        real       x 2x10^9        feels like
+  L1 cache reference               0.5 ns     1 s             one heartbeat
+  L2 cache reference               7 ns       14 s            a slow breath
+  main memory reference            100 ns     200 s           3.3 minutes
+  compress 1 KB with Zippy         10 us      20,000 s        5.6 hours
+  send 2 KB over 1 Gbps            20 us      40,000 s        11.1 hours
+  read 1 MB from memory            250 us     500,000 s       5.8 days
+  round trip within same DC        500 us     1,000,000 s     11.6 days
+  disk seek                        10 ms      20,000,000 s    7.6 months
+  read 1 MB from disk              30 ms      60,000,000 s    1.9 years
+  send packet CA -> NL -> CA       150 ms     300,000,000 s   9.5 years
+
+  the ratios you actually keep:
+    1 MB from disk vs from memory    30 ms / 250 us   = 120x
+    disk seek vs 1 MB from memory    10 ms / 250 us   = 40x
+    cross-continent vs same-DC RTT   150 ms / 500 us  = 300x
+    cross-continent vs Zippy 1 KB    150 ms / 10 us   = 15,000x
+```
+
+That is the table's real lesson: if a memory reference is a heartbeat, a cross-continent round trip
+is most of a decade. You would never make a decade-long call in a loop, and the scaled column is
+what makes "do not chat across regions" feel obvious rather than merely true.
 
 Because these numbers span nine orders of magnitude (0.5 ns to 150,000,000 ns), a linear chart is
 useless — one bar would be 300-million times taller than another. Plotting the **base-10
@@ -205,6 +294,54 @@ xychart-beta
 Caption: a perfectly regular staircase — every additional nine is a full order of magnitude less
 downtime, which is why "just add a nine" is an expensive engineering ask, not a rounding change.
 
+**In plain terms.** "An availability percentage is a promise about time, and the only honest way to
+hear it is to subtract it from 100% and cash the remainder out in seconds of a year."
+
+```
+downtime_per_year = (1 - A) x 31,536,000 s
+```
+
+Stating the rule this way means you never memorize the table — you regenerate any row of it in one
+multiplication, including rows the book does not list (99.95%, 99.995%) that vendors quote all the
+time.
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Availability as a fraction, not a percentage — 99.99% enters the formula as 0.9999 |
+| `1 - A` | The downtime fraction. This is the number that actually matters; A itself is decoration |
+| `31,536,000` | Seconds in a (non-leap) year: 365 × 24 × 60 × 60. The one constant to memorize |
+| "a nine" | One more 9 in the percentage, i.e. dividing `1 - A` by 10 — always exactly 10× less downtime |
+| SLA | The contract that names A. Cloud vendors typically promise 99.9% or better |
+
+**Walk one example.** Derive two adjacent rows and watch the decade appear:
+
+```
+  seconds in a year   = 365 x 24 x 60 x 60             = 31,536,000 s
+
+  A = 99.99%
+    availability fraction                              = 0.9999
+    downtime fraction (1 - A)                          = 0.0001
+    31,536,000 s x 0.0001                              = 3,153.6 s/year
+    3,153.6 s / 60                                     = 52.56 minutes/year
+
+  A = 99.999%   (one more nine)
+    downtime fraction (1 - A)                          = 0.00001
+    31,536,000 s x 0.00001                             = 315.36 s/year
+    315.36 s / 60                                      = 5.26 minutes/year
+
+  ratio of the two   3,153.6 / 315.36                  = exactly 10.0
+
+  meaning: the extra nine bought back 47 minutes a year. Whether that is worth a
+           second region is the actual decision the number exists to inform.
+```
+
+A note on the table's rounding: computed exactly, 99.9% allows 8.76 hours (31,536.0 s), 99.99%
+allows 52.56 minutes, and 99.9999% allows 31.54 seconds — the widely reproduced table above quotes
+8.77 hours, 52.60 minutes, and 31.56 seconds. The difference is not an error: those figures come
+from a **365.25-day** year (31,557,600 s, averaging in leap days), which gives 8.766 h, 52.596 min,
+and 31.558 s. Both conventions are defensible and the 0.07% gap changes no decision — which is
+itself the chapter's point about precision.
+
 ### Serial vs parallel availability composition
 
 A real system is many components, and how you wire them decides whether their availabilities
@@ -220,6 +357,54 @@ A real system is many components, and how you wire them decides whether their av
   `A_total = 1 − (1 − A1)(1 − A2) … (1 − An)`. Two 99% services in parallel give
   1 − (0.01 × 0.01) = 1 − 0.0001 = **99.99%** — two nines better than either alone. Redundancy is
   how you *buy* nines.
+
+**The idea behind it.** "Both formulas are the same act of multiplying probabilities together — in
+series you multiply the good news and it shrinks, in parallel you multiply the bad news and *that*
+shrinks. The operation is identical; only which column you feed it changes the sign of the result."
+
+That symmetry is why availability engineering has exactly one lever. You cannot make a component
+better than it is, so every real gain comes from moving something out of the series path and into a
+parallel one.
+
+| Symbol | What it is |
+|--------|------------|
+| `A_i` | The availability of component i, as a fraction (99.9% → 0.999) |
+| `A_total` | The availability a user actually experiences, after composition |
+| `1 - A_i` | Component i's failure probability — the term parallel redundancy multiplies |
+| `n` | How many components are composed: hops in the chain, or replicas in the pool |
+| `A1 × A2 × … × An` | Series: everything must work, so multiply the successes |
+| `1 − (1−A1)(1−A2)…` | Parallel: everything must fail to take you down, so multiply the failures |
+
+**Walk one example.** Push the same components through both wirings and read the downtime:
+
+```
+  SERIES -- all must be up:  A_total = A1 x A2 x ... x An
+
+    2 hops @ 99.9%    0.999^2 = 0.998001    -> 99.80%     downtime 63,040 s = 17.51 h/year
+    5 hops @ 99.9%    0.999^5 = 0.995010    -> 99.50%     downtime 157,365 s = 43.71 h/year
+
+    each hop you append costs another 0.1% -- five "three nines" services in a row
+    do not deliver three nines, they deliver two and a half
+
+  PARALLEL -- any one suffices:  A_total = 1 - (1-A1)(1-A2)...(1-An)
+
+    2 replicas @ 99%  1 - (0.01 x 0.01) = 0.9999      -> 99.9900%  downtime 3,153.6 s = 52.6 min/yr
+    3 replicas @ 99%  1 - (0.01 x 0.01 x 0.01)
+                                        = 0.999999    -> 99.9999%  downtime 31.5 s/year
+
+    each replica you append multiplies the failure probability by 0.01 -- one more
+    replica is one more decade of downtime removed, the same 10x as one more nine
+
+  the punchline: three cheap 99% boxes in parallel (99.9999%) beat five careful
+                 99.9% services in series (99.50%) by four orders of magnitude
+```
+
+**Why the `1 −` wrapper exists at all.** In parallel you cannot multiply availabilities directly —
+0.99 × 0.99 = 0.9801 would say two replicas are *worse* than one, which is nonsense. The event you
+have to multiply is the one that requires *all* participants to cooperate, and in a redundant pool
+that event is total failure, not success. Flipping into failure space (`1 − A`), multiplying there,
+and flipping back is the whole trick, and forgetting the flip is the single most common error when
+people first do this arithmetic on a whiteboard.
 
 ```mermaid
 flowchart LR
@@ -284,6 +469,56 @@ The 86,400 in the denominator is the number every QPS estimate divides by — me
 "**~86,400 s/day, round to ~100,000 for a quick pass**." Peak traffic is not uniform across the
 day, so a standard rule of thumb multiplies average QPS by **2** to size for the busy hour.
 
+**Stated plainly.** "Queries per second is not a measurement, it is a chain of stated assumptions
+multiplied together and then divided by 86,400 — and every disagreement about the answer is really
+a disagreement about one of the multipliers."
+
+```
+QPS      = (users x active_fraction x actions_per_user_per_day) / 86,400
+peak QPS = QPS x peak_factor
+```
+
+Writing it as one expression is what lets an interviewer push back surgically — "make it 3 tweets
+a day, not 2" — and lets you re-derive in one step instead of starting over.
+
+| Symbol | What it is |
+|--------|------------|
+| `users` | The headline population, usually quoted as monthly actives (MAU) |
+| `active_fraction` | Share of those who show up on a given day. Turns MAU into DAU; here 50% |
+| `actions_per_user_per_day` | How busy an active user is. Here 2 tweets — the softest number in the chain |
+| `86,400` | Seconds in a day, 24 × 3,600. The denominator of every QPS estimate ever |
+| `peak_factor` | Busy-hour multiplier over the 24-hour average. Default ~2; higher for spiky loads |
+| `QPS` | Average request rate. What the system sees on a boring Tuesday afternoon |
+| `peak QPS` | The rate you must actually provision for. Capacity is sized here, never at the average |
+
+**Walk one example.** The chapter's own chain, with the unit carried on every single line:
+
+```
+  users              300,000,000 MAU
+  x active_fraction  x 0.50                          = 150,000,000 DAU
+  x actions/user/day x 2 tweets/DAU/day              = 300,000,000 tweets/day
+
+  / seconds per day  / 86,400 s/day                  = 3,472.2 tweets/s
+  round                                              ~ 3,500 QPS
+
+  x peak_factor      x 2                             = 6,944.4 tweets/s
+  round                                              ~ 7,000 peak QPS
+
+  sanity check against the population:
+    3,500 QPS across 150,000,000 DAU means each user acts once every
+    150,000,000 / 3,500 = 42,857 s = 11.9 hours -- about twice a day. Consistent
+    with the stated assumption, so the arithmetic did not slip a unit.
+```
+
+**Why the peak factor is not optional.** Drop it and you provision 3,500 QPS of capacity for a
+system that will see 7,000 during its busy hour — you have not under-provisioned by a rounding
+error, you have under-provisioned by 100%, and the failure arrives precisely when the most people
+are watching. The peak factor is also the cheapest number to defend out loud, because a rough
+diurnal argument ("traffic is not flat; the busy hour is roughly double the mean") is one sentence
+and the interviewer will nod. The sanity check at the bottom of the block is worth the same ten
+seconds: dividing back through the population catches the `/24` blunder instantly, because it would
+have implied every user tweeting every twelve seconds.
+
 ### Step 2 — Storage
 
 Only media dominates storage (text and IDs are tiny by comparison), so estimate media:
@@ -300,6 +535,56 @@ Sanity check on the text/ID part to prove it is negligible: each tweet's non-med
 64 + 140 = 204 bytes; 300 million tweets/day × 204 bytes ≈ 61 GB/day ≈ 0.06 TB/day — about
 **0.2%** of the 30 TB/day media figure. That is why the estimate ignores it: on a back-of-the-
 envelope pass you drop terms that are 500× smaller than the dominant one.
+
+**What the formula is telling you.** "Total storage is just daily volume times the fraction of it
+that is actually big, times how big that thing is, times how long you promised to keep it — and one
+of those four factors always dominates so completely that the other three barely matter."
+
+```
+storage = events_per_day x heavy_fraction x bytes_per_heavy_event x 365 x years
+```
+
+Naming `heavy_fraction` as its own factor is what makes the "ignore the text" move defensible
+rather than lazy: you are not forgetting the text, you are showing it is 0.2% and dropping it on
+purpose.
+
+| Symbol | What it is |
+|--------|------------|
+| `events_per_day` | Daily volume carried over from the QPS chain — here 300M tweets/day |
+| `heavy_fraction` | Share of events carrying the payload that dominates. Here 10% have media |
+| `bytes_per_heavy_event` | Average size of that payload. Here 1 MB per media item |
+| `365 x years` | Retention. A product-policy number, not a technical one — always ask for it |
+| "the dominant term" | The factor whose removal changes the answer. Estimate it; drop the rest |
+
+**Walk one example.** The media chain, then the test that lets you throw the text away:
+
+```
+  events_per_day             300,000,000 tweets/day
+  x heavy_fraction           x 0.10                        = 30,000,000 media/day
+  x bytes_per_heavy_event    x 1 MB/media                  = 30,000,000 MB/day
+  convert                    / 10^6 MB per TB              = 30 TB/day
+
+  x retention                x 365 days/yr x 5 yr = 1,825 days
+                             30 TB/day x 1,825 days        = 54,750 TB
+  climb one rung             / 1,000 TB per PB             = 54.75 PB   ~ 55 PB
+
+  now the dropped term, to prove it was safe to drop:
+    bytes per tweet (non-media)  64 B id + 140 B text      = 204 B/tweet
+    300,000,000 tweets/day x 204 B/tweet                   = 61,200,000,000 B/day
+                                                           = 61.2 GB/day = 0.0612 TB/day
+    share of the total           0.0612 / 30               = 0.204%
+
+  meaning: carrying the text through the whole calculation would have moved
+           54.75 PB to 54.86 PB -- both round to 55 PB, and the gap is far smaller
+           than the error already baked into the "1 MB average media" guess.
+```
+
+**Why retention is the factor to interrogate first.** The other three multipliers are guesses about
+user behaviour and move the answer by tens of percent; retention is a policy decision that moves it
+by *whole multiples*. Cut the promise from five years to one and 55 PB becomes 11 PB — an 80%
+reduction bought with a product conversation rather than an engineering one. This is why "how long
+do we keep it?" is the most valuable clarifying question in any storage estimate, and why an
+estimate quoted without its retention window is not an estimate at all.
 
 ```mermaid
 flowchart LR

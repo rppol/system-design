@@ -115,6 +115,60 @@ With asynchronous followers, a read from a lagging follower returns **stale** da
 inconsistency that resolves "eventually" (**eventual consistency**). But "eventually" can be
 seconds or minutes under load, breaking three intuitive guarantees:
 
+### Decoding replication lag: it is a queue, not a constant
+
+Lag is not a property of the network — it is the length of a queue. The follower receives log
+entries at the leader's write rate and drains them at its own apply rate:
+
+```
+  backlog B      = replication-log entries received but not yet applied
+  staleness      = B / arrival_rate          (how many seconds of writes are queued)
+  drain time     = B / (apply_rate - arrival_rate)
+  utilization  r = arrival_rate / apply_rate
+```
+
+**What this actually says.** "A follower is behind by however much work is sitting in its
+queue, and it only catches up if it can apply faster than the leader can write." That reframing
+is the point: lag is a *rate* problem, so it is unbounded whenever the follower is even
+marginally slower — no amount of waiting fixes it.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Backlog: log entries the follower has received but not applied yet |
+| `arrival_rate` | The leader's write rate, in writes/sec — what the follower must keep up with |
+| `apply_rate` | How fast this follower can execute replayed writes, in writes/sec |
+| `staleness` | How many seconds behind the follower's view of the data is |
+| `drain time` | Seconds until the backlog reaches zero. Undefined when apply <= arrival |
+| `r` | Utilization. Below 1.0 the follower catches up; at or above 1.0 lag grows forever |
+
+**Walk one example.** A leader taking 5,000 writes/sec, a follower holding a 200,000-entry
+backlog, and three different follower speeds:
+
+```
+  staleness now = 200,000 / 5,000 = 40 s behind, in all three cases
+
+                 apply    net drain    r = arr/apply    drain time
+  healthy        6,000    +1,000/s        0.833          200 s   -> caught up
+  marginal       5,100      +100/s        0.980        2,000 s   -> 33 min
+  overloaded     4,800      -200/s        1.042          never   -> diverges
+```
+
+The overloaded follower is only 4% slower than the leader, and it never recovers:
+
+```
+  B(t) = 200,000 + 200 x t          staleness(t) = B(t) / 5,000
+
+    t = 0        B =    200,000     staleness =    40 s
+    t = 1 hour   B =    920,000     staleness =   184 s   (3.1 min)
+    t = 24 hours B = 17,480,000     staleness = 3,496 s   (58.3 min)
+```
+
+**Why the "seconds or minutes" wording matters.** The queue formula explains why lag reports
+are bimodal in production: while `r < 1` lag is small and self-correcting, and the instant `r`
+crosses 1.0 — a vacuum, a big batch job, a slower replica disk — lag climbs linearly and does
+not stop. There is no gentle middle. This is the mathematical reason the chapter warns against
+assuming "it'll be fast enough."
+
 ### Reading your own writes (read-after-write consistency)
 
 A user submits data, then reads it back from a lagging follower and sees it *missing* — looks
@@ -129,6 +183,57 @@ A user reads from an up-to-date follower (sees new data), then a later read hits
 follower (data *disappears* — moving backward in time). **Monotonic reads** guarantees you never
 see time go backward: a weaker guarantee than strong consistency but stronger than eventual.
 Achieve it by routing each user to a fixed replica (e.g. hash of user ID).
+
+### Decoding the staleness window both guarantees have to cover
+
+Both fixes are sized by the same quantity — how far behind the follower is. Written as
+log positions rather than seconds, the rule each technique enforces is:
+
+```
+  follower_LSN     = leader_LSN - B
+  safe to read from a follower  iff  follower_LSN >= LSN_of_my_last_write
+  pin-to-leader window          =  B / arrival_rate     (the staleness from above)
+  monotonic-read violation      =  staleness(replica_2) - staleness(replica_1)
+```
+
+**Stated plainly.** "Only read from a replica that has already caught up past your own write;
+if you cannot check that, read from the leader for as long as the lag lasts." The LSN form is
+exact, the seconds form is the crude version everyone actually ships.
+
+| Symbol | What it is |
+|--------|------------|
+| `leader_LSN` | The leader's current log position — the newest write in the system |
+| `follower_LSN` | How far this follower has replayed. Always `leader_LSN - B` |
+| `LSN_of_my_last_write` | The position the user's own write landed at; the token to compare against |
+| `pin-to-leader window` | Seconds a user must be routed to the leader before followers are safe |
+| `staleness(replica_i)` | Seconds that particular replica is behind; each replica has its own |
+
+**Walk one example.** Same cluster: leader at LSN 10,000,000, backlog 200,000, 5,000 writes/sec:
+
+```
+  follower_LSN = 10,000,000 - 200,000 = 9,800,000
+  gap          =    200,000 entries  =  200,000 / 5,000 = 40 s of writes
+
+  user writes -> lands at LSN 10,000,000
+    read from follower now  : 9,800,000 < 10,000,000  -> write NOT visible, looks lost
+    pin to leader for 40 s  : covers the whole window -> read-your-writes holds
+    or wait for catch-up    : 200,000 / (6,000 - 5,000) = 200 s at the healthy apply rate
+```
+
+Monotonic reads breaks on the *spread between* replicas, not on any single lag figure:
+
+```
+  replica F1 staleness =  2 s        first read  -> sees writes up to t-2
+  replica F2 staleness = 40 s        second read -> sees writes up to t-40
+
+  apparent jump backward = 40 - 2 = 38 s of history vanishing between two reads
+```
+
+**Why pinning to one replica is enough for monotonic reads but not read-your-writes.** Pinning
+zeroes the *spread* term — one replica cannot disagree with itself — so time never runs
+backward. It does nothing to the *absolute* staleness, so your own 40-second-old write can
+still be missing from that pinned replica. Different guarantee, different term of the formula;
+this is exactly why the chapter lists them separately.
 
 ### Consistent prefix reads
 
@@ -250,6 +355,74 @@ flowchart LR
 
 Caption: with n=3, w=2, r=2 the write set (A, B) and read set (B, C) overlap on replica B, so
 w+r exceeding n guarantees the read always touches at least one replica holding the latest write.
+
+### Decoding w + r > n
+
+The inequality is pigeonhole counting, and the quantity it is really about is the size of the
+guaranteed overlap between the write set and the read set:
+
+```
+  |W| = w        |R| = r        both drawn from the same n replicas
+
+  guaranteed overlap = max(0, w + r - n)
+
+  overlap >= 1  <=>  w + r - n >= 1  <=>  w + r > n
+```
+
+**Read it like this.** "You are putting `w` marks and `r` marks on `n` slots; if the two counts
+together exceed the number of slots, some slot must carry both marks." That shared slot is a
+replica which both accepted the newest write and answers the read — so the read cannot miss it.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Total replicas holding each key |
+| `w` | Replicas that must acknowledge before a write is reported successful |
+| `r` | Replicas the client reads from and compares versions across |
+| `W`, `R` | The actual sets of nodes contacted by one write and one read |
+| `w + r - n` | Overlap size. `>= 1` means guaranteed freshness; `<= 0` means a gap may exist |
+
+**Walk one example.** Every configuration worth knowing, with the overlap computed:
+
+```
+   n    w    r     w + r    w + r - n     verdict
+   3    2    2       4         +1         holds  -- the standard default
+   3    1    1       2         -1         BROKEN -- write {A}, read {B}, no overlap
+   5    3    3       6         +1         holds  -- the 5-node standard
+   5    2    2       4         -1         BROKEN -- write {A,B}, read {D,E}, disjoint
+   3    3    1       4         +1         holds  -- write all, read one
+   5    4    2       6         +1         holds  -- write-heavy skew
+   5    1    5       6         +1         holds  -- write one, read all
+```
+
+The two broken rows fail for the same reason: `w + r - n` is negative, so the sets can be
+chosen fully disjoint. With n=3, w=1, r=1 a write landing only on replica A and a read served
+only by replica B share nothing, and the read returns a value that predates the acknowledged
+write — silently, with no error.
+
+**Put simply.** The same three numbers also decide how many dead nodes you survive, and the two
+tolerances pull in opposite directions:
+
+```
+  node failures a write tolerates = n - w
+  node failures a read  tolerates = n - r
+  sum of the two                  = 2n - (w + r)  <  n     whenever w + r > n
+```
+
+```
+   n    w    r     write tolerates    read tolerates    note
+   3    2    2         1 down             1 down        balanced, survives one loss either way
+   5    3    3         2 down             2 down        balanced, survives two
+   3    3    1         0 down             2 down        ANY node down blocks all writes
+   5    1    5         4 down             0 down        writes almost always succeed, reads fragile
+   3    1    1         2 down             2 down        maximum availability, zero freshness
+```
+
+**Why you cannot have all three.** `(n - w) + (n - r) < n` is forced by `w + r > n`, so the
+freshness guarantee is paid for directly out of the failure budget. The `n=3, w=3, r=1` row is
+the trap: it satisfies the inequality and gives the cheapest possible reads, but a single
+unavailable replica halts every write in the cluster. And the maximally available `n=3, w=1,
+r=1` row is exactly the one whose overlap is negative — availability bought by giving up the
+guarantee, which is the whole tradeoff the chapter is describing.
 
 **Limits of quorums:** even with w+r>n, edge cases return stale data — concurrent writes (which
 to keep?); a write that succeeds on some and fails on others isn't rolled back; if a node with a

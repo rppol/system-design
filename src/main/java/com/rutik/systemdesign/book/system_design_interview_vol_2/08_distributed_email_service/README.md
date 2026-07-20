@@ -98,6 +98,43 @@ send QPS           = 1e10 / 1e5 = 1e5 = 100,000 QPS
 peak QPS           ≈ 2 × average ≈ 200,000 QPS
 ```
 
+**In plain terms.** "Every user's daily sends, added up and then smeared evenly across the day's
+seconds — plus a doubling because real traffic clusters in working hours instead of arriving
+evenly." The peak multiplier is the honest part of this estimate: the average is a fiction nobody
+ever experiences, and capacity is bought for the peak.
+
+| Symbol | What it is |
+|--------|------------|
+| `1e9 users` | 1 billion — the Gmail-scale assumption the chapter fixes up front |
+| `10 emails` | Average sends per user per day. Sends only; receives are 4x larger |
+| `1e10 emails/day` | Total daily send volume across the fleet |
+| `1e5` | Seconds per day, 86,400 rounded up for clean division |
+| `2 x` | Peak-to-average ratio — a standing assumption, not a measurement |
+
+**Walk one example.** Both the shorthand route and the exact one:
+
+```
+  users                                 1,000,000,000
+  x sends per user per day                         10
+  --------------------------------------------------
+  emails sent per day                  10,000,000,000     = 1e10
+
+  using the 1e5 shorthand:  1e10 /  100,000  =  100,000 QPS
+  using the true day:       1e10 /   86,400  =  115,741 QPS
+  peak (2x the average):    2 x 100,000      =  200,000 QPS
+```
+
+100,000 QPS is a number a horizontally scaled stateless web tier answers by adding machines — no
+architectural insight required. That is exactly why the chapter reports it and moves on: it is the
+*control* against which the storage figure looks alarming. Note the same formula with the receive
+assumption instead of the send one gives `1e9 x 40 / 1e5 = 400,000 QPS` of inbound mail, four times
+the send rate, which is why the receiving pipeline gets its own queue rather than sharing one.
+
+**Why the `1e5` shorthand is safe here.** It under-counts the day by 13,600 seconds, so it
+*under*-states QPS by roughly 13% (115,741 vs 100,000). The conclusion — "compute is easy" — does
+not depend on 13%, and the 2x peak multiplier swamps the error in the conservative direction.
+Reach for the true 86,400 only when an estimate lands near a hardware boundary.
+
 100K sustained / 200K peak send QPS is a *large* but unremarkable number — a horizontally scaled web
 tier plus a message queue absorbs it easily. Compute is **not** the bottleneck.
 
@@ -110,6 +147,41 @@ per day  = 1e9 users × 40 emails/day × 50 KB
 per year = 2 PB/day × 365 ≈ 730 PB / year
 ```
 
+**What this actually says.** "Every email a user *receives* leaves a permanent 50 KB row behind, so
+multiply population by inbox rate by row size — then multiply by 365, because unlike QPS this
+number never goes back down." Storage is the one estimate that integrates rather than averaging;
+that is the single structural reason it dominates the design.
+
+| Symbol | What it is |
+|--------|------------|
+| `1e9 users` | The population |
+| `40 emails/day` | **Received** per user, not sent. Receives are the storage driver — you keep them |
+| `50 KB` | Average metadata size: headers plus body. HTML bodies are bigger than intuition says |
+| `50e3 bytes` | 50 KB written in decimal bytes so the multiplication stays in powers of ten |
+| `x 365` | The accumulation term. QPS is a rate; storage is a rate integrated over time |
+
+**Walk one example.** Build it from one user upward, which makes the final number checkable:
+
+```
+  one user, one day:      40 emails x 50 KB              =    2,000 KB  =  2 MB
+  one user, one year:      2 MB x 365                    =      730 MB
+
+  all users, one day:      1e9 x 40 x 50e3 bytes         =    2e15 bytes  =  2 PB / day
+  all users, one year:     2 PB x 365                    =      730 PB / year
+```
+
+The per-user and fleet lines are the same number with the units shifted: 730 **MB** per user per
+year becomes 730 **PB** across a billion users, because a billion is exactly the MB-to-PB step. Use
+this as the arithmetic check — if the two figures do not share digits, one of them is wrong. And
+notice what 730 MB/user/year means operationally: a ten-year Gmail account is ~7.3 GB of *metadata*
+alone, before a single attachment.
+
+**Why `40` and not `10` belongs in this formula.** Storage is driven by what lands in a mailbox,
+not what leaves it, and the chapter's own assumptions say users receive 4x what they send. Using
+the send figure would give `1e9 x 10 x 50 KB = 0.5 PB/day` — a 4x under-estimate that would make
+metadata look smaller than it is and weaken the conclusion the whole section is building toward.
+Sending and receiving drive different budgets: sends size the *compute*, receives size the *disk*.
+
 **Attachment storage (per year)**
 
 ```
@@ -119,6 +191,41 @@ per day  = 1e9 users × 40 emails/day × 20% × 500 KB
 per year = 4 PB/day × 365 ≈ 1,460 PB / year
 ```
 
+**Read it like this.** "Same shape as the metadata line, with one extra factor — only a fifth of
+emails carry a file, but that file is ten times the size of the entire email around it." The 0.2
+and the 500 KB pull in opposite directions and the 500 KB wins decisively; that single fact is what
+makes attachments, not messages, the dominant cost.
+
+| Symbol | What it is |
+|--------|------------|
+| `20%` (`0.2`) | Attachment rate — the fraction of received emails carrying a file |
+| `500 KB` | Average attachment size, decoded. Base64 inflation is a *transport* cost, not storage |
+| `500e3 bytes` | 500 KB in decimal bytes, keeping the whole product in powers of ten |
+| `4e15 bytes` | 4 PB/day — exactly twice the metadata figure |
+
+**Walk one example.** The two extra factors, applied one at a time to the metadata baseline:
+
+```
+  received emails per day (fleet)     1e9 x 40         =  4.0e10 emails
+  x 20% carry an attachment                 x 0.2      =  8.0e9  attachments/day
+  x average attachment size                 x 500e3 B  =  4.0e15 bytes  =  4 PB / day
+  x 365                                                =  1,460 PB / year
+
+  why it beats metadata, per email received:
+     metadata cost                    50 KB x 1.0      =  50 KB
+     attachment cost                 500 KB x 0.2      = 100 KB      <- exactly 2x
+```
+
+The bottom pair is the whole result in two lines. Averaged over *all* received email, an attachment
+costs 100 KB against metadata's 50 KB — the `0.2` discounts the 500 KB by five, but 500 KB started
+out ten times larger, so attachments finish at precisely twice the metadata. This is why the ratio
+lands on a clean 2.0 rather than something ragged.
+
+**Why the stored size is 500 KB and not 685 KB.** The Base64 inflation described below applies on
+the wire, inside the MIME message. Attachments are decoded before they reach the object store, so
+storage is billed on the raw binary. Storing the base64 blob inline instead would push this line to
+`1,460 x 1.37 = 2,000 PB/year` — an extra 540 PB annually to hold an encoding artifact.
+
 **The conclusion — storage is the monster.**
 
 ```
@@ -126,6 +233,47 @@ metadata   ≈   730 PB / year
 attachments ≈ 1,460 PB / year   (2× the metadata)
 total      ≈ 2,190 PB / year ≈ ~2.2 EB / year   (before replication)
 ```
+
+**Stated plainly.** "Add the two storage lines, then remember the total is what you *hold*, not
+what you *buy* — durability multiplies it again." The phrase "before replication" is doing heavy
+work in that last line; a mail product's reliability bar means the number you procure is several
+times the number you store.
+
+| Symbol | What it is |
+|--------|------------|
+| `730 PB` | Yearly metadata, from the received-mail x row-size product |
+| `1,460 PB` | Yearly attachments — exactly 2x the metadata |
+| `2,190 PB` | Logical bytes added per year, counted once |
+| `EB` (exabyte) | 1,000 PB. The unit the total forces you into |
+| `~3x` | Replication factor — copies kept for durability and availability, not extra data |
+
+**Walk one example.** Sum, convert, then apply the multiplier the text flags but does not compute:
+
+```
+  metadata per year                          730 PB
+  + attachments per year                   1,460 PB
+  ------------------------------------------------
+  logical total per year                   2,190 PB   =  2.19 EB
+
+  x replication factor                        ~3
+  ------------------------------------------------
+  provisioned capacity per year            6,570 PB   =  6.57 EB / year
+
+  per-user cross-check:
+     730 MB metadata + 1,460 MB attachments  =  2,190 MB/user/year
+     x 1e9 users                             =  2,190 PB/year   (matches)
+```
+
+6.57 EB of *new* disk every year, growing, forever — for one year of one product. That is the
+number that reframes the design: it is not a database question, it is a capacity-procurement
+question, and every percent shaved off the attachment line is worth roughly 44 PB of provisioned
+capacity annually (`1,460 x 0.01 x 3`). Checksum deduplication and tiering cold mail to cheaper
+media stop being optimizations and become the design.
+
+**Why the per-user cross-check works.** A billion is exactly the step from MB to PB, so any
+per-user figure in MB/year reads directly as the fleet figure in PB/year. It is the cheapest
+possible sanity check on an estimate this large, and it catches the single most common mistake in
+back-of-envelope storage math — dropping or doubling a factor of 1,000 in a unit conversion.
 
 Attachments alone are **twice** the metadata, and neither number includes the ~3× multiplier for
 replication. This single result reframes the whole design: the send/receive pipeline is standard
@@ -200,6 +348,42 @@ base64 text:  [ c0 c1 c2 c3 ][ c4 c5 c6 c7 ] ...  4 chars      = +33% (+~37% wit
 
 Caption: MIME + Base64 is why an attachment on the wire is ~37% larger than the file on disk — store
 the decoded binary once in object storage, not the inflated base64 inside the metadata rows.
+
+**Put simply.** "It takes four printable characters to safely carry three arbitrary bytes, so
+anything binary gets a third bigger the moment it enters an email." The ratio is fixed by the
+encoding itself — it is not a compression outcome and no amount of tuning changes it — which is
+why every advertised email attachment limit is quietly smaller than it looks.
+
+| Symbol | What it is |
+|--------|------------|
+| `3 bytes` | The input group. 24 bits of arbitrary binary |
+| `4 chars` | The output group. 24 bits re-cut into four 6-bit values, each a safe ASCII character |
+| `4/3` | The inflation ratio. Pure encoding overhead: +33.33% |
+| `~37%` | The practical ratio once CRLF line wrapping (a break every 76 characters) is counted |
+| `encoded size` | What SMTP transports and what the advertised limit measures |
+
+**Walk one example.** The chapter's 500 KB attachment, and what the ratio does to a stated limit:
+
+```
+  encoding overhead:      4 / 3  =  1.3333   ->  +33.33% before line breaks
+
+  500 KB file, encoding only:      500 x 1.3333  =  666.67 KB
+  500 KB file, with CRLF wrap:     500 x 1.37    =  685.00 KB   <- what crosses the wire
+
+  reading the ratio backwards, Gmail's advertised 25 MB limit:
+     25 MB encoded / 1.3333  =  18.75 MB of real file
+     25 MB encoded / 1.37    =  18.25 MB of real file
+```
+
+So "25 MB attachment limit" means roughly an 18 MB file, and a user with a 20 MB video will be
+rejected by a limit that reads as comfortably large. The gap is not a bug or a safety margin — it
+is the encoding, showing up in the user interface.
+
+**Why this is a transport cost and never a storage cost.** The inflation exists only while the file
+is inside a MIME message. Decode once at ingest and the object store holds the original 500 KB.
+Skip that step — store the base64 blob inline in the metadata rows, as the Pitfalls section warns —
+and you pay the 37% on the *dominant* storage line forever, and you pay it inside the write-heavy
+metadata store rather than in cheap object storage. Two mistakes, one omitted decode.
 
 #### Traditional mail-server architecture (and why it dies at 1B users)
 
@@ -523,6 +707,47 @@ forwarded 1,000×  ─────────────►  checksum(file) = 
 
 Caption: content-addressed storage means 1,000 identical attachments collapse to one stored blob and
 1,000 lightweight pointers — the single biggest lever on the design's dominant cost.
+
+**The idea behind it.** "Fan-out multiplies the number of *mailboxes* a file appears in, but
+content addressing means it never multiplies the number of *bytes* stored — so the saving grows in
+lock-step with how widely the file spreads." Naive per-recipient storage is `N x size`; dedup makes
+it `size`, independent of `N`, so the bigger the mailing list the better dedup does.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Recipients of one message — the fan-out factor. 1,000 employees in the chapter's example |
+| `size` | The attachment's decoded size: a 5 MB PDF |
+| `checksum(file)` | SHA-256 of the content, used as the object key. Identical bytes, identical key |
+| `N x size` | Naive cost: one stored copy per recipient |
+| `ref count` | How many metadata rows point at the blob. Gates deletion; here it reaches 1,000 |
+
+**Walk one example.** The company-wide memo, both ways:
+
+```
+  naive (one blob per recipient):    1,000 x 5 MB     =  5,000 MB  =  4.88 GB
+  deduplicated (content-addressed):      1 x 5 MB     =      5 MB
+
+  saving                             4,995 MB of 5,000 MB      =  99.9%
+  storage reduction factor                                     =  1,000x  (exactly N)
+
+  what still scales with N (and must):
+     metadata rows          1,000 rows x 50 KB        =  50 MB
+     ref count on the blob                            =  1,000
+```
+
+The reduction factor equals `N` exactly — dedup does not shave a percentage off the cost, it
+removes the fan-out dimension from it entirely. Note the asymmetry in the bottom block: the 50 MB
+of metadata rows is *not* waste and cannot be deduplicated, because each recipient has genuinely
+different state (their own folder, their own read flag, their own delete). Only the immutable bytes
+collapse. That is precisely the split the design draws between the metadata store and object
+storage, arriving here from a second direction.
+
+**Why the reference count is load-bearing.** Without it the first of the 1,000 employees to empty
+their trash deletes the only copy and breaks the attachment for the other 999 — a data-loss bug
+that dedup *creates*. Deletion must decrement and only remove the blob at zero (or leave it to a
+garbage collector that sweeps unreferenced keys). This is also where dedup collides with
+compliance: a GDPR "right to be forgotten" request cannot erase a blob that 999 other users still
+legitimately hold, which is why the Wrap Up flags ref counts and the right to be forgotten together.
 
 ### Email deliverability
 

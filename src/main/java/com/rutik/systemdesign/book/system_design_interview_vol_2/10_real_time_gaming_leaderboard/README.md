@@ -117,6 +117,56 @@ of producing a score update:
 
 So the write path must sustain roughly **2,900 QPS average, ~14,500 QPS peak**.
 
+**Put simply.** "Count how many events the whole population generates in a day, spread them evenly
+over the 86,400 seconds in that day to get the average rate, then multiply by a peak factor because
+players do not log in uniformly at 4 a.m."
+
+The framing matters because the peak factor is the only term in the chain that is a *judgement*
+rather than a measurement — and it is the one that sizes your fleet. Everything to its left is
+arithmetic on numbers the product team already knows.
+
+| Symbol | What it is |
+|--------|------------|
+| `U` | Daily active users — 25,000,000 here |
+| `g` | Score-generating events per user per day — 1 in the naive pass, 10 in the realistic one |
+| `U x g` | Total daily events; the numerator of everything below |
+| `86,400` | Seconds in a day — `24 x 60 x 60`, the constant that turns per-day into per-second |
+| `k` | Peak-to-average factor — 5x here, covering the evening play spike |
+| QPS_peak | `(U x g / 86,400) x k` — the number the write path must actually survive |
+
+**Walk one example.** Both passes side by side, so the effect of `g` is visible:
+
+```
+  seconds in a day = 24 x 60 x 60 = 86,400
+
+  naive pass, g = 1 win/user/day
+     daily events = 25,000,000 x 1  =  25,000,000
+     average QPS  = 25,000,000 / 86,400 = 289.35   ->  ~290 updates/s
+     peak QPS     = 289.35 x 5          = 1,446.76 -> ~1,450 updates/s
+
+  realistic pass, g = 10 games/user/day
+     daily events = 25,000,000 x 10 = 250,000,000
+     average QPS  = 250,000,000 / 86,400 = 2,893.52 -> ~2,900 updates/s
+     peak QPS     = 2,893.52 x 5         = 14,467.59 -> ~14,500 updates/s
+
+  read path, one leaderboard open per user per day
+     average QPS  = 25,000,000 / 86,400 = 289.35   ->  ~290 fetches/s
+
+  headroom check against a single Redis node at ~100,000 simple ops/s:
+     14,500 / 100,000 = 0.145      <- peak writes use ~14.5% of one node
+     (14,500 + 290) / 100,000 = 0.148   <- reads barely move the number
+
+  Meaning: the entire write path fits in roughly a seventh of one Redis node. Throughput
+  is NOT the constraint here -- which is why the rest of the chapter is about memory,
+  availability, and rank-query shape rather than about adding capacity.
+```
+
+**Why the peak factor cannot be dropped.** Provision to the 2,900 average and the evening spike
+arrives at 5x that rate; the queue in front of Redis grows for hours and every score update lands
+late, breaking the "real-time" requirement without any component actually failing. The `k` term is
+what converts a daily total into a number you can size hardware against — its absence is the single
+most common back-of-the-envelope error in this class of problem.
+
 **Top-10 fetch QPS:** if each user opens the leaderboard about **once per day**, the top-10 read
 QPS is the same order as the naive user rate:
 
@@ -379,6 +429,55 @@ saving is dramatic and grows with n: at a million nodes it is ~20 hops instead o
 is why rank, top-N, and range queries are all cheap on a sorted set while they are scans on a
 plain list or a B-tree count.
 
+**The idea behind it.** "Finding *where* a player sits costs `log N` hops down the express lanes;
+handing back a *window* of players costs those same `log N` hops plus one step per row you actually
+return — so the size of the answer, not the size of the leaderboard, is what makes a range query
+more expensive than a rank query."
+
+Splitting the cost into `log N` (the seek) plus `M` (the walk) is what makes the whole design
+legible. It explains why `ZREVRANK` and `ZREVRANGE` feel identical in practice — `M` is 9 or 10 —
+and it warns you exactly which query would not be safe: one where `M` is a million.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Members in the sorted set — the whole player population on the board |
+| `M` | Rows the query returns — 10 for the top-10, 9 for the rank window |
+| `log2 N` | Skip-list levels traversed to locate a position; the seek cost |
+| `O(log N)` | Cost of `ZREVRANK` — locate only, return a single integer |
+| `O(log N + M)` | Cost of `ZREVRANGE` — locate, then walk `M` nodes along level 0 |
+| `N / 2` | Index entries a SQL `COUNT(*) WHERE score > X` traverses for a mid-table player |
+
+**Walk one example.** The two population sizes the chapter uses, with the book's real `M` values:
+
+```
+  25M DAU board:  N = 25,000,000     log2 N = 24.58  ->  ~25 hops
+  500M MAU board: N = 500,000,000    log2 N = 28.90  ->  ~29 hops
+
+  at N = 500,000,000
+     ZREVRANK mario              O(log N)      = 28.90            ~29 steps
+     ZREVRANGE 0 9   (top 10)    O(log N + M)  = 28.90 + 10       ~39 steps
+     ZREVRANGE r-4 r+4 (window)  O(log N + M)  = 28.90 +  9       ~38 steps
+
+  the SQL alternative for a mid-table player, same N:
+     COUNT(*) WHERE score > X    ~ N / 2       = 250,000,000 index entries
+     ratio vs the sorted set     = 250,000,000 / 28.90
+                                 = 8,651,311x more work
+
+  scaling check -- 20x the players, from 25M to 500M:
+     N grew        25,000,000 -> 500,000,000   = 20.0x
+     seek cost     24.58      -> 28.90         = 1.18x
+
+  Meaning: multiplying the player base by 20 makes a rank lookup 18% more expensive,
+  while the SQL count gets 20x worse in lockstep with N. That gap -- 29 steps against
+  250 million -- is the entire reason the design leaves the relational table behind.
+```
+
+**Why `M` is the term that must stay small.** Because the walk is linear, `ZREVRANGE 0 999999` on a
+500M-member board costs `28.90 + 1,000,000` steps and blocks the single-threaded Redis event loop
+for the whole traversal, stalling every other client. The requirement only ever asks for 10 rows and
+a 9-row window, so `M` stays negligible and the seek dominates — but "give me the full board" is a
+genuinely dangerous query against exactly the same data structure.
+
 **The commands.** The whole design is five Redis commands against a per-month key:
 
 | Operation | Command | Meaning |
@@ -430,6 +529,71 @@ Assume each entry is a **user id + a score ≈ 26 bytes**. For the daily-active 
 Redis's per-key overhead (sorted-set skip-list pointers, hash-table entries, object headers), you
 are at ~6.5 GB — still a single commodity node. Throughput (peak ~14,500 writes/s) is likewise
 well within one node. So on capacity grounds, **one Redis node is enough.**
+
+**What it means.** "Total memory is just members times bytes-per-member — but bytes-per-member is
+not the size of your data, it is the size of your data *plus everything Redis allocates to make it
+sortable*, and which encoding the sorted set picked decides whether that overhead is 4 bytes or 90."
+
+That is why the estimate carries a 10x safety factor rather than a 1.2x one. A ZSET has two
+encodings with radically different costs, and a leaderboard lands on the expensive one — so the
+naive `user_id + score` byte count is a floor, never a forecast.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Members in the sorted set — 25M DAU or 500M MAU |
+| `b_data` | Raw bytes of the member id plus its score — the book's ~26 B figure |
+| `b_lp` | Bytes per member under **listpack/ziplist** encoding — one flat array, no pointers |
+| `b_sl` | Bytes per member under **skiplist** encoding — sds string + skip-list node + dict entry + bucket slot |
+| `zset-max-ziplist-entries` | Redis config, default **128** — above this many members the ZSET converts to skiplist and never converts back |
+| `n x b` | Total memory; the number you compare against a node's RAM |
+
+**Walk one example.** Cost out both encodings for a 10-character user id, then scale:
+
+```
+  listpack encoding (small sets only)
+     member entry  = 2 (encoding+len prefix) + 10 (id bytes) + 1 (backlen) = 13 B
+     score entry   = 1 (int16 encoding)      +  2 (value)    + 1 (backlen) =  4 B
+     b_lp                                                                  = 17 B
+
+  skiplist encoding (what a real leaderboard uses)
+     sds string    = 3 (sdshdr8) + 10 (id) + 1 (NUL) = 14  -> 16 B allocated
+     zskiplistNode = 8 (ele ptr) + 8 (score) + 8 (backward)
+                     + 1.33 avg levels x 16 B        = 45  -> 48 B allocated
+     dictEntry     = 8 (key) + 8 (val) + 8 (next)    = 24  -> 32 B allocated
+     hash bucket slot, amortized                            =  8 B
+     b_sl                                                   = 104 B
+     ratio b_sl / b_lp = 104 / 17 = 6.1x
+
+  which encoding does a leaderboard get?
+     25,000,000 members / 128 entry threshold = 195,312x over the limit
+     -> ALWAYS skiplist. The 17 B figure never applies to the main board.
+
+  scale it out
+     population    b = 26 B (book)   b = 104 B (skiplist)   b = 130 B (implied by 65 GB)
+     25M DAU          0.65 GB            2.60 GB                3.25 GB
+     500M MAU        13.00 GB           52.00 GB               65.00 GB
+
+  reconciling the chapter's own two figures:
+     65 GB / 500,000,000 members = 130 bytes per member
+
+  Meaning: the book's 26 B/member is the payload floor and its 65 GB figure implies
+  130 B/member -- 5x higher -- which is precisely the skiplist overhead computed above
+  (104 B) plus room for a longer id. The "10x blow-up" caveat is not padding; it is the
+  data structure.
+```
+
+**Where this forces sharding.** At 500M MAU and 104 B/member the set is 52 GB, and at the chapter's
+130 B/member it is 65 GB. Against a node with ~16 GB usable for this key that is `ceil(52 / 16) = 4`
+shards minimum, and the 65 GB figure needs more — which is exactly the trigger for the partitioning
+deep dive below. Note what did *not* force it: peak write QPS of 14,500 is about 14.5% of one node.
+**Memory, not throughput, is what breaks the single-node design.**
+
+**Why the encoding threshold exists at all.** Redis keeps small sorted sets as a flat listpack
+because 17 B/member with an O(n) scan beats 104 B/member with O(log n) pointers when `n` is 50 — a
+friends-only board of 50 players costs 850 B as a listpack against 5,200 B as a skiplist. The
+128-entry default is where the scan stops being cheaper than the pointers. A global leaderboard is
+195,312x past that line, so it pays the pointer tax on every one of its 25 million members, and the
+`b_lp` column is only ever relevant to per-guild or per-friend boards you might store alongside it.
 
 But "one node is enough" is not "one node is acceptable," for two reasons:
 
@@ -637,6 +801,77 @@ fractional/low-order part, so that among equal point totals the **earlier** time
 A common encoding: `composite = points - (timestamp / LARGE_CONSTANT)`, so more points always
 dominate, and among equal points the smaller timestamp yields a slightly larger composite score.
 The sorted set then ranks ties correctly with no extra query.
+
+**Stated plainly.** "Keep the points as the whole-number part of the score and hide the arrival time
+in the decimals, shrunk small enough that it can never spill over into the integer part — so one
+number sorts by points first and by arrival time second."
+
+The framing to hold onto is that the divisor is not a tuning knob, it is a *guarantee*: it must be
+large enough that the timestamp term stays strictly below 1, or a fast-arriving player could
+out-score someone with genuinely more points.
+
+| Symbol | What it is |
+|--------|------------|
+| `points` | The player's real score — must dominate every comparison |
+| `timestamp` | Unix seconds at which the player reached that score; smaller = earlier = should rank higher |
+| `C` | The large constant divisor that squeezes the timestamp below 1.0 |
+| `timestamp / C` | The tiebreak term, always in `[0, 1)`; larger for later arrivals |
+| `composite` | `points - (timestamp / C)` — the single double stored as the ZSET score |
+
+**Walk one example.** Two players tied at 455 points an hour apart, plus one player with 456:
+
+```
+  C = 10,000,000,000  (1e10)
+
+  player  points  timestamp     timestamp / C     composite = points - ts/C
+  A         455   1,612,000,000    0.16120000      454.83880000
+  B         455   1,612,003,600    0.16120036      454.83879964
+  D         456   1,612,003,600    0.16120036      455.83879964
+
+  descending sort of composite (ZREVRANGE order):
+     455.83879964  -> player D   (456 points; wins on points alone, time never consulted)
+     454.83880000  -> player A   (tied on points, arrived FIRST)
+     454.83879964  -> player B   (tied on points, arrived an hour later)
+
+  the tie between A and B:
+     A - B = 454.83880000 - 454.83879964 = 3.6 x 10^-7
+     B arrived 3,600 s later, so B subtracts MORE (0.16120036 > 0.16120000),
+     so B's composite is SMALLER and B sorts BELOW A.
+     -> first-to-reach-the-score ranks higher, exactly as required, with no extra query.
+
+  check the separation is what you expect:
+     3,600 s / C = 3,600 / 1e10 = 3.6 x 10^-7        <- matches A - B above
+     1 s     / C = 1 / 1e10     = 1.0 x 10^-10       <- finest gap the encoding must hold
+
+  Meaning: one double now carries two sort keys. Points decide the ranking whenever they
+  differ (D beats both by a full 1.0), and the sub-1.0 fraction only ever discriminates
+  inside a tie -- which is precisely the behaviour the requirement asked for.
+```
+
+**Why `C` is bounded on both sides, and what breaks outside those bounds.** The divisor has a floor
+and a ceiling, and both are real. The **floor**: `timestamp / C` must stay strictly below 1.0, or the
+tiebreak spills into the integer part and a fast arrival outranks a genuinely higher score — with
+unix timestamps around 1.61e9 today, that means `C > 1.7e9`, and `C = 1e10` holds until unix time
+1e10 (year 2286). The **ceiling** comes from the double itself: a ZSET score is IEEE-754 with a
+52-bit mantissa, and once `1 / C` drops below the ULP at your score magnitude, consecutive seconds
+round to the same value and ties silently stop breaking. Measured over 1,000 consecutive one-second
+timestamps:
+
+```
+  points    C       consecutive seconds that COLLIDE (out of 1,000)
+    455    1e10        0     <- clean
+    455    1e13        0     <- still clean at a 3-point score
+    455    1e14      824     <- 82% of ties now unresolvable
+  999999   1e10      141     <- 14% collide already, at the SAME C that was clean at 455
+  999999   1e11      914     <- almost totally degenerate
+```
+
+The row that matters is `999999 / 1e10`: the same constant that is perfectly safe for a 3-digit score
+loses 14% of its tiebreaks once scores reach six digits, because the ULP grows with the magnitude of
+the integer part. So `C` cannot be chosen once and forgotten — it must be sized against the *largest
+score the board will ever hold*, not the scores it has today. The failure mode is the dangerous kind:
+nothing errors, the leaderboard keeps serving, it just quietly reverts to Redis's arbitrary
+lexicographic tie order.
 
 **Faulty / cheated scores.** Two defenses, one structural and one detective:
 - **Server authority (structural).** The client never sets its score — only the **game server**,

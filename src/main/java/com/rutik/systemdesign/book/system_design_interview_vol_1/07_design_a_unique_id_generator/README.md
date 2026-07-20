@@ -120,6 +120,47 @@ Caption: each master owns a residue class modulo k, so the streams are disjoint 
 but "merged timeline" is a fiction; there is no global clock forcing A's `3` to be issued before
 B's `4`.
 
+**What it means.** "Give each database its own lane by counting in steps of k, and the lanes can
+never cross — until you try to change the number of lanes."
+
+This is modular arithmetic used as a coordination substitute: server `i` owns every integer congruent
+to `i` modulo `k`, and since residue classes are disjoint by definition, no two servers can produce
+the same number without ever talking. The catch is that `k` is baked into the arithmetic itself.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Step size — equal to the number of database masters in the cluster |
+| `i` | A server's offset, its starting number and its residue class modulo `k` |
+| `i, i+k, i+2k, …` | The stream server `i` emits — every integer `n` with `n mod k == i` |
+| High-water mark | The largest ID issued anywhere so far; the boundary any new `k` must clear |
+
+**Walk one example.** Two masters working cleanly, then what happens when you add a third:
+
+```
+ k = 2 masters
+   master A, offset 1 : 1, 3, 5, 7, 9        = every n where n mod 2 == 1
+   master B, offset 2 : 2, 4, 6, 8, 10       = every n where n mod 2 == 0
+   2 residue classes cover every integer exactly once   -> no collision possible
+   high-water mark so far                    = 10
+
+ now scale out: k = 2 -> k = 3, offsets 1, 2, 3, each stepping by 3
+   master A : 1, 4, 7, 10, 13
+   master B : 2, 5, 8, 11
+   master C : 3, 6, 9, 12
+                ^^^^^^^^^^
+   1, 2, 3, 4, 5, 6, 7, 8, 9, 10 were ALREADY ISSUED under k = 2.
+   A's 10 collides with B's old 10; 11 and 12 are fresh but the low numbers are not.
+
+ the fix is not arithmetic but operations: every master must be fast-forwarded past
+ the high-water mark (10) before the new k takes effect, in lockstep, cluster-wide.
+```
+
+That lockstep fast-forward is the whole objection. Adding a stateless app node needs no coordination
+at all; adding a master here needs every existing master to agree on a new `k` and a new starting
+point simultaneously, with ID generation unsafe in between. Snowflake avoids this entirely by never
+encoding the fleet size in the ID — a new node just takes an unused machine ID, and the other 1,023
+nodes never learn it exists.
+
 **Pros:** reuses a battle-tested database feature; scales aggregate write throughput with the number
 of masters; no new component to build.
 
@@ -145,6 +186,50 @@ Xu's framing: the probability of a duplicate is negligible even at absurd rates 
 generate ~1 billion UUIDs per second for about 100 years before the probability of a single
 collision reached even 1 in a billion.* In practice UUID collisions are not a risk you design
 against.
+
+**Stated plainly.** "With 122 random bits there are so many possible values that you run out of
+centuries long before you run out of UUIDs."
+
+The governing rule is the **birthday bound**, not the size of the space directly: collisions become
+likely at roughly the *square root* of the space, not at the space itself. That square root is why
+122 bits behaves like ~61 bits when you are asking about duplicates — still astronomically safe, but
+a very different number from `2^122`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N = 2^122` | Size of the UUID v4 value space (128 bits, 6 fixed for version/variant) |
+| `n` | How many UUIDs have been generated so far |
+| `p` | Probability that at least one collision exists among those `n` |
+| `p = 1 - exp(-n^2 / 2N)` | The birthday bound — collision odds grow with `n` **squared** |
+| `sqrt(2 ln2 x N)` | The `n` at which `p` reaches 50%, the standard "birthday" landmark |
+
+**Walk one example.** Push 1 billion UUIDs/second through the birthday bound:
+
+```
+ N = 2^122                                        = 5.317 x 10^36 possible values
+ rate                                             =         10^9 UUIDs / second
+
+ 50% chance that ANY two of them collide:
+   n = sqrt(2 x ln2 x N)                          = 2.715 x 10^18 UUIDs
+   time at 10^9/s = 2.715e18 / 1e9 / 86,400 / 365 =        86.09 years
+
+ the chapter's framing, checked against the same bound:
+   100 years at 10^9/s = 1e9 x 86,400 x 365 x 100 = 3.154 x 10^18 UUIDs
+   p = 1 - exp(-n^2 / 2N)                         =         0.61   (about 61%)
+   p = 1-in-a-billion is reached much earlier, at
+   n = 1.031 x 10^14 UUIDs, i.e. 103,120 seconds  =        28.6 hours at that rate
+
+ so at 10^9 UUIDs/s the honest landmarks are:
+   ~28.6 hours  -> 1-in-a-billion chance of a collision
+   ~86 years    -> even odds of a collision
+```
+
+The chapter's "1 billion per second for ~100 years to reach 1-in-a-billion odds" does not survive the
+birthday bound: at that volume the probability is already about 61%, and the 1-in-a-billion threshold
+arrives after roughly a day. The **86-year figure for even odds** is the defensible version of the
+same point, and it is the one to quote. Either way the conclusion the chapter draws is untouched —
+nobody generates a billion UUIDs per second for decades, so collisions remain a non-risk, and UUID
+loses this chapter on *width, numeric format, and sortability*, never on collision probability.
 
 ```
 UUID v4 example:   09c93e62-50b4-468d-bf8a-c07e1040bfb2
@@ -253,6 +338,56 @@ positive `long`.
 - **Sequence number (12 bits):** a per-machine, per-millisecond counter — `2^12 = 4096` values,
   reset to 0 every millisecond.
 
+**What the formula is telling you.** "Cut a 64-bit integer into four labelled slots — when, which
+datacenter, which machine, and which of this millisecond's IDs — so that no two machines can ever
+fill all four the same way."
+
+Every field width is a capacity decision in disguise. A field of `k` bits holds `2^k` distinct values
+(`0` through `2^k - 1`), so reading the layout is really reading four ceilings: how long the scheme
+lives, how many datacenters it addresses, how many machines per datacenter, and how many IDs one
+machine can mint per millisecond. Uniqueness is then pure arithmetic — two IDs can only collide if
+their timestamp, datacenter, machine, *and* sequence all match, which cannot happen while each live
+process owns a distinct (datacenter, machine) pair.
+
+| Symbol | What it is |
+|--------|------------|
+| Bit index | Position within the 64-bit integer; bit 63 is the most significant, bit 0 the least |
+| `k` bits | A field of width `k`, holding `2^k` distinct values, `0` through `2^k - 1` |
+| `2^41` | Milliseconds the timestamp field can express before it overflows |
+| `2^5` | 32 values — the datacenter field's range, and separately the machine field's |
+| `2^12` | 4,096 values — sequence slots available to one machine within one millisecond |
+| `1 + 41 + 5 + 5 + 12` | The width budget; it must total exactly 64, with no bit to spare |
+
+**Walk one example.** Read the layout field by field, converting each width into its ceiling:
+
+```
+ bit index  63 | 62 ................. 22 | 21 ... 17 | 16 ... 12 | 11 ......... 0
+ field     sign|        timestamp        |    dc     |  machine  |   sequence
+ width       1 |           41            |     5     |     5     |       12
+
+ width check: 62 - 22 + 1 = 41 timestamp bits, 21 - 17 + 1 = 5, 16 - 12 + 1 = 5,
+              11 -  0 + 1 = 12 sequence bits.  1 + 41 + 5 + 5 + 12 = 64 exactly.
+
+ field       bits   values = 2^bits   max value   what that ceiling MEANS
+ ---------   ----   ---------------   ---------   -----------------------------------
+ sign           1                 2           1   pinned to 0 -> ID is always positive
+ timestamp     41   2,199,023,255,552   2,199,023,255,551 ms -> 69.73 years of clock
+ datacenter     5                32          31   32 datacenters, ids 0..31
+ machine        5                32          31   32 machines per datacenter, 0..31
+ sequence      12             4,096       4,095   4,096 IDs per ms per machine
+
+ derived ceilings:
+   machine identities = 32 datacenters x 32 machines        =         1,024 nodes
+   per-node rate      = 4,096 IDs/ms x 1,000 ms/s           =     4,096,000 IDs/s
+   whole-fleet rate   = 1,024 nodes x 4,096,000 IDs/s       = 4,194,304,000 IDs/s
+```
+
+The sign bit is the one field that carries no information, and it is worth understanding why it is
+still spent. Java's `long` and SQL's `BIGINT` are signed, so a 64-bit value with bit 63 set reads as
+a *negative* number — IDs would sort wrongly, print with a minus sign, and break any code assuming a
+positive key. Pinning it to 0 buys 63 usable bits instead of 64 and keeps every ID a positive integer
+in every language that will ever read it.
+
 ### Field-by-field mechanics
 
 **Timestamp — the reason IDs sort by time, and the 69-year number.** The timestamp occupies the
@@ -275,6 +410,49 @@ So the field lasts **~69 years** from the custom epoch. With Twitter's 2010 epoc
 around **2079**; with an epoch set at your own system's launch, you push the overflow date decades
 into the future. This is the number to state in an interview: `41 bits of ms ≈ 69 years`.
 
+**Read it like this.** "Forty-one bits of milliseconds is about seven decades of clock, and the epoch
+you pick decides which seven decades you get."
+
+The epoch choice is the only free lever on the timestamp field: the *width* buys you a fixed
+**duration**, while the *epoch* slides that duration along the calendar. Choosing 1970 spends decades
+of that budget on time that already happened, which is why every Snowflake implementation defines its
+own zero point.
+
+| Symbol | What it is |
+|--------|------------|
+| `2^41` | Total milliseconds the field can count before wrapping |
+| Custom epoch | The operator-chosen millisecond that counts as time zero (Twitter: `1288834974657`) |
+| epoch + `2^41 - 1` | The last instant representable — the rollover moment |
+| `/ 1000`, `/ 86,400`, `/ 365` | Unit conversions: ms to seconds, seconds to days, days to years |
+
+**Walk one example.** The chapter's conversion chain, then the actual calendar date it lands on:
+
+```
+ 2^41                   = 2,199,023,255,552 ms
+ / 1,000 ms/s           =     2,199,023,255.552 s
+ / 86,400 s/day         =            25,451.658 days
+ / 365 days/year        =                69.731 years
+ (using 365.25-day years instead:            69.683 years -- same answer, ~69 years)
+
+ Twitter's epoch  1288834974657 ms  =  2010-11-04 01:42:54.657 UTC
+ + (2^41 - 1) ms                    =  2080-07-10 17:30:30.208 UTC
+                                       ^ the last millisecond the field can express
+
+ move the epoch to 2026-01-01 UTC (1767225600000 ms):
+ + (2^41 - 1) ms                    =  2095-09-07 15:47:35.551 UTC
+   same 41 bits, ~15 more years of runway, bought purely by choosing a later zero.
+```
+
+Note the exact arithmetic puts Twitter's rollover in **mid-2080**, a little past the "around 2079"
+the chapter states — the chapter's figure is the same ~69-year result rounded down, not a different
+claim. Either number is fine to quote in an interview; what matters is that you can derive it from
+`2^41` rather than recite it.
+
+The unit conversions are also where the field width stops being abstract. Had the designers stored
+*microseconds* instead of milliseconds, the same 41 bits would last 1,000x less — about 25 days —
+which is why the time unit is as much a design decision as the bit count, and exactly the lever
+Sonyflake pulls in the other direction with its 10-ms tick.
+
 **Datacenter ID + Machine ID — fixed at startup, never touched on the hot path.** Together the 10
 bits give `2^5 × 2^5 = 32 × 32 = 1024` distinct machine identities. These two fields are **chosen
 when the generator process starts up** and do not change while it runs. In practice they are handed
@@ -294,6 +472,50 @@ sequence **resets to 0**. This yields a hard per-node ceiling:
 Comfortably above the 10,000 IDs/sec *fleet* requirement — a single node exceeds it 400×. The only
 question the sequence raises is: what happens when a single machine needs to generate a **4097th** ID
 in the same millisecond? That is the rollover case, handled by the algorithm below.
+
+**In plain terms.** "One machine can mint four thousand IDs every millisecond, and there can be a
+thousand such machines — so the design's real ceiling is four billion IDs a second, not ten
+thousand."
+
+Stating both ceilings matters because they answer different interview questions. The per-node number
+is what bounds a single hot writer and decides whether the rollover stall ever fires; the fleet number
+is what you compare against the requirement, and the gap between them is the honest answer to "does
+this scale?"
+
+| Symbol | What it is |
+|--------|------------|
+| 4,096 IDs/ms | The 12-bit sequence ceiling — IDs one machine can issue inside one millisecond |
+| 1,000 ms/s | Milliseconds per second, the conversion from the per-ms ceiling to a per-second rate |
+| 1,024 nodes | 32 datacenters x 32 machines — the fleet size the 10 identity bits allow |
+| 10,000 IDs/s | The requirement from §7.1 — a floor for the whole fleet, not per machine |
+| Headroom | Achievable rate divided by the required rate |
+
+**Walk one example.** Both ceilings, each compared against the stated requirement:
+
+```
+ per machine
+   4,096 IDs/ms x 1,000 ms/s               =         4,096,000 IDs/s
+   requirement (whole fleet)               =            10,000 IDs/s
+   headroom from ONE machine               =             409.6x
+
+ whole fleet
+   1,024 nodes x 4,096,000 IDs/s           =     4,194,304,000 IDs/s
+   requirement                             =            10,000 IDs/s
+   headroom from the fleet                 =         419,430.4x
+
+ sanity check the same number the other way:
+   1,024 nodes x 4,096 IDs/ms              =         4,194,304 IDs/ms
+   x 1,000 ms/s                            =     4,194,304,000 IDs/s   (matches)
+
+ to actually hit the 10,000 IDs/s requirement you need
+   10,000 / 4,096,000                      =           0.00244 of one machine
+```
+
+The last line is the one that reframes the problem. The requirement is not a throughput challenge at
+all — a quarter of one percent of a single node covers it. Snowflake is chosen for the *other four*
+requirements (64-bit, numeric, time-ordered, no SPOF), and the throughput ceiling is simply so far
+above the ask that it never enters the tradeoff. Recognizing which requirement is actually binding is
+most of the work in this chapter.
 
 ### Which parts are fixed vs. runtime
 
@@ -395,6 +617,52 @@ The three branches, spelled out:
 
 The final `return` packs the fields: subtract the epoch, then shift each field into its slot and OR
 them together. Note the sequence is **not** shifted — it occupies the lowest 12 bits.
+
+**The idea behind it.** "Multiply each field by its place value and add them up — a left shift by `s`
+is just multiplication by `2^s`, and the OR is an addition that cannot carry."
+
+Bit-packing looks like a different kind of operation from arithmetic, but it is ordinary place-value
+notation in base 2: the shift amounts are chosen so each field lands in its own decimal column, so to
+speak, and never overlaps a neighbour. That non-overlap is why `|` and `+` produce the same answer
+here — there is never a carry between fields.
+
+| Symbol | What it is |
+|--------|------------|
+| `ts - EPOCH` | Milliseconds since the custom epoch — what actually goes in the timestamp field |
+| `<< 22` | Shift left 22 places, i.e. multiply by `2^22 = 4,194,304`, clearing the low 22 bits |
+| `<< 17` | Datacenter's place value, `2^17 = 131,072` — it sits above machine and sequence |
+| `<< 12` | Machine's place value, `2^12 = 4,096` — it sits just above the sequence |
+| `\|` | Bitwise OR; identical to `+` here because the fields occupy disjoint bit ranges |
+| `& 4095` | The 12-bit mask used to read the sequence back out (and to wrap it on rollover) |
+
+**Walk one example.** Pack a real ID, then take it apart again:
+
+```
+ EPOCH = 1288834974657      ts = EPOCH + 5,000 ms      dc = 3   machine = 17   seq = 42
+
+ pack:
+   ts - EPOCH  =     5,000
+   5,000       << 22  =     5,000 x 4,194,304   =   20,971,520,000
+   dc      3   << 17  =         3 x   131,072   =          393,216
+   machine 17  << 12  =        17 x     4,096   =           69,632
+   seq    42   << 0   =                                          42
+                                                  ----------------
+   OR the four together (disjoint bits, so OR == +) =   20,971,982,890
+
+ unpack the same integer:
+   id >> 22            = 5,000     -> ms since epoch    (matches)
+   (id >> 17) & 31     =     3     -> datacenter id     (matches)
+   (id >> 12) & 31     =    17     -> machine id        (matches)
+   id & 4095           =    42     -> sequence          (matches)
+
+ every field survives the round trip, which is what "no overlap" guarantees.
+```
+
+The masks are what make unpacking work, and they are the same masks that enforce each field's
+ceiling. `& 31` keeps 5 bits, `& 4095` keeps 12 — so a sequence of 4,096 masks back to `0`, which is
+exactly the rollover the algorithm detects with `if sequence == 0`. The overflow check and the field
+extraction are the same operation, which is why the generator needs no separate bounds test on the
+hot path.
 
 ```mermaid
 flowchart TD

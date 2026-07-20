@@ -180,6 +180,40 @@ append-only sequence of messages, each message assigned a monotonically increasi
   topic live on different brokers, so a topic's throughput scales with its partition
   count.
 
+**In plain terms.** "Take any deterministic hash of the key, divide by the partition count, and
+the remainder *is* the partition — so the same key always lands in the same place, and different
+keys spread evenly." Two properties fall out of that one line: determinism gives you per-key
+ordering, and the uniformity of the hash gives you balanced load without a coordinator.
+
+| Symbol | What it is |
+|--------|------------|
+| `key` | The producer-supplied partition key (a user id, an order id) — may be absent |
+| `hash(key)` | A deterministic, well-spread integer digest of the key bytes |
+| `mod` | Remainder after division — folds any digest into `0 .. N-1` |
+| `num_partitions` (`N`) | Partition count of the topic; the modulus, and the parallelism ceiling |
+| result | The partition index the message is appended to, hence its leader broker |
+
+**Walk one example.** Four keys routed into a 4-partition topic (digests are CRC-32 of the key
+bytes; production systems use MurmurHash2, but the mechanics are identical):
+
+```
+  key             hash(key)        hash mod 4     -> partition
+  ----            -----------      ----------        ---------
+  user_42           712,180,813        1                 P1
+  user_43         1,567,896,795        3                 P3
+  user_77         1,899,275,009        1                 P1
+  order_9001      1,264,943,481        1                 P1
+
+  every later message for user_42 recomputes 712,180,813 mod 4 = 1  -> P1 again
+  so user_42's whole history sits in one ordered log, read by one consumer
+```
+
+The `mod` is doing more work than it looks. It is what makes routing a pure client-side
+computation — the producer needs no round-trip to ask "where does this go?", it needs only the
+partition count from cached metadata. It is also the term that makes `N` load-bearing in a way
+`N` usually is not: because `N` is the modulus, changing it re-routes existing keys (see
+Scalability below).
+
 **Consumer group.** A named set of consumers that cooperate to consume a topic. The
 governing rule:
 
@@ -209,6 +243,45 @@ Topic "orders" with 4 partitions, one consumer group of 3 consumers
 
    Balanced-ish. Add a 4th consumer -> each owns 1. Add a 5th -> it is IDLE.
 ```
+
+**What this actually says.** "A topic's ceiling is per-partition throughput x partition count, and
+a single partition's ceiling is fixed by physics you cannot buy your way out of — one leader, one
+append stream, one consumer per group." Partition count is therefore a capacity decision made at
+topic-creation time, not a runtime knob.
+
+| Symbol | What it is |
+|--------|------------|
+| per-partition bandwidth | Sustained bytes/sec one partition's leader can append; ~10 MB/s |
+| message size | ~1 KB (1,000 B) per the requirements |
+| per-partition msg rate | per-partition bandwidth / message size |
+| `N` | Partition count — the multiplier, and the cap on useful consumers per group |
+| consumer rate | Messages/sec one consumer instance can actually process |
+
+**Walk one example.** Sizing a topic for a 1,000,000 msg/sec target:
+
+```
+  per-partition msg rate  =  10 MB/s / 1,000 B          =  10,000 msg/s per partition
+  topic ceiling           =  10,000 x N
+
+  N =   1    ceiling =     10,000 msg/s
+  N =  10    ceiling =    100,000 msg/s
+  N = 100    ceiling =  1,000,000 msg/s   <- meets the target
+  partitions needed  =  1,000,000 / 10,000  =  100
+
+  ingress bytes       =  1,000,000 msg/s x 1,000 B     =  1.0 GB/s
+
+  now size the consumer side; one consumer processes 4,000 msg/s:
+    consumers needed  =  1,000,000 / 4,000              =  250 consumers
+    but consumers <= partitions, and 100 < 250          -> the group stalls at 400,000 msg/s
+    fix: provision N = 250 partitions, not 100
+```
+
+That last step is the trap. The producer side needs 100 partitions and the consumer side needs
+250, and the *larger* of the two is the number you must provision — because you can always run
+fewer consumers than partitions, but never more useful ones. What caps a single partition is that
+it has exactly one leader broker writing it (one sequencer, one append stream, one disk's
+sequential bandwidth) and exactly one consumer per group reading it; adding hardware does not
+raise that ceiling, only adding partitions does.
 
 ### High-level architecture
 
@@ -412,6 +485,40 @@ messages. This raises throughput dramatically:
 - **Smaller batches / immediate flush → lower latency but lower throughput.** You pay
   more per-message overhead.
 
+**Stated plainly.** "Per-message cost is a fixed request overhead divided by the batch size, so
+throughput rises linearly with batch size while added latency rises linearly with how long you
+wait to fill it." The two effects pull in opposite directions from the same number, which is why
+there is no universally correct batch setting — only a per-use-case one.
+
+| Symbol | What it is |
+|--------|------------|
+| request overhead | Fixed cost of one produce request — TCP, headers, broker handling; ~200 us |
+| `B` | Batch size — messages accumulated before the request is sent |
+| amortized cost | request overhead / `B`; the per-message share of that fixed cost |
+| linger | Max time a message waits for the batch to fill before being sent anyway |
+| added latency | Up to the full linger for the *first* message in a batch; ~0 for the last |
+
+**Walk one example.** One producer connection at 200 us of fixed overhead per request:
+
+```
+  B        amortized overhead      messages/sec        requests/sec at 1e6 msg/s
+  ---      ------------------      ------------        -------------------------
+     1      200 / 1  = 200 us            5,000              1,000,000 req/s
+    10      200 / 10 =  20 us           50,000                100,000 req/s
+   100      200 / 100 =  2 us          500,000                 10,000 req/s
+  1000      200 / 1000 = 0.2 us      5,000,000                  1,000 req/s
+
+  at B = 100 and 1 KB messages, one request carries  100 x 1,000 B = 100 KB
+  throughput gain  B=1 -> B=100  =  500,000 / 5,000  =  100x   (exactly B)
+  latency cost     linger = 10 ms -> a message may wait up to 10 ms before it ships
+```
+
+The gain factor is identically `B`, which is the whole reason batching is the dominant throughput
+lever: it does not make anything faster, it just stops paying the same 200 us a million times a
+second. The linger term is what makes the tradeoff explicit rather than accidental — without it a
+producer under light load would sit forever waiting for a batch that never fills, so linger caps
+the wait and turns "batch size" into a bounded latency budget you choose.
+
 This is exactly why the requirements demanded **both** high-throughput and
 low-latency use cases be **configurable**: log-aggregation pipelines set a large
 batch size and a linger of tens of milliseconds (throughput-first); near-real-time
@@ -603,6 +710,50 @@ Because offsets are stored separately from the message log, a consumer can also
 **rewind** (commit an older offset) to replay, or **skip ahead** — the log is
 immutable and the offset is just a pointer into it.
 
+**What it means.** "Lag is just the subtraction of two offsets, but its *derivative* is what
+matters: backlog grows at (produce rate - consume rate), and it drains at (consume rate - produce
+rate) — so a group that is 200k msg/s short builds a backlog exactly as fast as it later burns it
+off, only if the producer slows down first." A steady lag number is harmless; a steadily rising
+one has a deadline attached to it, namely the retention edge.
+
+| Symbol | What it is |
+|--------|------------|
+| tail offset | Offset of the newest message in the partition — where producers are |
+| committed offset | Last offset this group durably committed — where consumers are |
+| lag | tail offset - committed offset; unconsumed messages waiting |
+| `p` | Produce rate, messages/sec |
+| `c` | Consume rate, messages/sec |
+| lag in time | lag / `c`; how far behind the group is expressed as wall-clock delay |
+| time to drain | backlog / (`c` - `p`); only finite while `c > p` |
+
+**Walk one example.** A 10-minute traffic spike, then recovery:
+
+```
+  spike phase   p = 1,000,000 msg/s   c = 800,000 msg/s   for t = 600 s
+    deficit     =  1,000,000 - 800,000                  =    200,000 msg/s
+    backlog     =  200,000 x 600 s                      =  120,000,000 messages
+    as bytes    =  1.2e8 x 1,000 B                      =  120 GB of unread log
+    lag in time =  1.2e8 / 800,000                      =  150 s behind the tail
+
+  recovery      p falls to 600,000 msg/s   c stays 800,000 msg/s
+    drain rate  =  800,000 - 600,000                    =    200,000 msg/s
+    time to drain = 120,000,000 / 200,000               =  600 s  =  10 min
+
+  retention headroom
+    retention window                                    =  1,209,600 s (14 days)
+    lag in time                                         =        150 s
+    ratio       =  1,209,600 / 150                      =  8,064x margin
+```
+
+Two readings of the same numbers. Operationally, the recovery is symmetric: a 200k/s deficit for
+10 minutes takes a 200k/s surplus for 10 minutes to undo, so a group that only *just* keeps up in
+steady state never recovers from a spike — it needs genuine headroom, not parity. And the retention
+headroom line is the one that decides whether lag is an alert or an incident: at 150 s of lag
+against a 14-day window the group has 8,064x margin, but the moment lag-in-time approaches the
+retention window the log starts deleting segments the consumer has not read, and unconsumed data
+is gone for good. That is why the health metric is lag, and why it is best watched in seconds
+rather than messages.
+
 ### Metadata storage
 
 **Metadata storage holds the cluster's configuration**, separate from message data:
@@ -632,6 +783,41 @@ leader's log. The system computes a **replica-distribution plan** that spreads
 partition leaders and followers evenly across brokers (and, ideally, across racks/
 availability zones) so no single broker or rack failure loses a partition's only
 copy or overloads one machine.
+
+**Put simply.** "Your disk bill is ingress rate x retention window x replication factor — three
+independent multipliers, and the replication factor multiplies *everything*, including the two
+weeks of history you are only keeping for replay." Durability is not a fixed overhead; it triples
+the largest number in the system.
+
+| Symbol | What it is |
+|--------|------------|
+| ingress rate | Bytes/sec of messages arriving = msg rate x message size |
+| retention window | How long messages are kept regardless of consumption; 14 days here |
+| `RF` | Replication factor — copies of each partition on distinct brokers; typically 3 |
+| compression ratio | On-disk shrinkage from batch compression; ~4:1 on log-like payloads |
+| per-broker bytes | Total stored bytes / broker count |
+
+**Walk one example.** The 1,000,000 msg/sec topic from above, retained two weeks at `RF = 3`:
+
+```
+  ingress rate      =  1,000,000 msg/s x 1,000 B      =  1.0 GB/s
+  retention window  =  14 days x 86,400 s/day         =  1,209,600 s
+
+  raw (RF = 1)      =  1.0e9 B/s x 1.2096e6 s         =  1.2096e15 B  =  1.2096 PB
+  RF = 2            =  1.2096 PB x 2                  =  2.4192 PB
+  RF = 3            =  1.2096 PB x 3                  =  3.6288 PB   <- the actual bill
+  with 4:1 compression at RF = 3                      =  0.9072 PB
+
+  spread over 20 brokers:
+    uncompressed    =  3.6288 PB / 20                 =  181.44 TB per broker
+    compressed      =  0.9072 PB / 20                 =   45.36 TB per broker
+```
+
+Two things fall out. First, retention dominates: cutting the window from 14 days to 3 would cut
+the bill by 78.6%, which is why "how long do you really need to replay?" is the highest-leverage
+requirement question in the chapter. Second, `RF` is why the wrap-up lists **tiered storage** as a
+talking point — 181 TB of local disk per broker, most of it cold segments nobody will ever re-read,
+is exactly the data you want offloaded to object storage while keeping the hot tail on the broker.
 
 **In-sync replicas (ISR).** Not every follower is always caught up. The **ISR** is
 the set of replicas (including the leader) that are **fully caught up with the
@@ -715,6 +901,43 @@ partition, new ones in the new one, and a consumer of the new partition won't se
 the earlier ones in sequence). The practical guidance: **provision enough partitions
 up front** if per-key ordering matters, because adding partitions mid-flight breaks
 the key→partition mapping.
+
+**Read it like this.** "`N` is the modulus, so changing `N` changes the answer for keys whose hash
+never changed at all — the routing function is stable in the key but brittle in the partition
+count." That asymmetry is the entire hazard: nothing about the data changed, yet half of it starts
+going somewhere else.
+
+| Symbol | What it is |
+|--------|------------|
+| `hash(key)` | Fixed forever for a given key — this is *not* what moves |
+| `N_old` / `N_new` | Partition count before and after the increase; the modulus that moved |
+| key stays put | True only when `hash(key) mod N_new == hash(key) mod N_old` |
+| split history | A key's messages living in two partitions with no ordering between them |
+
+**Walk one example.** The same four keys as before, when the topic grows from 4 to 8 partitions:
+
+```
+  key            hash(key)        mod 4     mod 8     verdict
+  ----           -----------      -----     -----     -------
+  user_42          712,180,813      P1        P5       MOVED  - history split P1 / P5
+  user_43        1,567,896,795      P3        P3       stays
+  user_77        1,899,275,009      P1        P1       stays
+  order_9001     1,264,943,481      P1        P1       stays
+
+  measured over 200,000 distinct keys, N: 4 -> 8
+    fraction of keys that move  =  0.500
+
+  why exactly half: a key stays only if (hash mod 8) < 4, and the low bits are
+  uniform, so P(stay) = 4/8 = 1/2 for any doubling N -> 2N
+```
+
+The consequence is precise, not vague: after the change, half of all keys have their history
+split across two partitions, and a consumer reading the new partition sees a key's new messages
+with none of the old ones ahead of them. Ordering for those keys is not degraded, it is gone. This
+is also why consistent hashing exists as an alternative — it is designed so that adding a bucket
+moves only `1/N` of the keys instead of half of them — but the design here keeps plain `mod`
+because it is a pure client-side computation needing nothing but the partition count, and pays for
+that simplicity by making partition count effectively immutable for keyed topics.
 
 **Decreasing partitions.** You generally **cannot immediately delete** a partition
 because it still holds retained, unconsumed data. Instead the partition is

@@ -157,6 +157,51 @@ waiting for data. The practical lever: **increase batch size** so more work happ
 raising utilization (up to the point you run out of memory). The takeaway: never budget capacity from
 peak FLOPS — budget from *realized* FLOPS at your actual utilization.
 
+**In plain terms.** "Utilization is the fraction of the hardware you paid for that your job is actually using, and because it multiplies straight into every capacity estimate, planning at peak does not make you slightly optimistic — it makes you wrong by a fixed factor of `1/utilization`." That framing matters because the error is silent: nothing crashes, the job simply takes three times longer than the plan said and the GPU bill arrives three times larger.
+
+| Symbol | What it is |
+|--------|------------|
+| peak FLOPS | The spec-sheet number — floating-point ops/sec if nothing ever stalls |
+| actual FLOPS | What your job really achieves, limited by feeding data to the cores |
+| utilization | `actual FLOPS / peak FLOPS`; 0.3 is common and often acceptable |
+| work | Total floating-point operations the job must perform |
+| 1 / utilization | The factor by which a peak-based estimate understates time and cost |
+| batch size | The main lever: more work per data-load raises utilization |
+
+**Walk one example.** A training run of 3.6 x 10^18 FLOPs on an accelerator advertising 100 teraFLOPS, at the chapter's typical 0.3 utilization.
+
+```
+  peak                 = 100 TFLOPS       = 1.0e14 FLOP/s
+  utilization          = 0.30
+  realized             = 1.0e14 x 0.30    = 3.0e13 FLOP/s   = 30 TFLOPS
+  work                 = 3.6e18 FLOPs
+
+  PLANNED AT PEAK  (the mistake)
+    time = 3.6e18 / 1.0e14 = 36,000 s = 10.0 hours
+    "one GPU, overnight, done by morning"
+
+  REALITY AT 0.3 UTILIZATION
+    time = 3.6e18 / 3.0e13 = 120,000 s = 33.3 hours
+    the overnight job finishes on the evening of the following day
+
+  error factor = 1 / 0.30 = 3.33x     (and 33.3 / 10.0 = 3.33 -- same number)
+
+Same mistake stated as a capacity purchase. To hit a 10-hour deadline:
+    budgeted from peak      : 3.6e18 / (1.0e14 x 36,000) = 1.0  -> buy 1 GPU
+    budgeted from realized  : 3.6e18 / (3.0e13 x 36,000) = 3.33 -> need 4 GPUs
+
+You do not under-provision by "a bit." You under-provision by 70% of the fleet,
+and you discover it the night before the deadline.
+
+Why 0.3 and not 1.0: the cores finish their arithmetic and then wait for the
+next tile of data to arrive from memory. Raising batch size means more compute
+per data-load, so a batch increase that lifts utilization 0.30 -> 0.45 cuts the
+same job from 33.3 h to 3.6e18/(1.0e14 x 0.45)/3600 = 22.2 h -- a 33% saving
+from a one-line config change, with no new hardware at all.
+```
+
+This is also the reason the chapter reaches for MLPerf rather than spec sheets. Peak FLOPS is a property of the chip alone; realized FLOPS is a property of the chip *plus your model, your batch size, and your data pipeline*. Two accelerators with identical peak numbers can differ by more than 2x on real work, so the only honest comparison is a benchmark that runs the whole pipeline — which is precisely what MLPerf standardizes.
+
 **Benchmarking is hard — MLPerf.** Because a compute unit's real speed depends on the operation, the
 model, and the data pipeline, comparing hardware from spec sheets is unreliable. The industry's answer
 is **MLPerf** (from MLCommons), a benchmark suite that measures hardware on standardized real ML tasks
@@ -212,6 +257,58 @@ Caption: cloud wins at small scale (no upfront cost, pay only for the little you
 pay-per-use curve climbs steeply with steady-state load while owned hardware's mostly-fixed cost stays
 flat — the two curves cross, which is exactly the Dropbox repatriation story. The right answer is
 scale-dependent, not absolute.
+
+**What this actually says.** "Cloud sells you a cost that is mostly *variable* and owned hardware sells you a cost that is mostly *fixed*, so the comparison is never 'which is cheaper' but 'at what steady-state load does a rising line pass a flat one'." That framing matters because it explains why both camps are sincerely right: they are standing on opposite sides of a crossover point and each is reporting their side accurately.
+
+| Symbol | What it is |
+|--------|------------|
+| cloud cost | Mostly variable — scales roughly with the load you actually run |
+| owned cost | Mostly fixed — hardware, power, and staff you pay for whether busy or idle |
+| delta | `cloud - owned`; negative means cloud wins, positive means owned wins |
+| crossover | The load at which delta = 0 and the decision flips |
+| repatriation | Moving workloads off cloud onto owned hardware past the crossover |
+| steady-state load | The predictable base load, as opposed to spiky burst load |
+
+**Walk one example.** Read the crossover directly off the chart above, then check it against the Dropbox figure.
+
+```
+  scale point   cloud   owned   delta = cloud - owned    who wins
+  -----------   -----   -----   ---------------------    --------
+  Startup           5      45          -40               cloud, by 9x
+  Small            18      48          -30               cloud
+  Medium           40      52          -12               cloud, narrowing
+  Large            70      58          +12               owned
+  Huge             95      62          +33               owned
+
+  The delta walks -40, -30, -12, +12, +33: it crosses zero between Medium and
+  Large. Interpolating linearly across that segment:
+      crossover = -(-12) / (12 - (-12)) = 12 / 24 = 0.50
+  -> exactly halfway between the Medium and Large scale points.
+
+  Cloud premium at the top of the curve:
+      33 / 62 = 53.2% more expensive than owning the same capacity.
+
+Sanity-check against the real number the chapter cites. Dropbox saved roughly
+$75M over two years by repatriating:
+      $75M / 2 years   = $37.5M per year
+      $37.5M / 12      = $3.125M per month of pure margin recovered
+
+For that saving to exist at all, Dropbox had to be operating far to the RIGHT of
+its crossover -- huge, steady, predictable storage load, which is the workload
+shape that owning serves best. Note also what the numbers do NOT say: at the
+Startup row, owning costs 9x more than renting. The identical decision that
+recovered $37.5M/year for Dropbox would have been close to fatal for a seed-stage
+company, because the fixed cost lands before the load does.
+
+The middle path in the same arithmetic. Split an 80/20 steady/burst load:
+  all-cloud at Large            :  70
+  all-owned at Large            :  58
+  owned for the steady 80%, cloud for the volatile 20%: you pay the flat owned
+  cost only for capacity you keep busy, and rent the spikes instead of buying
+  peak-sized hardware that idles the rest of the month.
+```
+
+The trap in this table is treating the crossover as a fact about *companies* rather than about *workloads*. A single company usually sits on both sides at once: its steady serving tier is past the crossover while its bursty experimentation and one-off large training runs are nowhere near it. Which is exactly why the chapter's answer is the split, not a side — and why "reversing this decision is expensive" (10.5) is the constraint that actually matters, since you will cross the point long before you finish migrating.
 
 ---
 

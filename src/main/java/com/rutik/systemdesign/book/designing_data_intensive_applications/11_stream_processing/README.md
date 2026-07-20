@@ -75,6 +75,78 @@ and works best when each message is fast to process and order matters; tradition
 slow/variable per-message work where you want fine-grained per-message redelivery. If one slow message
 shouldn't block the partition, traditional broker semantics may fit better.
 
+### Decoding stream capacity: partitions, Little's Law, and consumer lag
+
+"Parallelism by partition" is a throughput ceiling with an exact formula. If each event costs `c`
+seconds of processing and partitions are the unit of parallelism:
+
+```
+  per-consumer throughput  =  1 / c
+  cluster throughput  (capacity)  =  P / c          (P = partitions, one consumer each)
+```
+
+**Put simply.** "Your maximum event rate is the partition count divided by the per-event cost — and
+because a partition is the smallest unit you can hand to a consumer, adding consumers beyond `P` buys
+you exactly nothing."
+
+| Symbol | What it is |
+|--------|------------|
+| `c` | Seconds of work per event — a DB lookup, an enrichment, a state update |
+| `P` | Partitions in the topic. Fixed at topic-creation time; repartitioning is disruptive |
+| `1 / c` | Events per second one consumer sustains |
+| `P / c` | Cluster capacity — the ceiling that `lambda` must stay under |
+| `lambda` | The actual arrival (produce) rate |
+| `L`, `W` | Little's Law: `L` = events sitting in the queue, `W` = seconds each waits |
+
+**Walk one example.** A stream-table enrichment costing 2 ms per event on a 100-partition topic:
+
+```
+  per consumer  = 1 / 0.002        =     500 events/s
+  capacity      = 100 x 500        =  50,000 events/s
+
+  now Little's Law, L = lambda x W, rearranged to read latency off queue depth:
+     W = L / lambda
+
+     queue depth        1,000 events  ->  W = 1,000 / 50,000     =  0.02 s   = 20 ms
+     queue depth       10,000 events  ->  W = 10,000 / 50,000    =  0.2 s
+     queue depth    1,000,000 events  ->  W = 1,000,000 / 50,000 = 20 s      <- alerting territory
+```
+
+Little's Law is what makes **consumer lag** the one metric worth alerting on: lag *is* `L`, and
+dividing it by throughput converts an opaque event count into the user-visible number, "how stale is
+the derived view right now?" A lag of a million events means nothing on its own; 20 seconds behind
+means something to everyone.
+
+**Decoding lag drain — why a short outage is a long recovery.** Backlog only shrinks at the *surplus*
+capacity, not at full capacity, because new events keep arriving the whole time:
+
+```
+  backlog built    =  lambda x outage
+  drain rate       =  capacity - lambda        <- the surplus, not the capacity
+  time to drain    =  backlog / (capacity - lambda)
+```
+
+**Walk one example.** Produce rate 50,000 events/s, capacity 60,000 events/s, consumer down 10 minutes:
+
+```
+  backlog     = 50,000/s x 600 s        = 30,000,000 events
+  drain rate  = 60,000 - 50,000         = 10,000 events/s     <- only 1/6 of capacity
+  drain time  = 30,000,000 / 10,000     =  3,000 s = 50 minutes
+
+  a 10-minute outage costs 60 minutes end-to-end.
+
+  headroom matters more than capacity:
+    capacity 55,000  ->  drain 5,000/s   ->  100 minutes
+    capacity 51,000  ->  drain 1,000/s   ->  500 minutes  (8.3 hours)
+    capacity 50,000  ->  drain 0/s       ->  never catches up
+```
+
+The denominator is the whole story. Running a stream job at 98% of capacity is not "2% away from
+trouble" — it is a system that takes 8 hours to recover from a 10-minute blip. This is also the exact
+mechanic behind the pitfall in this chapter about a restarted consumer dumping a burst of buffered
+events into the "current" processing-time window: the burst is that 30-million-event backlog arriving
+at once.
+
 ## 11.2 Databases and Streams
 
 The chapter's conceptual core: **a replication log is a stream of events**, and conversely a stream
@@ -191,6 +263,93 @@ correct the device's clock offset.
 Window types: **tumbling** (fixed, non-overlapping, e.g. every 1-minute block), **hopping** (fixed
 length, overlapping), **sliding** (events within a moving interval of each other), **session** (group
 a user's events until a gap of inactivity).
+
+### Decoding window overlap: what "hopping" actually costs you
+
+The difference between tumbling and hopping is one ceiling function, and it is the difference between
+one copy of your state and many:
+
+```
+  windows an event belongs to  =  ceil(W / H)
+
+  tumbling  =>  H = W  =>  ceil(W/W) = 1        (non-overlapping)
+  hopping   =>  H < W  =>  ceil(W/H) > 1        (overlapping)
+```
+
+**The idea behind it.** "A hopping window starts a new bucket every `H` seconds and each bucket stays
+open for `W` seconds, so at any instant `W/H` buckets are open and every arriving event has to be
+counted into all of them."
+
+| Symbol | What it is |
+|--------|------------|
+| `W` | Window length — how much history each result covers ("average over the last 5 minutes") |
+| `H` | Hop / advance — how often a new window opens ("emit a fresh answer every minute") |
+| `W / H` | How many windows are open simultaneously |
+| `ceil(...)` | Round up — a window that is even partly open still receives the event |
+| the result | Both the write amplification per event and the multiplier on retained state |
+
+**Walk one example.** A 5-minute average refreshed every minute, versus the tumbling equivalent:
+
+```
+                        W      H     ceil(W/H)   state       per-event updates
+  tumbling 5-min       5min   5min       1        2 GB              1
+  hopping  5min/1min   5min   1min       5       10 GB              5
+  hopping  5min/30s    5min    30s      10       20 GB             10
+  hopping  1hr/1min     60min  1min     60      120 GB             60
+```
+
+The trap is that `H` looks like a *freshness* dial — "how often do I want an answer?" — while it is
+really a *cost* dial. Halving the hop from 1 min to 30 s does not make the answer twice as good; it
+doubles the operator state you must checkpoint and doubles the work per event, which walks straight
+back into the `c` term of the capacity formula above. Going from a 5-minute tumbling window to a
+1-hour/1-minute hopping window is a 60x state increase, which is how a stream job that ran fine for
+months falls over after a one-line config change.
+
+### Decoding watermarks: what a delay of D seconds actually buys
+
+A watermark is a bet about lateness, and the bet has two sides that move in opposite directions:
+
+```
+  events admitted   =  fraction of the lateness distribution below D
+  events dropped    =  1 - that fraction
+  result latency    =  W + D          (a window can't be emitted until its watermark passes)
+```
+
+**Stated plainly.** "Waiting `D` seconds past a window's end lets in every event that was less than
+`D` late — and delays every single correct answer by `D`, including the overwhelming majority that
+were never late at all."
+
+| Symbol | What it is |
+|--------|------------|
+| `D` | Watermark delay — how long past the window's end you keep it open |
+| lateness | Per-event gap between event time and arrival time; a long-tailed distribution |
+| `W + D` | End-to-end delay before a window's result is published |
+| dropped fraction | Straggler policy's cost, if you ignore late events |
+| retraction | The alternative: emit at `W + D`, then correct when a straggler shows up |
+
+**Walk one example.** The chapter's own straggler — an event at 10:04 from an offline phone, arriving
+at 10:09, five minutes late — against a realistic lateness distribution at 50,000 events/s:
+
+```
+  lateness      p50 = 2 s    p90 = 30 s    p99 = 5 min    p99.9 = 1 hour
+
+  D =  30 s  ->  admits 90%,   drops 10%     ->  5-min window emits at W+D = 5.5 min
+  D =  5 min ->  admits 99%,   drops  1%     ->  5-min window emits at W+D = 10 min
+  D =  1 hour->  admits 99.9%, drops  0.1%   ->  5-min window emits at W+D = 65 min
+
+  at 50,000 events/s = 4.32 billion events/day, the dropped counts are:
+     D = 30 s    ->  432,000,000 events/day discarded
+     D = 5 min   ->   43,200,000 events/day discarded
+     D = 1 hour  ->    4,320,000 events/day discarded
+```
+
+Look at the `D = 5 min` row: to catch the chapter's one offline phone you doubled the latency of a
+5-minute window — every result now lands 10 minutes after the fact — and you are *still* dropping 43
+million events a day. The tail never closes, which is the real lesson: no value of `D` makes a
+watermark correct. That is precisely why the second option exists — emit early at a small `D` and
+issue a **retraction plus corrected value** when a straggler arrives, buying accuracy back without
+paying it in latency. The choice is not "which `D` is right" but "do I want to be late, wrong, or
+willing to correct myself."
 
 ### Stream joins
 

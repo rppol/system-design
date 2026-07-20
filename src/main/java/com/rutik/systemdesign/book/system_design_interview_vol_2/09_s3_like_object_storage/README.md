@@ -128,6 +128,57 @@ The book pushes on the size distribution because it dictates the storage engine.
   key-value lookup problem. This is the central data-layout decision, derived directly from the 40%
   figure.
 
+**In plain terms.** "Divide the bytes you must store by the size of a typical object and you learn
+how many *rows* you must keep; multiply that row count by the size of one row and you learn how big
+the metadata database has to be."
+
+That framing matters because it separates two budgets that feel like one. The payload budget is set
+by physics (100 PB is 100 PB), but the metadata budget is set entirely by *object count* — so a
+store full of 512-byte objects and a store full of 512-MB objects can hold identical bytes while
+their metadata stores differ by six orders of magnitude.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Total payload bytes in the slice being sized — 10 PB in the book's example |
+| `s_avg` | Average object size — ~1 MB here; the whole answer swings on this one number |
+| `N` | Object count, `S / s_avg` — the row count of the object table and of every mapping table |
+| `b` | Bytes of metadata per object — ~256 B for a data-node mapping row, 1–2 KB for a full object-table row (name, version, size, placement, ACL) |
+| `f_small` | Fraction of objects under 1 MB — the 40% skew that decides the on-disk layout |
+
+**Walk one example.** Push the book's 10 PB / 1 MB / 40% through both budgets:
+
+```
+  N  = S / s_avg
+     = 10 PB / 1 MB
+     = 10,000,000,000,000,000 B / 1,000,000 B
+     = 10,000,000,000                      <- 10 billion objects
+  small objects = f_small x N
+     = 0.40 x 10,000,000,000
+     = 4,000,000,000                       <- 4 billion sub-1 MB objects
+
+  metadata store size = N x b
+     b =   256 B/object  ->  10e9 x   256 =   2.56 TB    (mapping-table row)
+     b = 1,024 B/object  ->  10e9 x 1,024 =  10.24 TB    (lean object-table row)
+     b = 2,048 B/object  ->  10e9 x 2,048 =  20.48 TB    (rich row + version)
+
+  now price the alternative -- one FILE per object:
+     inodes for the tiny objects alone = 4,000,000,000 x 256 B
+                                       = 1,024,000,000,000 B = 1.02 TB
+     block waste on a 512 B object in a 4 KB block
+                                       = (4,096 - 512) / 4,096 = 87.5% discarded
+
+  Meaning: the metadata database is a multi-terabyte system in its own right -- 2.56 TB of
+  mapping rows minimum -- and that is the CHEAP option. One-file-per-object spends 1.02 TB
+  on inodes for the small objects alone and still throws away 87.5% of every block they
+  touch. Packing turns a filesystem problem into a key-value problem you can actually shard.
+```
+
+**Why `s_avg` is the term that does all the work.** It appears in the denominator of `N`, and `N`
+multiplies straight into the metadata budget — so halving the average object size *doubles* your
+metadata store while storing the identical number of payload bytes. Drop `s_avg` from the model and
+you get the classic capacity-planning failure: teams size for petabytes, provision a single metadata
+node, and discover at launch that the object table alone will not fit on one machine.
+
 The 100 PB / six-nines / 40%-small triad is the whole problem statement compressed: **enough scale
 that layout efficiency matters, enough durability that you must engineer for it, and enough small
 objects that naive layout fails.**
@@ -440,6 +491,53 @@ durability       = 1 - 5.31 x 10^-7 = 0.99999947 = 99.999947%  ->  ~ six nines
 So **3-way replication** manufactures roughly six nines out of commodity disks — but at a **storage
 cost of 3x (200% overhead):** to store 100 PB of data you buy 300 PB of disk.
 
+**What this actually says.** "An object is lost only when *every* copy dies in the same repair
+window, so each independent copy multiplies the loss probability by the failure rate again — and
+because durability is quoted in nines, each copy adds a fixed number of nines rather than a fixed
+percentage."
+
+That last part is the framing worth internalizing. Nines are logarithmic, so "how many copies do I
+need?" is really "how many times do I want to multiply by 0.0081?" — and the answer stops being a
+guess the moment you count nines instead of percentages.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Annual failure probability of one disk — 0.0081 (0.81%) here |
+| `R` | Number of independent replicas of the object |
+| `p^R` | Probability all `R` copies die in the same window — the loss probability |
+| `1 - p^R` | Durability, the probability the object survives the year |
+| nines | `-log10(p^R)` — the conventional way durability targets are stated |
+
+**Walk one example.** The book's 0.81% disk, taken one replica at a time:
+
+```
+  p = 0.0081                      (0.81% annual failure rate, one disk)
+
+  R   loss probability p^R              durability 1 - p^R          nines = -log10(p^R)
+  1   0.0081^1 = 8.10000  x 10^-3       99.1900000000%              2.09
+  2   0.0081^2 = 6.56100  x 10^-5       99.9934390000%              4.18
+  3   0.0081^3 = 5.31441  x 10^-7       99.9999468559%              6.27
+
+  the per-copy step:
+     -log10(0.0081) = 2.0915 nines bought by each additional independent copy
+     3 copies  ->  3 x 2.0915 = 6.2745 nines                      <- matches the table
+
+  cost side, for 100 PB of real data:
+     raw disk = 100 PB x R
+     R = 1  -> 100 PB      R = 2 -> 200 PB      R = 3 -> 300 PB
+
+  Meaning: copy #2 and copy #3 each cost a flat 100 PB of disk but each buys the SAME
+  2.09 nines. Durability is bought linearly in money and gained logarithmically in
+  reliability -- which is exactly why nobody runs 5x replication.
+```
+
+**Why "independent" is load-bearing and what breaks without it.** The `p^R` form is only valid if
+the `R` failures are independent events; the moment two copies share a rack — hence a power supply
+and a top-of-rack switch — their joint failure probability is far larger than `p^2`, and the
+formula silently overstates durability by orders of magnitude. Three copies on one rack are, for
+this arithmetic, closer to one copy. The failure-domain rules below exist purely to make the
+independence assumption true enough to multiply.
+
 **Failure domains — replicas must be *independent*.** The math above assumes independent failures;
 that only holds if the three copies do not share a common failure. So placement spreads replicas
 across **failure domains**: different **nodes**, different **racks** (a rack shares a power supply
@@ -461,6 +559,53 @@ The book's worked example is **4 + 2**:
   4 using the parity math.
 - **Storage overhead = 6 stored / 4 data = 1.5x = 50% overhead** (vs 3x / 200% for triple
   replication) — **a quarter of replication's overhead for comparable durability.**
+
+**Read it like this.** "You write `k + m` chunks to hold `k` chunks of real data, so every raw byte
+of disk returns `k / (k + m)` bytes of usable capacity — and the `m` parities are the entire price
+of being able to lose `m` chunks."
+
+The useful consequence is that `k` and `m` are two independent dials, not one. The *cost* depends
+only on the ratio `m / k`, while the *failure tolerance* depends only on `m` — so you can hold cost
+fixed and buy more tolerance by scaling both numbers up together.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Data chunks the object is split into — the real payload |
+| `m` | Parity chunks computed by Reed-Solomon — pure redundancy, no user bytes |
+| `k + m` | Total chunks written, one per node; the stripe width |
+| `(k + m) / k` | Storage multiplier — how many raw bytes you buy per usable byte |
+| `k / (k + m)` | Usable capacity per raw byte — the inverse, the "efficiency" |
+| `m / k` | Overhead fraction — the number quoted as "50% overhead" |
+
+**Walk one example.** Put the book's 4+2 next to 6+3 and 3x replication on the same 100 PB:
+
+```
+  storage multiplier  = (k + m) / k        usable per raw byte = k / (k + m)
+  overhead            = m / k              tolerates            = any m chunk losses
+
+  scheme      stored / data   multiplier   usable per raw byte   raw disk (100 PB)   survives
+  3x replica     3 / 1          3.00x           0.3333                300 PB           2 losses
+  RS 4 + 2       6 / 4          1.50x           0.6667                150 PB           2 losses
+  RS 6 + 3       9 / 6          1.50x           0.6667                150 PB           3 losses
+  RS 10 + 4     14 / 10         1.40x           0.7143                140 PB           4 losses
+
+  the 6+3 arithmetic, step by step:
+     multiplier          = (6 + 3) / 6 = 9 / 6 = 1.5
+     usable per raw byte = 6 / (6 + 3) = 6 / 9 = 0.6667
+     overhead            = 3 / 6       = 0.50  = 50%
+     raw disk for 100 PB = 100 x 1.5   = 150 PB
+     versus 3x replication            = 300 PB     -> 150 PB of disk saved
+
+  Meaning: 6+3 and 4+2 cost EXACTLY the same 1.5x, because both have m/k = 0.5 -- but
+  6+3 survives three simultaneous chunk losses where 4+2 survives two. Widening the
+  stripe from 6 chunks to 9 buys a whole extra failure for zero extra storage.
+```
+
+**Why the parities exist and what breaks without them.** Set `m = 0` and the multiplier collapses to
+a perfect 1.0x — you store exactly the bytes you were given — but any single node loss destroys a
+chunk that no surviving chunk can regenerate, and the object is gone. `m` is precisely the number of
+chunks you are allowed to be missing when the `k`-of-`k+m` reconstruction runs, so it is the only
+term standing between "cheapest possible storage" and "no durability at all."
 
 ```mermaid
 flowchart LR
@@ -520,6 +665,72 @@ sensitive data** (a single-node read is fast and simple).
 | Write cost | Copy to N nodes | Compute parity (CPU) |
 | Reconstruction | Copy a replica | Reed-Solomon compute across nodes |
 | Best for | Hot, small, latency-sensitive | Cold, large, archival |
+
+**What the formula is telling you.** "Data is lost when *more than* `m` of the `k + m` chunks die in
+one repair window — so you are no longer multiplying a single probability like `p^R`, you are summing
+a binomial tail over every way the cluster could lose too many chunks at once."
+
+That shift from a product to a binomial tail is the part interviews skip and production does not.
+Replication has exactly one way to lose everything (all `R` copies), but a 9-chunk stripe has 126
+distinct ways to lose 4 chunks — and that combinatorial count, not the per-disk failure rate, is
+what decides whether an EC scheme actually reaches its advertised nines.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Stripe width, `k + m` — the number of independent disks/nodes holding chunks |
+| `m` | Chunks you may lose and still reconstruct — the tolerance |
+| `p` | Per-disk annual failure probability, 0.0081 as above |
+| `C(n, i)` | Number of distinct ways `i` of the `n` chunks can be the ones that die |
+| `p^i (1-p)^(n-i)` | Probability of one specific pattern of `i` dead and `n - i` alive |
+| `P_loss` | `sum over i = m+1..n of C(n,i) p^i (1-p)^(n-i)` — the binomial tail |
+
+**Walk one example.** Three schemes, same disk, same window:
+
+```
+  p = 0.0081; "lost" means MORE than m of the n chunks die before repair.
+
+  3x replication          n = 3,  m = 2  (lost only if all 3 die)
+     P_loss = C(3,3) x p^3          = 1   x 5.31441e-7
+            = 5.31441 x 10^-7
+     durability = 99.9999468559%                         6.27 nines
+
+  RS 4 + 2                n = 6,  m = 2  (lost if 3 or more die)
+     dominant term = C(6,3) x p^3 x (1-p)^3
+                   = 20 x 5.31441e-7 x 0.975896 = 1.03726e-5
+     full tail P_loss = 1.04364 x 10^-5
+     durability = 99.9989563638%                         4.98 nines
+
+  RS 6 + 3                n = 9,  m = 3  (lost if 4 or more die)
+     dominant term = C(9,4) x p^4 x (1-p)^5
+                   = 126 x 4.30467e-9 x 0.960151 = 5.20775e-7
+     full tail P_loss = 5.25051 x 10^-7
+     durability = 99.9999474949%                         6.28 nines
+
+  side by side, for 100 PB of real data:
+     scheme        raw disk    nines
+     3x replica     300 PB      6.27
+     RS 6 + 3       150 PB      6.28     <- same durability, HALF the disk
+     RS 4 + 2       150 PB      4.98     <- same disk as 6+3, ~1.3 nines worse
+
+  Meaning: 6+3 is the scheme that genuinely replaces 3x replication -- it matches the
+  durability (6.28 vs 6.27 nines) while cutting 300 PB of purchased disk to 150 PB.
+  4+2 costs the same as 6+3 but lands lower, because C(6,3) = 20 ways to lose 3 of 6
+  chunks overwhelms the single way to lose all 3 replicas.
+```
+
+Note on the comparison table above: it reports both replication and 4+2 as "~6 nines." Running the
+binomial tail at `p = 0.0081` puts 3x replication at 6.27 nines and 4+2 at 4.98; the scheme that
+lands alongside replication at the same 1.5x cost is **6+3** (6.28 nines). The table's underlying
+point — that erasure coding reaches replication-class durability at a fraction of the overhead — is
+what the arithmetic supports; it is the choice of `m` that determines whether a given `k+m` gets
+there.
+
+**Why widening the stripe is free durability, and where it stops.** Going 4+2 → 6+3 holds `m / k` at
+0.5 but raises `m` from 2 to 3, and since `P_loss` is driven by `p^(m+1)`, one extra parity buys
+roughly another factor of `p` — about 2.09 nines of headroom, partly eaten back by the growing
+`C(n, m+1)` term. It does not scale forever: a wider stripe means more nodes touched per read, a
+bigger reconstruction fan-out when one dies, and a larger blast radius for correlated failures. That
+is the real ceiling on `k + m`, not the storage math.
 
 **Checksums — catching the corruption replication can't see.** Replication and EC protect against a
 node *disappearing*, but not against **silent bit rot** — a disk quietly flipping a bit so the data

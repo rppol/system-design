@@ -76,6 +76,39 @@ read QPS   = 10 × 1,160
 = 36.5 TB  over 10 years
 ```
 
+**Read it like this.** The four estimates are one chain, not four independent facts: *"take one daily volume, divide by seconds to get a rate, multiply by the read ratio to get the hot-path rate, multiply by the retention window to get rows, then multiply by row size to get bytes."* Every later decision in the chapter cites one link of that chain, so the units matter more than the digits.
+
+| Symbol | What it is |
+|--------|------------|
+| `100,000,000 URLs/day` | The traffic volume the interviewer supplies in Step 1. |
+| `86,400 sec/day` | 24 h/day x 3600 s/h — the constant that turns a daily volume into a rate. |
+| `10:1` | Assumed read-to-write ratio: each created short URL is clicked about ten times. |
+| `10 years` | Assumed service lifetime — the retention window rows accumulate over. |
+| `365 days/year` | Days per year, ignoring leap days. |
+| `100 bytes/record` | Assumed average stored row size, dominated by the long URL text. |
+| `write QPS` | New mappings inserted per second (the write path). |
+| `read QPS` | Redirect lookups per second (the hot path). |
+
+**Walk one example.** The whole chain, with units carried on every line:
+
+```
+step 1  seconds per day     24 h/day x 3600 s/h              = 86,400 s/day
+step 2  write rate          100,000,000 URLs/day
+                            / 86,400 s/day                   = 1,157.4 writes/s  (~1,160/s)
+step 3  read rate           1,157.4 writes/s
+                            x 10 reads/write                 = 11,574.1 reads/s  (~11,600/s)
+step 4  rows over lifetime  100,000,000 URLs/day
+                            x 365 days/year x 10 years       = 365,000,000,000 rows
+step 5  bytes               365,000,000,000 rows
+                            x 100 bytes/row                  = 36,500,000,000,000 bytes
+step 6  in terabytes        36,500,000,000,000 bytes
+                            / 1,000,000,000,000 bytes/TB     = 36.5 TB
+Meaning: ~1,160 writes/s is trivial for a single node, but 365 billion rows is what
+forces a 7-character code, and 36.5 TB is what forces sharding.
+```
+
+Each multiplier is load-bearing. Drop the `10:1` read ratio and you size the cache for 1,160 QPS instead of 11,600 — a 10x under-provision on the one path that must feel instant. Drop the 10-year retention window and you size the code space against a single day's 100,000,000 URLs, where `62^5 = 916,132,832` codes looks like 9x headroom; at 100,000,000 URLs/day that supply is exhausted in 9.16 days.
+
 Sanity check on the shape of the problem: `1,160` writes/sec and `11,600` reads/sec are **modest** numbers — a single well-tuned database node can handle thousands of QPS. The interesting engineering is not raw throughput but the **read-heavy skew** (which drives caching), the **365-billion-row key space** (which drives short-code length), and **latency** (a redirect must feel instant). Write these four numbers down and refer back to them; every later decision cites one of them.
 
 | Estimate | Value | Drives the decision about… |
@@ -247,6 +280,37 @@ The short code uses the **base-62** alphabet, since the requirement allows `0-9`
 ```
 (Base-62 is chosen over base-64 precisely to stay URL-safe: base-64 adds `+` and `/`, which have special meaning in URLs.)
 
+**The idea behind it.** The alphabet size is a *radix*: *"every character you add multiplies the number of distinct codes by however many symbols the alphabet contains."* Picking 62 rather than 10 or 16 is not cosmetic — it changes the growth rate of the entire code space, which is what buys the short code its lifetime.
+
+| Symbol | What it is |
+|--------|------------|
+| `10` | Count of digits `0-9`. |
+| `26` (lower) | Count of lowercase letters `a-z`. |
+| `26` (upper) | Count of uppercase letters `A-Z`. |
+| `62` | `10 + 26 + 26` — the radix (base) of the short code. |
+| `n` | Number of characters in the short code. |
+| `62^n` | Total distinct codes a length-`n` code can express. |
+
+**Walk one example.** Same 7 characters, three different alphabets:
+
+```
+base 10 (digits only)     10^7  =            10,000,000 codes
+base 16 (hex)             16^7  =           268,435,456 codes
+base 62 (0-9 a-z A-Z)     62^7  =     3,521,614,606,208 codes
+
+62^7 / 10^7 = 352,161x more codes than decimal at the same length
+62^7 / 16^7 =  13,119x more codes than hex at the same length
+
+At 100,000,000 URLs/day the same 7 characters last:
+  base 10   10,000,000 / 100,000,000 per day        = 0.10 days   (2.4 hours)
+  base 16   268,435,456 / 100,000,000 per day       = 2.68 days
+  base 62   3,521,614,606,208 / 100,000,000 per day = 35,216 days (96.5 years)
+Meaning: the alphabet, not the length, is what turns a 2-hour code into a
+career-length one -- so widen the alphabet before you lengthen the code.
+```
+
+Base-64 would go slightly further — `64^7 = 4,398,046,511,104`, only **1.25x** more codes than base-62 — which is a tiny gain for the price of `+` and `/` needing percent-encoding inside a URL. That is why the chapter stops at 62: the last two symbols buy almost nothing and cost URL-safety.
+
 **How long must the code be?** With `n` characters and 62 possibilities each, the code space is `62^n`. We need it to comfortably exceed the 365 billion records from Step 1:
 
 ```
@@ -268,6 +332,38 @@ Walk the powers of 62:
 
 `62^6 ≈ 56.8 billion` is **less** than 365 billion, so 6 characters run out of codes before 10 years are up. `62^7 ≈ 3.5 trillion` is roughly **10×** the records we will ever create, so **n = 7** is the answer: a 7-character short code. This is exactly the length of the `y7keocwj`-style codes real shorteners use.
 
+**What the formula is telling you.** `62^n >= 365,000,000,000` is a *lifetime* question wearing a capacity question's clothes: *"how many characters do I need so the service never runs out of codes before it is retired?"* Restating each `62^n` as "years of runway at 100,000,000 URLs/day" makes the n=6 versus n=7 cliff impossible to miss.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Short-code length, in characters. |
+| `62^n` | Distinct short URLs available at that length. |
+| `365,000,000,000` | Records accumulated over the assumed 10-year lifetime. |
+| `100,000,000 URLs/day` | Consumption rate — codes burned per day. |
+| `62^n / 100,000,000 / 365` | Years of runway that code length buys. |
+
+**Walk one example.** Every length from 1 to 8, with the runway each one buys:
+
+```
+ n    62^n                          distinct short URLs supported   runway at 100 M/day
+ 1                        62        62                              0.05 seconds
+ 2                     3,844        3.8 thousand                    3.3 seconds
+ 3                   238,328        238 thousand                    3.4 minutes
+ 4                14,776,336        14.8 million                    3.5 hours
+ 5               916,132,832        916 million                     9.16 days
+ 6            56,800,235,584        56.8 billion                    1.56 years   <- too few
+ 7         3,521,614,606,208        3.52 trillion                   96.5 years   <- chosen
+ 8       218,340,105,584,896        218 trillion                    5,982 years  <- overkill
+
+Requirement check against the 365,000,000,000 lifetime records:
+  62^6 / 365,000,000,000 = 0.16x   -- covers only 16 percent of them
+  62^7 / 365,000,000,000 = 9.65x   -- roughly 10x headroom
+Meaning: n=6 exhausts the code space in year 2 of a 10-year service, while n=7
+survives the full decade nine times over -- hence the 7-character code.
+```
+
+The runway column is the reason the answer is not "pick the smallest `n` that exceeds today's traffic." Each step of `n` multiplies runway by 62, so the interesting region is narrow: n=6 is short by more than 6x and n=8 wastes a character. There is exactly one right answer, and reading `62^n` as a date rather than a count is what makes it obvious.
+
 ### Approach A — hash + collision resolution
 
 **Idea:** feed the long URL into a well-known hash function (CRC32, MD5, or SHA-1) and take the **first 7 characters** of the result as the short code.
@@ -281,6 +377,35 @@ The problem is length. A hash's natural output is far longer than 7 characters:
 | SHA-1 | 160-bit → 40 hex chars | `2ef7bde608ce5404e97d5f042f95f89f1c...` |
 
 None of these is 7 characters, so you **truncate to the first 7 characters** of the hash. Truncation, however, throws away most of the hash's bits and **reintroduces collisions** — two different long URLs can share the same 7-character prefix.
+
+**Put simply.** Truncating a hash is discarding bits: *"whatever the hash's advertised width, the only thing that decides collisions is how many bits survive into the characters you keep."* A 128-bit MD5 and a 32-bit CRC32 become the same thing the moment you keep only 7 characters of either.
+
+| Symbol | What it is |
+|--------|------------|
+| `128 bits` | Full MD5 output width (32 hex characters). |
+| `160 bits` | Full SHA-1 output width (40 hex characters). |
+| `32 bits` | Full CRC32 output width (about 8 hex characters). |
+| `7` | Number of characters kept after truncation. |
+| `log2(62^7)` | Bits of entropy surviving in a 7-character base-62 code. |
+| `16^7` | Codes available if you kept 7 *hex* characters instead of 7 base-62 ones. |
+
+**Walk one example.** How much of MD5 actually reaches the short code:
+
+```
+full MD5 width            128 bits    -> 3.4028 x 10^38 distinct values
+keep 7 base-62 chars      62^7        =       3,521,614,606,208 values
+bits that survive         log2(3,521,614,606,208)              = 41.68 bits
+bits thrown away          128 - 41.68                          = 86.32 bits
+                          i.e. 67 percent of the hash is discarded
+
+If you truncated the hex string instead of re-encoding in base 62:
+  keep 7 hex chars        16^7 = 268,435,456 values             = 28.00 bits
+  penalty                 3,521,614,606,208 / 268,435,456       = 13,119x fewer codes
+Meaning: truncation collapses a collision-free 128-bit space into a ~42-bit one,
+which is why Approach A must carry a collision loop that full-length MD5 would not need.
+```
+
+The `~42 bits` figure is the whole argument for Approach A's existence check. CRC32 is even starker: its *entire* output is 32 bits — `4,294,967,296` values — so it cannot fill a 42-bit code space at all, and by the birthday bound a 50 percent chance of some collision arrives after only about **77,162** URLs. Choosing MD5 or SHA-1 over CRC32 buys nothing at the *truncated* length; it only means the 7 characters you keep are drawn from a well-mixed source rather than a checksum.
 
 **Collision resolution.** When a newly-generated 7-char code already exists in the database, resolve it by **appending a predefined string to the long URL and re-hashing**, repeating until the truncated hash is unused:
 
@@ -341,6 +466,45 @@ Read remainders bottom-to-top:  2, 55, 59  →  "2TX"
 ```
 
 So the numeric ID `11157` shortens to the code `2TX`, and the redirect simply reverses the process (base-62 decode `2TX` → `11157`, then look up the row). The mapping table stores `<id=11157, shortURL="2TX", longURL=...>`.
+
+**In plain terms.** Base-62 conversion is long division that keeps its leftovers: *"divide by 62 repeatedly, and the remainders, read bottom-to-top, are the digits of that number written in base 62."* Encoding and decoding are exact inverses, which is why Approach B never needs a lookup to get from an ID to its code — the code *is* the ID in another notation.
+
+| Symbol | What it is |
+|--------|------------|
+| `id` | The unique numeric ID minted by the Chapter 7 generator. |
+| `id / 62` | Integer quotient — the part still left to encode. |
+| `id % 62` | Remainder in `0..61` — exactly one base-62 digit. |
+| `0..9` | Remainders 0 through 9 map to the characters `'0'..'9'`. |
+| `10..35` | Remainder 10 is `'a'`, 35 is `'z'`. |
+| `36..61` | Remainder 36 is `'A'`, 61 is `'Z'`. |
+
+**Walk one example.** The larger ID from the shortening sequence diagram, `2,009,215,674,938`:
+
+```
+ENCODE -- repeated divmod 62, remainders read bottom-to-top
+      value                 / 62 = quotient          rem   char
+      2,009,215,674,938              32,406,704,434    30   'u'   (10+20 -> 'a'+20)
+         32,406,704,434                 522,688,781    12   'c'
+            522,688,781                   8,430,464    13   'd'
+              8,430,464                     135,975    14   'e'
+                135,975                       2,193     9   '9'
+                  2,193                          35    23   'n'
+                     35                           0    35   'z'
+      remainders bottom-to-top: 35, 23, 9, 14, 13, 12, 30  ->  "zn9edcu"
+
+DECODE -- multiply-and-add, digits read top-to-bottom
+      'z' = 35                                        ->                35
+      35 x 62 + 23 ('n')                              ->             2,193
+      2,193 x 62 + 9 ('9')                            ->           135,975
+      135,975 x 62 + 14 ('e')                         ->         8,430,464
+      8,430,464 x 62 + 13 ('d')                       ->       522,688,781
+      522,688,781 x 62 + 12 ('c')                     ->    32,406,704,434
+      32,406,704,434 x 62 + 30 ('u')                  -> 2,009,215,674,938   (original ID)
+Meaning: the round trip is lossless, so a redirect can decode "zn9edcu" back to the
+row's primary key without any extra index.
+```
+
+This also pins down exactly when Approach B's codes change length. Seven characters covers IDs in the band `62^6 = 56,800,235,584` up to `62^7 - 1 = 3,521,614,606,207`; the example ID `2,009,215,674,938` sits inside that band, so it encodes to 7 characters. Anything below 56.8 billion encodes to 6 characters or fewer, and the first ID past 3.52 trillion spills to 8 — which is precisely the "length grows over time" tradeoff in the comparison table.
 
 **How A and B compare** — the book's decision table:
 
@@ -403,6 +567,35 @@ function shorten(longURL):
 ```
 
 The bug: truncating a 128-bit MD5 to 7 base-62 characters keeps only ~42 bits, so with 365 billion keys collisions are not rare — they are expected. A blind `save` on a colliding `key` **overwrites** the existing mapping, so an old short URL now silently redirects to the *wrong* long URL. Users of the clobbered link land on a stranger's page.
+
+**What this actually says.** "Collisions are not rare, they are expected" is a birthday-problem claim: *"duplicates start appearing once the number of keys you insert approaches the square root of the code space, and 365 billion keys is far past that line for a 42-bit space."* Framing it as occupancy rather than luck is what turns the existence check from a paranoid extra into the load-bearing part of Approach A.
+
+| Symbol | What it is |
+|--------|------------|
+| `m` | Size of the code space, `62^7 = 3,521,614,606,208`. |
+| `N` | Codes inserted over the service lifetime, `365,000,000,000`. |
+| `sqrt(m)` | Roughly the insert count at which the first collision becomes likely. |
+| `N^2 / (2m)` | Expected number of colliding pairs (birthday approximation). |
+| `N / m` | Chance the *next* generated code lands on an already-used one. |
+
+**Walk one example.** Collisions in the 7-character space over the 10-year run:
+
+```
+m = 62^7                                            = 3,521,614,606,208 codes
+sqrt(m)                                             =         1,876,596 codes
+   -> a first collision is likely after ~1.88 million inserts, which at
+      1,157.4 writes/s arrives in about 27 minutes of operation
+
+N = 365,000,000,000 codes inserted over 10 years
+expected colliding pairs   N^2 / (2 x m)
+   = 365,000,000,000^2 / (2 x 3,521,614,606,208)    =    18,915,329,316 pairs
+occupancy at end of life   N / m
+   = 365,000,000,000 / 3,521,614,606,208            =              10.4 percent
+Meaning: by year 10 roughly one in ten freshly generated codes lands on an occupied
+slot, so the broken version above would mis-map billions of links, not a handful.
+```
+
+The occupancy number is also why the Bloom filter is the right optimization and not merely a nice one. Early in the service life occupancy is near zero, so the filter answers "definitely not present" on essentially every insert and the database is never touched; only as the table fills does the fraction of inserts that must fall through to a real `existsInDB` lookup climb toward that 10.4 percent. The filter converts a per-insert database query into a per-*collision* database query.
 
 ```
 # FIXED — check existence, resolve on collision (Bloom-filtered)

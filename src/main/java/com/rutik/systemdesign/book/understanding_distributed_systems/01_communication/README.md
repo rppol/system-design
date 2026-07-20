@@ -209,6 +209,41 @@ and only halves cwnd, whereas a loss that falls through to an **RTO timeout** co
 restarts slow start — an order of magnitude more expensive. This is why bursty loss on a
 high-throughput connection is far worse than the same loss rate spread out.
 
+**The idea behind it.** "Wait a bit longer than this path's usual round trip — plus a margin for how
+jittery that round trip has been — and if the retransmission also goes unanswered, double the wait
+every time."
+
+| Symbol | What it is |
+|--------|------------|
+| `SRTT` | Smoothed round-trip time: a running average of the RTTs actually measured on this connection |
+| `RTTVAR` | How much recent RTTs bounced around — the jitter margin |
+| `RTO` | `SRTT + 4 x RTTVAR`, the deadline for an ACK before the sender retransmits |
+| doubling | Each successive retransmission of the *same* segment doubles the RTO (exponential backoff) |
+
+**Walk one example.** Two paths sized by the same rule, then a run of failed retries:
+
+```
+  path             SRTT     RTTVAR    RTO = SRTT + 4 x RTTVAR
+  datacenter LAN    20 ms     5 ms     20 +  20  =    40 ms
+  satellite        600 ms    50 ms    600 + 200  =   800 ms
+
+  exponential backoff, starting from a 200 ms RTO
+    retry 1    wait   0.2 s     elapsed   0.2 s
+    retry 2    wait   0.4 s     elapsed   0.6 s
+    retry 3    wait   0.8 s     elapsed   1.4 s
+    retry 4    wait   1.6 s     elapsed   3.0 s
+    retry 5    wait   3.2 s     elapsed   6.2 s
+    retry 6    wait   6.4 s     elapsed  12.6 s
+    retry 7    wait  12.8 s     elapsed  25.4 s
+```
+
+**Why the `4 x RTTVAR` term exists.** Without it the RTO would sit right on top of the average RTT,
+so roughly half of all ACKs would arrive *after* the timer fired and the sender would retransmit data
+that was never lost — pouring extra traffic onto a path that is already the slow one. The variance
+term buys headroom proportional to how unpredictable the path is: a steady LAN gets a tight 40 ms
+deadline, a jittery satellite link gets 800 ms, and neither one fires spuriously. The doubling is the
+other half of the same instinct — if the path is not answering, asking louder makes it worse.
+
 ### Connection lifecycle
 
 TCP is **connection-oriented**: before any data flows, the two endpoints establish shared state
@@ -352,6 +387,40 @@ bandwidth; a **"long fat pipe"** (satellite links, intercontinental paths) needs
 *and* time to ramp before it performs. The practical lesson: on high-latency paths, **throughput is
 bounded by the window, not the link** — you can't buy your way out of it with more bandwidth alone.
 
+**What the formula is telling you.** "You may put one window of bytes on the wire, then you must stop
+and wait a full round trip for the ACKs that grant permission to send the next one — so your speed is
+window divided by RTT, and buying more bandwidth does not change either number."
+
+| Symbol | What it is |
+|--------|------------|
+| `WindowSize` | Bytes allowed unacknowledged at once — in practice `min(cwnd, rwnd)` |
+| `RTT` | Round-trip time: send a byte, receive its acknowledgment |
+| `Throughput` | Bytes per second the connection can actually sustain, whatever the link is rated at |
+| `BDP` | `Bandwidth x RTT` — the window you would need in flight to keep the link 100% busy |
+
+**Walk one example.** The same classic 64 KB window on three different paths:
+
+```
+  window    RTT       throughput = window / RTT           as a link rate
+   64 KB     30 ms    65,536 / 0.030 = 2,184,533 B/s        17.48 Mbps
+   64 KB     50 ms    65,536 / 0.050 = 1,310,720 B/s        10.49 Mbps
+   64 KB    200 ms    65,536 / 0.200 =   327,680 B/s         2.62 Mbps
+
+  BDP that a 1 Gbps link would need kept in flight
+     30 ms  ->  1e9 x 0.030 =  30 Mbit =   3.75 MB
+     50 ms  ->  1e9 x 0.050 =  50 Mbit =   6.25 MB
+    200 ms  ->  1e9 x 0.200 = 200 Mbit =  25.00 MB
+
+  64 KB measured against the 30 ms BDP:  0.065536 / 3.75 = 1.75% of the pipe filled
+```
+
+Read the table as one statement: **RTT is a divisor, so doubling it exactly halves throughput** — the
+30 ms and 200 ms rows differ by 6.67x in latency and 6.67x in speed, with the window held constant.
+Nothing about the link's rating appears in the formula, which is why upgrading that 1 Gbps path to
+10 Gbps moves the 17.48 Mbps figure not at all. The only two levers are a bigger window (window
+scaling) or a shorter RTT (move the server closer), and the BDP column tells you exactly how big
+"bigger" has to be.
+
 **The slow-start ramp adds a second tax on top of the window ceiling.** Even with window scaling in
 place, a fresh connection doesn't *start* at the full window — it climbs there exponentially. To fill
 the 3.75 MB BDP above (≈ 2,570 segments at a 1,460-byte MSS) starting from an initial cwnd of 10 MSS
@@ -360,6 +429,46 @@ ramp-up before the connection reaches full speed. A short transfer that complete
 RTTs may *finish before slow start ever opened the window*, spending its entire life bandwidth-starved.
 This is the concrete reason short-lived connections are inefficient and long-lived, reused connections
 (keep-alive, HTTP/2) are so much faster: they pay the ramp once and then stay at cruising altitude.
+
+**Read it like this.** "cwnd doubles once per round trip, so the number of round trips needed to
+reach a target window is simply how many times you must double the starting window to get there —
+that count is `log2(target / initial)`."
+
+| Symbol | What it is |
+|--------|------------|
+| `cwnd` | Congestion window, counted here in MSS-sized segments |
+| initial cwnd | Where a fresh connection begins — 10 MSS on modern Linux, 1 MSS historically |
+| `MSS` | Maximum segment size, 1,460 bytes on a standard 1,500-byte-MTU path |
+| `log2(target / initial)` | Number of doublings, and therefore the number of RTTs, to climb between them |
+
+**Walk one example.** Ramping to the 3.75 MB BDP from the previous section:
+
+```
+  target = 3,750,000 / 1,460 = 2,568 segments
+  ramp   = log2(2,568 / 10)  = 8.00 doublings
+
+  RTT    cwnd (MSS)    bytes in flight
+    0          10         0.015 MB     <- initial window, ~1.5% of the BDP
+    1          20         0.029 MB
+    2          40         0.058 MB
+    3          80         0.117 MB
+    4         160         0.234 MB
+    5         320         0.467 MB
+    6         640         0.934 MB
+    7       1,280         1.869 MB     <- still only half the pipe
+    8       2,560         3.738 MB     <- essentially the full 3.75 MB BDP
+
+  wall-clock ramp at  30 ms RTT:  8 x  30 ms =   240 ms
+  wall-clock ramp at 200 ms RTT:  8 x 200 ms = 1,600 ms
+```
+
+Two things are worth reading off that table. First, the exponential is deceptive from the inside:
+**after 7 of the 8 round trips the connection is still running at half speed**, so a transfer that
+finishes in 5 RTTs never sees more than about 12% of the link. Second, `log2` is extremely forgiving
+at the top end — raising the initial window from 1 MSS to 10 MSS removes `log2(10) = 3.3` round trips
+of ramp, which is the entire reason the initial-cwnd default was raised. (Strictly, 8 doublings land
+at 2,560 segments, 8 shy of the 2,568 the BDP wants; the 9th RTT closes that sliver, which is why the
+text above says "about 8".)
 
 ### Custom protocols (UDP and QUIC)
 
@@ -486,6 +595,38 @@ setup before the first byte of the request is processed.
   backends inside the trusted network — trading a security boundary for CPU savings and simpler
   certificate management.
 
+**In plain terms.** "Before your response can start coming back, a fresh HTTPS request pays a fixed
+number of round trips — count them, multiply by the path's RTT, and that product is the floor no
+server tuning can get under."
+
+| Symbol | What it is |
+|--------|------------|
+| `RTT` | One round trip on the path between client and server |
+| DNS lookup | 1 RTT to the recursive resolver on a cache miss; 0 when the record is already cached |
+| TCP handshake | 1 RTT — SYN, SYN-ACK, then the ACK that may already carry request bytes |
+| TLS handshake | 1 RTT for TLS 1.3, 2 RTT for TLS 1.2, 0 RTT on a TLS 1.3 resumption |
+| request/response | 1 final RTT before the first response byte lands |
+
+**Walk one example.** The same request in four connection states, on a 50 ms path:
+
+```
+  scenario                              round trips             time to first byte
+  cold, DNS miss, TLS 1.2         1 + 1 + 2 + 1 = 5 RTT              250 ms
+  cold, DNS miss, TLS 1.3         1 + 1 + 1 + 1 = 4 RTT              200 ms
+  warm DNS, new connection        0 + 1 + 1 + 1 = 3 RTT              150 ms
+  pooled keep-alive connection    0 + 0 + 0 + 1 = 1 RTT               50 ms
+
+  the same four rows on a 200 ms intercontinental path
+    1,000 ms  /  800 ms  /  600 ms  /  200 ms
+```
+
+The arithmetic settles two arguments that otherwise get made on vibes. **Upgrading TLS 1.2 to 1.3
+buys exactly one RTT** — 50 ms here, 200 ms across an ocean — a real but bounded win. **Connection
+pooling buys three**, taking 200 ms down to 50 ms, a 75% cut, and it is the single largest latency
+lever in this list. That is also why QUIC's 0-RTT resumption is such an aggressive design: it folds
+DNS-warm setup down to nothing and puts the request itself in the very first packet, making the
+bottom row the *default* rather than the reward for keeping a socket alive.
+
 A few mechanics that fill in the picture:
 
 - **Cipher-suite negotiation.** The handshake agrees on a **cipher suite** — the concrete algorithms
@@ -600,6 +741,41 @@ chapter develops).
 Crucially, **you cannot force-expire caches you don't control** — once a resolver caches your record
 for its TTL, that's how long clients may keep the old answer. The TTL is a *promise you made in
 advance*, which is why it's a leading operational lever.
+
+**Put simply.** "A cached record is refetched once per TTL no matter how many clients ask for it, so
+the TTL sets both how little upstream DNS traffic you generate and how long a stale answer can
+outlive a failover."
+
+| Symbol | What it is |
+|--------|------------|
+| `TTL` | Seconds a cache may keep the record before it must refetch |
+| `R` | Query rate for that name arriving at one resolver, per second |
+| upstream misses | `1 / TTL` per second — one refetch per TTL window, no matter how large `R` is |
+| cache hit rate | `1 - 1/(R x TTL)` — the share of queries the cache answers by itself |
+| stale window | Up to `TTL` seconds during which a client may still use the pre-failover IP |
+
+**Walk one example.** One resolver fielding R = 500 queries/second for the name:
+
+```
+  TTL          queries served per upstream miss      hit rate        worst stale window
+      60 s        500 x     60 =        30,000       99.99667%           1 minute
+     300 s        500 x    300 =       150,000       99.99933%           5 minutes
+   3,600 s        500 x  3,600 =     1,800,000       99.99994%           1 hour
+  86,400 s        500 x 86,400 =    43,200,000       99.999998%         24 hours
+
+  upstream load    1/60 = 0.0167 qps   vs   1/86,400 = 0.0000116 qps   -> 1,440x less
+  failover cost      60 s of stale routing   vs   86,400 s of stale routing
+```
+
+**Why the tradeoff is less symmetric than the table above suggests.** Look at what each column does
+as TTL grows: the hit rate is *already* 99.997% at 60 seconds and can only crawl the remaining
+0.003% of the way to 100%, while the stale window grows linearly and without limit — 60 seconds
+becomes a full day. The load axis saturates; the risk axis does not. At any serious query volume the
+marginal DNS traffic you save by going from a 1-minute TTL to a 1-day TTL is a rounding error, and
+what you buy with it is a 24-hour window in which a failover you already executed has not reached
+your users. This is the arithmetic behind the standard operational move of cutting TTLs to 60 s a
+day *before* a planned migration: you pre-pay a trivial load increase to shrink an untouchable
+staleness window.
 
 ### DNS as an eventually-consistent hierarchical KV store
 

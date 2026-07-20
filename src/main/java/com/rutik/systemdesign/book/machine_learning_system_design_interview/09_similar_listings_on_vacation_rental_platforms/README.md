@@ -217,6 +217,40 @@ where `σ(x) = 1 / (1 + e^{−x})` is the sigmoid. The first term rewards a high
 true context; each negative term rewards a low dot product with a random listing. A few (e.g. 5–20)
 negatives per positive is enough, turning an O(vocabulary) softmax into O(k) work.
 
+**In plain terms.** "Reward the model whenever the true co-clicked listing's vector points the same
+way as the central listing's, and reward it again whenever a random listing's vector points a
+different way." Framing it as a handful of independent yes/no bets — rather than one giant
+probability that must sum to 1 across 4.5M listings — is the whole cost saving.
+
+| Symbol | What it is |
+|--------|------------|
+| `v_l` | The central listing's embedding — the vector being nudged |
+| `v_c` | A true context listing's embedding — co-clicked inside the window |
+| `v_d` | A random negative listing's embedding, drawn from the vocabulary |
+| `v_c · v_l` | Dot product: large positive = the two vectors already agree |
+| `σ(x)` | `1 / (1 + e^{-x})`, squashing a dot product into a `(0, 1)` "is this a real pair?" score |
+| `log σ(...)` | The per-term reward; 0 is perfect, large negative means the model is badly wrong |
+
+**Walk one example.** One central listing against a true context and one random negative:
+
+```
+term            dot product   sigmoid argument   sigma    log sigma
+true context       +2.0            +2.0         0.8808     -0.1269
+random negative    -0.5            +0.5         0.6225     -0.4741
+                                                           --------
+                                              partial objective  -0.6010
+
+Reading the two rows:
+  the true context already scores 0.8808 -- the model mostly believes this pair, small penalty
+  the random negative scores 0.6225 -- the model is only mildly sure it is fake, bigger penalty
+```
+
+The sign flip on the negative term is the piece worth staring at: the negative's dot product is
+`-0.5`, and the objective feeds `-v_d · v_l = +0.5` into the sigmoid. So a negative whose vector
+already points *away* from the central listing produces a positive sigmoid argument and a small
+penalty — the model is not asked to push it any further. All the gradient goes to negatives that are
+still sitting too close, which is exactly the property Trick 2 below exploits.
+
 ### Trick 1 — Booked listing as global context
 
 Skip-gram as-is only knows about **clicks within a window**; it has no notion that a session
@@ -296,11 +330,92 @@ argmax_θ   Σ_{(l,c) ∈ D_p} log σ( v_c · v_l )        ← window co-clicks 
 booked listing; `D_{m_n}` = same-market hard negatives. For **exploratory** (non-booked) sessions
 the `l_b` term is simply dropped.
 
+**What this actually says.** "Four forces act on one listing's vector: pull it toward what people
+clicked next to it, pull it toward what they eventually booked, push it away from random listings,
+and push it away from listings in its own market." Every term is the same `log σ` shape; only the
+sign of the dot product and the source of the other vector change.
+
+| Symbol | What it is |
+|--------|------------|
+| `D_p` | Positive pairs — central listing with each in-window co-clicked context listing |
+| `D_n` | Random negatives, drawn from the whole 4.5M vocabulary (almost always another city) |
+| `l_b` | The listing this session eventually booked; a positive for every window in the session |
+| `D_{m_n}` | Hard negatives sampled from the central listing's own market |
+| `argmax_θ` | We *maximize* this; `θ` is the embedding table, the only parameters that exist |
+
+**Walk one example.** One central listing in a booked session, one term of each kind:
+
+```
+term                        dot with v_l   sigmoid arg    sigma     log sigma
+window context   v_c            +2.0          +2.0        0.8808     -0.1269
+booked listing   v_lb           +1.2          +1.2        0.7685     -0.2633
+random negative  v_d            -0.5          +0.5        0.6225     -0.4741
+hard negative    v_m            +1.5          -1.5        0.1824     -1.7014
+                                                                     --------
+                                              objective for this central listing  -2.5657
+
+Where the learning signal is going:
+  hard negative     -1.7014  =  66% of the total penalty   <- dominates
+  random negative   -0.4741  =  18%
+  booked listing    -0.2633  =  10%
+  window context    -0.1269  =   5%
+```
+
+The distribution in that second block is the numerical case for Trick 2. The hard negative sits at
+`+1.5` — it points nearly the same way as the central listing, because it is a comparable property
+in the same city — so it produces two thirds of the gradient by itself. The random negative, already
+at `-0.5`, contributes almost nothing. Drop the hard negatives and you delete most of the learning
+signal, which is exactly the "mushy inside a market" failure the chapter warns about.
+
 **Hyperparameters (Airbnb).** Embedding dimension **`d = 32`** (small, cheap to store and to run
 ANN over 4.5M vectors), window size **`m = 5`**, trained over **800M+ sessions**, **retrained
 daily** on a sliding window of recent sessions. `d = 32` is a deliberate choice: high enough to
 separate markets and within-market clusters, low enough that a 4.5M × 32 float table is a few
 hundred MB and ANN latency stays in the low-ms range.
+
+**Read it like this.** "The embedding table costs listings times dimensions times bytes-per-number,
+and the training set costs sessions times the number of (central, context) pairs a window of size
+`m` carves out of each one." Both hyperparameters — `d` and `m` — are chosen by what those two
+products come to, so it is worth doing the multiplication rather than accepting the adjectives.
+
+| Symbol | What it is |
+|--------|------------|
+| 4.5M | Active listings — the embedding table's row count |
+| `d = 32` | Embedding dimension; numbers stored per listing |
+| 4 bytes | Size of one fp32 float (fp16 would be 2) |
+| `m = 5` | Window half-width; a central listing pairs with up to `m` listings on each side |
+| `2m` | Maximum context listings per central listing — 10 for an interior position |
+| `n` | Number of clicks in a session |
+
+**Walk one example.** The table first, then the pair count for one 12-click session:
+
+```
+Embedding table
+  4,500,000 listings x 32 dims x 4 bytes  =  576,000,000 bytes
+                                          =  576 MB   (549 MiB)
+  same table in fp16:  4,500,000 x 32 x 2 =  288 MB
+
+Window arithmetic, n = 12 clicks, m = 5
+  an interior central listing pairs with 2m = 10 context listings
+  edge positions are truncated: click 1 has only 5 neighbours to its right, none to its left
+  summing the true window width over all 12 positions:      90 positive pairs
+  plus the booked listing as global context, one per central listing:  + 12
+                                                            ------------
+                                            total positives    102 pairs from ONE session
+
+  scaled to the corpus:  800,000,000 sessions x 90 window pairs = 7.2e10 positive pairs
+```
+
+Two things fall out. First, the booked-listing trick adds 12 pairs against the window's 90 — roughly
+12% more positives — yet it is the term carrying the entire booking objective, which shows how much
+leverage a well-chosen positive has relative to its cost. Second, 7.2e10 positive pairs is why the
+full softmax over 4.5M listings was never an option and negative sampling is structural, not an
+optimization.
+
+**Book-vs-arithmetic note.** The text above describes the fp32 table as "a few hundred MB", but the
+multiplication gives **576 MB** — more than half a gigabyte, and above what "a few hundred MB"
+normally suggests. The claim holds comfortably at fp16 (288 MB), which is how such tables are
+usually stored in serving; at fp32 the honest number is 576 MB.
 
 ### Trick 3 — Cold start by embedding composition
 
@@ -321,6 +436,42 @@ v_new = (1/3) · Σ_{k ∈ nearest-3 same-type same-price within 10 mi} v_k
 The new listing is instantly placed in a sensible neighborhood of the embedding space and can be
 both recommended and used as a query the moment it goes live; once it accumulates its own clicks,
 the next daily retrain gives it a genuine learned vector.
+
+**Put simply.** "Stand the new listing at the centre of gravity of the three most comparable
+listings that already have a position." The averaging is coordinate-by-coordinate and nothing else —
+no training, no gradient, one pass over three vectors.
+
+| Symbol | What it is |
+|--------|------------|
+| `v_new` | The composed embedding for the listing that has no clicks |
+| `v_k` | An already-learned embedding of one qualifying neighbour |
+| nearest-3 | The 3 geographically closest listings within ~10 miles that also match on type and price |
+| `(1/3) · Σ` | Plain arithmetic mean, applied independently to each of the 32 dimensions |
+
+**Walk one example.** Shown at `d = 4` so the arithmetic is visible; the real table is `d = 32`:
+
+```
+                  dim0     dim1     dim2     dim3
+  v_k1           0.42    -0.11     0.35     0.08
+  v_k2           0.38    -0.05     0.29     0.12
+  v_k3           0.46    -0.14     0.33     0.04
+                 ----    -----     ----     ----
+  sum            1.26    -0.30     0.97     0.24
+  / 3          0.4200  -0.1000   0.3233   0.0800   =  v_new
+
+Cosine similarity of v_new to each neighbour it was built from:
+  cos(v_new, v_k1) = 0.9992
+  cos(v_new, v_k2) = 0.9920
+  cos(v_new, v_k3) = 0.9948
+```
+
+All three cosines land above 0.99, which is the point: the composed vector is a near-neighbour of
+every listing it was built from, so an ANN query for the new listing immediately returns those three
+and their neighbourhoods. Note also what the mean does to disagreement — `dim1` ranges from `-0.05`
+to `-0.14` across the three sources and the average lands at `-0.10`, so any dimension the
+neighbours disagree on gets damped toward the middle. A composed embedding is therefore always
+*blander* than a learned one, which is why it is a placeholder until the next daily retrain rather
+than a permanent answer.
 
 ```mermaid
 flowchart LR
@@ -368,6 +519,41 @@ Procedure (replayed over many held-out booked sessions):
 3. Record the **rank position of the booked listing `l_b`** in that ranked list.
 4. Average that rank across clicks and across all held-out sessions → **average rank of the booked
    listing**. **Lower is better.**
+
+**What it means.** "Pretend you did not know how the session ended, ask the embedding to rank the
+market at every click along the way, and write down where the answer was hiding each time." Because
+the ranking is produced without ever seeing the booking, a low average is evidence the geometry
+anticipated the outcome rather than memorized it.
+
+| Symbol | What it is |
+|--------|------------|
+| `l_b` | The listing this held-out session eventually booked — the single ground-truth item |
+| query | The listing being viewed at some click in the session; the ANN query vector |
+| candidate pool | The market's listings, ranked by embedding similarity to the query |
+| rank | 1-indexed position of `l_b` in that ranked list; 1 is best |
+| average rank | Mean of those ranks over the session's clicks, then over all held-out sessions |
+
+**Walk one example.** One held-out session, 4 clicks, a 20-listing market pool, booked `l8`:
+
+```
+click   query listing   rank of l8 in the ranked pool
+  1          l3                    14
+  2          l7                     9
+  3          l1                     5
+  4          l9                     2
+                                  ----
+  average rank for this session = (14 + 9 + 5 + 2) / 4 = 7.5
+
+Baseline: a random ranking of a 20-listing pool puts l8 at an expected rank of (20 + 1) / 2 = 10.5
+
+  7.5 vs 10.5  ->  the embedding beats chance, and the per-click trend 14, 9, 5, 2 is monotonic
+```
+
+The trend matters more than the average. A model that memorized popular listings would score the
+same rank at every click; the fact that the rank falls 14 → 9 → 5 → 2 as the session progresses means
+each newly-clicked listing pulls the query vector closer to the one the user was converging on. That
+descending shape is what the chapter's chart plots, and it is the actual evidence that the space
+encodes booking intent rather than mere popularity.
 
 The intuition: a good embedding should place the listing the user will actually book near the top
 of the similar-listings ranking *even before they book it* — and, as the session progresses toward

@@ -54,6 +54,38 @@ serverIndex = hash(key) % N        // N = number of servers
 While `N` is fixed this is excellent: a good hash function scatters keys uniformly, so each of the
 `N` servers gets roughly `k/N` keys, and lookup is one hash plus one modulo — O(1), no state.
 
+**In plain terms.** The formula reads as a lookup, but what it really encodes is a *dependency*:
+> "A key's home is decided by the remainder it leaves when divided by the current server count — so
+> the server count is baked into every single key's address."
+
+Reading it that way makes the failure obvious before you see any example. Nothing about the key
+changed when a server died; the *divisor* changed, and the divisor is half the address.
+
+| Symbol | What it is |
+|--------|------------|
+| `hash(key)` | A large integer derived from the key alone; stable forever, independent of the fleet |
+| `N` | The number of live servers — the one term that moves when membership changes |
+| `%` | Remainder after division; folds the huge hash down into `0 .. N-1` |
+| `serverIndex` | The resulting server slot, valid only for this exact value of `N` |
+
+**Walk one example.** Push two of the chapter's own key hashes through both divisors:
+
+```
+key0:  hash = 18,358,617
+       18,358,617 % 4 = 1        (4 servers  -> server 1)
+       18,358,617 % 3 = 0        (3 servers  -> server 0)      MOVED
+
+key1:  hash = 26,143,584
+       26,143,584 % 4 = 0        (4 servers  -> server 0)
+       26,143,584 % 3 = 0        (3 servers  -> server 0)      stayed, by coincidence
+
+the hash never changed -- only the divisor did, and the divisor is what picks the server
+```
+
+The `% N` is doing two jobs at once: it distributes, and it *names*. Distribution is the job you
+wanted; naming is the job that ruins you. Consistent hashing keeps the distribution and takes away
+the naming, by deciding ownership from ring geometry instead of from `N`.
+
 ### The worked example (4 servers, 8 keys)
 
 Take 4 servers (indices 0–3) and 8 keys (`key0`–`key7`). Hash each key, take `hash % 4`, and you
@@ -104,6 +136,48 @@ that traffic falls through to the origin database at once, which was never provi
 full read load, and it can topple. The same thing happens in reverse when you *add* a server (`N`
 goes from 4 to 5, divisor changes, everything re-maps).
 
+**What this actually says.** "Almost every key moves" has an exact closed form, and it gets *worse*
+as your fleet grows:
+> "When the divisor goes from `N` to `N+1`, a key keeps its home only if its two remainders happen to
+> coincide — about 1 chance in `N+1` — so the fraction that moves is `N / (N+1)`."
+
+The counter-intuitive part is the direction: the bigger your cluster, the closer that fraction gets to
+100%. Scaling out does not soften the rehash storm, it sharpens it.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Server count before the change (the old divisor) |
+| `N+1` | Server count after adding one server (the new divisor) |
+| `1/(N+1)` | Fraction of keys whose old and new remainders coincide, so they stay put |
+| `N/(N+1)` | Fraction of the whole keyspace that is re-homed — the blast radius |
+
+**Walk one example.** Evaluate the fraction at several fleet sizes, then check it against a
+million-key simulation:
+
+```
+fraction that KEEPS its server, N -> N+1  =  1 / (N+1)
+fraction that MOVES                       =  N / (N+1)
+
+N =   3   ->  moves   3/4   = 75.00%     (the chapter's case: 4 servers down to 3)
+N =  10   ->  moves  10/11  = 90.91%
+N =  20   ->  moves  20/21  = 95.24%     (matches the pitfall's "20 -> 21, ~95% remap")
+N = 100   ->  moves 100/101 = 99.01%
+
+measured on 1,000,000 SHA-1 hashed keys:
+  4 <-> 3 servers    749,919 moved  = 74.99%   (theory 75.00%)
+  20 -> 21 servers   952,360 moved  = 95.24%   (theory 95.24%)
+
+for contrast, consistent hashing on the same 20 -> 21 change moves 1/(n+1) = 4.76%
+  measured with 200 vnodes per server:  48,613 of 1,000,000 = 4.86%
+  95.24% / 4.76% = 20.0x fewer keys disturbed
+```
+
+A note on the chapter's own table: its 8-key sample shows 7 of 8 keys moving, which is `7/8 = 87.5%`,
+while the expectation for 4 servers down to 3 is `75.00%`. That gap is small-sample noise, not an
+error in the argument — with a million keys the measured figure lands at `74.99%`. Either number
+carries the same point: losing one server out of four should have orphaned the 2 keys that lived on
+it, and instead it re-homed most of the keyspace.
+
 > **Broken → fix.** Broken: `serverIndex = hash(key) % N` — correct and even while `N` is fixed,
 > but any change in `N` re-maps ~all keys and triggers a miss storm. Fix: make the mapping depend
 > on where servers and keys land on a fixed ring, *not* on the count `N`, so that changing
@@ -118,6 +192,44 @@ such that when a hash table is resized, **on average only `k/n` keys need to be 
 `k` is the number of keys and `n` is the number of slots (servers). Contrast with modulo hashing,
 where changing the slot count re-maps *nearly all* keys because it rehashes everything.
 
+**Read it like this.** `k/n` looks like a ratio but it is really a count, and reading it as a count is
+what makes the guarantee land:
+> "One membership change re-homes about one server's worth of keys — the arc that server owns — and
+> leaves every other server's keys exactly where they were."
+
+Under modulo hashing the number of keys you must move scales with the *whole keyspace*; under
+consistent hashing it scales with one server's *share* of it. That is the entire theorem.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Total number of keys stored across the fleet |
+| `n` | Number of slots (servers, or ring positions) |
+| `k/n` | Keys living on one average server — and the keys a single membership change disturbs |
+| "on average" | Exact only in expectation; actual arcs vary, which is why virtual nodes exist |
+
+**Walk one example.** One million keys on a 20-server fleet, adding a 21st server both ways:
+
+```
+k = 1,000,000 keys        n = 20 servers
+
+hash % N, adding one server (20 -> 21):
+  keys remapped = k x N/(N+1) = 1,000,000 x 20/21 = 952,381 keys
+
+consistent hashing, adding one server (20 -> 21):
+  keys remapped = k / (n+1)   = 1,000,000 / 21    =  47,619 keys
+  measured, 200 vnodes per server                 =  48,613 keys
+
+keys spared    = 952,381 - 47,619 = 904,762 keys never re-fetched from the origin
+reduction      = 952,381 / 47,619 = 20.0x
+
+the 20.0x is not a coincidence: it is exactly n, the fleet size
+```
+
+That last line is the property worth carrying into an interview: the *advantage* of consistent
+hashing over modulo hashing grows linearly with your fleet size. At 20 servers it saves you 20x the
+re-fetch work; at 100 servers, 100x. The technique matters most precisely where the naive scheme
+hurts most.
+
 ### Hash space and hash ring
 
 Start with the **hash space**: the full range of outputs of the hash function. Using **SHA-1**,
@@ -125,6 +237,43 @@ the output is 160 bits, so the space runs from `0` to `2^160 − 1` — about 1.
 Lay that range out and then **join the two ends** so `0` and `2^160 − 1` are adjacent. That circle
 is the **hash ring**. Every point on the ring is one possible hash value; the join point is where
 the value wraps from the maximum back to `0`.
+
+**Put simply.** The 160 bits are not there for cryptographic reasons; they buy *resolution*:
+> "The ring has about 1.46 x 10^48 addressable positions, which is so many more than the few thousand
+> points you will ever place on it that the circle behaves like a continuous line."
+
+That is what lets you slice the ring as finely as you like with virtual nodes without ever worrying
+that two points collide or that the spacing quantizes.
+
+| Symbol | What it is |
+|--------|------------|
+| 160 bits | SHA-1's output width; every hash is one of `2^160` values |
+| `2^160 − 1` | The largest ring position; the next step past it wraps to `0` |
+| hash space | The full set of positions `0 .. 2^160 − 1` |
+| ring | That same space with its two ends joined, so the walk never runs out of servers |
+
+**Walk one example.** Compare the ring's capacity against the number of points you actually occupy:
+
+```
+SHA-1 output width = 160 bits
+ring positions     = 2^160
+                   ~ 1.46 x 10^48 distinct points
+
+for scale, a 32-bit ring (what some implementations use):
+  2^32          = 4,294,967,296 points
+  2^160 / 2^32  = 2^128 ~ 3.40 x 10^38 times larger
+
+a realistic fleet: 20 servers x 200 virtual nodes = 4,000 ring points occupied
+  average gap between neighbouring points = 2^160 / 4,000
+                                          ~ 3.65 x 10^44 positions
+
+occupancy = 4,000 / 1.46 x 10^48 ~ 2.7 x 10^-45 of the ring
+```
+
+The **join** is the term people forget. Without it the space is a line segment, and any key hashing
+above the highest server point has no server clockwise of it — the lookup returns nothing. Joining
+`2^160 − 1` to `0` is what guarantees the clockwise walk always terminates, which is why the
+implementations later in this chapter all end with a `% len(points)` or a `firstEntry()` fallback.
 
 ```
                         hash = 0   (= 2^160, the wrap point)
@@ -201,6 +350,46 @@ easier):
 
 These same numbers drive the add/remove examples below: inserting `s4` at 0.45 or deleting `s1` at
 0.30 changes only the keys whose clockwise-first server flips, and nothing else.
+
+**What it means.** A server's load is not decided by anything about the server — it is decided by the
+gap in front of it:
+> "Each server owns the stretch of ring running from the previous server up to itself, so its expected
+> share of keys is just that arc's length as a fraction of the whole circle."
+
+Once ownership is arc length, load balancing becomes a geometry problem, and the basic ring's flaw
+becomes visible as arithmetic rather than as a vague warning.
+
+| Symbol | What it is |
+|--------|------------|
+| ring position | A point in `0 .. 2^160 − 1`, written here as a fraction of the full circle |
+| arc / partition | `(previous server, this server]` — the range this server owns |
+| arc length | Position difference; the server's expected share of the keyspace |
+| ideal share | `1/n` — what every arc would be if the hashes landed perfectly evenly |
+
+**Walk one example.** Take the four positions in the table above and total each server's arc:
+
+```
+server points (as fractions of the 2^160 ring):  s0 0.10, s1 0.30, s2 0.55, s3 0.80
+arc owned = from the previous server (exclusive) up to this server (inclusive)
+
+  s1 owns (0.10, 0.30]              0.30 - 0.10        = 0.20  = 20.0% of the ring
+  s2 owns (0.30, 0.55]              0.55 - 0.30        = 0.25  = 25.0%
+  s3 owns (0.55, 0.80]              0.80 - 0.55        = 0.25  = 25.0%
+  s0 owns (0.80, 1.00] + [0, 0.10]  (1.00 - 0.80) + 0.10 = 0.30 = 30.0%   (wraps the join)
+                                                   total = 1.00 = 100.0%
+
+ideal share with n = 4 servers = 1/4 = 0.25 = 25.0%
+largest / smallest = 0.30 / 0.20 = 1.50x   -- s0 carries 50% more load than s1
+
+now remove s1: its arc merges into its clockwise successor s2
+  s2 owns 0.20 + 0.25 = 0.45 = 45.0% of the ring
+  ideal share with n = 3 is 1/3 = 33.3%
+  0.45 / 0.333 = 1.35x the fair share -- the imbalance got worse, not better
+```
+
+That last step is issue 1 of §5.3 in numbers: membership changes do not re-randomize the arcs, they
+*merge* them, so imbalance ratchets upward over a server's lifetime. Nothing in the basic ring pushes
+it back toward `1/n`, which is exactly the job virtual nodes take on.
 
 ### Add a server — only one segment of keys moves
 
@@ -325,6 +514,93 @@ Caption: the two right-hand bars (10% at 100 vnodes, 5% at 200) are the book's s
 left bars sketch the trend that very few points per server leave load badly skewed. Doubling
 vnodes from 100 to 200 roughly halves the imbalance — diminishing returns bought with more
 metadata.
+
+**What the formula is telling you.** "Standard deviation of load" is the averaging law from
+statistics applied to ring arcs:
+> "A server's load is the sum of its `k` random arcs, and averaging `k` random quantities shrinks
+> their relative spread by a factor of `sqrt(k)` — so the imbalance falls as `1 / sqrt(k)`."
+
+That is why the book's numbers are what they are, and it also tells you where the curve stops paying:
+each halving of imbalance costs a *quadrupling* of vnodes.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Virtual nodes per physical server — how many arcs each server's load averages over |
+| `n` | Physical servers; each server's fair share is `1/n` of the ring |
+| std dev of load | Spread of per-server key counts around the mean, as a percent of the mean |
+| `1/sqrt(k)` | The rate at which that spread shrinks as you add virtual nodes |
+
+**Walk one example.** Three servers, 300,000 SHA-1 hashed keys, ideal share 100,000 keys (33.3%)
+each — first with one ring point per server, then with 100:
+
+```
+3 servers, 300,000 keys, ideal share = 300,000 / 3 = 100,000 keys = 33.3% each
+
+  1 virtual node per server:
+    s0    46,379 keys   15.5%
+    s1    27,559 keys    9.2%
+    s2   226,062 keys   75.4%   <- one server holds three quarters of the load
+    spread (max / min) = 226,062 / 27,559 = 8.20x
+
+  100 virtual nodes per server:
+    s0    96,488 keys   32.2%
+    s1    96,319 keys   32.1%
+    s2   107,193 keys   35.7%
+    spread (max / min) = 107,193 / 96,319 = 1.11x
+
+imbalance falls 8.20x -> 1.11x with no data moved and no server added --
+only 297 extra ring points (3 servers x 99 more points each)
+
+the 1/sqrt(k) law behind it:
+  k =   1  ->  1 / sqrt(1)   = 100.00%
+  k =  10  ->  1 / sqrt(10)  =  31.62%
+  k = 100  ->  1 / sqrt(100) =  10.00%   <- matches the book's 10% at 100 vnodes
+  k = 200  ->  1 / sqrt(200) =   7.07%
+```
+
+One figure to flag: the square-root law puts 200 vnodes at `7.07%`, while the book states about
+**5%**. The book's number is the more optimistic of the two; treat `5-7%` as the practical band at
+200 vnodes rather than a single exact value. The shape of the claim is unaffected — going from 100 to
+200 vnodes buys a meaningful but clearly diminishing improvement, and getting to `2.5%` would take
+roughly 1,600 vnodes per server under the square-root law.
+
+**Stated plainly.** The cost side of that tradeoff is a single multiplication:
+> "Every router holds `n x k` ring points, so the vnode count you pick multiplies your ring metadata,
+> your gossip traffic on membership changes, and (logarithmically) your lookup cost."
+
+Worth sizing before you assume it is expensive — for realistic fleets the metadata is trivially small,
+and the real constraint is propagation, not memory.
+
+| Symbol | What it is |
+|--------|------------|
+| `n x k` | Total ring points a router must store, sort, and search |
+| bytes per entry | Storage per point: the 8-byte position plus a reference to the physical server |
+| `O(log(n x k))` | Lookup cost — the binary search over the sorted ring points |
+| gossip volume | Ring state that must be disseminated when membership changes |
+
+**Walk one example.** Size the ring for a 20-server fleet at three vnode settings:
+
+```
+ring points = n servers x k virtual nodes per server
+
+  20 servers x   1 vnode  =     20 points     load std dev ~ 99%    (basic ring)
+  20 servers x 100 vnodes =  2,000 points     load std dev ~ 10%    (book)
+  20 servers x 200 vnodes =  4,000 points     load std dev ~ 5-7%
+
+metadata at ~16 bytes per entry (8-byte ring position + server reference):
+  4,000 points x 16 bytes = 64,000 bytes = 64 KB of ring state per router
+
+lookup cost = O(log2(n x k)):
+  log2(20)    =  4.3 comparisons     (basic ring)
+  log2(4,000) = 12.0 comparisons     (200 vnodes/server)
+  cost grew 2.8x while imbalance fell from ~99% to ~5-7%
+```
+
+64 KB is nothing, which is why "metadata cost" rarely means memory in practice. What it does mean is
+**agreement**: all 4,000 points must be identical across every router, so a membership change has to
+propagate 200 point insertions or deletions to the whole fleet, and any router still on the old view
+routes a shared key to a different server. That is the split-brain failure in the pitfalls below, and
+it is the real reason vnode counts stay in the hundreds rather than the millions.
 
 ---
 

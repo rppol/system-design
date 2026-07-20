@@ -80,6 +80,64 @@ appending a random number (say 0–99) to the hot key, splitting its writes acro
 partitions. The cost: reads must now query all 100 variants and combine them, and you must track
 which keys are hot. There's no automatic remedy.
 
+### Decoding the hot-spot arithmetic
+
+The chapter states the hot-spot problem qualitatively. Putting one number on it makes clear why
+"add more partitions" is not the fix. The measure is the **skew factor**:
+
+```
+  skew factor = max_partition_load / mean_partition_load
+
+  with P partitions and perfectly uniform keys, every partition holds 1/P of
+  the load, so mean_partition_load = 1/P and skew factor = 1.0
+```
+
+**In plain terms.** "Compare the busiest partition against the average one. A skew factor of 1.0
+means the work is spread perfectly; a skew factor of 30 means one node is doing thirty times its
+share while the rest idle."
+
+The reason this matters is that the skew factor, not the partition count, is what you are
+bottlenecked on. Your cluster's throughput ceiling is set by its hottest partition.
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | Number of partitions in the cluster |
+| `1/P` | The fair share — the fraction of load one partition carries if keys spread evenly |
+| `max_partition_load` | The fraction of total load landing on the busiest partition |
+| `skew factor` | How many times the average a hot partition works. `1.0` = perfect, higher = worse |
+
+**Walk one example.** One celebrity key on a 100-partition cluster:
+
+```
+  Cluster: P = 100 partitions.  One celebrity key draws 30% of all traffic.
+
+  uniform baseline    mean share = 1/P = 1/100                    =  1.00%
+  non-hot traffic     the other 70%, spread over 100 partitions   =  0.70% each
+  hot partition       its celebrity key + its ordinary share
+                      0.30 + 0.0070                               = 30.70%
+
+  skew factor = max / mean = 30.70% / 1.00%                       = 30.7x
+```
+
+That partition does 30.7 times the work of an average one, and **growing the cluster does not
+help**: the key is indivisible, so 30% of the load sits on one partition whether you run 100
+partitions or 10,000. This is precisely why the chapter says most systems cannot auto-correct it.
+
+**Walk the fix.** The chapter's remedy — append a random number 0–99 to the hot key:
+
+```
+  hot key's 30% split across 100 sub-keys   0.30 / 100                =  0.30%
+  plus that partition's ordinary share                               +  0.70%
+  new max partition share                                             =  1.00%
+
+  skew factor = 1.00% / 1.00%                                         =  1.0x
+```
+
+Perfectly flat again. The price is exactly what the chapter names: every read of that key now
+fans out to all 100 variants and merges them, and the application must track which keys are hot
+enough to deserve the treatment. Splitting a key that is *not* hot costs you the fan-out for
+nothing.
+
 ## 6.3 Partitioning and Secondary Indexes
 
 Secondary indexes (find all items with `color = red`) don't map neatly to partitions because
@@ -101,6 +159,45 @@ a *term-partitioned* index. **Reads are efficient** (go straight to the partitio
 term, no scatter/gather). But **writes are slower and more complex**: a single document write
 may touch *multiple* index partitions (one per indexed field value), so the index update is a
 distributed operation, often done **asynchronously** (the index lags the write).
+
+### Decoding the scatter/gather cost
+
+The whole local-vs-global tradeoff reduces to one count — how many partitions a single read has
+to touch:
+
+```
+  local (document-partitioned) index    partitions touched per read = P
+  global (term-partitioned) index       partitions touched per read = 1
+
+  probability a scatter/gather query is slow = 1 - (1 - p_slow)^P
+```
+
+**Stated plainly.** "A local index makes every secondary-index read ask *every* partition, so the
+query is only as fast as the unluckiest partition it spoke to — and the more partitions you have,
+the more likely at least one of them is having a bad moment."
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | Number of partitions the read must fan out to |
+| `p_slow` | Chance one partition answers slower than your latency budget |
+| `(1 - p_slow)^P` | Chance *every* partition came back in time — the query is fast only if all did |
+| `1 - (1 - p_slow)^P` | Chance the query is slow because at least one partition lagged |
+
+**Walk one example.** Each partition meets a 10 ms budget 99% of the time, so `p_slow = 0.01`:
+
+```
+                              partitions   P(all under 10 ms)     P(query is slow)
+  global (term) index              1        0.99^1   = 0.9900          1.00%
+  local (document) index          10        0.99^10  = 0.9044          9.56%
+  local (document) index         100        0.99^100 = 0.3660         63.40%
+```
+
+At 100 partitions, **63% of scatter/gather queries hit at least one slow partition** even though
+each individual partition is meeting its p99 budget. That is the precise meaning of "prone to
+tail latency": the fan-out converts a rare per-partition hiccup into the common case. The global
+index reads a single partition and stays at 1.00%, which is what buys it the "reads are
+efficient" label — paid for by writes that must touch one index partition per indexed field
+value, which is why they are pushed asynchronous.
 
 ## 6.4 Rebalancing Partitions
 
@@ -126,6 +223,80 @@ network/disk I/O).
 - **Partitioning proportional to nodes.** A *fixed number of partitions per node*; when a new
   node joins, it randomly picks existing partitions to split and takes half of each. Used by
   Cassandra and Ketama. Keeps partition size stable as the dataset and cluster grow together.
+
+### Decoding the rebalance cost
+
+"Move no more data than necessary" is a number you can compute. For a cluster growing from `N`
+nodes to `N + 1`:
+
+```
+  hash mod N          fraction of keys that move = N / (N + 1)
+  fixed partitions    fraction of keys that move = 1 / (N + 1)
+```
+
+**What the formula is telling you.** "Under `hash mod N`, adding one node reshuffles nearly the
+whole dataset; with a fixed partition count, adding one node moves only the one-in-N-plus-one
+slice the new node is supposed to own — which is the theoretical minimum."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Node count before the new node joins |
+| `N + 1` | Node count after |
+| `hash(key) mod N` | Maps a key straight onto a node. Changing `N` changes the answer for nearly every key |
+| `1 / (N + 1)` | The fair share of one node after the join — the least data that *must* move |
+| `N / (N + 1)` | What actually moves under `mod N`; approaches 100% as the cluster grows |
+
+**Walk one example.** The chapter's own numbers — 1000 partitions, 10 nodes, adding an eleventh:
+
+```
+  hash mod N        a key stays put only when h mod 10 == h mod 11.
+                    Over one full 110-value cycle that holds for h = 0..9 only.
+                      stay  = 10/110 = 1/11 =  9.09%
+                      moved = 1 - 1/11 = 10/11 = 90.91%
+
+  fixed partitions  1000 partitions, created up front, never renumbered.
+                      before  1000 / 10  = 100.0 partitions per node
+                      after   1000 / 11  =  90.9 partitions per node
+                      the new node is handed 90.9 whole partitions
+                      moved = 90.9 / 1000 = 1/11 = 9.09%
+
+  90.91% / 9.09% = 10x less data crosses the network for the same rebalance
+```
+
+The trap gets *worse* the bigger your cluster, which is the opposite of what you want:
+
+```
+  N -> N + 1        keys moved under hash mod N
+    3 ->  4                  75.00%
+    4 ->  5                  80.00%
+   10 -> 11                  90.91%
+  100 -> 101                 99.01%
+```
+
+**Why the partition count must stay fixed.** The reason fixed partitioning wins is that it
+separates two mappings: `key -> partition` (computed by hash, frozen forever) and
+`partition -> node` (a lookup table you are free to edit). `hash mod N` fuses them into one
+expression, so touching `N` rewrites both. Only whole partitions move; no key is ever rehashed.
+
+**Read it like this.** The proportional-to-nodes strategy adds a second knob — `V`, the number of
+partitions (**vnodes**, Cassandra's tokens) each node owns. More vnodes per node means each node's
+load is the sum of more independent random slices, so its relative spread shrinks like
+`1 / sqrt(V)`:
+
+```
+  V vnodes per node        relative spread of node load = 1 / sqrt(V)
+
+    V =   1                1 / sqrt(1)    = 100.00%    wildly uneven
+    V =   4                1 / sqrt(4)    =  50.00%
+    V =  16                1 / sqrt(16)   =  25.00%    Cassandra 4.0 default
+    V = 100                1 / sqrt(100)  =  10.00%
+    V = 256                1 / sqrt(256)  =   6.25%    Cassandra's pre-4.0 default
+```
+
+Diminishing returns are steep: going from 1 to 16 vnodes cuts the spread by 75 percentage points,
+while going from 16 to 256 buys only another 18.75. That is why real defaults sit in the tens-to-
+hundreds range rather than the thousands — past that point you are paying bookkeeping and repair
+overhead per vnode for load-balancing gains you can no longer measure.
 
 ```mermaid
 flowchart LR

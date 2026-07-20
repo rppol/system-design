@@ -190,6 +190,47 @@ The exact numbers matter less than the *habit*: you converted "design Twitter" i
 handful of concrete magnitudes, and every downstream design decision (do we need a CDN? how
 many database shards? fan-out on write or read?) now has a number behind it.
 
+**In plain terms.** "Every one of those four bullets is the same two-step move — multiply the user
+count by a per-user rate to get things-per-day, then divide by 86,400 to get things-per-second."
+
+Once you see that the whole dialogue collapses to one chain, the estimation stops being memorised
+and becomes mechanical: users → per-user rate → per day → per second, with a peak factor and a
+retention multiplier bolted on the ends.
+
+| Symbol | What it is |
+|--------|------------|
+| `MAU` | Monthly active users — the raw number the interviewer gave (300 million) |
+| `DAU` | Daily active users = `MAU x daily-use fraction` (50%) |
+| `86,400` | Seconds in a day — the constant that turns per-day into per-second |
+| `peak factor` | Multiplier for burst over average; the chapter uses `2x` |
+| `media fraction` | Share of tweets carrying media (10%) |
+| `retention` | `365 x years` — the multiplier that turns per-day storage into total storage |
+
+**Walk one example.** The full chain, carrying units on every line:
+
+```
+  DAU        :  300,000,000 MAU x 0.50            = 150,000,000 users/day
+  tweets/day :  150,000,000 users x 2 tweets      = 300,000,000 tweets/day
+  write QPS  :  300,000,000 tweets / 86,400 s     = 3,472 tweets/s   (book: ~3,500)
+  peak QPS   :  3,472 tweets/s x 2                = 6,944 tweets/s   (book: ~7,000)
+
+  media/day  :  300,000,000 tweets x 0.10         = 30,000,000 media tweets/day
+             :  30,000,000 x 1 MB                 = 30,000,000 MB/day = 30 TB/day
+  5-yr media :  30 TB/day x 365 days x 5 years    = 54,750 TB = 54.75 PB  (book: ~55 PB)
+
+  text/day   :  300,000,000 tweets x 1 KB         = 300 GB/day = 0.3 TB/day
+  5-yr text  :  0.3 TB/day x 365 x 5              = 547.5 TB = 0.55 PB
+
+  Meaning: media is 54.75 / 0.55 = 100x the text volume. That single ratio is the
+  design decision -- blobs go to object storage behind a CDN, and the database
+  only ever holds the half-petabyte of text.
+```
+
+The two terms candidates most often drop are the **peak factor** and the **retention multiplier**,
+and both are load-bearing. Size the write path for the 3,472/s average and it falls over at the
+6,944/s peak — you have provisioned exactly for the number that is exceeded every day. Skip the
+`365 x 5` and you plan for 30 TB instead of 54,750 TB, undersizing storage by a factor of 1,825.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -461,6 +502,50 @@ Caption: using the midpoint of each range, the deep dive (Step 3) is the single 
 — roughly as much time as Steps 1 and 4 combined — which is why over-running Step 1 or a
 single Step-3 component is the most common way to run out of clock.
 
+**What the formula is telling you.** "The four ranges are not a schedule — they are a slack budget:
+their floors sum to well under 45 minutes and their ceilings to well over it, so every minute you
+overspend early is taken directly out of Step 3."
+
+That asymmetry is the whole lesson of the table. There is no arrangement in which all four steps run
+at their upper bound, which is why the chapter says the numbers are "proportion, not a stopwatch."
+
+| Symbol | What it is |
+|--------|------------|
+| `lo` | The lower bound of a step's range (3, 10, 10, 3 minutes) |
+| `hi` | The upper bound of a step's range (10, 15, 25, 5 minutes) |
+| `(lo + hi) / 2` | The step's midpoint — the figure the pie chart above is drawn from |
+| `45` | The session length the whole budget is scaled against |
+| `slack` | `45 - sum(lo)` — minutes left to distribute once every step has its floor |
+
+**Walk one example.** Push all four ranges through, in minutes:
+
+```
+  step            lo    hi    midpoint          share of 45 min
+  1 scope          3    10    (3+10)/2  =  6.5      14.4%
+  2 blueprint     10    15    (10+15)/2 = 12.5      27.8%
+  3 deep dive     10    25    (10+25)/2 = 17.5      38.9%
+  4 wrap up        3     5    (3+5)/2   =  4.0       8.9%
+  ------------------------------------------------------------
+  sum             26    55              = 40.5      90.0%
+
+  all floors  :  26 min   ->  45 - 26 =  19 min of discretionary slack
+  all ceilings:  55 min   ->  55 - 45 = -10 min, i.e. 10 minutes OVER budget
+
+  Where the slack goes decides the interview:
+      spend it on Step 3  ->  10 + 19 = 29 min of deep dive   (the good case)
+      spend it on Step 1  ->   3 + 19 = 22 min of scoping, and Step 3 is
+                              squeezed back toward its 10-minute floor
+
+  Meaning: Step 3 is elastic by 15 min (10 to 25) -- more than the other three
+  ranges combined (7 + 5 + 2 = 14) -- so it is both the biggest prize and the
+  step that silently absorbs every overrun elsewhere.
+```
+
+Note that the exact midpoints sum to 40.5 minutes, not 45; the pie chart above rounds them to
+7/13/20/5 so the slices total a clean 45. Either way the ordering is identical and Step 3 is the
+largest slice — the chart is showing proportion, which is exactly what the chapter says to take from
+it.
+
 ---
 
 ## Visual Intuition
@@ -546,6 +631,48 @@ Why it passes: the candidate resolved the vagueness (features, scale, retention)
 assumption and got it confirmed, used a back-of-the-envelope number to *justify* a design
 choice (7-char key, cache-first read path), and explicitly signalled the next steps —
 blueprint, buy-in, then deep dive. Same knowledge, completely different signal.
+
+**Stated plainly.** "The key length is not a style choice — you count how many URLs must ever exist,
+then pick the smallest `L` where `62^L` clears that count, and the read:write ratio decides
+separately whether a cache is mandatory."
+
+This is the model answer for the chapter's own rule that estimation is for *shaping a decision*. Two
+numbers, two design commitments: one sizes the ID scheme, the other justifies the cache.
+
+| Symbol | What it is |
+|--------|------------|
+| `62` | Alphabet size for base-62 — `0-9` (10) + `a-z` (26) + `A-Z` (26) |
+| `L` | Key length in characters; the candidate lands on `7` |
+| `62^L` | Total distinct keys a length-`L` base-62 string can express |
+| `100:1` | Read-to-write ratio the interviewer supplies |
+| `86,400` | Seconds per day, converting URLs/day into QPS |
+
+**Walk one example.** Both halves of the transcript's arithmetic, step by step:
+
+```
+  Rate half:
+    writes  :  100,000,000 URLs/day / 86,400 s   =   1,157 writes/s   (said: ~1,160)
+    reads   :  1,157 writes/s x 100              = 115,741 reads/s    (said: ~116K)
+
+    Meaning: reads are two orders of magnitude above writes, so the read path
+    -- not the write path -- is the thing that must be cached.
+
+  Capacity half:
+    total keys needed :  100,000,000/day x 365 x 10 yrs = 365,000,000,000 URLs
+                                                       = 3.65 x 10^11
+
+    L = 6  ->  62^6 =      56,800,235,584  = 5.68 x 10^10   TOO SMALL (0.16x)
+    L = 7  ->  62^7 =   3,521,614,606,208  = 3.52 x 10^12   FITS (9.6x headroom)
+
+    Meaning: 6 characters covers only 56.8 / 365 = 15.6% of the keyspace needed,
+    so 7 is the smallest length that works -- and it lasts 62^7 / 100M / 365 =
+    96 years at this write rate, not just the stated 10.
+```
+
+The term worth defending here is the retention window. Drop `x 365 x 10` and you size the keyspace
+against 100 million URLs, where `L = 5` (`62^5` = 916,132,832) looks generous — and you discover the
+mistake nine days into production, when short codes start colliding and every existing link would
+need rewriting to add a character.
 
 ```mermaid
 flowchart LR

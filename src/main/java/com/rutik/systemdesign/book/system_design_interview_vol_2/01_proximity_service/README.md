@@ -93,6 +93,40 @@ search QPS = DAU × searches per user per day / seconds per day
            ≈ 5,000 search QPS
 ```
 
+**What this actually says.** "Every daily active user searches five times, so spread half a billion
+searches evenly across the seconds in a day and count how many land in each second."
+
+The rounding of 86,400 to 10^5 is deliberate interview hygiene, not sloppiness — it makes the
+division mental. But it errs on the *low* side, which is precisely why the book immediately reaches
+for a peak multiplier instead of trusting the headline number.
+
+| Symbol | What it is |
+|--------|------------|
+| `DAU` | Daily active users — 100,000,000 here |
+| `searches per user per day` | 5, the average search count for one active user |
+| `seconds per day` | 86,400, rounded up to 10^5 to keep the division mental |
+| `search QPS` | Average searches arriving per second — the number every later component is sized against |
+
+**Walk one example.** The book's rounded form against the exact one:
+
+```
+  total searches per day = 100,000,000 x 5           = 500,000,000
+
+  book's rounded form    = 500,000,000 / 100,000     = 5,000 QPS
+  exact form             = 500,000,000 /  86,400     = 5,787 QPS
+
+  the divisor was inflated  86,400 -> 100,000  =  +15.7%
+  so the published QPS lands  5,000 vs 5,787   =  -13.6% (low)
+
+  peak headroom the book adds:
+    5,000 x 2 = 10,000 QPS
+    5,000 x 3 = 15,000 QPS      <- both sit well above the exact 5,787 average
+```
+
+The peak multiplier is doing double duty here: it absorbs real traffic spikes *and* it silently
+covers the 13.6% the rounding gave away. That is why "round to 10^5, then design for 2-3x" is safe
+in an interview but would be a bug if you sized a fleet at exactly 5,000 QPS with no headroom.
+
 So the target is roughly **5,000 searches per second** against **200 million businesses**. Peak is
 some multiple of that (say 2–3×), so design for ~10,000–15,000 QPS headroom. Writes (owners editing
 listings) are **negligible** by comparison — a business is edited maybe a few times ever, so the
@@ -365,6 +399,59 @@ characters = more halvings = smaller, more precise cells. The precision table:
 | 8 | 38.2 m × 19.1 m | a building |
 | ... | ... | down to length 12 ≈ a few cm |
 
+**Read it like this.** "Each character buys you five more halvings of the world, and those halvings
+alternate between the longitude axis and the latitude axis — so a cell's *area* shrinks by exactly
+32x per character, but its width and height shrink in a 4x-then-8x zigzag."
+
+That zigzag is why the table's cells are sometimes square (length 5: 4.9 × 4.9) and sometimes 2:1
+(length 4: 39.1 × 19.5). Nothing about it is approximate — every row is forced by the bit count.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Geohash length in characters |
+| `5n` | Total bits, because base32 packs exactly 5 bits into one character |
+| `ceil(5n / 2)` | Bits spent on longitude — even positions come first, so an odd bit total favours lng |
+| `floor(5n / 2)` | Bits spent on latitude |
+| `360 / 2^lng_bits` | Cell width in degrees; 360 deg is the full longitude span of Earth |
+| `180 / 2^lat_bits` | Cell height in degrees; 180 deg is the full latitude span |
+| `111.32 km` | Kilometres per degree of longitude, measured at the equator |
+| `110.94 km` | Kilometres per degree of latitude |
+
+**Walk one example.** Rebuild the length-6 row of the table above from nothing but the bit count:
+
+```
+  n = 6 characters   ->   5 x 6 = 30 bits total
+                          lng bits = ceil(30 / 2)  = 15
+                          lat bits = floor(30 / 2) = 15
+
+  width  = 360 deg / 2^15  = 360 / 32,768 = 0.010986 deg
+         = 0.010986 x 111.32 km           = 1.223 km    <- table row says 1.2 km
+
+  height = 180 deg / 2^15  = 180 / 32,768 = 0.005493 deg
+         = 0.005493 x 110.94 km           = 0.609 km    <- table row says 0.6 km
+```
+
+Now watch the zigzag across the three lengths the book actually uses:
+
+```
+   n   bits   lng bits   lat bits      width         height        shape
+   4    20      10         10        39.136 km     19.501 km      2:1 wide
+   5    25      13         12         4.892 km      4.875 km      square
+   6    30      15         15         1.223 km      0.609 km      2:1 wide
+
+   4 -> 5 :  width / 8 ,  height / 4       (lng gained 3 bits, lat gained 2)
+   5 -> 6 :  width / 4 ,  height / 8       (lng gained 2 bits, lat gained 3)
+
+   area ratio, both steps:  (39.136 x 19.501) / (4.892 x 4.875) = 32.0
+                            ( 4.892 x  4.875) / (1.223 x 0.609) = 32.0
+```
+
+**Why cells flip between square and 2:1.** Longitude spans 360 deg and latitude only 180 deg, so
+equal bit counts leave the cell twice as wide as it is tall. Only when longitude holds exactly one
+*extra* bit (odd total, i.e. odd `n`) does the extra halving cancel that 2:1 head start and the cell
+come out square. That is the whole reason lengths 5, 7, 9 look square in the table and 4, 6, 8 do
+not — it is a parity artifact of interleaving, not a property of the Earth.
+
 The book uses only lengths **4, 5, 6** because those bracket the five allowed radii. The radius →
 precision mapping the book gives:
 
@@ -375,6 +462,41 @@ precision mapping the book gives:
 | 2 km | 5 |
 | 5 km | 4 |
 | 20 km | 4 |
+
+**Put simply.** "The nine cells you fetch form a rectangle, but the answer you owe the user is a
+circle sitting inside it — so most of what you pull back is guaranteed to be discarded."
+
+This is the arithmetic behind the "always do a final exact-distance filter" rule, and it also
+explains why the mapping table has *five* radii but only *three* precisions: each precision is
+tuned for the largest radius in its band, so the smaller radius in the same band over-fetches badly.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | Requested search radius in km |
+| `w x h` | One geohash cell's width and height at the chosen length |
+| `3w x 3h` | The 9-cell union (centre plus 8 neighbours) — always a 3x3 block |
+| `9wh` | Area actually scanned, in km^2 |
+| `pi * r^2` | Area the user actually asked for |
+| `9wh / (pi r^2)` | Over-fetch factor — how many km^2 you scan per km^2 you want |
+
+**Walk one example.** Push all five radius options through, reusing the cell sizes derived above:
+
+```
+  radius  len   one cell (km)     9-cell box (km)    scanned    wanted    over-fetch
+   0.5     6    1.223 x  0.609     3.67 x  1.83        6.7 km2   0.79 km2     8.5x
+   1       5    4.892 x  4.875    14.68 x 14.63      214.6 km2   3.14 km2    68.3x
+   2       5    4.892 x  4.875    14.68 x 14.63      214.6 km2  12.57 km2    17.1x
+   5       4   39.136 x 19.501   117.41 x 58.50     6868.8 km2  78.54 km2    87.5x
+  20       4   39.136 x 19.501   117.41 x 58.50     6868.8 km2  1256.6 km2    5.5x
+```
+
+Read the last column top to bottom and the design falls out. The two radii sitting at the *top* of
+their band (20 km and 0.5 km) are efficient — 5.5x and 8.5x. The two sitting at the *bottom* of a
+shared band (1 km and 5 km) are the expensive ones at 68x and 88x, because they borrow a precision
+sized for a neighbour four times larger. A 1 km search scans a 14.7 km-wide box to answer a 2 km-wide
+question. Nothing is *wrong* — the exact-distance filter still returns the right answer — but it is
+why a production system with more than five radius options would add precisions rather than reuse
+them, and why the candidate set is called *coarse*.
 
 So each of the five radius options is served by a precomputed geohash column (`geohash_4`,
 `geohash_5`, `geohash_6`); the LBS picks the right precision for the requested radius, computes the
@@ -431,6 +553,44 @@ physical space at the fold lines.
 character of the geohash** to jump up one precision level (a ~32× larger area) and query again,
 repeating until enough businesses are found or the max radius is reached. This is the same mechanism
 that satisfies the "widen the radius if too few results" requirement from Step 1.
+
+**The idea behind it.** "Deleting one character un-does exactly five halvings, so the cell you are
+searching gets 32 times bigger in area — but only 4x or 8x wider in any single direction."
+
+The distinction matters more than it looks. Interviewers hear "32x larger" and expect the *radius*
+to grow 32x; it does not. Area scales as the product of two linear dimensions, so the reach of your
+search grows by roughly the square root — the widening is far gentler per step than the number 32
+suggests, which is why the fallback usually has to fire more than once in a genuinely empty region.
+
+| Symbol | What it is |
+|--------|------------|
+| `5` | Bits thrown away by dropping one base32 character |
+| `2^5 = 32` | Area multiplier per dropped character — always exactly 32, never approximate |
+| `4x` / `8x` | The per-axis growth; which axis gets which depends on the parity of the length |
+| `sqrt(32) = 5.66` | Roughly how much farther the search *reaches* per dropped character |
+
+**Walk one example.** A dense-city search at length 6 that comes back nearly empty:
+
+```
+  start:  length 6 cell   1.223 km x 0.609 km      area  0.745 km2
+                                                   9-cell box  3.67 x 1.83 km
+
+  drop 1 char -> length 5    4.892 km x  4.875 km  area  23.85 km2   = 32.0x
+                             width  x4,  height x8
+                                                   9-cell box  14.68 x 14.63 km
+
+  drop 1 char -> length 4   39.136 km x 19.501 km  area  763.2 km2   = 32.0x
+                             width  x8,  height x4
+                                                   9-cell box  117.41 x 58.50 km
+
+  two drops: area 0.745 -> 763.2 km2  =  1,024x  (32 x 32)
+             but the 9-cell box only went 3.67 km wide -> 117.41 km wide = 32x
+```
+
+Two drops multiply the area by 1,024 while widening your actual reach only 32-fold. That asymmetry
+is the whole reason the fallback is cheap to *attempt* and expensive to *over-use*: each step
+multiplies the candidate rows you must distance-filter by 32, so a service that habitually drops two
+characters is scanning a thousand times more index than the tight query would have.
 
 ### Quadtree
 
@@ -493,6 +653,61 @@ Internal nodes (a quadtree's internal nodes ≈ 1/3 of the leaves):
 
 Total memory  ≈  1.6 GB (business ids) + ~0.1 GB (nodes)  ≈  ~1.71 GB
 ```
+
+**In plain terms.** "Count how many buckets you need at 100 businesses per bucket, add a third again
+for the scaffolding that points at them, and notice that the scaffolding is almost free — the
+business ids alone are 94% of the memory."
+
+The "internal nodes ≈ 1/3 of the leaves" line is not a fudge factor; it is an exact geometric series.
+Each level up has a quarter as many nodes as the level below, so `1/4 + 1/16 + 1/64 + ...` converges
+to exactly `1/3`. Knowing it is a series and not a rule of thumb is what lets you re-derive the
+estimate for an octree (1/7) or a binary tree (1/1) on the spot.
+
+| Symbol | What it is |
+|--------|------------|
+| `200,000,000` | Businesses to index |
+| `100` | Leaf capacity — the split threshold the book picks |
+| `L` | Leaf count = businesses / leaf capacity |
+| `(L - 1) / 3` | Internal-node count, from the `1/4 + 1/16 + ...` geometric series |
+| `8 B` | Bytes per stored `business_id` (a 64-bit integer) |
+| `~40 B` | Per-node overhead: 4 child pointers x 8 B, plus bookkeeping |
+| `d` | Tree depth; a quadtree has `4^d` cells at depth `d` |
+
+**Walk one example.** Reproduce the book's total, then extract the depth it never states:
+
+```
+  leaves        = 200,000,000 / 100                 = 2,000,000
+  internal      = (2,000,000 - 1) / 3               =   666,666
+  total nodes   = 2,000,000 + 666,666               = 2,666,666
+
+  id storage    = 200,000,000 x 8 B                 = 1,600,000,000 B = 1.60 GB
+  node overhead = 2,666,666 x 40 B                  =   106,666,653 B = 0.11 GB
+                                                      ------------------------
+  total                                                                 1.71 GB
+
+  share of the total that is just business ids:  1.60 / 1.71 = 93.8%
+```
+
+Now the depth, which follows from the leaf count alone:
+
+```
+  a quadtree at depth d has 4^d cells:
+
+    depth  9  ->  4^9  =   262,144 cells  ->  200M / 262,144 = 763 biz/cell  (too many)
+    depth 10  ->  4^10 = 1,048,576 cells  ->  200M / 1,048,576 = 191 biz/cell (too many)
+    depth 11  ->  4^11 = 4,194,304 cells  ->  200M / 4,194,304 =  48 biz/cell (under 100)
+
+  so a UNIFORM quadtree would need depth 11 to satisfy the <= 100 rule everywhere.
+
+  the actual tree needs only 2,000,000 leaves, and  log4(2,000,000) = 10.47
+  -> average leaf depth ~10.5, i.e. between 10 and 11
+```
+
+That gap between 10.47 and 11 is the entire value proposition of a quadtree. A uniform grid fine
+enough for Manhattan needs 4,194,304 cells; the density-adaptive tree hits the same guarantee with
+2,000,000 leaves — **less than half** — because desert quadrants stop splitting at depth 2 or 3 while
+downtown keeps going past 11. The book's memory estimate quietly assumes this: if you built the
+uniform depth-11 grid instead, node overhead alone would be `(4^11 + (4^11-1)/3) x 40 B`.
 
 So the entire quadtree index for 200 M businesses fits in **~1.71 GB of RAM** — small enough to hold on
 a single server. This is a crucial number: the geospatial index is *tiny* compared to the business
@@ -591,6 +806,50 @@ Geospatial index size:
            ≈  a few GB  ->  fits comfortably in ONE database table / server
 ```
 
+**Stated plainly.** "The index stores a pointer, not a business — twenty-odd bytes a row instead of
+a full record — and twenty-odd bytes times 200 million is small enough that the entire sharding
+question evaporates."
+
+The whole read-scaling argument rests on this one multiplication. If the index row had carried
+name and address too, it would not fit one node, you *would* have to shard it, and you would inherit
+every boundary-query problem the chapter spends pages avoiding. Keeping the index narrow is not a
+micro-optimisation; it is what makes "replicate, don't shard" a legal move.
+
+| Symbol | What it is |
+|--------|------------|
+| `business_id` | 8 B — a 64-bit integer, the only payload the index needs |
+| `geohash_4` | 4 B — a 4-character base32 string |
+| `geohash_5` | 5 B |
+| `geohash_6` | 6 B |
+| `200,000,000` | Rows, one per business |
+
+**Walk one example.** Multiply it out, then compare against the alternative encoding:
+
+```
+  per row  =  8 B (id) + 4 B + 5 B + 6 B (three geohash columns)   =  23 B
+
+  total    =  200,000,000 x 23 B  =  4,600,000,000 B  =  4.6 GB
+
+  of which the ids alone     =  200,000,000 x  8 B  =  1.6 GB  (35%)
+             the geohashes   =  200,000,000 x 15 B  =  3.0 GB  (65%)
+```
+
+The geohash columns cost twice what the ids do, which suggests the obvious squeeze:
+
+```
+  packed form: store ONE 30-bit key (= geohash length 6) in a 4 B integer,
+               and derive lengths 5 and 4 by masking off 5 and 10 bits.
+
+  per row  =  8 B (id) + 4 B (packed geohash)  =  12 B
+  total    =  200,000,000 x 12 B               =  2.4 GB     <- 48% smaller
+```
+
+Either way the conclusion holds and that is the point: at 4.6 GB *or* 2.4 GB the index sits on one
+machine with room to spare, so the answer to "how do we scale it" is replicas, full stop. Contrast
+this with the business-detail table, which carries name, address, hours, phone and type per row and
+is therefore two orders of magnitude larger — which is exactly why that one gets sharded and this
+one does not.
+
 Since the whole index fits on a single machine, the read-scaling answer is **read replicas**, not
 sharding: keep the index in one logical table on the primary, replicate it to N read replicas, and let
 the (stateless) LBS fan reads across the replicas. This sidesteps every boundary-query headache that
@@ -616,6 +875,36 @@ front of the read path with two cache families:
 - **`business_id` → business object.** Cache the full business detail by id, so rendering a results
   page (which needs each business's name/address/rating) and opening a business page both hit Redis
   rather than the DB.
+
+**What the formula is telling you.** "One user search is not one cache read — it is nine, because the
+boundary fix multiplied your request fan-out by nine before Redis ever sees it."
+
+This is the hidden cost of the 9-cell trick, and the number most candidates forget to carry forward.
+The geohash design is sized in *searches* per second everywhere else in the chapter, but Redis is
+sized in *lookups* per second, and those two numbers differ by an order of magnitude.
+
+| Symbol | What it is |
+|--------|------------|
+| `9` | Cells per search — centre plus 8 neighbours, fixed by the boundary fix |
+| `5,000` | Average search QPS, from the Step-1 estimate |
+| `2-3x` | Peak multiplier the Step-1 estimate already budgeted for |
+| `MGET` | Redis multi-key read that collapses the 9 lookups into one round trip |
+
+**Walk one example.** Convert search QPS into actual cache load:
+
+```
+  average:   9 cells x  5,000 searches/s  =   45,000 Redis lookups/s
+  peak 2x:   9 cells x 10,000 searches/s  =   90,000 Redis lookups/s
+  peak 3x:   9 cells x 15,000 searches/s  =  135,000 Redis lookups/s
+
+  over a full day:  45,000 x 86,400 s  =  3,888,000,000 cell lookups
+```
+
+A single Redis node handles this comfortably, but only if the 9 keys go out as **one** pipelined
+`MGET` rather than 9 sequential round trips. Issued serially at, say, 0.2 ms each, the 9 lookups add
+`9 x 0.2 = 1.8 ms` of pure network wait to every search; batched, they cost one round trip. This is
+why the read-flow sequence diagram above shows a single "GET business ids for the 9 geohash cells"
+step and a single `MGET` for hydration — the batching *is* the design, not an implementation detail.
 
 Sizing and cluster: even caching all 200 M business objects is on the order of the dataset size and
 fits a **Redis cluster**; the geohash→id lists are small. **Invalidation** happens on a business edit —

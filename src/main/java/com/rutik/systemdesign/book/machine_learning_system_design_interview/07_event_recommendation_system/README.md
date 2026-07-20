@@ -112,10 +112,76 @@ model scorings/sec across the fleet — comfortably a horizontally-sharded, feat
 ranking tier, provided per-candidate feature lookup is cheap (hence the batch-vs-streaming feature
 split in §7.4).
 
+**In plain terms.** "Every step of that chain is one multiplication or one division, and the last
+number — 510,000 model scorings per second — is the one that decides whether the design is
+buildable." Each arrow either spreads a daily total across a day's seconds or fans a single request
+out over its candidate set, so the entire capacity story is four operations long.
+
+| Symbol | What it is |
+|--------|------------|
+| DAU | Daily active users — 10M here; the users who open the app on a given day |
+| opens/day | How many times one active user opens the home page — 5 |
+| 86,400 | Seconds in a day (`60 x 60 x 24`); converts a per-day total into a per-second rate |
+| peak factor | Multiplier from average to busiest-hour traffic — 3x, the standard planning assumption |
+| candidates | Events surviving the cheap geo + date filter and reaching the model — ~300 |
+| scorings/sec | Per-candidate model evaluations the fleet must sustain = peak QPS x candidates |
+
+**Walk one example.**
+
+```
+requests/day  = 10,000,000 DAU  x 5 opens       =  50,000,000 requests/day
+average QPS   = 50,000,000      / 86,400 s      =       578.7 req/s   (the book's ~580)
+peak QPS      = 578.7           x 3             =     1,736.1 req/s   (the book's ~1,700)
+scorings/sec  = 1,700 req/s     x 300 candidates =    510,000 scorings/s
+
+What 510,000/s implies for ONE candidate:
+  end-to-end budget                 150 ms      (mid-point of the 100-200 ms target)
+  slice handed to ranking            50 ms
+  candidates inside that slice          300
+  serial time per candidate  =  50 ms / 300  =  166.7 microseconds
+
+Fleet sizing at a nominal 10,000 scorings/s per core:
+  510,000 / 10,000 = 51 cores of pure scoring
+```
+
+That 166.7-microsecond figure is the sentence the whole chain exists to produce. It is far too
+small for a per-candidate network round trip or a one-at-a-time deep forward pass, which is exactly
+why §7.7 batches the candidate set into a single scoring call and why every feature must already be
+sitting in a store rather than being computed inline.
+
 **Storage.**
 - Events: `1,000,000 × ~1 KB ≈ 1 GB` (tiny — events are small and few).
 - Interactions: `~10^10 rows × ~100 bytes ≈ 1 TB` of history (the training-data goldmine).
 - Friendship: `~10^10 edges × ~16 bytes ≈ 160 GB` adjacency.
+
+**Read it like this.** "Every store is just rows times bytes-per-row; the only interesting question
+is which of the three dominates the bill." Doing all three side by side is what makes the chapter's
+punchline visible — the catalog is a rounding error next to the behavioral log.
+
+| Symbol | What it is |
+|--------|------------|
+| rows | Number of records in the store (events, interaction rows, friendship edges) |
+| bytes/row | Average serialized size of one record |
+| 1 KB | Size of one event record — title, description, venue, times, price |
+| 100 bytes | Size of one interaction row — two IDs, a type, a timestamp, a location |
+| 16 bytes | Size of one friendship edge — two 8-byte user IDs |
+
+**Walk one example.**
+
+```
+events        1,000,000 rows      x  1 KB       =      1.0 GB
+interactions  10,000,000,000 rows x  100 bytes  =      1.0 TB       (1e12 bytes)
+friendship    10,000,000,000 edges x 16 bytes   =    160.0 GB       (1.6e11 bytes = 149 GiB)
+                                                   -----------
+total                                                ~1.16 TB
+
+interactions / events = 1.0 TB / 1.0 GB = 1,000x
+```
+
+The 1,000x ratio is the number to carry into the interview: the item catalog fits in RAM on one
+machine, while the interaction log — the only thing that can train the model — is three orders of
+magnitude larger. That asymmetry is why the engineering cost lands on features and retraining
+rather than on serving the catalog.
 
 The takeaway the numbers make concrete: **events are cheap to store and few in number; the cost is
 in features and retraining, not in catalog size.** The engineering problem is freshness and cold
@@ -415,6 +481,47 @@ final registration count → this user registered," which is circular and unavai
 (when the event is in the future and its final count does not exist yet). Offline AUC looks near-
 perfect; online performance is garbage.
 
+**What this actually says.** "A feature computed after the fact can quietly contain the answer, and
+a metric that only measures ordering will happily hand it a perfect score." The reason this trap is
+so dangerous is that nothing in the offline pipeline complains — the numbers get *better*, which is
+the last thing an engineer is trained to distrust.
+
+| Symbol | What it is |
+|--------|------------|
+| `t` | The impression timestamp — the moment the user actually saw the event |
+| `num_registered_at_impression` | The as-of feature: registrations with `ts < t`, the honest count |
+| `total_registrations` | The event's final count, known only after the event is over |
+| AUC | Probability a random positive scores above a random negative; 0.5 = coin flip, 1.0 = perfect |
+
+**Walk one example.** Six impressions across six events, each scored by one feature at a time:
+
+```
+impression   as-of count   final count   registered?
+    A             12            40           yes
+    B             26            35            no
+    C             28            38           yes
+    D             14            33            no
+    E             22            41           yes
+    F             22            31            no
+
+Rank by FINAL count (the leaked feature):
+    41   40   38  |  35   33   31
+   yes  yes  yes  |   no   no   no      every positive sits above every negative
+   AUC = 9 winning pairs / 9 pairs = 1.00
+
+Rank by AS-OF count (the honest feature the server will actually have):
+    28   26   22   22   14   12
+   yes   no  yes   no   no  yes         positives scattered through the order
+   AUC = (0 + 3 + 1.5) / 9 = 4.5 / 9 = 0.50
+```
+
+Read the two AUCs together and the mechanism is exact: the leaked feature scores a flawless 1.00
+because every positive's final count was itself incremented by that user's own registration, so the
+feature *is* the label wearing a different name. The honest feature scores 0.50 — a coin flip — and
+0.50 is the number the production model will actually deliver, because at serving time the event is
+still in the future and `total_registrations` does not exist yet. A jump from 0.50 to 1.00 on an
+offline dashboard should therefore read as an alarm, not a win.
+
 **The fix — an as-of join.** Compute each time-dependent feature as of the impression timestamp:
 
 ```sql
@@ -544,11 +651,87 @@ information about the rest. Biased toward the one-relevant-item case; not ideal 
 But our labels are **binary** — registered or not — so the "graded" machinery adds nothing over
 simpler metrics; nDCG with binary relevance degenerates and is awkward to justify.
 
+**What it means.** "Give each result a gain based on how relevant it is, shrink that gain by how far
+down the list it sits, add them up, and divide by the best total this same set of results could
+possibly have scored." The division by the ideal is what makes nDCG comparable across lists of
+different length and different relevance mixes.
+
+| Symbol | What it is |
+|--------|------------|
+| `rel_i` | Graded relevance of the item at position `i` — 0 irrelevant, 3 perfect |
+| `2^rel_i - 1` | The gain; makes a grade-3 hit worth 7 while a grade-1 hit is worth 1 |
+| `log2(i + 1)` | The positional discount; position 1 divides by 1.000, position 5 by 2.585 |
+| DCG | Sum of discounted gains over the ranking we actually produced |
+| IDCG | The same sum over the ideal ranking (same grades, sorted best-first) |
+| nDCG | `DCG / IDCG`, always in `[0, 1]`; 1.0 means we produced the ideal order |
+
+**Walk one example.** Two rankings of the same five results, then the same two collapsed to binary:
+
+```
+Ranking A (graded)                     Ranking B (same items, top two swapped)
+pos  rel  gain   disc    contrib       pos  rel  gain   disc    contrib
+ 1    3     7    1.000    7.0000        1    1     1    1.000    1.0000
+ 2    1     1    1.585    0.6309        2    3     7    1.585    4.4164
+ 3    2     3    2.000    1.5000        3    2     3    2.000    1.5000
+ 4    0     0    2.322    0.0000        4    0     0    2.322    0.0000
+ 5    1     1    2.585    0.3869        5    1     1    2.585    0.3869
+                 DCG_A =  9.5178                        DCG_B =  7.3034
+
+ideal order 3, 2, 1, 1, 0  ->  IDCG = 9.8235   (identical for both: same grade multiset)
+nDCG_A = 9.5178 / 9.8235 = 0.9689
+nDCG_B = 7.3034 / 9.8235 = 0.7435        graded nDCG separates them by 0.2254
+
+Now replace the grades with our ACTUAL labels -- registered / not -- so both become 1,1,1,0,1:
+nDCG_A = 0.9829
+nDCG_B = 0.9829                          identical: the metric can no longer tell them apart
+```
+
+That last pair of lines is the whole argument for rejecting nDCG here. With graded labels the metric
+punishes ranking B by 0.2254 for burying the best result; with the binary registered/not labels this
+chapter actually has, the two rankings are indistinguishable, so all of nDCG's discriminating power
+comes from grades we do not possess.
+
 **mAP (mean Average Precision).** Designed for **binary** relevance and multiple relevant items per
 list — it averages precision at each rank where a relevant item appears, across all queries. This
 matches our setup exactly (binary registered/not, possibly several registrations per session), so it
 is the **book's pick** for the primary offline metric. Precision@k and recall@k are reported
 alongside as intuitive sanity checks.
+
+**Put simply.** "For one session, measure precision only at the ranks where a registration actually
+sits and average those; then average that number across sessions." Only sampling precision at the
+hit positions is the trick — it rewards pushing every registration higher without needing grades.
+
+| Symbol | What it is |
+|--------|------------|
+| `P@k` | Precision at rank `k` = registered events in the top `k`, divided by `k` |
+| AP | Average precision for one session = mean of `P@k` over the ranks `k` that hold a registration |
+| mAP | Mean of AP across all sessions — the reported number |
+
+**Walk one example.** Two sessions, each showing eight ranked events:
+
+```
+Session 1 -- user registered for the events at ranks 1, 3, 7
+  P@1 = 1 / 1 = 1.0000
+  P@3 = 2 / 3 = 0.6667
+  P@7 = 3 / 7 = 0.4286
+  AP1 = (1.0000 + 0.6667 + 0.4286) / 3 = 0.6984
+
+Session 2 -- user registered for the events at ranks 2, 5
+  P@2 = 1 / 2 = 0.5000
+  P@5 = 2 / 5 = 0.4000
+  AP2 = (0.5000 + 0.4000) / 2 = 0.4500
+
+mAP = (0.6984 + 0.4500) / 2 = 0.5742
+
+Same two sessions under MRR, which only credits the FIRST hit:
+  1/1 = 1.0000 and 1/2 = 0.5000  ->  MRR = 0.7500
+  The registrations at ranks 3, 7 and 5 contributed nothing at all.
+```
+
+The contrast is the reason for the choice. MRR scores session 1 a perfect 1.0000 while ignoring that
+two more registrations were buried at ranks 3 and 7; mAP's 0.6984 says plainly that two thirds of the
+user's registrations were badly placed. When a session can convert several times, only mAP prices
+the misses.
 
 | Metric | Assumes | Fits event recsys? |
 |--------|---------|--------------------|

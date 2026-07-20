@@ -132,6 +132,57 @@ already stores a replica of that input block, so the (large) input doesn't cross
 the (smaller) mapper output does. Workflows of MapReduce jobs are chained (one job's output is the
 next's input), commonly orchestrated by tools like Oozie, Airflow, Luigi.
 
+### Decoding batch throughput: how long does a job actually take?
+
+"Throughput, not latency" is a slogan until you attach the arithmetic to it. For a scan-bound
+MapReduce job — the common case, since the map phase reads every input block exactly once — the
+wall-clock time is governed by one division:
+
+```
+  job time  =  total input bytes / (machines x per-machine scan rate)
+```
+
+**In plain terms.** "A batch cluster is one enormous disk; its read speed is the sum of every
+machine's read speed, and the job takes as long as it takes to read the pile once."
+
+This is why batch scaling feels so unlike online-service scaling. There is no per-request overhead to
+amortize and no queue to keep short — you are simply buying disk bandwidth, and doubling the machines
+halves the clock.
+
+| Symbol | What it is |
+|--------|------------|
+| total input bytes | The bounded dataset. Known before the job starts — that is what "bounded" buys you |
+| machines | How many nodes hold a replica and can run a mapper locally |
+| per-machine scan rate | Sustained local-disk sequential read, roughly 100 MB/s on commodity spinning disks |
+| the product | Aggregate scan rate — the cluster's effective single-disk speed |
+| job time | Wall clock, assuming the map phase dominates and nothing is skewed |
+
+**Walk one example.** 100 TB of yesterday's logs on a 1000-machine HDFS cluster, 100 MB/s per disk:
+
+```
+  aggregate scan rate = 1000 machines x 100 MB/s
+                      = 100,000 MB/s  =  100 GB/s
+
+  job time = 100 TB / 100 GB/s
+           = 100,000 GB / 100 GB/s
+           = 1,000 s   =  16.7 minutes
+
+  same 100 TB on ONE machine:
+           = 100,000 GB / 0.1 GB/s
+           = 1,000,000 s  =  11.6 days     <- the Unix-pipeline ceiling from 10.1
+```
+
+Sixteen minutes versus eleven and a half days is the entire argument for MapReduce over the shell
+pipeline. And the scaling is linear in both directions: 500 machines gives 33.3 minutes, 2000
+machines gives 8.3 minutes. Nothing about the job changes — only how many disks are spinning.
+
+**Why "bring computation to the data" is in this formula and not beside it.** The `per-machine scan
+rate` term is a *local disk* number only if the mapper runs on a node that already holds the block.
+Schedule mappers randomly instead and every byte of the 100 TB crosses the network first; on a
+12.5 GB/s (100 Gbit/s) cross-rack fabric that alone is 8,000 s = 2.2 hours, turning a 16.7-minute job
+into a network-bound one an order of magnitude slower. Data locality is not an optimization here, it
+is what keeps the division honest.
+
 ### Reduce-side joins and grouping
 
 To **join** two datasets (e.g. user activity events with the user profile table) in MapReduce:
@@ -184,6 +235,111 @@ are both sides already co-partitioned by key (partitioned hash), and are they al
 partition (map-side merge) — falling back to the general but full-shuffle sort-merge (reduce-side)
 join only when none of those hold.
 
+### Decoding join cost: shuffle bytes versus broadcast bytes
+
+The decision tree above hides a single comparison of two byte counts. Write `A` for the large side,
+`B` for the small side, and `N` for the number of machines:
+
+```
+  sort-merge (reduce-side) network bytes  =  A + B          (both sides shuffled, once)
+  broadcast hash (map-side) network bytes =  B x N          (small side copied to every node)
+```
+
+**What this actually says.** "Shuffling moves each row once no matter how big the cluster; broadcasting
+moves the small table once *per machine*. Pick whichever side you'd rather pay for."
+
+Notice what each formula does *not* depend on. Sort-merge cost is independent of `N` — adding machines
+speeds the job up without moving more bytes. Broadcast cost is independent of `A` — the giant side
+never crosses the network at all. That asymmetry is the whole reason both strategies exist.
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Bytes in the large dataset (the activity events) |
+| `B` | Bytes in the small dataset (the user profile table) |
+| `N` | Number of machines, i.e. how many mapper hash tables you must fill |
+| `A + B` | Sort-merge's bill: every record of both sides crosses the network exactly once |
+| `B x N` | Broadcast's bill: one full copy of the small side per node, large side stays put |
+| memory for `B` | The hard precondition — `B` must fit in a single mapper's heap, or broadcast is off the table |
+
+**Walk one example.** Joining 10 TB of activity events against a 100 MB profile table, 1000 machines:
+
+```
+                            bytes over the network
+  sort-merge   A + B  = 10 TB + 100 MB   = 10.0001 TB
+  broadcast    B x N  = 100 MB x 1000    =    100 GB
+
+  ratio = 10.0001 TB / 100 GB = 100x less data moved by broadcast
+
+  at a 12.5 GB/s (100 Gbit/s) cross-rack fabric:
+    sort-merge  10.0001 TB / 12.5 GB/s =  800 s   = 13.3 min of pure shuffle
+    broadcast      100 GB / 12.5 GB/s  =    8 s
+```
+
+**Where the two curves cross.** Broadcast is not free — grow the small side and `B x N` climbs fast:
+
+```
+  B x N  <  A + B          broadcast wins
+  B(N - 1) < A
+  B < A / (N - 1)
+
+  A = 10 TB, N = 1000  ->  B < 10 TB / 999  =  10.01 GB
+
+  B =   100 MB  ->  broadcast   100 GB  vs shuffle 10.00 TB   broadcast wins by 100x
+  B = 10.01 GB  ->  broadcast 10.01 TB  vs shuffle 10.01 TB   dead heat
+  B =    20 GB  ->  broadcast 20.00 TB  vs shuffle 10.02 TB   shuffle wins, 2x cheaper
+```
+
+So on a 1000-node cluster a 20 GB "small" table is already the wrong choice for broadcast even though
+20 GB fits comfortably in memory. "Does it fit in RAM?" is the *precondition*; `B < A/(N-1)` is the
+actual decision — and it gets stricter as the cluster grows. This is exactly the calculation a query
+optimizer (Hive, Spark SQL) is making for you when it picks a join strategy from table statistics.
+
+### Decoding skew: why one hot key sets the whole job's clock
+
+A reduce phase finishes when its *slowest* reducer finishes, so the job's time is set by the largest
+partition, not the average one:
+
+```
+  job time  ~  max records on any reducer / reducer rate
+  uniform case:  records / R          (R = number of reducers)
+  skewed case:   f x records          (f = the hot key's share of all records)
+
+  inflation factor = (f x records) / (records / R) = f x R
+```
+
+**Read it like this.** "Skew multiplies your job time by the hot key's share times the reducer count —
+so on a 1000-reducer job, a key holding just 5% of the rows makes the job 50x longer."
+
+| Symbol | What it is |
+|--------|------------|
+| `records` | Total rows flowing into the reduce phase |
+| `R` | Number of reducers, i.e. how many ways the work was meant to split |
+| `f` | Fraction of all records carrying the single hottest join key |
+| `f x records` | What the unlucky reducer actually receives |
+| `records / R` | What every reducer *should* have received |
+| `f x R` | The inflation factor — note it grows with `R`, so adding reducers does not help |
+
+**Walk one example.** 10 billion activity records, 1000 reducers, one celebrity at 5% of all events:
+
+```
+  uniform per reducer   = 10,000,000,000 / 1000        =  10,000,000 records
+  celebrity's reducer   = 0.05 x 10,000,000,000        = 500,000,000 records
+  the other 999 share   = 9,500,000,000 / 999          =   9,509,510 records
+
+  inflation = 500,000,000 / 10,000,000 = 50x
+
+  at 200,000 records/s per reducer:
+    999 reducers finish in  9,509,510 / 200,000 =   47.5 s
+    the hot reducer takes 500,000,000 / 200,000 = 2,500 s = 41.7 minutes
+
+  999 machines sit idle for 41 minutes waiting on one.
+```
+
+Even a 1% hot key gives `0.01 x 1000 = 10x` inflation. The cruel term is `f x R`: throwing more
+reducers at a skewed job raises the inflation factor, because the *uniform* baseline shrinks while the
+hot key's load does not move at all. Only splitting the hot key itself (a skewed/sharded join that
+scatters that one key across many reducers and replicates the other side to match) changes `f`.
+
 ### The output of batch workflows and comparison to MPP databases
 
 Batch output is *derived data*: build a **search index** (Lucene segments built by a batch job, as
@@ -204,6 +360,50 @@ before the next job can start — so a workflow of N jobs writes and re-reads al
 times (slow, and replicated 3× each time). Jobs run strictly sequentially (job N+1 can't start until
 job N's output is fully written), and mappers are often redundant (just re-reading what a previous
 reducer wrote). The repeated sort and disk I/O dominate.
+
+### Decoding the two multiplications behind "MapReduce is slow"
+
+Both of MapReduce's inefficiencies are multiplications that nobody writes down:
+
+```
+  shuffle fragments     =  M x R                       (M mappers, R reducers)
+  workflow I/O bytes    =  N x S x (3 writes + 1 read) (N jobs, S bytes per step, 3x replication)
+```
+
+**What it means.** "Every mapper owes every reducer a piece, so the shuffle is a full M-by-R grid of
+fragments; and every job in the chain writes its whole output to disk three times before the next job
+is allowed to read it back once."
+
+| Symbol | What it is |
+|--------|------------|
+| `M` | Number of mappers, roughly one per input block |
+| `R` | Number of reducers, i.e. the partition count you chose |
+| `M x R` | Shuffle fragments — each mapper partitions its output R ways, so every pair (m, r) is a transfer |
+| `N` | Jobs in the chained workflow |
+| `S` | Bytes of intermediate output a single job produces |
+| `3 writes` | HDFS replication factor — materialized intermediate data is durably replicated like real data |
+| `1 read` | The next job reading it straight back, often just to re-emit it |
+
+**Walk one example.** A 1000-mapper, 1000-reducer job inside a 10-job workflow moving 10 TB a step:
+
+```
+  shuffle fragments = 1000 x 1000 = 1,000,000 open transfers/files for ONE job
+
+  raise the partition count to 10,000 reducers to fight skew:
+                    = 1000 x 10,000 = 10,000,000       <- 10x the fragments, same data
+
+  workflow I/O, N = 10 jobs at S = 10 TB per step:
+    written = 10 x 10 TB x 3 = 300 TB
+    read    = 10 x 10 TB x 1 = 100 TB
+    total   =                  400 TB of disk and network traffic
+
+  the actual useful data in flight was 10 TB.  Amplification: 40x.
+```
+
+That `M x R` grid is why raising the partition count is never free — it is the cost side of the skew
+fix above, and it is why shuffle-file counts, not CPU, are what usually falls over first. And that
+40x amplification is precisely the term a dataflow engine deletes: keep the 10 TB in memory between
+operators and the `N x S x 4` disappears, leaving one pass.
 
 **Dataflow engines** (Spark, Tez, Flink) fix this by modeling the whole workflow as **one job** — a
 **directed acyclic graph (DAG)** of **operators** — instead of independent map/reduce steps. They:

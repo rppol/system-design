@@ -73,6 +73,39 @@ The interviewer sketches "design People You May Know." Questions to pin down bef
 Establishing "batch precompute is acceptable" and "friendships are symmetric" early is what lets
 the rest of the design be a graph-batch pipeline rather than a low-latency online service.
 
+**In plain terms.** "Count one endpoint-slot for every user's every connection, then halve it,
+because each friendship was counted from both ends." The framing matters because almost every
+scale claim later in the chapter — why full-batch message passing is impossible, why negatives
+dwarf positives, why FoF scoping is the linchpin — is this one number carried forward.
+
+| Symbol | What it is |
+|---|---|
+| `N` | number of users (nodes) — about 10^9 |
+| `d` | average degree: connections per user — a few hundred to ~1,000 |
+| `N × d` | total directed half-edges (one per user-endpoint of every connection) |
+| `/ 2` | the correction for double counting, since the connection is symmetric |
+| `C(N,2)` | all possible user pairs — the space FoF scoping has to escape |
+
+**Walk one example.** The book's stated figures pushed through.
+
+```
+  half-edges   = 10^9 users x 10^3 connections     = 1,000,000,000,000  = 1e12
+  edges        = 1e12 / 2                          =   500,000,000,000  = 5e11
+
+  all pairs    = C(10^9, 2) = 10^9 x (10^9 - 1)/2  = 499,999,999,500,000,000
+                                                   ~ 5e17
+
+  density      = 5e11 edges / 5e17 pairs           = 1.0e-6
+
+  So one pair in a million is a real edge; 999,999 in a million are not.
+```
+
+The density line is the whole reason negative sampling exists (§11.3) and the reason ROC-AUC
+needs a companion metric: with a 10^-6 positive rate, a model can be wrong about essentially every
+prediction and still post a flattering false-positive rate. Note the `/ 2`: drop it and you report
+1e12 "edges" — the half-edge count — which is where the "roughly a trillion edges" phrasing comes
+from and why the same graph gets quoted as both 5e11 and 10^12 depending on which is meant.
+
 ---
 
 ## 11.2 Frame the Problem as an ML Task
@@ -291,6 +324,41 @@ z_v = h_v^(K)                                                       # final embe
 `AGGREGATE` must be **permutation-invariant** (neighbors have no order) — mean, sum, or max pool.
 `UPDATE` is a small neural net (a linear layer + nonlinearity).
 
+**What it means.** "Each round, every node replaces its own state with a blend of its previous
+state and whatever its neighbors were holding — so after `K` rounds, information has travelled
+exactly `K` hops." The framing matters because the depth knob `K` is not an accuracy dial; it is
+literally the radius of the subgraph each embedding summarizes, and both the PYMK signal and the
+compute blow-up are consequences of that radius.
+
+| Symbol | What it is |
+|---|---|
+| `h_v^(k)` | node `v`'s hidden state after `k` rounds; `h_v^(0)` is its raw feature vector |
+| `neighbors(v)` | the set of nodes directly connected to `v` — size `d` on average |
+| `m_v` | the single vector summarizing all of `v`'s neighbors this round |
+| `AGGREGATE` | permutation-invariant pool (mean/sum/max) — must not depend on neighbor order |
+| `UPDATE` | small learned net mixing `v`'s own state with `m_v` |
+| `K` | number of rounds = hop radius = how far structural signal travels |
+| `z_v` | the final embedding, `h_v^(K)`, fed to the edge decoder |
+
+**Walk one example.** Neighborhood size at each `K`, with the chapter's `d ≈ 1,000`.
+
+```
+  K   nodes reachable = d^K      what the embedding encodes
+  1        1,000                 v's direct connections
+  2    1,000,000                 friends-of-friends -- the PYMK signal
+  3    1,000,000,000            ~the entire 1e9-user population
+  4    1,000,000,000,000         1000x the population; pure re-visiting
+
+  Full-batch cost per node at K=3 is ~1e9 neighbor states -- one node's
+  forward pass would touch the whole graph.
+```
+
+The result means `K=2` is not a hyperparameter that happened to win a sweep — it is the smallest
+radius that reaches the friends-of-friends structure and the largest that stays below population
+scale. At `K=3` the receptive field already covers every user, so every node is aggregating over
+essentially the same set: that is over-smoothing stated as arithmetic, and it is also why compute
+explodes at exactly the depth where the signal stops being distinctive.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -359,6 +427,47 @@ turns a pair of embeddings into an edge score.
   just that, and update. This bounds per-example compute regardless of hub degree and lets training
   distribute across many workers.
 
+**What the formula is telling you.** "Instead of visiting all `d` neighbors at each hop, visit a
+fixed `s_k` of them, so the subgraph you actually compute on has size `s_1 × s_2 × … × s_K` no
+matter how the real graph is shaped." The framing matters because it converts a quantity that
+depends on the *data* (degree, which is heavy-tailed and unbounded) into a quantity that depends
+only on a *config* — which is what makes the cost predictable enough to schedule at billion scale.
+
+| Symbol | What it is |
+|---|---|
+| `s_1` | neighbors sampled at hop 1 (the book's example: 25) |
+| `s_2` | neighbors sampled per hop-1 node at hop 2 (the book's example: 10) |
+| `s_1 + s_1·s_2` | total nodes in the sampled computation subgraph for one target node |
+| `d^K` | the unsampled alternative — the full `K`-hop neighborhood |
+| Hub degree | the worst case sampling removes: a recruiter with 300,000 connections |
+
+**Walk one example.** One target node, fan-out (25, 10), against the full 2-hop neighborhood.
+
+```
+  sampled subgraph
+    hop 1 nodes = 25
+    hop 2 nodes = 25 x 10                       = 250
+    total                                       = 275 nodes
+
+  full 2-hop neighborhood at d = 1,000
+    hop 1 nodes = 1,000
+    hop 2 nodes = 1,000 x 1,000                 = 1,000,000
+    total                                     ~ 1,001,000 nodes
+
+  ratio  1,000,000 / 275                       ~ 3,636x less work
+
+  hub case: a node with 300,000 connections
+    sampled  -> still 275 nodes
+    unsampled-> 300,000 at hop 1 alone (1,091x the whole sampled subgraph)
+```
+
+The result means per-example cost is a constant 275 node-states whether the target is a brand-new
+user with 4 connections or a recruiter with 300,000 — the sampling is what makes minibatches
+uniform enough to shard across workers. The term exists because without it a single hub in a
+minibatch determines that batch's memory footprint, so batch size would have to be set for the
+worst node in the graph rather than the average one, and training would stall or OOM
+unpredictably whenever a mega-connector was drawn.
+
 ### Broken → fix: leaking structure through the message-passing graph
 
 **Broken.** A team builds the training pairs correctly (features frozen at `t`) but runs message
@@ -391,6 +500,48 @@ both framings' metrics appear:
 
 Evaluate on a **held-out future window** — snapshots whose `(t, t+Δ]` edges the model never saw —
 so the offline number reflects genuine forecasting, not memorization.
+
+**Put simply.** "ROC-AUC is the probability that, if you pick one edge that really formed and one
+pair that did not, the model scored the real one higher." The framing matters because that
+pairwise question is nearly free to answer well when non-edges outnumber edges a million to one —
+almost any random non-edge is obviously wrong — so a high AUC certifies almost nothing about the
+handful of names actually printed on the PYMK card.
+
+| Symbol | What it is |
+|---|---|
+| Positive | a pair that did connect in `(t, t+Δ]` |
+| Negative | a candidate pair that did not connect in the window |
+| ROC-AUC | `P(score(positive) > score(random negative))`; 0.5 is random, 1.0 is perfect |
+| Rank of a positive | where a true future edge landed in the scored candidate list |
+| precision@k | of the top `k` suggestions shown, the fraction that became real edges |
+
+**Walk one example.** One user, 1,000,000 FoF candidates, 5 edges that actually formed.
+
+```
+  true edge landed at rank   negatives it beat   / 999,995 negatives
+        3                          999,993             0.999998
+       40                          999,957             0.999962
+      900                          999,098             0.999103
+   12,000                          987,999             0.988004
+  250,000                          750,000             0.750004
+                                                     ----------
+  ROC-AUC = mean                                       0.947414
+
+  but the card shows the top 10:   precision@10  = 1/10   = 0.10
+                                   precision@100 = 2/100  = 0.02
+                                   recall@100    = 2/5    = 0.40
+```
+
+The result means a respectable 0.947 AUC coexists with 9 of the 10 suggestions the user actually
+sees being wrong — the AUC is carried by the 750,000 negatives the worst positive still beat,
+none of which are anywhere near the visible list. That is why the book pairs AUC with mAP and
+precision@k, which are computed only over the part of the ranking a user ever looks at.
+
+Now run the same arithmetic on the leaked model from §11.5, where message passing saw the target
+edge: the five positives land at ranks 1–5, every one of them beats all 999,995 negatives, and
+ROC-AUC comes out at exactly **1.0**. An offline AUC in the 0.99+ range is therefore not a
+triumph, it is the signature of leakage — a genuine forecaster of human behavior cannot separate
+future friends from plausible non-friends that cleanly, so the number itself is the alarm.
 
 ### Online metrics
 
@@ -438,6 +589,45 @@ Candidate space per user
 Caption: FoF exploits triadic closure to cut the candidate set by three-to-four orders of
 magnitude, turning an `O(N^2)` all-pairs problem into a bounded per-user traversal. Hubs are
 capped (sample their FoF) so a mega-connector doesn't explode the fan-out.
+
+**Read it like this.** "Walk two hops out, count who you land on, throw away the duplicates and
+the people you already know — whatever survives is everyone worth scoring." The framing matters
+because the saving is not an approximation the design tolerates; triadic closure means the
+discarded 99.9% contains almost no true future edges, so the cheap set is also the *right* set.
+
+| Symbol | What it is |
+|---|---|
+| `N` | total users to score against if you did not scope at all — 10^9 |
+| `d` | average connections per user — ~1,000 |
+| `d × d` | raw 2-hop reach before dedup: each of your `d` friends has `d` friends |
+| Dedup / already-connected | the shrink: your friends share many friends, and some 2-hop hits are already your connections |
+| Distinct FoF set | what survives — the book's 10^5–10^6 per user |
+| `O(N^2)` | the unscoped all-pairs cost the whole move exists to avoid |
+
+**Walk one example.** The chapter's own figures, checked.
+
+```
+  unscoped, per user      = 1e9 candidates
+  unscoped, all users     = 1e9 x 1e9 = 1e18 pair evaluations
+
+  raw 2-hop reach         = d x d = 1,000 x 1,000 = 1,000,000 = 1e6 hits
+    (hits, not distinct -- your friends' friend lists overlap heavily)
+
+  after dedup + removing existing connections
+    optimistic (dense, overlapping community)  ~ 1e5 distinct
+    pessimistic (sparse, little overlap)       ~ 1e6 distinct
+
+  reduction vs 1e9
+    1e9 / 1e6 =  1,000x        keeps 0.1%   of the population
+    1e9 / 1e5 = 10,000x        keeps 0.01%  of the population
+```
+
+The result means the scoped set is 1,000x to 10,000x smaller — exactly the "three-to-four orders
+of magnitude" the caption claims, and it lines up with the `1,000–10,000x` figure stated in the
+ASCII block above. Note the raw reach `d × d = 1e6` is an *upper* bound on hits, not on distinct
+people: in a tightly clustered community your 1,000 friends may collectively know only ~100,000
+distinct people, which is why the surviving set can be a full order of magnitude below the raw
+product. The dedup step is therefore doing real work, not bookkeeping.
 
 ### Precompute vs on-demand
 

@@ -87,6 +87,37 @@ positives/day    = 1e11 × 1% CTR            = 1e9   clicks/day
 training rows/day = 1e11 (before downsampling)
 ```
 
+**In plain terms.** "Multiply users by ads to get a daily impression count, divide by a day's
+seconds to get a rate, multiply by the click rate to get labels — and every awkward design decision
+in this chapter falls out of the size of those three numbers." The chain is short on purpose: it
+exists to prove that downsampling and a feature store are forced, not chosen.
+
+| Symbol | What it is |
+|--------|------------|
+| DAU | Daily active users — 1e9, social-platform scale |
+| ads/user/day | Ad impressions one active user sees in a day — ~100 |
+| 86,400 | Seconds in a day; turns a per-day total into a per-second request rate |
+| peak factor | Average-to-busiest-hour multiplier — 3x |
+| CTR | Click-through rate, ~1% here; converts impressions into positive labels |
+
+**Walk one example.**
+
+```
+impressions/day = 1,000,000,000 users x 100 ads   =  1e11    impressions/day
+average QPS     = 1e11 / 86,400 s                 =  1,157,407 req/s   (the book's ~1.16e6)
+peak QPS        = 1,157,407 x 3                   =  3,472,222 req/s   (the book's ~3.5e6)
+clicks/day      = 1e11 x 0.01                     =  1e9     clicks/day
+clicks/sec      = 1e9 / 86,400 s                  =  11,574  clicks/s
+
+Two forced consequences, read straight off the numbers:
+  1e11 rows/day cannot be stored or trained on raw   ->  downsample the negatives
+  3.5e6 QPS inside a tens-of-ms budget               ->  precompute features, keep the model cheap
+```
+
+The 1e9-vs-1e11 gap is worth pausing on: even the *positives* alone number a billion a day, which is
+already a large training set. Keeping all of them while discarding most of the 99e9 negatives is
+therefore not a compromise at all — it throws away almost nothing the model needed.
+
 Two consequences fall straight out of the arithmetic: (1) **1e11 rows/day is unlabelable and
 untrainable raw** → we must **downsample negatives**; (2) **1M+ QPS with a tens-of-ms budget** →
 the scoring model must be cheap per candidate, and heavy features must be **precomputed in a feature
@@ -147,6 +178,35 @@ Labels are formed by **joining impressions to clicks**: an impression with a mat
 Real CTR is roughly **0.1–2%**. So negatives outnumber positives on the order of **50:1 to
 1000:1**. Training on the raw 1e11 rows/day is wasteful and the extreme imbalance drowns the signal.
 
+**Read it like this.** "The imbalance ratio is nothing more than the odds form of the CTR — the
+share that did not click divided by the share that did." Seeing it as odds is what makes the book's
+`50:1 to 1000:1` band verifiable rather than a quoted rule of thumb.
+
+| Symbol | What it is |
+|--------|------------|
+| CTR | Fraction of impressions that get clicked — the positive class rate |
+| `1 - CTR` | Fraction that do not get clicked — the negative class rate |
+| imbalance | `(1 - CTR) / CTR`, negatives per positive |
+| `w` | Negative-keep rate used later by downsampling — the fraction of negatives retained |
+
+**Walk one example.** Both ends of the stated 0.1%-to-2% CTR range:
+
+```
+CTR = 0.1%  ->  imbalance = 0.999 / 0.001 =  999 : 1   (the book's "1000:1")
+CTR = 2.0%  ->  imbalance = 0.980 / 0.020 =   49 : 1   (the book's "50:1")
+
+So "50:1 to 1000:1" is exactly the 2%-to-0.1% CTR band restated as odds -- both endpoints check out.
+
+What downsampling with w = 0.01 does to the harder end:
+  before   1 positive : 999 negatives
+  keep 1% of the negatives:  999 x 0.01 = 9.99 negatives
+  after    1 positive : 9.99 negatives   ~=  10 : 1   (the book's "~10:1 training set")
+```
+
+The last three lines are worth memorizing as a pair with the recalibration formula below: `w = 0.01`
+is not an arbitrary knob, it is the value that turns a 1000:1 problem into a roughly 10:1 one, and
+that same `w` is the number the recalibration step needs to undo the damage.
+
 **Negative downsampling** — keep all positives, keep only a random fraction `w` of negatives (e.g.
 `w = 0.1` keeps 10% of negatives, `w = 0.01` keeps 1%). This shrinks the dataset ~10–100× and
 rebalances the classes so the model spends its capacity on the positives. **But it biases the
@@ -185,6 +245,42 @@ q = 0.10 / (0.10 + (1 - 0.10)/0.01)
 Without this recalibration step, **every pCTR entering the auction would be ~90× too high**, and
 the auction's `bid × pCTR` comparisons and billing would be nonsense. The step is one line of code
 and easy to forget — a classic interview gotcha.
+
+**What the formula is telling you.** "Take the model's odds, stretch the losing side back out by the
+same factor you shrank it with, and turn the restored odds back into a probability." Every symbol in
+it is doing exactly one of those three jobs, which is why the correction is a single line.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | The probability the model predicts after training on the downsampled data — inflated |
+| `w` | Negative-keep rate; `w = 0.01` means 1% of negatives were kept |
+| `1 - p` | The model's negative mass — the side that was artificially thinned |
+| `(1 - p) / w` | That negative mass restored to its true size (divide by `w` = multiply by `1/w`) |
+| `q` | The calibrated probability that is safe to hand the auction |
+
+**Walk one example.** The chapter's own case, `p = 0.10` and `w = 0.01`, carried to the ratio:
+
+```
+q = p / ( p + (1 - p) / w )
+
+    p          =  0.10
+    1 - p      =  0.90
+    (1-p)/w    =  0.90 / 0.01     =  90.00       negatives restored to 100x their kept size
+    denominator=  0.10 + 90.00    =  90.10
+    q          =  0.10 / 90.10    =  0.00110988  =  0.110988%
+
+How wrong was the raw prediction?
+    p / q      =  0.10 / 0.00110988  =  90.10x    -- the chapter's "~90x too high" is exact
+
+Sanity check at w = 1 (no downsampling):
+    (1-p)/1    =  0.90
+    q          =  0.10 / (0.10 + 0.90) = 0.10 / 1.00 = 0.10 = p        no correction, as required
+```
+
+Note the inflation factor is `90.10`, not `1/w = 100`. The difference is the surviving `p` term in
+the denominator: the model's own positive mass was never thinned, so it sits alongside the restored
+negatives instead of being scaled with them. That is precisely why the fix is this formula and not a
+flat multiply by `w` — a flat `p x w = 0.001` would land 9.9% low.
 
 ### The delayed-click (delayed-feedback) problem
 
@@ -521,6 +617,46 @@ NE = ----------------------------------------------------------
   has structurally lower log loss than a 2% period regardless of model quality). This comparability
   is exactly why Facebook reports NE.
 
+**Stated plainly.** "Score the model by how surprised it was by what actually happened, then divide
+that surprise by how surprised a model that knows nothing but the average CTR would have been." The
+division is the entire contribution of NE — it turns an absolute penalty into a fraction of a fixed
+reference, so two periods with different base rates become comparable.
+
+| Symbol | What it is |
+|--------|------------|
+| `y_i` | The true label of impression `i` — 1 if clicked, 0 if not |
+| `p_i` | The model's predicted click probability for impression `i` |
+| `-[y log p + (1-y) log(1-p)]` | Log loss for one impression — the surprise, in nats |
+| `p̄` | The background CTR: the empirical average click rate over the same set |
+| numerator | Mean log loss of the model across `N` impressions |
+| denominator | Log loss of always predicting `p̄` — the do-nothing baseline |
+| NE | Their ratio; `< 1` beats the baseline, `= 1` matches it, `> 1` is worse than useless |
+
+**Walk one example.** Four impressions, one of which was clicked:
+
+```
+  i   y_i    p_i     term = -log(p_i) if y=1 else -log(1 - p_i)
+  1    1    0.60     -ln(0.60)  =  0.5108
+  2    0    0.20     -ln(0.80)  =  0.2231
+  3    0    0.10     -ln(0.90)  =  0.1054
+  4    0    0.30     -ln(0.70)  =  0.3567
+                                   ------
+  mean log loss (numerator) = 1.1960 / 4 = 0.2990
+
+  background CTR  p̄ = 1 clicked / 4 impressions = 0.25
+  denominator = -( 0.25 x ln 0.25 + 0.75 x ln 0.75 )
+              = -( 0.25 x -1.3863 + 0.75 x -0.2877 )
+              = 0.3466 + 0.2158 = 0.5623
+
+  NE = 0.2990 / 0.5623 = 0.5317
+```
+
+NE = 0.5317 means the model carries roughly 53% of the uncertainty that a constant "everyone clicks
+at 25%" predictor carries — a clear win. Note what would happen to the *numerator alone* if the same
+model quality were evaluated on a 1%-CTR day: nearly every term becomes `-ln(1 - small)`, which is
+tiny, so raw log loss would collapse toward zero and look like an improvement. The denominator
+collapses by the same mechanism, so NE stays put. That invariance is the whole reason to report it.
+
 ### Calibration — the metric the auction cares about
 
 - **Calibration plot / reliability diagram:** bucket predictions by predicted pCTR, and in each
@@ -535,6 +671,44 @@ NE = ----------------------------------------------------------
 systematically 2× high; the *ranking* among equal-bid ads survives, but **prices, budget pacing, and
 cross-campaign/cross-auction comparisons all break**. Calibration is not a nicety here — it is the
 correctness condition for the auction.
+
+**The idea behind it.** "The auction does not rank on pCTR, it ranks on `bid × pCTR × 1000` — an
+expected revenue per thousand impressions — so a wrong pCTR is a wrong dollar figure, and dollar
+figures get compared against things that were never scaled by your error." The moment a CPM bid or a
+price floor enters the same auction, uniform miscalibration stops cancelling and starts flipping
+outcomes.
+
+| Symbol | What it is |
+|--------|------------|
+| bid | What the advertiser pays per click (CPC) — a real number, never miscalibrated |
+| pCTR | The model's predicted click probability — the only estimated term |
+| eCPM | `bid × pCTR × 1000`: expected revenue per thousand impressions; the auction's ranking score |
+| CPM bid | A competing advertiser's direct bid per thousand impressions — no pCTR involved |
+
+**Walk one example.** One CPC ad against one CPM ad, first with honest pCTR, then 2x-inflated:
+
+```
+Ad A (CPC):  bid $2.00 per click,  TRUE pCTR 1.0%
+Ad D (CPM):  bid $25.00 per thousand impressions  -- a fixed price, no pCTR term
+
+Honest pCTR:
+  eCPM(A) = 2.00 x 0.010 x 1000 = $20.00
+  eCPM(D) =                       $25.00
+  D wins. Correct: the slot really is worth more to D.
+
+Model is 2x miscalibrated high (pCTR reported as 2.0%):
+  eCPM(A) = 2.00 x 0.020 x 1000 = $40.00
+  eCPM(D) =                       $25.00
+  A wins -- but A only ever delivers 1.0% x $2.00 x 1000 = $20.00 of real revenue.
+
+Damage per thousand impressions:  $25.00 - $20.00 = $5.00 forgone
+As a share of what was on the table:  5.00 / 25.00 = 20% revenue haircut on every affected slot
+```
+
+This is the case AUC structurally cannot see. AUC only asks whether positives outrank negatives
+inside the model's own score list; ad D never passes through the model at all, so no amount of
+ranking skill protects the auction. The 20% haircut is invisible on every offline dashboard that
+does not measure calibration.
 
 ### Online metrics
 

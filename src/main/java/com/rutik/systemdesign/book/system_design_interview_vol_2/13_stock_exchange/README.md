@@ -91,6 +91,37 @@ Average order rate  = 1e9 orders / 23,400 s
                     ≈ 42,735 orders/sec        (≈ 43K orders/sec average)
 ```
 
+**What this actually says.** "Spread the whole day's order flow evenly across the hours the
+market is actually open, and that quotient is the *floor* the system must clear before you even
+think about bursts." The framing matters because the average is the only number you can derive
+honestly from the two givens — everything harsher comes from admitting the flow is not even.
+
+| Symbol | What it is |
+|--------|------------|
+| 1,000,000,000 | orders accepted across the whole trading day, all symbols |
+| 6.5 hours | the continuous-trading window (open to close) |
+| 3,600 | seconds per hour, converting the window into the divisor's units |
+| 23,400 s | the trading window in seconds — the denominator |
+| 100 | symbols the exchange lists, used to get a per-symbol average |
+
+**Walk one example.**
+
+```
+  trading window = 6.5 h x 3,600 s/h
+                 = 23,400 s
+
+  average rate   = 1,000,000,000 orders / 23,400 s
+                 = 42,735.04 orders/sec
+                 ~ 43K orders/sec
+
+  per symbol     = 42,735 orders/sec / 100 symbols
+                 = 427 orders/sec/symbol   (average, evenly spread)
+
+  meaning: 43K/sec is the FLOOR. The per-symbol average of ~427/sec is so small that the
+           average alone makes this look like an easy problem. It is not -- the peak, not
+           the mean, is what sizes the machine.
+```
+
 But the average lies: order flow is savagely peaked at the **open** and **close**. A realistic peak
 is several times the average — call it **5×–10×**, so bursts of **~200K–500K orders/sec** during
 volatile opens/closes and news events. Two consequences fall straight out of this:
@@ -103,9 +134,120 @@ volatile opens/closes and news events. Two consequences fall straight out of thi
   bottleneck is **per-message processing latency**, not aggregate bandwidth. This single observation
   drives the entire deep dive: optimize the hot path's latency, not its throughput.
 
+**The idea behind it.** "Turn the peak arrival *rate* into the gap *between* consecutive orders,
+then compare that gap to how long one match takes — if the match is not clearly shorter, a queue
+forms and never drains." This reframing matters because it converts a throughput number into a
+hard per-order deadline, which is the only form the single-threaded matching loop can act on.
+
+| Symbol | What it is |
+|--------|------------|
+| 200,000 orders/sec | peak arrival rate into one hot symbol (5x the 43K average) |
+| 1,000,000 us | one second expressed in microseconds, so the quotient lands in us |
+| 5 us | the resulting mean gap between two consecutive orders at that peak |
+| S | service time — microseconds the engine spends matching one order |
+| capacity | orders/sec one thread sustains = 1,000,000 / S |
+| rho | utilization = arrival rate / capacity; the queue is stable only while rho < 1 |
+
+**Walk one example.**
+
+```
+  peak into one hot symbol .......... 200,000 orders/sec
+  inter-arrival = 1,000,000 us / 200,000 orders
+                = 5.0 us between consecutive orders
+
+  now push candidate service times S through a single-server queue:
+      capacity = 1,000,000 / S        rho = 200,000 / capacity
+      queue wait = rho x S / (1 - rho)
+
+    S (us)   capacity (orders/s)   rho    queue wait   response = wait + S
+    ------   -------------------   ----   ----------   -------------------
+     2.0           500,000         0.40      1.33 us          3.33 us
+     4.0           250,000         0.80     16.00 us         20.00 us
+     4.5           222,222         0.90     40.50 us         45.00 us
+     5.0           200,000         1.00     unbounded        unbounded
+
+  meaning: at S = 5 us the engine exactly equals the arrival rate, so the queue never
+           drains. "Comfortably under 5 us" is not a style preference -- S = 4.5 us
+           already costs 40.5 us of pure waiting, about 30x the 1.33 us at S = 2 us.
+```
+
+The `1 - rho` denominator is the term that does all the work here, and it is why the requirement
+is stated as "comfortably under" rather than "under." As rho climbs the last few percent toward
+1, waiting time does not grow gently — it blows up hyperbolically. Drop that term and you would
+conclude that any S below 5 us is fine, which is exactly the mistake that produces an engine that
+tests clean at average load and collapses at the open.
+
+**Put simply.** "Multiply how many messages the cluster writes each second by how big each one
+is, and you get the log's bandwidth demand — then check it against what the disk can actually
+sustain." The point of running this is not to size the disk; it is to *eliminate* bandwidth as a
+suspect so the whole deep dive can aim at per-message latency instead.
+
+| Symbol | What it is |
+|--------|------------|
+| 5,000,000 msg/sec | cluster-wide message rate (orders plus executions, all symbols) |
+| ~100 bytes | size of one sequenced event in the compact internal format |
+| 500 MB/s | the product — sequential append bandwidth the event store must absorb |
+| multi-GB/s | what a single NVMe drive sustains on sequential writes |
+
+**Walk one example.**
+
+```
+  messages/sec (cluster-wide) ....... 5,000,000
+  bytes per message ................. 100
+
+  log bandwidth = 5,000,000 x 100 B
+                = 500,000,000 B/s
+                = 500 MB/s
+                = 0.5 GB/s
+
+  against one NVMe drive at ~3 GB/s sequential:
+      0.5 / 3 = 16.7% of a single drive
+
+  meaning: aggregate bandwidth uses about a sixth of ONE drive -- it is nowhere near the
+           limit. The scarce resource is the ~5 us each individual message is allowed to
+           take. Optimize latency; throughput is already free.
+```
+
 **Order book footprint.** A liquid symbol holds ~500–5,000 resting orders across 20–100 price
 levels per side; each order is ~40–64 bytes, so a full book is **~250–320 KB** — small enough to
 sit resident in **L2/L3 CPU cache**, which is *why* microsecond matching is even possible.
+
+**Read it like this.** "Count the resting orders, multiply by how many bytes one order costs,
+and check the product against the size of the CPU's last-level cache." The comparison is the
+whole point: this is the calculation that decides whether matching runs at cache speed or DRAM
+speed, and that single fact is the difference between microseconds and milliseconds.
+
+| Symbol | What it is |
+|--------|------------|
+| 500–5,000 | resting orders on a liquid symbol's book (both sides together) |
+| 20–100 | distinct price levels per side that those orders spread across |
+| 40–64 bytes | size of one `Order` record in the compact internal format |
+| L3 cache | last-level CPU cache, ~32 MB on a modern server socket |
+| ~1–2 ns / ~100 ns | rough per-access cost of an L3 hit versus a DRAM fetch |
+
+**Walk one example.**
+
+```
+  resting orders (liquid symbol, upper end) ..... 5,000
+  bytes per order ............................... 40 to 64
+
+  5,000 x 40 B = 200,000 B = 200 KB
+  5,000 x 50 B = 250,000 B = 250 KB    <- matches the ~250 KB lower figure quoted above
+  5,000 x 64 B = 320,000 B = 320 KB    <- matches the ~320 KB upper figure quoted above
+
+  against a modern server L3 of ~32 MB:
+      32 MB / 320 KB = 32,768 KB / 320 KB = 102 whole books
+      one book = 320 / 32,768 = 0.98% of L3
+
+  meaning: the entire order book is about 1% of L3, so every hot-path pointer chase is a
+           cache hit (~1-2 ns) rather than a DRAM fetch (~100 ns) -- a ~50x per-access gap.
+           This is the arithmetic that makes single-digit-microsecond matching possible.
+```
+
+Note that the 250 KB lower bound corresponds to ~50 bytes per order rather than the 40-byte end
+of the stated range (5,000 x 40 B is 200 KB); the quoted 250–320 KB band sits comfortably inside
+the 200–320 KB the endpoints allow, and either way the conclusion — a book two orders of
+magnitude smaller than L3 — is unchanged.
 
 ---
 
@@ -391,6 +533,38 @@ price`); otherwise update `high = max`, `low = min`, `close = price`, `volume +=
 publisher consumes the **sequenced** execution stream, candles are deterministic and identical for
 every subscriber.
 
+**In plain terms.** "A candle is four running accumulators over one interval: two that remember
+*where* a trade sat in the sequence (first and last) and two that remember *how extreme* it was
+(max and min), plus a running sum." Splitting the five fields that way explains precisely which
+of them can be corrupted by out-of-order delivery — and therefore why the sequenced stream is
+load-bearing rather than a convenience.
+
+| Symbol | What it is |
+|--------|------------|
+| open | price of the FIRST execution in the interval — positional, order-dependent |
+| high | running max of execution prices — extremal, order-independent |
+| low | running min of execution prices — extremal, order-independent |
+| close | price of the LAST execution in the interval — positional, order-dependent |
+| volume | running sum of executed quantity over the interval |
+
+**Walk one example.**
+
+```
+  1-minute candle starting 15:30:00; executions arrive in sequence order (price x qty):
+
+    100.03 x 200  -> new interval: open=high=low=close=100.03,  volume=200
+    100.07 x 100  -> high=max(100.03,100.07)=100.07  close=100.07  volume=200+100=300
+     99.99 x 500  -> low =min(100.03, 99.99)= 99.99  close= 99.99  volume=300+500=800
+    100.04 x  50  -> high stays 100.07, low stays 99.99, close=100.04, volume=800+50=850
+
+  candle = { open 100.03, high 100.07, low 99.99, close 100.04, volume 850 }
+
+  meaning: shuffle those four executions and high (100.07), low (99.99) and volume (850)
+           come out identical -- but open and close would change. Exactly two of the five
+           fields depend on ordering, which is why candles MUST be folded over the
+           sequenced stream or two subscribers will disagree about the same minute.
+```
+
 ---
 
 ## 13.4 Step 3 — Design Deep Dive
@@ -407,6 +581,45 @@ microseconds**. Split the budget across the hops:
     ├─ sequencer append ................... ~ single-digit µs
     ├─ matching engine match .............. ~ single-digit µs (p50), < ~50 µs p99.9
     └─ execution return path .............. ~ tens of µs
+```
+
+**What the formula is telling you.** "The sub-millisecond number is not one budget — it is a sum
+of five, and every hop you insert gets charged against the same total." Reading it as a sum is
+what exposes the real failure mode: no single component is slow, but transit added between them
+is billed once per hop, and five hops is enough to spend the budget before any matching happens.
+
+| Symbol | What it is |
+|--------|------------|
+| < 1 ms | the total round-trip budget: order in to execution out (1,000 us) |
+| gateway | auth, validate, throttle, normalize — tens of us |
+| order mgr + risk + wallet | pre-trade checks before sequencing — tens of us |
+| sequencer append | stamp the sequence id and append to the log — single-digit us |
+| matching engine | the match itself — single-digit us at p50 |
+| return path | execution report back out through manager and gateway — tens of us |
+| ~100 us | one in-data-center network round-trip, if components were separate services |
+
+**Walk one example.** Take the midpoints of the stated ranges (20 us for a "tens of us" hop,
+5 us for a "single-digit us" one) and sum them.
+
+```
+  gateway (auth/validate/normalize) ....    20 us
+  order manager + risk + wallet ........    25 us
+  sequencer append .....................     5 us
+  matching engine match ................     5 us
+  execution return path ................    20 us
+                                        ----------
+  hot-path work total ..................    75 us
+  budget ...............................  1,000 us   (1 ms)
+  headroom = 1,000 - 75 ................   925 us    (only 7.5% of budget spent)
+
+  now put ONE network hop (~100 us) between each of the 5 components:
+      transit = 5 x 100 us  = 500 us
+      total   = 500 + 75    = 575 us   -> 57.5% of the budget, 500 us of it pure wire time
+
+  meaning: the work fits in 7.5% of the budget with room to spare. Transit charged five
+           times consumes half of it -- leaving nothing for p99 jitter, GC-free tail
+           spikes, or a burst queue. Deleting the network is the only move that recovers
+           the 500 us; making any single component faster cannot.
 ```
 
 **The book's evolution — how the design arrives at "one machine":**
@@ -727,6 +940,33 @@ xychart-beta
 Caption: a single in-DC network round-trip (~100 µs) would consume most of the sub-millisecond budget
 by itself — which is exactly why the design deletes the network and runs the components in shared
 memory on one machine.
+
+**Stated plainly.** "Add up only the bars the design actually keeps, then hold the rejected bar
+next to that sum." The chart is a comparison, not an inventory, and reading it as a ratio is what
+makes the rejection obvious rather than merely stated.
+
+| Symbol | What it is |
+|--------|------------|
+| network hop (rejected) | ~100 us for one in-DC round-trip — the bar the design refuses |
+| gateway | 20 us — retained hot-path work |
+| order mgr + risk | 25 us — retained hot-path work |
+| sequencer | 5 us — retained hot-path work |
+| matching | 5 us — retained hot-path work |
+
+**Walk one example.**
+
+```
+  retained bars ..... gateway 20 + order mgr 25 + sequencer 5 + matching 5
+                    = 55 us of real work on the hot path
+
+  rejected bar ...... one network hop = 100 us
+
+  ratio ............. 100 / 55 = 1.82x
+
+  meaning: a SINGLE network round-trip costs nearly twice everything the design chose to
+           keep, combined. The tallest bar on the chart is the one component that was
+           deleted -- which is the entire argument for the single-machine architecture.
+```
 
 ---
 

@@ -152,6 +152,48 @@ from the precomputed table — no model runs during your session. That's why the
    of that compute is thrown away. And a **brand-new user with no precomputed row** ("cold
    user") has nothing to serve until a batch job includes them, which may be hours away.
 
+**In plain terms.** "Batch pays for a prediction per *user you have*; online pays for a
+prediction per *user who shows up* — and those two numbers differ by more than an order of
+magnitude."
+
+Framing it as a ratio rather than a cost makes the tradeoff decidable: batch buys near-zero
+user-facing latency by paying the inverse of your daily-active rate in wasted compute.
+
+| Symbol | What it is |
+|--------|------------|
+| `U` | Total users you precompute predictions for |
+| `d` | Daily-active fraction — the share of `U` who actually request a prediction |
+| `U x d` | Predictions that get used; everything else is discarded at the next refresh |
+| `t_infer` | Model inference time for one prediction |
+| `t_lookup` | Time to read an already-computed prediction out of the KV store |
+| Waste ratio | `U / (U x d) = 1 / d` — how many predictions you compute per one used |
+
+**Walk one example.** 100M users, 5% of whom open the app before the next refresh, 50 ms
+inference:
+
+```
+  predictions computed by the batch job = 100,000,000
+  predictions actually served           =   5,000,000   (d = 5%)
+  thrown away                           =  95,000,000   -> 95.0% wasted
+  waste ratio                           = 1 / 0.05      -> 20x
+
+  compute at 50 ms per prediction:
+      batch  job : 100,000,000 x 0.050 s = 5,000,000 s = 1,388.9 core-hours per cycle
+      online     :   5,000,000 x 0.050 s =   250,000 s =    69.4 core-hours per cycle
+                                                          ------------------------
+                                                          20x less compute
+
+  latency the USER feels:
+      batch  : t_lookup                            =     ~5 ms
+      online : t_feature_fetch + t_infer = 10 + 50 =    ~60 ms
+```
+
+Batch burns 20x the compute to save the user about 55 ms. That is the trade in one line — and
+it flips the moment `d` rises (a high-engagement product wastes less) or `t_infer` falls, which
+is exactly what §7.3 compression buys. Note that the cold user is not a rounding error in this
+model: they are outside `U` entirely at job time, so no amount of extra batch compute reaches
+them.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -338,6 +380,65 @@ blocks" idea to reach AlexNet-level ImageNet accuracy with **~50× fewer paramet
 model small enough to fit in **under 0.5 MB**. Low-rank factorization is powerful but is
 mostly hand-designed per architecture — it doesn't generalize automatically to any model.
 
+**What this actually says.** "A normal convolution does two jobs at once — look at a
+neighbourhood *and* mix the channels — and it pays the product of both costs; do them as two
+separate steps and you pay the sum instead."
+
+Product versus sum is the entire trick, and it is why the saving grows with how big the two
+factors are. Nothing is approximated away by hand-tuning; the cheaper cost is structural.
+
+| Symbol | What it is |
+|--------|------------|
+| `K` | Spatial filter size — a `K x K` window, typically `3` |
+| `C` | Number of input channels |
+| `C'` | Number of output channels the layer produces |
+| `K x K x C x C'` | Standard conv cost per output location — the **product** of both jobs |
+| `K x K x C` | Depthwise step — one `K x K` filter per input channel, **no** channel mixing |
+| `C x C'` | Pointwise step — a `1 x 1` conv that mixes channels, no spatial extent |
+| `K x K x C + C x C'` | Separable cost — the **sum** of the two steps |
+
+**Walk one example.** A real MobileNet-shaped layer, `K = 3`, `C = 512`, `C' = 1024`:
+
+```
+  standard  : K x K x C x C' = 3 x 3 x 512 x 1024        = 4,718,592 multiply-adds
+  depthwise : K x K x C      = 3 x 3 x 512               =     4,608
+  pointwise : C x C'         = 512 x 1024                =   524,288
+  separable : 4,608 + 524,288                            =   528,896
+
+  reduction = 4,718,592 / 528,896 = 8.92x
+```
+
+**Does the "~9x" claim hold?** Approximately, and always from *below* — it is a ceiling the
+layer approaches but never reaches. The exact ratio is `1 / (1/C' + 1/K^2)`, so `K^2 = 9` is
+the limit as `C'` grows:
+
+```
+  K   C     C'      standard      separable    actual ratio    1/K^2 limit
+  --  ----  ------  ------------  -----------  ------------    -----------
+  3     32      64        18,432        2,336      7.89x            9x
+  3     64     128        73,728        8,768      8.41x            9x
+  3    128     256       294,912       33,920      8.69x            9x
+  3    256     512     1,179,648      133,376      8.84x            9x
+  3    512   1,024     4,718,592      528,896      8.92x            9x
+  5    128     256       819,200       35,968     22.78x           25x
+```
+
+The `1/C'` term is what keeps it under 9: the pointwise step's `C x C'` cost never disappears,
+it just becomes negligible next to the standard conv as `C'` grows. So "~9x for a 3x3 filter"
+is right as a rule of thumb for wide layers (8.9x at `C' = 1024`) and noticeably optimistic for
+narrow early layers (7.9x at `C' = 64`). The same formula also says a `5x5` filter would save
+~25x — the saving scales with `K^2`, not with the model.
+
+**A discrepancy worth naming in the SqueezeNet figure.** The two SqueezeNet numbers quoted
+above — "~50x fewer parameters" and "under 0.5 MB" — are *not* the same configuration, and the
+arithmetic shows it. AlexNet has ~60M parameters, so 50x fewer is ~1.2M parameters; at fp32
+(4 bytes each) that is `1.2M x 4 = 4.8 MB`, roughly **ten times** the quoted 0.5 MB. Fitting
+1.2M parameters into 0.5 MB requires `0.5 MB x 8 / 1.2M = 3.3 bits per parameter`. The
+sub-0.5 MB result comes from applying **Deep Compression** (pruning plus ~6-bit quantization
+plus Huffman coding) *on top of* the architecture. Both figures are real; they just don't hold
+simultaneously at fp32, so read them as "50x fewer parameters, and under 0.5 MB once
+additionally compressed."
+
 ### Knowledge distillation
 
 **Idea:** train a **small "student" model to mimic a large "teacher" model** (or ensemble).
@@ -348,6 +449,46 @@ student can approach the teacher's quality.
 **DistilBERT** is the canonical result: a distilled BERT that is **~40% smaller**, **~60%
 faster** at inference, while retaining **~97% of BERT's language-understanding performance**
 (on GLUE-style benchmarks). That's the numbers to remember.
+
+**Put simply.** "You give up 3% of the quality and get back 40% of the size and 60% of the
+latency — the exchange rate is roughly thirteen-to-one in your favour."
+
+Compression claims are easiest to judge as a *rate*, not as three separate percentages. Turning
+the headline into parameters and megabytes shows what actually lands on the serving box.
+
+| Symbol | What it is |
+|--------|------------|
+| Teacher | The large trained model being imitated — BERT-base, ~110M parameters |
+| Student | The small model trained to match it — DistilBERT, ~66M parameters |
+| "40% smaller" | Student parameters ÷ teacher parameters = `0.60`, i.e. `1 - 0.60 = 40%` fewer |
+| "60% faster" | Inference runs at ~`1.6x` the teacher's throughput |
+| "97% of quality" | Student's benchmark score ÷ teacher's score on GLUE-style tasks |
+| Soft targets | The teacher's full probability vector, richer than a one-hot hard label |
+
+**Walk one example.** The three headline numbers, converted into what you deploy:
+
+```
+  parameters   BERT-base   110,000,000
+               DistilBERT   66,000,000       66/110 = 0.60  ->  40% fewer   ok
+
+  fp32 weights (4 bytes each)
+               BERT-base   110M x 4 = 440.0 MB
+               DistilBERT   66M x 4 = 264.0 MB      saves 176 MB per replica
+
+  latency (teacher at 100 ms)
+               1.6x throughput -> 100 / 1.6 = 62.5 ms      saves ~37.5 ms per request
+
+  quality on a 79.5-point GLUE average
+               0.97 x 79.5 = 77.11                          gives up ~2.4 points
+
+  exchange rate: 40 points of size for 3 points of quality  ->  ~13 : 1
+```
+
+The size and speed wins are the *same* win seen twice: fewer parameters means fewer bytes to
+move from memory to the ALUs, and inference at this scale is memory-bandwidth-bound. That is
+also why distillation composes so well with quantization — stack int8 on DistilBERT and the
+66M parameters occupy `66M x 1 byte = 66 MB`, a **6.7x** total reduction against BERT's
+440 MB fp32, from two independent techniques that do not fight each other.
 
 Key properties:
 
@@ -653,6 +794,48 @@ overflow  <-- narrower range as bits shrink -->  rounding error grows
 Caption: dropping bits shrinks the model geometrically (fp32→int8 = 4×, →binary = 32×) but
 narrows the representable range (overflow risk) and coarsens the steps (rounding error) —
 which is why int8 is the common sweet spot and QAT is used to recover the lost accuracy.
+
+**Read it like this.** "A model's weight file is just `parameters x bytes-per-parameter`, and
+quantization only ever touches the second factor — so the ladder is literally a division."
+
+Stating it as a two-factor product is what makes the ladder actionable: you can shrink a model
+by training a smaller one (factor one) or by spending fewer bits (factor two), and the two
+multiply.
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | Number of parameters (weights) in the model |
+| `b` | Bits used to store one parameter — 32, 16, 8, or 1 |
+| `P x b / 8` | Model size in bytes |
+| `32 / b` | Shrink factor versus the fp32 baseline |
+| Overflow / saturation | A real value larger than the format's max, clipped to the max |
+| Rounding error | A real value falling between two representable steps, snapped to one |
+
+**Walk one example.** BERT-base's 110M parameters down the whole ladder:
+
+```
+  format   bits   bytes/param   size = 110,000,000 x bytes      vs fp32
+  ------   ----   -----------   --------------------------      -------
+  fp32       32       4.000     440,000,000 B  =  440.0 MB        1x
+  fp16       16       2.000     220,000,000 B  =  220.0 MB        2x smaller
+  int8        8       1.000     110,000,000 B  =  110.0 MB        4x smaller
+  binary      1       0.125      13,750,000 B  =   13.8 MB       32x smaller
+
+  In binary units: 419.6 MiB / 209.8 MiB / 104.9 MiB / 13.1 MiB
+```
+
+The practical reading of this table is a set of thresholds, not a curve. A 440 MB fp32 BERT
+does not fit in a phone's per-app memory budget; the 110 MB int8 version plausibly does. That
+is why int8 is the sweet spot — it is the first rung where a data-center model becomes an
+on-device model, and it is also the rung most edge accelerators implement natively in
+fixed-point silicon.
+
+What the `32/b` factor hides is why you cannot just keep going. Each halving of `b` also halves
+the number of representable values: fp32 offers billions of gradations, int8 offers exactly
+`2^8 = 256`, and binary offers `2`. The size axis is geometric and free; the precision axis is
+geometric and paid for. Going from 256 levels to 2 is a 128x loss of resolution to buy an 8x
+size win over int8 — which is the whole reason the ladder stops being worth climbing after
+int8 for most models.
 
 ---
 

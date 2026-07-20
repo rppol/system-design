@@ -71,6 +71,39 @@ daily storage = DAU × upload_ratio × videos_per_uploader × avg_video_size
 
 **150 TB of new video every single day** — and that is *before* transcoding produces multiple resolutions/codecs, which multiplies the stored bytes further.
 
+**In plain terms.** "Only one user in ten uploads anything, but each of those drops a 300 MB file, and half a million of those a day is 150 TB you have to keep forever."
+
+The framing that matters: this is a *flow*, not a total. Nothing is ever deleted, so the daily figure accumulates — the yearly number, not the daily one, is what actually sizes the storage bill.
+
+| Symbol | What it is |
+|--------|------------|
+| `DAU` | Daily active users — 5,000,000, the anchor every other estimate hangs off |
+| `upload_ratio` | Fraction of DAU who upload at all — 0.10, so 4 users in 5 add no storage |
+| `videos_per_uploader` | Videos each uploader posts per day — 1 |
+| `avg_video_size` | 300 MB, the *source* file as uploaded, before any transcoding |
+| `daily storage` | New bytes added per day — a rate, not a stock |
+
+**Walk one example.** Units on every line, one multiplier at a time:
+
+```
+  DAU                            5,000,000   users
+  x  upload_ratio                     0.10   fraction of users who upload
+  =  uploaders                     500,000   users/day
+  x  videos_per_uploader                 1   videos/user/day
+  =  new videos                    500,000   videos/day
+  x  avg_video_size                    300   MB/video
+  =  daily storage             150,000,000   MB/day
+  /  1,000,000 MB per TB       ->      150   TB/day
+
+  Accumulate it
+  150 TB/day  x  365 days/year  ->  54,750  TB/year  =  54.75 PB/year
+
+  Meaning: one year of uploads alone needs ~55 PB of source video, and that is
+  the floor -- not one transcoded rendition is counted yet.
+```
+
+**Why the 10% upload ratio is load-bearing.** Drop it and you implicitly assume every active user uploads: 5,000,000 x 300 MB = 1,500,000,000 MB/day = 1,500 TB/day, a 10x overestimate that would size the whole storage tier wrong. Consumer video platforms are overwhelmingly read-heavy — the ratio is what encodes that asymmetry, and an interviewer will ask you to justify it.
+
 **CDN cost (the decisive number):**
 
 CDN bandwidth is billed per GB served. Using Amazon CloudFront's US pricing of **\$0.02 per GB** as the model:
@@ -84,6 +117,69 @@ daily CDN cost = DAU × videos_watched_per_day × avg_video_size_GB × price_per
 ```
 
 **~\$150,000 per day — roughly \$54 million a year — just to serve video from the CDN.** That single number is what forces the cost-optimization section later: *you cannot afford to serve everything from the CDN.* The conclusion the arithmetic forces is **"serve only popular videos from the CDN"** and everything else from cheaper origin storage on demand. Hold onto this — it reappears as the central tradeoff in Step 3.
+
+**What this actually says.** "Every view costs you six-tenths of a cent, and you serve twenty-five million views a day."
+
+CDN billing has no notion of videos, users, or sessions — it counts **bytes leaving the edge**. Reducing the bill therefore has exactly two levers: ship fewer bytes per view (better codecs, lower default rung) or serve fewer views from the CDN at all (the long-tail play).
+
+| Symbol | What it is |
+|--------|------------|
+| `videos_watched_per_day` | Views per DAU — 5, from the requirements dialogue |
+| `avg_video_size_GB` | 0.30 GB — the same 300 MB, restated in the billing unit |
+| `price_per_GB` | \$0.02, Amazon CloudFront's US egress rate |
+| `daily CDN cost` | Views/day x GB/view x price/GB — a pure egress bill |
+| `egress volume` | The same product without the price, i.e. bytes shipped per day |
+
+**Walk one example.** Push it through in the billing unit, then annualize:
+
+```
+  cost per view    0.30 GB/view  x  $0.02/GB     =  $0.006      per view
+  views per day   5,000,000 DAU  x  5 views/day  =  25,000,000  views/day
+  daily CDN cost  25,000,000     x  $0.006       =  $150,000    per day
+  annual cost     $150,000/day   x  365 days     =  $54,750,000 per year
+
+  Same product, without the price
+  egress volume   25,000,000 views x 0.30 GB/view = 7,500,000 GB/day
+                                                  = 7.5 PB/day leaving the edge
+
+  Meaning: you ship 50x more bytes out to viewers each day (7.5 PB) than you
+  take in from uploaders (150 TB) -- the read side is where the money goes.
+```
+
+The chapter rounds the annual figure to "roughly \$54 million"; the exact product of \$150,000 x 365 is **\$54,750,000**. Note also that daily egress (7.5 PB) is exactly 50x daily ingest (0.15 PB), which is the numeric statement of "video platforms are read-heavy."
+
+**Read it like this.** "Seven and a half petabytes a day is about seven hundred gigabits a second — sustained, around the clock, forever."
+
+Dollars are the interviewer's headline, but the *engineering* constraint is a bitrate. Converting the daily egress into a steady bits-per-second rate is what tells you how much edge capacity you are actually buying, and it lets you sanity-check the whole assumption set against a real per-stream bitrate.
+
+| Symbol | What it is |
+|--------|------------|
+| `daily egress` | 7,500,000 GB/day, carried over from the cost calculation |
+| `x 8` | Bytes to bits — storage is billed in bytes, links are rated in bits |
+| `/ 86,400` | Seconds in a day, converting a per-day volume into a per-second rate |
+| `concurrent viewers` | DAU x watch-minutes/day / minutes-in-a-day — the average number streaming at once |
+| `peak factor` | 2x, the book's standard multiplier for the busy hour versus the daily average |
+
+**Walk one example.** Mbps to Gbps to Tbps, explicitly:
+
+```
+  daily egress                    7,500,000  GB/day
+  x  8 bits per byte    ->       60,000,000  Gb/day  (= 60,000 Tb/day = 60 Pb/day)
+  /  86,400 s/day       ->            694.4  Gbps    average sustained egress
+                        =              0.69  Tbps
+
+  x  2 peak factor      ->          1,388.9  Gbps  =  1.39 Tbps at the busy hour
+
+  Cross-check against watch time
+  5,000,000 DAU x 30 min/day   =  150,000,000  viewer-minutes/day
+  / 1,440 min/day              =      104,167  average concurrent viewers
+  694.4 Gbps / 104,167 viewers =         6.67  Mbps per stream
+
+  Meaning: 6.67 Mbps is a believable 1080p bitrate, so the 5 views, 300 MB, and
+  30-minutes-a-day assumptions are mutually consistent -- the estimate hangs together.
+```
+
+That last line is the point of doing the conversion at all. If the implied per-stream bitrate had come out at 0.5 Mbps or 60 Mbps, one of the stated assumptions would have to be wrong, and an interviewer would expect you to catch it.
 
 ---
 
@@ -240,6 +336,38 @@ The deep dive is where the real engineering lives: how transcoding works, why it
 2. **Device / browser compatibility.** Different devices and browsers support different video formats. To play everywhere, you must produce the formats each target supports.
 3. **Adaptive bitrate / smooth playback under varying conditions.** To keep playback smooth on a weak or fluctuating network, you deliver multiple **resolutions and bitrates** and let the client switch. Splitting a video into different resolutions with different encodings is what enables adaptive-bitrate streaming.
 
+**What it means.** "One uploaded file is not one stored file — it is one stored file for every (resolution, codec) pair you choose to publish, plus the original."
+
+This is the hidden multiplier on the 150 TB/day figure from Step 1. The chapter flags it ("multiplies the stored bytes further") but deliberately never fixes the number, because the number is a *design choice* — and choosing it per-video is precisely the cost lever the chapter reaches for later.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Resolution rungs in the ladder — e.g. 240p, 480p, 720p, 1080p, 4K |
+| `C` | Codecs published per rung — the chapter names H.264, VP9, HEVC (H.265) |
+| `N = R x C` | Renditions produced per source video, the DAG's encoding fan-out width |
+| `k` | Total rendition bytes expressed as a multiple of the source video's size |
+| `1 + k` | Storage amplification factor — the `1` is the original, kept for re-encoding |
+
+**Walk one example.** Fan-out width first, then the storage it implies:
+
+```
+  Ladder shape    R = 5 resolutions  x  C = 3 codecs  =  15 renditions per video
+                  (this is also the width of the DAG's encoding stage)
+
+  Stored bytes    = source + all renditions
+                  = 150 TB/day  x  (1 + k)
+
+     k = 0   no transcoding at all      150 TB/day        54.75 PB/year
+     k = 1   renditions total = source  300 TB/day       109.50 PB/year
+     k = 2                              450 TB/day       164.25 PB/year
+     k = 4                              750 TB/day       273.75 PB/year
+
+  Meaning: the 150 TB/day headline is a floor, not an estimate. A modest k = 2
+  already triples storage to 164 PB/year of encoded video.
+```
+
+**Why the amplification factor is the thing to name in an interview.** The three cost mitigations later in the chapter are all attacks on `k`, not on the source: *don't pre-encode every version of unpopular content* lowers `k` for the cold tail, *encode short/unpopular videos on demand* drives `k` toward 0 until someone actually watches, and *region-aware distribution* limits how many *copies* of each rendition are pushed out. Without naming `k` you cannot explain why those three levers belong together.
+
 **Container vs codec** — the single most confused pair in this chapter:
 
 - **Container** — the "basket" that holds the video stream, audio stream, and metadata together. It is identified by the **file extension**: `.avi`, `.mov`, `.mp4`. The container says *how the pieces are packaged*, not how they are compressed.
@@ -297,6 +425,39 @@ flowchart LR
 Caption: the arrows are dependencies, not a fixed order — inspection, encoding, thumbnail, and watermark have no dependency on each other so they run in parallel, and only the final *merge* waits for all of them; a linear pipeline would run these one after another and waste the parallelism a DAG scheduler exploits.
 
 **Why a DAG beats a linear pipeline (the interview answer):** a DAG expresses which tasks *can* run concurrently (no edge between them) and which *must* wait (an edge). A scheduler can then fan the independent tasks out across many workers simultaneously, cutting wall-clock time, and different creators can supply different DAGs (add a watermark node, drop the 4K encoding node) without changing the engine. A hard-coded pipeline gives you neither the parallelism nor the per-creator flexibility.
+
+**Put simply.** "A pipeline takes as long as the sum of its stages; a DAG takes as long as its longest chain."
+
+Naming the *critical path* is what turns "DAGs are more parallel" from a slogan into an argument — and it immediately tells you where the remaining win is hiding, which the chapter then goes and exploits with GOP chunking.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_i` | Wall-clock cost of leaf task `i` — inspection, encoding, thumbnail, watermark, audio |
+| `serial` | Sum of all `t_i` — what a hard-coded pipeline costs |
+| `critical path` | The longest dependency chain; here `max(t_i)` since the leaves are independent |
+| `speedup` | `serial / critical path` — how much the DAG scheduler actually buys |
+| `merge` | The single node that *does* have edges from everything, so it always waits |
+
+**Walk one example.** The chapter's own five leaf tasks, first assuming equal cost, then realistically:
+
+```
+  Equal-cost leaves (each t)
+    serial pipeline   t + t + t + t + t   =  5t   then merge
+    DAG, 5 workers    max(t,t,t,t,t)      =   t   then merge
+    speedup           5t / t              =  5x
+
+  Realistic costs -- encoding dominates everything else
+    inspection 1t   encoding 6t   thumbnail 1t   watermark 1t   audio 1t
+    serial            1+6+1+1+1            = 10t
+    DAG, 5 workers    max(1,6,1,1,1)       =  6t
+    speedup           10t / 6t             =  1.67x
+
+  Meaning: the DAG's payoff is capped by its slowest node. Going from 5x to 1.67x
+  is why the next optimization must split the encoding node itself -- which is
+  exactly what GOP chunking does.
+```
+
+This is the honest version of the interview answer. Claiming a flat "5x from parallelism" invites the follow-up *"what if one task takes ten times as long as the others?"* — and the answer, that you must then subdivide the dominant task, is the bridge to the GOP-splitting section.
 
 ### Video transcoding architecture
 
@@ -452,6 +613,36 @@ xychart-beta
 
 Caption: a tiny head of videos draws almost all the views, so caching just that head on the expensive CDN captures most of the traffic while the cold tail — the bulk of the catalog — is served cheaply from origin storage on demand.
 
+**The idea behind it.** "Evicting the cold half of the catalog from the CDN removes half your distribution footprint but only one percent of your egress bill — the two savings are not the same thing, and confusing them is the classic error here."
+
+Because the CDN bill is *per byte served*, and the tail serves almost no bytes, pushing the tail to origin barely dents the \$150,000/day egress line. What it does slash is the **replication and storage footprint** — how many copies of how many videos you push to how many edges — plus the transcoding compute for renditions nobody requests. Both matter; they are just different budgets.
+
+| Symbol | What it is |
+|--------|------------|
+| `head` | The fraction of the *catalog* kept resident on the CDN |
+| `view share` | The fraction of total *views* that head accounts for (the bar chart) |
+| `egress bill` | \$150,000/day x view share served from the CDN |
+| `egress saved` | \$150,000/day x (1 - view share) — the views now served from origin |
+| `catalog offloaded` | `1 - head` — the share of videos no longer replicated to every edge |
+
+**Walk one example.** Three cache-depth policies against the chapter's own popularity split:
+
+```
+  Baseline: everything on the CDN     $150,000/day    $54.75M/year
+
+  CDN keeps    view    egress bill   egress saved   saved/year   catalog offloaded
+  ----------------------------------------------------------------------------------
+  top  1%       80%    $120,000/day    $30,000/day    $10.95M          99%
+  top 10%       95%    $142,500/day     $7,500/day     $2.74M          90%
+  top 50%       99%    $148,500/day     $1,500/day     $0.55M          50%
+
+  Meaning: going from "top 50%" to "top 1%" cached saves 20x more egress money
+  ($30,000 vs $1,500 a day) -- but every step down also pushes more real viewers
+  onto slower origin fetches. The bar chart is what tells you the trade is worth it.
+```
+
+**Why the long-tail assumption has to be stated out loud.** All of the above collapses if popularity were uniform: with 100 videos each drawing 1% of views, caching the top 1% would capture 1% of traffic and save 99% of the bill — but 99% of your viewers would now wait on origin. The entire strategy is licensed by the *shape* of the distribution, not by the caching mechanism, which is why the chapter leads with the long-tail claim before proposing the fix.
+
 ### Error handling
 
 Errors fall into **two categories**:
@@ -507,6 +698,41 @@ Original video timeline (frames)
 ```
 
 Caption: each GOP is an independently playable chunk of a few seconds, so the timeline can be cut at GOP boundaries and both *uploaded* and *transcoded* by different workers at once — and a failure only costs the one chunk, not the whole 1 GB file.
+
+**Stated plainly.** "Cutting at GOP boundaries turns one long serial job into N short independent ones, so you buy near-linear speedup and you make a dropped connection cost one chunk instead of the whole file."
+
+GOP splitting is the answer to the critical-path problem the DAG left behind: the encoding node dominated total time, and the only way past that is to subdivide the encoding node itself. It is also, for free, the resume mechanism.
+
+| Symbol | What it is |
+|--------|------------|
+| `video length` | Duration of the source upload, in seconds |
+| `GOP length` | Seconds per Group of Pictures — "typically a few seconds", per the chapter |
+| `chunks` | `video length / GOP length` — independently decodable units, the unit of work |
+| `waves` | `ceil(chunks / workers)` — how many rounds the fleet needs to finish the job |
+| `resume cost` | Bytes re-sent after a failure — one chunk, not the whole file |
+
+**Walk one example.** A 10-minute upload with 4-second GOPs:
+
+```
+  video length                     600  s
+  /  GOP length                      4  s/GOP
+  =  chunks                        150  independently transcodable chunks
+
+  Transcode waves = ceil(chunks / workers)
+       1 worker    ->  150 waves   ->     1x  speedup   (this is the serial case)
+      10 workers   ->   15 waves   ->    10x  speedup
+      50 workers   ->    3 waves   ->    50x  speedup
+     150 workers   ->    1 wave    ->   150x  speedup
+
+  Failure cost on a 1 GB upload
+     whole-file retry                 1,000  MB re-sent
+     one-GOP retry     1,000 / 150  =  6.67  MB re-sent  =  0.67% of the file
+
+  Meaning: GOP splitting buys speedup linear in the worker count until workers
+  outnumber chunks, and cuts the cost of a dropped connection by ~150x here.
+```
+
+**Why "align to GOP" and not just "split every 4 MB".** A GOP starts with a keyframe and is self-contained, so any chunk can be decoded without its neighbours. Cut at an arbitrary byte offset instead and the pieces reference frames that live in a different chunk — no worker can transcode one alone, and a resumed upload cannot be validated independently. The alignment requirement is what makes both the parallelism and the resume correct rather than merely fast.
 
 ---
 

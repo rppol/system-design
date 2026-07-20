@@ -51,6 +51,55 @@ scan; (2) you no longer need every key in memory — a **sparse** in-memory inde
 few KB) suffices, and you scan the small gap between known offsets; (3) you can compress blocks
 between sparse-index entries, saving disk and I/O.
 
+### Decoding the index-memory arithmetic
+
+The hash index and the sparse index differ by one number — how many entries you must hold in
+RAM:
+
+```
+hash index RAM  =  n_keys x (key bytes + offset bytes + map overhead)
+sparse index    =  segment_bytes / block_bytes   entries
+```
+
+**In plain terms.** "A hash index charges you RAM per *key*; a sparse index charges you RAM
+per *block*, and then makes you scan the block."
+
+That single swap is what lifts the "all keys must fit in memory" ceiling. Sorting the segment
+is what makes it legal: because keys are ordered, an unknown key still lands between two known
+offsets, so scanning the gap always finds it or proves it absent.
+
+| Symbol | What it is |
+|--------|------------|
+| `n_keys` | Number of distinct live keys. The hash index scales with this, and only this |
+| `offset bytes` | The byte position in the segment file the key's value starts at |
+| `map overhead` | Buckets, pointers, and per-entry headers the hash map itself costs |
+| `block_bytes` | Size of the compressed chunk between two sparse-index entries (a few KB) |
+| `segment_bytes / block_bytes` | Entry count. Bigger blocks = less RAM, more bytes scanned |
+
+**Walk one example.** A 1 GB segment of 100-byte records, 4 KB blocks:
+
+```
+  Bitcask-style hash index -- every key in RAM, ~50 B per entry:
+      100,000,000 keys   ->    5.0 GB RAM
+    1,000,000,000 keys   ->   50.0 GB RAM      <- the hard ceiling Bitcask hits
+
+  SSTable sparse index -- 1 GB segment, one key per 4 KB block:
+    entries    = 1,000,000,000 / 4,096          =    244,140
+    at 24 B/entry (16-byte key + 8-byte offset) =      5.9 MB RAM
+    a DENSE index over the same segment
+      = 10,000,000 records x 24 B               =    240.0 MB RAM
+    ratio                                       =       41x fewer entries
+
+  What the sparseness costs you per lookup:
+    scan one 4 KB block = 4,096 / 100 = 40 records, in RAM, after a single seek
+```
+
+Trading 240 MB of RAM for 5.9 MB plus a 40-record in-memory scan is the whole reason LSM
+engines index terabytes on commodity nodes while Bitcask cannot. **Compaction is the other
+half of the deal:** three 1 GB segments in which every key was written three times merge down
+to 1 GB, reclaiming 66.7% of the disk — and because all three inputs are sorted, the merge is
+a linear streaming scan with no extra memory, not a sort.
+
 How to keep writes sorted when they arrive in random order? Buffer them in an in-memory
 balanced tree (red-black/AVL), called a **memtable**. When it exceeds a threshold (a few MB),
 write it out as a new SSTable segment (already sorted). Reads check the memtable, then the
@@ -110,6 +159,73 @@ missing key must check every level, which is exactly why Bloom filters exist.
   HBase, Cassandra) vs *leveled* (key range split into smaller SSTables organized in levels;
   LevelDB, RocksDB). Leveled uses less disk; size-tiered does less write work.
 
+### Decoding the Bloom filter false-positive rate
+
+A Bloom filter is a bit array plus `k` hash functions. Insert = set `k` bits; query = check
+those `k` bits. All set means "probably here"; any clear bit means "definitely not here." The
+probability of a false "probably" is:
+
+```
+p = (1 - e^(-k*n/m))^k                optimal k = (m/n) * ln 2
+
+  m = bits in the filter      n = keys inserted      k = hash functions
+```
+
+**What this actually says.** "After `n` insertions each bit has some chance of already being
+set; `p` is the chance that all `k` bits a stranger key happens to probe are set by accident."
+
+The ratio `m/n` — bits *per key* — is the only knob that really matters. `n` and `m` never
+appear alone, only as `m/n`, which is why the accuracy of a Bloom filter is independent of how
+many keys you store and depends purely on how many bits per key you are willing to buy.
+
+| Symbol | What it is |
+|--------|------------|
+| `m/n` | Bits allocated per key. The budget knob; sets the whole accuracy curve |
+| `k` | Hash functions per key. Too few and bits are under-used; too many and the array saturates |
+| `k*n/m` | Expected number of times each bit gets set across all insertions |
+| `e^(-k*n/m)` | Probability one given bit is still **clear** after all insertions |
+| `1 - e^(-k*n/m)` | Probability one given bit is set |
+| `(...)^k` | All `k` probed bits set by coincidence — a false positive |
+| `ln 2` | 0.693. Comes from the optimum being "the array is exactly half full" |
+
+**Walk one example.** The standard 10-bits-per-key configuration:
+
+```
+  m/n = 10 bits/key   ->   optimal k = 10 x ln 2 = 6.93   ->   use k = 7
+
+    k =  4    p = 1.181%
+    k =  5    p = 0.943%
+    k =  6    p = 0.844%
+    k =  7    p = 0.819%    <- minimum, exactly where k_opt predicted
+    k =  8    p = 0.846%
+    k = 11    p = 1.165%    <- worse than k=4: the array has saturated
+
+  Memory cost -- 10 bits/key = 1.25 bytes/key:
+        100,000,000 keys    ->    125 MB
+      1,000,000,000 keys    ->   1.25 GB
+
+  Buying more bits (k re-optimized at each budget):
+    m/n =  8  (1.00 B/key), k =  6   ->   2.158%
+    m/n = 10  (1.25 B/key), k =  7   ->   0.819%
+    m/n = 16  (2.00 B/key), k = 11   ->   0.046%
+```
+
+Doubling from 1.25 to 2.00 bytes per key cuts the false-positive rate roughly 18-fold — the
+curve is exponential in `m/n`, so small memory increases buy large accuracy gains, until they
+don't.
+
+**What that buys on the read path.** A key that does not exist must be checked against every
+level. With 6 SSTable levels and no filter, that is 6 disk probes for a guaranteed
+disappointment. At `p = 0.819%`, the expected number of probes that actually touch disk is
+`6 x 0.00819 = 0.049` — about one wasted disk read per 20 missing-key lookups. That is why the
+"cache miss storm" pitfall below is catastrophic *only* when Bloom filters are absent.
+
+**Why there are no false negatives.** If a key was inserted, its `k` bits were set, and bits
+are never cleared — so a clear bit is proof of absence. The asymmetry is what makes the filter
+safe to use as a skip decision: a false positive costs one wasted disk read, while a false
+negative would silently lose data. Deletions break this, which is why LSM engines rebuild the
+filter on compaction rather than unsetting bits.
+
 ### B-trees
 
 The most widely used index (every major relational DB, plus many non-relational). B-trees keep
@@ -118,6 +234,68 @@ KB), read or written one page at a time — mirroring the underlying hardware. E
 keys and **references to child pages**; the **branching factor** (references per page) is
 typically several hundred, so a tree of just 3–4 levels can index a huge dataset (4 KB pages,
 branching factor 500 ⇒ 4 levels = 256 TB).
+
+### Decoding B-tree height: why 3-4 levels covers a billion rows
+
+```
+fanout  =  usable_page_bytes / internal_entry_bytes
+height  =  log_fanout(leaf_pages) + 1                  rows = leaf_pages x rows_per_leaf
+```
+
+**Read it like this.** "Each level down multiplies your reach by the fanout, so capacity grows
+*exponentially* in height and height grows only *logarithmically* in data — one more level
+means 500 times more data, not 500 more bytes."
+
+| Symbol | What it is |
+|--------|------------|
+| `usable_page_bytes` | The 4-16 KB page minus its header; the fixed I/O unit the disk gives you |
+| `internal_entry_bytes` | One key plus one child pointer. Tiny (8-22 B) — no row data lives here |
+| `fanout` | Child references per internal page. The book's "branching factor," in the hundreds |
+| `leaf_pages` | Pages at the bottom, the only ones holding actual rows |
+| `rows_per_leaf` | `page_bytes / row_bytes`. Small (8-40), because rows are fat |
+| `log_fanout(...)` | "How many times do I multiply by the fanout to reach that many pages" |
+
+**Walk one example.** Start from the page, derive the fanout, then climb:
+
+```
+  An internal-node entry is key + child pointer, so it is TINY:
+     8-byte key + 6-byte pointer = 14 B   ->  4096 / 14  = 292 refs per page
+    16-byte key + 6-byte pointer = 22 B   ->  4096 / 22  = 186 refs per page
+    the book's round 500 refs             ->  4096 / 500 = 8.2 B per entry
+
+  Reach with fanout 500 -- pages addressable after N branching steps:
+    1 step                       500
+    2 steps                  250,000
+    3 steps              125,000,000
+    4 steps           62,500,000,000
+
+  Leaf pages hold ROWS, not pointers, so they are wide, not deep:
+    500-byte rows  ->  4096 / 500 =  8 rows per leaf page
+    100-byte rows  ->  4096 / 100 = 40 rows per leaf page
+
+  A 4-level tree (root + 2 internal levels + leaves) => 500^3 = 125,000,000 leaves
+      x  8 rows/leaf   =  1,000,000,000 rows     <- a billion rows in 4 page reads
+      x  4 KB/page     =        512 GB of leaf data
+
+  Same tree at the more realistic fanouts:
+    fanout 292, 4 levels ->  24,897,088 leaves x  8 rows =   199,176,704 rows
+    fanout 186, 4 levels ->   6,434,856 leaves x  8 rows =    51,478,848 rows
+    fanout 186, 4 levels ->   6,434,856 leaves x 40 rows =   257,394,240 rows
+```
+
+**Note on the book's 256 TB figure.** The chapter states "4 KB pages, branching factor 500 ⇒
+4 levels = 256 TB." That result requires `500^4 = 62,500,000,000` leaf pages
+(`62.5e9 x 4 KB = 256 TB`), i.e. four branching *steps* below the root — which by the
+root-counted convention used above is a five-level page tree. Counting four *levels of pages*
+(root + 2 internal + leaves) gives `500^3 x 4 KB = 512 GB`. The book's number is reproduced
+here as written; the discrepancy is purely in whether "level" counts pages or branching steps,
+not in the arithmetic.
+
+**Why the tree can never get tall.** To force a fifth level you must exhaust the fourth, which
+means multiplying by 500 again: from a billion rows to 500 billion. Real B-trees essentially
+live at height 3-4 forever. This also explains the read-latency claim in the comparison below
+— the root and first internal level are a handful of pages, permanently resident in the buffer
+cache, so a "4-level lookup" is typically 3 RAM hits and exactly **one** disk read.
 
 Updates are **in place**: find the page, change the value, write the page back. Inserts may
 **split** a full page into two. The depth stays O(log n) and balanced. Crash safety relies on a
@@ -147,6 +325,63 @@ The defining difference is **where the work goes**:
   monitor it.
 - **B-tree advantage — transactions:** each key exists in exactly one place in a B-tree, which
   makes locking ranges for transaction isolation natural (LSM has the same key across levels).
+
+### Decoding write amplification
+
+```
+WA  =  physical bytes written to disk / logical bytes the application wrote
+
+  B-tree :  WA = (WAL record + whole dirty page [+ pages created by a split]) / row bytes
+  LSM    :  WA ~ 1 (WAL) + 1 (memtable flush) + T x L
+              T = size ratio between adjacent levels    L = leveled compaction steps
+```
+
+**What the formula is telling you.** "Neither engine writes your 100 bytes and stops — the
+B-tree rounds your write up to a whole page *right now*, and the LSM writes it cheaply now
+then rewrites it once per level *later*."
+
+| Symbol | What it is |
+|--------|------------|
+| `row bytes` | What the application actually changed. The denominator, and it is small |
+| `whole dirty page` | The B-tree's unit of I/O. Change 1 byte, write 4,096 |
+| `WAL record` | The durability copy — this is the "at least twice" in the bullet above |
+| `T` | Size ratio between levels, typically 10. Each level is 10x the one above |
+| `L` | Number of levels a byte must be rewritten through before it settles |
+| `T x L` | Each byte is rewritten ~T times per level it descends, across L levels |
+
+**Walk one example.** One 100-byte row update, 4 KB pages, both engines:
+
+```
+  B-TREE -- updating a 100-byte row that lives inside a 4 KB page:
+    WAL record  (row + ~64 B header)                        164 B
+    the whole dirty page, rewritten                       4,096 B
+    ------------------------------------------------------------
+    total                                                 4,260 B   ->  WA =  42.6x
+    with full-page WAL images (Postgres default)          8,192 B   ->  WA =  81.9x
+    if the insert splits the page (2 pages + their WAL)  16,384 B   ->  WA = 163.8x
+
+  LSM LEVELED -- 1 TB dataset, base level 256 MB, size ratio T = 10:
+    level sizes    0.26 GB -> 2.6 GB -> 25.6 GB -> 256 GB -> 2,560 GB
+    compaction steps below the base level                       L = 4
+    WA = 1 (WAL) + 1 (flush) + T x L = 1 + 1 + 40           =  42x
+    per 100-byte row that is                                  4,200 B written
+```
+
+The two land in almost the same place (42.6x vs 42x) — which is the point. **Write
+amplification is not what separates them; the *shape* of the writes is.** The B-tree's 4,260
+bytes are a random 4 KB page write happening synchronously on the user's write path. The LSM's
+4,200 bytes are one small sequential append now, plus large sequential rewrites later, on a
+background thread. Same bytes, but sequential throughput on an SSD is several times random
+throughput, and the deferred work is exactly what makes LSM tail latency spike when compaction
+falls behind.
+
+**Why "at least twice" is doing so much work in that bullet.** Counting *records*, a B-tree
+writes your data twice: WAL plus page. Counting *bytes* — which is what the disk and the SSD's
+wear counter care about — a small row costs 42x, and a split costs 164x. Interviewers who ask
+"what's the write amplification of a B-tree?" are testing whether you answer 2 (records) or
+tens-to-hundreds (bytes). Tuning `T` is the LSM knob: raising `T` from 10 to 20 halves the
+number of levels but doubles the per-level rewrite, which is the size-tiered vs leveled
+tradeoff from Section 3.1 restated as arithmetic.
 
 ### Other indexing structures
 

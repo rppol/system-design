@@ -346,6 +346,40 @@ L_total = L_classification  +  λ · L_regression
   the gradient.
 - **λ** balances the two terms so neither the box error nor the class error swamps the other.
 
+**What it means.** "Be wrong about *what* it is and be wrong about *where* it is, add up both penalties, and let λ decide how much a misplaced box costs relative to a mislabelled one."
+
+The two terms live in incompatible units — cross-entropy is in nats, box regression is in pixels (or normalized offsets). Nothing makes them commensurable automatically, which is precisely why λ has to exist.
+
+| Symbol | What it is |
+|--------|------------|
+| `L_classification` | Cross-entropy over face / plate / background for each proposal |
+| `L_regression` | Smooth L1 on the four box offsets, summed over positive proposals only |
+| `λ` | The balance weight converting box error into "classification-comparable" units |
+| smooth L1(x) | `0.5x²` when `\|x\| < 1`, else `\|x\| − 0.5` — quadratic near zero, linear in the tail |
+| Positive proposals | The only proposals with a regression term; background regions have no box to fit |
+
+**Walk one example.** One proposal, classification loss 0.35, box off by 12, 8, 5, and 9 units — computed first in raw pixels, then in offsets normalized by box size:
+
+```
+  Raw-pixel offsets (12, 8, 5, 9) -- all > 1, so smooth L1 is the linear branch |x| - 0.5
+     smooth L1 terms: 11.5 + 7.5 + 4.5 + 8.5          = 32.00
+     L_total (lambda = 1) = 0.35 + 32.00              = 32.35
+     classification share = 0.35 / 32.35              =  1.1%   <- class error is invisible
+
+  Normalized offsets (0.12, 0.08, 0.05, 0.09) -- all < 1, so the quadratic branch 0.5x^2
+     smooth L1 terms: 0.0072 + 0.0032 + 0.00125 + 0.00405   = 0.0157
+     L_total (lambda = 1) = 0.35 + 0.0157             = 0.3657
+     regression share = 0.0157 / 0.3657               =  4.3%   <- now the BOX is invisible
+
+  With lambda = 10 on normalized offsets:
+     L_total = 0.35 + 10 x 0.0157                     = 0.5070
+     regression share                                 = 31%     <- both terms actually matter
+```
+
+The same model error swings from "boxes are 99% of the loss" to "boxes are 4% of the loss" purely from a units choice nobody wrote down. In the first case the network learns to place boxes beautifully around things it cannot name; in the second it labels confidently and never tightens a box. Neither failure raises an exception, and both look like a plateau in the training curve — this is what λ is defending against.
+
+The smooth L1 choice is visible in the same numbers. Under plain MSE those raw-pixel errors would contribute `144 + 64 + 25 + 81 = 314` instead of 32, and the single 12-pixel coordinate alone would supply 144 of it — 46% of the gradient from one badly-placed corner. Smooth L1's linear tail caps that coordinate's contribution at 11.5 of 32, or 36%, so a handful of wild proposals can no longer dominate the update.
+
 The two heads are trained **jointly** — one backward pass updates the backbone, RPN, and both heads
 together — so the shared features serve localization and classification simultaneously.
 
@@ -391,6 +425,40 @@ Union:
 
 IoU = 6 400 / 13 600 = 0.47
 ```
+
+**In plain terms.** "Of all the pixels either box claims, what fraction do both boxes agree on? Agreement alone is not enough — the disagreement sits in the denominator and penalizes you twice."
+
+The subtraction in the union is the whole mechanism. Overlap appears in both box areas, so adding them double-counts it; subtracting it once puts every pixel in the denominator exactly once. That means a box that is too large is punished just as surely as one that is misplaced — you cannot game IoU by predicting a box that swallows the image.
+
+| Symbol | What it is |
+|--------|------------|
+| `GT` | Ground-truth box drawn by a human annotator — `(x1, y1, x2, y2)` |
+| `P` | The model's predicted box |
+| `area(∩)` | Overlap: `max(0, min(x2s) − max(x1s)) x max(0, min(y2s) − max(y1s))` |
+| `area(∪)` | `area(GT) + area(P) − area(∩)` — the subtraction removes the double count |
+| Threshold | The IoU a prediction must clear to count as a true positive; 0.5 by convention |
+
+**Walk one example.** Both boxes from the text, plus what a 20-pixel versus 10-pixel offset costs:
+
+```
+  GT = (50, 50, 150, 150)  ->  100 x 100 = 10,000 px^2
+
+  Prediction A = (70, 70, 170, 170)   -- offset 20 px on both axes
+     x overlap = min(150,170) - max(50,70) = 150 - 70 = 80
+     y overlap = min(150,170) - max(50,70) = 150 - 70 = 80
+     area(inter) = 80 x 80                          =  6,400
+     area(union) = 10,000 + 10,000 - 6,400          = 13,600
+     IoU = 6,400 / 13,600                           = 0.4706  -> FP at 0.5
+
+  Prediction B = (60, 60, 160, 160)   -- offset 10 px on both axes
+     overlap    = 90 x 90                           =  8,100
+     union      = 10,000 + 10,000 - 8,100           = 11,900
+     IoU = 8,100 / 11,900                           = 0.6807  -> TP at 0.5
+
+  Halving the offset (20 px -> 10 px) moved IoU 0.47 -> 0.68, a 45% jump.
+```
+
+Both of the file's stated figures verify exactly: 6,400/13,600 = 0.4706 rounds to the quoted 0.47, and 8,100/11,900 = 0.6807 rounds to the quoted 0.68. What deserves attention is the *non-linearity* — a 10-pixel improvement on a 100-pixel box bought 0.21 of IoU, because the offset erodes the intersection and inflates the union simultaneously. IoU punishes localization error from both directions at once, which is exactly the sensitivity that makes a single 0.5 threshold feel arbitrary.
 
 At threshold 0.5 this prediction is a **false positive** (0.47 < 0.5) — close, but not tight enough.
 Shift the prediction to `(60, 60, 160, 160)` and the intersection becomes 90×90 = 8 100, union =
@@ -461,6 +529,52 @@ AP = sum over recall bands of (Δrecall x interpolated precision):
 AP(face) = 0.200 + 0.200 + 0.150 + 0.134 = 0.68
 ```
 
+**Put simply.** "Walk down the ranked detections; every time you catch a new face, write down how clean your work has been up to that point. AP is those cleanliness scores, weighted by how much ground each one covered."
+
+The integration is doing something specific: recall only moves when a detection is a TP, so the recall bands are what carve the x-axis, and interpolated precision is the height of each band. Precision drops between hits, but the "max precision at any recall ≥ r" rule flattens each band to the best you ever achieve later — that is what makes the curve a monotone staircase instead of a sawtooth.
+
+| Symbol | What it is |
+|--------|------------|
+| `cumTP` / `cumFP` | Running true/false positive counts as you descend the confidence ranking |
+| Precision at rank i | `cumTP / (cumTP + cumFP)` — how clean the list has been so far |
+| Recall at rank i | `cumTP / 5` — the denominator is all ground-truth faces, found or not |
+| Interpolated precision | At recall `r`, the **maximum** precision at any recall ≥ `r` — the monotone envelope |
+| `Δrecall` | Width of each band. With 5 ground-truth faces each TP moves recall by exactly `1/5 = 0.2` |
+| `AP` | `Σ (Δrecall x interpolated precision)` — the area under that staircase |
+
+**Walk one example.** The table's 7 detections against 5 ground-truth faces, integrated band by band:
+
+```
+  raw precision down the ranking:
+     rank 1 TP  1/1 = 1.0000    recall 0.2
+     rank 2 TP  2/2 = 1.0000    recall 0.4
+     rank 3 FP  2/3 = 0.6667    recall 0.4   <- precision dips, recall stalls
+     rank 4 TP  3/4 = 0.7500    recall 0.6
+     rank 5 FP  3/5 = 0.6000    recall 0.6
+     rank 6 TP  4/6 = 0.6667    recall 0.8
+     rank 7 FP  4/7 = 0.5714    recall 0.8
+
+  interpolate (take the max precision at any recall >= r):
+     r = 0.2  ->  1.0000
+     r = 0.4  ->  1.0000
+     r = 0.6  ->  max(0.7500, 0.6000, 0.6667, 0.5714)  = 0.7500
+     r = 0.8  ->  max(0.6667, 0.5714)                  = 0.6667
+     r = 1.0  ->  0.0000    (5th face never detected)
+
+  integrate: width 0.2 per band
+     [0.0 -> 0.2]   0.2 x 1.0000  = 0.2000
+     [0.2 -> 0.4]   0.2 x 1.0000  = 0.2000
+     [0.4 -> 0.6]   0.2 x 0.7500  = 0.1500
+     [0.6 -> 0.8]   0.2 x 0.6667  = 0.1333
+     [0.8 -> 1.0]   0.2 x 0.0000  = 0.0000
+                                    ------
+     AP(face)                     = 0.6833  -> 0.68
+```
+
+This reproduces the table's stated `0.68` exactly. The instructive band is the last one: the model never found the fifth face, so a full fifth of the recall axis contributes zero no matter how confident or clean everything above it was. AP is capped at 0.8 for this model before the first detection is even scored — a single miss costs up to 0.2 of AP outright. For a privacy system where a miss is the legally expensive error, that structural penalty is a feature, and it is why the chapter tunes the operating point toward recall.
+
+Note also that the interpolation *raises* the third band from its raw 0.6667 at rank 3 to 0.7500. Without the max-envelope rule, a lucky FP early in the ranking would permanently depress the curve; interpolation asks "could you have achieved this recall more cleanly by going deeper?" and credits the better answer.
+
 ```mermaid
 xychart-beta
     title "Precision-recall curve for the face class (AP = area under = 0.68)"
@@ -490,6 +604,38 @@ thresholds** — 0.50, 0.55, 0.60, …, 0.95 (step 0.05) — and then across cla
 ```
 mAP@[0.5:0.95] = mean over IoU in {0.50, 0.55, ..., 0.95}  of  mAP at that IoU
 ```
+
+**What the formula is telling you.** "Don't ask whether the box was good enough once. Ask it ten times at rising standards, and score the detector on how many of those standards it survives."
+
+Averaging over thresholds converts a pass/fail gate into a graded one. A box no longer just *counts* — it counts at some thresholds and not others, and the fraction it survives becomes its effective contribution.
+
+| Symbol | What it is |
+|--------|------------|
+| IoU threshold set | `{0.50, 0.55, 0.60, …, 0.95}` — ten values, step 0.05 |
+| mAP at one IoU | The full class-averaged AP computed with that single threshold |
+| `mAP@[0.5:0.95]` | The plain mean of those ten numbers — no weighting |
+| Effective credit | Fraction of the ten thresholds a given box clears; a proxy for how tight it is |
+
+**Walk one example.** The chapter's own two boxes, plus a tight one, scored against all ten thresholds:
+
+```
+  thresholds:  0.50 0.55 0.60 0.65 0.70 0.75 0.80 0.85 0.90 0.95
+
+  IoU 0.47  (the (70,70,170,170) box)
+     clears:   -    -    -    -    -    -    -    -    -    -    =  0 of 10
+     already a FP at 0.5, so COCO changes nothing for it
+
+  IoU 0.68  (the (60,60,160,160) box)
+     clears:   Y    Y    Y    Y    -    -    -    -    -    -    =  4 of 10
+     a TP under the headline 0.5 metric, but credited at only 40% by COCO
+
+  IoU 0.93  (a tight box that hugs the face)
+     clears:   Y    Y    Y    Y    Y    Y    Y    Y    Y    -    =  9 of 10
+```
+
+The 0.68 box and the 0.93 box are *identical* under mAP@0.5 — both are simply true positives, indistinguishable. Under COCO one earns 40% credit and the other 90%. That 2.25x separation between two boxes the single-threshold metric calls equal is the entire reason the protocol exists.
+
+The Street View consequence is concrete. A box at IoU 0.68 passes the 0.5 gate while leaving roughly a third of the face outside the blurred region or a third of the surrounding wall inside it — either a partial privacy failure or a visibly smeared photo. Reporting only mAP@0.5 would rate that detector as fully successful on exactly the dimension the product cares about most.
 
 This rewards **tight** localization: a detector that overlaps at 0.5 but not 0.9 scores lower than
 one whose boxes hug the object. Street View benefits from tight boxes so the blur covers the face

@@ -239,6 +239,40 @@ per video; entry `A[i][j]` encodes user *i*'s feedback on video *j*. Three ways 
 The matrix is enormous and >99% empty — a billion users × billions of videos with only a handful of
 interactions each.
 
+**In plain terms.** `density = (observed entries) / (users x videos)` says *"what fraction of every
+possible user-video pairing has anyone actually confirmed"* — and the answer is a number so small
+that ">99% empty" badly understates it. The framing matters because every design choice downstream
+(store factors not the matrix, sample negatives, use ANN) exists to avoid ever materializing this
+object.
+
+| Symbol | What it is |
+|--------|------------|
+| `#users` | ~**1e9** per the requirements |
+| `#videos` | ~**1e9** (billions; the low end of the chapter's range) |
+| cells | `#users x #videos` — every possible pairing, observed or not |
+| observed | `#users x (interactions per user)` — the 1s actually in the log |
+| density | `observed / cells`; `1 - density` is the emptiness |
+
+**Walk one example.** Take 1e9 users, 1e9 videos, and a generous 100 logged interactions per user:
+
+```
+  cells     = 1e9 x 1e9              = 1.0e+18 possible user-video pairs
+  observed  = 1e9 x 100              = 1.0e+11 actual interactions
+  density   = 1.0e+11 / 1.0e+18      = 1.0e-07
+  empty     = 100% - 0.00001%        = 99.9999900000% empty
+
+  Even at 1,000 interactions per user:  density = 1.0e-06,  99.999990% empty.
+
+  Storing it densely at 4 bytes/cell:  1.0e+18 x 4 = 4.0e+18 bytes = 4 exabytes.
+```
+
+The ">99% empty" in the text is technically true and practically misleading: the real figure is
+**99.99999% empty**, five more nines. One in ten million cells is filled. That is why the blank in
+the diagram above cannot be read as a zero — if it were, you would be asserting a billion confident
+"dislikes" per user based on nothing, and 99.99999% of your training signal would be an assumption
+rather than an observation. The whole `w0` discussion below is about how gently to make that
+assumption.
+
 ```
                          VIDEOS  (billions of columns, >99% empty)
              v1    v2    v3    v4    v5    v6   ...
@@ -263,6 +297,45 @@ handle.
 embedding; row `V[j]` is video *j*'s embedding. The predicted affinity of user *i* for video *j* is the
 **dot product** `U[i] · V[j]`. Learn `U` and `V` so the dot products reconstruct the observed
 feedback; then the *unobserved* entries' dot products become the predicted scores used to rank.
+
+**Read it like this.** `A ≈ U · Vᵀ` says *"every user is d numbers, every video is d numbers, and
+their compatibility is one dot product — so replace a 1e18-cell table with two skinny tables you
+can actually hold."* The framing matters because `d` is not an accuracy knob alone; it is
+simultaneously the memory bill, and the arithmetic below is what makes that concrete.
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | The `#users x #videos` feedback matrix — never materialized |
+| `U` | The user factor table, shape `(#users x d)`; row `U[i]` is user *i*'s embedding |
+| `V` | The video factor table, shape `(#videos x d)`; row `V[j]` is video *j*'s embedding |
+| `d` | Embedding dimension — the chapter's range is **64 to 256** |
+| `U[i] · V[j]` | `d` multiply-adds; the predicted affinity that fills a blank cell |
+| table bytes | `num_entities x d x 4` — 4 bytes per float32 parameter |
+
+**Walk one example.** Size both embedding tables at 1e9 users and 1e9 videos, at each end of the
+`d` range:
+
+```
+  d      table     entities     bytes = n x d x 4        size
+   64    users       1e+09      1e9 x  64 x 4 =  2.560e+11      256.0 GB
+   64    videos      1e+09      1e9 x  64 x 4 =  2.560e+11      256.0 GB
+                                              both tables ->    512.0 GB   (0.512 TB)
+
+  256    users       1e+09      1e9 x 256 x 4 =  1.024e+12    1,024.0 GB
+  256    videos      1e+09      1e9 x 256 x 4 =  1.024e+12    1,024.0 GB
+                                              both tables ->  2,048.0 GB   (2.048 TB)
+
+  d: 64 -> 256 is 4x the dimension and exactly 4x the memory (linear, not free).
+  vs. the dense matrix:  4.0e+18 / 5.12e+11 = 7.81e+06  ->  7.8 million-fold compression.
+```
+
+Two consequences an interviewer will push on. First, **`d` is a linear memory multiplier**, so
+"just use 256 for better quality" is a decision to move from a half-terabyte of parameters to two
+terabytes — which stops fitting on one machine and forces a sharded parameter server or embedding
+store. Second, at 512 GB the *factors* are already too large for a single GPU, yet they are seven
+million times smaller than the matrix they replace; the factorization is not a modelling nicety,
+it is the only reason the object exists at all. Note also that `d` sets the retrieval cost: each
+ANN comparison is `d` multiply-adds, so d = 256 makes serving-time scoring 4x more expensive too.
 
 **Loss over observed pairs only — and why it is degenerate.** The naive objective sums squared error
 over just the observed (positive) entries:
@@ -400,6 +473,42 @@ as this user's negatives). Train with **binary cross-entropy** on the dot-produc
 through a sigmoid). Negative sampling is essential because you cannot enumerate the billions of true
 negatives per user.
 
+**Put simply.** `negatives per epoch = (#positives) x k` instead of `(#users) x (#videos - positives)`
+says *"stop trying to teach the model about every video it did not watch; show it a handful and let
+statistics do the rest."* The framing matters because it converts an impossible sum into a
+tunable constant `k`, and `k` — not the architecture — is often what decides retrieval quality.
+
+| Symbol | What it is |
+|--------|------------|
+| `#videos` | ~1e9 candidates any user could have engaged with |
+| positives | Logged relevant pairs for a user — ~**100** on the earlier assumption |
+| unobserved | `#videos - positives` — the pairs the exhaustive WMF term would enumerate |
+| `k` | Negatives sampled per positive; typically a small single-digit-to-teens constant |
+| in-batch negatives | The free variant: other users' positives in the same minibatch |
+
+**Walk one example.** One user, then the whole corpus, at `k = 5`:
+
+```
+  per user:
+    unobserved (exhaustive)        = 1e9 - 100        = 9.99999900e+08
+    sampled     (k = 5)            = 100 x 5          = 500
+    reduction                      = 1.0e+09 / 500    = 2.00e+06     (2 million-fold)
+
+  across 1e9 users, per epoch:
+    exhaustive unobserved terms    = 1e9 x 1e9        = 1.0e+18
+    sampled negative terms         = 1e9 x 500        = 5.0e+11
+    reduction                      =                    2.00e+06
+```
+
+That 1.0e+18 is the same number as the matrix-cell count from 6.4.1, and for the same reason: the
+exhaustive unobserved term *is* the matrix. WALS can afford it only because the squared loss admits
+a closed form that folds all the `w0`-weighted zeros into a rank-`d` algebraic shortcut — it never
+loops over 1e18 entries either. SGD has no such trick, so the moment you leave squared loss (as the
+two-tower does, using binary cross-entropy) sampling stops being an optimization and becomes a
+requirement. This is the precise reason the SGD-vs-WALS row above reads "via negative sampling" for
+SGD and "handles the full unobserved set" for WALS: they are not two styles, they are one method
+that must approximate and one that gets the exact answer for free.
+
 **Why it solves cold start.** Because the user embedding is *computed from user features* by the
 tower, a **brand-new user** with zero interaction history still has demographics and context, so the
 user tower produces a usable embedding (imperfect, but far better than nothing). Symmetrically, a
@@ -487,6 +596,46 @@ than for most ML tasks, for structural reasons:
   slot — **position/selection bias**), so both training and offline evaluation are computed on
   systematically skewed labels.
 
+**The idea behind it.** `precision@k = (relevant in top k) / k` looks like it measures the model,
+but under logged data it actually computes `(relevant AND labelled in top k) / k` — which says
+*"what fraction of your picks did the incumbent system already show and the user already
+approved."* That framing matters because the gap between those two numerators is not noise; it is a
+systematic, one-directional penalty that grows with how *different* the new model is.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Size of the recommendation slate being scored — 10 here |
+| relevant | Items with a logged positive: shown by the incumbent **and** engaged with |
+| unlabelled | Items the incumbent never showed — scored as **not relevant** by default |
+| measured `p@k` | What the offline harness reports |
+| true `p@k` | What the user would actually have found relevant — unobservable offline |
+
+**Walk one example.** Model B proposes a slate of 10. Three carry logged positives, three carry
+logged negatives, and four were never shown by the incumbent so have no label at all:
+
+```
+  model B slate of 10:   3 logged positive
+                         3 logged negative
+                         4 never shown -> no label -> counted as NOT relevant
+
+  measured  p@10 = 3 / 10                    = 0.30
+  true      p@10 = between 3/10 and 7/10     = 0.30 to 0.70    <- a 0.40-wide blind spot
+
+  incumbent p@10 = 4 / 10                    = 0.40   (everything it picks is, by construction,
+                                                       something it also showed and labelled)
+
+  verdict offline:  B loses by 0.10.
+  verdict if the 4 unlabelled picks were good:  B wins by 0.30.
+```
+
+The asymmetry is the whole problem. The incumbent's slate has **no unlabelled items** — it can only
+recommend what it recommends, so its numerator is fully observed and its score is unbiased. Model
+B's numerator is censored, and censored downward only: an unlabelled item can lose B points but
+can never win it any. The measured 0.10 loss and the possible 0.30 win are separated by a band the
+offline harness structurally cannot see into, and the band widens exactly as B diverges from the
+incumbent. So the most valuable model — the one that surfaces things the current system never
+would — is the one offline evaluation punishes hardest.
+
 The consequence: a model can win on offline precision@k yet lose in production, or vice versa.
 **Online A/B testing is the only trustworthy verdict** — deploy to a small traffic slice and compare
 real engagement against the control. Offline metrics are for *filtering out clearly-worse candidates
@@ -556,6 +705,51 @@ deduplicates:
 
 Each source contributes candidates; their union (typically a few thousand) goes to ranking. Using
 multiple sources improves recall and provides graceful cold-start behavior.
+
+**What it means.** The funnel budget is `total_latency = Σ_stage (items at that stage) x (cost per
+item at that stage)`, which says *"you may spend a lot per item or look at a lot of items, but
+never both in the same stage."* That framing matters because it explains why the stages exist at
+all: each one buys a 1000x drop in item count to fund a 1000x rise in per-item cost.
+
+| Symbol | What it is |
+|--------|------------|
+| items | Candidates entering the stage: ~1e9 → ~1e3 → ~1e2 → tens |
+| cost per item | Retrieval is `d` multiply-adds; ranking is a full deep-net forward pass |
+| `d` | 64, from the MF/two-tower sizing above — each dot product is 64 multiply-adds |
+| ANN visit rate | Fraction of the index an approximate search actually touches (~0.1%) |
+| budget | The **200 ms** end-to-end requirement from 6.1 |
+
+**Walk one example.** Assume a serving node sustaining 1e11 multiply-adds/sec and a ranking model
+costing 10 microseconds per `<user, video>` pair (assumptions for scale; the ratios are the point):
+
+```
+  the thing you cannot do -- score the catalog with the ranking model:
+    1e9 candidates x 10 us  = 1.0e+04 s  = 2.78 hours
+    versus the 0.2 s budget = 50,000x over.  Not "slow" -- five orders of magnitude wrong.
+
+  the thing you cannot quite do either -- brute-force dot product over the catalog:
+    1e9 videos x d=64       = 6.40e+10 multiply-adds
+    at 1e11 MAC/s           = 0.640 s = 640 ms      -> still 3.2x over the 200 ms budget
+
+  the funnel that works:
+    stage                items      per-item work        latency
+    ANN retrieval        1e6 (0.1% of index) x 64 MAC     0.64 ms
+    ranking model        1e3         10 us each          10.00 ms
+    re-ranking           1e2         rules                1.00 ms
+                                                        --------
+                                             total       11.64 ms   (5.8% of 200 ms)
+```
+
+The middle line is the underrated one. Even the *cheap* scorer — a bare 64-dimension dot product,
+about the least work you can do per item — takes 640 ms across the catalog and blows the budget on
+its own. So the two-stage funnel is not sufficient by itself; the retrieval stage additionally
+needs **ANN** to avoid touching most of the index. Visiting 0.1% of 1e9 vectors is what turns 640 ms
+into 0.64 ms, and it is the reason "candidate generation" means *ANN over embeddings*, not *dot
+product over everything*.
+
+The final total, 11.64 ms, leaves ~94% of the budget for feature fetching, network hops, and the
+tail of the distribution — which is the actual reason production systems look over-provisioned here.
+The p50 is not the constraint; the p99, with a cold cache and a slow feature store, is.
 
 ### Ranking / scoring
 

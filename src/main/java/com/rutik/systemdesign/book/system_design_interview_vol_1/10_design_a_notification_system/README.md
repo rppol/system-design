@@ -106,6 +106,53 @@ why every channel gets its own queue and worker pool rather than a shared pipeli
 > can spike the push channel 100× for a few minutes, and that spike is exactly what the queues
 > absorb.
 
+**What the formula is telling you.** "Pick a user population, decide how often each user hears from
+you on each channel, and the daily totals — plus every QPS number under them — fall out
+mechanically."
+
+Every capacity number in this chapter is one multiplication chain: users × notifications per user
+per day, split per channel, divided by 86,400 s/day, then multiplied by a peak factor. Naming the
+assumption behind each multiplier is what makes the chain defensible in an interview.
+
+| Symbol | What it is |
+|--------|------------|
+| `DAU` | Daily active users the system may notify |
+| `n_c` | Notifications per user per day on channel `c` (push / SMS / email) |
+| `opt_c` | Fraction of users opted in to channel `c` — the assumption behind each split |
+| `dev` | Average push-capable devices per user; one user has many device tokens |
+| `86,400` | Seconds in a day — the divisor that turns per-day into per-second |
+| `P` | Peak-to-average factor; the burst the queues must absorb |
+
+**Walk one example.** Assumptions chosen so the chain reproduces the book's published totals:
+
+```
+DAU                              = 10,000,000 users
+push : opt = 1.00, n = 1.0 /day  = 10,000,000 x 1.00 x 1.0 = 10,000,000 push/day
+sms  : opt = 0.10, n = 1.0 /day  = 10,000,000 x 0.10 x 1.0 =  1,000,000 sms/day
+email: opt = 0.50, n = 1.0 /day  = 10,000,000 x 0.50 x 1.0 =  5,000,000 email/day
+                                                             ----------
+total                                                        16,000,000 notif/day
+
+average QPS = 16,000,000 notif/day / 86,400 s/day = 185.19 notif/s   (the book's ~185/sec)
+push QPS    = 10,000,000 push/day  / 86,400 s/day = 115.74 push/s
+
+device fan-out (dev = 1.4 devices/user):
+  10,000,000 push/day x 1.4 devices/user = 14,000,000 device sends/day
+  14,000,000 sends/day / 86,400 s/day    =    162.04 device sends/s
+
+steady peak P = 2x   : 185.19 notif/s x   2 =    370.37 notif/s
+news spike  P = 100x : 115.74 push/s  x 100 = 11,574.07 push/s   (push channel only)
+```
+
+Meaning: the average load is trivial (185/s), but the push channel must survive an 11,574/s burst
+lasting minutes — that gap between average and peak is the whole reason for the queues.
+
+**Why the device ratio and the peak factor both matter.** Drop `dev` and you under-provision APNs
+and FCM by 40 percent, because a "notification" is one logical message but N physical sends, one
+per device token. Drop `P` and you size the worker pools for 185/s, so the first broadcast fills
+the queues far faster than the workers drain them; a queue only absorbs a burst if somebody sized
+the drain rate against the burst rather than the average.
+
 ---
 
 ## 10.2 Step 2 — Propose High-Level Design and Get Buy-In
@@ -419,6 +466,38 @@ Caption: the dedup gate is what turns unavoidable at-least-once delivery into "e
 the event ID is the idempotency key, so a retried or re-queued event is recognized and dropped
 rather than delivered twice.
 
+**Put simply.** "The dedup gate is just a set of event IDs you have already sent, so its cost is
+IDs-per-day × bytes-per-ID × how long you keep them."
+
+Sizing it matters because "check whether this event ID was seen before" sounds expensive until you
+compute it — at this volume the whole dedup set is a single cache node, not a database.
+
+| Symbol | What it is |
+|--------|------------|
+| `E` | Events entering the system per day |
+| `b_id` | Bytes to store one event ID — 16 B for a UUID |
+| `b_ovh` | Per-key overhead of the store — roughly 50 B for a Redis key plus its TTL |
+| `W` | Dedup window in days: how far back a duplicate is still recognized |
+| `E x (b_id + b_ovh) x W` | Total memory the dedup set occupies |
+
+**Walk one example.**
+
+```
+E     = 16,000,000 events/day          (the chapter's total volume)
+entry = 16 B (event_id) + 50 B (store overhead) = 66 B/entry
+W     = 1 day
+
+memory = 16,000,000 entries x 66 B/entry = 1,056,000,000 B = 1.06 GB
+```
+
+Meaning: one commodity cache node holds a full day of dedup keys, so "effectively once" costs
+about a gigabyte of RAM — cheap enough that skipping dedup is never a capacity argument.
+
+**Why the window `W` exists.** If `W` is shorter than the longest retry chain, the original event
+ID has already expired by the time the retry arrives, the gate sees a "new" event, and the user
+gets the duplicate the gate existed to stop. Size `W` well above the worst-case retry span
+(31 s for five attempts — see the retry block below); a day of margin costs about a gigabyte.
+
 ### Additional components and considerations
 
 **Notification template.** A large system sends millions of near-identical notifications that share
@@ -453,6 +532,31 @@ channel, the notification is not sent** on that channel. This is the enforcement
 opt-out requirement from Step 1. (Some categories — OTPs, fraud alerts — may bypass opt-out as
 account-safety messages, but the default is: respect the setting.)
 
+**Stated plainly.** "One row per user per channel, so the settings table is users × channels × a
+handful of bytes — small enough to keep entirely in cache and check on every single send."
+
+This sizing is what licenses the design decision above. A settings check on the hot path is only
+acceptable if the settings never touch disk.
+
+| Symbol | What it is |
+|--------|------------|
+| `U` | Users who have notification settings |
+| `C` | Channels per user — push, SMS, email |
+| `b_row` | Bytes per row: 8 B `user_id` + 1 B `channel` + 1 B `opt_in` |
+| `U x C x b_row` | Raw size of the whole `notification_setting` table |
+
+**Walk one example.**
+
+```
+U     = 10,000,000 users
+C     =          3 channels/user
+rows  = 10,000,000 users x 3 channels/user = 30,000,000 rows
+bytes = 30,000,000 rows x 10 B/row = 300,000,000 B = 300 MB
+```
+
+Meaning: the entire opt-in state of the user base is 300 MB, so it lives in the same cache as
+device tokens and templates and the opt-out check adds a cache lookup, not a database round trip.
+
 **Rate limiting.** To avoid overwhelming users, we **limit the number of notifications a user can
 receive** in a given window. This matters because a user who gets bombarded will **turn
 notifications off entirely** — over-sending is self-defeating. The mechanism is the token-bucket /
@@ -461,12 +565,92 @@ cap, further notifications in the window are dropped or deferred. This is a *pro
 (protect the user) layered on top of the *provider* rate limits (stay under Twilio/APNs/SES
 quotas); both exist for different reasons.
 
+**Read it like this.** "Your required send rate divided by what one provider unit is allowed to do
+gives the number of phone numbers, connections, or workers you must run in parallel."
+
+The provider limit — not your own CPU — is what sets per-channel parallelism, and the two limits
+differ by three orders of magnitude across channels.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Your required send rate on a channel, in sends/s |
+| `r_p` | Throughput one provider unit sustains: 1 SMS/s per long code, ~1000/s per APNs socket |
+| `P` | Peak factor applied to `R` before dividing |
+| `ceil(R x P / r_p)` | Parallel units (numbers / connections / workers) required |
+
+**Walk one example.**
+
+```
+SMS channel:
+  R     = 1,000,000 sms/day / 86,400 s/day = 11.57 sms/s
+  r_p   = 1 sms/s per long code
+  units = ceil(11.57 / 1)                  = 12 long codes    (at average load)
+  units = ceil(11.57 x 2 / 1)              = 24 long codes    (at P = 2x)
+
+Push channel:
+  R     = 14,000,000 device sends/day / 86,400 s/day = 162.04 sends/s
+  r_p   = 1,000 sends/s per HTTP/2 connection
+  units = ceil(162.04 / 1,000)                       =  1 connection    (at average load)
+  units = ceil(162.04 x 100 / 1,000)                 = 17 connections   (at P = 100x)
+```
+
+Meaning: push carries 14x the SMS volume yet needs 17 sockets, while SMS needs 24 leased phone
+numbers — the same design cannot serve both, which is exactly why every channel gets its own queue
+and its own independently-sized worker pool.
+
+**What breaks without the per-provider divisor.** Size the SMS pool by your own throughput and the
+workers will happily push 100 sends/s at a long code rated for 1/s; the provider throttles or drops
+the excess, the workers see failures, and the retry loop re-sends the same traffic into the same
+wall. The provider limit must be enforced on your side, at the worker, before the call goes out.
+
 **Retry mechanism.** When a third-party service **fails to send** a notification, the failed
 notification is **added back to the message queue for retry.** Workers re-attempt delivery. If the
 same notification **keeps failing** after repeated retries, the system **alerts the developers** —
 persistent failure is an operational signal (a bad token, a provider outage, a misconfiguration),
 not something to retry forever silently. The retry loop plus the persisted log is what makes
 "never lose a notification" true even when providers are flaky.
+
+**In plain terms.** "Each retry waits twice as long as the one before it, so `n` attempts spread
+across a total wait of `b x (2^n - 1)` seconds — and when only a small fraction fails, all those
+retries add almost nothing to your send volume."
+
+Both halves matter in an interview: the first tells you how long a notification can be delayed
+before you give up, the second tells you how much extra provider load retries actually cost.
+
+| Symbol | What it is |
+|--------|------------|
+| `b` | Base delay before the first retry, in seconds |
+| `n` | Number of retry attempts before giving up and alerting |
+| `b x 2^i` | Delay before retry `i`, counting `i` from 0 |
+| `b x (2^n - 1)` | Total wall-clock wait across all `n` retries |
+| `p` | Per-attempt failure probability |
+| `p + p^2 + ... + p^n` | Extra sends per original notification caused by retrying |
+
+**Walk one example.**
+
+```
+Backoff, b = 1 s:
+  retry 1 waits  1 s     running total  1 s
+  retry 2 waits  2 s     running total  3 s
+  retry 3 waits  4 s     running total  7 s
+  retry 4 waits  8 s     running total 15 s
+  retry 5 waits 16 s     running total 31 s   = 1 s x (2^5 - 1) = 31 s
+
+Amplification, p = 0.01 (1% of sends fail) with n = 3 retries:
+  extra   = 0.01 + 0.0001 + 0.000001 = 0.010101  ->  1.0101% extra sends
+  total   = 1.010101 x original volume
+  on 16,000,000 notif/day -> 161,616 extra sends/day
+  still failing after all 4 attempts: p^4 = 1e-8 -> 0.16 notif/day
+```
+
+Meaning: a 1 percent failure rate costs only about 1 percent extra provider calls, so retries are
+nearly free insurance — and the roughly 0.16 notifications per day that survive four failures are
+few enough that alerting a developer on each one is reasonable rather than noisy.
+
+**Why `n` is capped at all.** Without a ceiling, a permanently-bad device token or a
+misconfigured API key retries forever, and each doomed notification occupies queue slots and worker
+time indefinitely. Capping `n` converts an infinite retry loop into a bounded 31-second delay plus
+one alert — which is precisely why the book pairs "keep failing" with "alert the developers."
 
 **Security in push notifications.** The notification-sending APIs must not be open to the world —
 otherwise anyone could spam your users. The book's mechanism: **appKey and appSecret.** Only
@@ -482,6 +666,34 @@ depth is thus the primary scaling signal: it tells you *exactly* which channel i
 (a long iOS queue vs a long SMS queue) and that the remedy is more workers on that channel. A
 steadily growing queue that you don't react to means growing delivery latency and, eventually,
 dropped notifications.
+
+**The idea behind it.** "Queue depth divided by the worker pool's combined drain rate is the
+delivery delay you have already signed up for."
+
+This is why depth alone is a bad alarm threshold: the same 700,000-event backlog is either an
+11-minute delay or a 1-minute delay depending entirely on how many workers are draining it.
+
+| Symbol | What it is |
+|--------|------------|
+| `D` | Events currently waiting in one channel's queue — the queue depth |
+| `W` | Number of workers assigned to that channel |
+| `s` | Sends per second one worker sustains against its provider |
+| `W x s` | Combined drain rate of the pool |
+| `D / (W x s)` | Seconds to clear the backlog once the inflow burst stops |
+
+**Walk one example.** The breaking-news spike from the scale section, hitting the push channel:
+
+```
+inflow = 11,574 push/s sustained for 60 s
+D      = 11,574 push/s x 60 s = 694,440 events queued
+
+W =  20 workers x 50 sends/s =  1,000 sends/s -> 694,440 /  1,000 = 694.44 s = 11.6 min
+W = 200 workers x 50 sends/s = 10,000 sends/s -> 694,440 / 10,000 =  69.44 s =  1.2 min
+```
+
+Meaning: the identical backlog is an 11.6-minute delivery delay at 20 workers and a 69-second
+delay at 200 — so "add more workers" is not a vague remedy, it is a direct, linear division of the
+delay, and the alert should fire on `D / (W x s)` rather than on `D`.
 
 **Events tracking.** Beyond delivering, the business wants to know how notifications *perform*:
 **open rate, click rate, and engagement** are core to understanding user behavior and measuring

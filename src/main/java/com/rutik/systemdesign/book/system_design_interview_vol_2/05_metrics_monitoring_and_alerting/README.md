@@ -116,6 +116,38 @@ row-per-insert relational database can sustain, which is the single most importa
 storage design. The book's headline is: **this is a write-heavy system, and writes are the hard
 part.**
 
+**What the formula is telling you.** "Series count is a *product* of fleet dimensions; write rate is
+that product *divided by* how often you sample each one." Series count and write rate are two
+different quantities, and confusing them is the most common estimation mistake in this interview —
+10M is how many *things* you track, not how many writes per second you take.
+
+| Symbol | What it is |
+|--------|------------|
+| pools x machines x metrics | The three fleet dimensions whose product is the distinct-series count |
+| 10,000,000 | Total distinct time series (the *cardinality* of the whole system) |
+| scrape interval | Seconds between successive samples of one series (10 s, or 1 s) |
+| writes/s | series count / scrape interval — the sustained append rate the TSDB must absorb |
+
+**Walk one example.** Push the fleet through both candidate scrape intervals:
+
+```
+  series count
+    pools                             1,000
+    x machines per pool                 100  ->      100,000 machines
+    x metrics per machine               100  ->   10,000,000 series
+
+  write rate = series / scrape interval
+    10 s interval   10,000,000 / 10   =   1,000,000 writes/s
+     1 s interval   10,000,000 /  1   =  10,000,000 writes/s
+
+  a 10x faster scrape costs 10x the write rate and 10x the raw bytes,
+  and buys nothing for a rule whose 'for:' duration is 5 minutes
+```
+
+Meaning: the scrape interval is a *pure multiplier* on both write load and storage. Ten-second
+scrapes buy an order of magnitude of headroom over one-second scrapes, which is why 10 s is the
+industry default — the alerting layer's `for: 5m` cannot use per-second detail anyway.
+
 ### Data retention and resolution — the rollup policy
 
 Storing 10M series at 1-second resolution for a full year is astronomically expensive and nobody
@@ -131,6 +163,36 @@ as it ages** — the retention/rollup ladder (reproduce exactly):
 This is **downsampling**: after 7 days, raw points are aggregated into 1-minute buckets; after 30
 days, into 1-hour buckets. It trades resolution for a massive reduction in stored volume, and it is
 the reason a year of history is affordable. (Mechanics and *who runs it* are in §5.3.)
+
+**Read it like this.** "Each rung of the ladder divides the point count by the ratio of the new
+bucket width to the old one — and because the coarse rungs cover the *long* time spans, almost all
+of the year's storage disappears." The compression factor of a rollup is not a subtle constant; it
+is just `new_bucket / old_bucket`, and the ladder is designed so the biggest divisor lands on the
+longest retention window.
+
+| Symbol | What it is |
+|--------|------------|
+| raw resolution | The scrape interval, 10 s — one point every 10 seconds per series |
+| bucket width | The span each rolled-up point summarizes (60 s, then 3,600 s) |
+| compression factor | new bucket width / old bucket width — how many fine points collapse into one |
+| points/series/day | 86,400 s per day divided by the bucket width at that rung |
+
+**Walk one example.** Take one series down all three rungs of the ladder:
+
+```
+  rung          bucket    compression vs previous   points/series/day
+  ----          ------    -----------------------   -----------------
+  raw            10 s     --  (baseline)                     8,640
+  1-minute       60 s     60 / 10   =    6x                  1,440
+  1-hour       3,600 s    3600 / 60 =   60x                     24
+
+  raw -> hourly overall:  3600 / 10 = 360x fewer points
+  8,640 / 24 = 360   (the same factor, seen from the point counts)
+```
+
+Meaning: a day of history costs 360 times less once it reaches the hourly rung. The ladder is a
+*storage budget*, not a fidelity policy — you keep expensive detail exactly as long as an incident
+investigation would plausibly want it (7 days) and no longer.
 
 ---
 
@@ -272,6 +334,51 @@ get a *cardinality explosion* — millions or billions of series, each needing i
 and storage stream. This is the classic TSDB outage: someone tags a metric with a unique
 per-request ID, cardinality explodes, memory blows up, and the TSDB falls over. **Rule: tags must
 be low-cardinality** (host, region, service, status_code) — never unbounded identifiers.
+
+**In plain terms.** "Labels do not add, they multiply — so the cost of one more label is not
+'+1 column', it is 'x the number of values that label can take'." This is the single most
+misunderstood fact about metrics systems, because a label *looks* like a column in a table, and
+columns are cheap. A label is not a column; it is a factor.
+
+| Symbol | What it is |
+|--------|------------|
+| cardinality | Number of distinct time series for a metric = the product over all its labels |
+| \|label\| | The number of distinct values one label can take (its domain size) |
+| product | cardinality = \|L1\| x \|L2\| x ... x \|Ln\| — every combination is its own stored series |
+| bounded label | A label whose domain is fixed and small (region, status_code) — safe to multiply by |
+| unbounded label | A label whose domain grows with traffic (user_id, request_id, raw url) — fatal |
+
+**Walk one example.** One metric, `http_requests_total`, gaining one label at a time:
+
+```
+  label added        domain     running cardinality        note
+  -----------        ------     -------------------        ----
+  (metric alone)          1                     1
+  + service              50                    50
+  + instance            200                10,000          50 x 200
+  + endpoint             40               400,000          10,000 x 40
+  + status                8             3,200,000          400,000 x 8
+  + region                5            16,000,000          3,200,000 x 5
+
+  16,000,000 series from ONE metric, on a system budgeted for 10,000,000 total
+    16,000,000 / 10,000,000 = 1.6x the entire fleet budget
+
+  now append one unbounded label:
+  + user_id       1,000,000    16,000,000,000,000        16 trillion series
+                                                          = 1,600,000x the budget
+```
+
+Meaning: five *perfectly reasonable, bounded* labels already overshoot the whole system's 10M-series
+budget by 1.6x — you do not need a rogue `user_id` to get into trouble, only five sensible labels
+whose domains happen to be large. The `user_id` line is the same multiplication continued one step
+further; it is a difference of degree, not of kind.
+
+**Why the multiplication is unavoidable.** A series key is the (name + full tag set), and the TSDB
+must keep an inverted-index entry and an open write stream per key. There is no way to store
+"service x instance" as a joint summary and answer `avg by (region)` later — the query needs the
+per-combination series to exist. That is why the only lever is *removing a label*, and why the fix
+for high-cardinality dimensions is to send them to a logging or tracing system instead, where the
+storage model is per-event rather than per-series.
 
 **The book's stance:** *do not build a TSDB from scratch in an interview.* Pick an existing one
 (InfluxDB / Prometheus / OpenTSDB) and be ready to explain *why* TSDBs beat general-purpose stores
@@ -545,6 +652,38 @@ xychart-beta
 Caption: delta-of-delta timestamps plus XOR value encoding shrink a 16-byte point to ~1.37 bytes —
 about a 12× win, and the entire reason a year of 10M series fits on affordable disk.
 
+**Put simply.** "A raw point is a timestamp plus a number, 16 bytes; compression throws away
+everything the *previous* point already told you, leaving about 1.37 bytes of genuinely new
+information." The compression ratio is not a magic constant — it is a direct measure of how
+redundant consecutive samples are, which is why *regular* scrape intervals and *slowly-changing*
+values compress best.
+
+| Symbol | What it is |
+|--------|------------|
+| 8 B timestamp | A full 64-bit Unix timestamp, stored verbatim only for the first point in a block |
+| 8 B value | A 64-bit float, stored verbatim only for the first point in a block |
+| 16 B/point | Raw uncompressed cost = 8 + 8 |
+| ~1.37 B/point | Gorilla's measured average after delta-of-delta timestamps + XOR values |
+| compression ratio | 16 / 1.37 — how many raw points fit in the space of one compressed one |
+
+**Walk one example.** Size one series' worth of a single day at the raw 10-second rung:
+
+```
+  points in one day at 10 s      86,400 / 10          =     8,640 points
+
+  uncompressed                   8,640 x 16 B         =   138,240 B  (~138 KB)
+  Gorilla-compressed             8,640 x 1.37 B       =    11,837 B  (~ 12 KB)
+
+  compression ratio              16 / 1.37            =      11.7x
+
+  across the whole fleet, one day of raw:
+    8,640 x 1.37 B x 10,000,000 series = 118,368,000,000 B  = ~118 GB/day
+```
+
+Meaning: ~118 GB of raw ingest per day compressed, versus ~1.4 TB uncompressed for the same day.
+The 11.7x factor is what turns "we cannot afford a week of raw data" into "a week of raw data is a
+sub-terabyte problem."
+
 #### Downsampling — the rollup jobs
 
 Downsampling implements the retention ladder from §5.1: as data ages, replace many fine-grained
@@ -571,6 +710,41 @@ every 10s   ─────►  avg/min/max per minute ─►  avg/min/max per h
 Caption: each rollup stage is a batch job that aggregates the finer series into coarser buckets;
 points-per-series-per-day collapses from millions to 24, which is what makes both storage and
 long-range queries affordable.
+
+**Stated plainly.** "The storage bill for a rung is bytes-per-point x points-per-series-per-day x
+days-at-that-rung x number-of-series — and the ladder exists so the term with the biggest
+*days* factor also has the smallest *points* factor." Every rung is the same four-way product; the
+only thing the ladder changes is which factor is large where.
+
+| Symbol | What it is |
+|--------|------------|
+| bytes/point | ~1.37 B after Gorilla compression, the same at every rung |
+| points/series/day | 8,640 raw, 1,440 at 1-minute, 24 at 1-hour |
+| days | How long that rung is retained: 7, 30, 365 |
+| series | 10,000,000 distinct time series across the fleet |
+| rung cost | bytes/point x points/series/day x days x series |
+
+**Walk one example.** Price all three rungs of the retention ladder for the full 10M-series fleet:
+
+```
+  rung        pts/day   days   bytes/pt   series        total
+  ----        -------   ----   --------   ------        -----
+  raw           8,640      7     1.37 B     10M        829 GB
+  1-minute      1,440     30     1.37 B     10M        592 GB
+  1-hour           24    365     1.37 B     10M        120 GB
+                                                     --------
+  full year of history, all three rungs                1.54 TB
+
+  compare: keep everything at raw resolution for a year (still compressed)
+    8,640 x 365 x 1.37 B x 10M              =         43.2 TB
+
+  ladder saving:  43.2 TB / 1.54 TB         =           28x
+```
+
+Meaning: the entire year of observability for a 100,000-machine fleet fits in about **1.5 TB** —
+a single commodity SSD. Note the shape of the result: the 7-day raw rung, covering under 2% of the
+year, is still the *largest* line item at 829 GB. Recent data dominates the bill, which is exactly
+why the 7-day boundary (not the 1-year one) is the number worth arguing about in a design review.
 
 #### Cold storage
 

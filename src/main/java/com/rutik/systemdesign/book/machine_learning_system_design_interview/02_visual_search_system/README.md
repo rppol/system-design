@@ -330,6 +330,44 @@ L = − log  ──────────────────────�
   negatives more uniformly. Typical values are small (e.g. 0.05–0.1). Temperature is the knob that
   controls how much the model focuses on hard negatives.
 
+**In plain terms.** "Of all the candidates the query could have been matched to, how much of the probability mass landed on the right one? Take the negative log of that share and push it down."
+
+The fraction inside the log is a softmax: the positive's exponentiated similarity over the sum across *all* candidates. So the loss falls either by raising the positive's similarity or by lowering the negatives' — the pull and the push are the same gradient, not two separate terms.
+
+| Symbol | What it is |
+|--------|------------|
+| `q` | The query (anchor) embedding |
+| `c₀ … c_{n-1}` | The candidate embeddings; `c₀` is the positive, the rest are negatives |
+| `s_i = sim(q, cᵢ)` | Similarity of the query to candidate i — dot product on L2-normalized vectors |
+| `τ` (temperature) | Divides every similarity before exponentiating; small τ sharpens, large τ flattens |
+| `exp(s_positive / τ)` | The numerator — the positive's unnormalized score |
+| `Σ_i exp(s_i / τ)` | The partition function over all n candidates; this is what the negatives control |
+| `− log(…)` | Zero when the positive owns all the mass, growing without bound as that share shrinks |
+
+**Walk one example.** One query, n = 4 candidates (1 positive, 3 negatives), similarities held fixed while only τ changes:
+
+```
+  similarities:  positive 0.90 | negatives 0.60, 0.40, 0.20
+
+  tau = 0.07  (sharp -- the typical setting)
+     exp(0.90/0.07) = 383,518        exp(0.60/0.07) = 5,278.7
+     exp(0.40/0.07) =     303.2      exp(0.20/0.07) =    17.4
+     Z = 389,117.6
+     p(positive) = 383,518 / 389,117.6      = 0.9856
+     loss = -log(0.9856)                    = 0.0145
+
+  tau = 0.50  (soft)
+     exp(0.90/0.5) = 6.050    exp(0.60/0.5) = 3.320
+     exp(0.40/0.5) = 2.226    exp(0.20/0.5) = 1.492
+     Z = 13.087
+     p(positive) = 6.050 / 13.087           = 0.4623
+     loss = -log(0.4623)                    = 0.7716
+```
+
+Identical embeddings, identical similarities — and the loss differs by 53x purely because of τ. At τ = 0.07 the hardest negative (0.60) still takes 1.4% of the mass and everything below it is rounded into irrelevance, so essentially all gradient flows toward separating the query from that one close negative. At τ = 0.5 the positive holds only 46% and the three negatives split the rest fairly evenly, so the model spends gradient pushing away a negative at similarity 0.20 that was never a threat. That is the concrete meaning of "small τ focuses on hard negatives."
+
+Note what happens without the denominator's negatives at all: with n = 1 the fraction is `exp(s₀/τ)/exp(s₀/τ) = 1` and the loss is `-log(1) = 0` for *any* embedding. The loss would be satisfied instantly and the encoder could collapse every image to one point. The negatives are not a refinement — they are the only thing preventing the trivial solution.
+
 The book mentions temperature briefly; the practical takeaway is that it materially affects the
 geometry of the learned space and is worth tuning.
 
@@ -371,6 +409,40 @@ that query) or hand-labeled. The book walks the standard family:
   degenerates and offers little over mAP, and manufacturing graded labels for image similarity is
   expensive and subjective. So nDCG's headline advantage (graded relevance) doesn't apply, making
   mAP/recall@k the more honest choices.
+
+**Stated plainly.** "Precision@k asks how clean the page is, recall@k asks how much of the good stuff you found, and mAP asks whether the good stuff was near the top — the same retrieval graded three different ways."
+
+Only mAP is sensitive to *ordering within* the top-k, which is why it is the book's pick: two result pages with identical precision@10 can differ sharply in mAP, and the user experiences that difference immediately.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | The cutoff depth — how many results the page actually shows |
+| Relevant in top-k | Count of returned images a human (or the interaction log) calls visually similar |
+| `precision@k` | `(relevant in top-k) / k` — page cleanliness, blind to order |
+| `recall@k` | `(relevant in top-k) / (total relevant)` — coverage, needs the complete relevant set |
+| Precision at a hit | Running precision measured *only* at the ranks where a relevant image sits |
+| `AP` | Mean of those hit-precisions divided by **total relevant** — mAP is AP averaged over queries |
+
+**Walk one example.** One query image, 10 returned results, 5 genuinely similar images exist in the corpus, and 4 of them were returned at ranks 1, 3, 4, and 7:
+
+```
+  rank    1    2    3    4    5    6    7    8    9   10
+  rel     1    0    1    1    0    0    1    0    0    0
+
+  precision@5 = 3 relevant in top 5 / 5        = 0.60
+  recall@5    = 3 relevant in top 5 / 5 total  = 0.60
+
+  AP: precision measured AT each relevant hit
+       rank 1 -> 1/1 = 1.0000
+       rank 3 -> 2/3 = 0.6667
+       rank 4 -> 3/4 = 0.7500
+       rank 7 -> 4/7 = 0.5714
+       AP = (1.0000 + 0.6667 + 0.7500 + 0.5714) / 5   = 0.598
+```
+
+The divisor is 5, the total number of similar images that exist, not the 4 that came back — so the one never retrieved costs AP directly. And note why `precision@5` and `recall@5` coincide at 0.60 here: it is arithmetic coincidence (`k = 5` happens to equal the relevant-set size), not a property. Move the cutoff to k = 10 and they separate immediately to 0.40 and 0.80.
+
+This example also shows nDCG's problem concretely. With binary labels every `rel_i` is 1 or 0, so DCG becomes a fixed sum of `1/log2(i+1)` over whichever ranks happened to hit — there are no relevance *grades* for the logarithm to weight differently, and the metric degenerates into a smoother restatement of what AP already told you. nDCG earns its keep only when a label can be 3 rather than 1.
 
 **The book's practical picks:** mAP and recall@k (with precision@k and MRR as secondary), and it
 explicitly notes nDCG is a poor fit given binary relevance.
@@ -481,6 +553,33 @@ Compare the query to **every** point and keep the k smallest distances.
   and latency doesn't matter (offline batch). Exact search is the correctness baseline ANN is
   measured against.
 
+**What this actually says.** "One query costs you one multiply-add for every dimension of every image in the catalog — so the price of a search is the size of your catalog, multiplied."
+
+The formula has no constant to tune and no clever implementation hiding in it. `O(N·D)` means the work scales linearly with corpus size, which is the one thing that grows without bound in this product.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of indexed image embeddings — 2 x 10¹¹ here |
+| `D` | Embedding dimensionality — 256 floats per image |
+| `N · D` | Multiply-adds for one query: every dimension of every point touched exactly once |
+| Throughput | Multiply-adds per second the hardware sustains — assumed 10⁹ (1 GFLOP/s) |
+| `N · D / throughput` | Wall-clock seconds for a single query |
+
+**Walk one example.** The chapter's own numbers, pushed all the way to a wall-clock figure:
+
+```
+  N x D  = 2e11 x 256           = 5.12e13 multiply-adds per query
+
+  at 1e9 ops/sec:
+     5.12e13 / 1e9              = 51,200 seconds
+     51,200 / 3,600             = 14.2 hours   PER SINGLE QUERY
+
+  the budget was tens of milliseconds, call it 0.05 s:
+     51,200 / 0.05              = 1,024,000x too slow
+```
+
+Both figures in the text check out exactly: `5.12e13` rounds to the stated ~5x10¹³, and `14.2` hours matches the stated ~14 hours. The gap to the latency budget is six orders of magnitude, which is the real point — this is not a problem you optimize your way out of with better SIMD or more cores. Even a 1,000-machine cluster leaves you 1,000x short. The only move that closes a millionfold gap is *not looking at most of the points*, which is the definition of ANN.
+
 The only way to hit tens-of-milliseconds at 200B is to **not look at most of the points** — i.e.
 **approximate nearest neighbor (ANN)**, which trades a small amount of recall (you might miss a few
 true neighbors) for a massive speedup. The three ANN families the book covers:
@@ -530,6 +629,34 @@ high probability** and far points collide rarely.
   (more chances to co-hash with a true neighbor) at the cost of memory and query time; more bits per
   bucket (**m**) ↓ candidate-set size (more selective buckets) but ↑ the chance of missing a
   neighbor. Tuning `(m, L)` trades recall against speed.
+**Read it like this.** "Ask a random yes/no question about which side of a line a vector falls on. Two vectors at a small angle almost always answer the same way; two at a wide angle answer the same way about half the time."
+
+The bit `h(v) = sign(r · v)` is a coin flip biased by geometry. For a random hyperplane, the probability two vectors land on the same side is exactly `1 − θ/π` where θ is the angle between them. Everything about LSH tuning follows from raising that single probability to the power `m` and then giving yourself `L` independent attempts.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | A random vector defining a hyperplane through the origin |
+| `h(v) = sign(r · v)` | One bit: which side of that hyperplane `v` sits on |
+| `θ` | Angle between two embeddings — small θ means visually similar |
+| `1 − θ/180°` | Probability the two agree on **one** random bit |
+| `m` | Bits concatenated into a bucket code. Agreement on all m has probability `(1 − θ/180)^m` |
+| `L` | Independent tables. Probability of co-hashing in **at least one** is `1 − (1 − p^m)^L` |
+
+**Walk one example.** `m = 8` bits per bucket, `L = 10` tables, three candidate pairs at different angles:
+
+```
+  angle    p per bit = 1 - deg/180    p^8 (one table)    1 - (1-p^8)^10  (any of 10)
+  ------   ---------------------      ---------------    ---------------------------
+   15 deg  1 - 15/180  = 0.9167           0.4985              0.9990    near-certain
+   30 deg  1 - 30/180  = 0.8333           0.2326              0.9291    very likely
+   90 deg  1 - 90/180  = 0.5000           0.0039              0.0384    almost never
+
+  A true 15-degree neighbour is retrieved 999 times in 1,000.
+  An orthogonal, irrelevant image sneaks into the candidate set 4 times in 100.
+```
+
+The separation between 0.9990 and 0.0384 *is* the index. Note it comes from two opposing knobs: `m` is the selectivity lever — raising it to 16 bits drops even the 30-degree pair to 0.054 per table, shrinking candidate sets but losing genuine neighbours — while `L` is the recovery lever, buying back recall by giving each neighbour ten independent chances. Raising `m` alone makes the index fast and blind; raising `L` alone makes it accurate and enormous, since every table is a full copy of the pointer set. Tuning LSH always means moving both.
+
 - **Strengths / weaknesses.** ✓ Cheap inserts (just hash and append — great for high-churn corpora),
   sublinear query, strong theory. ✗ Often needs many tables (memory heavy) to reach high recall, and
   tends to be beaten on the recall-per-byte and recall-per-millisecond frontier by IVF and graph
@@ -583,6 +710,64 @@ the **inverted-file (IVF)** approach and the workhorse behind FAISS/ScaNN at bil
   k ≈ √N and small nprobe, that's ~O(√N), the big win. Downside: building requires training k-means
   (expensive), and inserts can unbalance clusters, so the index needs **periodic retraining/rebuild**
   as the distribution drifts.
+
+**The idea behind it.** "Pay a fixed toll to find out roughly where the query lives, then only pay for the handful of neighbourhoods you decided to walk down."
+
+The two terms are a genuine tradeoff against each other, not a sum of overheads. Make `k` large and the toll `k` grows while each cell `N/k` shrinks; make `k` small and the reverse. Minimizing `k + (N/k)·nprobe` is what puts `k` near `√N`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Corpus size — 2 x 10¹¹ embeddings |
+| `k` | Number of k-means centroids (cells). The "coarse quantizer" |
+| `k` (first term) | Cost of comparing the query to every centroid — the unavoidable toll |
+| `N / k` | Average points per cell, assuming balanced clusters |
+| `nprobe` | How many nearest cells you actually scan — the recall dial |
+| `(N/k) · nprobe` | Cost of exhaustively scanning those cells |
+
+**Walk one example.** `N = 2 x 10¹¹`, `k = √N ≈ 447,214` centroids:
+
+```
+  points per cell = 2e11 / 447,214           = 447,213
+
+  nprobe = 1:  447,214  +  447,213 x 1       =     894,427 distance computations
+               vs exact 5.12e13 multiply-adds -> the point count drops 223,607x
+
+  nprobe = 8:  447,214  +  447,213 x 8       =   4,024,920 distance computations
+               -> still a 49,690x reduction versus scanning all 2e11 points
+
+  Raising nprobe 1 -> 8 costs 4.5x the work and buys back the recall
+  lost to the cell-boundary problem.
+```
+
+Two things are worth naming out loud. First, the toll dominates at `nprobe = 1`: half the work (447,214 of 894,427) is spent just locating the query, which is why pushing `k` much higher stops paying. Second, going from 1 to 8 probes multiplies work by only 4.5x rather than 8x, precisely because that fixed toll is already paid — the *marginal* probe is cheap, which is the arithmetic reason "ship with nprobe = 1" is such a bad default.
+
+**What the formula is telling you.** "Stop storing 256 real numbers per image. Store a handful of bytes that each name one entry in a small learned dictionary, and reconstruct approximately when asked."
+
+PQ attacks a different bottleneck than IVF. IVF reduces *how many* vectors you touch; PQ reduces *how many bytes each vector costs*. At 200B vectors the index is RAM-bound before it is compute-bound, so you need both.
+
+| Symbol | What it is |
+|--------|------------|
+| `D` | Original dimensionality — 256 |
+| float32 | 4 bytes per dimension, the uncompressed baseline |
+| `M` | Number of sub-vectors the D dims are split into — 32 or 64 here |
+| Codebook | 256 learned centroids per sub-vector, so each sub-vector's id fits in exactly 1 byte |
+| Code size | `M` bytes total — one byte per sub-vector, independent of D |
+| Compression | `D x 4 / M` — the source of the stated 16–32x |
+
+**Walk one example.** The chapter's 256-D float32 vector, at both ends of the stated range:
+
+```
+  raw:        256 dims x 4 bytes            = 1,024 bytes per vector
+
+  M = 32:     32 sub-vectors x 1 byte       =    32 bytes    1,024 / 32 = 32x
+  M = 64:     64 sub-vectors x 1 byte       =    64 bytes    1,024 / 64 = 16x
+
+  Across the full 200B corpus:
+     raw     2e11 x 1,024 bytes             = 204.8 TB   -- not a RAM budget
+     M = 32  2e11 x    32 bytes             =   6.4 TB   -- a large cluster, but real
+```
+
+Both endpoints of the book's "16–32x" claim verify exactly. The 204.8 TB figure is the one that makes the design argument by itself: no cluster holds that in memory, so an uncompressed 200B index is not a slow design, it is an impossible one. Compressing to 6.4 TB turns it into a sharding problem. The cost is a second, independent layer of approximation — IVF may skip the cell holding the true neighbour, and PQ may mis-rank the neighbours inside the cell it does scan, which is why production IVF-PQ systems re-rank the final shortlist against full-precision vectors fetched from disk.
 
 ```
 IVF search: k-means cells + nprobe

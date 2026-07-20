@@ -289,6 +289,38 @@ request, because a request may have to **wait for a batch to fill** before it's 
 production, an individual user's latency often matters more than aggregate throughput, so you
 can't just batch everything.
 
+**What this actually says.** "Throughput counts requests finished per second across the whole
+server; latency counts seconds endured by one waiting human — and batching buys the first by
+spending the second." The two are not two views of the same number; they are measured from
+opposite ends of the system, which is why an improvement in one can be a regression in the other.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Batch size — how many requests the server groups into one forward pass |
+| `t_wait` | How long an arriving request sits waiting for the batch to fill before work starts |
+| `t_proc` | Time to run the forward pass on the whole batch of `B` |
+| `latency = t_wait + t_proc` | What one user experiences: their wait plus the batch's compute |
+| `throughput = B / t_proc` | Requests finished per second once the pipeline is saturated |
+
+**Walk one example.** Illustrative GPU numbers showing the shape of the trade (the book states the
+tension; these are worked figures for it):
+
+```
+  B    t_wait   t_proc    latency = wait + proc     throughput = B / t_proc
+  ---------------------------------------------------------------------------
+   1     0 ms    20 ms      0 + 20  =  20 ms         1 / 0.020 =   50 req/s
+   8    15 ms    32 ms     15 + 32  =  47 ms         8 / 0.032 =  250 req/s
+  32    60 ms    60 ms     60 + 60  = 120 ms        32 / 0.060 =  533 req/s
+
+  going from B = 1 to B = 32:  throughput 50 -> 533 req/s   = 10.7x better
+                               latency    20 -> 120 ms      =  6.0x worse
+```
+
+Note where B = 32 lands: 120 ms, past the ~100 ms "feels instant" threshold below. The batch
+size is not a tuning detail, it is the knob that decides whether you buy hardware or buy user
+patience, and the latency SLA is what caps it. This is exactly why the research default (maximize
+throughput, batch as large as memory allows) is the wrong default in the request path.
+
 **Latency is a distribution, not a single number — use percentiles.** Huyen stresses that you
 should **never report just the average latency.** Latency is a distribution with a long tail,
 and one slow request can wreck the experience even if the mean looks fine. Report **percentiles**:
@@ -305,6 +337,41 @@ Worked intuition on why the average lies: given latencies `100ms, 102ms, 100ms, 
 request*. The median (~100ms) describes the typical experience, and the p90/p100 (3000ms)
 exposes the real problem: one pathological request. Optimize the tail (p90/p95/p99), not the
 average.
+
+**Put simply.** "The mean adds every request together and divides, so one 3-second outlier gets
+spread across all ten and contaminates the summary; a percentile *sorts* and *points*, so no
+request can distort any other." That is the whole reason percentiles survive outliers and means
+do not.
+
+| Symbol | What it is |
+|--------|------------|
+| `mean` | Sum of all latencies divided by the count. Every value influences it |
+| `p50` (median) | The middle value of the sorted list. Half of requests are faster |
+| `pN` | The value at rank `ceil(N/100 x count)` in the sorted list — a position, not an average |
+| `p99` | The threshold 99% of requests beat. The 1% above it are your worst experiences |
+| `p100` | The maximum — the single worst request observed |
+
+**Walk one example.** The book's own ten latencies, sorted first (sorting is the whole trick):
+
+```
+  raw:     100, 102, 100, 100, 99, 104, 110, 90, 3000, 95
+  sorted:   90,  95,  99, 100, 100, 100, 102, 104, 110, 3000
+             1    2    3    4    5    6    7    8    9    10   <- rank
+
+  mean = 3900 / 10                       = 390 ms   <- describes no request in the list
+  mean with the 3000 ms removed          = 100 ms   <- one sample moved the mean by 290 ms
+
+  p50  -> rank ceil(0.50 x 10) =  5      = 100 ms   <- the typical experience
+  p90  -> rank ceil(0.90 x 10) =  9      = 110 ms
+  p95  -> rank ceil(0.95 x 10) = 10      = 3000 ms  <- the tail appears here
+  p100 -> rank 10                        = 3000 ms
+```
+
+The second line is the punchline: deleting one of ten samples moves the mean from 390 ms to
+100 ms, but moves the median not at all. A summary statistic that a single request can swing by
+290 ms cannot be used to run a service. Note also that with only ten samples the tail is coarse —
+p95 and p100 are the same request — which is why tail percentiles need thousands of samples per
+window to mean anything.
 
 **The concrete latency numbers the book cites.** Production latency isn't a nicety — small
 delays cost real money and users, which is why latency, not throughput, is the production
@@ -449,6 +516,36 @@ problems traditional apps don't have:
   a server — is increasingly desired (for latency, privacy, offline use), but the device has
   tight memory and compute limits, so the model must be **compressed** to fit. Getting a
   gigabyte-scale model onto a phone is an ML-specific engineering problem with no SWE precedent.
+
+**Stated plainly.** "A model's disk and memory footprint is just parameter count times bytes per
+parameter, so the only two levers you have are fewer parameters or smaller numbers." Knowing this
+one product is why 'compress the model' is a concrete engineering task rather than a wish.
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | Parameter count — hundreds of millions to billions for modern models |
+| `bytes/param` | 4 for fp32, 2 for fp16, 1 for int8 — the numeric precision the weights are stored in |
+| `P x bytes/param` | Weight memory. This is the floor; activations and the runtime sit on top |
+| quantization | Cutting bytes/param (fp32 -> int8), which shrinks the model 4x without dropping any weight |
+
+**Walk one example.** The chapter's stated size range, priced in memory:
+
+```
+  P               fp32 (4 B)    fp16 (2 B)    int8 (1 B)
+  ---------------------------------------------------------
+  300,000,000       1.2 GB        0.6 GB        0.3 GB
+  1,000,000,000     4.0 GB        2.0 GB        1.0 GB
+  7,000,000,000    28.0 GB       14.0 GB        7.0 GB
+
+  A 1B-parameter model at fp32 is 4.0 GB -- larger than the entire RAM budget of many
+  phones, before the OS, the app, and activations. Quantized to int8 it is 1.0 GB:
+  the same 1,000,000,000 weights, stored in a quarter of the space.
+```
+
+That 4x from quantization is free of any architecture change — you did not remove a single weight,
+you only stopped spending 32 bits to describe each one. Pruning and distillation attack the other
+factor (`P` itself) and compose with it, which is how a server-scale model ends up running on a
+handset at all.
 
 ### The monitoring implication
 

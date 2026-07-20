@@ -320,6 +320,38 @@ Models eat numbers, so categoricals must be encoded:
   places similar categories near each other. This is the workhorse encoding for every
   large-scale chapter in the book.
 
+**Put simply.** "One-hot ties the width of every input row to how many distinct categories exist; an embedding cuts that cord and fixes the width at a number you choose."
+
+One-hot width `= cardinality C`. Embedding width `= d`, chosen independently of `C`. That single decoupling is what makes million-ID features trainable at all, and it is worth doing the arithmetic out loud in an interview rather than asserting "one-hot doesn't scale."
+
+| Symbol | What it is |
+|--------|------------|
+| `C` | Cardinality — how many distinct values the categorical feature can take |
+| `d` | Embedding dimension — a hyperparameter you pick (commonly 32 or 64), independent of `C` |
+| One-hot row width | `C` floats, exactly one of them non-zero |
+| Embedding row width | `d` floats, all of them informative |
+| Embedding table size | `C x d` parameters — the cost moves from the *row* to a shared *table* |
+
+**Walk one example.** A `video_id` feature on a catalog of 10,000,000 videos, `d = 32`, float32 (4 bytes):
+
+```
+  One-hot, per input row:
+     width      = C                       = 10,000,000 floats
+     dense size = 10,000,000 x 4 bytes    = 40 MB      <- for ONE feature of ONE row
+     signal     = 1 non-zero out of 10M   = 0.00001% of the bytes carry information
+
+  Embedding, per input row:
+     width      = d                       = 32 floats
+     size       = 32 x 4 bytes            = 128 bytes
+
+  Row-width ratio: 10,000,000 / 32        = 312,500x narrower
+
+  The table you pay for once, not per row:
+     10,000,000 x 32 x 4 bytes            = 1.28 GB, shared across every row and every batch
+```
+
+A 40 MB row versus a 128-byte row is the difference between "cannot form a minibatch" and "routine." Note where the cost went: it did not vanish, it moved into a single 1.28 GB table amortized over the whole dataset, and that table is *learned* — similar videos end up near each other, which a one-hot row can never express because every pair of one-hot vectors is exactly equidistant.
+
 ### Privacy and bias in the data
 
 Collected data can carry bias (over-representing some groups, encoding historical
@@ -450,9 +482,69 @@ Built on the **confusion matrix** (TP, FP, TN, FN):
 | **ROC-AUC** | area under TPR-vs-FPR curve | Ranking quality across all thresholds; 0.5 = random, 1.0 = perfect |
 | **PR-AUC** | area under precision-vs-recall curve | Better than ROC-AUC under heavy class imbalance |
 
+**In plain terms.** "Every one of these metrics is the same four counts (TP, FP, TN, FN) divided differently — the only question is which denominator you put underneath the hits."
+
+Accuracy divides by *everything*, precision divides by *what you flagged*, recall divides by *what was actually there*. Choosing a metric is choosing whose mistakes you refuse to hide.
+
+| Symbol | What it is |
+|--------|------------|
+| `TP` | Predicted positive and truly positive — a correct catch |
+| `FP` | Predicted positive but truly negative — a false alarm |
+| `FN` | Predicted negative but truly positive — a miss |
+| `TN` | Predicted negative and truly negative — a correct pass |
+| `TP + FP` | Everything the model flagged. Precision's denominator |
+| `TP + FN` | Everything that was actually positive. Recall's denominator |
+| `2 · P · R / (P + R)` | Harmonic mean — collapses to the *worse* of the two, not the average |
+
+**Walk one example.** A fraud model on 10,000 transactions where 100 are truly fraud (1%):
+
+```
+                       Actual FRAUD (100)   Actual CLEAN (9,900)
+  Predicted FRAUD           TP = 60             FP = 20        -> flagged 80
+  Predicted CLEAN           FN = 40             TN = 9,880
+
+  Accuracy  = (60 + 9,880) / 10,000    = 0.994    <- looks superb
+  Precision = 60 / (60 + 20) = 60/80   = 0.75     <- 3 of 4 flags were real
+  Recall    = 60 / (60 + 40) = 60/100  = 0.60     <- but 40 frauds walked free
+  F1        = 2 x 0.75 x 0.60 / 1.35   = 0.667    <- the honest single number
+```
+
+Note the arithmetic mean of 0.75 and 0.60 would be 0.675; the harmonic mean gives 0.667 instead. The gap is small here because the two are close — but if recall collapsed to 0.05, the arithmetic mean would still read 0.40 while F1 would read 0.094. That refusal to be rescued by one strong half is the entire reason F1 uses a harmonic mean.
+
 The precision/recall tradeoff is set by the decision threshold; the **F1** collapses the
 tradeoff into a single comparable number, and the **PR curve** is the honest picture when
 positives are rare.
+
+**Read it like this.** "Under heavy imbalance, ROC-AUC grades you against an ocean of easy negatives, so it stays flattering; PR-AUC grades you against the rare positives you actually care about."
+
+The difference is one denominator. ROC plots recall against the **false positive rate** `FP/(FP+TN)`, and `TN` is enormous when positives are 1%. PR plots recall against **precision** `TP/(TP+FP)`, which has no `TN` in it at all and therefore cannot be inflated by the majority class.
+
+| Symbol | What it is |
+|--------|------------|
+| `TPR` (recall) | `TP / (TP + FN)` — the y-axis of both curves |
+| `FPR` | `FP / (FP + TN)` — ROC's x-axis; `TN` dominates it under imbalance |
+| `Precision` | `TP / (TP + FP)` — PR's x-axis; contains no `TN`, so imbalance can't hide in it |
+| `ROC-AUC` | Area under TPR-vs-FPR. 0.5 = random ranking, 1.0 = perfect |
+| `PR-AUC` | Area under precision-vs-recall. Baseline is the positive rate itself, not 0.5 |
+
+**Walk one example.** The same 10,000 transactions, contrasting the useless "always negative" model with the real one:
+
+```
+  Model A: always predict CLEAN
+     TP = 0, FP = 0, FN = 100, TN = 9,900
+     Accuracy = 9,900 / 10,000 = 0.99      <- the 99% trap from the pitfalls list
+     Recall   = 0 / 100        = 0.00      <- catches nothing at all
+
+  Model B: the real model above (TP 60, FP 20, FN 40, TN 9,880)
+     FPR       = 20 / (20 + 9,880) = 20 / 9,900 = 0.0020
+     Precision = 20 wasted flags out of 80        = 0.75
+
+  Same 20 false positives, two readings:
+     as FPR       -> 0.0020   "essentially zero error"   (9,880 TNs drown it)
+     as precision -> 0.75     "1 in 4 flags is wrong"    (no TNs to hide behind)
+```
+
+Twenty false alarms move the ROC x-axis by two-tenths of one percent and the PR x-axis by twenty-five percent. That is why a 0.99-accuracy, 0.97-ROC-AUC fraud model can still be unshippable, and why the book insists on PR-AUC whenever positives are rare.
 
 ### Offline metrics — regression
 
@@ -479,6 +571,51 @@ Two formulas the book leans on:
   ordering) — so nDCG ∈ [0, 1], with 1 = ideal ranking.
 - `MRR = (1/Q) · Σ_q 1/rank_q`, where `rank_q` is the position of the first relevant
   result for query q.
+
+**What it means.** "Score the list, not the set — a relevant item at rank 1 is worth more than the same item at rank 7, and each metric encodes a different opinion about *how much* more."
+
+Precision@k and recall@k ignore order inside the cutoff entirely; MRR only looks at the first hit; AP averages precision at every hit; nDCG applies a smooth logarithmic discount. Pick the one whose opinion matches your product.
+
+| Symbol | What it is |
+|--------|------------|
+| `rel_i` | Relevance of the result at rank `i` — 1/0 for binary, a grade (0–3) for nDCG |
+| `k` | The cutoff — how deep into the list the user realistically looks |
+| `rank_q` | Position of the **first** relevant result for query q; MRR uses only this |
+| `1 / log2(i + 1)` | The DCG position discount. Rank 1 keeps 1.00, rank 3 keeps 0.50, rank 7 keeps 0.33 |
+| `IDCG` | DCG of the perfect ordering (all relevant items packed at the top) — the normalizer |
+| `AP` | Mean of the precisions measured *at each relevant hit*, divided by total relevant |
+
+**Walk one example.** One query, 10 returned results, 4 relevant items exist in total, and 3 of them landed at ranks 2, 3, and 7:
+
+```
+  rank    1    2    3    4    5    6    7    8    9   10
+  rel     0    1    1    0    0    0    1    0    0    0
+
+  precision@5 = 2 relevant in top 5 / 5        = 0.40
+  recall@5    = 2 relevant in top 5 / 4 total  = 0.50
+  precision@10 = 3 / 10                        = 0.30
+  recall@10    = 3 / 4                         = 0.75   <- one relevant item never returned
+
+  MRR (this query): first hit at rank 2  ->  1/2         = 0.50
+
+  AP: precision measured AT each hit, then averaged over the 4 relevant
+       hit at rank 2 -> 1/2 = 0.5000
+       hit at rank 3 -> 2/3 = 0.6667
+       hit at rank 7 -> 3/7 = 0.4286
+       AP = (0.5000 + 0.6667 + 0.4286) / 4    = 0.399
+                                        ^ divide by 4, not 3 -- the miss costs you
+
+  nDCG@10:
+       DCG  = 1/log2(3) + 1/log2(4) + 1/log2(8)
+            = 0.6309    + 0.5000    + 0.3333        = 1.4643
+       IDCG = ranks 1..4 all relevant
+            = 1.0000 + 0.6309 + 0.5000 + 0.4307     = 2.5616
+       nDCG = 1.4643 / 2.5616                       = 0.572
+```
+
+Read the four numbers side by side: recall@10 says 0.75 (we found most of them), MRR says 0.50 (a good result was near the top), AP says 0.399 (the ordering was mediocre), nDCG says 0.572. They disagree because they are asking different questions, which is exactly why quoting one ranking metric without naming the product question behind it is a red flag.
+
+Note the divisor in AP. It is the **total** number of relevant items (4), not the number found (3), so an item the system never returns silently drags AP down — the same way the missing recall band drags AP down in the detection chapter's worked example. Divide by 3 instead and AP jumps to 0.532, flattering a system that lost a quarter of the answers.
 
 The choice among these is a recurring interview micro-decision: MRR when there's one
 relevant item, mAP when relevance is binary but there can be several, nDCG when relevance
@@ -550,6 +687,30 @@ tight cloud latency budgets):
   smaller model.
 - **Quantization** — store and compute weights in lower precision (fp32 → fp16 or int8);
   shrinks the model ~2–4× and speeds inference, with a small accuracy cost.
+
+**Stated plainly.** "The 2–4x is not a heuristic — it is literally the ratio of bytes per weight before and after, because the parameter *count* never changes."
+
+Quantization is the one compression technique with no modelling judgement in its size math: distillation and pruning change how many parameters exist, quantization changes only how wide each one is. That is why the factor is exact and quotable.
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | Number of parameters — identical before and after quantization |
+| fp32 | 32-bit float, 4 bytes per weight — the training default |
+| fp16 | 16-bit float, 2 bytes per weight — half the bytes, still floating point |
+| int8 | 8-bit integer, 1 byte per weight — needs a scale/zero-point per tensor |
+| Compression factor | `bytes_before / bytes_after` = `4/2` or `4/1` — where the "2–4x" comes from |
+
+**Walk one example.** A 100-million-parameter model, weights only:
+
+```
+  fp32:  100,000,000 x 4 bytes  = 400 MB     baseline
+  fp16:  100,000,000 x 2 bytes  = 200 MB     400 / 200 = 2x
+  int8:  100,000,000 x 1 byte   = 100 MB     400 / 100 = 4x
+
+  P is unchanged at 100,000,000 in all three rows -- only the byte width moved.
+```
+
+That is the whole "~2–4x" claim: 2x at the fp16 end, 4x at the int8 end, and nothing in the range depends on the architecture. The accuracy cost is not symmetric with the size win, though — fp16 is usually near-free because the *range* of a float is preserved and only mantissa precision is lost, while int8 must squeeze an unbounded float range into 256 levels via a learned or calibrated scale, which is where the "small accuracy cost" actually gets spent. This is also why the speedup often exceeds the size ratio: int8 arithmetic units process more values per cycle and move fewer bytes through the memory hierarchy, and on a memory-bound model bandwidth is the real bottleneck, not FLOPs.
 
 ### Testing in production
 

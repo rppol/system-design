@@ -93,6 +93,47 @@ Some things break without it:
   PACELC framing: *if Partition then C-or-A, Else Latency-or-Consistency*). Most systems choose to
   drop linearizability for performance, not just for availability.
 
+### Decoding what linearizability actually costs
+
+"Linearizability is slow" is vague until you count round trips. A read has to prove it is not
+stale, and the only proof available is hearing from a majority *right now*:
+
+```
+read latency = (round trips required) x RTT
+```
+
+**Stated plainly.** "A stale read is free because you just answer from local memory; a fresh read
+costs at least one full network round trip, because that is the minimum time it takes to find out
+whether anyone else changed the value while you weren't looking."
+
+| Symbol | What it is |
+|--------|------------|
+| `RTT` | Round-trip time to a majority of replicas — the floor set by the speed of light and queueing |
+| local read | Answer from this replica's own copy. Zero network hops, possibly stale |
+| quorum-confirmed read | Leader asks a majority "am I still leader?" before answering. 1 RTT |
+| log-entry read | Push the read through the consensus log as an entry. 2 RTT (propose, then commit) |
+
+**Walk one example.** The same read, priced at three deployment scales:
+
+```
+  deployment              RTT       local    1-RTT confirmed    2-RTT through the log
+  same rack             0.5 ms     0.0 ms       0.5 ms               1.0 ms
+  same datacenter       1   ms     0.0 ms       1   ms               2   ms
+  cross-region        100   ms     0.0 ms     100   ms             200   ms
+
+  serial reads per second on one key, cross-region:
+    local                 unbounded (no network)
+    1-RTT confirmed       1000 / 100  =  10 /s
+    2-RTT through log     1000 / 200  =   5 /s
+```
+
+Inside one datacenter the linearizable read costs 1 ms instead of 0 — annoying but survivable.
+Stretch the same protocol across regions and the identical code path costs 100 ms, a 100x
+slowdown, and a single hot key tops out around 10 reads/second. Nothing in the algorithm changed;
+only `RTT` did. This is the chapter's point that latency is "bounded below by network delay" and
+unavoidable — and it is why systems ship lease-based leader reads, which trade a bounded clock
+assumption for the right to answer locally.
+
 ## 9.3 Ordering Guarantees
 
 Ordering, linearizability, and consensus turn out to be deeply connected.
@@ -191,6 +232,93 @@ decision. Consensus has limits: it needs a majority alive to make progress (a pa
 the majority halts it — safety preserved, liveness lost); it's sensitive to network delays (frequent
 leader elections under a flaky network can stall progress); and the number of nodes is usually fixed
 (dynamic membership reconfiguration is complex).
+
+#### Decoding quorum size and fault tolerance
+
+"Majority" has an exact definition, and so does the number of failures it survives:
+
+```
+quorum size       q = floor(n / 2) + 1
+failures survived f = floor((n - 1) / 2)
+```
+
+**The idea behind it.** "Any two majorities of the same group must share at least one member, and
+that shared member is the one who remembers what the previous leader decided — which is the entire
+reason consensus is safe across leader changes."
+
+The `+ 1` is not decoration. Exactly half is *not* a quorum: with `n = 4`, two groups of two can
+form without overlapping, both believe they are authoritative, and you get the split-brain the
+epoch numbers were meant to prevent. Requiring one more than half guarantees the overlap.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Total nodes in the consensus group (usually fixed at configuration time) |
+| `q` | Nodes that must agree before a value is decided |
+| `f` | Nodes that may fail while the remaining ones can still form a quorum |
+| `floor(...)` | Round down — you cannot have a fractional node |
+
+**Walk one example.** Every cluster size from 3 to 7:
+
+```
+  n     q = floor(n/2)+1     f = floor((n-1)/2)     survivors needed     verdict
+  3          2                     1                      2              standard minimum
+  4          3                     1                      3              wasteful
+  5          3                     2                      3              standard
+  6          4                     2                      4              wasteful
+  7          4                     3                      4              high tolerance
+```
+
+Compare `n = 3` and `n = 4`. Both tolerate exactly **1** failure. But `n = 4` needs 3 nodes to
+agree on every decision instead of 2, so it costs you an extra machine, an extra vote on the
+critical path, and a *higher* probability that some quorum member is slow — while buying zero
+extra fault tolerance. That is why real deployments are 3, 5, or 7 nodes and never 4 or 6: fault
+tolerance only increases on the odd steps.
+
+#### Decoding the round-trip count
+
+The chapter describes consensus as "two rounds of voting". Those rounds are literal network
+round trips, and each one costs a fixed number of messages:
+
+```
+messages per round = 2(n - 1)          (proposer -> n-1 peers, then n-1 replies back)
+single-decree Paxos = 2 rounds         prepare/promise, then accept/accepted
+Multi-Paxos / Raft steady state = 1 round   (round 1 amortized away by leader election)
+```
+
+**What it means.** "Round one buys you the right to propose; round two records what you proposed.
+If you keep the right to propose across many decisions, you only pay for round one once — and
+every decision after that costs a single round trip."
+
+| Symbol | What it is |
+|--------|------------|
+| `n - 1` | Peers the proposer talks to — everyone except itself, since it counts its own vote locally |
+| `2(n - 1)` | One outbound message and one reply per peer, for one round |
+| prepare/promise | Round 1: claim an epoch/ballot and learn any value a previous leader may have decided |
+| accept/accepted | Round 2: get a majority to durably record the proposed value |
+
+**Walk one example.** Message counts and latency for one decision, at `RTT = 1 ms`:
+
+```
+  n     msgs per round     single-decree Paxos      Multi-Paxos / Raft steady state
+             2(n-1)         2 rounds / 2 RTT             1 round / 1 RTT
+  3            4            8 msgs,  2 ms                4 msgs,  1 ms
+  5            8           16 msgs,  2 ms                8 msgs,  1 ms
+  7           12           24 msgs,  2 ms               12 msgs,  1 ms
+```
+
+Two things fall out. First, latency does **not** grow with `n` — the proposer fans out in
+parallel and waits for the fastest majority, so a 7-node group commits in the same 2 RTT as a
+3-node group. What grows is *message volume*, linearly: 24 messages per decision at `n = 7`
+versus 8 at `n = 3`. Second, the leader election in "elect a leader for an epoch" is exactly the
+prepare/promise round, hoisted out of the loop. A stable leader running a million decisions pays
+that round once and then commits each entry in 1 RTT — which is why Multi-Paxos and Raft are
+usable in production and single-decree Paxos, run fresh per value, is not.
+
+**What breaks without round one.** Skip prepare/promise and a newly elected leader has no way to
+learn about a value a previous leader might already have gotten a majority to accept. It would
+propose something different for the same slot, a second majority would accept it, and two nodes
+would decide differently — a direct violation of uniform agreement. Round one exists purely so the
+overlapping-quorum member can say "careful, the last epoch already accepted this."
 
 ### Membership and coordination services
 

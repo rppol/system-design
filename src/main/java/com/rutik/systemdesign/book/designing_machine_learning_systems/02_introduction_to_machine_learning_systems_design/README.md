@@ -374,6 +374,44 @@ Multilabel is harder than plain multiclass for concrete reasons:
   this article "tech" only, or "tech" + "business"?), producing noisier training labels than the clean
   one-of-N of multiclass.
 
+**In plain terms.** "Multiclass asks *which one*, and argmax answers it for free; multilabel asks *how
+many*, and nothing answers that for you — you have to pick a cutoff per class, and that cutoff is a
+product decision, not a modelling one." A single global 0.5 is the default that quietly costs you recall on
+every class whose scores happen to run low.
+
+| Symbol | What it is |
+|--------|------------|
+| `p_c` | The model's independent probability for class `c` (multi-hot head: these do NOT sum to 1) |
+| `t` | A single global threshold applied to every class — the 0.5 default |
+| `t_c` | A per-class threshold, tuned separately for each class from its own PR curve |
+| `emit = {c : p_c > t_c}` | The predicted label set. Its *size* varies per example, which is the hard part |
+
+**Walk one example.** One article whose true labels are {tech, finance}, scored across five classes:
+
+```
+  class       p_c      global t = 0.5     global t = 0.3     per-class t_c
+  --------------------------------------------------------------------------
+  tech        0.62     emit               emit               t_c = 0.50 -> emit
+  finance     0.47     --                 emit               t_c = 0.40 -> emit
+  sports      0.31     --                 emit               t_c = 0.55 -> --
+  politics    0.08     --                 --                 t_c = 0.50 -> --
+  health      0.03     --                 --                 t_c = 0.50 -> --
+  --------------------------------------------------------------------------
+  emitted            {tech}          {tech,finance,sports}   {tech,finance}
+  precision           1.0000              0.6667                 1.0000
+  recall              0.5000              1.0000                 1.0000
+  F1                  0.6667              0.8000                 1.0000
+```
+
+One global knob cannot win here: raise it and you drop "finance" (recall 0.50); lower it and you pick up
+"sports" (precision 0.67). Only per-class thresholds get both, because "finance" is a class the model
+scores conservatively and "sports" is one it scores loosely — a property of each class's training
+distribution, not of this example. This is why multilabel systems ship a threshold *vector*, tuned on a
+validation set, and re-tune it whenever class frequencies shift.
+
+Approach B (N binary classifiers) makes the per-class threshold obvious — each classifier owns its own —
+at the cost of N models to train, deploy, and monitor, and no shared representation between them.
+
 #### Regression — and the "regression ⇄ classification" reframing
 
 Regression predicts a **continuous** value — a house price, a delivery ETA, a credit score. The
@@ -397,6 +435,42 @@ You want to predict **which app a phone user will open next**, to pre-load it.
   pick the highest score. Now adding a new app requires **no retraining** — you just include the new app's
   features at inference time. Same underlying prediction, but the regression framing is **adaptable** (ties
   right back to §2.2's adaptability requirement) where the classification framing is not.
+
+**What this actually says.** "A softmax head hard-codes the catalog into the weight matrix, so the model's
+shape is a function of how many things exist in the world." Put a number on "one node per app" and the
+maintenance nightmare stops being an abstraction.
+
+| Symbol | What it is |
+|--------|------------|
+| `d` | Width of the last hidden layer feeding the output head (512 is a common size) |
+| `N` | Number of classes — here, the number of apps in the catalog |
+| `d x N` | Weights in the output layer: one length-`d` row per class |
+| `+ N` | One bias per class |
+| `N x (d + 1)` | Total output-layer parameters. Linear in the catalog size |
+
+**Walk one example.** A 512-wide hidden layer, three catalog sizes, fp32 weights (4 bytes each):
+
+```
+  d = 512, so each class costs d + 1 = 513 parameters
+
+  N =   1,000 apps ->   1,000 x 513 =     513,000 params =   2.05 MB
+  N =  10,000 apps ->  10,000 x 513 =   5,130,000 params =  20.52 MB
+  N = 100,000 apps -> 100,000 x 513 =  51,300,000 params = 205.20 MB
+
+  Adding ONE app adds only 513 parameters -- but they are 513 parameters that did not
+  exist in the trained checkpoint, so the architecture changes and the model retrains.
+
+  Regression framing (user features + candidate-app features -> one score):
+    output head = d x 1 + 1 = 513 params, CONSTANT for any N
+    100,000 apps: 51,300,000 params of head vs 513 -- a 100,000x difference
+    cost moved to inference: 1 forward pass becomes 1 pass per candidate app
+```
+
+That last line is the real trade, and it is the part the "just use regression" framing hides: the
+classification head does all N decisions in one forward pass, while the regression framing does one pass
+per candidate. In practice you cap it — a cheap retrieval stage narrows 100,000 apps to a few hundred
+candidates, and only those get scored. You have swapped a *retraining* problem for a *candidate-generation*
+problem, which is the trade almost every large recommender makes.
 
 The lesson: the task type is not dictated by the problem; it is a **choice**, and the right choice can
 eliminate a maintenance nightmare.
@@ -448,6 +522,40 @@ Now α and β are **serving-time knobs, not training-time constants.** You can *
 without retraining anything** — just re-rank. You **retrain a model only when its own objective changes**
 (e.g. you redefine what "quality" means → retrain only the quality model; the engagement model is
 untouched). Each model can be retrained on its own schedule with its own data.
+
+**Read it like this.** "The two formulas are algebraically identical; the only difference is *when* α and β
+are fixed — inside a training run you cannot undo, or inside a config file you can edit at 2 a.m. during an
+incident." That timing difference is the entire value of decoupling.
+
+| Symbol | What it is |
+|--------|------------|
+| `quality_score` | The quality model's output for a post, independent of engagement |
+| `engagement_score` | The engagement model's output for the same post |
+| `α` | Weight on quality. In Approach 1 it is baked into the trained weights; in Approach 2 it is config |
+| `β` | Weight on engagement, same distinction |
+| `rank_score` | The blended score the feed actually sorts by |
+
+**Walk one example.** Three posts, two weightings, no retraining between them:
+
+```
+  post   quality   engagement      alpha=0.2, beta=0.8        alpha=0.6, beta=0.4
+  ---------------------------------------------------------------------------------
+  A        0.2        0.9        0.2x0.2 + 0.8x0.9 = 0.76   0.6x0.2 + 0.4x0.9 = 0.48
+  B        0.8        0.5        0.2x0.8 + 0.8x0.5 = 0.56   0.6x0.8 + 0.4x0.5 = 0.68
+  C        0.6        0.7        0.2x0.6 + 0.8x0.7 = 0.68   0.6x0.6 + 0.4x0.7 = 0.64
+  ---------------------------------------------------------------------------------
+  feed order                        A > C > B                   B > C > A
+```
+
+Post A is the engagement bait (0.9 engagement, 0.2 quality) and post B is the well-sourced piece nobody
+clicks. Shifting the weights from engagement-led to quality-led **completely reverses** their positions —
+A falls from first to last — and the cost of that change is editing two numbers in a config, not a
+training run. Under Approach 1 the identical outcome requires retraining the fused model and re-validating
+it, which turns a same-day incident response into a multi-day project.
+
+Note what does *not* change: both models' outputs are untouched (0.2/0.9 and 0.8/0.5 in every column). The
+scores are the model's job; the trade-off between them is the product's job, and decoupling is what keeps
+those two jobs on separate release cycles.
 
 ```mermaid
 flowchart LR

@@ -105,6 +105,58 @@ Caption: Part III is not ten unrelated topics — it is one service outgrowing o
 chapter removing the next ceiling; the three scale-cube axes are the only three directions that
 growth can go.
 
+### Decoding the ceiling — why "agreement is the thing that stops scaling"
+
+Vitillo never writes the equation down, but the quote above *is* **Amdahl's Law**. If a fraction
+`s` of the work must be done serially — the part where the boxes coordinate — then adding boxes
+buys you:
+
+```
+speedup(N) = 1 / ( s + (1 - s)/N )
+```
+
+**What this actually says.** "However many machines you add, you can never go faster than the part
+you refused to parallelize." The parallel term `(1-s)/N` shrinks toward zero as `N` grows, but the
+serial term `s` never moves — so the whole expression converges to `1/s` and stops. That ceiling is
+set the day you choose the architecture, not the day you buy the machines.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of machines you throw at the problem |
+| `s` | Fraction of the work that is inherently serial — coordination, a single leader, a lock |
+| `(1-s)` | Fraction that genuinely parallelizes across the `N` boxes |
+| `(1-s)/N` | The parallel part's time after splitting it `N` ways — this is the only term `N` touches |
+| `1/s` | The hard ceiling. The best speedup you can *ever* reach, at `N = infinity` |
+
+**Walk one example.** A service that coordinates on 5% of its work (`s = 0.05`):
+
+```
+    N        speedup     efficiency (speedup / N)
+      1        1.00          100%
+      2        1.90           95%
+      4        3.48           87%
+     10        6.90           69%
+    100       16.81           17%      <- 100 boxes doing the work of 17
+   1000       19.63            2%      <- 900 extra boxes bought 2.8x more speedup
+  infinity    20.00            0%      <- ceiling = 1/0.05
+
+  Going 100 -> 1000 machines (10x the bill) moved speedup 16.81 -> 19.63: +17%.
+```
+
+Now change only `s`, holding `N = 100`:
+
+```
+    s = 0.20   ->  ceiling   5.00   at N=100 you get  4.81   (already 96% of the ceiling)
+    s = 0.05   ->  ceiling  20.00   at N=100 you get 16.81
+    s = 0.01   ->  ceiling 100.00   at N=100 you get 50.25
+```
+
+This is the whole thesis of Part III in one table: **you buy scale by shrinking `s`, not by growing
+`N`.** Every chapter that follows is a technique for removing coordination from the request path —
+caching removes a database round trip, partitioning removes a shared leader, an async broker removes
+a synchronous handoff. And it explains the asymmetry the chapter keeps returning to: shaving `s`
+from 5% to 1% raises the ceiling 5x, while a 10x hardware bill at fixed `s` raises it 17%.
+
 ---
 
 ## 3.1 HTTP Caching (Ch 14)
@@ -191,6 +243,53 @@ expires. The design tension is how long to set `max-age`:
 - **Long `max-age`** — fewer revalidations, less origin load, but you cannot push an urgent change:
   clients keep serving the old copy until their cache expires. Stale content lingers.
 - **Short `max-age`** — fast propagation of changes, but constant revalidation traffic.
+
+#### Decoding the two speeds — what each mechanism actually saves
+
+The two mechanisms save two *different* resources, and conflating them is why `max-age` tuning
+often disappoints. Write them separately. For one client making `L` requests a day for one asset of
+size `S`, with freshness lifetime `T` seconds and a 304 response costing `H` header bytes:
+
+```
+origin round trips per client per day  =  min( L , 86400 / T )      <- max-age governs this
+origin bytes per client per day        =  S  +  (round trips - 1) x H   <- the ETag governs this
+```
+
+**In plain terms.** "`max-age` decides how many times you talk to the origin; the ETag decides how
+much you say when you do." Freshness kills round trips, validation kills bytes — and because a 304
+is a few hundred header bytes against a payload of hundreds of kilobytes, almost all the *bandwidth*
+win is already banked by the ETag alone.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Requests this client makes for the asset in a day |
+| `T` | `max-age` in seconds — how long the cached copy stays fresh |
+| `86400 / T` | How many freshness windows fit in a day, i.e. the most revalidations possible |
+| `S` | Full payload size, paid once on the first real download |
+| `H` | Bytes of a `304 Not Modified` — headers only, no body |
+| `min(L, 86400/T)` | Whichever bites first: the client's own request rate, or the TTL |
+
+**Walk one example.** One 200 KB `app.css`, a client loading 10 pages a day (`L = 10`), a 304
+costing about 300 bytes:
+
+```
+  strategy                        origin round trips   origin bytes
+  no cache headers at all               10              2,000.0 KB   (10 full downloads)
+  ETag only, always revalidate          10                202.6 KB   (1 full + 9 x 304)
+  max-age = 6 h                          4                200.9 KB   (1 full + 3 x 304)
+  max-age = 24 h                         1                200.0 KB   (1 full)
+  hashed URL, immutable 1 y              1 per YEAR        200.0 KB
+
+  The ETag alone cut bytes 89.9% (2,000.0 -> 202.6 KB) and cut round trips by ZERO.
+  Raising max-age from 1 h to 24 h cut round trips 10 -> 1 and cut bytes 202.6 -> 200.0 KB (1.3%).
+```
+
+Note the crossover in the `min(...)`: this client's requests are `86400 / 10 = 8,640 s = 2.4 h`
+apart, so **any `max-age` below 2.4 h changes nothing at all** — every request already arrives after
+the copy went stale. Setting `max-age=600` on an asset a user touches twice a day is a no-op you
+will nonetheless see in production configs. `max-age` only starts paying once it exceeds the typical
+gap between a client's requests, which is exactly why the useful values are hours-to-a-year, not
+minutes.
 
 ### Immutable versioned URLs — having it both ways
 
@@ -379,6 +478,75 @@ Caption: tiered caching — hot objects are served from the nearest edge with a 
 objects are absorbed once at the shared parent cache, and the origin only ever sees the small
 residue of true misses over warm, pre-optimized connections.
 
+#### Decoding origin offload — why a second tier beats a better first tier
+
+Origin offload is a product of *miss* rates, not a sum of hit rates. With edge hit ratio `he` and
+parent hit ratio `hp`:
+
+```
+fraction of requests reaching the origin  =  (1 - he) x (1 - hp)
+effective end-to-end hit ratio            =  1 - (1 - he) x (1 - hp)
+```
+
+**Read it like this.** "A request only reaches the origin if it misses at *every* tier, so each tier
+multiplies the survivors down." Because the tiers multiply, a mediocre second tier is worth more
+than a heroic improvement to the first — this is the arithmetic reason CDNs build a parent layer
+instead of just buying bigger edges.
+
+| Symbol | What it is |
+|--------|------------|
+| `he` | Edge PoP hit ratio — how often the nearest cache already has the object |
+| `hp` | Parent/regional cache hit ratio, measured *on the traffic that missed the edge* |
+| `(1 - he)` | Edge miss rate — the share of traffic that goes on to the parent |
+| `(1 - he)(1 - hp)` | Share surviving both tiers. This, times request rate, is the origin's real load |
+
+**Walk one example.** 100,000 req/s of user traffic, a 90% edge hit ratio, and a parent that catches
+75% of what the edges miss:
+
+```
+  edges only (flat CDN):
+    origin share = 1 - 0.90            = 10.0%    -> 10,000 req/s at the origin
+
+  edge + parent tier:
+    origin share = (1 - 0.90)(1 - 0.75) = 2.5%    ->  2,500 req/s at the origin
+    effective hit ratio = 97.5%
+    origin offload improved 4.0x by adding a tier, with the edges unchanged.
+
+  compare: pushing the EDGE alone from 90% -> 95% only halves origin load (10% -> 5%),
+  and that last 5 points of edge hit ratio is the expensive kind to buy.
+```
+
+**What it means.** Content popularity is Zipfian, and the hit ratio of a cache grows only
+*logarithmically* with its size — so buying edge capacity has sharply diminishing returns while
+pooling misses does not. Modelling a 1,000,000-object catalog with a classic Zipf (exponent 1)
+popularity curve and caching the top `C` objects:
+
+| Symbol | What it is |
+|--------|------------|
+| `M` | Total distinct objects in the catalog |
+| `C` | How many objects the cache can hold — its size, in objects |
+| Zipf exponent | How concentrated popularity is; `1` is the classic "few very hot, endless tail" |
+| hit ratio | Share of requests answered by the top `C` objects |
+
+**Walk one example.** Same catalog, growing the cache tenfold at each step:
+
+```
+  cache holds C objects      share of catalog     hit ratio
+        100                      0.01%              36.0%
+      1,000                      0.10%              52.0%
+     10,000                      1.00%              68.0%
+    100,000                     10.00%              84.0%
+  1,000,000                    100.00%             100.0%
+
+  Every 10x of memory buys a flat ~16 points of hit ratio -- and the FIRST 0.01% of the
+  catalog already buys 36 points. That is the long tail: cheap to start, brutal to finish.
+```
+
+That shape is why the tail is aggregated rather than replicated. A tail object requested once a day
+*per edge* is cold at all 1,000 edges but warm at the one parent that sees all 1,000 of those
+requests — the parent gets, in effect, a much larger `C` for the same total hardware, which is
+precisely the "improves hit ratio on the long tail" claim above made numeric.
+
 **Dynamic (uncacheable) content** still benefits. Even a personalized API response that cannot be
 cached is accelerated by the CDN's overlay routing, edge TLS/TCP termination, and warm origin
 connections — the request is "dynamic content acceleration," not caching, but the latency win is
@@ -539,6 +707,43 @@ Caption: on the consistent-hashing ring a key belongs to the next node clockwise
 node only steals the arc between it and its predecessor — the movement is O(K/N), not O(K), which
 is the whole reason to prefer it over `mod N`.
 
+#### Decoding the movement cost — `mod N` vs the ring
+
+Both schemes have a closed form for "what fraction of the `K` keys change owner when you go from
+`N` nodes to `N+1`":
+
+```
+mod N               keys moved  =  K x  N / (N + 1)      <- almost everything
+consistent hashing  keys moved  =  K x  1 / (N + 1)      <- only the new node's fair share
+```
+
+**Put simply.** "`mod N` moves everything *except* the new node's share; the ring moves *only* the
+new node's share." They are exact mirror images of each other, which is why the ratio between them
+is simply `N` — and why the penalty for `mod N` gets *worse*, not better, as your cluster grows.
+
+| Symbol | What it is |
+|--------|------------|
+| `K` | Total number of keys stored across the cluster |
+| `N` | Node count before the change |
+| `N + 1` | Node count after adding one machine |
+| `N/(N+1)` | Fraction of keys whose `hash % N` answer differs from `hash % (N+1)` |
+| `1/(N+1)` | The new node's fair share of the ring — the only arcs that must change hands |
+
+**Walk one example.** A 1,000,000-key cluster, adding one node at three different sizes:
+
+```
+  cluster       mod N moves            ring moves          ratio
+  4 -> 5        800,000 keys (80.0%)   200,000 (20.0%)      4x
+  10 -> 11      909,091 keys (90.9%)    90,909  (9.1%)     10x
+  100 -> 101    990,099 keys (99.0%)     9,901  (1.0%)    100x
+```
+
+The trap this exposes: `mod N` is *least* bad on the tiny cluster you prototype on and *most* bad on
+the large one you run in production. At 100 nodes it moves 100x more data than the ring, so a
+routine capacity addition becomes a cluster-wide data-movement storm — arriving exactly at the
+moment you were already short on capacity. The ASCII table above shows the mechanism (every key's
+divisor changed at once); this shows the bill.
+
 **Virtual nodes.** Plain consistent hashing has two problems: with few nodes the arcs are uneven
 (load imbalance), and a heterogeneous node (a bigger box) still owns just one arc. The fix is
 **virtual nodes (vnodes)**: each physical node is hashed onto the ring at *many* points (say 100–200
@@ -553,6 +758,51 @@ one node owning 40% of the keyspace and another 15% — a 2.6× imbalance. Give 
 of the 25% ideal. Adding a 5th node then steals ~1/5 of the keyspace as 128 small arcs scattered
 across all four existing nodes, so no single neighbor is hit hard — the reason production stores
 default to hundreds of vnodes per node.
+
+#### Decoding the vnode count — why the imbalance shrinks like `1/sqrt(V)`
+
+The quantity operators actually watch is the **skew factor**:
+
+```
+skew factor  =  (load on the busiest node) / (mean load per node)
+
+relative spread of node loads  ~  1 / sqrt(V)      <- V = vnodes per physical node
+```
+
+**The idea behind it.** "Each node's share is the sum of `V` independent random arcs, and averaging
+`V` random things tightens the result by `sqrt(V)`." It is the central limit theorem doing capacity
+planning: you are not making the ring fairer, you are making each node's share an *average* of many
+draws instead of a single lucky-or-unlucky one.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Virtual nodes per physical node — how many ring positions one machine occupies |
+| `N` | Physical node count (4 in the worked case above) |
+| skew factor | Busiest node's load divided by the mean. `1.0` is perfect, `2.0` means twice the average |
+| relative spread | Standard deviation of node loads as a fraction of the mean |
+| `1/sqrt(V)` | The rate the spread shrinks: quadruple `V` to halve the imbalance |
+
+**Walk one example.** 4 physical nodes, ring positions drawn uniformly at random, averaged over
+4,000 simulated rings per row:
+
+```
+    V (vnodes/node)   ring points   mean skew factor   relative spread
+          1                4             2.07              72.2%
+          8               32             1.38              27.7%
+         32              128             1.19              14.1%
+        128              512             1.09               7.0%
+        512            2,048             1.05               3.5%
+
+  Spread halves every time V quadruples (27.7 -> 14.1 -> 7.0 -> 3.5), exactly 1/sqrt(V).
+```
+
+The single-arc case (`V = 1`) is genuinely as bad as the text claims: across 20,000 simulated rings
+the *median* skew factor is 1.99 and about one ring in six lands at 2.6x or worse — so "a random
+ring placement can easily leave one node owning 40% and another 15%" is the typical outcome, not a
+pathological one. At `V = 128` the busiest node runs about 9% above the mean, which is the "within a
+few percent of the 25% ideal" the text describes. Note the diminishing return baked into the square
+root: going `V = 1 -> 128` removes 65 points of spread, while `128 -> 512` removes 3.5 — which is
+why production defaults sit in the low hundreds and stop there.
 
 ### Request routing — who knows where the key lives?
 
@@ -793,6 +1043,55 @@ around failed instances). A production LB provides:
 - **Slow start / warm-up.** A freshly added instance may have cold caches and unwarmed JITs; some
   LBs ramp traffic to it gradually rather than hitting it with full load the instant it registers,
   avoiding a per-instance version of the cold-start stampede.
+
+#### Decoding the routing algorithms — what "balanced" actually costs
+
+The routing choices above differ in how much they *look* before they leap, and the payoff is
+measured by the **maximum** load on any one instance, never the average. Spreading `m` in-flight
+requests over `n` instances:
+
+```
+average load       =  m / n                            (every algorithm hits this on average)
+round-robin        =  m/n  exactly                     (only if every request costs the same)
+random / hash      =  m/n  +  ~sqrt( 2 (m/n) ln n )    <- one blind draw per request
+power of two       =  m/n  +  ~ln(ln n) / ln 2         <- pick 2 at random, take the emptier
+```
+
+**Stated plainly.** "One blind guess leaves an imbalance that grows with the square root of the
+load; peeking at two candidates and keeping the lighter one collapses that imbalance to almost
+nothing." Going from inspecting one instance to inspecting *two* is the entire win — inspecting all
+`n` (true least-connections) barely improves on two and costs a fleet-wide query per request.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of backend instances behind the load balancer |
+| `m` | Requests in flight being distributed across them |
+| `m/n` | Mean load per instance — what a perfect balancer would put everywhere |
+| maximum load | Load on the single busiest instance; this is what saturates and times out first |
+| `sqrt(2 (m/n) ln n)` | Random assignment's overshoot — grows with the square root of the mean |
+| `ln(ln n)/ln 2` | Two-choices' overshoot — a small constant, 2.2 at `n = 100`, 2.8 at `n = 1000` |
+
+**Walk one example.** 100 instances, 10,000 in-flight requests, so a mean of 100 each, averaged over
+300 simulated runs:
+
+```
+  algorithm                       busiest instance   overshoot vs mean
+  round-robin (uniform costs)          100.0               +0%
+  random / IP-hash                     126.0              +26%
+  power of two choices                 101.9               +2%
+
+  At 1,000 instances and the same mean of 100:
+  random / IP-hash                     133.9              +34%
+  power of two choices                 102.1               +2%
+```
+
+Read those two groups together: as the fleet grows, random assignment gets *worse* (+26% -> +34%,
+because `ln n` grows), while two-choices stays flat at +2%. That is the practical argument — you
+must provision every instance for the *maximum*, so blind random routing means buying 26-34% more
+fleet than the work actually requires. It also shows why round-robin's perfect column is misleading:
+it balances request *counts*, not work, so the moment request costs vary it degrades toward the
+random row — and the least-connections family, of which two-choices is the cheap approximation, is
+what actually holds the line.
 
 ### DNS load balancing — cheap, coarse, slow to fail over
 
@@ -1082,6 +1381,52 @@ Caption: cache value is dominated by the *miss* rate `(1−h)`, so the last few 
 carry most of the benefit — and most of the hidden risk, since a 95%-hit origin is sized for 5% of
 load and cannot survive the cache vanishing.
 
+#### Decoding the cache equation — read the miss rate, never the hit rate
+
+The formula above simplifies to something you can do in your head, and the simplification is the
+whole insight:
+
+```
+Lavg = h.Lc + (1 - h)(Lc + Lo)
+     = Lc + (1 - h) . Lo          <- the h terms cancel; only the MISS rate survives
+
+origin load = (1 - h) x total request rate
+```
+
+**What the formula is telling you.** "You always pay the cache lookup; everything else you pay is
+the miss rate times the origin's cost." Both the latency and the load reduce to a single lever,
+`(1-h)` — so the correct habit is to quote caches by their **miss** rate, because that is the number
+that is actually linear in what you care about.
+
+| Symbol | What it is |
+|--------|------------|
+| `h` | Hit ratio — share of requests the cache answers itself |
+| `(1 - h)` | Miss rate. The only term that matters; halve it and you halve both latency-over-`Lc` and origin load |
+| `Lc` | Cache lookup latency, paid on *every* request, hit or miss (1 ms here) |
+| `Lo` | Origin latency, paid only on a miss and added on top of `Lc` (50 ms here) |
+| `Lc + (1-h).Lo` | Average latency — a fixed floor of `Lc` plus a miss-rate-scaled origin tax |
+
+**Walk one example.** The same `Lc = 1 ms`, `Lo = 50 ms`, now at 10,000 req/s, walking the hit
+ratios people actually argue about:
+
+```
+    h        miss rate    avg latency    origin req/s    change from row above
+  0.80         20%          11.0 ms          2,000            -
+  0.90         10%           6.0 ms          1,000        origin load HALVED
+  0.95          5%           3.5 ms            500        origin load HALVED again
+  0.99          1%           1.5 ms            100        origin load cut 5x
+
+  80 -> 90 buys 10 points of hit ratio and halves the backend.
+  90 -> 95 buys  5 points of hit ratio and halves the backend AGAIN.
+  95 -> 99 buys  4 points of hit ratio and cuts the backend 5x.
+```
+
+That is the counter-intuitive part worth memorising: **equal halvings of backend load cost
+progressively fewer points of hit ratio.** "We improved the cache from 90% to 95%" sounds like a 5%
+tweak and is in fact a 2x capacity win; "we improved it from 50% to 55%" sounds identical and is
+worth 10%. Talking in hit ratios makes those two indistinguishable, which is why the miss rate is
+the number to put on the dashboard.
+
 ### Policies: expiration vs eviction
 
 Two independent policies govern a cache entry's life:
@@ -1091,6 +1436,49 @@ Two independent policies govern a cache entry's life:
 - **Eviction.** When the cache is **full**, which entry to drop to make room: **LRU** (least
   recently used — evict the coldest, the common default), **LFU** (least frequently used — better
   for stable hot sets), **FIFO**, or random. Eviction is about *space*; expiration is about *time*.
+
+#### Decoding the TTL — staleness and hit ratio are the same dial
+
+For a single key requested at a steady rate `r`, a TTL of `T` seconds admits at most **one** origin
+fetch per `T` seconds, no matter how much traffic the key gets:
+
+```
+origin fetches per second for that key  =  1 / T          (independent of r!)
+hit ratio for that key                  =  1 - 1/(r . T)  (when r.T >= 1)
+worst-case staleness                    =  T seconds
+```
+
+**In plain terms.** "The TTL is simultaneously your staleness budget and your hit ratio — you cannot
+tighten one without loosening the other." There is no third knob: every millisecond of freshness you
+demand is bought with an origin fetch.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | Request rate for this one key, in requests per second |
+| `T` | TTL in seconds — how long a cached copy is allowed to be reused |
+| `r . T` | Requests that arrive within one TTL window; the first is the miss, the rest are hits |
+| `1/T` | Origin fetches per second for the key — set purely by the TTL, not by traffic |
+| `1 - 1/(r.T)` | Hit ratio: one miss out of every `r.T` requests |
+
+**Walk one example.** Three keys with very different popularity, the same TTL ladder:
+
+```
+                       T = 1 s        T = 10 s       T = 60 s      T = 300 s
+  hot key,  r = 100/s   h = 99.00%    h = 99.90%    h = 99.98%    h = 99.99%
+  warm key, r =  10/s   h = 90.00%    h = 99.00%    h = 99.83%    h = 99.97%
+  cold key, r =   1/s   h =  0.00%    h = 90.00%    h = 98.33%    h = 99.67%
+
+  Origin fetches per key per second: 1.0000, 0.1000, 0.0167, 0.0033 -- the SAME for every row.
+```
+
+Two things fall out. First, **a hot key barely needs a TTL** — at `r = 100/s`, a one-second TTL
+already hits 99%, so there is rarely a reason to accept minutes of staleness on your hottest data.
+Second, a cold key at `r = 1/s` with `T = 1 s` has a **0% hit ratio** — every request misses, and by
+the "when a cache helps" rule above it is strictly *more* work than not caching, since you pay a
+lookup, a fetch, and a write for every request. Short TTLs on rarely-read keys are the classic way
+a cache becomes pure overhead. And notice the middle column: the origin's load is set entirely by
+`1/T`, which is why raising a TTL from 1 s to 10 s cuts origin traffic 10x regardless of how popular
+the key is.
 
 ### Local (in-process) cache
 
@@ -1238,6 +1626,46 @@ one*. Mitigations:
 - **Watch the hit ratio as a dependency signal** — a slowly rising hit ratio means the origin is
   quietly becoming unable to stand on its own.
 
+#### Decoding the load-bearing multiplier
+
+The size of the disaster has a one-line closed form. If the origin normally serves `(1-h)` of the
+traffic and the cache disappears, it must suddenly serve all of it:
+
+```
+fall-through amplification  =  1 / (1 - h)
+
+               =  (load with cache down) / (load the origin was sized for)
+```
+
+**Read it like this.** "Your hit ratio is not a performance number, it is the multiplier on your
+next outage." The very metric the team celebrates for going up is the same metric that says how far
+the origin will be over capacity the moment the cache blinks.
+
+| Symbol | What it is |
+|--------|------------|
+| `h` | Steady-state hit ratio |
+| `(1 - h)` | Fraction of real traffic the origin normally sees — and therefore what it got sized for |
+| `1/(1 - h)` | Instantaneous load multiplier when the cache is flushed, partitioned, or lost |
+
+**Walk one example.** Same 10,000 req/s service, and what the origin faces at t=0 of a cache outage:
+
+```
+    h        origin sized for      load on cache-down      amplification
+  0.80          2,000 req/s            10,000 req/s             5x
+  0.90          1,000 req/s            10,000 req/s            10x
+  0.95            500 req/s            10,000 req/s            20x
+  0.99            100 req/s            10,000 req/s           100x
+
+  Every improvement in hit ratio moved the LEFT column down and the RIGHT column not at all.
+```
+
+This is why the chapter treats the load-bearing cache as the defining pitfall of Part III rather
+than an operational footnote. The team that heroically pushed the hit ratio from 95% to 99% cut
+origin cost 5x *and* moved the cache-down amplification from 20x to 100x — a real efficiency win
+that simultaneously made the failure mode five times worse, with no alert firing anywhere. The
+mitigations above are all versions of one rule: **capacity-plan against `1/(1-h)`, not against the
+`(1-h)` you observe on a good day.**
+
 ---
 
 ## 3.8 Microservices (Ch 21)
@@ -1360,6 +1788,56 @@ flowchart LR
 Caption: the gateway hides the service fan-out behind one client call and centralizes cross-cutting
 concerns — but every service it must call to compose a response multiplies into a lower aggregate
 availability, so composition is not free.
+
+### Decoding the composition tax — availability multiplies, it does not average
+
+The `0.999^5` above is worth unpacking, because it is the single most-quoted number in a
+microservices interview and the intuition it breaks is a strong one:
+
+```
+A_composite = p1 x p2 x ... x pN     =  p^N   when every dependency is equally reliable
+
+downtime per year = 525,600 minutes x (1 - A_composite)
+```
+
+**What this actually says.** "A composed request succeeds only if *every* hop succeeds, so the
+weakest link does not set your availability — the *product* of all the links does, and it is always
+worse than the worst one." People instinctively average reliabilities; the operation is
+multiplication, and multiplying numbers below 1 only ever goes down.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | One dependency's availability, e.g. `0.999` — three nines |
+| `N` | Number of dependencies that must ALL answer for the composed request to succeed |
+| `p^N` | Composite availability of the fan-out |
+| `1 - p^N` | Composite failure rate — this is the number that grows roughly linearly in `N` |
+| `525,600` | Minutes in a year, for turning a ratio into downtime you can feel |
+
+**Walk one example.** Every dependency at a solid 99.9%, varying only the fan-out width:
+
+```
+    N        composite availability     annual downtime
+     1              99.9000%              525.6 min   (8.8 h)
+     2              99.8001%            1,050.7 min  (17.5 h)
+     3              99.7003%            1,575.2 min  (26.3 h)
+     5              99.5010%            2,622.7 min  (43.7 h)   <- the book's 0.999^5
+    10              99.0045%            5,232.4 min  (87.2 h)
+    20              98.0189%           10,412.7 min (173.5 h)
+    50              95.1206%           25,646.3 min (427.4 h)
+
+  Downtime is very nearly N x 525.6 min -- each dependency you add donates its full
+  outage budget to every request that touches it.
+```
+
+The rule of thumb hiding in that table: for small failure rates, `1 - p^N` is approximately
+`N x (1-p)`, so **failure budgets simply add up**. Ten three-nines services chained together give
+you two nines. That leaves exactly three escapes, and they are the reason the chapter's caveats read
+the way they do: (1) **make dependencies soft** — degrade gracefully so a failed recommendations
+call does not fail checkout, dropping that service out of the product entirely; (2) **retry**, which
+turns a dependency's `0.001` failure rate into `0.000001` if failures are independent, taking a
+5-way fan-out from 99.501% to 99.9995%; (3) **do not fan out** — the composed call you never make
+cannot lower your availability, which is the strongest argument in the book for not splitting a
+service you have no independent reason to split.
 
 ---
 
@@ -1655,6 +2133,50 @@ orders spread across partitions for parallelism. Pick the key wrong (e.g. a sing
 everything under one key for "global order") and you collapse to a single partition and lose all
 parallelism — the log equivalent of a range-partition hotspot.
 
+#### Decoding how many consumers you need — Little's Law
+
+"Add consumers until you keep up" has a number attached, and it comes from **Little's Law**, the
+one piece of queueing theory every backend engineer should be able to recite:
+
+```
+L = lambda x W
+
+consumer capacity      =  C / S              (C consumers, S seconds of work per message)
+consumers to keep up   =  C >= lambda x S    (Little's Law, solved for C)
+```
+
+**Put simply.** "The number of things in flight equals how fast they arrive times how long each one
+stays." Applied to a work queue it answers the only staffing question that matters: to absorb
+`lambda` messages a second when each takes `S` seconds, you must have `lambda x S` of them being
+worked on at any instant — so that is your consumer count, and no amount of broker tuning changes it.
+
+| Symbol | What it is |
+|--------|------------|
+| `lambda` | Arrival rate — messages produced per second |
+| `W` | Time a message spends in the system (queueing plus processing) |
+| `L` | Messages in the system at any instant — the in-flight count, or the backlog |
+| `S` | Service time — seconds of work one consumer spends on one message |
+| `C` | Number of consumer instances actually processing in parallel |
+| `C / S` | Total consumption capacity in messages per second |
+
+**Walk one example.** A topic taking 5,000 messages/s, each needing 40 ms of consumer work:
+
+```
+  consumers needed  C = lambda x S = 5,000 x 0.040 = 200 consumers
+
+  at C = 200 -> capacity = 200 / 0.040 = 5,000 msg/s  -> exactly break-even, zero headroom
+  at C = 150 -> capacity =             3,750 msg/s    -> falls behind 1,250 msg/s forever
+  at C = 240 -> capacity =             6,000 msg/s    -> 20% headroom to drain a backlog
+```
+
+Now connect it to the partition-count ceiling from the paragraph above: a consumer group can have at
+most **one consumer per partition**, so needing 200 parallel consumers means the topic needs **at
+least 200 partitions**. Provision 8 partitions for this workload and the 9th through 200th consumers
+sit idle no matter how many you launch — you are capped at `8 / 0.040 = 200 msg/s`, 4% of the
+required rate, and the only fix is a repartition that reshuffles keys (the mini mod-N problem). This
+is why partition count is a capacity decision made from `lambda x S` up front, not a default you
+accept and revisit later.
+
 ### Delivery guarantees
 
 - **At-most-once.** Send and forget; a message may be **lost** but is **never duplicated**. Cheapest,
@@ -1743,6 +2265,56 @@ with extra steps**, invisible until users notice their work never completed. Def
   latency.
 - **Scale consumers / autoscale on backlog.** Add consumers (competing-consumers) when the backlog
   grows.
+
+#### Decoding the backlog — growth, age, and the asymmetry of draining
+
+Three lines of arithmetic turn "the queue is deep" into an incident timeline:
+
+```
+backlog growth rate  =  lambda_in  -  lambda_out        (negative = draining)
+backlog age (the SLI) =  L / lambda_out                 (Little's Law, rearranged)
+time to drain         =  L / (lambda_out - lambda_in)   (only if lambda_out > lambda_in!)
+```
+
+**What it means.** "A backlog grows at the *difference* between the rates, and it drains at the
+difference too — which is why recovering takes far longer than falling behind." Producers keep
+arriving during the recovery, so your drain speed is only the *surplus* capacity, not your total
+capacity, and that surplus is usually a small fraction of the whole.
+
+| Symbol | What it is |
+|--------|------------|
+| `lambda_in` | Production rate — messages entering the queue per second |
+| `lambda_out` | Consumption rate — what the consumer fleet actually achieves per second |
+| `L` | Current backlog depth in messages |
+| `lambda_out - lambda_in` | Surplus capacity. The *only* rate at which a backlog shrinks |
+| `L / lambda_out` | Backlog age — how stale the oldest unprocessed message is, in seconds |
+
+**Walk one example.** The same 5,000 msg/s topic, 40 ms per message, with the consumers down for a
+30-minute deploy gone wrong:
+
+```
+  backlog accumulated = 5,000/s x 1,800 s = 9,000,000 messages
+  (nothing errored; every producer call succeeded; no alert fired on depth alone)
+
+  recovery, with the fleet back and lambda_in still 5,000/s:
+    consumers   capacity     surplus     time to drain
+       240      6,000/s      1,000/s      9,000 s = 2.50 h
+       300      7,500/s      2,500/s      3,600 s = 1.00 h
+       400     10,000/s      5,000/s      1,800 s = 0.50 h
+       600     15,000/s     10,000/s        900 s = 0.25 h
+
+  A 30-minute outage costs 2.5 HOURS of degraded latency at 20% headroom -- a 5x
+  amplification -- and the users' total wait is 30 min + 2.5 h = 3 h.
+```
+
+Two lessons the numbers make unavoidable. First, **the size of your steady-state headroom is your
+recovery time**: 20% surplus turns a 30-minute stall into a 3-hour incident, while tripling the
+fleet to 600 consumers ends it in 15 minutes. Second, **age is the SLI, depth is not**. At the
+moment recovery begins with 240 consumers the depth is 9,000,000 — a number that means nothing on
+its own — but the age is `9,000,000 / 6,000 = 1,500 s = 25 minutes`, which is directly the delay a
+user is experiencing. That is why the alert threshold belongs on age. The same reasoning sizes the
+bounded queue of the next section: if you will accept at most 60 seconds of processing delay, the
+cap is `60 x 6,000 = 360,000 messages`, and past that you shed rather than buffer.
 
 ### Backpressure — the broker is not infinite absorption
 

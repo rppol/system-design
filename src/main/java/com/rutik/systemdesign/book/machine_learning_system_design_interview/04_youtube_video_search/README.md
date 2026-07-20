@@ -188,6 +188,40 @@ The identical preprocessing must run **offline (indexing)** and **online (any li
 a train/serve preprocessing mismatch (e.g. different normalization constants) silently degrades
 recall.
 
+**Read it like this.** The sampling rule `frames_per_video = rate x duration` says: *"your entire
+indexing bill is one multiplication you choose, and then you pay it a billion times."* Frame
+sampling looks like a preprocessing detail; it is actually the single biggest cost lever in the
+chapter, because the ViT runs once per sampled frame and the corpus is ~1B videos.
+
+| Symbol | What it is |
+|--------|------------|
+| `rate` | Frames extracted per second of video (the book's example: **1 fps**) |
+| `duration` | Length of the video in seconds |
+| `frames_per_video` | `rate x duration` — how many ViT forward passes one video costs |
+| `V` | Corpus size, **1e9 videos** |
+| `total_frames` | `frames_per_video x V` — total ViT passes to build the index |
+| fixed-`N` | The alternative: **N evenly-spaced frames**, independent of duration |
+
+**Walk one example.** Assume a ViT encoder sustaining 1,000 frames/sec on one GPU (an assumption
+for scale, not a book figure); only the ratios are the point:
+
+```
+  strategy                frames/video   total frames    GPU-seconds     GPU-hours   GPU-years
+  1 fps, 1-min video           60          6.0e+10        6.000e+07        16,667       1.90
+  1 fps, 10-min video         600          6.0e+11        6.000e+08       166,667      19.03
+  fixed N = 8 frames            8          8.0e+09        8.000e+06         2,222       0.25
+
+  600 / 8 = 75x   <- a 10-min video at 1 fps costs 75 ViT passes for every 1 that
+                     fixed-8 sampling costs, for the same one video embedding
+```
+
+Two things fall out. First, 1 fps makes the bill **proportional to duration**, so a corpus that
+skews long (lectures, streams, VODs) is punished quadratically in practice: more videos *and*
+more frames each. Second, fixed-`N` sampling turns the cost into a **constant per video** — 0.25
+GPU-years versus 19 — which is why production video indexers overwhelmingly sample a fixed small
+`N` rather than a fixed rate. The price is coverage: 8 frames from a 10-minute video is one frame
+every 75 seconds, so a short but decisive visual moment can be missed entirely.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -277,6 +311,59 @@ space where dot product = relevance. A larger batch N gives more negatives per s
 training (CLIP used batches of ~32k over 400M pairs). At serve time only the **query encoder** runs
 live; all video embeddings are precomputed and indexed.
 
+The loss the four steps describe, written out:
+
+```
+  S[i][j] = (t_i . v_j) / tau                     N x N scaled similarity matrix
+
+  L_row = -(1/N) * sum_i log( exp(S[i][i]) / sum_j exp(S[i][j]) )     query -> video
+  L_col = -(1/N) * sum_j log( exp(S[j][j]) / sum_i exp(S[i][j]) )     video -> query
+
+  L = (L_row + L_col) / 2                         symmetric contrastive loss
+```
+
+**What this actually says.** *"For every query, make its own video the most likely of the N videos
+in the batch — and for every video, make its own query the most likely of the N queries — then
+average the two directions."* The framing matters because it recasts retrieval as an
+**N-way classification problem whose label is always the diagonal**: there is no separate negative
+mining step, the batch itself supplies the class set.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_i` | Embedding of the i-th query, from the text encoder |
+| `v_j` | Embedding of the j-th video, from the frame-level video encoder |
+| `t_i . v_j` | Dot product — the single number that must mean "relevance" |
+| `tau` | Temperature; divides every similarity before softmax, sharpening the distribution |
+| `S[i][i]` | A diagonal cell — the annotated positive pair |
+| `S[i][j]`, `i != j` | An off-diagonal cell — a free in-batch negative |
+| `L_row` | Cross-entropy over each row: pick the right **video** for a query |
+| `L_col` | Cross-entropy over each column: pick the right **query** for a video |
+| `L` | The average of both directions — why it is called *symmetric* |
+
+**Walk one example.** Take the `N = 4` matrix from the Visual Intuition section verbatim, and push
+row 1 (`0.91, 0.12, 0.05, 0.20`) through the softmax at three temperatures:
+
+```
+  tau      p(diagonal) for row 1     L_row      L_col        L = (L_row+L_col)/2
+  1.00           0.4222              0.8579     0.8580            0.8579
+  0.20           0.9420              0.0575     0.0581            0.0578
+  0.07           0.9999              0.0001     0.0001            0.0001
+
+  random-guess baseline for N = 4:  -log(1/4) = ln 4 = 1.3863
+```
+
+At `tau = 1` the model is already better than chance (0.8579 < 1.3863) but the softmax is so flat
+that a 0.91 positive only earns 42% of the probability mass — the gradient stays large and diffuse.
+Dividing by `tau = 0.07` (CLIP's learned value) stretches those same similarities to
+`0.91/0.07 = 13.0` versus `0.20/0.07 = 2.86`, and the positive takes essentially all the mass.
+
+**Why the temperature has to be there at all.** Dot products of unit-norm embeddings live in
+`[-1, 1]`, so without `tau` the largest gap softmax can ever see is 2.0 — far too compressed to
+produce a confident distribution, and the loss floors out well above zero no matter how good the
+encoders get. `tau` is the knob that converts a bounded geometric quantity into logits with usable
+dynamic range. Set it too high and nothing separates; too low and one confusable negative produces
+an enormous gradient and training destabilizes.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -337,6 +424,76 @@ metric. Walk the candidates:
 So the priority order the interview wants: **MRR fits the one-relevant-item labels; mAP degenerates
 to it; nDCG needs graded relevance we don't have; precision@k is capped at 1/k; recall@k is a
 coarse binary coverage check.**
+
+**Put simply.** `precision@k = (relevant items in top k) / k` says *"of the k things I showed you,
+what fraction were right"* — and when the ground truth contains exactly one right thing, the
+numerator can never exceed 1, so the whole metric can never exceed `1/k`. The framing matters
+because the cap is a property of the *labels*, not of the model: no amount of model improvement can
+move it.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Size of the result window being scored (top-1, top-5, top-10) |
+| numerator | Count of relevant items inside the top k — **at most 1 here**, since only one exists |
+| `precision@k` | `numerator / k` — capped at `1/k` |
+| `recall@k` | `(relevant items in top k) / (total relevant)` = `1/1` or `0/1` — **binary per query** |
+| `rank` | Position of the single correct video in the returned list (1-indexed) |
+
+**Walk one example.** A *perfect* system that puts the one correct video at rank 1, scored at three
+window sizes:
+
+```
+  k     best possible numerator   precision@k = 1/k   reads as
+   1              1                     1.000          "100% right"    correct
+   5              1                     0.200          "80% wrong"     misleading
+  10              1                     0.100          "90% wrong"     absurd
+
+  Same system. Same perfect ranking. Three different verdicts, none of them the model's fault.
+```
+
+The trap this sets in practice is worse than a bad number: a team optimizing precision@10 can raise
+it only by getting **more than one** relevant item into the window — and with one ground-truth
+video the only way to do that is to return near-duplicates of it, which is exactly the degenerate
+behavior the Pitfalls section describes.
+
+**Stated plainly.** `MRR = (1/Q) * sum_q (1 / rank_q)` says *"score each query by how far down the
+list the user had to look, then average"* — and because it uses `1/rank` rather than `rank`, the
+distance from rank 1 to rank 2 counts far more than the distance from rank 9 to rank 10. That
+matches real search behavior, where rank 2 is a real cost and rank 10 versus rank 9 is noise.
+
+| Symbol | What it is |
+|--------|------------|
+| `Q` | Number of evaluation queries |
+| `rank_q` | Rank of the one correct video for query `q`; infinite (contributes 0) if not returned |
+| `1 / rank_q` | The **reciprocal rank** — this query's contribution, in `(0, 1]` |
+| `MRR` | Mean of those contributions across all `Q` queries |
+
+**Walk one example.** Five evaluation queries, with the rank at which each one's single correct
+video actually landed:
+
+```
+  query   rank of correct video   1/rank    recall@5   recall@10
+    q1            1                1.0000       1          1
+    q2            3                0.3333       1          1
+    q3            2                0.5000       1          1
+    q4           10                0.1000       0          1
+    q5            5                0.2000       1          1
+                                  -------      ---        ---
+                          sum =    2.1333       4/5       5/5
+
+  MRR       = 2.1333 / 5 = 0.4267
+  recall@5  = 4 / 5      = 0.800
+  recall@10 = 5 / 5      = 1.000
+
+  1 / MRR = 1 / 0.4267 = 2.344   <- "the right video sits around rank 2.3 on average"
+```
+
+Read the three numbers together and the division of labour is obvious. **recall@10 = 1.000** says
+the retrieval stage never lost the correct video — a clean pass/fail on *coverage*, and exactly
+what you want to monitor for the ANN layer. But it is blind: q1 at rank 1 and q4 at rank 10 both
+score 1. **MRR = 0.4267** is the metric that separates them, because only it knows the difference
+between "found it" and "found it first." Note also that q4 alone drags MRR down by contributing
+0.1000 where q1 contributes 1.0000 — a 10x swing from a video that recall@10 scored as a success.
 
 ```mermaid
 flowchart TD
@@ -399,6 +556,53 @@ At query time, two retrievers run **in parallel**, then merge:
    them — e.g. a **weighted sum** `score = α·visual + (1−α)·text`, or **reciprocal rank fusion**
    (RRF) which combines by rank position and sidesteps the scale-mismatch problem. The weight `α` is
    tuned on online metrics.
+
+**What it means.** `score = α·visual + (1−α)·text` promises *"blend the two paths in the proportion
+α"* — but that promise only holds if both terms are measured in the same units, and they are not.
+The framing matters because the failure is silent: the weighted sum still runs, still returns a
+ranking, and still looks tuned, while `α` has quietly stopped controlling anything.
+
+| Symbol | What it is |
+|--------|------------|
+| `visual` | The ANN path's score — a cosine/dot product, roughly bounded in `[-1, 1]` |
+| `text` | The inverted index's score — BM25, unbounded positive, commonly in the tens |
+| `α` | The intended blend weight, `α = 0.5` meaning "count both paths equally" |
+| RRF `1/(k + rank)` | The alternative: score by **rank position only**; `k` (typically 60) damps the top |
+
+**Walk one example.** One candidate video, scored by both paths, fused with `α = 0.5`:
+
+```
+  path      raw score   weighted term        share of the total
+  visual      0.82      0.5 x 0.82 = 0.410          3.2%
+  text       24.50      0.5 x 24.50 = 12.250       96.8%
+                        -------------------
+                        total       = 12.660
+
+  "Equal weighting" gave the text path 96.8% of the decision.
+```
+
+Min-max normalizing BM25 onto `[0, 1]` first — say the candidate pool ranges 2.0 to 30.0, so
+`(24.5 - 2.0) / (30.0 - 2.0) = 0.8036` — restores the intent: `0.5 x 0.82 + 0.5 x 0.8036 = 0.8118`,
+with the two paths now contributing 0.410 and 0.402, near-equally, as `α = 0.5` was meant to.
+
+**Walk it the other way with RRF.** Now ignore scores entirely and fuse by rank, `k = 60`:
+
+```
+  video    visual rank   text rank   1/(60+rv)   1/(60+rt)     RRF score
+    A            1           40       0.016393    0.010000      0.026393
+    B           35            2       0.010526    0.016129      0.026655
+    C            5           6        0.015385    0.015152      0.030536   <- winner
+
+  Final order: C, B, A
+```
+
+C wins despite topping neither list. That is the whole point of RRF: `1/(k + rank)` is a
+**concave, saturating** function of rank, so being #1 instead of #5 buys only `0.016393 - 0.015385
+= 0.001008`, while being #40 instead of #6 costs `0.015152 - 0.010000 = 0.005152` — five times
+more. Agreement across both retrievers therefore beats a single spectacular hit, which is exactly
+the behavior you want when one path is systematically blind (visual to model numbers, text to
+untitled clips). The constant `k` is what creates the saturation; with `k = 0` the top rank would
+dominate everything and RRF would collapse back toward "whoever ranked it #1 wins."
 4. **Re-ranking service** — apply business and integrity logic over the fused candidates: boost by
    **popularity/freshness**, apply **region restrictions**, filter **policy-violating / unsafe**
    content, remove **near-duplicates**, and (in richer systems) run a heavier cross-attention

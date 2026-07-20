@@ -161,6 +161,44 @@ request through; if the bucket is empty, **drop** the request.
 - **Bucket size** — the maximum number of tokens allowed in the bucket.
 - **Refill rate** — number of tokens added to the bucket per second.
 
+**What this actually says.** The two parameters are not independent knobs; read together they say:
+> "You may sustain `refill rate` requests per second forever, and on top of that you may spend up to
+> `bucket size` requests in a single instant — but only if you were quiet long enough to save them."
+
+The refill rate sets the long-run average; the bucket size sets how large a burst you are willing to
+forgive. That split is why token bucket is the default for public APIs: you cap the average without
+punishing a client that wakes up and fires a handful of calls at once.
+
+| Symbol | What it is |
+|--------|------------|
+| bucket size | Max tokens the bucket holds; the largest burst that can pass in one instant |
+| refill rate | Tokens added per second; the sustained request rate over the long run |
+| tokens(t) | Tokens present at time `t`, always capped at bucket size |
+| overflow | Tokens generated while the bucket is already full; discarded, never banked |
+
+**Walk one example.** Bucket size = 4 (the diagram's capacity), refill rate = 2 tokens/second. An
+idle client bursts 4 requests at `t=0`, then goes quiet:
+
+```
+bucket size  = 4 tokens
+refill rate  = 2 tokens / second
+
+t=0.0s   tokens 4  ->  burst of 4 requests, 1 token each  ->  tokens 0     4 ALLOWED
+t=0.1s   tokens 0  ->  5th request arrives, no token      ->  DROPPED (429)
+t=1.0s   tokens 0 + 2 x 1.0 = 2                           ->  2 requests could pass
+t=2.0s   tokens 0 + 2 x 2.0 = 4  (capped at 4)            ->  full burst restored
+t=3.0s   tokens still 4; the next 2 tokens/s OVERFLOW     ->  idling longer earns no extra credit
+
+recovery time for a burst of N   = N / refill    = 4 / 2 = 2.0 seconds
+steady-state sustained rate      = refill        = 2 requests / second
+worst case admitted in any 1 sec = size + refill = 4 + 2 = 6 requests
+```
+
+The **cap** is the term that does the real work. Without it, tokens would accumulate without bound
+during a quiet hour and the client could later fire 7,200 requests in one instant — the limiter would
+enforce the average but not protect the server from the spike. The cap is what makes "bucket size"
+a hard ceiling on burst damage rather than a starting balance.
+
 **How many buckets?** It depends on the rate-limiting rules:
 - It is common to have **different buckets for different API endpoints.** If a user may make 1 post
   per second, add 150 friends per day, and like 5 posts per second, that's **3 buckets per user**.
@@ -214,6 +252,50 @@ are then pulled from the queue and processed at regular intervals.
 - **Bucket size** — the queue size; equals the number of requests it can hold.
 - **Outflow rate** — how many requests are processed at a fixed rate, usually per second.
 
+**The idea behind it.** Swap the token bucket's two parameters for their mirror image and you get:
+> "Requests leave at exactly `outflow rate` per second no matter how they arrived; `bucket size` is
+> only how many you are willing to make *wait* before you start throwing them away."
+
+Token bucket meters *permission* and lets it accumulate; leaking bucket meters *departure* and never
+lets it accumulate. That is the whole difference, and it is why one allows bursts and the other
+cannot, by construction.
+
+| Symbol | What it is |
+|--------|------------|
+| bucket size | Queue capacity in requests; arrivals beyond it are dropped immediately |
+| outflow rate | Requests dequeued and processed per second, fixed and unvarying |
+| queue depth | Requests currently waiting; grows on arrival, shrinks at the outflow rate |
+| queue wait | `queue depth / outflow rate` — how long a newly queued request sits before service |
+
+**Walk one example.** Queue size = 4 requests, outflow rate = 2 requests/second. A burst of 10
+requests arrives all at once at `t=0`:
+
+```
+queue size (bucket size) = 4 requests
+outflow rate             = 2 requests / second
+
+burst of 10 arrives at t=0:
+  queued  = min(10, 4) = 4 requests
+  dropped = 10 - 4     = 6 requests        (queue full -> drop on arrival, no 5th slot)
+
+drain schedule -- strictly even, 1 request every 1 / 2 = 0.5 s:
+  t=0.5s   request 1 leaves      queue 3
+  t=1.0s   request 2 leaves      queue 2
+  t=1.5s   request 3 leaves      queue 1
+  t=2.0s   request 4 leaves      queue 0
+
+time to drain a full queue         = 4 / 2  = 2.0 seconds
+wait for a request joining a FULL queue = 4 / 2  = 2.0 seconds before it is served
+requests admitted over 60 s of saturation = 2 x 60 = 120 requests
+```
+
+That 2.0-second drain is exactly the **con** the book names: the queue "fills with old requests." A
+fresh request arriving at `t=0.1s` finds all 4 slots still occupied by the `t=0` burst and is dropped
+— rate limited not by its own behaviour but by requests 0.1 s older than it. And a request that does
+squeeze in at `t=1.6s` is not served until `t=2.5s`, by which point it may already be stale. Compare
+the token bucket above, where the same 4-deep credit is spent instantly and recovers in the same 2.0
+seconds without making anyone wait at all.
+
 **Pros:** **memory efficient** given the limited queue size; requests are processed at a **stable,
 constant outflow rate**, which suits use cases that need a steady output (e.g. a downstream system
 that can only handle a fixed throughput).
@@ -242,6 +324,45 @@ requests per minute**, with quotas resetting at round minute boundaries:
   in the *first half*, between `2:01:00` and `2:01:30`. All 5 are allowed.
 - Now slide a 60-second window from `2:00:30` to `2:01:30`: it contains **all 10 requests** — `2×`
   the limit of 5 — even though neither fixed window individually exceeded its quota.
+
+**Read it like this.** The counter is not measuring your rate; it is measuring your rate *since the
+last clock tick*, which is a different thing:
+> "Each fixed window independently promises at most `L` requests, but nothing coordinates two
+> adjacent windows, so a rolling view straddling the reset can collect one window's `L` plus the
+> next window's `L` — exactly `2L`, and never more."
+
+The `2L` is a hard bound, not a worst case that might be worse: a single fixed window can contribute
+at most `L`, and a 60-second rolling view touches at most two windows.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | The limit — max requests allowed per fixed window |
+| window size | The fixed interval (60 s here) whose boundaries are wall-clock aligned |
+| counter | Requests seen in the current window; reset to 0 at every boundary |
+| rolling view | Any 60-second interval an observer picks, not aligned to the boundaries |
+
+**Walk one example.** `L = 5` requests per 60-second window, boundaries at round minutes:
+
+```
+L = 5 requests per 60-second window
+
+window A [2:00:00 - 2:01:00]   5 requests land in 2:00:30 - 2:01:00
+                               counter 0 -> 5, and 5 <= 5     ALLOW all 5
+RESET at 2:01:00               counter 5 -> 0                 (no memory of window A)
+window B [2:01:00 - 2:02:00]   5 requests land in 2:01:00 - 2:01:30
+                               counter 0 -> 5, and 5 <= 5     ALLOW all 5
+
+rolling 60-second view [2:00:30 - 2:01:30] contains  5 + 5 = 10 requests
+10 / 5 = 2.0x the intended rate, with no window ever reporting a violation
+
+hard bound: 2 x L = 2 x 5 = 10 -- a burst can reach 2L but can never exceed it
+```
+
+The **reset** is the term that causes the damage. Delete it and the counter would grow forever and
+throttle a client permanently; keep it and the counter forgets the immediately preceding traffic at
+exactly the moment that traffic matters most. Every sliding-window algorithm below is an answer to
+that one line: sliding window log replaces the reset with per-request expiry, and sliding window
+counter replaces it with a decaying weight on the previous window.
 
 **Pros:** memory efficient; easy to understand; resetting the quota at the end of each unit window
 fits some use cases.
@@ -300,10 +421,86 @@ estimate = 3 + 5 × 0.70 = 3 + 3.5 = 6.5 requests
 Because `6.5` exceeds the limit of 5, this request is **rejected**. (Depending on the use case you
 round the estimate up or down; here even the raw `6.5` is over the limit.)
 
+**In plain terms.** The formula is a straight-line fade of the past into the present:
+> "Count everything in the current window for real, then add back only the *fraction* of the previous
+> window that the rolling 60 seconds still covers — and that fraction shrinks to zero as the current
+> window fills."
+
+Framing it as a fade, rather than as "an approximation," is what makes the behaviour predictable: the
+same client history flips from reject to allow purely by waiting, and you can compute exactly when.
+
+| Symbol | What it is |
+|--------|------------|
+| current window count | Requests actually recorded in the window in progress — an exact number |
+| previous window count | Requests recorded in the window just before it — also exact |
+| overlap % | `1 − elapsed fraction` of the current window; how much of the previous window the rolling view still spans |
+| estimate | The weighted sum compared against the limit; can be fractional |
+
+**Walk one example.** Reuse the chapter's numbers, then re-run them later in the same window:
+
+```
+limit L               = 5 requests / 60-second window
+previous window count = 5
+current window count  = 3
+
+-- 30% into the current window (the chapter's case) --
+overlap  = 1 - 0.30 = 0.70
+estimate = current + previous x overlap
+         = 3 + 5 x 0.70
+         = 3 + 3.50
+         = 6.50 requests      ->  6.50 > 5    REJECT
+
+-- same two counts, but now 80% into the current window --
+overlap  = 1 - 0.80 = 0.20
+estimate = 3 + 5 x 0.20
+         = 3 + 1.00
+         = 4.00 requests      ->  4.00 <= 5   ALLOW
+
+the previous window's contribution decays linearly 3.50 -> 1.00 -> 0.00 as the window fills
+```
+
+The **overlap weight** is the only thing separating this algorithm from the fixed window counter.
+Drop it — set the weight to 0 — and the estimate becomes just the current count, which is precisely
+the fixed window and its `2L` edge burst. Set it to 1 instead and you double-count the full previous
+window forever, throttling well-behaved clients. The linear fade is the compromise, and it is why the
+same request is rejected at 30% into the window and allowed at 80%.
+
 **How good is the approximation?** It assumes requests in the previous window are **evenly
 distributed**, which isn't strictly true — so it is an estimate, not an exact count. But
 **Cloudflare** ran the experiment on ~**400 million requests** and found only **0.003%** were
 wrongly allowed or wrongly rejected. In practice the approximation is excellent.
+
+**Put simply.** A percentage that small is easier to judge once you turn it back into a request count:
+> "Out of 400 million real requests, the even-distribution assumption produced the wrong answer about
+> twelve thousand times — roughly one bad call in every 33,000 requests."
+
+Stated as a rate rather than a percentage, it is obvious why nobody pays the sliding window log's
+memory bill for exactness: the error is smaller than the noise from clock skew between limiter nodes.
+
+| Symbol | What it is |
+|--------|------------|
+| sample size | Number of real production requests Cloudflare replayed (~400 million) |
+| error rate | Share decided differently from an exact rolling count (0.003%) |
+| wrongly allowed | A request the estimate let through that an exact count would have rejected |
+| wrongly rejected | A request the estimate rejected that an exact count would have allowed |
+
+**Walk one example.** Convert the percentage into absolute requests:
+
+```
+sample size         = 400,000,000 requests
+measured error rate = 0.003%  =  0.00003 as a fraction
+
+wrong decisions = 400,000,000 x 0.00003
+                =      12,000 requests
+
+correct decisions = 400,000,000 - 12,000 = 399,988,000 requests
+frequency of error = 1 / 0.00003 = 1 wrong decision per 33,333 requests
+```
+
+The error exists only because the formula assumes the previous window's requests were **evenly
+distributed**. Drop that assumption and you would need the actual timestamps — which is the sliding
+window log, and its per-request storage cost. The 12,000 figure is the price of skipping that
+storage, paid once across 400 million requests.
 
 **Pros:** **smooths out spikes** because the rate is based on the average of the previous window;
 **memory efficient**.
@@ -330,6 +527,50 @@ is the popular option, using two commands:
 3. If the limit **is** reached, the request is **rejected**.
 4. If the limit is **not** reached, the request is forwarded to the API servers, and meanwhile the
    middleware **increments** the counter (`INCR`) and stores it back in Redis.
+
+**What the formula is telling you.** "Use as little memory as possible" is a requirement with an
+arithmetic shape, and the shape is a product of three numbers:
+> "Redis memory = bytes per counter x number of principals you meter x rules per principal — and
+> because the last two multiply, adding one rule costs as much as adding a whole user population."
+
+That multiplication is why the earlier "3 buckets per user" line is a capacity decision, not a
+modelling detail: it triples the Redis footprint before a single request arrives. (The per-entry byte
+figures below are engineering estimates for sizing, not figures the book states.)
+
+| Symbol | What it is |
+|--------|------------|
+| bytes per counter | Redis overhead for one key: key string + integer value + TTL + hash-table slot |
+| principals | Distinct things you meter — users, IPs, or API tokens |
+| rules per principal | Separate limits each principal is subject to (post, add-friend, like) |
+| live counters | `principals x rules` — the number of keys resident at any moment |
+
+**Walk one example.** Take the chapter's own "3 buckets per user" rule set at a 10-million-user scale:
+
+```
+bytes per Redis counter entry = ~100 bytes/counter   (key + value + TTL + slot overhead)
+principals (users)            = 10,000,000 users
+rules per user                = 3 rules/user         (1 post/s, 150 friends/day, 5 likes/s)
+
+live counters = 10,000,000 users x 3 rules/user = 30,000,000 counters
+memory        = 30,000,000 counters x 100 bytes/counter
+              = 3,000,000,000 bytes
+              = 3.0 GB              -- fits one Redis node; no sharding needed yet
+
+same fleet on a sliding window LOG instead, at 16 bytes per sorted-set timestamp
+and a 100-request window:
+  bytes per user = 16 bytes x 100 timestamps x 3 rules = 4,800 bytes/user
+  memory         = 10,000,000 users x 4,800 bytes/user
+                 = 48,000,000,000 bytes
+                 = 48 GB            -- now a multi-node Redis cluster
+
+48 GB / 3.0 GB = 16x more memory to buy exactness
+```
+
+**`EXPIRE` is the term that keeps this bounded.** Drop it and nothing above holds: counters for users
+who churned, IPs seen once, and windows that closed hours ago all stay resident, so the 3.0 GB is a
+floor that grows monotonically until Redis evicts under pressure — at which point it evicts *live*
+counters too and the limiter silently stops limiting. `INCR` enforces the limit; `EXPIRE` is what
+makes the memory bill a steady state instead of a leak.
 
 ---
 

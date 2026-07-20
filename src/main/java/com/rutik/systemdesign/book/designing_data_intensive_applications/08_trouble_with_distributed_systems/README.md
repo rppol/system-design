@@ -69,6 +69,57 @@ some nodes. You don't have to *handle* partitions gracefully in every way, but y
 your software responds to them (and test it — see Jepsen). Ignoring them leads to silent data loss
 or split brain.
 
+### Decoding "at scale, something is always broken"
+
+The reason partial failure is the *normal* state of a large cluster, rather than an exception, is
+one line of arithmetic. If each of `N` machines independently has probability `p` of failing on a
+given day, then:
+
+```
+P(at least one machine fails today) = 1 - (1 - p)^N
+```
+
+**What this actually says.** "The chance that *everything* survives the day shrinks a little with
+every machine you add, and shrinking repeatedly is exponential — so past a certain fleet size,
+'nothing is broken' stops being a state your system is ever in."
+
+The formula is written as the complement (`1 -` something) because "at least one fails" is awkward
+to count directly — there are far too many ways for *some* subset to fail. "Nobody fails" has
+exactly one way: every machine survives, probability `(1-p)` each, multiplied `N` times.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of machines in the cluster |
+| `p` | Probability one machine fails on a given day, independent of the others |
+| `1 - p` | Probability one machine survives the day |
+| `(1 - p)^N` | Probability *every* machine survives — the multiplication is where independence is assumed |
+| `1 - (1 - p)^N` | The complement: at least one machine is down today |
+
+**Walk one example.** Take `p = 0.001` — a machine that fails about once every 1000 days, roughly
+once per three years, which is a healthy commodity server:
+
+```
+  N        (1 - p)^N = survive-all      P(at least one fails)      expected failures = N x p
+  10          0.999^10   = 0.99005            0.996%                     0.01 / day
+  100         0.999^100  = 0.90479            9.521%                     0.1  / day
+  1000        0.999^1000 = 0.36770           63.230%                     1.0  / day
+  10000       0.999^10000= 0.000045          99.995%                    10.0  / day
+```
+
+Read the last two rows. At 1000 machines you are already more likely than not to be operating
+with something broken at any given moment. At 10000 machines the probability of a clean day is
+about 1 in 22000 — you will see roughly 10 failures per day, every day, forever. Nothing about
+the individual machine got worse; only `N` changed. This is precisely why the chapter's engineering
+stance is "be pessimistic, assume faults" rather than "buy better hardware."
+
+**Why independence is the load-bearing assumption.** The `^N` only holds if failures don't
+correlate. In reality they do — a shared rack, power supply, switch, or bad kernel rollout takes
+out many machines at once — so the real distribution is far more clustered than this formula
+predicts. That makes the result *optimistic*, not pessimistic: real fleets see fewer quiet days
+than the arithmetic above suggests, not more. The chapter's ~12 network faults/month figure for a
+single datacenter works out to one fault every 2.5 days, and those faults are exactly the
+correlated kind.
+
 ### Detecting faults and timeouts
 
 Many systems need to detect failed nodes (load balancers stop routing to dead servers; a new
@@ -79,6 +130,53 @@ network blip), which can be worse: actions taken by the "dead" node may still co
 duplicated, and prematurely shifting load to other nodes can **cascade** the failure. The "right"
 timeout can't be a fixed constant; jitter and load make latency unpredictable, so systems often
 measure response-time distributions and adapt (e.g. Phi Accrual failure detectors).
+
+#### Decoding the timeout choice
+
+If the network guaranteed a maximum one-way delay `d` and the remote node guaranteed a maximum
+processing time `r`, then the shortest safe timeout would be:
+
+```
+T = 2d + r
+```
+
+**Read it like this.** "Wait for the request to get there, for the node to do the work, and for
+the reply to come back — and only after all three could plausibly have finished are you entitled
+to conclude the node is dead."
+
+The `2d` is there because the message crosses the network *twice*: once outbound, once inbound.
+Drop one `d` and you are timing out while the reply is still in flight — the false positive the
+chapter warns about.
+
+| Symbol | What it is |
+|--------|------------|
+| `d` | Maximum one-way network delay for a packet to arrive |
+| `r` | Maximum time the remote node needs to process the request |
+| `2d` | Round trip: one `d` out, one `d` back |
+| `T` | The timeout — how long you wait before declaring the node dead |
+
+**Walk one example.** Same node, three different assumptions about what "maximum" means:
+
+```
+  assumption                     d        r      T = 2d + r    what it buys you
+  median intra-DC                1 ms     1 ms      3 ms       detects fast, fires constantly
+  p99 intra-DC                  10 ms     5 ms     25 ms       reasonable steady-state guess
+  p99.9 with a slow node       100 ms     5 ms    205 ms       safe, but 200 ms of blind waiting
+  after a 1 s stop-the-world GC pause on the remote node, ALL THREE fire falsely
+```
+
+The last line is the whole problem. Section 8.3's process pauses are unbounded, so no finite `T`
+is actually safe — `d` and `r` have no true maximum in an asynchronous network. `T = 2d + r` is a
+formula for a guarantee you do not have, which is why the chapter concludes the right timeout
+cannot be a fixed constant.
+
+**What a false positive actually costs.** Declaring a healthy node dead does not just waste a
+detection; it moves that node's traffic onto its peers. In a 10-node cluster, evicting one node
+raises every survivor's load by `1/(10-1)` = 11.11%. In a 100-node cluster the same eviction costs
+each survivor only `1/99` = 1.01%. Small clusters with aggressive timeouts are therefore the
+cascade risk: an 11% load bump can push the next node past *its* timeout threshold, which evicts
+it, which bumps the remainder by `1/8` = 12.5%, and the cluster unravels one false positive at a
+time.
 
 ### Synchronous versus asynchronous networks
 
@@ -110,6 +208,42 @@ mishandling (the 2012 leap second crashed many systems), and untrusted device cl
 clocks across nodes can disagree by **tens of milliseconds, sometimes much more**. So you cannot
 assume two machines' clocks agree to better than that.
 
+#### Decoding "200 ppm"
+
+`ppm` means *parts per million*, so a 200 ppm quartz oscillator is simply a clock that gains or
+loses 200 microseconds for every second of real time:
+
+```
+drift = ppm x 10^-6 x elapsed_time
+```
+
+**In plain terms.** "The clock is wrong by a fixed *fraction* of however long it has been running,
+so the error is invisible over a second and enormous over a day."
+
+| Symbol | What it is |
+|--------|------------|
+| `ppm` | Parts per million — the oscillator's rated frequency error, 200 for commodity quartz |
+| `10^-6` | Converts parts-per-million into a plain fraction: 200 ppm = 0.0002 |
+| `elapsed_time` | How long since the clock was last corrected, *not* since the machine booted |
+| `drift` | Accumulated error, in the same unit as `elapsed_time` |
+
+**Walk one example.** Push 200 ppm through the timescales that matter:
+
+```
+  elapsed since last NTP correction     drift = 0.0002 x elapsed
+    1 second                               0.2      ms
+    1 minute      (60 s)                  12.0      ms
+    1 hour        (3600 s)               720.0      ms   (0.72 s)
+    1 day         (86400 s)            17280.0      ms   (17.28 s)
+```
+
+That bottom row is the book's "~17 seconds/day" figure, reproduced exactly. Note what the middle
+rows say, though: the number that matters operationally is not the daily drift but the drift
+*between NTP corrections*. Resync every 60 s and your worst-case skew is 12 ms; let a machine go
+10 minutes without a successful NTP poll (a blocked port, a dead upstream server) and it is
+already 120 ms off.
+
+
 ### Relying on synchronized clocks
 
 The danger: **last-write-wins (LWW)** conflict resolution orders writes by timestamp, but if the
@@ -122,6 +256,74 @@ narrow uncertainty interval) and *waits out the uncertainty* — it deliberately
 of the interval before committing, so that two transactions' intervals never overlap, giving
 globally consistent ordering. Most systems lack such bounded clocks and must not trust timestamps
 for correctness.
+
+#### Why drift breaks last-write-wins
+
+**What the formula is telling you.** Two writes can only be ordered by timestamp if the gap
+between them is larger than the clocks' possible disagreement. State that as an inequality:
+
+```
+ordering is trustworthy only when    (t2 - t1)  >  skew
+```
+
+`t2 - t1` is the real-time gap between the two writes; `skew` is the maximum the two nodes' clocks
+can disagree — the drift figure above, or the "tens of milliseconds" the section quotes for
+NTP-synced machines. When the gap is smaller than the skew, the timestamps can come out in either
+order, and LWW will silently keep the wrong one.
+
+**Walk one example.** Node A's clock runs 30 ms ahead of node B's. Both write to the same key,
+and B's write genuinely happens *later* in real time:
+
+```
+  real-time gap    A's timestamp    B's timestamp    LWW keeps    correct?
+     1 ms          T + 30           T +  1           A            NO  - B's later write is lost
+     5 ms          T + 30           T +  5           A            NO  - B's later write is lost
+    10 ms          T + 30           T + 10           A            NO  - B's later write is lost
+    50 ms          T + 30           T + 50           B            yes - gap exceeded the skew
+   100 ms          T + 30           T + 100          B            yes - gap exceeded the skew
+```
+
+Every row where the gap is under 30 ms discards a write that actually happened later, and nothing
+anywhere logs an error: the row simply holds the older value. That is the chapter's "silently
+discarded, invisible and unattributable" data loss, made arithmetic. Note that a *faster* network
+makes this worse, not better — the quicker two clients can write to the same key, the more of
+their writes fall inside the skew window.
+
+#### Decoding TrueTime and commit-wait
+
+Spanner's answer is to stop pretending a clock reading is a point. TrueTime returns an interval,
+and the commit rule follows directly:
+
+```
+TT.now() = [earliest, latest]        interval width  w = latest - earliest
+commit rule: pick timestamp = latest, then sleep until real time is past latest
+```
+
+**Put simply.** "If you don't know exactly what time it is, wait until you know the moment has
+definitely passed — then no later transaction can possibly claim an earlier timestamp."
+
+| Symbol | What it is |
+|--------|------------|
+| `earliest` | Lower bound: real time is certainly not before this |
+| `latest` | Upper bound: real time is certainly not after this |
+| `w` | Width of the uncertainty interval — how badly the clock is unsure |
+| commit-wait | Deliberate sleep of `w` before releasing locks, so intervals cannot overlap |
+
+**Walk one example.** The wait is pure latency, and it caps how fast one row can be rewritten:
+
+```
+  interval width w    commit-wait per txn    max serial commits/s on one row = 1000 / w
+      1 ms                 1 ms                  1000.00
+     10 ms                10 ms                   100.00
+    100 ms               100 ms                    10.00
+```
+
+This is why Spanner spends money on GPS receivers and atomic clocks in every datacenter: they are
+not there for accuracy as such, they are there to shrink `w`. Halving `w` doubles the achievable
+commit rate. Run the same protocol on plain NTP, where the honest interval is the "tens of
+milliseconds" quoted above, and you would be sleeping tens of milliseconds on every commit — which
+is exactly why the chapter says most systems lack bounded clocks and must not trust timestamps for
+correctness.
 
 ```mermaid
 flowchart LR

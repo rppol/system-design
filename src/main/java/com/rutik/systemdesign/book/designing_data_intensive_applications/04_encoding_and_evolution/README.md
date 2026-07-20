@@ -67,6 +67,83 @@ ID space reaches 2^63 (about 9.2 quintillion) — 10 extra bits, a 1,024x gap. A
 silently loses precision when parsed as a JSON number, which is exactly why Twitter had to return
 tweet IDs as both a number and a string.
 
+### Decoding the 2^53 limit
+
+JSON has no integer type — a number is an IEEE 754 double, which spends 52 bits on the
+significand plus one implied leading bit:
+
+```
+  exactly representable integers = every integer in [-2^53, 2^53]
+  ID space of a 64-bit signed ID = up to 2^63
+  gap = 2^63 / 2^53 = 2^(63-53) = 2^10
+```
+
+**In plain terms.** "A JSON number can count one-by-one only up to about nine quadrillion;
+past that it starts skipping, and it skips silently." Nothing errors — the parser returns a
+number, just not the one that was sent, which is why this bug reaches production.
+
+| Symbol | What it is |
+|--------|------------|
+| `2^53` | Largest integer a double can represent exactly, and the last one with no gaps below it |
+| `2^63` | Size of a signed 64-bit ID space, what Twitter's snowflake IDs actually use |
+| `2^(63-53)` | The gap, expressed as bits: 10 bits of ID space a JSON number cannot address |
+| significand | The 52 stored mantissa bits (+1 implied) that set where exact counting stops |
+
+**Walk one example.** The exact boundary, and what happens one step past it:
+
+```
+  2^53 = 9,007,199,254,740,992      last integer with every predecessor exact
+  2^63 = 9,223,372,036,854,775,808  top of a 64-bit ID space
+  ratio = 1,024x                     = 2^10, ten bits of unreachable IDs
+
+  ID 9,007,199,254,740,993  -> parsed as double -> 9,007,199,254,740,992   off by 1
+  ID 9,007,199,254,740,995  -> parsed as double -> 9,007,199,254,740,996   off by 1
+```
+
+Above `2^53` doubles can only land on even integers, so odd IDs round to a neighbour — and two
+different tweets can collapse onto the same ID. The workaround in the text follows directly:
+ship the ID as a *string* as well, because a string has no numeric representation to round.
+
+### Decoding the Base64 33% tax
+
+The other textual-format cost in the text has an exact formula. Base64 re-slices bytes into
+6-bit groups and pads the output to a multiple of 4 characters:
+
+```
+  3 bytes = 24 bits = 4 groups of 6 bits = 4 output characters
+
+  encoded_bytes = ceil(n / 3) x 4
+  overhead      = encoded_bytes / n - 1  ->  4/3 - 1 = 33.33%
+```
+
+**The idea behind it.** "You are re-packing 8-bit bytes into 6-bit printable characters, and
+6/8 of a byte per character means you need four characters to carry three bytes." The 33% is
+not an implementation detail you can tune away — it is forced by the ratio of the two widths.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Size of the raw binary payload in bytes |
+| `3 -> 4` | The fixed unit: three input bytes always become four output characters |
+| `ceil(n / 3)` | Number of 3-byte groups, rounded up — the final partial group is padded |
+| `4/3` | The expansion ratio. Multiply any payload size by this to get the encoded size |
+| overhead | The `+33%` the chapter cites, i.e. `4/3 - 1` |
+
+**Walk one example.** Small payloads first, then a realistic one:
+
+```
+      n bytes    ceil(n/3) x 4   encoded    added      overhead
+            3      1 x 4 =  4          4       +1        33.33%
+            6      2 x 4 =  8          8       +2        33.33%
+        1,000    334 x 4 = 1,336   1,336     +336        33.60%   (padding on the last group)
+    1,048,576  349,526 x 4     1,398,104  +349,528       33.33%   (1 MiB image in JSON)
+```
+
+The 1,000-byte row is slightly *worse* than 33.33% because 1,000 is not a multiple of 3, so the
+last group is padded — the overhead is exactly 33.33% only when `n` divides by 3. Embedding a
+1 MiB image in a JSON document therefore costs an extra 349,528 bytes on every transfer, which
+is the concrete reason the chapter treats "no native binary support" as a real cost rather than
+an inconvenience.
+
 ### Binary encoding
 
 For internal data (within one organization), binary formats win on **size** and **speed**.
@@ -165,6 +242,51 @@ fields through a decode-modify-encode cycle. Also note **"data outlives code"**:
 code in minutes, but the data in the database may be five years old — the database effectively
 contains every version of your schema ever written. Migrations (rewriting all rows) are
 expensive, so most databases allow the schema to evolve and old rows to keep their old shape.
+
+#### Decoding why "both directions at once" is not optional
+
+Count the reader/writer pairings a rolling upgrade actually produces rather than the ones you
+tested:
+
+```
+  combinations = (code versions running) x (data versions on disk)
+               = 2 x 2 = 4
+
+  same-version pairs   = 2      (v1 reads v1 data, v2 reads v2 data)  -- what you tested
+  version-skew pairs   = 4 - 2 = 2
+      v2 code reads v1 data  ->  BACKWARD compatibility
+      v1 code reads v2 data  ->  FORWARD  compatibility
+```
+
+**What the formula is telling you.** "Two versions in flight do not give you two cases to
+handle, they give you four — and the two you did not think about are exactly the two that need
+compatibility rules." Forward and backward are not alternatives to pick between; they are the
+two off-diagonal cells of the same square.
+
+| Symbol | What it is |
+|--------|------------|
+| code versions | Application builds running simultaneously during the rollout — normally 2 |
+| data versions | Record shapes present in the store. Never fewer than the code versions, usually far more |
+| same-version pairs | The diagonal: `k` cases where reader and writer agree. Trivially fine |
+| version-skew pairs | The off-diagonal: `k^2 - k` cases requiring a compatibility guarantee |
+
+**Walk one example.** The square for a two-version rollout, then what widening it costs:
+
+```
+                      data written by v1     data written by v2
+    v1 code reads          same version      FORWARD  (must ignore + preserve unknown field)
+    v2 code reads          BACKWARD          same version
+
+  k = 2 versions  ->  2^2 - 2 =  2 skew cases
+  k = 3 versions  ->  3^2 - 3 =  6 skew cases
+  k = 4 versions  ->  4^2 - 4 = 12 skew cases
+```
+
+And each of the chapter's three dataflow modes carries both directions independently, so a
+system using databases, services, and a message broker owes `3 x 2 = 6` separate compatibility
+guarantees. The "data outlives code" point makes the data-version axis worse than the table
+suggests: code versions collapse to 2 within minutes of a deploy, while the database may hold
+records in every shape written over five years, so `k` on the data side never shrinks on its own.
 
 ### Dataflow through services: REST and RPC
 

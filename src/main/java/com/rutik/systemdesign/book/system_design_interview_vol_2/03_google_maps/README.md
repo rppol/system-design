@@ -105,6 +105,44 @@ all levels (geometric sum, top level dominates):
    naive total        ≈  5.9e12 x 100 KB  ≈  ~590 PB
 ```
 
+**What this actually says.** "Every zoom level costs four times the level above it, so the
+deepest level you choose to keep *is* the storage bill — the entire rest of the pyramid rounds to
+a third of it on top." That framing tells you exactly where to cut: shaving one level off the deep
+end removes about three quarters of the footprint, while dropping shallow levels saves nothing at
+all.
+
+| Symbol | What it is |
+|--------|------------|
+| `z` | Zoom level. 0 = the whole world in one tile; each level splits every tile into four |
+| `4^z` | Tiles at level `z` — a `2^z x 2^z` grid, Web Mercator's power-of-two quadtree |
+| `21` | The deepest zoom level kept (street-level detail) |
+| `100 KB` | Bytes per rendered 256x256 raster tile |
+| `(4^(z+1) - 1) / 3` | Closed form of `sum_{k=0..z} 4^k` — every tile in the pyramid up to `z` |
+| `PB` | Petabyte, 1e15 bytes |
+
+**Walk one example.** Pricing the pyramid level by level:
+
+```
+  level z        tiles = 4^z         bytes = tiles x 100 KB        as PB
+  -------        -----------         ----------------------      --------
+     0                        1              1.0e5 B               0.0000
+    10                1,048,576              1.0e11 B              0.0001
+    15            1,073,741,824              1.1e14 B              0.1074
+    18           68,719,476,736              6.9e15 B              6.8719
+    21        4,398,046,511,104              4.4e17 B            439.8047   <- one level
+  ------------------------------------------------------------------------
+  sum 0..21   (4^22 - 1) / 3
+            = 5,864,062,014,805              5.9e17 B            586.4062   <- whole pyramid
+
+  whole pyramid / deepest level  =  586.4062 / 439.8047  =  1.3333  =  4/3
+  share of the bill from z=21    =  439.8047 / 586.4062  =  75.0%
+```
+
+The `4/3` is the geometric series `1 + 1/4 + 1/16 + ...` read backwards: levels 0-20 combined add
+only a third again on top of level 21. So "how deep do I render, and where?" is the only storage
+question that matters — which is precisely why the next move is to stop rendering level 21 over
+open ocean.
+
 That naive ~590 PB is not what Google actually stores, and the two corrections are the point of
 the estimate:
 
@@ -132,6 +170,37 @@ batch cadence               = 1 upload / 15 s  (client buffers GPS points, sends
 steady-state write QPS      ≈ 24e6 / 15  ≈ 1.6 million writes/sec
 peak (say 2x)               ≈ 3+ million writes/sec
 ```
+
+**Put simply.** "Concurrency, not headcount, sets the write path — and the batch window divides
+that concurrency straight down." A billion registered users is not a billion writers; only the
+slice with the app live right now writes, and the client's buffer then cuts even that by the
+length of the window.
+
+| Symbol | What it is |
+|--------|------------|
+| DAU | Daily active users, 1e9 |
+| 35 min / 1440 min | Duty cycle — the fraction of a day an average user has the app live |
+| concurrent | DAU x duty cycle; how many clients are streaming at any given instant |
+| 15 s | Client batch window — buffer GPS points locally, flush one request every 15 s |
+| write QPS | concurrent / batch window; requests per second arriving at the location service |
+
+**Walk one example.** Pushing the chapter's own numbers through:
+
+```
+  duty cycle       =  35 min / 1440 min per day       =  0.024306
+  concurrent       =  1e9 x 0.024306                  =  24,305,556 clients
+  unbatched QPS    =  24,305,556 / 1 s                =  24.3 M writes/sec
+  batched QPS      =  24,305,556 / 15 s               =   1.62 M writes/sec
+  peak (2x)        =  2 x 1.62 M                      =   3.24 M writes/sec
+
+  writes removed   =  24.3 M - 1.62 M                 =  22.7 M writes/sec
+  reduction factor =  24.3 M / 1.62 M                 =  15x  (exactly the window length)
+```
+
+The reduction factor is *identically* the window length: 15 seconds of client-side buffering buys
+15x fewer requests, and nothing else in the design comes close to that lever. The duty-cycle term
+is what keeps the estimate honest — drop it and you would size the write path for 1e9 concurrent
+writers, over-provisioning by roughly 41x.
 
 Even after batching, the location path is **millions of writes per second** — overwhelmingly
 write-heavy, append-only, rarely read back per-user. That profile screams a **wide-column,
@@ -240,6 +309,39 @@ Caption: the tile pyramid quarters the world at each zoom level (`4^k` tiles at 
 client only ever pulls the handful of tiles under its viewport — turning "serve the planet" into
 "serve a dozen static files from the nearest CDN edge."
 
+**Read it like this.** "A client's download is set by the size of its screen, not by the size of
+the world: bytes = (viewport tiles + prefetch ring) x bytes per tile." The planet's tile count
+never appears in the client's cost function, which is why the same design serves a phone and a
+wall-sized display without changing.
+
+| Symbol | What it is |
+|--------|------------|
+| viewport tiles | Tiles whose 256x256 pixel area intersects the visible screen |
+| prefetch ring | One extra band of tiles around the viewport so panning does not stall |
+| bytes/tile | ~100 KB for a rendered raster tile; substantially less for a vector tile |
+
+**Walk one example.** A phone whose screen covers a 3x4 block of tiles, with a one-tile ring:
+
+```
+  visible grid              3 x 4                      =    12 tiles
+  grid with 1-tile ring     5 x 6                      =    30 tiles  (12 visible + 18 ring)
+
+  raster @ 100 KB/tile      12 x 100 KB                =  1,200 KB  =  1.2 MB
+                            30 x 100 KB                =  3,000 KB  =  3.0 MB
+  vector @  25 KB/tile      12 x  25 KB                =    300 KB
+                            30 x  25 KB                =    750 KB
+
+  whole planet at zoom 21                              =  439.8 PB  =  4.398e17 B
+  planet / one raster screenful  =  4.398e17 / 1.2e6   =  3.7e11 x
+```
+
+The ring is where the prefetch term earns its place: without it the client fetches only the 12
+visible tiles and every pan stalls on a network round-trip; with it the client carries 30 tiles so
+the next tile is already local. Note the two payload columns against the "a few hundred KB per
+screenful" figure used elsewhere in this chapter — that figure lines up with the vector-tile
+column (300 KB for the visible grid), while the 100 KB raster tile of the storage estimate puts
+the same screenful at 1.2 MB. It is one more reason the chapter lands on vector tiles.
+
 ### Map 101: Road data for navigation algorithms (routing tiles)
 
 Navigation is a **graph problem**. Model the road network as a graph:
@@ -257,6 +359,44 @@ nodes/edges in a small region as a serialized **adjacency list**. A tile stores 
 **neighbor tiles** at the roads that cross its boundary, so a path search can start in one tile
 and **expand across tile boundaries** by loading adjacent tiles **on demand** — you only ever hold
 the tiles the search actually touches.
+
+**In plain terms.** "The graph's memory bill is nodes x bytes-per-node plus edges x
+bytes-per-edge — and because every intersection carries a couple of road segments, the edges are
+the bill." Once you see that, partitioning stops being a nicety and becomes the only way to bound
+the working set of a single search.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Nodes — intersections and decision points; the chapter's "hundreds of millions" |
+| `E` | Directed edges — road segments; `E = V x average out-degree` |
+| average out-degree | Road segments leaving an intersection, counting both directions; ~2.5 |
+| bytes/node | Node id + latitude + longitude, packed = 24 B |
+| bytes/edge | Target node id + weight + flags + geometry pointer = 24 B |
+| bytes/tile | Total adjacency bytes / number of routing tiles |
+
+**Walk one example.** Size the planet first, then one routing tile:
+
+```
+  V   =  300,000,000 nodes
+  E   =  300,000,000 x 2.5                     =  750,000,000 directed edges
+
+  node store   =  3.0e8 x 24 B                 =    7.2 GB
+  edge store   =  7.5e8 x 24 B                 =   18.0 GB
+  adjacency total                              =   25.2 GB   <- one big machine, barely
+  + polyline geometry @ 100 B/edge             =  +75.0 GB
+  full graph with geometry                     =  100.2 GB   <- one machine, no
+
+  partition at 2,000 nodes per routing tile:
+    tile count      =  3.0e8 / 2,000           =  150,000 tiles
+    bytes per tile  =  25.2 GB / 150,000       =  168 KB per tile
+    search touching 50 tiles  =  50 x 168 KB   =  8.4 MB resident
+```
+
+That last line is the entire argument for routing tiles: a search holds 8.4 MB of working set
+instead of 25-100 GB, so a commodity broker-sized machine can plan routes and you scale by adding
+machines rather than by buying RAM. Drop the out-degree term and you would size the graph at 7.2
+GB and conclude it fits comfortably in memory — the edges are 71% of the adjacency bytes and they
+are what breaks the single-machine assumption.
 
 Even that is too slow for cross-country routes (a New York → Los Angeles search would load
 thousands of local tiles). So routing tiles are layered into **hierarchical tiers**:
@@ -547,12 +687,85 @@ destination. Because this runs on the **static** graph and ignores traffic, its 
 of candidate paths — is stable and cacheable; the same origin/destination yields the same
 candidates until the *road network itself* changes.
 
+**The idea behind it.** "Search cost is nodes settled x time per node, and hierarchy is a trick
+for shrinking the first factor by four orders of magnitude." Both factors are visible and only one
+is compressible — you cannot make a heap operation much faster, so the only lever is settling
+dramatically fewer nodes.
+
+| Symbol | What it is |
+|--------|------------|
+| nodes settled | Nodes the search pops off the frontier and finalizes (never revisits) |
+| time per node | Decode the node, relax its edges, do the heap work; ~1 microsecond |
+| Dijkstra, no heuristic | Expands in all directions; worst case it settles the reachable graph |
+| A* + tiers | Aims at the destination and crosses the long middle on the highway tier |
+
+**Walk one example.** One coast-to-coast route, three search strategies:
+
+```
+  strategy                       nodes settled    x 1 us/node    =  wall time
+  --------                       -------------    -----------       ---------
+  Dijkstra over whole planet       300,000,000      3.0e8 us          300 s
+  A* on local tiles only             2,000,000      2.0e6 us          2.0 s
+  A* with hierarchical tiers            30,000      3.0e4 us          0.030 s  =  30 ms
+
+  tiers vs planet-wide Dijkstra  =  3.0e8 / 3.0e4  =  10,000x fewer nodes settled
+  tiles resident (at 168 KB ea)  =  50 tiles       =  8.4 MB, not 100 GB
+```
+
+The cost model is linear in nodes settled, so the only way to make a cross-country route
+interactive is to settle fewer of them — which is exactly what climbing to the arterial and then
+highway tier does. Remove the tier term and the same query settles two million nodes and takes two
+seconds, well past the point where a user waits.
+
 **ETA service.** For each candidate route, the ETA service predicts **travel time** by folding in
 traffic: **live speeds** (from the location/Kafka traffic aggregator) for congestion right now,
 and **historical patterns** (this segment is always slow at 5 pm on weekdays) via **ML models**.
 This is why shortest-path and ETA are split: the *shape* of good routes changes slowly (graph),
 but the *time* to drive them changes minute to minute (traffic) — mixing them would force a
 graph re-search on every traffic tick.
+
+**What the formula is telling you.** "ETA cost is candidate routes x segments per route x cost per
+segment prediction — and the adaptive version replaces 'recompute for every navigator' with
+'recompute for the navigators indexed to the segment that actually moved'." The first product is
+why a single ETA call is cheap; the second is why the *continuous* version is tractable at all.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Candidate routes the shortest-path service handed over |
+| segments per route | Route length / average road-segment length |
+| cost per segment | One model inference over live + historical speed features; ~2 us batched |
+| segments changed | Road segments whose measured traffic moved on this tick |
+| navigators per segment | Active navigators indexed as "on or approaching" that segment |
+
+**Walk one example.** First a single route request, then a single traffic tick:
+
+```
+  one route request:
+    route length                    500 km
+    average segment length          0.2 km
+    segments per route              500 / 0.2                =      2,500 segments
+    candidate routes                k = 3
+    segment predictions             3 x 2,500                =      7,500
+    cost @ 2 us each                7,500 x 2 us             =  15,000 us  =  15 ms
+
+  one traffic tick (adaptive ETA):
+    active navigators               2,000,000
+    segments each is on/approaching 50
+    index entries                   2.0e6 x 50               =  100,000,000
+    total road segments             750,000,000
+    mean navigators per segment     1.0e8 / 7.5e8            =  0.133
+    segments changed this tick      50,000
+    navigators to recompute         50,000 x 0.133           =  6,667
+    naive "recompute everyone"                               =  2,000,000
+    saving                          2.0e6 / 6,667            =  300x
+```
+
+The segment-to-navigator index is the term that makes adaptive ETA possible. Without it, every
+traffic tick costs 2,000,000 route recomputations — at 15 ms each that is 30,000 CPU-seconds per
+tick, which no fleet absorbs. With it, the tick costs 6,667 recomputations, because a changed
+segment on average has a fraction of a navigator on it and the vast majority of drivers are
+nowhere near it. This is also why the chapter flags maintaining that index as the hard part: it
+is 1.0e8 entries churning as every navigator moves.
 
 **Ranker.** Applies user preferences (avoid tolls, avoid highways, wheelchair-accessible, fastest
 vs shortest) as filters and orders the candidate routes by the chosen objective (usually predicted

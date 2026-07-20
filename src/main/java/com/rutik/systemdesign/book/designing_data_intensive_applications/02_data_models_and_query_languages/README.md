@@ -85,6 +85,56 @@ databases handle one-to-many (trees) well but **joins weakly** — you either de
 accept update anomalies) or emulate joins in application code. As features grow, data tends
 to become more interconnected (many-to-many), which favors the relational/graph models.
 
+### Decoding "handles joins weakly"
+
+This chapter is mostly qualitative — it argues about *shape*, not formulas. But "emulate joins
+in application code" hides a cost model worth writing down, because it is the one number that
+turns a modelling opinion into an outage:
+
+```
+app-side join latency  =  (1 + N) x RTT          "N+1 queries"
+engine-side join       =  1 x RTT + join_cost
+```
+
+**Put simply.** "A join done in the database is one round trip; the same join done in your
+application is one round trip per row you got back."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Rows returned by the first query — each one needs its referenced document fetched |
+| `RTT` | Round-trip time to the database. Network-bound, and it does not get faster with scale |
+| `1 +` | The initial query that discovers which `N` documents you now have to go get |
+| `join_cost` | In-engine hash/merge join. CPU-bound, no network per row, and parallelizable |
+
+**Walk one example.** A list page showing 200 people and each person's region name:
+
+```
+  App-side emulation, 0.5 ms RTT on a warm local network:
+    1 query for the 200 people                        0.5 ms
+    200 follow-up lookups x 0.5 ms                  100.0 ms
+    -------------------------------------------------------
+    total                                           100.5 ms
+
+  Single SQL join:
+    1 round trip                                      0.5 ms
+    hash join over 200 rows                           1.5 ms
+    -------------------------------------------------------
+    total                                             2.0 ms
+
+  slowdown  =  100.5 / 2.0  =  50.2x
+```
+
+The `N` is why the chapter says joins get *worse* as features grow: the term scales with result
+size, so the design that felt fine on a 10-row prototype (5.5 ms) is 50x slower on a 200-row
+page, and the fix is not an index — it is a different data model.
+
+**The denormalization alternative, also as arithmetic.** Store the region *name* in every
+person document and the read becomes one query with zero follow-ups. The cost moves to writes:
+if 1,000 people share a region, renaming that region is **1 write** normalized and **1,000
+writes** denormalized, and any failure partway through leaves the two spellings coexisting.
+That is precisely the "update anomaly" the section names — the ID indirection is buying write
+consistency with read latency.
+
 ### Historical echo: the network and hierarchical models
 
 The 1970s debate repeats. IMS's **hierarchical model** (trees, like JSON documents) struggled
@@ -119,6 +169,48 @@ route around.
 - **Convergence:** relational DBs added JSON/XML column types and document-like features;
   document DBs added join-like references. The models are converging, and a hybrid is likely
   the future of mainstream databases.
+
+### Decoding the locality caveat
+
+"Keep documents small" is the chapter's practical rule, and it follows from two facts stated
+just above: the database loads the *whole* document even for one field, and updates typically
+rewrite the whole document. Written as ratios:
+
+```
+read waste            =  doc_bytes x (1 - fraction_needed)
+write amplification   =  doc_bytes / changed_bytes
+```
+
+**The idea behind it.** "Locality is a discount you only collect if you actually wanted most
+of the document — otherwise it is a surcharge, and on writes it is always a surcharge."
+
+| Symbol | What it is |
+|--------|------------|
+| `doc_bytes` | Size of the whole document. The unit the storage engine reads and rewrites |
+| `fraction_needed` | Share of the document the query actually uses. The break-even variable |
+| `changed_bytes` | What the update really modified — one field, usually tiny |
+| `doc_bytes / changed_bytes` | Physical bytes written per useful byte. Grows linearly with doc size |
+
+**Walk one example.** Reading one field, then updating one field:
+
+```
+  READ -- a 100 KB document, engine loads all 100,000 B regardless:
+    need 100% of it   ->  wasted      0 B     locality is a pure win
+    need  50% of it   ->  wasted 50,000 B     break-even-ish
+    need  10% of it   ->  wasted 90,000 B     you are paying 10x for one field
+    need   2% of it   ->  wasted 98,000 B     you are paying 50x
+
+  WRITE -- change one 50-byte field:
+      4 KB document   ->  rewrite      4,000 B   ->  WA =    80x
+    100 KB document   ->  rewrite    100,000 B   ->  WA = 2,000x
+      1 MB document   ->  rewrite  1,000,000 B   ->  WA = 20,000x
+```
+
+The write column is why the rule is "keep documents small" rather than "keep documents
+focused": read waste is bounded by how much you over-fetch, but write amplification is
+unbounded in document size and is paid on *every* update to *any* field. A résumé that grows an
+append-only activity log is the classic failure — the document creeps from 4 KB to 1 MB, and
+the cost of touching one field silently rises 250-fold.
 
 ### Schema-on-read vs schema-on-write
 
@@ -170,6 +262,43 @@ graph. **Cypher** (Neo4j's declarative language) expresses traversals like
 finds matching paths regardless of length. The same query in SQL needs **recursive common
 table expressions** (`WITH RECURSIVE`) and is far more verbose, because the number of joins
 is not fixed in advance — exactly where SQL is awkward and graph queries shine.
+
+### Decoding "the number of joins is not fixed in advance"
+
+The comparison the chapter makes is between a query whose *text length* depends on traversal
+depth and one whose does not:
+
+```
+SQL joins written  =  d          (d = traversal depth, must be known when you write the query)
+vertices visited   ~  b^d        (b = average out-degree, the branching factor of the graph)
+```
+
+**Stated plainly.** "In SQL you must know the depth before you write the query; in Cypher you
+only have to know the pattern, and the engine walks as deep as the data goes."
+
+| Symbol | What it is |
+|--------|------------|
+| `d` | Hops from the start vertex. In SQL this is a hand-written join per hop |
+| `b` | Average out-degree — how many edges leave a typical vertex |
+| `b^d` | Frontier size after `d` hops. The work the engine does, in either language |
+| `WITH RECURSIVE` | SQL's escape hatch: expresses unbounded `d` at the cost of much verbosity |
+
+**Walk one example.** A social graph with average out-degree 50:
+
+```
+        depth d    SQL joins to write    frontier ~ 50^d
+          1                1                        50
+          2                2                     2,500
+          3                3                   125,000
+          4                4                 6,250,000
+```
+
+Two separate things grow here, and conflating them is the classic interview trap. The **left
+column** is a *language* problem: Cypher's pattern is the same text at every depth, SQL's is
+not, and at unknown depth SQL needs `WITH RECURSIVE`. The **right column** is a *work* problem
+that no query language escapes — a graph database traversing 4 hops still touches millions of
+vertices. Graph models win on expressiveness and on locality of the edge pointers, not by
+making `b^d` smaller.
 
 ### Triple-stores and SPARQL
 

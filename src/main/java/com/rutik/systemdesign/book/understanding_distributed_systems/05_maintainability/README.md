@@ -104,6 +104,45 @@ the team routinely re-runs failed builds, and nobody trusts a green build. The f
 coverage *down* the pyramid — replace an e2e test that checks a validation rule with a unit test
 that checks the same rule directly.
 
+**In plain terms.** "Total CI time is just `Σ (count × per-test duration)` per layer — and because
+per-test duration differs by *three orders of magnitude* between layers, the shape of the pyramid,
+not the number of tests, decides whether CI takes five minutes or an hour." The pyramid is a
+cost-optimization result, not an aesthetic preference.
+
+| Symbol | What it is |
+|--------|------------|
+| `count` | Number of tests at a layer |
+| `duration` | Wall time for one test at that layer: unit ~10 ms, integration ~200 ms, e2e ~5 s |
+| `count × duration` | That layer's contribution to the CI run |
+| `Σ` | Sum over the three layers — the total CI time developers actually wait for |
+| shape | The *ratio* between layer counts. 80/15/5 is a pyramid; 5/15/80 is the ice-cream cone |
+
+**Walk one example.** The same 1,000 tests, arranged two ways:
+
+```
+  HEALTHY PYRAMID (80% / 15% / 5%)
+    unit          800 x   10 ms =    8.0 s
+    integration   150 x  200 ms =   30.0 s
+    e2e            50 x 5000 ms =  250.0 s
+    total                       =  288.0 s  =  4.8 min
+
+  INVERTED (ice-cream cone: 50 unit / 150 integration / 800 e2e)
+    unit           50 x   10 ms =    0.5 s
+    integration   150 x  200 ms =   30.0 s
+    e2e           800 x 5000 ms = 4000.0 s
+    total                       = 4030.5 s  = 67.2 min
+
+  same 1,000 tests, same coverage intent  ->  4.8 min vs 67 min, a 14x difference
+```
+
+That 67-minute figure is the "CI takes 40 minutes" smell the text names, and the arithmetic shows
+why it is self-reinforcing: e2e tests are also the *flaky* ones, so an inverted suite doesn't just
+run for an hour — it runs for an hour and then asks you to re-run it. **Flakiness multiplies the
+worst term.** At a 2% per-test flake rate, 800 e2e tests fail a build with probability
+`1 − 0.98^800`, which is effectively 100% — the suite is *never* green on the first try.
+
+
+
 ### Size of testing
 
 Scope (how much *code* is exercised) is related to but distinct from **size** (how many
@@ -298,6 +337,42 @@ in production and watch the health signals at each step:
   budget burn, latency percentiles, or crash rate cross a threshold, the pipeline halts (or
   auto-rolls-back) rather than promoting.
 
+**What this actually says.** "The blast radius of a bad deploy is `exposure % × users × time at that
+exposure` — and a staged rollout works by keeping the *first* factor tiny for exactly as long as it
+takes the *third* factor to reveal the bug." Canarying does not make deploys safer; it makes them
+*cheaper when they are unsafe*.
+
+| Symbol | What it is |
+|--------|------------|
+| `U` | Total user population |
+| `e` | Exposure fraction at the current stage. `1%` → `0.01` |
+| `U × e` | Users who can hit the new version right now — the blast radius at this stage |
+| bake time | How long you hold at `e` before widening. Must exceed the bug's time-to-surface |
+| stages | The exposure ladder, e.g. `1% → 10% → 50% → 100%` |
+
+**Walk one example.** `U = 10,000,000` users, the text's `1% → 10% → 50% → 100%` ladder with a
+30-minute bake at each step:
+
+```
+  stage    exposure e    users at risk      cumulative rollout time
+   1%        0.01           100,000            30 min
+  10%        0.10         1,000,000            60 min
+  50%        0.50         5,000,000            90 min
+ 100%        1.00        10,000,000           120 min  (2.0 h end to end)
+
+  bug caught at the 1% stage   ->     100,000 users affected
+  bug shipped big-bang         ->  10,000,000 users affected
+  ratio                        ->  100x smaller blast radius, bought with 2 hours
+```
+
+**Why bake time is the load-bearing knob, not the percentage.** The exposure ladder only helps if the
+bug *shows up* while you are still at 1%. A crash-on-startup surfaces in seconds and any canary
+catches it; a memory leak that OOMs after 40 minutes, or a bug that only fires on a nightly cron,
+sails through a 5-minute bake and gets promoted to 100% — where it now takes down everything at
+once, having consumed your entire rollout budget proving nothing. **A fast rollout through all four
+stages is a big-bang deploy with extra ceremony.** Size the bake to the *slowest* failure mode you
+believe in, not to how impatient the release train is.
+
 ### Rollbacks and backward compatibility
 
 The safety net under the whole pipeline is the ability to **roll back** fast — and rollback is only
@@ -419,6 +494,52 @@ this fast) captures the tail the average erases. High percentiles matter more th
 a single user's page load fans out into *many* backend requests, so the probability that user hits
 *at least one* slow request is far higher than 1% — the tail dominates real user experience.
 
+**Read it like this.** "An average is a *single number that describes nobody*; a percentile is a
+*promise about a fraction of your users*." `pX = v` reads "X% of requests were at least as fast as
+`v`" — which is the only form a user-facing latency claim can honestly take.
+
+| Symbol | What it is |
+|--------|------------|
+| mean | `Σ latencies / count`. One slow outlier drags it; it corresponds to no real request |
+| `pX` | The latency value below which `X%` of requests fall. `p99 = 300 ms` → 99% were ≤ 300 ms |
+| `1 − X` | The fraction of users living *above* `pX` — the population the percentile excludes |
+| `f` | Fan-out: backend calls behind one user-visible page load |
+| `1 − pX^f` | Chance a user hits **at least one** tail request across the fan-out |
+
+**Walk one example.** The text's distribution, scaled to 1,000 requests — 990 at 10 ms and 10 at
+5,000 ms:
+
+```
+  mean   = (990 x 10 + 10 x 5000) / 1000 = (9,900 + 50,000) / 1000 = 59.9 ms
+  p50    = 10 ms          <- the typical experience
+  p99    = 10 ms          <- still 10 ms! the slow 1% starts ABOVE p99
+  p99.9  = 5000 ms        <- here is the truth the mean buried
+
+  "59.9 ms average" describes ZERO of the 1000 requests. Not one was near 60 ms.
+  Every request was either 10 ms (fast) or 5000 ms (catastrophic).
+```
+
+Note the second gotcha the walk exposes: **the percentile has to be high enough to reach the tail
+you care about.** With 1% of traffic pathological, `p99` sits exactly at the boundary and reports
+10 ms — perfectly healthy — while `p99.9` reports 5 seconds. Choosing `p99` here would have hidden
+the incident as thoroughly as the mean did.
+
+Now the fan-out multiplier the text alludes to, at a genuinely good `p99`:
+
+```
+  per-call P(fast) = 0.99          one page load = f backend calls
+  f = 1     P(hit >=1 slow call) = 1 - 0.99^1   =  1.00%
+  f = 5                          = 1 - 0.99^5   =  4.90%
+  f = 10                         = 1 - 0.99^10  =  9.56%
+  f = 20                         = 1 - 0.99^20  = 18.21%
+  f = 100                        = 1 - 0.99^100 = 63.40%
+```
+
+A page that fans out to 100 services with a 99th-percentile-clean backend gives **63% of users a
+slow experience.** This is why large systems chase `p99.9` and `p99.99` on individual services: the
+tail you can ignore at `f = 1` is the median experience at `f = 100`. It is the same compounding
+arithmetic as Part IV's `A^N` dependency chain, measured in milliseconds instead of nines.
+
 The subtle trap the chapter names is **coordinated omission**: a naive latency measurement records
 only the requests that *completed*, silently *omitting* the requests that were never sent or never
 finished *because the system was already stalled* — and those omitted requests are exactly the slow
@@ -479,6 +600,80 @@ The same arithmetic explains **slow burn**: a chronic 0.3% error rate is only a 
 hour looks alarming — but sustained it exhausts the 30-day budget in `30 / 3 = 10 days`. It deserves
 a ticket, not a 3 a.m. page.
 
+**What it means.** "Your SLO says you're allowed to fail `1 − SLO` of the time. Multiply that
+allowance by the window and you get a *quantity* — minutes, or failed requests — that you own and
+may spend." The reframing is the entire point: reliability stops being a moral absolute and becomes
+a budget line with a balance you can check.
+
+| Symbol | What it is |
+|--------|------------|
+| `SLO` | The target, as a fraction. `99.9%` → `0.999` |
+| `1 − SLO` | The error budget as a *rate* — the fraction of failure you're permitted |
+| window | The measurement period. `30 days` = `43,200` minutes = `2,592,000` seconds |
+| `(1 − SLO) × window` | Error budget in **time** — the downtime you may spend |
+| `(1 − SLO) × total requests` | The same budget in **requests** — the failures you may serve |
+| balance | Budget minus what you've already burned. This is what gates risky releases |
+
+**Walk one example.** Both currencies, at four common SLOs over a 30-day window:
+
+```
+  30-day window = 30 x 24 x 60 = 43,200 minutes
+
+  SLO       1-SLO      budget in TIME        budget in REQUESTS at 1,000 rps
+  99%       0.01       432.00 min (7.2 h)    25,920,000 failed requests
+  99.9%     0.001       43.20 min            2,592,000
+  99.95%    0.0005      21.60 min            1,296,000
+  99.99%    0.0001       4.32 min              259,200
+
+  the request-count column, derived:
+    total requests = 1000 x 60 x 60 x 24 x 30 = 2,592,000,000  (2.592 billion)
+    at 99.9%:  0.001 x 2,592,000,000          =     2,592,000  (2.592 million)
+    on pace:   2,592,000 / 30 days            =        86,400 errors/day
+               86,400 / 24                    =         3,600 errors/hour
+```
+
+Both columns match the worked example above and Part IV's nines table (`99.9%` → 43.2 min/month is
+the same `(1 − A) × window` calculation), which is the point: **availability and error budget are
+one equation used for two purposes** — Part IV to size redundancy, Part V to decide whether to ship.
+
+**Put simply.** Burn rate answers "at the speed I'm failing *right now*, how long until the budget is
+gone?" It is a ratio of two rates — observed error rate over the on-pace error rate — so a burn rate
+of `1×` lands you at exactly zero budget on the last day of the window, and `B×` gets you there `B`
+times sooner.
+
+| Symbol | What it is |
+|--------|------------|
+| observed rate | Your actual error rate over the alerting window, e.g. `1.44%` |
+| on-pace rate | `1 − SLO`, the rate that exactly consumes the budget by the window's end |
+| `B` | Burn rate = observed / on-pace. Dimensionless — `14.4×` means 14.4 times too fast |
+| `window / B` | Time to budget exhaustion at this burn rate |
+| alert window | How long you measure `B` over. Short = fast detection, noisy; long = slow, precise |
+
+**Walk one example.** Verify the canonical `14.4×` threshold from both directions:
+
+```
+  SLO 99.9% / 30 days, 1,000 rps.  Budget = 2,592,000 errors.
+
+  observed 1.44% for one hour:
+    errors burned = 0.0144 x (1000 x 3600) = 0.0144 x 3,600,000 =  51,840
+    on-pace hour  = 0.001  x 3,600,000                          =   3,600
+    burn rate B   = 51,840 / 3,600                              =    14.4x
+    share of month's budget spent in 60 min = 51,840 / 2,592,000 =   2.00%
+
+  time to exhaustion, two ways -- they must agree:
+    window / B          = 30 days / 14.4      = 2.083 days = 50.0 hours
+    budget / burn-rate  = 2,592,000 / 51,840  = 50.0 hours     <- agrees
+```
+
+**The `14.4×` number is not arbitrary — it is reverse-engineered from "2% per hour."** Someone chose
+"an alert should fire when a single hour eats 2% of the month," and `0.02 × 30 days = 14.4 hours`
+of budget consumed per hour, i.e. `14.4×`. Every canonical burn-rate threshold is constructed this
+way: pick the budget fraction you're willing to lose before being woken, divide by the window
+fraction you're measuring over. Contrast the slow-burn tier — `3×` over `6 h` spends `3 × 6 / 720 =
+2.5%` of the budget, a nearly identical *total* loss, but stretched over six hours instead of one,
+which is exactly why one pages and the other files a ticket. The two tiers cost the same; they
+differ in *urgency*, and that is the axis the multi-window scheme is sorting on.
+
 ### Alerts
 
 An alert fires when an SLI threatens or breaches its SLO. Two failure modes bracket good alerting:
@@ -495,6 +690,43 @@ An alert fires when an SLI threatens or breaches its SLO. Two failure modes brac
   did it fire — high recall = few misses). They trade off: a hair-trigger alert has high recall but
   low precision (fatigue); a very conservative alert has high precision but low recall (misses).
   Symptom-based, SLO-burn alerting is how you get *both* high — it fires exactly when users hurt.
+
+**The idea behind it.** Both metrics are the same fraction — "how many of these were real?" — with a
+different denominator. Precision divides by *what you fired*; recall divides by *what was actually
+broken*. Naming the denominator out loud is the whole trick to keeping them straight under interview
+pressure.
+
+| Symbol | What it is |
+|--------|------------|
+| `TP` | True positive — alert fired, there was a real problem |
+| `FP` | False positive — alert fired, nothing was wrong. The fatigue generator |
+| `FN` | False negative — a real problem, no alert. The outage you find out about on Twitter |
+| precision | `TP / (TP + FP)` — of the pages you got, the fraction that mattered |
+| recall | `TP / (TP + FN)` — of the real problems, the fraction that paged you |
+| `TP + FP` | Total pages the on-call actually receives per period |
+
+**Walk one example.** Ten real incidents in a quarter, three alerting strategies:
+
+```
+  strategy         TP    FP    FN    precision   recall   pages received
+  hair-trigger     10   190     0        5.0%    100.0%   200  <- 190 of them noise
+  (CPU > 80%, any instance down, disk 80% -- cause-based)
+
+  conservative      3     0     7      100.0%     30.0%     3  <- silent for 7 outages
+  (only page if the whole service is hard down for 15 min)
+
+  SLO burn-rate     9     1     1       90.0%     90.0%    10  <- both high
+  (14.4x/1h page + 3x/6h ticket, symptom-based)
+```
+
+The hair-trigger row is how alert fatigue is *manufactured*, and the arithmetic shows the mechanism:
+at 5% precision the on-call learns — correctly, rationally — that 19 out of 20 pages are noise, and
+starts dismissing them. **Recall on paper was 100%; recall in practice collapses to whatever
+fraction the human still reads.** That is why the conservative row is not actually the safe
+alternative it looks like: 100% precision with 30% recall means seven real outages went unnoticed.
+Symptom-based burn-rate alerting escapes the tradeoff rather than picking a side, because "the SLO
+is burning" is *by construction* the definition of a real problem — there is no such thing as a
+false positive on a symptom your users are already feeling.
 
 **SLO burn-rate alerting** is the modern technique. The **burn rate** is *how fast* you're consuming
 the error budget relative to "on pace." A burn rate of 1× exhausts the budget exactly at the end of
@@ -648,6 +880,55 @@ mechanics:
   outcome is known — keep 100% of errors and slow requests, sample the rest — which captures the
   interesting traces but needs a buffering collector and more infrastructure. The tradeoff is cost
   and complexity vs. the odds of having captured the trace you need when an incident hits.
+
+**Stated plainly.** "With a sampling rate `s`, the chance you captured *at least one* instance of an
+event that happened `n` times is `1 − (1 − s)^n`." Sampling doesn't uniformly dim your visibility —
+it is nearly free for common events and nearly total blindness for rare ones, which is exactly
+backwards from what you need during an incident.
+
+| Symbol | What it is |
+|--------|------------|
+| `s` | Sampling rate. `1%` → `0.01` |
+| `n` | How many times the event you care about actually occurred |
+| `s × n` | Expected number of instances captured. Below 1, you probably have none |
+| `(1 − s)^n` | Probability you missed **every** instance |
+| `1 − (1 − s)^n` | Probability you captured at least one — your odds of being able to debug it |
+
+**Walk one example.** 1% head-based sampling, against events of different rarity:
+
+```
+  event frequency     expected captured     P(captured >= 1)
+  1 / day             0.01                    1.00%   <- effectively invisible
+  10 / day            0.10                    9.56%
+  100 / day           1.00                   63.40%
+  1,000 / day        10.00                   99.99%   <- fully visible
+
+  The cruel inversion: the 1-per-day event is the WEIRD one you most need a trace
+  for, and it is the one you have a 99% chance of not having captured.
+  The 1000-per-day event is routine, and you have thousands of traces of it.
+```
+
+The fix is not "sample more" — raising `s` to catch the 1-per-day event means keeping nearly
+everything, which is the cost you were avoiding. The fix is to **stop sampling uniformly**, which is
+precisely what tail-based sampling buys:
+
+```
+  head-based, s = 1%
+    keeps 1% of everything -> 1.000% of traffic stored
+    of the 0.1% of requests that ERRORED, you keep 1% -> you have 1% of your errors
+
+  tail-based: keep 100% of errors + 1% of successes
+    volume = 0.001 + 0.01 x 0.999 = 0.01099  ->  1.099% of traffic stored
+    error-trace capture: 1% -> 100%
+
+  +0.099 percentage points of storage buys a 100x improvement in error visibility.
+```
+
+That ratio is the argument for tail sampling in one line: **the interesting traces are a tiny
+fraction of the volume, so keeping all of them costs almost nothing** — you just have to defer the
+keep/drop decision until after you know the outcome, which is what the buffering collector is for.
+Head-based sampling is cheap because it decides early; that early decision is also the only reason
+it misses the traces you want.
 
 ### Putting it together — metrics vs. logs vs. traces
 

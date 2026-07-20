@@ -63,6 +63,49 @@ gradually building a new one from the same log, then switch over — schema migr
 at the architecture level. (This is the lambda-architecture idea — run batch and stream in parallel —
 which Kleppmann notes is being simplified as engines unify the two.)
 
+### Decoding "reprocess the whole history": the catch-up formula
+
+This chapter is mostly argument rather than arithmetic, but "maintain the old view while building the
+new one from the same log, then switch over" hides one calculation that decides whether the migration
+is a week or a decade. The new view starts at the beginning of the log while new events keep arriving,
+so it is a chase:
+
+```
+  catch-up time  =  H / (r - 1)
+
+  H = the history you must replay, measured in units of live time (e.g. "2 years of log")
+  r = replay speed as a multiple of the live event rate
+```
+
+**What the formula is telling you.** "You only close the gap with the speed you have *left over* after
+keeping up with today's traffic — so what matters is not how fast you can replay, but how much faster
+than real time."
+
+| Symbol | What it is |
+|--------|------------|
+| `H` | Length of retained history to replay — the log's retention, in wall-clock terms |
+| `r` | Replay throughput ÷ live produce rate. `r = 10` means you chew ten days of log per day |
+| `r - 1` | The surplus. One unit is consumed just staying level with incoming events |
+| `H / (r - 1)` | Wall-clock time until the new derived view is current and you can cut over |
+
+**Walk one example.** Two years of retained event log, building a brand-new search index from scratch:
+
+```
+  H = 730 days
+
+    r =  1   ->  surplus 0    ->  never catches up (moves exactly as fast as time)
+    r =  2   ->  surplus 1    ->  730 / 1  =  730 days
+    r = 10   ->  surplus 9    ->  730 / 9  =   81 days
+    r = 50   ->  surplus 49   ->  730 / 49 =   15 days
+```
+
+The shape is the same denominator that governs consumer lag in Chapter 11, and it carries the same
+warning: the difference between `r = 2` and `r = 10` is not 5x, it is 730 days versus 81. It is also
+the quiet argument for why reprocessing is done with a *batch* engine reading the log's cold storage
+rather than a stream processor — batch buys you a large `r` by throwing a thousand machines at a
+bounded input (Chapter 10's scan-rate arithmetic), which is exactly what makes "rebuild any derived
+view from the log" a practical operation rather than a slogan.
+
 ## 12.2 Unbundling Databases
 
 A database bundles several features internally: durable storage, secondary indexes, materialized
@@ -106,6 +149,48 @@ because they don't understand the application's notion of a duplicate or a valid
 TCP deduplicates *packets*, but if a user clicks "pay" twice or a request is retried after a timeout,
 only an application-level **idempotency key / unique request ID** can recognize and suppress the
 *business* duplicate. Correctness must be designed at the boundary where the meaning lives.
+
+### Decoding the end-to-end argument: why lower layers multiply to nothing
+
+The usual mental model of layered reliability is that each layer catches some fraction of the errors,
+so the survivors are the product of what each layer misses:
+
+```
+  residual errors  =  incoming errors x m_TCP x m_DB x m_app
+                      (m = the fraction each layer fails to catch)
+```
+
+**In plain terms.** "That product only shrinks if every factor is below one — and for an
+application-level duplicate, every lower layer's factor is exactly 1.0, so the whole chain collapses
+to whatever the top layer does."
+
+| Symbol | What it is |
+|--------|------------|
+| incoming errors | Business-level duplicates: the user's second click, the client's retry after a timeout |
+| `m_TCP` | Fraction TCP fails to suppress. TCP dedupes *packets*, so for business duplicates this is 1.0 |
+| `m_DB` | Same for the database's internal retries — a legitimate second INSERT is not a duplicate to it |
+| `m_app` | The idempotency key / unique request ID. The only factor that can be less than 1 |
+| residual | What actually reaches the ledger and charges the customer twice |
+
+**Walk one example.** A payments service at 1,000,000 requests/day with a 0.1% client retry rate:
+
+```
+  incoming business duplicates = 1,000,000 x 0.001 = 1,000 per day
+
+  with TCP + DB retries but no idempotency key:
+     1,000 x 1.0 (TCP) x 1.0 (DB) x 1.0 (app) = 1,000 double charges/day
+     at $50 average       ->  $50,000/day wrongly charged
+     over one 90-day quarter -> 90,000 double charges,  $4,500,000
+
+  add ONE application-level idempotency key (m_app -> ~0):
+     1,000 x 1.0 x 1.0 x ~0  =  ~0 double charges/day
+```
+
+Two things are worth noticing. First, the two "reliable" layers contribute literally nothing — this is
+the end-to-end argument's actual content, not a caveat to it. Second, no amount of hardening TCP or
+the database moves the number, because the *meaning* of "duplicate" does not exist at those layers.
+Correctness has to be enforced where the definition lives, and here that is a single unique request ID
+generated by the client and checked once at the application boundary.
 
 **Enforcing constraints.** Uniqueness (one username), no-double-spend, and similar constraints are
 exactly the consensus-flavored problems of Chapter 9. In a log-based system you can enforce them by
@@ -155,6 +240,45 @@ duplicated updates; violations here are *permanent* and far worse). Dataflow sys
 timeliness* (derived views lag a little) but must *never sacrifice integrity*. The good news:
 exactly-once processing on a replayable log, with idempotent operations, preserves integrity even
 while timeliness is eventual — so you can build correct systems on asynchronous dataflow.
+
+### Decoding why integrity outranks timeliness: bounded versus accumulating
+
+The reason Kleppmann is willing to trade one and not the other is that the two errors behave
+completely differently over time:
+
+```
+  timeliness error(t)  <=  replication lag        (bounded, and self-erasing)
+  integrity error(t)    =  violation rate x t     (unbounded, and permanent)
+```
+
+**What this actually says.** "Staleness is a debt that pays itself off the moment the stream catches
+up; a corrupted or lost update is a debt that compounds forever, because nothing in the system is
+looking for it."
+
+| Symbol | What it is |
+|--------|------------|
+| replication lag | How far a derived view trails the log — Chapter 11's consumer lag, in seconds |
+| timeliness error | How wrong a read can be. Capped by the lag, and gone once the event arrives |
+| violation rate | Lost or duplicated updates per unit time, from a non-idempotent write path |
+| `x t` | The term that makes integrity different — nothing removes past violations |
+| integrity error | Total permanent corruption accumulated since the bug shipped |
+
+**Walk one example.** A derived view running 2 seconds behind, next to a write path that silently
+double-applies 1,000 updates per day:
+
+```
+                        after 1 day     after 90 days     self-corrects?
+  timeliness error       <= 2 s            <= 2 s              yes
+  integrity error         1,000           90,000              no
+
+  the staleness is identical on day 90; the corruption is 90x worse
+  and every one of those 90,000 records is still wrong today.
+```
+
+That flat row versus that climbing row is the whole design rule. It is also why "trust, but verify"
+is the paragraph that follows: since integrity violations never announce themselves and never decay,
+the only defence is to keep recomputing derived views from the immutable log and comparing — turning
+a silent, accumulating error into a detected one.
 
 **Trust, but verify.** Don't blindly trust that storage and transmission are perfect — disks corrupt
 data silently, software has bugs, "durable" isn't absolute. Build systems that **audit** themselves:

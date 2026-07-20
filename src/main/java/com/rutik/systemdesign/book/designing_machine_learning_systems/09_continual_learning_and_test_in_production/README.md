@@ -185,6 +185,59 @@ def try_label(prediction, now):
 
 The tradeoff didn't vanish — a 30-minute window means labels lag 30 minutes and you hold that much in-flight prediction state — but it removes the systematic false negatives that were corrupting every update.
 
+**What this actually says.** "The window length does not decide how *accurate* your labels are on average — it decides what fraction of your positives get silently filed as negatives, and that fraction lands entirely on the class you have least of." That framing matters because the damage is asymmetric: a click is rare, so every click you miss is a large relative loss to the positive class, while the negative class barely notices the contamination.
+
+| Symbol | What it is |
+|--------|------------|
+| W | The log-and-wait window length (5 min, 30 min, 4 h) |
+| coverage(W) | Share of real clicks that arrive within W of the impression |
+| FN | False negatives — real clicks labeled 0 because they landed after W |
+| FN rate | FN divided by all true clicks: the share of positives you destroyed |
+| CTR | Click-through rate — how rare the positive class is to begin with |
+| poisoned share | Share of the *negative* class that is secretly a mislabeled positive |
+| in-flight state | Predictions held in memory waiting for their window to close |
+
+**Walk one example.** Use the click-time histogram from the Visual Intuition section below (buckets of 4, 8, 5, 3, 2, 1 units plus a thin tail), scaled to 1,000,000 impressions.
+
+```
+Click-time distribution, 1,000,000 impressions, 24,000 true clicks (CTR 2.4%)
+
+  minutes after impression   0-5    5-10   10-15  15-20  20-25  25-30   >30
+  clicks landing            4,000  8,000  5,000  3,000  2,000  1,000  1,000
+  cumulative               4,000  12,000 17,000 20,000 22,000 23,000 24,000
+
+W = 5 MINUTES  (the broken version)
+  coverage      = 4,000 / 24,000  = 16.7%
+  FN            = 24,000 - 4,000  = 20,000 clicks filed as "no click"
+  FN rate       = 20,000 / 24,000 = 83.3% of ALL positives destroyed
+  labels emitted: 4,000 ones and 996,000 zeros
+  poisoned share of the negative class = 20,000 / 996,000 = 2.01%
+
+  Read that pair of numbers together. The negative class looks 98% clean, so no
+  data-quality check flags it -- while FIVE OUT OF SIX of your positives have
+  been relabeled as their own opposite. The model's training signal for "what a
+  good recommendation looks like" has been almost entirely inverted.
+
+W = 30 MINUTES  (the fix)
+  coverage      = 23,000 / 24,000 = 95.8%     <- the chapter's "~95% of clicks"
+  FN            = 1,000
+  FN rate       = 1,000 / 24,000  = 4.2%
+  poisoned share of the negative class = 1,000 / 977,000 = 0.10%
+  FN reduction vs the 5-min window = 20,000 -> 1,000 = 20x fewer
+
+W = 4 HOURS
+  coverage      = ~100%,  FN ~ 0
+  but in-flight state = 240 min / 30 min = 8x what the 30-min window holds,
+  and every label arrives 4 hours stale -- so an hourly update cadence is dead:
+  you would be training on labels for predictions made four cycles ago.
+
+  effective label lag:  W = 5 min -> 5 min       (fast, and 83% wrong)
+                        W = 30 min -> 30 min     (usable, 4.2% wrong)
+                        W = 4 h    -> 240 min    (accurate, too late to matter)
+```
+
+The reason the fix returns `None` rather than `0` for a pending prediction is visible in the arithmetic above: at any instant a large share of in-flight impressions have not yet had time to be clicked. Emitting them as zeros does not add a little noise — it systematically converts the *youngest* predictions, which are exactly the freshest and most valuable ones, into false negatives. Holding them as unknown costs you 30 minutes of latency; emitting them as negatives costs you the positive class.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -217,6 +270,50 @@ Caption: labels are *computed* by a windowed stream join of each logged predicti
 The scariest challenge, because **more frequent updates multiply the chances to fail catastrophically.**
 
 - **More updates = more failure opportunities.** Every model update is a chance to ship a broken model. A quarterly retrain gives you four chances a year to break production; an hourly update gives you ~8,760. Continual learning *increases* the rate at which bad models can reach users, so it demands *more* rigorous, automated evaluation, not less.
+
+**The idea behind it.** "Your yearly count of bad models in production is just your update rate multiplied by your per-update failure rate — so raising the update rate by 2,000x while leaving the gate untouched raises your annual incident count by 2,000x too." That framing converts a vague anxiety into a design constraint: it tells you exactly how much more reliable the evaluation gate must become before a cadence increase is safe.
+
+| Symbol | What it is |
+|--------|------------|
+| U | Model updates per year (the cadence you chose) |
+| f | Per-update probability that a bad model passes the gate |
+| U x f | Expected number of bad models reaching users per year |
+| 4 | Updates/year at a quarterly retrain cadence |
+| 8,760 | Updates/year at an hourly cadence (24 x 365) |
+| required f | The per-update failure rate needed to hold `U x f` constant |
+
+**Walk one example.** Hold the evaluation gate fixed at a fairly good 1% escape rate and change only the cadence.
+
+```
+Assume the eval gate lets a bad model through 1 time in 100:  f = 0.01
+
+  cadence      U (updates/yr)    U x f = bad models shipped per year
+  ----------   --------------    ----------------------------------
+  quarterly              4          4 x 0.01 =    0.04   (one every 25 years)
+  hourly             8,760      8,760 x 0.01 =   87.60   (one every ~4 days)
+
+Same gate. Same model. Same team. The only thing that changed is the clock, and
+the incident rate went up by  8,760 / 4 = 2,190x.
+
+Now invert it: what gate do you need for hourly updates to be AS SAFE as the
+quarterly cadence was?
+  required f = 0.04 / 8,760 = 0.00000457   (4.57e-06, about 1 in 219,000)
+  reliability improvement needed = 0.01 / 4.57e-06 = 2,190x
+
+That 2,190x is the real price of the cadence change, and it is why the gate has
+to be automated. A human reviewing each candidate at 1-in-100 judgment quality
+cannot be made 2,190x more reliable by trying harder -- and there is no human
+who is going to review 8,760 model promotions a year regardless.
+
+The escape hatch is that you do not have to hold the incident count constant --
+you have to hold the incident COST constant, and cost = escapes x blast radius:
+  quarterly, full rollout:  0.04 escapes/yr x 100% of users =  0.040 user-years
+  hourly, canary at 1%:    87.60 escapes/yr x   1% of users =  0.876 user-years
+  hourly, canary at 1% + automatic rollback within 1/20 of the window:
+                           87.60 x 0.01 x 0.05             =  0.044 user-years
+```
+
+That last line is the whole argument for why "test in production" (9.5) is not an optional companion to continual learning but a precondition for it. Shrinking `f` — making the gate smarter — has hard limits. Shrinking the blast radius per escape does not: a canary slice and a fast automatic rollback are two independent multipliers on the same product, and together they buy back the entire 2,190x without requiring the evaluation to get meaningfully better at all.
 - **Adversarial poisoning risk — the Tay lesson.** A continually-learning model that trains on live user input is a target for **coordinated data poisoning**. Microsoft's **Tay** chatbot (2016) learned from Twitter interactions and, within **under 24 hours**, was manipulated by coordinated trolls into producing offensive content — forcing Microsoft to pull it. The faster and more automatically a model absorbs user data, the more exposed it is to being deliberately steered by malicious input.
 - **Evaluation takes TIME.** You cannot always know quickly whether an update is good. Huyen's example: a **fraud-detection** model's true quality can take about **two weeks** to reveal itself, because fraud is rare and confirmations (chargebacks, investigations) arrive slowly — you must accumulate enough fraudulent events under the new model to trust its precision/recall. Consequently, **evaluation — not training — becomes the bottleneck on update frequency.** Even if you *could* retrain hourly, if it takes two weeks to trust an update, your *effective* safe cadence is measured in weeks. Speeding up training buys you nothing until you speed up trustworthy evaluation.
 
@@ -410,6 +507,51 @@ Split live traffic: route some users to model **A** (champion) and some to model
 - **Statistical significance is not everything.** A "significant" result at the 5% level still carries a ~5% chance of being a false positive; and statistical significance is not the same as **practical significance** — a difference can be statistically real yet too small to matter for the business. Conversely, an important effect can be missed if the sample is too small.
 - **More than two variants.** You aren't limited to two models — you can run **A/B/C/D testing** with several challengers at once, splitting traffic among them (with the multiple-comparison caveat that testing many variants inflates the chance of a spurious "winner").
 
+**Stated plainly.** "The p-value answers only one question — *if A and B were truly identical, how often would random chance alone hand me a gap this big?* — and the answer depends as much on how many users you collected as on how much better B actually is." That framing matters because it explains both failure modes at once: too few samples and a real winner looks like noise, too many variants and noise looks like a winner.
+
+| Symbol | What it is |
+|--------|------------|
+| n | Users assigned to each arm |
+| conv_A, conv_B | Observed conversions in each arm |
+| p_A, p_B | Conversion rates, conv/n |
+| lift | The true difference you are trying to detect, `p_B - p_A` |
+| p-value | Probability of a gap this large if A and B were actually equal |
+| alpha (0.05) | The significance level — the p-value below which you declare a winner |
+| power (0.80) | The chance of detecting a real lift of that size if it exists |
+
+**Walk one example.** A baseline converting at 10.0%, a challenger genuinely converting at 10.5% — a 5% relative lift, the kind of win teams ship on. Hold the true rates fixed and vary only how long you run.
+
+```
+True rates fixed throughout: p_A = 10.0%, p_B = 10.5%  (B really is better)
+
+  n per arm     conv_A     conv_B     observed gap     p-value    call at 0.05?
+  ----------    -------    -------    -------------    --------   -------------
+      1,000        100        105        0.5 pp         0.712     no ("no diff")
+     10,000      1,000      1,050        0.5 pp         0.244     no ("no diff")
+    100,000     10,000     10,500        0.5 pp        0.00023    YES
+
+B was better in all three rows. The first two are not "B failed" -- they are
+"you did not collect enough users to tell." Stopping at n=1,000 and concluding
+"no difference" ships the worse model and calls it evidence.
+
+Sample size needed to detect this lift at alpha=0.05 with 80% power:
+    ~57,700 users per arm  ->  ~115,400 users total
+
+So a test with 2,000 users total was never capable of answering the question it
+was run to answer. Compute this number BEFORE the test, not after.
+
+Now the opposite failure -- why alpha = 0.05 means ~5% spurious winners.
+Run 20 A/A tests: the same model against ITSELF, so the true lift is exactly 0.
+    expected "significant" results = 20 x 0.05 = 1.0
+
+One of those 20 identical-vs-identical comparisons will come back a "winner" at
+p < 0.05. Nothing was different. That is what the 5% level buys you, and it is
+why A/B/C/D testing with many challengers inflates the risk: every extra arm is
+another lottery ticket in the same drawing.
+```
+
+The reason both halves of this matter together is that teams usually guard only one. Powering the test correctly protects against calling a real winner "no difference"; pre-registering *which* metric and *how many* arms protects against the reverse. And neither says anything about **practical** significance — the 0.5pp lift above is unambiguously real at n = 100,000, and whether it is worth the operational cost of shipping a new model is a separate judgment the p-value cannot make for you.
+
 ### Canary release
 
 Deploy the new model to a **small slice** of traffic (the **canary** — named for the canary in a coal mine), watch its metrics, and **gradually ramp** the traffic share while continuing to monitor; if anything looks wrong, **roll back** immediately by routing all traffic back to the old model.
@@ -460,6 +602,48 @@ flowchart LR
 Caption: a bandit loops choose-serve-observe-update, shifting traffic toward the higher-payout model as estimates sharpen — unlike A/B's fixed split, it stops paying full price to keep exposing users to the losing arm.
 
 - **Data efficiency — the book's comparison.** Because bandits stop wasting traffic on the loser, they reach a confident decision with **far fewer "loss" samples** (users exposed to the worse model) than A/B testing. Huyen cites an illustrative comparison: to conclude at 95% confidence that one variant beats another, a classic **A/B test can need on the order of ~630,000 samples**, while an **epsilon-greedy bandit reaches the same conclusion with a fraction of that** (roughly on the order of ~100,000 samples spent on the worse arm). The exact numbers depend on the effect size, but the order-of-magnitude message holds: **bandits converge with far fewer regret-samples than A/B.**
+
+**What it means.** "Regret is not an abstract score — it is the literal count of clicks, conversions, or dollars you gave up by continuing to show users the arm you already suspected was worse." Framing it as a bill rather than a metric is what makes the bandit's advantage concrete: A/B testing pays that bill at a fixed rate for the entire experiment, while a bandit's payments taper as its estimates sharpen.
+
+| Symbol | What it is |
+|--------|------------|
+| arm | One variant being tested (here: model A vs model B) |
+| gap | The true difference in reward rate between best and worse arm |
+| loser samples | Users routed to the worse arm over the whole experiment |
+| regret | Rewards lost: `loser samples x gap` |
+| epsilon | In epsilon-greedy, the probability of exploring instead of exploiting |
+| 1 - eps + eps/k | Steady-state traffic share the *best* arm receives (k = number of arms) |
+| eps/k | Steady-state share each *other* arm keeps receiving |
+
+**Walk one example.** Two models, true click rates 5.0% and 4.0% — so the gap is 1.0 percentage point — using the book's own sample figures.
+
+```
+Two arms:  A (best) true CTR 5.0%      B (worse) true CTR 4.0%
+           gap = 0.050 - 0.040 = 0.010
+
+CLASSIC A/B TEST -- fixed 50/50 split for the whole run
+  total samples to conclude at 95% confidence   = 630,000   (book's figure)
+  samples routed to the worse arm  = 630,000 / 2 = 315,000
+  regret = 315,000 x 0.010 = 3,150 clicks thrown away
+
+EPSILON-GREEDY BANDIT -- same conclusion, fewer regret-samples
+  samples spent on the worse arm   ~ 100,000   (book's figure)
+  regret = 100,000 x 0.010 = 1,000 clicks thrown away
+
+  regret-sample ratio = 315,000 / 100,000 = 3.15x fewer
+  clicks saved        = 3,150 - 1,000     = 2,150
+
+Where the bandit's 100,000 comes from -- the allocation arithmetic.
+With eps = 0.1 and k = 2 arms, once estimates have separated:
+  best arm gets   1 - eps + eps/k = 1 - 0.10 + 0.05 = 0.95   (95% of traffic)
+  worse arm gets  eps/k           =            0.05 =  5%    ( 5% of traffic)
+
+Compare the standing tax on the loser:
+  A/B            50% of traffic, forever, until the experiment is stopped
+  eps-greedy      5% of traffic once it has learned  ->  10x lighter
+```
+
+The epsilon term is the one worth defending, because the instinct is to drive it to zero. Set `eps = 0` and the bandit becomes pure exploitation: it locks onto whichever arm happened to lead after the first few noisy samples and never collects the evidence that would overturn that choice. A run of bad luck on the genuinely-better arm becomes permanent. That standing 5% is not waste — it is the premium you pay to keep the option of changing your mind, and it is exactly the same trade the randomization tap in Ch 8 makes to break a degenerate feedback loop.
 - **Algorithms:**
   - **Epsilon-greedy** — with probability ε explore (pick a random arm), with probability 1−ε exploit (pick the current best). Simple; ε controls the explore/exploit balance.
   - **Thompson sampling** — maintain a *probability distribution* over each arm's payout; each round, **sample** from those distributions and play the arm with the highest sampled value. Naturally explores arms it's uncertain about.

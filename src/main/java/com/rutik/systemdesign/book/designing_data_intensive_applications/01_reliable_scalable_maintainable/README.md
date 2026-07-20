@@ -79,6 +79,46 @@ RAID, dual power supplies, hot-swappable CPUs. As data volumes grew, software fa
 techniques (tolerating the loss of whole machines) increasingly *supplement or replace*
 hardware redundancy, because they enable rolling restarts and patching with zero downtime.
 
+#### Decoding "10,000 disks means one dies every day"
+
+That sentence is a formula in disguise. The rate at which a *fleet* fails is the fleet size
+divided by the mean time to failure of one unit:
+
+```
+  failures per year = number of disks / MTTF of one disk
+  failures per day  = failures per year / 365
+```
+
+**Stated plainly.** "One disk lasting decades is irrelevant. What matters is that you own
+thousands of them, and the fleet failure rate scales linearly with how many you own."
+
+| Symbol | What it is |
+|--------|------------|
+| `MTTF` | Mean time to failure for a *single* disk. The book's range: 10 to 50 years |
+| `number of disks` | Fleet size. The multiplier that turns a rare event into a routine one |
+| `failures per year` | Expected disk deaths across the whole fleet in a year |
+| `365` | Days per year — only converts the rate into an on-call-relevant unit |
+
+**Walk one example.** Push both ends of the book's MTTF range through it, 10,000 disks:
+
+```
+  optimistic disk (MTTF = 50 years)
+    10000 / 50  =  200 failures/year
+    200 / 365   =  0.55 failures/day      <- about one every two days
+
+  pessimistic disk (MTTF = 10 years)
+    10000 / 10  = 1000 failures/year
+    1000 / 365  =  2.74 failures/day      <- about three every day
+
+  the book's "roughly one per day" sits inside [0.55, 2.74]
+```
+
+The point of the arithmetic is the *reframing*. A single disk with a 50-year MTTF feels
+like something you will never have to think about; multiply by a fleet and disk death
+becomes a scheduled, budgeted, automated event. This is exactly why the chapter says
+hardware redundancy alone stops being the answer at scale — you cannot hand-swap a drive
+every day, so the software has to treat whole-machine loss as normal.
+
 ### Software errors
 
 Systematic faults are more insidious than hardware faults because they're **correlated** —
@@ -142,6 +182,51 @@ architecture.** Kleppmann's running example is Twitter's timeline:
 > (~300k req/s). The hard part isn't tweet *volume* — it's **fan-out**: each user follows
 > many, and each user is followed by many.
 
+#### Decoding the fan-out numbers
+
+The three rates above look like trivia until you divide them. Fan-out-on-write turns one
+insert into one write *per follower*, so the real write volume is not the tweet rate:
+
+```
+  timeline writes/sec = tweet rate x average followers per user
+  read:write ratio    = timeline reads/sec / tweet rate
+```
+
+**The idea behind it.** "Posting is rare and reading is constant, so pay the cost at write
+time — unless a single writer has so many followers that one post becomes its own outage."
+
+| Symbol | What it is |
+|--------|------------|
+| `tweet rate` | Posts accepted per second. 4.6k/s average, 12k/s peak |
+| `average followers per user` | The fan-out factor. ~75 in the book's example |
+| `timeline reads/sec` | Home-timeline requests, ~300k/s — the dominant operation |
+| `read:write ratio` | How read-heavy the workload is; decides which side to precompute |
+
+**Walk one example.** The average case first, then the celebrity that breaks it:
+
+```
+  read:write ratio  = 300000 / 4600        = 65.2 reads per tweet
+  peak headroom     =  12000 / 4600        =  2.6x above average
+  fan-out on write  =   4600 x 75          = 345000 timeline writes/sec
+
+  celebrity with 30,000,000 followers posts ONE tweet:
+    30000000 writes from a single insert   = 30,000,000x write amplification
+    at 100000 timeline writes/sec drain    = 300 seconds = 5 minutes
+```
+
+Read the two lines at the bottom together. Sixty-five reads per write is what *justifies*
+fan-out-on-write: you precompute once and serve 65 cheap lookups. But the same choice means
+one celebrity post occupies the entire write pipeline for five minutes, during which every
+other user's timeline delivery queues behind it. That single division is the whole argument
+for Twitter's hybrid — precompute for the 99.9% of users with ordinary follower counts, and
+merge-at-read for the handful whose fan-out is pathological.
+
+**Why "requests per second" is the wrong load parameter here.** Tweet rate alone says the
+system handles 4.6k writes/s, which sounds easy. The parameter that actually predicts load
+is the *distribution* of followers per user — and specifically its tail, because the mean of
+75 and a maximum of 30M live in the same dataset. Sizing off the mean under-provisions by
+five orders of magnitude for the accounts that matter most.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -186,6 +271,67 @@ performance affected? And, to hold performance steady, how much must you grow re
 - **Tail latencies matter disproportionately** because of **fan-out**: a single user request
   often hits many backends in parallel, and the *slowest* one determines the user's wait.
   The more backends, the higher the chance at least one is slow — so the tail dominates.
+
+#### Decoding the percentile — and why the mean lies
+
+Both statistics summarize the same sorted list of response times, but they ask different
+questions:
+
+```
+  mean = (sum of all response times) / (number of requests)
+
+  pN   = sort the response times ascending, then take the value at
+         position ceil(N/100 x count)
+         "N percent of requests were at least this fast"
+```
+
+**In plain terms.** "The mean asks *how much total time did we spend*; a percentile asks
+*how bad was it for the unluckiest customers*. Only the second question has a user attached
+to the answer."
+
+| Symbol | What it is |
+|--------|------------|
+| `sum / count` | The mean. Every request contributes, so one huge value drags all of it |
+| `sort ascending` | The step that makes percentiles robust — magnitude becomes rank |
+| `ceil(N/100 x count)` | Which position in the sorted list. p50 = middle, p99 = near the end |
+| `p50` | Median. The *typical* experience — half of users did better |
+| `p95 / p99 / p999` | Tail. The 1-in-20, 1-in-100, 1-in-1000 worst experiences |
+
+**Walk one example.** Twenty requests, small enough to check by hand. Sixteen at 10 ms, two
+at 25 ms, one at 90 ms, and one straggler at 1800 ms:
+
+```
+  sorted: 10 x16, 25, 25, 90, 1800          count = 20, total = 2100 ms
+
+  mean  = 2100 / 20              = 105 ms
+  p50   = position ceil(0.50x20) = 10  -> value   10 ms
+  p95   = position ceil(0.95x20) = 19  -> value   90 ms
+  p99   = position ceil(0.99x20) = 20  -> value 1800 ms
+
+  mean / p50 = 105 / 10 = 10.5x
+  requests actually slower than the mean: 1 of 20
+  the single 1800 ms request supplies 85.7% of all milliseconds spent
+  drop that one request and the mean collapses to 15.79 ms
+```
+
+Look at the third line from the bottom. **The mean of 105 ms describes no request in this
+dataset.** Nineteen of twenty users were served in 25 ms or less; the twentieth waited
+nearly two seconds. The mean sits ten times above the typical experience and twenty times
+below the worst, so it is simultaneously too pessimistic to describe the median user and
+far too optimistic to describe the angry one. It is an average of two populations that
+should never have been averaged.
+
+The last line is the tell for how fragile the mean is: deleting a *single* request out of
+twenty moves it from 105 ms to 15.79 ms. Any statistic that one sample can move by 6.6x is
+not a summary of the distribution — it is a summary of the outlier. The percentiles barely
+move at all, because `p50` only cares that the value sits at rank 10; whether the slowest
+request took 1800 ms or 18000 ms is irrelevant to it.
+
+**Why this is the chapter's most-quoted paragraph.** An SLO written as "average < 200 ms"
+passes cleanly on this data (105 ms), while 5% of users wait 1.8 seconds. Written as
+"p99 < 200 ms" it fails, correctly. The percentile is what makes the promise enforceable —
+and the tail requests are disproportionately your largest accounts, because more data per
+user means more work per request.
 
 Why tails dominate (head-of-line blocking + fan-out):
 
@@ -240,6 +386,66 @@ is one more chance for at least one call to land in its own p99 tail (1 - 0.99^N
 N = 100 backends that is already ~63% of users, matching the number above, which is why
 fan-out-heavy services must drive down tail latency itself, not just the median.
 
+#### Decoding tail-latency amplification
+
+The curve above is one formula. A request that fans out to `N` backends is slow if *any*
+single backend is slow, so compute the probability that they are *all* fast and subtract:
+
+```
+  P(user sees a slow request) = 1 - (1 - p)^N
+
+  with p = 0.01 (each backend's own p99):   1 - 0.99^N
+```
+
+**What the formula is telling you.** "You are not rolling the dice once per request — you
+are rolling it once per backend, and you lose if *any* roll comes up bad."
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | One backend's chance of being slow. `p = 0.01` is exactly what "p99" means |
+| `1 - p` | Chance that one backend is fast. `0.99` |
+| `(1 - p)^N` | Chance that **all** `N` are fast — multiplication, since calls are independent |
+| `1 - (...)` | Flip it: chance that **at least one** was slow. This is the user's experience |
+| `N` | Fan-out width. The exponent, which is why the effect compounds rather than adds |
+
+**Walk one example.** Hold `p` fixed at 1% and widen the fan-out:
+
+```
+  N =   1    1 - 0.99^1    = 1 - 0.990000 = 0.010000  ->   1.00% of users
+  N =  10    1 - 0.99^10   = 1 - 0.904382 = 0.095618  ->   9.56% of users
+  N = 100    1 - 0.99^100  = 1 - 0.366032 = 0.633968  ->  63.40% of users
+  N = 500    1 - 0.99^500  = 1 - 0.006570 = 0.993430  ->  99.34% of users
+```
+
+Read the last line slowly. **Every backend is meeting a 99% fast SLO, and 99.34% of users
+still hit a slow call.** Nothing is broken, no service is misbehaving, every dashboard is
+green — and essentially every user has a bad experience. The exponent is doing all the work:
+`N` appears as a power, not a multiplier, so widening fan-out does not degrade the user
+experience gradually, it collapses it.
+
+The crossover is worth memorizing: `log(0.5) / log(0.99) = 68.97`, so at **69 backends** the
+majority of your users are hitting a tail call. Most microservice architectures cross that
+line without anyone deciding to.
+
+**The fix is in `p`, not `N`.** You usually cannot shrink fan-out — the architecture needs
+those services. So drive down the per-backend tail instead. Tightening each backend from
+p99 (`p = 0.01`) to p999 (`p = 0.001`) is a 10x improvement in one number, and here is what
+that single change buys at the same fan-out widths:
+
+```
+                    p = 0.01 (p99)      p = 0.001 (p999)
+  N =   1               1.00%                0.10%
+  N =  10               9.56%                1.00%
+  N = 100              63.40%                9.52%
+  N = 500              99.34%               39.36%
+```
+
+At `N = 100`, one order of magnitude on the backend tail takes the fraction of affected
+users from 63.40% down to 9.52% — a 6.7x improvement in user-visible quality bought entirely
+by work no single service's own dashboard would have flagged as urgent. This is the
+arithmetic behind Amazon targeting p999 rather than p99, and behind Dean and Barroso's
+"The Tail at Scale": in a fan-out system, the tail *is* the median experience.
+
 ### Approaches for coping with load
 
 - **Scaling up (vertical)** — a more powerful machine. Simple, but a single big machine is
@@ -293,6 +499,36 @@ as "p99 < 200 ms", never "average < 200 ms".
 
 Caption: the chapter's signature lesson made visible — report the percentile vector, set
 SLOs on the tail (p95/p99/p999), and remember the tail hits your highest-value users hardest.
+
+### Reconstructing the distribution behind that chart
+
+The five bars are not five independent facts — they are five readings of one sorted list of
+1000 response times. Here is a distribution that produces every one of them exactly:
+
+```
+  rank        count   value     which bar it sets
+  1  - 949      949    10 ms    p50 = rank 500  -> 10 ms
+  950            1     80 ms    p95 = rank 950  -> 80 ms
+  951 - 989     39    130 ms
+  990            1    400 ms    p99 = rank 990  -> 400 ms
+  991 - 998      8   1870 ms
+  999 - 1000     2   2500 ms    p999 = rank 999 -> 2500 ms
+                ----
+                1000 requests, 35000 ms total
+
+  mean = 35000 / 1000 = 35 ms
+```
+
+**Read it like this.** "Ninety-five percent of this system's requests finish in 80 ms or
+less, and the mean still says 35 ms — a number no user experienced, because it is the
+average of a 10 ms crowd and a 2500 ms disaster."
+
+Note what the mean of 35 ms is made of. The 949 fast requests contribute 9490 ms of the
+35000 ms total; the 11 slowest requests — barely 1% of traffic — contribute 20,360 ms, or
+58.2% of all time spent. The mean is majority-owned by the requests it is hiding. That
+inversion is the entire reason the percentile vector `10 / 80 / 400 / 2500` is reported
+instead of the single number, and why the chart puts `mean` deliberately out of rank order
+between p50 and p95: it belongs to neither population.
 
 ---
 

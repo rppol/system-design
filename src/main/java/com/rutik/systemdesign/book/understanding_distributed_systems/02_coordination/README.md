@@ -234,6 +234,39 @@ detectors (used by Cassandra/Akka) go further: instead of a binary up/down, they
 *suspicion level* that rises with the time since the last heartbeat, letting each consumer pick its
 own threshold.
 
+**The idea behind it.** "Beat every `H` seconds and declare death after `T` seconds of silence — so
+`T/H` is how many beats a peer may miss before you give up on it, and that one ratio sets both how
+fast you notice a real crash and how often you libel a healthy process."
+
+| Symbol | What it is |
+|--------|------------|
+| `H` | Heartbeat interval — how often the monitored process emits "I'm alive" |
+| `T` | Failure timeout — silence longer than this and the monitor declares SUSPECT |
+| `T / H` | Consecutive beats a peer may miss before being declared dead |
+| detection time | Between `T` and `T + H`, averaging `T + H/2`, because a crash lands mid-interval |
+| `p` | Probability that any one individual beat is lost or arrives late |
+
+**Walk one example.** The same 1-second heartbeat under two timeout settings:
+
+```
+  H = 1 s, T = 2 s     misses tolerated 2      detect in 2.0-3.0 s, mean 2.5 s
+  H = 1 s, T = 5 s     misses tolerated 5      detect in 5.0-6.0 s, mean 5.5 s
+
+  false-positive probability if a single beat is late with p = 0.01
+    tolerate 1 miss     0.01^1 = 1e-02      one bad verdict per 100 windows
+    tolerate 2 misses   0.01^2 = 1e-04
+    tolerate 3 misses   0.01^3 = 1e-06
+    tolerate 5 misses   0.01^5 = 1e-10      effectively never
+```
+
+**Why the trade is lopsided in your favour.** Detection time grows **linearly** in the number of
+misses you tolerate, while the false-positive probability falls **exponentially** — `p^k`. Moving
+from 2 tolerated misses to 5 costs 3 extra seconds of detection delay and buys six orders of
+magnitude fewer spurious failovers. That asymmetry is why production detectors almost always require
+several missed beats rather than one, and it is the quantitative version of the tuning dial above.
+Note also the floor: no matter how small you make `H`, detection cannot beat `T`, so shrinking `H`
+alone just multiplies heartbeat traffic while sharpening only the `+H/2` tail.
+
 **Indirect probing (SWIM) guards against false positives from network glitches.** A refinement used
 in gossip-based membership: before the monitor declares a peer dead on a single missed direct probe,
 it asks `k` *other* random members to probe the suspect on its behalf. If any of them gets a
@@ -302,6 +335,42 @@ in sync will diverge.
 The takeaway: even well-synchronized physical clocks disagree by enough (and can jump) that you
 **cannot use them to reliably order events across machines**. If two events are microseconds apart
 on two servers, their wall-clock timestamps may order them wrongly. Hence logical clocks.
+
+**What this actually says.** "A quartz oscillator is specified as a fraction of error per unit of
+time, so multiply that fraction by how long the machine has run since its last sync and you get how
+far its idea of 'now' can be from everyone else's."
+
+| Symbol | What it is |
+|--------|------------|
+| ppm | Parts per million — 1 ppm is 1 microsecond of error accumulated per second elapsed |
+| drift rate | The oscillator's error fraction; commodity server quartz runs roughly 20-50 ppm |
+| elapsed | Time since the last NTP correction reset the error to (near) zero |
+| accumulated error | `drift rate x elapsed` — this clock's distance from true time |
+
+**Walk one example.** Ordinary clocks left to run without a sync:
+
+```
+  drift        after 1 min     after 1 hour     after 1 day      after 1 week
+   20 ppm         1.2 ms           72 ms          1.728 s          12.10 s
+   50 ppm         3.0 ms          180 ms          4.320 s          30.24 s
+  100 ppm         6.0 ms          360 ms          8.640 s          60.48 s
+
+  two 50 ppm clocks drifting in OPPOSITE directions, 1 hour since sync
+    gap = 2 x 180 ms = 360 ms between what the two machines each call "now"
+
+  how long one 50 ppm clock needs to accumulate a given error
+    100 microseconds  ->    2 s
+      1 millisecond   ->   20 s
+```
+
+**Why this destroys event ordering.** The bottom rows are the damning ones. A single 50 ppm machine
+drifts a full millisecond away from true time in **20 seconds** — longer than most operations take,
+which means two writes issued a millisecond apart on two servers can carry wall-clock timestamps in
+the wrong order almost immediately after a perfect sync. Let an hour pass and the disagreement is
+360 ms, which is longer than many entire requests. Worse, the error is not even monotone: NTP's
+correction can step a clock **backward**, so sorting by timestamp can reorder events that already
+happened. Logical clocks sidestep all of this by throwing away "how much time passed" and keeping
+only "what could have caused what" — a quantity no oscillator can corrupt.
 
 ### Logical clocks
 
@@ -486,6 +555,40 @@ Caption: a majority of votes in a term elects exactly one leader (any two majori
 server that voted only once), and randomized election timeouts make one candidate almost always
 wake first — turning the split-vote risk into a rare, self-healing event.
 
+**What it means.** "A majority is 'strictly more than half', which is `floor(n/2) + 1` servers — and
+because everything left over is what you are allowed to lose and still assemble one, a cluster
+tolerates exactly `floor((n-1)/2)` failures."
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Total servers in the cluster |
+| `floor(n/2) + 1` | Quorum size: the smallest set that is strictly more than half of `n` |
+| `floor((n-1)/2)` | Failures tolerated, i.e. `n` minus the quorum size |
+| overlap | Any two quorums share a server, because their sizes sum to more than `n` |
+
+**Walk one example.** Every cluster size from 3 to 8:
+
+```
+   n     quorum = floor(n/2)+1     failures tolerated = n - quorum
+   3             2                            1
+   4             3                            1     <- no better than n=3
+   5             3                            2
+   6             4                            2     <- no better than n=5
+   7             4                            3
+   8             5                            3     <- no better than n=7
+
+  overlap check at n = 5:  two quorums of 3 sum to 6, which exceeds 5, so they
+  must share at least one server -- and that server granted at most one vote
+  this term, so two leaders in one term is arithmetically impossible.
+```
+
+**Why an even cluster size buys nothing.** Follow the arrows. Going from 3 servers to 4 raises the
+quorum from 2 to 3 while the failure tolerance stays pinned at 1. You have bought another machine,
+another vote to collect on every single decision, and another thing that can break — in exchange for
+zero additional fault tolerance. The same is true at 6 and 8. That is the entire reason production
+consensus clusters are sized 3, 5, or 7: the odd sizes are the only ones where the extra node
+actually moves the `floor((n-1)/2)` column.
+
 ### Practical: don't build it — use leases, and beware the lease-expiry race
 
 Raft election is subtle and easy to get wrong. The book's strong advice: **do not implement leader
@@ -634,6 +737,45 @@ Caption: the leader commits an entry only after a *majority* durably store it, a
 prevIndex/prevTerm check (the Log Matching Property) is what lets the leader detect a divergent
 follower and backfill it — so every replica applies the identical command sequence to its
 deterministic state machine.
+
+**Read it like this.** "One committed decision costs the leader one fan-out and one fan-in — `n-1`
+requests plus `n-1` acknowledgments, so `2(n-1)` messages — but because those requests go out in
+parallel, the latency is one round trip no matter how large the cluster gets."
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Servers in the consensus group |
+| `n - 1` | Followers the leader must reach: the fan-out |
+| `2(n - 1)` | Messages per committed entry — one AppendEntries out and one ack back per follower |
+| 1 RTT | Latency per decision, because the `n-1` requests are issued in parallel, not in series |
+| leader election | The extra phase Raft/Multi-Paxos pay **once per term**, not once per decision |
+
+**Walk one example.** Message cost and the throughput ceiling it implies:
+
+```
+   n      msgs/decision = 2(n-1)      basic Paxos, 2 phases = 4(n-1)
+   3               4                            8
+   5               8                           16
+   7              12                           24
+   9              16                           32
+
+  latency is FLAT at 1 RTT for every row above -- only the message count grows
+
+  serialized decisions per second, at one decision per round trip
+      0.5 ms RTT  (same rack)        2,000/s
+      1   ms RTT  (same AZ)          1,000/s
+     50   ms RTT  (cross-region)        20/s
+```
+
+**Where the amortization comes from.** Basic Paxos runs two phases — prepare, then accept — for
+*every* value, costing 2 RTT and `4(n-1)` messages. Multi-Paxos and Raft establish a stable leader
+**once per term** and then reuse that leadership for every subsequent log entry, so the prepare phase
+is divided across thousands of decisions and rounds to nothing. That is the whole optimization: it
+halves the steady-state cost to 1 RTT and `2(n-1)` messages. The last block is the sobering half —
+a cross-region group at 50 ms RTT tops out near 20 serialized decisions per second. Batching many
+commands into one AppendEntries and pipelining entries rescues *throughput*; nothing rescues the
+per-decision *latency*, which is why geo-distributed consensus is placed on the write path only when
+the correctness is genuinely worth it.
 
 ### Consensus as the abstraction
 
@@ -997,6 +1139,38 @@ Amazon's **Dynamo** popularized **leaderless replication** with tunable quorums 
   node — so a read is guaranteed to see at least one replica that has the latest write (strong-ish
   "quorum consistency"). Common setting: N=3, W=2, R=2.
 
+**Stated plainly.** "Make the number of replicas you write to plus the number you read from add up
+to more than the total, and the two sets cannot avoid sharing a node — and that shared node is
+holding your latest write."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Replicas holding each key |
+| `W` | Replicas that must acknowledge a write before it counts as done |
+| `R` | Replicas a read must gather responses from |
+| `W + R > N` | Pigeonhole condition: two subsets of `N` summing to more than `N` must intersect |
+| `N - W` / `N - R` | Nodes that may be down while writes / reads still succeed |
+
+**Walk one example.** N = 3, with every setting worth naming:
+
+```
+   W   R   W+R   overlaps?    write survives    read survives
+   1   1    2       no          2 down            2 down     fastest, no recency
+   1   2    3       no          2 down            1 down     still stale-prone
+   2   2    4      yes          1 down            1 down     <- the Dynamo default
+   3   1    4      yes          0 down            2 down     read-optimized
+   1   3    4      yes          2 down            0 down     write-optimized
+   3   3    6      yes          0 down            0 down     zero fault tolerance
+```
+
+**Why W = R = 2 is the setting everyone lands on.** It is the only row that satisfies `W + R > N`
+*and* keeps a spare on both paths — one replica can be down and reads and writes both still succeed.
+Push `W` to 3 and a single node failure stops all writes; drop to `W = R = 1` and you have the
+fastest possible store with no recency guarantee whatsoever. One caveat the inequality does not
+cover: `W + R > N` guarantees your read **touches** a replica holding the newest value, not that the
+reader can **tell which returned value is newest** — deciding that is the separate job of version
+vectors (§2.3) or a last-write-wins rule.
+
 Because it favours availability, Dynamo softens the quorum under failure:
 
 - **Sloppy quorum + hinted handoff.** During a partition, if the "home" nodes for a key are
@@ -1266,6 +1440,41 @@ blocked, holding locks (freezing rows), until the coordinator recovers and reads
 to resume. Hence the mantra: **2PC guarantees atomicity but sacrifices availability — 2PC ≠
 availability.** (This blocking is *why* Chapter 13 exists — asynchronous transactions exist to escape
 it.)
+
+**Put simply.** "Every participant has to be up at commit time, so the transaction's availability is
+all of their individual availabilities multiplied together — and multiplying numbers below 1 only
+ever moves in one direction."
+
+| Symbol | What it is |
+|--------|------------|
+| `a` | One participant's availability — the fraction of time it is up and answering |
+| `n` | Participants enrolled in the transaction |
+| `a^n` | Joint availability: the chance *all* `n` are reachable when the coordinator calls prepare |
+| blocking window | Extra unavailability while prepared participants hold locks awaiting a decision |
+
+**Walk one example.** Participants that are each individually excellent, at 99.9%:
+
+```
+   n participants      joint = 0.999^n       downtime per year
+         1                 99.9000%              525.6 min
+         2                 99.8001%            1,050.7 min
+         3                 99.7003%            1,575.2 min
+         5                 99.5010%            2,622.7 min
+        10                 99.0045%            5,232.4 min
+
+  the same shape with more ordinary 99% participants
+         3                 97.0299%           15,610.8 min
+        10                 90.4382%           50,256.8 min
+```
+
+**Why this compounds worse than the table shows.** Enrolling participants is not additive risk, it
+is multiplicative: ten services that are each 99.9% available become a **99.0%** transaction — an
+entire nine lost, 5,232 minutes (about 87 hours) of failure per year. And that figure only counts
+"somebody was already down at prepare time." The blocking window sits on top of it: a coordinator
+that dies after collecting votes does not merely fail the transaction, it **freezes every prepared
+participant's locks** until the coordinator recovers, so the outage is bounded by the *coordinator's*
+recovery rather than any participant's. Multiply a shrinking availability by an unbounded blocking
+tail and you have the quantitative case for pushing cross-service work to sagas (§2.8).
 
 ```mermaid
 sequenceDiagram

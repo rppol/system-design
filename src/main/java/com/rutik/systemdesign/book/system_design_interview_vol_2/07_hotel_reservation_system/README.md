@@ -98,12 +98,81 @@ average stay length (assume)  = 3 days
 reservations per day          = 700,000 / 3  ≈ 233,000  ≈ 240,000 / day
 ```
 
+**In plain terms.** "Count how many rooms are occupied tonight, then divide by how many nights
+each booking covers — because one booking pays for several nights, there are far fewer bookings
+than occupied rooms." The division by stay length is the step people skip; forget it and you
+over-estimate the write rate by 3x and start designing for a throughput problem that isn't there.
+
+| Symbol | What it is |
+|--------|------------|
+| `rooms` | Total physical rooms across the chain: 1,000,000 |
+| `occupancy rate` | Fraction of rooms filled on an average night: 0.70 |
+| `room-nights` | One room, occupied for one night. The unit inventory is measured in |
+| `average stay length` | Nights per booking: 3. The conversion factor from room-nights to bookings |
+| `reservations per day` | New booking *events* per day — what the write path must handle |
+
+**Walk one example.** Push the chain's numbers straight through:
+
+```
+  rooms                              1,000,000
+  x occupancy rate                        0.70
+  ---------------------------------------------
+  room-nights sold per night           700,000    <- units of "one room, one night"
+
+  room-nights per night                700,000
+  / average stay length (nights)             3
+  ---------------------------------------------
+  reservations created per day         233,333    <- the book rounds this up to ~240,000
+```
+
+Result: about a quarter-million booking *events* per day, not 700,000 — a single reservation is
+amortized over the three nights it occupies. Note the ratio: `240,000 / 233,333 = 1.029`, so the
+book's headline number is a 2.9% round-up for arithmetic comfort, not a different calculation.
+
+**Why the stay-length divisor exists.** It is the only term converting *inventory occupancy* into
+*write events*. Without it you would size the reservation service for 700,000 writes/day, and with
+a 30-day average stay (extended-stay properties) the true write rate drops another 10x. Any booking
+system's write load scales as `occupied units / average booking duration` — long bookings are cheap
+to serve, short ones are expensive.
+
 **Reservations per second:**
 
 ```
 seconds per day               ≈ 24 × 3600 = 86,400  ≈ 10^5
 reservations per second       = 240,000 / 10^5  ≈ 3 reservations/second
 ```
+
+**Read it like this.** "Spread the day's bookings evenly across the day's seconds — and note the
+answer is a single-digit number, which is the entire point of doing the estimate." The value of
+this step is not the number; it is the *order of magnitude*, which rules out an entire class of
+architecture (write sharding, log-structured ingest, eventual consistency) before you propose it.
+
+| Symbol | What it is |
+|--------|------------|
+| `reservations per day` | 240,000 — the funnel result from the previous step |
+| `seconds per day` | 86,400, deliberately rounded up to `10^5` so the division is mental arithmetic |
+| `10^5` | The interview shorthand for a day. Costs ~16% accuracy, buys instant division |
+| `reservations per second` | Sustained write QPS on the reservation path |
+
+**Walk one example.** Three defensible routes to the same conclusion:
+
+```
+  route 1 (the book's)   240,000 / 100,000  =  2.40 QPS
+  route 2 (rounded/true) 240,000 /  86,400  =  2.78 QPS
+  route 3 (unrounded)    233,333 /  86,400  =  2.70 QPS
+
+  spread                 2.40 ... 2.78 QPS   ->  book states "~3 reservations/second"
+```
+
+Every route lands between 2.4 and 2.8 QPS, so "~3 QPS" is the rounded headline rather than any one
+division's exact output. What matters is that all three answers share a magnitude: single-digit
+writes per second. A commodity relational database handles this on one node with room to spare,
+which is why the chapter can afford `SELECT ... FOR UPDATE`-class machinery at all.
+
+**Why `10^5` instead of 86,400.** The shorthand under-counts the day by `100,000 - 86,400 = 13,600`
+seconds, so it *under*-states QPS by about 16%. That is safe here because the conclusion ("tiny")
+survives a 16% error by three orders of magnitude. It stops being safe when the estimate lands near
+a capacity boundary — then use the real 86,400.
 
 So the *write* rate is only about **3 QPS** — trivially small. That is the key insight of the sizing
 step: this is **not** a high-throughput write system. The engineering hardness is entirely
@@ -247,6 +316,60 @@ A booking for a 3-night stay touches **3 rows** (one per night). Availability fo
 total_reserved + rooms_requested  <=  total_inventory × 1.1     -- 110%, the overbooking ceiling
 ```
 
+**What this actually says.** "After I add this party's rooms to what is already sold for this
+date, am I still at or below 110% of what physically exists?" Every concurrency mechanism in the
+rest of the chapter — the lock, the version column, the `CHECK` constraint — exists only to make
+this one inequality evaluate atomically. The formula is trivial; making it *true after the write*
+is the entire design problem.
+
+| Symbol | What it is |
+|--------|------------|
+| `total_reserved` | Units of this room type already sold for this date — the counter being defended |
+| `rooms_requested` | How many units this booking wants (a party may need 2 or 3 rooms) |
+| `total_inventory` | Physical count of this room type in this hotel. Static; changes only on renovation |
+| `1.1` | The overbooking factor. `1.0` = sell to capacity; `1.1` = deliberately sell 10% extra |
+| `<=` | Inclusive: filling the ceiling exactly is a legal sale, exceeding it by one is not |
+
+**Walk one example.** One room type with `total_inventory = 100`, so the ceiling is fixed:
+
+```
+  total_inventory                                       100
+  x 1.10 overbooking factor
+  ---------------------------------------------------------
+  ceiling for this date                                 110    <- max sellable units
+
+  case A   reserved =  99, requested = 1  ->   99 + 1 = 100 <= 110   ACCEPT
+  case B   reserved = 109, requested = 1  ->  109 + 1 = 110 <= 110   ACCEPT  (the last unit)
+  case C   reserved = 110, requested = 1  ->  110 + 1 = 111 <= 110   REJECT
+  case D   reserved = 108, requested = 3  ->  108 + 3 = 111 <= 110   REJECT  (party of three)
+```
+
+Case D is the one that catches people: 2 units remain and the request is for 3, so a check written
+as "is anything left?" would wrongly accept. The `+ rooms_requested` term is what makes the test a
+*sufficiency* check rather than a non-emptiness check. Note also that the sequence diagram below
+illustrates the race with a 100-unit ceiling (`99 + 1 <= 100`) rather than the 110 computed here —
+it is showing the race mechanics at capacity, and the same interleaving occurs at any ceiling value.
+
+**Why the `1.1` is a business parameter, not a constant.** It should equal roughly `1 / (1 -
+no_show_rate)`, the factor that fills the seats no-shows would have left empty. Push the chapter's
+own 3% no-show figure through it:
+
+```
+  break-even factor at 3% no-show   =  1 / 0.97      =  1.031   ->  a 103.1% ceiling
+
+  sell 100 units, 3% no-show   ->  guests arriving = 100 x 0.97 =  97.0   (3 rooms empty)
+  sell 110 units, 3% no-show   ->  guests arriving = 110 x 0.97 = 106.7
+                                   guests walked   = 106.7 - 100 =   6.7
+
+  no-show rate that 110% actually assumes  =  1 - 100/110  =  9.09%
+```
+
+So a flat `1.1` is only revenue-neutral when about 9% of guests fail to show; at the 3% rate the
+text cites, that ceiling walks roughly 6.7 guests per 100 rooms per sold-out night. Real revenue
+management therefore fits the factor per hotel, per season, and per lead time. The design does not
+change — only the constant does, which is exactly why it belongs in a column or config, not
+hard-coded in a `CHECK` constraint.
+
 **Check-availability query** (read every night of the requested stay):
 
 ```sql
@@ -269,6 +392,45 @@ room types    ≈ 20 per hotel
 horizon       = 2 years ≈ 730 days
 rows          = 5,000 × 20 × 730  ≈  73,000,000  ≈ 73 million rows
 ```
+
+**Put simply.** "The inventory table has one row for every combination of hotel, room type, and
+bookable date — so its size is the product of those three counts, and nothing about guest traffic
+enters into it." That independence is the useful part: the table's size is set by the *calendar*,
+not by demand, so it does not grow when the business gets busier — only when it opens hotels or
+extends the booking horizon.
+
+| Symbol | What it is |
+|--------|------------|
+| `hotels` | 5,000 — properties in the chain |
+| `room types` | ~20 per hotel (King Deluxe, Twin, Suite, ...). Not physical rooms |
+| `horizon` | How far ahead guests may book: 2 years, expressed as 730 days |
+| `rows` | One `room_type_inventory` row per `(hotel_id, room_type_id, date)` |
+
+**Walk one example.** Multiply the three axes, one at a time:
+
+```
+  hotels                                    5,000
+  x room types per hotel                       20
+  ---------------------------------------------------
+  distinct (hotel, room type) pairs       100,000
+
+  x horizon in days (2 years = 365 x 2)       730
+  ---------------------------------------------------
+  room_type_inventory rows             73,000,000    <- ~73 million
+```
+
+73 million rows is a *small* table by modern standards — it fits in one relational instance and
+much of it fits in RAM. Compare that against what the alternative schema would need: the same
+horizon keyed per *physical* room is `1,000,000 rooms x 730 days = 730,000,000` rows, ten times
+larger for strictly less expressive power. Aggregating identical rooms into a room type is a 10x
+row-count reduction that arrives free with the modelling decision.
+
+**Why the horizon term is the dangerous one.** Rows scale *linearly* in the booking window, and
+that window is a product decision someone can change in a config file. Extending bookings from 2
+years to 5 years multiplies the table by 2.5x to about 182.5 million rows without a single line of
+code changing. Rows are also created ahead of demand — a date 700 days out has a row holding
+`total_reserved = 0` — so a nightly job must extend the horizon forward and archive dates that have
+passed, or the table grows without bound.
 
 **~73M rows fits comfortably in a single relational database** — no sharding needed at this scale.
 But the schema is deliberately **shard-ready**: `hotel_id` is part of the primary key of every hot
@@ -431,6 +593,63 @@ Caption (broken): both transactions read `total_reserved = 99` before either wri
 the availability check and both commit — a classic **lost update / oversell** that snapshot
 isolation alone does not prevent. This is the double-booking the whole chapter exists to stop.
 
+**How likely is that interleaving?** The race needs a second transaction to arrive during the gap
+between one transaction's `SELECT` and its `COMMIT`. Model arrivals on a single inventory row as
+Poisson with rate `r` and call the read-then-write gap `w`; the chance that at least one rival
+lands inside your window is:
+
+```
+P(collision) = 1 - e^(-r x w)          where  r x w = expected number of rivals in the window
+```
+
+**The idea behind it.** "Multiply how busy this one row is by how long you leave the door open —
+that product *is* your collision rate." The framing matters because it names the two levers you
+actually control: you cannot reduce demand for the last room on New Year's Eve, but you can make
+`w` shorter, and collision probability falls with it essentially proportionally while `r x w` stays
+small.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | Booking attempts per second landing on **one** `(hotel, room type, date)` row — not system QPS |
+| `w` | Seconds between the availability `SELECT` and the `COMMIT`. Round trips plus app logic |
+| `r x w` | Expected number of *other* transactions inside your window. The whole quantity that matters |
+| `e^(-r x w)` | Probability of a clean run — nobody else showed up |
+| `P(collision)` | Probability at least one rival overlaps you, so the read-then-write is unsafe |
+
+**Walk one example.** Fix `w = 50 ms` and vary how hot the row is. The uniform baseline first:
+3 QPS spread over `5,000 x 20 = 100,000` room-type pairs is `3 / 100,000 = 0.00003` attempts per
+second on an average row — effectively never contended.
+
+```
+  scenario            r (per row)     r x w      P(collision)      odds
+  ---------------------------------------------------------------------------
+  average row           0.00003     0.0000015     0.00015%      1 in 666,667
+  warm row (1% of
+   all bookings hit
+   this one row)        0.03        0.0015        0.1499%       1 in    667
+  holiday flash         2.0         0.1000        9.5163%       1 in     11
+  ticket-drop scale    20.0         1.0000       63.2121%       1 in      2
+```
+
+Two readings, and both are in the chapter. Down the top of the table: at this system's real
+contention a collision is a once-in-hundreds event, which is precisely why optimistic locking and
+the DB constraint are recommended over pessimistic locking — you are paying the conflict cost
+almost never. Down the bottom: the same design at ticket-drop rates collides more often than not,
+and that is the regime where holding a lock beats retrying.
+
+**Why probability is the wrong bar for correctness.** A 0.15% collision rate does not mean 0.15% of
+oversells are acceptable — it means the bug is rare enough to pass every test and still fire in
+production. Cost the *outcome*, not the frequency: at 240,000 bookings/day, a 0.15% collision rate
+on contended rows is a real oversell arriving on a schedule, each one a guest standing at a front
+desk at midnight. The magnitude is deterministic once it fires — `N` transactions racing for `d`
+remaining units all pass the check and all commit, oversell `= N - d`:
+
+```
+  N = 2 racers, d = 1 unit left   ->  both commit, oversell = 1 guest walked
+  N = 5 racers, d = 1 unit left   ->  all 5 commit, oversell = 4 guests walked
+  N = 5 racers, d = 2 units left  ->  all 5 commit, oversell = 3 guests walked
+```
+
 There are **three** fixes. Because the contention here is genuinely low (~3 QPS system-wide, and only
 a handful of transactions ever collide on one hot row), the book leans toward **optimistic locking or
 the database constraint** — but all three are worth knowing, and the choice flips at high contention.
@@ -516,6 +735,58 @@ WHERE hotel_id = ${hotelId} AND room_type_id = ${roomTypeId}
 -- affected rows = 0  ->  someone else committed first  ->  conflict, retry from the read
 ```
 
+**How many times will it actually retry?** If each attempt independently fails the version check
+with probability `p` (the collision probability from the previous section), the number of attempts
+is geometric:
+
+```
+E[attempts] = 1 / (1 - p)          E[retries] = E[attempts] - 1 = p / (1 - p)
+```
+
+**What the formula is telling you.** "Retries are nearly free while `p` is small, and they explode
+as `p` approaches 1 — there is no gentle middle." That non-linearity is why the same mechanism is
+both the chapter's recommendation here and a documented failure mode elsewhere; nothing about the
+code changes, only `p`.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Probability one attempt loses the version race and updates 0 rows |
+| `1 - p` | Probability an attempt wins and commits |
+| `E[attempts]` | Expected total tries, including the successful one. Always at least 1 |
+| `E[retries]` | Expected *wasted* round trips — the cost optimistic locking actually charges |
+
+**Walk one example.** Feed in the three collision probabilities computed for the 50 ms window:
+
+```
+  scenario           p            E[attempts]     E[retries]     P(2+ retries) = p^2
+  ---------------------------------------------------------------------------------------
+  warm row        0.001499          1.0015          0.0015          0.0000022
+  holiday flash   0.095163          1.1052          0.1052          0.0090560
+  ticket-drop     0.632121          2.7181          1.7181          0.3995771
+```
+
+Read the middle column. At this system's contention a booking takes 1.0015 attempts — the retry
+path executes roughly once in every 667 bookings, so its cost rounds to zero and the "no held
+locks" benefit is pure profit. That single number is the quantitative case for the book's
+recommendation. At ticket-drop contention the same booking takes 2.72 attempts and 40% of bookings
+retry at least twice: the retry path stops being an exception handler and becomes the main path.
+
+**Why the storm is worse than `E[retries]` suggests.** The geometric model assumes independent
+attempts, but real contenders retry *into each other*. With `k` transactions all racing for one
+row, each round retires exactly one winner and sends `k - 1` back to the start, so draining them
+costs `k + (k-1) + ... + 1 = k(k+1)/2` attempts to complete `k` bookings:
+
+```
+  k =  2 contenders  ->   3 attempts for  2 bookings   =  1.50x work amplification
+  k =  5 contenders  ->  15 attempts for  5 bookings   =  3.00x work amplification
+  k = 10 contenders  ->  55 attempts for 10 bookings   =  5.50x work amplification
+```
+
+Wasted work grows quadratically in `k` while useful work grows linearly, and the retries themselves
+raise `r` on the hot row, which raises `p`, which produces more retries. That positive feedback is
+the "retry/failure storm" the Cons bullet names. Capping retries (3 attempts, then fail cleanly)
+and adding randomized backoff between them are what keep the loop from closing.
+
 **Pros:** no locks held → **better performance and scalability than pessimistic** when contention is
 low, which is exactly this system's regime; deadlock-free. This is the book's **usual choice** for
 the hotel system.
@@ -572,6 +843,44 @@ suppose total reservation QPS grows to, say, 30,000 QPS
 shards                        = 100
 QPS per shard                 = 30,000 / 100  =  300 QPS per shard   ← easily handled
 ```
+
+**Stated plainly.** "Because a booking never spans two hotels, load divides by the shard count with
+nothing left over — the per-shard number is honest, not an average hiding a hot spot." Most shard
+estimates deserve suspicion because cross-shard work reappears as coordination cost; this one does
+not, and that is entirely a property of the key choice.
+
+| Symbol | What it is |
+|--------|------------|
+| `total QPS` | Hypothetical Booking.com-scale write rate: 30,000 — 10,000x the 3 QPS baseline |
+| `shards` | Independent database instances, partitioned on `hotel_id`: 100 |
+| `QPS per shard` | What one instance must sustain — the number to compare against hardware |
+| `hotel_id` | The shard key. Present in every availability, reservation, and rate query |
+
+**Walk one example.** Divide, then check the result against the baseline that already worked:
+
+```
+  hypothetical total write QPS               30,000
+  / shards                                      100
+  ------------------------------------------------
+  QPS per shard                                 300
+
+  sanity check against this chapter's own numbers:
+     one unsharded DB already served              3 QPS comfortably
+     each shard must now serve                  300 QPS
+     ratio                                      100x  <- still ordinary for one RDBMS node
+```
+
+The scale-out is a 10,000x growth in business absorbed by a 100x growth in per-node load and a 100x
+growth in node count. Crucially the concurrency logic is untouched: 300 QPS still lands on one node
+per booking, so `SELECT ... FOR UPDATE`, the version column, and the `CHECK` constraint all keep
+working with zero modification. Sharding bought throughput without costing correctness.
+
+**Why an even division is the exception, not the rule.** The clean `30,000 / 100` holds only while
+hotels are roughly equal and no single hotel dominates. Real chains are skewed — one flagship
+property during a convention can pull a large share of bookings onto one shard while the other 99
+idle. The mitigation is not a different key (every query carries `hotel_id`; nothing else is
+available) but finer partitioning: hash `hotel_id` across many more virtual shards than physical
+nodes, so a hot hotel occupies its own virtual shard and can be migrated off a struggling node.
 
 Sharding by `hotel_id` keeps each booking a **single-shard ACID transaction**, preserving the exact
 locking/constraint logic above — the concurrency design does not change, it just runs per shard.

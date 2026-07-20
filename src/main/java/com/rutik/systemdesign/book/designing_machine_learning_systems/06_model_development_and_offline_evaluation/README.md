@@ -165,6 +165,51 @@ diversity is what decorrelates the errors.
 
 (0.189 = C(3,1)×0.7×0.3² = 3×0.7×0.09; 0.027 = 0.3³; the four rows sum to 1.0.)
 
+**In plain terms.** "Count the ways at least two of three coin flips can come up right, weight
+each way by how likely it is, and add them up — that total is the ensemble's accuracy."
+
+This is just the binomial distribution wearing a hat. Seeing it that way explains both why the
+lift exists and why it evaporates the instant the flips stop being independent.
+
+| Symbol | What it is |
+|--------|------------|
+| `p = 0.7` | Accuracy of one base classifier — its chance of being right on an example |
+| `1 - p = 0.3` | Its chance of being wrong |
+| `n = 3` | Number of base classifiers voting |
+| `k` | How many of them are right on this particular example |
+| `C(n, k)` | Number of distinct ways to choose which `k` of the `n` are the right ones |
+| `C(n,k) x p^k x (1-p)^(n-k)` | Probability that exactly `k` are right |
+| Majority | Ensemble is correct when `k >= 2` — i.e. more than half |
+
+**Walk one example.** Every row of the binomial, computed and summed:
+
+```
+  k   C(3,k)   p^k          (1-p)^(3-k)    probability                majority right?
+  --  ------   ----------   ------------   ------------------------   ---------------
+  3     1      0.7^3=0.343  0.3^0=1        1 x 0.343 x 1     = 0.343        yes
+  2     3      0.7^2=0.49   0.3^1=0.3      3 x 0.49  x 0.3   = 0.441        yes
+  1     3      0.7^1=0.7    0.3^2=0.09     3 x 0.7   x 0.09  = 0.189        no
+  0     1      0.7^0=1      0.3^3=0.027    1 x 1     x 0.027 = 0.027        no
+                                            -------------------------
+                                            total             = 1.000
+
+  P(majority correct) = 0.343 + 0.441 = 0.784     ->  78.4%
+  lift over one model = 0.784 - 0.700 = 0.084     ->  +8.4 points
+```
+
+Every published figure checks out: the four rows sum to exactly 1.000, and the two "yes" rows
+sum to 0.784. Note where the lift really comes from — the `k = 2` row (0.441) is the *largest*
+single term. The ensemble is not usually saved by all three agreeing; it is saved by one model
+being wrong and getting outvoted. That is precisely the event that requires the errors to land
+on **different** examples.
+
+The `C(n, k)` term is the one that dies under correlation. It counts the `3` distinct ways
+exactly two can be right — but if all three classifiers fail on the same examples, only one of
+those arrangements ever actually occurs, the 0.441 mass collapses toward 0, and the ensemble
+falls back to roughly the 70% of a single model. Add more diverse voters and it moves the other
+way: five uncorrelated 70% classifiers reach `sum(C(5,k) x 0.7^k x 0.3^(5-k))` for `k = 3,4,5`
+= **83.7%**.
+
 There are **three flavors** of ensemble, differing in how base learners are created and combined:
 
 **Bagging (bootstrap aggregating) — reduces variance.**
@@ -551,6 +596,90 @@ overconfident. To *fix* miscalibration, apply a post-hoc method like **Platt sca
 logistic regression that maps the model's raw scores to calibrated probabilities) or isotonic
 regression.
 
+**Stated plainly.** "Gather every prediction where the model said 70%, count how many of them
+actually happened, and the answer should be 70% — a probability is a promise about a *bucket*,
+not about any one example."
+
+That bucket framing is the only way to test a probability at all. You can never check a single
+"70%" prediction; you can only check whether the model's 70%-labelled crowd behaved like a 70%
+crowd.
+
+| Symbol | What it is |
+|--------|------------|
+| Predicted probability | The number the model emits, e.g. `0.7` — the x-axis of the curve |
+| Bucket | All predictions whose probability falls in a small band around that value |
+| Observed frequency | Fraction of that bucket where the event actually happened — the y-axis |
+| Diagonal | The line `observed = predicted`; perfect calibration lies exactly on it |
+| Gap (`observed - predicted`) | Negative = overconfident (event rarer than claimed); positive = underconfident |
+| ECE | Expected calibration error — the average size of that gap across buckets |
+
+**Walk one example.** Bucket 1,000 predictions at each level, using the curve plotted below:
+
+```
+  predicted   bucket size   events that       observed     gap = obs - pred
+                            actually happened  frequency
+  ---------   -----------   ----------------  ----------   ----------------
+     0.10        1,000              40           0.04           -0.06
+     0.20        1,000             100           0.10           -0.10
+     0.30        1,000             170           0.17           -0.13   <- worst overclaim
+     0.40        1,000             270           0.27           -0.13
+     0.50        1,000             400           0.40           -0.10
+     0.60        1,000             550           0.55           -0.05
+     0.70        1,000             700           0.70            0.00   <- honest here
+     0.80        1,000             840           0.84           +0.04
+     0.90        1,000             950           0.95           +0.05
+
+  events the model PROMISED : (0.10+...+0.90) x 1,000 = 4,500
+  events that HAPPENED      :  40+100+...+950         = 4,020
+  overall ratio                                       = 4,020 / 4,500 = 0.893
+
+  ECE = mean of |gap| = 0.0733
+```
+
+The model is accurate in aggregate to within 11%, but the errors are not uniform: at a
+predicted `0.30` the event happens only `0.17` of the time — the model **overstates that
+bucket by 1.76x**. Any downstream system that multiplies by this probability inherits that
+1.76x error, not the mild 11%. That is why you read a calibration *curve* rather than a single
+calibration number: the average hides which region lies.
+
+**The idea behind it.** "When you bid the probability, the probability *is* the price — a
+model that is 2x overconfident bids 2x too much on every single impression."
+
+Miscalibration is invisible to accuracy because argmax never changes; it shows up only on the
+invoice. Turning the chapter's `2%` vs `1%` example into money is the fastest way to see the
+size of the hole.
+
+| Symbol | What it is |
+|--------|------------|
+| Predicted CTR | The model's claimed click probability for an impression, here `2%` |
+| Actual CTR | How often those impressions really get clicked, here `1%` |
+| `V` | Value to the advertiser of one click — the amount a click is worth |
+| Bid | What you pay per impression: `predicted CTR x V` |
+| True value | What the impression is actually worth: `actual CTR x V` |
+| Burn | `bid - true value`, per impression, every impression |
+
+**Walk one example.** A click is worth `V = $5.00`, over 10 million impressions:
+
+```
+  bid per impression        = 0.02 x $5.00 = $0.10
+  true value per impression = 0.01 x $5.00 = $0.05
+  burn per impression       = $0.10 - $0.05 = $0.05     (you pay 2x what it is worth)
+
+  over 10,000,000 impressions:
+      spend                 = $0.10 x 10,000,000 = $1,000,000
+      value received        = $0.05 x 10,000,000 =   $500,000
+      burned                                     =   $500,000
+
+  clicks actually delivered = 0.01 x 10,000,000 = 100,000
+  effective cost per click  = $1,000,000 / 100,000 = $10.00   vs a click worth $5.00
+```
+
+Half the budget is gone. Notice the failure mode is exactly proportional to the miscalibration
+ratio: `2% / 1% = 2x` overconfident means `2x` overpaid, on every impression, forever, with no
+error log and no accuracy regression to alert on. This is what "the probability is the product"
+means — and Platt scaling, which costs one logistic regression fit on a validation set, is what
+closes it.
+
 ```mermaid
 xychart-beta
     title "Calibration curve — predicted probability vs observed frequency"
@@ -602,6 +731,63 @@ the slices differ between the two models: Model A was mostly evaluated on the *h
 each model toward a different-difficulty population, and the weighting reverses the ranking. If you'd
 only looked at the "Overall" column you'd have picked the model that is worse on every slice you
 actually care about. This is precisely why slice-based evaluation is mandatory, not optional.
+
+**What the formula is telling you.** "An overall accuracy is not a property of the model — it
+is a weighted average of the model's per-slice accuracies, and the weights come from whatever
+mix of examples you happened to score it on."
+
+Once you see "Overall" as a weighted average, the paradox stops being spooky. Two models
+evaluated on different mixes are two *different* weighted averages, and comparing them compares
+the mixes as much as the models.
+
+| Symbol | What it is |
+|--------|------------|
+| `acc_A`, `acc_B` | The model's accuracy within slice A and within slice B |
+| `n_A`, `n_B` | How many examples of each slice this model was scored on |
+| `w_A = n_A / (n_A + n_B)` | The slice's *weight* in the overall number |
+| Overall | `acc_A x w_A + acc_B x w_B` — the weighted average |
+| Group A | The **easy** slice (both models score higher there) |
+| Group B | The **hard** slice (both models score lower there) |
+
+**Walk one example.** Rebuild both "Overall" cells from their parts:
+
+```
+  Model A:  Group A  81/87  = 0.9310    weight  87/350 = 0.2486
+            Group B 192/263 = 0.7300    weight 263/350 = 0.7514
+            Overall = 0.9310 x 0.2486 + 0.7300 x 0.7514 = 0.7800   = (81+192)/350 = 273/350
+
+  Model B:  Group A 234/270 = 0.8667    weight 270/350 = 0.7714
+            Group B  55/80  = 0.6875    weight  80/350 = 0.2286
+            Overall = 0.8667 x 0.7714 + 0.6875 x 0.2286 = 0.8257   = (234+55)/350 = 289/350
+
+  Model A is better in BOTH slices    (0.9310 > 0.8667 and 0.7300 > 0.6875)
+  Model B has 0.7714 of its weight on the EASY slice; Model A has only 0.2486.
+```
+
+Every figure in the table verifies: `81/87 = 93.1%`, `234/270 = 86.7%`, `192/263 = 73.0%`,
+`55/80 = 68.8%`, `273/350 = 78.0%`, `289/350 = 82.6%`. Nothing is wrong with the arithmetic —
+that is the unsettling part. Model B's higher overall is bought entirely by having been graded
+on an easier exam.
+
+**The fix is to score both models on the *same* weights.** Do that and the reversal disappears
+at every possible mix:
+
+```
+  weight on the easy Group A   Model A overall   Model B overall   winner
+  --------------------------   ---------------   ---------------   ------
+        0%  (all hard)             0.7300            0.6875           A
+       25%                         0.7803            0.7323           A
+       50%                         0.8305            0.7771           A
+       75%                         0.8808            0.8219           A
+      100% (all easy)              0.9310            0.8667           A
+
+  Score Model A on Model B's own easy mix: 0.8851  >  Model B's 0.8257
+```
+
+There is no slice mix at which Model B is the better model. The "83% vs 78%" was never a
+comparison between the models at all. Practically: pick the weights from your **production
+traffic distribution**, apply the same weights to every candidate, and the aggregate becomes
+trustworthy again.
 
 ```mermaid
 flowchart LR

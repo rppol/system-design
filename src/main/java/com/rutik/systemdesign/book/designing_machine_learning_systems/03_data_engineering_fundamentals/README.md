@@ -231,6 +231,44 @@ Caption: the same table, two byte layouts — the access you do most should run 
 axis, which is exactly why row-major CSV is good for writes/whole-example reads and column-major
 Parquet is good for feature-subset analytics (and compresses better).
 
+**In plain terms.** "Storage hardware charges you for the bytes it must *touch*, not the bytes you
+end up using — so the layout decides how much of the file a three-column query is forced to drag
+through." The 2x/6x AWS figures above are the consequence; this is the cause.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Number of rows (examples) in the dataset |
+| `C` | Number of columns (features) per row |
+| `w` | Bytes per value (8 for a float64) |
+| `q` | How many columns the query actually needs |
+| `R x C x w` | Total dataset size — what row-major must scan for a column query |
+| `q x R x w` | What column-major must scan for the same query |
+
+**Walk one example.** A 1,000,000-row x 100-column float64 table; the query needs 3 columns:
+
+```
+  total size = 1,000,000 x 100 x 8 bytes                       = 800 MB
+
+  "average 3 feature columns over all 1M rows"
+    row-major (CSV):    every row holds all 100 values interleaved,
+                        so the scan must pass all                = 800 MB read
+    column-major (Parquet): 3 x 1,000,000 x 8                    =  24 MB read
+                                                          ratio  = 33.3x less I/O
+
+  "load one complete example (all 100 features of row 7)"
+    row-major:          800 bytes, contiguous                    =   1 seek
+    column-major:       8 bytes from each of 100 column blocks   = 100 seeks
+
+  applying AWS's up-to-6x columnar compression on top:
+    stored size 800 MB -> 133 MB ;  the 3-column query 24 MB -> 4 MB
+```
+
+Both layouts are optimal — for opposite queries. The 33.3x is not a property of Parquet, it is the
+ratio `C/q` (100 features / 3 needed); narrow the query to 1 column and it becomes 100x, widen it to
+all 100 and the two layouts read identical bytes. Feature engineering and analytics are
+overwhelmingly narrow-column workloads over many rows, which is the only reason "just use Parquet"
+is good default advice — and it is exactly the wrong advice for an append-heavy transactional log.
+
 ### Text vs binary
 
 Orthogonal to row/column is **text vs binary**:
@@ -246,6 +284,39 @@ Huyen's concrete example: take a dataset that is **14 MB as a text (CSV) file**;
 while also being faster to query. Multiply that across a petabyte-scale lake and the storage and
 transfer savings are enormous. **Rule of thumb:** use text (CSV/JSON) for small data you need to eyeball
 or interchange with humans; use binary (Parquet) for the volume you feed models.
+
+**The idea behind it.** "Text spends one byte per *character* of a number's decimal spelling, plus a
+delimiter; binary spends the number's natural machine width and no delimiter at all." Once you see
+the 14 MB -> 6 MB shrink as per-value bookkeeping rather than magic compression, the ratio stops
+being a memorized fact.
+
+| Symbol | What it is |
+|--------|------------|
+| `text size` | Bytes when every value is written as characters, plus commas and newlines |
+| `binary size` | Bytes when every value is written at its native width (4 for int32, 8 for float64) |
+| `text / binary` | The shrink factor — how many times smaller the binary file is |
+| `1 - binary/text` | The fraction of storage and network transfer you stop paying for |
+
+**Walk one example.** The book's own 14 MB CSV, then the same ratio at lake scale:
+
+```
+  14 MB CSV  ->  6 MB Parquet
+    shrink factor  = 14 / 6                      = 2.33x
+    storage saved  = (14 - 6) / 14               = 57.1%
+
+  same ratio applied to a 1 PB (1,000 TB) text lake:
+    Parquet size   = 1,000 x 6 / 14              = 428.6 TB
+    storage freed  = 1,000 - 428.6               = 571.4 TB
+
+  where the bytes go, per value:
+    the number 1234567 as text = 7 characters + 1 delimiter  = 8 bytes
+    the same number as int32                                 = 4 bytes
+```
+
+The per-value line is the mechanism: a text file pays for the *spelling*, so a long number costs more
+than a short one and every field carries a separator. Binary formats also know each column's type in
+advance, which is what unlocks dictionary and run-length encoding on top — so the 2.33x here is the
+floor, not the ceiling, and it is why the AWS figure reaches up to 6x.
 
 | Format | Text/Binary | Row/Column | Typical home |
 |--------|-------------|------------|--------------|
@@ -650,6 +721,42 @@ recomputes "views in the last hour" from scratch every run redoes work over data
 processed. A stateful stream processor keeps a running state and **only processes each new event
 once**, updating the aggregate incrementally — so for continuously-updated features, streaming does
 strictly less work than re-running batch over the whole window.
+
+**What the formula is telling you.** "A batch job re-reads the whole window on every run, so each
+event is processed once per run that its window overlaps — the wasted work is the window length
+divided by the run interval." That ratio, not any property of Spark or Flink, is the entire
+efficiency argument.
+
+| Symbol | What it is |
+|--------|------------|
+| `E` | Event arrival rate (events per second) |
+| `W` | Window length the feature covers, e.g. 60 minutes for "views in the last hour" |
+| `I` | How often the batch job re-runs, e.g. every 5 minutes |
+| `W / I` | Read amplification — how many times each event gets reprocessed by batch |
+| `E x W` | Events a single batch run must read; the stream reads each event exactly once |
+
+**Walk one example.** A "views in the last hour" feature at 1,000 events/sec, batch refreshed every
+5 minutes:
+
+```
+  E = 1,000 events/sec  ->  1,000 x 3,600 = 3,600,000 events per hour
+  W = 60 min window,  I = 5 min refresh
+
+  batch:  runs per hour        = 60 / 5                    =         12
+          each run reads       = the full 60-min window    =  3,600,000 events
+          event-reads per hour = 12 x 3,600,000            = 43,200,000
+
+  stream: each event updates the running aggregate once
+          event-reads per hour                             =  3,600,000
+
+  read amplification = 43,200,000 / 3,600,000 = 12x  =  W / I = 60 / 5
+```
+
+Every event is read twelve times by batch and once by stream, and note that the amplification does
+not depend on `E` at all — it is fixed by how much fresher you want the feature than the window is
+long. Push the refresh to every minute for fresher features and batch's waste rises to 60x, while
+the stream's cost does not move. That asymmetry is why freshness requirements, more than data
+volume, are what force teams onto stream processing.
 
 **You almost always need both.** Static features (batch) and dynamic features (stream) feed the same
 models; a production ML system typically maintains a batch pipeline for slow-changing features and a
