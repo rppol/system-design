@@ -14,6 +14,42 @@ p(x) = sum_{k=1}^{K} pi_k * N(x | mu_k, Sigma_k)
 
 where `pi_k` are the mixture weights (`pi_k >= 0`, `sum_k pi_k = 1`), and each component is a multivariate Gaussian with mean `mu_k` and covariance `Sigma_k`. Unlike k-means, which returns a single hard cluster id per point, a GMM returns a full probability distribution over which component generated each point. It is simultaneously a **density estimator** (you can evaluate `p(x)` and sample from it), a **soft clustering** algorithm (responsibilities are soft memberships), and an **anomaly detector** (points with low `p(x)` are outliers).
 
+**What it means.** "The density at any point is a weighted blend of K bell curves — each component says how likely the point is under its own ellipse, and the weight says how often that component gets used at all."
+
+Reading it as a *blend* is what separates a GMM from a clustering algorithm. Every component contributes to `p(x)` at every point, however faintly, which is precisely why the output is a smooth density you can threshold for anomalies rather than a partition you can only label.
+
+| Symbol | What it is |
+|--------|------------|
+| `p(x)` | Total probability density at `x`. A density, not a probability — it can exceed 1 |
+| `K` | Number of components, chosen up front or by the BIC search in §4.4 |
+| `pi_k` | Mixing weight of component k. The bias of the K-sided die from §2; must sum to 1 |
+| `N(x \| mu_k, Sigma_k)` | Component k's own Gaussian density evaluated at `x` |
+| `mu_k` | Component k's center |
+| `Sigma_k` | Component k's covariance — the size, stretch, and rotation of its ellipse |
+| `sum_{k=1}^{K}` | Adds the weighted component densities together. This sum inside a later `log` is what forces EM |
+
+**Walk one example.** Two components, using the geometry already drawn in §5.5 — `mu_1 = (2, 3)`, `mu_2 = (8, 3)`, both with `Sigma = 4I` (an isotropic ellipse of standard deviation 2) and equal weights:
+
+```
+  x = (4, 3)          pi_1 = 0.5   pi_2 = 0.5
+
+  component densities (worked out factor by factor in the walk after 6.2)
+    N(x | mu_1, Sigma_1) = 0.024133      x is 2.0 units right of mu_1
+    N(x | mu_2, Sigma_2) = 0.005385      x is 4.0 units left  of mu_2
+
+  weighted blend
+    p(x) = 0.5 * 0.024133  +  0.5 * 0.005385
+         = 0.012066        +  0.002692
+         = 0.014759          <- the mixture density at (4, 3)
+
+  now tilt the die: pi_1 = 0.7, pi_2 = 0.3, same Gaussians
+    p(x) = 0.7 * 0.024133  +  0.3 * 0.005385
+         = 0.016893        +  0.001615
+         = 0.018509          <- 25% higher, purely because component 1 got heavier
+```
+
+**Why the weights must sum to 1, and what breaks otherwise.** `sum_k pi_k = 1` is what makes `p(x)` integrate to 1 over the whole space — it is the constraint that keeps the mixture a probability distribution instead of an arbitrary sum of bumps. Drop it and every quantity downstream stops meaning anything: the log-likelihood can be inflated without bound by scaling the weights up, BIC comparisons across K become incomparable, and the anomaly threshold in §6.4 is calibrated against a density that no longer normalizes. In the M-step this is enforced structurally rather than by a penalty — `pi_k = N_k / N` with `sum_k N_k = N` can only ever produce weights that sum to 1.
+
 The parameters cannot be fit by direct maximum likelihood because the log-likelihood contains a log-of-a-sum that couples all components. The **Expectation-Maximization (EM) algorithm** solves this by introducing a latent assignment variable `z` and alternating between two closed-form steps: the **E-step** computes posterior responsibilities `gamma(z_nk)` (the probability point n came from component k), and the **M-step** re-estimates `pi, mu, Sigma` as responsibility-weighted maximum-likelihood updates. EM is guaranteed to increase the data log-likelihood on every iteration — a property we prove below via the evidence lower bound (ELBO).
 
 GMM/EM is the canonical **latent-variable model** taught before variational autoencoders (VAEs) and hidden Markov models, because its E and M steps are both available in closed form. It is a staple of senior-ML interviews precisely because it forces you to reason about latent variables, Jensen's inequality, MLE, and the k-means connection all at once.
@@ -50,6 +86,51 @@ gamma(z_nk) = p(z_k=1 | x_n) = pi_k N(x_n|mu_k,Sigma_k) / sum_j pi_j N(x_n|mu_j,
 
 Each `gamma(z_nk) in [0,1]` and rows sum to 1: `sum_k gamma(z_nk) = 1`.
 
+**Stated plainly.** "This is the soft share of point `n` that component `k` owns — score the point under every component, weight each score by how popular that component is, and normalize so the shares add to one."
+
+The normalization is the whole reason responsibilities behave like memberships. The numerator alone is an unbounded density; dividing by the sum over all components converts K incomparable density readings into K fractions of a single point, which is exactly what the M-step needs in order to average.
+
+| Symbol | What it is |
+|--------|------------|
+| `gamma(z_nk)` | Responsibility: the share of point `n` owned by component `k`. A number in `[0, 1]` |
+| `z_k = 1` | The latent one-hot "this point came from component k" — never observed, only inferred |
+| `p(z_k=1 \| x_n)` | The posterior. Bayes' rule applied to the generative story of §2 |
+| Numerator `pi_k N(x_n \| ...)` | Prior (how often k fires) times likelihood (how well k explains this point) |
+| Denominator `sum_j ...` | The same quantity summed over every component — it is exactly `p(x_n)` |
+| Row sums to 1 | The point is fully accounted for; the K shares partition it, they do not compete freely |
+
+**Walk one example.** Same two components as §1 and §5.5 — `mu_1 = (2, 3)`, `mu_2 = (8, 3)`, `Sigma = 4I`, `pi = (0.5, 0.5)`:
+
+```
+  x = (4, 3)
+
+  step 1 -- score under each component
+    N(x | mu_1, Sigma_1) = 0.024133
+    N(x | mu_2, Sigma_2) = 0.005385
+
+  step 2 -- weight by the mixing prior
+    k=1:  0.5 * 0.024133 = 0.012066
+    k=2:  0.5 * 0.005385 = 0.002692
+                           ---------
+    denominator = p(x)   = 0.014759          (the same p(x) computed in 1)
+
+  step 3 -- normalize
+    gamma(z_1) = 0.012066 / 0.014759 = 0.817574
+    gamma(z_2) = 0.002692 / 0.014759 = 0.182426
+                                       --------
+                                       1.000000    <- always, by construction
+
+  reading: "(4,3) is about 82% component 1 and 18% component 2."
+           k-means would have thrown the 18% away and stamped it cluster 1.
+
+  the same arithmetic at three positions along the line y = 3
+      x = (2, 3)   deep in component 1's core   gamma = 0.989013 / 0.010987
+      x = (4, 3)   drifting right               gamma = 0.817574 / 0.182426
+      x = (5, 3)   exactly halfway              gamma = 0.500000 / 0.500000
+```
+
+Those endpoints are the two numbers annotated on the §5.5 sketch: the core point at `~0.98` and the boundary point `x_b = (5, 3)` splitting `0.50 / 0.50`. The midpoint result is forced by symmetry — equal weights and equal covariances mean the two Mahalanobis distances tie at `2.25`, the densities are identical, and the normalization can only return one half each.
+
 **3. The observed-data log-likelihood is a log-of-sum (hard to optimize directly).**
 
 ```
@@ -57,6 +138,44 @@ ln p(X | pi, mu, Sigma) = sum_{n=1}^{N} ln( sum_{k=1}^{K} pi_k N(x_n | mu_k, Sig
 ```
 
 The inner sum sits inside the log, so setting the gradient to zero gives coupled equations with no closed-form solution — hence EM.
+
+**What the formula is telling you.** "Score how surprised the model is by each observed point, take logs so the scores add instead of multiply, and total them — one number saying how well the current `pi, mu, Sigma` explain the whole dataset."
+
+This single number is also the convergence monitor: EM stops when it stops climbing. Its awkward shape — a log wrapped around a sum — is simultaneously the reason EM exists (no closed-form maximizer) and the reason the E-step's denominator is free (that inner sum is exactly the responsibility normalizer you already computed).
+
+| Symbol | What it is |
+|--------|------------|
+| `ln p(X \| ...)` | Log-likelihood of the entire dataset under the current parameters. Higher (less negative) is better |
+| `sum_{n=1}^{N}` | Over data points. Points are assumed independent, so their log-probabilities add |
+| Inner `sum_k` | Over components. This is `p(x_n)` — the mixture density for one point |
+| `ln` of that sum | The log-of-a-sum that blocks a closed-form MLE and forces the EM alternation |
+| Sign | Always negative for densities below 1; only *changes* between iterations are meaningful |
+| `Delta ln p` | Iteration-to-iteration improvement. EM's stopping rule: halt when `Delta < tol` (`1e-4` in §6.2) |
+
+**Walk one example.** Five 1-D points, `K = 2`, starting from `mu = (2, 7)`, `sigma^2 = (4, 4)`, `pi = (0.5, 0.5)`. This is the running example for the rest of this section:
+
+```
+  X = 1, 2, 3, 8, 9        component 1: mu=2, var=4     component 2: mu=7, var=4
+  1-D Gaussian: N(x) = exp(-(x-mu)^2 / (2*var)) / sqrt(2*pi*var),  sqrt(2*pi*4) = 5.0133
+
+    x      N_1(x)     N_2(x)     p(x) = 0.5*N_1 + 0.5*N_2     ln p(x)
+    1     0.176033   0.002216           0.089124             -2.417723
+    2     0.199471   0.008764           0.104118             -2.262234
+    3     0.176033   0.026995           0.101514             -2.287558
+    8     0.002216   0.176033           0.089124             -2.417723
+    9     0.000436   0.120985           0.060711             -2.801633
+                                                             ----------
+                                       ln p(X | theta_0)  =  -12.186871
+
+  and across EM iterations (each row is one full E-step + M-step):
+    iter 1   ln p(X) = -12.186871      Delta =      --
+    iter 2   ln p(X) = -10.160275      Delta = +2.026596
+    iter 3   ln p(X) =  -8.599735      Delta = +1.560540
+    iter 4   ln p(X) =  -8.465259      Delta = +0.134476
+    iter 5   ln p(X) =  -8.465259      Delta = +0.000000   -> Delta < tol, STOP
+```
+
+Every `Delta` is non-negative and the gains shrink fast — the shape drawn in §5.2, reproduced here on five points. That monotone climb is the property proved in §6.1, and it makes the log-likelihood a genuine assertion check: a *negative* `Delta` in your own implementation is always a bug, never a modeling result.
 
 **4. EM maximizes a lower bound (ELBO) instead.** For any distribution `q(z)`, Jensen's inequality on the concave `ln` gives `ln p(X | theta) >= L(q, theta)` (the ELBO), with the gap equal to `KL(q || p(z | X, theta))`. E-step tightens the bound; M-step lifts it. See §6 for the full derivation and the monotonicity proof.
 
@@ -69,6 +188,57 @@ pi_k    = N_k / N
 ```
 
 These are exactly the standard Gaussian MLE formulas, but with each point weighted by its soft responsibility instead of a hard 0/1 membership.
+
+**In plain terms.** "Now that every point has declared what fraction of itself belongs to each component, refit each component as a weighted average — weighted center, weighted spread, and a weight equal to its share of the crowd."
+
+Every one of the three updates is the same idea applied to a different quantity, which is why the M-step is closed-form while the direct MLE was not: once the responsibilities are held fixed, the coupling between components disappears and each component solves its own ordinary weighted-MLE problem.
+
+| Symbol | What it is |
+|--------|------------|
+| `N_k` | Effective count: how many points component k owns once fractions are added up. Rarely an integer |
+| `sum_k N_k = N` | The shares of every point add to one, so the effective counts add to the true count |
+| `mu_k` | Weighted mean position. Points that barely belong barely move it |
+| `(x_n - mu_k)(x_n - mu_k)^T` | Outer product — a `D x D` matrix, one point's contribution to the ellipse's shape |
+| `Sigma_k` | Weighted covariance, so the ellipse's size, stretch, and rotation all come from owned points |
+| `pi_k = N_k / N` | Component k's share of the dataset. Automatically non-negative and summing to 1 |
+| `1 / N_k` | The normalizer that turns a weighted sum into a weighted average |
+
+**Walk one example.** Continue the run started under principle 3 above — `X = 1, 2, 3, 8, 9` after the first E-step at `mu = (2, 7)`, `var = (4, 4)`, `pi = (0.5, 0.5)`. These are the responsibilities that E-step produced:
+
+```
+      x        gamma_1      gamma_2      (each row sums to 1)
+      1       0.987568     0.012432
+      2       0.957912     0.042088
+      3       0.867036     0.132964      <- genuinely split; 13% of it belongs right
+      8       0.012432     0.987568
+      9       0.003594     0.996406
+
+  EFFECTIVE COUNTS
+    N_1 = 0.987568 + 0.957912 + 0.867036 + 0.012432 + 0.003594 = 2.828542
+    N_2 = 0.012432 + 0.042088 + 0.132964 + 0.987568 + 0.996406 = 2.171458
+    check: 2.828542 + 2.171458 = 5.000000 = N                    (always)
+
+  WEIGHTS
+    pi_1 = 2.828542 / 5 = 0.565708
+    pi_2 = 2.171458 / 5 = 0.434292        sum = 1.000000
+
+  MEANS (weighted average of x)
+    sum_n gamma_1 * x = 0.987568 + 1.915824 + 2.601108 + 0.099456 + 0.032346
+                      = 5.636302
+    mu_1 = 5.636302 / 2.828542 = 1.992653      (moved from 2.000 -- barely)
+
+    sum_n gamma_2 * x = 0.012432 + 0.084176 + 0.398892 + 7.900544 + 8.967654
+                      = 17.363698
+    mu_2 = 17.363698 / 2.171458 = 7.996331     (moved from 7.000 -> 8.00, a big jump)
+
+  VARIANCES (weighted average of squared deviation from the NEW mean)
+    sum_n gamma_1 * (x - mu_1)^2 = 0.973109 + 0.000052 + 0.879823
+                                 + 0.448649 + 0.176476  = 2.478109
+    var_1 = 2.478109 / 2.828542 = 0.876108      (collapsed from 4.00 -- much tighter)
+    var_2 = 2.967966                            (same arithmetic on column 2)
+```
+
+Notice what the soft weighting bought: `x = 3` contributed `0.867` of a point to component 1's mean and `0.133` to component 2's, so it nudged both. Hard k-means assignment would have given it entirely to the left cluster and component 2 would never have seen it. Notice too that the variances must be computed with the **new** `mu_k`, not the old one — using the pre-update mean is the single most common hand-rolled-EM bug and shows up as a log-likelihood that decreases (see §5.2).
 
 ---
 
@@ -118,6 +288,47 @@ AIC = -2 * ln L_hat + 2 * p          (lighter penalty -> tends to pick larger K)
 ```
 
 where `L_hat` is the maximized likelihood and `p` is the number of free parameters (weights `K-1`, means `K*D`, plus the covariance count from the table in §4.1). BIC is the interview-default because its `ln N` penalty grows with data and yields a clean elbow; AIC optimizes predictive risk and often over-splits.
+
+**Put simply.** "Take how badly the model fits, then charge rent for every parameter it used — the model with the smallest total bill wins."
+
+The framing matters because likelihood alone cannot choose K: adding a component can only ever raise `ln L_hat`, so an unpenalized search runs away to one Gaussian per data point. The penalty term is the only thing standing between you and that degenerate answer, and BIC and AIC differ solely in what they charge.
+
+| Symbol | What it is |
+|--------|------------|
+| `L_hat` | The maximized likelihood — the best `ln p(X)` EM reached for this K |
+| `-2 * ln L_hat` | The misfit ("deviance"). Lower is better; the `-2` makes it a chi-squared-scaled quantity |
+| `p` | Free parameter count: `(K-1)` weights + `K*D` means + the covariance count from §4.1 |
+| `ln N` | BIC's price per parameter. Grows with dataset size, so big data buys stricter parsimony |
+| `2` | AIC's price per parameter. Constant, independent of N |
+| Lower is better | Both are bills to minimize, not scores to maximize |
+| Which to use | BIC when you believe a true finite K exists; AIC when you only want predictive accuracy |
+
+**Walk one example.** The BIC curve in §5.3 with `N = 1500`, `D = 2`, full covariance. Parameter count per component is `(K-1) + 2K + 3K = 6K - 1`, since a full `2x2` covariance has `D(D+1)/2 = 3` free entries:
+
+```
+  ln N = ln 1500 = 7.3132
+
+    K     p = 6K-1     BIC penalty        -2 ln L_hat        BIC        AIC
+    3        17        17 * 7.3132        8475.7           8600.0     8509.7
+                       = 124.3
+    4        23        23 * 7.3132        8131.8           8300.0     8177.8
+                       = 168.2
+    5        29        29 * 7.3132        8127.9           8340.0     8185.9
+                       = 212.1
+
+  what the K=4 -> K=5 step costs and buys
+    fit improvement :  8131.8 - 8127.9  =    3.9    (5 components barely fit better)
+    BIC charges     :  6 extra params * 7.3132  =  43.9   ->  43.9 > 3.9, REJECT
+    AIC charges     :  6 extra params * 2       =  12.0   ->  12.0 >  3.9, REJECT
+
+  both pick K=4, but look at the margins
+    BIC:  8340.0 - 8300.0 = 40.1 worse   -> rejects K=5 emphatically
+    AIC:  8185.9 - 8177.8 =  8.1 worse   -> rejects K=5 barely
+
+  price per parameter:  BIC 7.3132  vs  AIC 2.0000   ->  BIC is 3.66x stricter here
+```
+
+That `3.66x` ratio is the whole story of "AIC over-splits." At `N = 1500` the two criteria happen to agree; the ratio is `ln N / 2`, so it *grows* with data — at `N = 100` BIC charges `4.61` per parameter, only `2.3x` AIC, while at `N = 1,000,000` it charges `13.82`, nearly `7x` AIC, and rejects extra components that AIC still happily buys. Report which criterion you used whenever you report a chosen K.
 
 ---
 
@@ -242,6 +453,42 @@ ln p(X | theta^new) >= L(q^old, theta^new)      # ELBO is a lower bound (any the
 
 Hence `ln p(X | theta^new) >= ln p(X | theta^old)`. The likelihood is monotone non-decreasing; for a regularized model it is bounded above, so EM converges (to a stationary point — a local, not necessarily global, optimum).
 
+**The idea behind it.** "The quantity you actually want is hard to climb, so build a floor underneath it that touches it exactly where you stand, push the floor up instead, and you have provably risen — because the thing above the floor was never lower than the floor."
+
+Reading EM as floor-raising rather than as two ad-hoc update rules is what makes the two steps obviously necessary. The E-step's only job is to make the floor *touch* (`KL = 0`); the M-step's only job is to *lift* it. Take either away and the guarantee evaporates.
+
+| Symbol | What it is |
+|--------|------------|
+| `ln p(x_n \| theta)` | The target — the log-likelihood you wish you could maximize directly |
+| `q_n(z_n)` | Your current guess at the distribution over the latent for point n. Free to be anything |
+| `L(q, theta)` | The ELBO, the floor. Always `<=` the target, for every `q` |
+| `KL(q \|\| p(z\|x))` | The gap between floor and target. Always `>= 0`, and `= 0` only when `q` is the true posterior |
+| E-step | Choose `q = gamma` -> `KL = 0` -> floor touches the target at the current `theta` |
+| M-step | Hold `q` fixed, move `theta` to raise `L`. The target, being above `L`, is dragged up with it |
+| `Q(theta)` | The part of `L` that depends on `theta`: expected complete-data log-likelihood |
+
+**Walk one example.** Run the three-line proof with real numbers from the `X = 1, 2, 3, 8, 9` fit, taking one E-step at `theta_old = (mu=(2,7), var=(4,4), pi=(0.5,0.5))` and one M-step to `theta_new`:
+
+```
+  after the E-step at theta_old (q = the responsibilities gamma)
+    ln p(X | theta_old)      = -12.186871
+    L(q_old, theta_old)      = -12.186871      <- identical: KL = 0, the floor TOUCHES
+
+  after the M-step (q still frozen at q_old, theta moved to theta_new)
+    L(q_old, theta_new)      = -10.787070      <- the floor was lifted by +1.399801
+    ln p(X | theta_new)      = -10.160274      <- the target rose even MORE
+
+  the chain from the proof, instantiated
+    -10.160274  >=  -10.787070  >=  -12.186871
+     ln p(new)       L(q_old,new)     ln p(old) = L(q_old,old)
+
+  total gain in the target: -10.160274 - (-12.186871) = +2.026597
+  of which the floor accounts for +1.399801; the remaining +0.626796 is the
+  KL gap that reopened because q_old is no longer the posterior under theta_new
+```
+
+That reopened gap of `0.626796` is exactly what the *next* E-step closes for free, which is why EM's improvements come in two flavors every round and why the target can rise faster than the bound. It also shows why a decreasing log-likelihood is impossible in a correct implementation: the chain has no step that permits it.
+
 ### 6.2 Hand-rolled EM in numpy
 
 ```python
@@ -314,6 +561,63 @@ def gmm_em(
 # out = gmm_em(X, K=2)
 # assert np.all(np.diff(out["log_likelihood"]) >= -1e-9)   # never decreases
 ```
+
+The `_log_gaussian` helper above is the multivariate Gaussian density, written in logs:
+
+```
+N(x | mu, Sigma) = (2*pi)^(-D/2) * |Sigma|^(-1/2)
+                   * exp( -0.5 * (x - mu)^T Sigma^-1 (x - mu) )
+
+ln N(x | mu, Sigma) = -0.5 * ( D*ln(2*pi) + ln|Sigma| + (x-mu)^T Sigma^-1 (x-mu) )
+```
+
+**Read it like this.** "Measure how many standard deviations away the point is *in the ellipse's own stretched coordinates*, square that, and let the density fall off exponentially — then divide by the ellipse's volume so the whole thing still integrates to 1."
+
+Splitting it that way is the useful mental model: one factor decides *shape* (how fast density falls with distance) and one decides *scale* (how tall the peak is). A wide covariance widens the ellipse and simultaneously lowers the peak, because the total probability mass is fixed at 1.
+
+| Symbol | What it is |
+|--------|------------|
+| `D` | Number of dimensions |
+| `x - mu` | Offset from the component's center |
+| `Sigma^-1` | Inverse covariance ("precision"). Rescales the offset so 1 unit = 1 standard deviation along each axis |
+| `(x-mu)^T Sigma^-1 (x-mu)` | **Squared Mahalanobis distance** — the `maha` term in the code. Scale-free and rotation-aware |
+| `exp(-0.5 * maha)` | The bell curve itself. `maha = 0` gives 1 at the peak; density decays fast outward |
+| `\|Sigma\|` | Determinant — the ellipse's "volume". Big ellipse, low peak |
+| `(2*pi)^(-D/2) \* \|Sigma\|^(-1/2)` | The normalizing constant, everything needed to make the integral equal 1 |
+| `slogdet` | numpy's stable `ln\|Sigma\|`; the returned `sign` is the singularity alarm from §6.3 |
+
+**Walk one example.** The component from §1 and §5.5: `mu = (2, 3)`, `Sigma = 4I` (so `D = 2`, standard deviation 2 on each axis, no correlation):
+
+```
+  x = (3, 5)          x - mu = (1, 2)
+
+  SHAPE FACTOR -- squared Mahalanobis distance
+    Sigma^-1 = [ 0.25   0    ]
+               [ 0      0.25 ]
+    maha = 0.25*(1^2) + 0.25*(2^2)  =  0.25 + 1.00  =  1.25
+           (1 unit right is only 0.5 sd; 2 units up is 1.0 sd -> 0.5^2 + 1.0^2 = 1.25)
+    exp(-0.5 * 1.25) = exp(-0.625) = 0.535261
+
+  SCALE FACTOR -- the normalizing constant
+    |Sigma| = 4 * 4 - 0 * 0 = 16          sqrt(16) = 4
+    (2*pi)^(-D/2) = 1 / (2*pi) = 0.159155
+    constant = 0.159155 / 4 = 0.039789    <- the density at the peak, x = mu
+
+  DENSITY
+    N(x | mu, Sigma) = 0.039789 * 0.535261 = 0.021297
+
+  in logs, the way the code computes it (no underflow at high D)
+    ln N = -0.5 * ( 2*1.837877  +  2.772589  +  1.25 )
+         = -0.5 * ( 3.675754    +  2.772589  +  1.25 )
+         = -0.5 * 7.698343
+         = -3.849171             and exp(-3.849171) = 0.021297   (matches)
+
+  same component, the point used in the mixture walks
+    x = (4, 3):  maha = 0.25*(2^2) + 0 = 1.00
+                 N = 0.039789 * exp(-0.5) = 0.039789 * 0.606531 = 0.024133
+```
+
+**Why the log form is not just tidiness.** At `D = 50` a typical density is around `1e-40`; multiply a few of those inside the E-step's ratio and float64 flushes to exactly `0.0`, turning every responsibility into `0/0 = NaN`. Working in logs and normalizing with `logsumexp` (as §6.2 does) keeps every intermediate in a representable range — this is the same trick as a numerically stable softmax, and it is why the code never calls `np.exp` until *after* subtracting `log_norm`.
 
 ### 6.3 Broken -> fix: singular covariance collapse
 

@@ -102,12 +102,93 @@ matrix (see [../unsupervised_learning/README.md](../unsupervised_learning/README
 deterministic, but components can be **negative** (uninterpretable as "topics"), it is not a
 probabilistic model, and it offers no principled way to score new documents.
 
+**Read it like this.** `X ≈ U_k Σ_k V_k^T` says: "rebuild the whole term-document matrix out of only
+`k` reusable ingredient patterns, keeping the `k` that explain the most variance and throwing the
+rest away as noise."
+
+The compression is the point. You are not summarizing `X` for its own sake — you are forcing every
+document through a `k`-wide bottleneck so that documents which *cannot* be told apart by those `k`
+patterns end up close together. That is how *car* and *automobile*, which never co-occur, land in the
+same neighborhood.
+
+| Symbol | What it is |
+|--------|------------|
+| `X` | The `V × D` term-document matrix. One column per document, one row per vocabulary term |
+| `U_k` | `V × k`. Each column is a latent axis expressed in word space — the "topic" direction |
+| `Σ_k` | `k × k` diagonal of singular values, largest first. Each entry is that axis's strength |
+| `V_k^T` | `k × D`. Each column says how much of each latent axis a given document contains |
+| `k` | The retained rank. The whole knob: small `k` = heavy compression, `k = rank(X)` = no loss |
+| `≈` | Not equality. The discarded singular values are exactly the error you accept |
+
+**Walk one example.** A 4-term by 3-document matrix, truncated to `k = 2`:
+
+```
+  X (4 terms x 3 docs)          singular values of X
+    3  1  0                       s1 = 5.0763
+    2  1  0                       s2 = 3.8549
+    0  1  4                       s3 = 0.6090   <- the one we drop
+    0  0  3
+
+  energy share  s_i^2 / sum(s^2) :  0.6285   0.3624   0.0090
+  keeping k = 2 retains 0.6285 + 0.3624 = 0.9910  ->  99.1% of the variance
+
+  rank-2 reconstruction X_2         reconstruction error
+     2.937   1.159  -0.026            ||X - X_2||_F^2 = 0.3708
+     2.070   0.824   0.029            and  s3^2        = 0.3708   <- identical
+     0.117   0.704   4.048
+    -0.163   0.412   2.933            Discarding a singular value costs exactly
+                                      its square. Nothing more, nothing less.
+```
+
+Two things fall out. First, the error is *predictable*: Eckart-Young says the squared error equals the
+sum of the squares of everything you dropped, so `explained_variance_ratio_.sum()` in §6.5 is not a
+heuristic — it is the exact fraction you kept. Second, look at the reconstruction: `-0.026` and
+`-0.163` are **negative**. A "topic" that contributes negative mass to a word has no reading as a
+probability, and that single fact is why LSA lost to LDA and NMF for interpretable themes.
+
 ### 4.2 pLSA — probabilistic latent semantic analysis
 
 Hofmann's model: `P(w, d) = P(d) Σ_z P(z | d) P(w | z)`, with a latent topic `z`, fit by EM. It is a
 genuine probabilistic model, but `P(z | d)` is a free parameter *per document*, so the parameter count
 grows with the corpus — it **overfits** and cannot assign topics to an unseen document. LDA's
 Dirichlet prior on `P(z | d)` is precisely the fix.
+
+**Stated plainly.** `P(w, d) = P(d) Σ_z P(z | d) P(w | z)` says: "to see word `w` in document `d`,
+first pick the document, then pick one of the `K` topics using that document's private topic mix, then
+pick a word from that topic's vocabulary — and since you never saw which topic was picked, add up
+every way it could have happened."
+
+The `Σ_z` is a **marginalization**, not an average of predictions. The topic is a latent variable that
+genuinely occurred but was never recorded, so the only honest probability is the sum over all the
+values it could have taken.
+
+| Symbol | What it is |
+|--------|------------|
+| `P(d)` | How likely you are to pick document `d` at all. Usually just proportional to its length |
+| `z` | The latent topic index, `1..K`. Never observed — the whole reason inference is needed |
+| `P(z \| d)` | Document `d`'s topic mixture. In pLSA this is a **free parameter per document** |
+| `P(w \| z)` | Topic `z`'s word distribution. Shared across the entire corpus |
+| `Σ_z` | Sum over all `K` topics — "we do not know which topic fired, so count every possibility" |
+
+**Walk one example.** Where pLSA's parameter count comes from, and why it explodes:
+
+```
+  corpus: D = 480,000 documents, V = 14,200 terms, K = 40 topics
+
+  P(w | z)  : shared topic-word table    ->  K x V  = 40 x 14,200   =    568,000 params
+  P(z | d)  : one mixture PER DOCUMENT   ->  D x K  = 480,000 x 40  = 19,200,000 params
+                                                                      ----------
+                                                                      19,768,000
+
+  97.1% of the model is per-document bookkeeping that does not generalize.
+  Add one new document -> you must add 40 brand-new free parameters for it,
+  and there is no prior telling you what they should look like. That is the
+  "cannot fold in an unseen document" failure in the Section 8 table.
+```
+
+LDA changes exactly one line of that ledger: `P(z | d)` stops being a free parameter and becomes a
+*draw* from `Dir(alpha)`. The 19.2M numbers collapse into `K` prior parameters (or one, if symmetric),
+and a new document gets its mixture by inference under that prior instead of by fitting from scratch.
 
 ### 4.3 LDA — Latent Dirichlet Allocation (the workhorse)
 
@@ -118,10 +199,96 @@ The generative story for a corpus with `K` topics and vocabulary size `V`:
 3. For each word slot `n` in document `d`: draw a topic `z_dn ~ Categorical(theta_d)`, then draw the
    word `w_dn ~ Categorical(phi_{z_dn})`.
 
+**What this actually says.** The three steps together are the joint probability
+`P(w, z, theta, phi | alpha, beta) = P(phi | beta) P(theta | alpha) P(z | theta) P(w | z, phi)`,
+which reads: "roll `K` vocabulary dice once for the whole corpus, roll one topic-mix die per document,
+then per word slot roll the document's mix to pick a topic and that topic's vocabulary die to pick a
+word."
+
+The critical asymmetry is *how often each die is rolled*. `phi` is drawn `K` times for the entire
+corpus; `theta` is drawn once per document; `z` and `w` are drawn once per **token**. That is why
+topics are sharp (millions of tokens of evidence each) while a short document's `theta` is mush (ten
+tokens of evidence) — the short-text failure in §10, Pitfall 6, read straight off the generative story.
+
+| Symbol | What it is |
+|--------|------------|
+| `phi_k` | Topic `k`'s word distribution — a `V`-long vector summing to 1. Corpus-wide, shared |
+| `theta_d` | Document `d`'s topic mixture — a `K`-long vector summing to 1. Private to that document |
+| `z_dn` | Which topic produced the `n`-th word of document `d`. One integer per token, never observed |
+| `w_dn` | The word actually written. The only thing you ever see |
+| `Dir(alpha)` | The prior that generates `theta`. Its concentration decides sparse vs blurry mixtures |
+| `Dir(beta)` | The prior that generates `phi`. Same role, one level down at the word layer |
+| `Categorical(p)` | A single weighted die roll returning an index, with probabilities `p` |
+
+**Walk one example.** Generate a 3-word document forwards, then read off what inference must undo.
+`K = 2` (topic 0 = billing, topic 1 = shipping), `theta_d = [0.7, 0.3]`:
+
+```
+  phi[topic 0 = billing ]:  refund 0.050   card 0.040   ship 0.001
+  phi[topic 1 = shipping]:  refund 0.002   card 0.001   ship 0.060
+
+  P(word) = sum over both topics of  theta[k] * phi[k][word]
+
+  word    via topic 0        via topic 1        P(word)
+  refund  0.7*0.050=0.035000 0.3*0.002=0.000600 0.035600
+  card    0.7*0.040=0.028000 0.3*0.001=0.000300 0.028300
+  ship    0.7*0.001=0.000700 0.3*0.060=0.018000 0.018700
+
+  P(document) = 0.035600 x 0.028300 x 0.018700 = 1.8840e-05
+  log P       = -10.8795
+  per-word perplexity = exp(10.8795 / 3) = 37.58
+```
+
+Notice `ship`: 96.3% of its probability came from topic 1 even though the document is only 30%
+shipping, because topic 0 essentially never emits that word. Inference exploits exactly this — a token
+gets attributed to the topic that explains it best, *weighted* by how much the document already leans
+that way. Those two forces are literally the two factors in the Gibbs update in §6.1.
+
 **Hyperparameters.** `alpha` (doc-topic concentration) and `beta` (topic-word concentration), both
 symmetric Dirichlet parameters. Common defaults: `alpha = 50/K` or `0.1`, `beta = 0.01` (Griffiths &
 Steyvers). Lower `alpha` → each document commits to fewer topics; lower `beta` → each topic commits to
 fewer words. gensim can also learn asymmetric `alpha` from data (`alpha='auto'`), which usually helps.
+
+**The idea behind it.** A symmetric `Dir(alpha)` over `K` outcomes says: "hand out one unit of
+probability across `K` buckets — and `alpha` decides whether I am allowed to dump nearly all of it in
+one or two buckets (`alpha < 1`) or must spread it fairly evenly (`alpha > 1`)."
+
+The mental image that makes it stick: `alpha` is a **pseudo-count**. Before seeing a single word, the
+model pretends it has already observed `alpha` tokens of every topic in this document. Set
+`alpha = 0.1` and that pretend-evidence is almost nothing, so real counts dominate instantly and the
+mixture goes spiky. Set `alpha = 10` and every topic starts with 10 free tokens, so a 42-token
+document can never escape the prior's pull toward uniform.
+
+| Symbol | What it is |
+|--------|------------|
+| `alpha` | Doc-topic concentration. Pseudo-count of each topic added to every document before data |
+| `beta` | Topic-word concentration. Pseudo-count of each vocabulary word added to every topic |
+| `alpha < 1` | Sparse: each document commits to a couple of topics. This is what you want |
+| `alpha > 1` | Diffuse: every document is a blurry blend of all `K` topics. Unreadable |
+| `50/K` | Griffiths & Steyvers' default. At `K = 40` that is `1.25`; at `K = 500` it is `0.1` |
+| Asymmetric `alpha` | A different concentration per topic, learned from data (`alpha='auto'`) |
+
+**Walk one example.** Draw one `theta_d` from `Dir(alpha)` with `K = 5` at three settings, sorted
+largest-first (numpy default_rng seed 7):
+
+```
+  alpha      theta_d sorted descending                          top-1    top-2 mass
+  0.10   0.5406  0.4118  0.0476  0.0000  0.0000                 0.5406     0.9524
+  1.00   0.4000  0.2279  0.1910  0.1149  0.0663                 0.4000     0.6279
+  10.0   0.2608  0.2291  0.1947  0.1808  0.1345                 0.2608     0.4900
+
+  alpha = 0.1  -> two topics hold 95.2% of the document. Nameable.
+  alpha = 1.0  -> flat prior, no pressure either way. Data decides alone.
+  alpha = 10   -> spread 49.0% over the top two; uniform would be 40.0%.
+                  The document is "a bit of everything" and means nothing.
+```
+
+`beta` does the identical thing one layer down, over `V` words instead of `K` topics — and because `V`
+is huge (14,200 in the §14 case study versus `K = 40`), it needs to be far smaller to have the same
+sparsifying effect, which is exactly why the conventional defaults are `beta = 0.01` against
+`alpha = 0.1`. Drop `beta` and you get the fix prescribed for the junk-topic pitfall in §10: sparser
+topics that stop absorbing boilerplate. Raise it and every topic drifts toward the corpus unigram
+distribution, so all `K` topics start looking like the same list of common words.
 
 ### 4.4 NMF — non-negative matrix factorization
 
@@ -131,6 +298,49 @@ Non-negativity yields **parts-based**, additive topics. NMF is faster than LDA, 
 initialization, and frequently **more coherent on short text** (tweets, ticket titles, review
 sentences) where LDA's per-document Dirichlet has too little data to work with. It has no
 probabilistic generative story, but in practice that rarely matters for theme mining.
+
+**Put simply.** `min ||X - WH||²` subject to `W, H ≥ 0` says: "explain the corpus as a stack of `K`
+non-negative ingredient piles, where every document is built by *adding* piles together — no pile may
+ever subtract from another."
+
+That one inequality constraint is the entire difference from LSA, and it is what buys
+interpretability. SVD can express "this document is topic 1 *minus* topic 2," which is meaningless as
+a theme. NMF cannot, so each column of `W` has to stand on its own as a coherent set of words.
+
+| Symbol | What it is |
+|--------|------------|
+| `X` | The `V × D` TF-IDF matrix. NMF takes TF-IDF, unlike LDA which needs raw counts |
+| `W` | `V × K`, all entries `≥ 0`. Column `k` is topic `k` as a weight over the vocabulary |
+| `H` | `K × D`, all entries `≥ 0`. Column `d` is how much of each topic document `d` uses |
+| `\|\|A\|\|²` | Frobenius norm squared: square every entry of `A` and add them all up |
+| `W, H ≥ 0` | The constraint doing all the work. Parts add, never cancel |
+| KL variant | Alternative objective; penalizes ratio error instead of absolute error, better for counts |
+
+**Walk one example.** The same 4-term by 3-document matrix used for LSA above, now factored at
+`K = 2` with non-negative factors:
+
+```
+  X          W (V x K)        H (K x D)
+  3 1 0      1.4  0.0         2.0  0.8  0.0
+  2 1 0      1.0  0.0         0.0  0.2  2.1
+  0 1 4      0.2  1.9
+  0 0 3      0.0  1.5      topic 0 = terms 1,2  |  topic 1 = terms 3,4
+
+  WH                          residual E = X - WH
+  2.80  1.12  0.00             0.20  -0.12   0.00
+  2.00  0.80  0.00             0.00   0.20   0.00
+  0.40  0.54  3.99            -0.40   0.46   0.01
+  0.00  0.30  3.15             0.00  -0.30  -0.15
+
+  ||X - WH||_F^2 = 0.5786        ||X||_F^2 = 41.0
+  relative error = 0.5786 / 41.0 = 1.41%
+```
+
+Every entry of `W` and `H` is `≥ 0`, so "topic 0" is genuinely readable as *terms 1 and 2*, with no
+negative mass anywhere — contrast the `-0.026` and `-0.163` that the rank-2 SVD produced on this exact
+matrix. NMF pays for that: its 1.41% error is worse than SVD's optimal `0.3708 / 41.0 = 0.90%`,
+because Eckart-Young guarantees no rank-2 approximation beats the SVD. **You trade a little
+reconstruction accuracy for topics a human can name** — which is the whole bargain of topic modeling.
 
 ### 4.5 BERTopic and neural topic models
 
@@ -282,6 +492,58 @@ token." The first factor is *"this document already likes topic k"*; the second 
 likes this word."* Run ~1000 sweeps with a ~100-iteration burn-in, then read `phi` and `theta` off
 the final counts. MALLET and tomotopy implement this efficiently.
 
+**What the formula is telling you.** "Pull this one word out of the model, ask every topic two
+questions — *how much does this document already use you?* and *how much do you already use this
+word?* — multiply the two answers, and reassign the word to a topic drawn in proportion to that
+product."
+
+There are no gradients, no matrices, no learning rate. It is pure counting: pluck a token, decrement
+two counters, score `K` options, sample, increment two counters, move to the next token. That is the
+whole algorithm, and it is why a C++ implementation like tomotopy is so fast.
+
+| Symbol | What it is |
+|--------|------------|
+| `z_i = k` | The proposal: assign token `i` to topic `k`. We compute a score for every `k` |
+| `n_{d,k}^{-i}` | Tokens in this document already on topic `k`, **not counting token `i`** |
+| `n_{k,w_i}^{-i}` | Times this word type sits in topic `k` corpus-wide, excluding token `i` |
+| `n_k^{-i}` | Total tokens in topic `k` across the corpus. The normalizer for factor two |
+| `+ alpha` | Doc-side pseudo-count. Keeps a topic's score above zero even at `n_{d,k} = 0` |
+| `+ beta` | Word-side pseudo-count. Same job, and the reason unseen words never get probability 0 |
+| `V*beta` | Total pseudo-mass added to topic `k`'s denominator — `beta` for each of `V` words |
+| `-i` | "Leave-one-out." Without it a token would vote for its own current topic |
+| `proportional to` | Not a probability yet. Score all `K`, then divide by the sum to normalize |
+
+**Walk one example.** Resample the word *refund* in a support ticket. `K = 3`, `alpha = 0.1`,
+`beta = 0.01`, `V = 14,200` (so `V*beta = 142`). The ticket has 42 tokens, 41 after removing this one:
+
+```
+  factor 1 = n_dk + alpha        factor 2 = (n_kw + beta) / (n_k + V*beta)
+  --------------------------------------------------------------------------------
+  topic          n_dk   +alpha   n_kw   +beta      n_k   denom      score      P(k)
+  0 shipping       24    24.10      3    3.01   52,000   52,142   1.391e-03   0.1453
+  1 billing        12    12.10    180  180.01  310,000  310,142   7.023e-03   0.7337
+  2 login           5     5.10     20   20.01   88,000   88,142   1.158e-03   0.1210
+                                                          sum   = 9.572e-03   1.0000
+
+  Sample from [0.1453, 0.7337, 0.1210] -> "billing" with probability 73.4%.
+  Increment n_d,billing and n_billing,refund. Next token.
+```
+
+Read the fight between the two factors. The **document** prefers shipping (24 tokens already there
+versus 12 for billing — factor 1 favors shipping 2:1). The **word** overwhelmingly prefers billing:
+*refund* appears 180 times in the billing topic against 3 in shipping, and even after normalizing by
+topic size billing wins that factor 10.1:1. Multiplied, the word evidence overrules the document
+context and billing takes 73.4% of the mass. This is mixed membership happening mechanically — the
+ticket stays mostly-shipping, but *this particular word* gets attributed to billing.
+
+**Why `-i` and why sampling rather than argmax.** Drop the `-i` and the token's current assignment is
+included in the counts scoring its own move, so it reinforces itself and the chain freezes on the
+first random initialization. And note the update *samples* from `[0.1453, 0.7337, 0.1210]` rather
+than taking the max — 26.6% of the time this token goes somewhere other than billing. That
+willingness to make locally-worse moves is what lets the chain escape bad configurations, and it is
+also the reason LDA is not reproducible across seeds (§10, Pitfall 5) and why you burn in ~100 sweeps
+before trusting any counts.
+
 ### 6.2 LDA inference: variational EM
 
 The alternative is **mean-field variational inference**: approximate the intractable posterior with a
@@ -293,6 +555,60 @@ derived for GMMs in
 scikit-learn's `LatentDirichletAllocation` uses **online variational Bayes** (Hoffman et al., 2010),
 which processes mini-batches and scales to millions of documents. Gibbs tends to find slightly more
 coherent topics; variational is faster and streams.
+
+The ELBO being maximized is:
+
+```
+ELBO(q) = E_q[ log P(w, z, theta, phi | alpha, beta) ] - E_q[ log q(theta, z, phi) ]
+
+and it relates to the quantity you actually want by:
+
+log P(w | alpha, beta)  =  ELBO(q)  +  KL( q || true posterior )
+                              ^                   ^
+                        what we maximize     always >= 0, never computed
+```
+
+**In plain terms.** "The true log-likelihood is out of reach, so maximize a quantity that is provably
+never above it — and because the gap between them is a KL divergence that can only shrink, pushing
+this lower bound up must drag the real thing up with it."
+
+That single identity is why the method works at all. `log P(w)` is a fixed constant for your corpus,
+so `ELBO + KL = constant`: every point you gain on the ELBO is a point of KL you removed, meaning your
+approximation `q` got closer to the true posterior. You get to optimize an intractable objective by
+never touching it.
+
+| Symbol | What it is |
+|--------|------------|
+| `log P(w \| alpha, beta)` | The evidence — log-probability of the observed words with everything else integrated out. Intractable |
+| `q(theta, z, phi)` | The **approximate** posterior you invent. Mean-field forces it to factorize |
+| `E_q[...]` | Average under `q`. Tractable precisely because `q` factorizes |
+| First term | "Does `q` put its mass where the model says the data is likely?" Fit |
+| Second term | Negative entropy of `q`. Penalizes over-confident, collapsed approximations |
+| `KL(q \|\| posterior)` | The slack. Zero only if `q` is exactly right, which mean-field forbids |
+| `gamma` | The per-document variational parameters updated in the E-step — `q(theta_d)`'s Dirichlet |
+
+**Walk one example.** Two iterations on one document, watching the bound close:
+
+```
+  iteration   ELBO      implied KL gap        (log P(w) = -1250.0, fixed and unknown)
+  ---------------------------------------------------------------------------------
+  init      -1400.0     -1250.0 - (-1400.0) = 150.0      q is far from the posterior
+  iter 1    -1310.0     -1250.0 - (-1310.0) =  60.0      gained 90.0, gap shrank 90.0
+  iter 2    -1268.0     -1250.0 - (-1268.0) =  18.0      gained 42.0, gap shrank 42.0
+  ...
+  converged -1262.0     -1250.0 - (-1262.0) =  12.0      <- ELBO stops rising here
+
+  The residual 12.0 never goes away. That is the mean-field factorization error:
+  q was forced to treat theta and z as independent when the posterior couples them.
+```
+
+The monotone rise is guaranteed — same coordinate-ascent argument as EM for Gaussian mixtures in
+[../unsupervised_learning/gaussian_mixtures_and_em.md](../unsupervised_learning/gaussian_mixtures_and_em.md).
+The permanent residual gap is the honest cost, and it is the mechanical reason variational LDA lands on
+slightly less coherent topics than collapsed Gibbs (§8): Gibbs is asymptotically exact and pays only
+in runtime, while variational buys speed by accepting a posterior it can never fully reach. Note also
+that gensim's `log_perplexity` returns a bound derived from this ELBO, not the true held-out
+likelihood — so the perplexity number in §6.4 is itself an approximation of an approximation.
 
 ### 6.3 Fitting LDA and selecting K by coherence (gensim)
 
@@ -369,6 +685,48 @@ def choose_k_by_coherence(scores: dict[int, float]) -> int:
     # scores from sweep_num_topics() in 6.3
     return max(scores, key=scores.get)   # -> returns 40, the coherence peak.
 ```
+
+**What it means.** `perplexity = exp(-log_perplexity)` — where gensim's `log_perplexity` is the mean
+per-word log-probability — says: "convert an average log-probability back into a word count, and read
+the answer as *the model is as confused as if it were guessing uniformly among this many words at
+every position*."
+
+Perplexity is an **effective branching factor**, and that is the only interpretation worth carrying
+into an interview. A perplexity of 720 against a 14,200-word vocabulary means the model narrowed each
+next-word decision from 14,200 equally-likely options down to about 720 — real information, but still
+enormous uncertainty. This is the same quantity as `exp(cross-entropy)` in
+[../information_theory/README.md](../information_theory/README.md).
+
+| Symbol | What it is |
+|--------|------------|
+| `log_perplexity` | Mean log-probability **per word**, always negative. gensim returns the ELBO bound |
+| `-log_perplexity` | Flip the sign: mean per-word surprise, in nats. Bigger = more surprised |
+| `exp(...)` | Undoes the log, turning nats of surprise into an equivalent number of choices |
+| Perplexity `= 1` | Perfect: the model knew the next word with certainty |
+| Perplexity `= V` | Worst useful case: the model learned nothing beyond "some word from the vocab" |
+| Per-word, not per-doc | Normalized by token count, so long and short documents stay comparable |
+
+**Walk one example.** The perplexity curve from §5.4, converted back to what the model is actually doing:
+
+```
+   K     perplexity   log_perplexity   effective choices out of V = 14,200
+  ----------------------------------------------------------------------
+    5       1150         -7.0475        1 in 12.3 of the vocabulary
+   40        720         -6.5793        1 in 19.7                     <- coherence peak
+  150        585         -6.3716        1 in 24.3                     <- perplexity's pick
+
+  Going K = 40 -> 150 improves perplexity by 720 - 585 = 135 (18.8% better),
+  while c_v coherence falls 0.61 -> 0.43 (29.5% worse).
+
+  You bought a fifth off the branching factor and paid for it with topics
+  no human can read. Nobody deploys a branching factor.
+```
+
+The trap is now mechanical rather than mysterious. Perplexity rewards **any** extra capacity that
+predicts held-out words a bit better, and 150 near-duplicate topics do predict slightly better than 40
+clean ones — splitting "billing" into five shards lets each shard specialize on its own vocabulary
+slice. The metric has no term at all for *"can a person name this topic,"* which is the only thing you
+actually shipped for. Chang et al. (2009) measured the correlation and found it **negative**.
 
 The lesson: perplexity measures *predictive* fit and keeps improving as you add capacity; it does not
 measure whether a human can read the topics. Always select `K` (and compare models) on **coherence**,
@@ -479,6 +837,100 @@ contract touches indemnity, liability, and termination at once.
 | **UCI / c_uci** | PMI over an external reference corpus | Moderately | When a reference corpus exists |
 | **c_v coherence** | Sliding-window NPMI + cosine | **Best available proxy** | Default for K selection |
 | **Topic diversity** | Fraction of unique top words | Complements coherence | Detect redundant/duplicate topics |
+
+### Decoding the coherence formulas
+
+The three coherence measures in that table are three different answers to one question — *given that
+`refund` is a top word of this topic, how unsurprised should I be to also see `billing`?* Their
+formulas:
+
+```
+UMass :  C = sum over word pairs of   log( ( D(w_i, w_j) + 1 ) / D(w_j) )
+
+PMI   :  PMI(w_i, w_j) = log(  P(w_i, w_j) / ( P(w_i) * P(w_j) )  )
+
+NPMI  :  NPMI(w_i, w_j) = PMI(w_i, w_j) / ( -log P(w_i, w_j) )      in [-1, +1]
+
+c_v   :  NPMI over a sliding window (size 110), then cosine similarity between each
+         top word's NPMI vector and the sum vector of all top words, averaged.
+```
+
+**All three are asking one question.** Every one of them asks: "do these words show up together *more than
+chance would predict*?" — and the differences are only in what counts as "together" (whole document
+versus a 110-word window) and how the raw ratio is squashed into a comparable scale.
+
+| Symbol | What it is |
+|--------|------------|
+| `D(w_j)` | Number of documents containing word `w_j` |
+| `D(w_i, w_j)` | Number of documents containing **both**. The co-occurrence count |
+| `+ 1` in UMass | Smoothing. Without it a never-co-occurring pair gives `log 0 = -infinity` |
+| `P(w_i) * P(w_j)` | What the joint probability **would** be if the two words were independent |
+| The PMI ratio | Observed joint over independent-baseline joint. `> 1` means real association |
+| `-log P(w_i, w_j)` | NPMI's normalizer. Divides out the fact that rare pairs inflate raw PMI |
+| Sliding window | c_v's "together" = within 110 tokens, so long documents cannot fake proximity |
+| Cosine step | c_v's extra layer: does each word point the same *direction* as the topic overall? |
+
+**Walk one example.** Three word pairs scored on the §14 corpus (`D = 480,000` tickets), showing why
+NPMI is the one that behaves:
+
+```
+  pair                 D(wi)   D(wj)   D(wi,wj)    UMass      PMI     NPMI
+  ------------------------------------------------------------------------
+  refund / billing      1,800   1,500     1,200   -0.2223   5.3629   0.8951
+  refund / sincerely    1,800   4,800        90   -3.9655   1.6094   0.1875
+  refund / stadium      1,800     300         2   -4.6052   0.5754   0.0464
+
+  refund/billing    : 1,200 of refund's 1,800 tickets also say billing. Genuine topic.
+  refund/sincerely  : co-occurs 90 times, but 'sincerely' is boilerplate in 4,800
+                      tickets, so the overlap is barely above chance. NPMI 0.19 says so.
+  refund/stadium    : 2 co-occurrences out of 480,000. Coincidence, and NPMI 0.05 agrees.
+```
+
+Watch what each metric does to the middle row, the one that matters. `UMass` is unbounded and its
+magnitude is dominated by how *common* `w_j` is, so `sincerely`'s high document frequency drags the
+score to `-3.97` — a big-looking number that mixes "unrelated" with "frequent" and cannot be compared
+across corpora. Raw `PMI` says `1.61`, positive and seemingly meaningful, but PMI's ceiling depends on
+the pair's rarity, so `1.61` for a common pair and `1.61` for a rare pair mean different things. Only
+`NPMI` produces `0.19` on a fixed `[-1, +1]` scale where `0` is exactly chance — which is why `c_v` is
+built on NPMI and why it is the one measure that tracks human ratings.
+
+### Reading the topic-diversity score
+
+`diversity = (unique words across all topics' top-N lists) / (K * N)` — usually with `N = 10`.
+
+**Stated another way.** "Line up the top-10 words from every topic, count how many distinct words you
+actually got, and divide by how many you *would* have gotten if no two topics shared a single word."
+
+Coherence alone cannot catch redundancy: five near-duplicate "billing" topics each score *excellent*
+coherence, because each one's top words really do co-occur. Diversity is the metric that notices they
+are the same five topics.
+
+| Symbol | What it is |
+|--------|------------|
+| `K` | Number of topics |
+| `N` | Top words inspected per topic. `10` is the convention |
+| `K * N` | Total word slots — the count you would see with zero overlap between topics |
+| unique count | Distinct word types across all those slots |
+| `= 1.0` | Perfect: no word appears in two topics' top-10 lists |
+| `-> 0` | Collapse: every topic is showing you the same handful of words |
+
+**Walk one example.** The same two `K` settings that perplexity and coherence disagreed about:
+
+```
+  K     slots = K*10   unique top words   diversity   verdict
+  --------------------------------------------------------------------------------
+   40        400              352           0.880     healthy, topics mostly distinct
+  150      1,500              690           0.460     over half the slots are repeats
+   47        470              441           0.938     illustrative K = 47 run, well separated
+
+  At K = 150 the model produced 690 distinct words to fill 1,500 slots. That is
+  the "billing / pay / paid / payment split across four topics" failure from Sec 6.4,
+  visible as a single number before anyone reads a topic.
+```
+
+Track diversity next to coherence, exactly as Best Practice 8 prescribes: coherence tells you each
+topic is internally sensible, diversity tells you they are not all the *same* sensible topic. A model
+scoring high on one and low on the other is the classic over-fragmented `K`.
 
 ---
 

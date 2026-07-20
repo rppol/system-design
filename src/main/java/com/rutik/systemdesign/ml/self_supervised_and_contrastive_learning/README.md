@@ -67,6 +67,54 @@ L = -log( exp(sim(z_i, z_j) / tau) / sum_{k=1}^{2N} 1[k != i] exp(sim(z_i, z_k) 
 ```
 Where sim is cosine similarity, tau is temperature (0.07–0.2), and the 2N denominator includes 2(N-1) negatives from the batch plus the positive. Lower temperature sharpens the distribution — the model is penalized more for near-misses.
 
+**What this actually says.** "Out of every view in this batch, pick your own twin — the loss is plain cross-entropy over that multiple-choice question."
+
+Reading it as a classification problem is the whole point: the numerator is the one right answer, the denominator is the full answer sheet, and the loss is zero exactly when the model is certain the twin is the twin. That also explains why nothing about the loss changes if you add more wrong answers that are obviously wrong.
+
+| Symbol | What it is |
+|--------|------------|
+| `z_i` | The anchor — one projected, L2-normalized view of one sample |
+| `z_j` | The positive: the *other* augmented view of that same sample. The one right answer |
+| `z_k` | Every other view in the batch. The distractors |
+| `sim(a, b)` | Cosine similarity of two unit vectors. `+1` = same direction, `0` = unrelated, `-1` = opposite |
+| `tau` | Temperature. Divides every similarity before the exponential — a contrast knob |
+| `exp(sim/tau)` | Turns a similarity into an unnormalized score. Small `tau` makes small gaps explode |
+| `1[k != i]` | "Skip k = i" — an item is not its own negative, which is why the diagonal is masked out |
+| `sum_{k}` | The denominator: positive score plus all `2(N-1)` negative scores |
+| `-log(...)` | Loss. `0` when the positive owns all the probability, climbing as it loses share |
+
+**Walk one example.** Same anchor, same positive, only the negatives change — `tau = 0.1`:
+
+```
+  anchor z_i, one positive z_j, three negatives z_k       tau = 0.1
+
+  EASY negatives (unrelated samples)
+                       sim     sim/tau     exp(sim/tau)
+    positive  z_j      0.90      9.0           8103.08
+    negative  z_k1     0.10      1.0              2.72
+    negative  z_k2     0.00      0.0              1.00
+    negative  z_k3    -0.10     -1.0              0.37
+                                  sum  =       8107.17
+
+    p(positive) = 8103.08 / 8107.17 = 0.999496
+    loss = -log(0.999496) = 0.000504       <- already solved, no gradient
+
+  HARD negatives (same class, different instance)
+                       sim     sim/tau     exp(sim/tau)
+    positive  z_j      0.90      9.0           8103.08
+    negative  z_k1     0.85      8.5           4914.77
+    negative  z_k2     0.80      8.0           2980.96
+    negative  z_k3     0.75      7.5           1808.04
+                                  sum  =      17806.85
+
+    p(positive) = 8103.08 / 17806.85 = 0.455054
+    loss = -log(0.455054) = 0.787339       <- 1562x the easy-negative loss
+```
+
+The anchor and its positive never moved — `sim = 0.90` in both runs — yet the loss jumped by three orders of magnitude. **All of the learning signal lives in the denominator.** This is why "just use a bigger batch" works: a batch of 4096 is not valuable because it has 8190 negatives, it is valuable because a handful of them happen to be hard. It is equally why aggressive false-negative filtering can silently kill training — strip out the near-misses and you are left with the top block, where the loss is `0.0005` and the gradient is effectively zero.
+
+**Why the positive alone is not enough.** Delete the negatives from the denominator and the loss becomes `-log(exp(sim/tau)/exp(sim/tau)) = -log(1) = 0` for *any* pair of vectors, including the degenerate solution where the encoder maps every input to the same point. The negatives are the only term that punishes collapse.
+
 **Graph SSL:**
 
 - DGI (Deep Graph Infomax): maximize mutual information between node embeddings and a global graph summary. Negatives: corrupted graph (shuffle node features). Does not need class labels.
@@ -568,6 +616,131 @@ def ssl_pretrain(
 - Batch size: SimCLR needs large batches (4096+) for enough negatives. MoCo maintains a separate queue (65536 negatives) enabling small batches.
 - EMA decay (BYOL): 0.996 at start, linear ramp to 0.9999 over training. Too low: target updates too fast, instability. Too high: target barely changes, collapse.
 - Projection head: 2-layer MLP with hidden 2048, output 128. Critical insight: use the encoder output (before projector) for downstream tasks — projector throws away task-relevant info to satisfy the invariance objective.
+
+### Decoding the temperature tau
+
+`sim = torch.mm(z, z.T) / self.temperature` is one line of the loss, and it is the line that decides whether training is stable.
+
+**Read it like this.** "Dividing by tau before the softmax is a contrast dial: small tau magnifies tiny similarity gaps into huge probability gaps, large tau flattens real gaps into near-ties."
+
+| Symbol | What it is |
+|--------|------------|
+| `tau` | Temperature, `0.07` in the code above. Always divides, never multiplies |
+| `sim/tau` | The logit. Halving `tau` doubles every logit and doubles every gap between them |
+| `softmax(sim/tau)` | Probability mass over the positive and all negatives. What the loss actually scores |
+| small `tau` (0.05) | Sharp. The hardest negative dominates the gradient; low loss, high variance |
+| large `tau` (0.5) | Flat. Every negative contributes about equally; high loss, weak discrimination |
+
+**Walk one example.** The same hard-negative similarity vector at three temperatures, scores shown relative to the positive so `exp(0.90/tau)` normalizes to `1.0000`:
+
+```
+  similarities held fixed: 0.90 (positive), 0.85, 0.80, 0.75 (negatives)
+
+  tau = 0.05    rel exp : 1.0000   0.3679   0.1353   0.0498    sum 1.5530
+                softmax :  0.644    0.237    0.087    0.032
+                loss = log(1.5530) = 0.4402     <- sharp, positive wins clearly
+
+  tau = 0.10    rel exp : 1.0000   0.6065   0.3679   0.2231    sum 2.1975
+                softmax :  0.455    0.276    0.167    0.101
+                loss = log(2.1975) = 0.7873     <- SimCLR's default region
+
+  tau = 0.50    rel exp : 1.0000   0.9048   0.8187   0.7408    sum 3.4643
+                softmax :  0.289    0.261    0.236    0.214
+                loss = log(3.4643) = 1.2425     <- flat, near a 4-way coin flip
+```
+
+Now run the *easy* negatives (`0.10 / 0.00 / -0.10`) through the same sweep: loss `0.00000013` at `tau = 0.05`, `0.000504` at `0.10`, `0.4072` at `0.50`. Temperature barely matters when the negatives are far away and matters enormously when they are close — tau is, in effect, a hard-negative amplifier.
+
+**What breaks at each extreme.** At `tau = 0.05` the exponentials span `exp(18)`-scale ratios, so a single hardest negative absorbs nearly the whole gradient; if that negative is a false negative (same class, mislabeled as a distractor), the model is actively taught to separate two things that belong together. At `tau = 0.5` the softmax is nearly uniform, the positive gets only `0.289` of the mass, and the gradient carries almost no information about which negative was wrong — the encoder learns slowly and under-separates. The `0.07–0.2` band in the formula above is the empirical compromise.
+
+### Decoding the batch-size / negative-count effect
+
+**Stated plainly.** "At random initialization the model cannot tell the twin from anything else, so it spreads probability evenly across all `2N-1` candidates and the loss starts at exactly `log(2N-1)`."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Batch size in *samples*, before augmentation |
+| `2N` | Total views after two augmentations per sample |
+| `2N - 1` | Candidates row `i` scores against: itself is masked out by the diagonal mask |
+| `2(N-1)` | Of those, how many are true negatives (the remaining one is the positive) |
+| `log(2N-1)` | Starting loss at uniform probability — and the ceiling on the mutual information InfoNCE can certify |
+
+**Walk one example.** Uniform probability `1/(2N-1)` over every candidate:
+
+```
+  loss at random init = -log( 1 / (2N-1) ) = log(2N-1)
+
+    batch N        candidates 2N-1      starting loss
+       64                127                4.84
+      256                511                6.24
+     4096               8191                9.01
+    MoCo queue        65537               11.09
+```
+
+Two consequences worth stating out loud. First, **loss values are not comparable across batch sizes** — a run at `N = 4096` reporting loss `2.1` is far better trained than a run at `N = 64` reporting `2.1`, because the first started at `9.01` and the second at `4.84`. Second, InfoNCE is a lower bound on mutual information that saturates at `log(2N-1)` nats, so at `N = 64` the objective can certify at most `4.84` nats no matter how good the encoder is. That ceiling is the real reason SimCLR needs `4096+`, and the reason MoCo's `65536`-entry queue exists: it buys `11.09` nats of headroom with a small batch, because the queue entries need no gradient.
+
+### Decoding BYOL's regression loss
+
+The line `return 2 - 2 * (q * z.detach()).sum(dim=1).mean()` looks arbitrary until you expand it.
+
+**Put simply.** "Minimizing `2 - 2 cos` is exactly minimizing squared distance between two unit vectors — it says 'point the same way' and says nothing else."
+
+| Symbol | What it is |
+|--------|------------|
+| `q` | Online prediction, L2-normalized by `F.normalize` |
+| `z` | Target projection, L2-normalized and detached from the graph |
+| `(q * z).sum(dim=1)` | Dot product of two unit vectors, which for unit vectors *is* the cosine |
+| `.detach()` | The stop-gradient. Gradients reach `q` only, never the target branch |
+| `2 - 2 cos` | Squared Euclidean distance between the two unit vectors |
+
+**Walk one example.** Expand the squared distance for unit-norm vectors:
+
+```
+  ||q|| = ||z|| = 1  (both L2-normalized)
+
+  ||q - z||^2 = ||q||^2 + ||z||^2 - 2 (q . z)
+              = 1 + 1 - 2 cos
+              = 2 - 2 cos          <- the code, exactly
+
+    cos(q, z)     loss = 2 - 2 cos
+       1.0             0.0     same direction -- the target state
+       0.9             0.2     close
+       0.5             1.0
+       0.0             2.0     orthogonal
+      -1.0             4.0     opposite -- worst case
+```
+
+**Why this loss should collapse, and why it does not.** Note what is missing: no denominator, no negatives, nothing pushing anything apart. Map every input to one constant vector and `cos = 1`, giving loss `0.0` for every pair — a perfect, useless global minimum. The only things standing between BYOL and that solution are the predictor `q_o` on the online branch and the `.detach()` on the target. The online network is chasing a target that lags behind it, so it never catches a stationary point; SimSiam's ablations show that deleting either piece collapses the encoder within a few epochs.
+
+### Decoding the EMA target update
+
+**The idea behind it.** "`theta_target = m * theta_target + (1-m) * theta_online` is a running average — the target is where the online network has *been* lately, not where it is right now."
+
+| Symbol | What it is |
+|--------|------------|
+| `m` | EMA decay, `0.996` at start, ramping to `0.9999`. How much of the old target is kept |
+| `1 - m` | How much of the current online network leaks in each step. `0.004` at `m = 0.996` |
+| `theta_online` | The gradient-trained weights |
+| `theta_target` | The frozen-by-`requires_grad_(False)` copy, moved only by this arithmetic |
+| `1/(1-m)` | Effective memory length in steps — the useful way to read any EMA decay |
+
+**Walk one example.** One scalar parameter, `m = 0.996`:
+
+```
+  target = 0.500, online = 1.500
+
+  theta_target <- 0.996 x 0.500 + 0.004 x 1.500
+                = 0.498 + 0.006
+                = 0.504            <- moved 0.4% of the gap, not 100%
+
+  Memory length 1/(1-m):
+    m = 0.996    ->  1 / 0.004  =    250 steps of averaging
+    m = 0.9999   ->  1 / 0.0001 = 10000 steps
+
+  After 250 steps at m = 0.996, 0.996^250 = 0.3671 of the original value remains.
+```
+
+That `250 -> 10000` ramp is a deliberate stabilization schedule: early in training the online network changes fast and a short-memory target keeps up, while late in training a `10000`-step memory freezes the target into an almost-constant teacher so the representations settle. Set `m` too low and target and online move as one — the asymmetry vanishes and so does the protection against collapse; set it near `1.0` from step zero and the target never learns anything worth predicting.
 
 ---
 

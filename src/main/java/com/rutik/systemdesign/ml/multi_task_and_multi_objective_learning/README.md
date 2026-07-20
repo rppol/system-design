@@ -174,6 +174,52 @@ xychart-beta
 
 The curve is the Pareto front: to gain engagement (move right) you give up satisfaction (move down). Any point strictly below the curve is dominated and should never be shipped; scalarization weights just choose *where* on the curve you sit.
 
+**What the formula is telling you.** "Model P dominates model Q when P is at least as good on *every* objective and strictly better on at least one — and only undominated models deserve a shipping decision."
+
+Dominance is deliberately a *partial* order, not a ranking. Two points on the front are incomparable: no arithmetic can tell you which is better, because that answer lives in product judgment, not in the loss.
+
+| Symbol | What it is |
+|--------|------------|
+| `(E, S)` | One trained model as a pair: engagement AUC and satisfaction AUC |
+| `P ≻ Q` | "P dominates Q" — `E_P ≥ E_Q` and `S_P ≥ S_Q`, with at least one strict |
+| Pareto front | The set of points nothing dominates — the curve itself |
+| Dominated point | Sits below the curve; some front point beats it on both axes at once |
+| `w` | The scalarization weight; it picks *which* front point you land on, not whether you are on it |
+| Exchange rate | Satisfaction AUC given up per point of engagement AUC gained, along a segment |
+
+**Walk one example.** The five plotted models, plus one candidate that must be rejected:
+
+```
+  model   engagement E   satisfaction S     status
+    A        0.7600          0.820          on the front
+    B        0.7825          0.812          on the front
+    C        0.8050          0.798          on the front
+    D        0.8275          0.772          on the front
+    E        0.8500          0.730          on the front
+
+    Q        0.8050          0.780          DOMINATED
+
+  Test Q against C:  E: 0.8050 >= 0.8050  (tie, C not worse)
+                     S: 0.7980 >  0.7800  (C strictly better)
+                     -> C dominates Q. Q is never the right ship, at any w.
+
+  Test B against D:  E: 0.7825 <  0.8275  (D better here)
+                     S: 0.8120 >  0.7720  (B better here)
+                     -> neither dominates. Both are legitimate products.
+```
+
+The front is not a straight line, and that is the whole planning signal. Walk it segment by segment:
+
+```
+  segment    engagement gained   satisfaction paid   exchange rate
+   B -> C         0.0225              0.0140            0.62
+   D -> E         0.0225              0.0420            1.87
+
+  Same engagement gain both times; the price triples at the right-hand end.
+```
+
+Early on you buy engagement cheaply — 0.62 points of satisfaction per point of engagement. Out past D you pay 1.87, three times as much, for the identical gain. That steepening is why "just turn engagement up" stops being a good trade well before the front runs out, and it is the measured version of the sensitivity curve in §5.5.
+
 ### 5.5 Task-weight sensitivity — combined feed value peaks off the extremes
 
 ```mermaid
@@ -383,6 +429,43 @@ Kendall & Gal weight each task by its learned homoscedastic uncertainty `σ_i`. 
 total_loss = Σ_i [ exp(-s_i) · L_i  +  s_i ]      # regression form drops the ½ for brevity
 ```
 
+**In plain terms.** "Let each task announce how noisy it thinks it is, trust the quiet tasks more than the noisy ones — and charge every task a fee for claiming to be noisy, so none of them can lie its way out of the loss."
+
+The whole design is that fee. Without it the model has a free lever to silence any task it finds hard; with it, claiming noise costs you `s_i` directly, so the optimizer only down-weights a task when the loss savings actually exceed the fee.
+
+| Symbol | What it is |
+|--------|------------|
+| `L_i` | Task `i`'s raw loss this step, in whatever units that task naturally has |
+| `σ_i²` | Task `i`'s learned homoscedastic noise — how unpredictable the task is in principle |
+| `s_i` | `log σ_i²`, the thing actually stored as a parameter. Free to be any real number |
+| `exp(-s_i)` | The precision, `1/σ_i²`. This is the task's effective loss weight, always positive |
+| `+ s_i` | The fee. Grows as the task claims more noise, cancelling the gain from shrinking precision |
+| `Σ_i` | Sum over tasks; each task contributes one weighted loss plus one fee |
+
+**Walk one example.** Two tasks with wildly mismatched units — a regression loss of `50.0` and a BCE loss of `0.3`, the exact mismatch §12 warns about:
+
+```
+  naive sum:  50.0 + 0.3 = 50.3
+              regression share = 99.4%      BCE share = 0.6%
+              -> the trunk optimizes the regression task and ignores the other
+
+  learned:    s_regression = +4.0     s_bce = -1.0
+
+              precision_reg = exp(-4.0)  = 0.0183
+              precision_bce = exp(+1.0)  = 2.7183
+
+              weighted_reg = 0.0183 x 50.0 = 0.9158
+              weighted_bce = 2.7183 x  0.3 = 0.8155
+              -> shares are now 52.9% and 47.1%. Both tasks are heard.
+
+  total = (0.9158 + 4.0) + (0.8155 - 1.0) = 4.7313
+                    ^fee                ^fee (negative: low noise earns a rebate)
+```
+
+A 166:1 magnitude gap collapses to 1.12:1 without anyone hand-tuning a weight. Note the BCE fee is *negative* — a task that credibly claims low noise is rewarded, which is what pulls confident tasks up rather than merely pushing loud ones down.
+
+**What breaks without the fee.** Drop `+ s_i` and the minimum is at `s_i → +∞` for every task at once: precision goes to zero, the weighted loss goes to zero, and the reported total loss looks perfect while the trunk has learned nothing. Pushing `s_reg` from `4.0` to `10.0` alone would cut the weighted regression term from `0.9158` to `0.0023` — a 99.7% "improvement" bought purely by ignoring the task.
+
 ```python
 class UncertaintyWeightedLoss(nn.Module):
     """Kendall & Gal (CVPR 2018) homoscedastic uncertainty weighting."""
@@ -426,6 +509,38 @@ def dwa_weights(
 
 DWA is nearly free — no extra backward pass — which is why it is popular when GradNorm's second backward is too expensive.
 
+**Read it like this.** "Compare each task's last two losses. Whichever task is improving *slowest* is the one being neglected, so give it the larger share of the next update."
+
+DWA never looks at gradients or at loss magnitudes — only at each task's own rate of change against its own history. That is why it is immune to the units mismatch that wrecks a naive sum, and why it costs nothing.
+
+| Symbol | What it is |
+|--------|------------|
+| `prev`, `prev2` | Task losses at the last two epochs. `prev` is the more recent one |
+| `r_i` | `prev_i / prev2_i`, the improvement ratio. `< 1` = improving; `≈ 1` = stalled |
+| `temperature` | Flattens the spread. Large `T` pushes all weights toward `1.0`; `T = 2.0` is standard |
+| `exp(r_i / T)` | Turns each ratio into an unnormalized weight. Bigger `r` (slower progress) wins more |
+| `n × e / denom` | Softmax rescaled so the weights sum to `n`, not `1` — mean weight stays `1.0` |
+
+**Walk one example.** Two tasks, `T = 2.0`, where task 1 is improving briskly and task 2 has nearly stalled:
+
+```
+                 prev2     prev      ratio r = prev/prev2
+   task 1        0.60      0.50            0.8333   improving fast
+   task 2        0.31      0.30            0.9677   nearly stalled
+
+   exp(0.8333 / 2) = exp(0.4167) = 1.5169
+   exp(0.9677 / 2) = exp(0.4839) = 1.6223
+   denom = 1.5169 + 1.6223       = 3.1392
+
+   w_1 = 2 x 1.5169 / 3.1392 = 0.9664     <- fast task, throttled slightly
+   w_2 = 2 x 1.6223 / 3.1392 = 1.0336     <- stalled task, boosted slightly
+   w_1 + w_2 = 2.0000                      <- always n, by construction
+```
+
+The correction is gentle by design: `0.9664` vs `1.0336` is a 7% relative nudge, not a takeover. That is deliberate — DWA steers, it does not steer hard, because loss ratios are noisy epoch to epoch and an aggressive response oscillates. Raising `T` damps it further; lowering `T` toward `0.5` would widen the same two ratios into a much sharper split.
+
+**Why the `n ×` rescale exists.** Without it the weights would be a plain softmax summing to `1.0`, so adding a third task would silently shrink every existing task's weight by a third and change the effective learning rate. Normalizing to `n` keeps mean weight at `1.0` no matter how many tasks you add, so your LR schedule survives adding a task.
+
 ### 6.7 PCGrad — gradient surgery (net-new)
 
 ```python
@@ -452,6 +567,51 @@ def pcgrad(grads: list[torch.Tensor]) -> torch.Tensor:
 
 Geometry: if task `i`'s gradient has a component pointing *against* task `j`'s gradient, PCGrad subtracts exactly that component, keeping only the part of `g_i` that does not hurt `j`. When gradients already agree (`dot ≥ 0`) it does nothing. CAGrad refines this idea: instead of pure projection it solves for the update closest to the average gradient subject to the worst-case task still decreasing — provably reaching a Pareto-stationary point.
 
+**Stated plainly.** "Before adding two task gradients together, check whether they are pulling against each other. If they are, shave off exactly the part of each that fights the other, then add what remains."
+
+The dot product is doing double duty here: its *sign* is the conflict detector, and its *magnitude* is how much to remove. One quantity answers both questions, which is why PCGrad is four lines of arithmetic.
+
+| Symbol | What it is |
+|--------|------------|
+| `g_i`, `g_j` | Task `i` and task `j`'s gradients at the shared layer, flattened to one long vector each |
+| `dot = g_i · g_j` | Conflict test. Negative = the tasks disagree; zero or positive = no surgery needed |
+| `cos = dot / (‖g_i‖‖g_j‖)` | The same test, normalized to `[-1, 1]`. This is the number you log to diagnose negative transfer |
+| `g_j · g_j` | `‖g_j‖²`, the squared length. Divides out `g_j`'s scale so only its *direction* is removed |
+| `(dot / ‖g_j‖²) · g_j` | The offending component: exactly the part of `g_i` lying along `g_j` |
+| `projected[i]` | `g_i` with that component subtracted — now perpendicular to `g_j`, harmless to it |
+
+**Walk one example.** Two tasks pointing 135 degrees apart, in 2-D so the geometry is visible:
+
+```
+   g_1 = ( 3, -1)        ||g_1||^2 = 10
+   g_2 = (-2,  4)        ||g_2||^2 = 20
+
+   dot = (3)(-2) + (-1)(4) = -6 - 4 = -10          <- negative: CONFLICT
+   cos = -10 / (3.162 x 4.472) = -0.707            <- 135 degrees apart
+
+   project g_1 off g_2:  g_1 - (-10 / 20) x g_2
+                       = (3, -1) + 0.5 x (-2, 4)
+                       = (2, 1)        check: (2,1) . (-2,4) = -4 + 4 = 0  ok
+
+   project g_2 off g_1:  g_2 - (-10 / 10) x g_1
+                       = (-2, 4) + 1.0 x (3, -1)
+                       = (1, 3)        check: (1,3) . (3,-1) = 3 - 3 = 0   ok
+```
+
+Now compare what each update actually delivers. A task's loss falls when the update direction has a positive dot product with that task's gradient:
+
+```
+                    update vector    . g_1     . g_2
+   naive sum          (1, 3)          0.0      10.0
+   PCGrad sum         (3, 4)          5.0      10.0
+```
+
+The naive sum scores **exactly zero** against task 1 — the two gradients cancel task 1's component completely, so that task makes no progress at all while task 2 races ahead. This is the seesaw, visible in four numbers. PCGrad's sum gives task 1 a `+5.0` while costing task 2 nothing (`10.0` either way). The conflicting parts were removed; the agreeing parts were kept.
+
+**Why the random shuffle in the loop.** Projections do not commute: projecting `g_1` off `g_2` and *then* off `g_3` gives a different vector than the reverse order. Fixing the order would systematically privilege whichever task the loop hits first, so task 0 would quietly become the dominant objective. Shuffling makes the bias average out across steps instead of compounding.
+
+**The number to log.** That `cos = -0.707` is the production diagnostic named in §10 and §13. Log per-task gradient cosine at the shared layer every few hundred steps: hovering near zero means the tasks are simply unrelated and sharing buys little; persistently negative is the fingerprint of negative transfer and your cue to reach for separate capacity or gradient surgery.
+
 ### 6.8 MGDA — min-norm common descent direction
 
 ```python
@@ -467,6 +627,42 @@ def mgda_two_task(g1: torch.Tensor, g2: torch.Tensor) -> tuple[float, float]:
 ```
 
 For more than two tasks, Sener & Koltun solve the same min-norm quadratic program with Frank-Wolfe. When the min-norm is zero, no common descent direction exists — the model is Pareto-stationary and you have reached the front.
+
+**The idea behind it.** "Among all the blends of the task gradients you could take, pick the *shortest* one — because the shortest blend is the one direction that still manages to help every task at once."
+
+The counter-intuitive part is minimizing the norm. You are not looking for the biggest step; you are looking for the blend where the tasks cancel each other the most, because whatever survives that cancellation is the component they genuinely agree on.
+
+| Symbol | What it is |
+|--------|------------|
+| `g1`, `g2` | The two task gradients, flattened |
+| `w1`, `w2` | Blend weights, both in `[0, 1]` and summing to `1` — a convex combination |
+| `diff = g1 - g2` | The line segment joining the two gradient tips; the search happens along it |
+| `denom = ‖g1 - g2‖²` | Squared length of that segment. Normalizes the projection onto it |
+| `.clamp(0, 1)` | Keeps the answer inside the segment; if the foot of the perpendicular falls outside, the nearest endpoint wins |
+| `w1·g1 + w2·g2` | The min-norm point — the common descent direction, if one exists |
+
+**Walk one example.** The same conflicting pair from §6.7, so you can compare the two remedies directly:
+
+```
+   g1 = ( 3, -1)     g2 = (-2, 4)
+
+   diff  = g1 - g2 = (5, -5)          denom = 25 + 25 = 50
+   g2-g1 = (-5, 5)
+   num   = (g2 - g1) . g2 = (-5)(-2) + (5)(4) = 10 + 20 = 30
+
+   w1 = clamp(30 / 50, 0, 1) = 0.6        w2 = 1 - 0.6 = 0.4
+
+   d = 0.6 x (3, -1) + 0.4 x (-2, 4)
+     = (1.8 - 0.8, -0.6 + 1.6)
+     = (1.0, 1.0)          ||d|| = 1.414   <- shorter than either gradient
+
+   d . g1 = (1)(3) + (1)(-1) = 2   > 0     task 1 improves
+   d . g2 = (1)(-2) + (1)(4)  = 2   > 0     task 2 improves
+```
+
+Both dot products are positive, so this single step lowers *both* losses — that is the guarantee PCGrad does not give you. Note `‖d‖ = 1.414` against `‖g1‖ = 3.162` and `‖g2‖ = 4.472`: the min-norm direction is less than half the length of either input, and the shrinkage is the price of insisting nobody gets hurt.
+
+**Why zero norm means you have arrived.** As the model approaches the Pareto front the gradients rotate toward pointing directly opposite each other. At exactly 180 degrees with matched magnitudes, the min-norm point is the origin, `‖d‖ = 0`, and there is no direction left that helps both. That is Pareto-stationarity, and in practice a min-norm that decays toward zero is your convergence signal — training further only slides you *along* the front, trading one task for another, never improving both.
 
 ### 6.9 Multi-objective ranking — combining heads online
 
@@ -487,6 +683,42 @@ def rank_score(preds: dict[str, torch.Tensor], weights: dict[str, float]) -> tor
 # Example: watch and share help, report hurts.
 weights = {"pWatch": 1.0, "pShare": 0.5, "pReport": -2.0}
 ```
+
+**What it means.** "Multiply the head predictions together, each raised to a power that says how much that signal matters — so a near-zero probability on a heavily-penalized head drags the whole score down no matter how good everything else looks."
+
+Multiplicative beats additive here precisely because a sum lets a strong watch prediction paper over a bad report prediction. A product cannot: one terrible factor poisons the whole thing, which is exactly the veto behavior a feed needs.
+
+| Symbol | What it is |
+|--------|------------|
+| `p_name` | One head's predicted probability for this item, in `(0, 1]` |
+| `weights[name]` | The exponent for that head. Positive = reward, negative = penalize, magnitude = how much |
+| `p ** w` | Exponentiation, not multiplication. `w = 1` keeps `p` as is; `w = 0.5` softens it; `w < 0` inverts it |
+| `clamp(1e-6, 1.0)` | Floor that stops a predicted `0.0` from making the whole score `0` or `inf` |
+| `score` | The running product across all heads — the number the feed actually sorts by |
+
+**Walk one example.** Two candidate items under `pWatch = 1.0`, `pShare = 0.5`, `pReport = -2.0`:
+
+```
+   item     pWatch   pShare   pReport
+     A       0.40     0.10     0.001     rarely reported
+     B       0.60     0.20     0.050     reported 50x more often
+
+   item A:  0.40 ** 1.0  = 0.400
+            0.10 ** 0.5  = 0.316
+            0.001 ** -2  = 1,000,000
+            score = 0.400 x 0.316 x 1,000,000 = 126,491
+
+   item B:  0.60 ** 1.0  = 0.600
+            0.20 ** 0.5  = 0.447
+            0.050 ** -2  = 400
+            score = 0.600 x 0.447 x 400 = 107
+```
+
+Item B is better on *both* positive signals — 50% more watch, twice the share rate — and still loses by a factor of roughly 1,180. The 50x difference in report probability, squared by the `-2.0` exponent, becomes a 2,500x swing that nothing on the positive side can overcome. That is the veto working as designed.
+
+**Why the exponents are read as a log-linear score.** Take logs and the product becomes `Σ w_i · log p_i` — a plain weighted sum in log space, which is why the exponents behave like linear weights and why teams tune them on a log scale. It is also why `pShare = 0.5` means "half the influence of pWatch per log-unit," not "half the probability."
+
+**What breaks without the clamp.** A head that outputs an exact `0.0` under a negative exponent gives `0.0 ** -2 = inf`, and the item rockets to the top of the feed — the worst possible content winning because a model was maximally certain it was bad. `clamp(1e-6, 1.0)` caps that at `1e12` instead of infinity, keeping the score finite and sortable.
 
 Critically, these combination weights are **not** learned by SGD — the true objective (long-term retention) is not differentiable from a single batch. They are tuned by online A/B tests or Bayesian optimization over live metrics, which is why the task-weight sensitivity curve (§5.5) is measured, not assumed.
 

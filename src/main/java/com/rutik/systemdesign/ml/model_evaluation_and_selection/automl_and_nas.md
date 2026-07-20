@@ -71,6 +71,41 @@ Key insight: **NAS meta-optimizes the validation set.** The search loop selects 
 
 SHA/ASHA/Hyperband decide **how much budget** each config gets; TPE decides **which config** to try. BOHB does both. This is the clean mental split.
 
+**Stated plainly.** "Give everybody a tiny amount of compute, throw away the worst fraction, and give the survivors that same total amount of compute again — repeat until one is left."
+
+The whole family rests on one bet: a config that is bad after 1 epoch is probably still bad after 81, so paying for those 80 extra epochs is waste. That bet is usually right and occasionally wrong (slow-starting configs with warmup or low learning rates get killed unfairly), which is the single failure mode to remember.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | How many configurations enter the rung |
+| `r` | Budget each surviving config gets at this rung — epochs, data fraction, or wall-clock |
+| `eta` | Reduction factor. Keep the top `1/eta`, multiply the budget by `eta`. Typically 3 or 4 |
+| `1/eta` | The survival rate. `eta = 3` means the top third advances and two-thirds die |
+| rung | One round of the above. Rung 0 is the cheapest and widest; the last rung is one config at full budget |
+| bracket | A full ladder of rungs. Hyperband runs several brackets with different starting `n` |
+
+**Walk one example.** The `eta = 3` ladder plotted in 5.3 below, starting from 81 configs at 1 epoch each:
+
+```
+  rung    n (configs)   r (epochs each)   cost = n x r
+    0          81              1              81
+    1          27              3              81       81 / 3 = 27 survive, r x 3
+    2           9              9              81
+    3           3             27              81
+    4           1             81              81
+                                            -----
+                              total          405 epoch-units
+
+  naive alternative: train all 81 configs to the full 81 epochs
+                              total     81 x 81 = 6561 epoch-units
+
+  saving = 6561 / 405 = 16.2x, and the winner still received the full 81 epochs
+```
+
+The striking part is the middle column: every rung costs exactly the same 81 epoch-units. That is not a coincidence — it is the design. Because `n` shrinks by `eta` exactly as `r` grows by `eta`, `n x r` is invariant, so a ladder of `k` rungs costs `k` times one rung. Total cost is therefore linear in the number of rungs, while the budget the finalist receives grows *exponentially* — that trade is the entire reason multi-fidelity HPO works.
+
+**Why `eta` is the knob that sets your risk.** Raise `eta` and you cull harder: fewer rungs, cheaper search, but a higher chance of killing a late-blooming config on almost no evidence. Lower it and the search is fairer but costs more — the same ladder at `eta = 2` starting from 64 configs runs 7 rungs for 448 epoch-units against 4096 for full training, only a 9.1x saving versus 16.2x. `eta = 3` is the common default because it is roughly where the saving curve starts flattening while the culling is still evidence-based. This is also exactly what `reduction_factor=3` sets in the Ray Tune ASHA snippet in 6.3.
+
 ### 4.4 The three NAS axes
 
 **Search space:**
@@ -353,6 +388,41 @@ final = {edge: ops[a.argmax()] for edge, a in arch_logits.items()}
 
 Because there is one supernet and search is ordinary gradient descent, DARTS finishes in ~1 GPU-day on CIFAR-10 vs ~2000 for RL-NAS. The catch: alpha is optimized on the val split, so the search *is* fitting the validation set — see the broken-then-fix below.
 
+**What it means.** "Instead of choosing one operation per edge, run *all* of them and blend their outputs with learnable weights — then the choice becomes a set of numbers you can differentiate, and gradient descent picks the architecture for you."
+
+The trick is that "which of these 5 operations" is a discrete question with no gradient, so DARTS answers a nearby continuous question instead — "what mixture of these 5 operations" — solves that with ordinary backprop, and only at the very end snaps the mixture back to a single winner. Everything good and everything broken about DARTS follows from that substitution.
+
+| Symbol | What it is |
+|--------|------------|
+| `alpha` | Architecture logits — one raw score per candidate operation on one edge. A few thousand numbers total |
+| `w` | Supernet weights — the actual conv kernels shared by every candidate. Millions of numbers, the expensive part |
+| `softmax(alpha)` | Turns the raw logits into mixture weights that are positive and sum to 1 |
+| `sum(w_i * op_i(x))` | The mixed edge output: every operation runs, weighted by its share |
+| bilevel | Two nested optimizations: inner updates `w` on train, outer updates `alpha` on validation |
+| `argmax(alpha)` | The discretization step — keep only the highest-weighted op per edge, then retrain from scratch |
+
+**Walk one example.** One edge with the 5 candidate operations from the `MixedOp` docstring, after some search steps:
+
+```
+  operation      alpha (logit)   exp(alpha - max)   softmax weight
+  conv3x3            2.1             1.0000            0.5931
+  conv5x5            0.4             0.1827            0.1083
+  maxpool            0.3             0.1653            0.0980
+  zero              -1.2             0.0369            0.0219
+  skip               0.9             0.3012            0.1786
+                                    ------            ------
+                                     1.6861            1.0000
+
+  edge output = 0.5931*conv3x3(x) + 0.1083*conv5x5(x) + 0.0980*maxpool(x)
+              + 0.0219*zero(x)    + 0.1786*skip(x)
+
+  discretize: argmax -> conv3x3 (0.5931), drop the other four, retrain the pruned net
+```
+
+Two things to read off this. First, the forward pass costs the sum of all five operations, not one — that is why the supernet is memory-hungry and why the search space must stay small (a cell of ~7 nodes, not a whole macro network). Second, `conv3x3` wins with only 0.59 of the mass, so the discretized network is meaningfully different from the mixture that was actually validated. That gap between "the blend we measured" and "the single op we ship" is why the final net must be **retrained from scratch** and why weight-sharing rank disorder (Best Practice 7) is real.
+
+**Why `skip` and `zero` in the candidate set cause the famous collapse.** Both are parameter-free, so they train instantly while the convs are still warming up — early in the search they look better, their alpha grows, and a rich-get-richer loop can drive a cell to nearly all skip-connects. The model looks like it converged; it actually degenerated into an identity function. That is Best Practice 6's warning: skip-heavy output means switch to DARTS+/P-DARTS or add a skip-connect regularizer, not "the search found a simple architecture."
+
 ### 6.6 Broken → Fix — AutoML data leakage through CV
 
 The most common way an AutoML score comes out 2–4 AUC points too high is fitting preprocessing on the full dataset *before* cross-validation, so every validation fold has already leaked into the scaler/imputer/target-encoder.
@@ -593,6 +663,47 @@ TPE decides *which* configuration to try next from past results, while Hyperband
 1. **Search space** — a MobileNetV3-style macro space: per-block choices of expansion ratio, kernel size (3/5/7), squeeze-excite on/off, and depth. Reachable models span ~10–55 ms.
 2. **Latency model** — build a lookup table by benchmarking each candidate operation on the actual SoC, so total latency ≈ sum of per-op LUT entries (predicted within ~8% of measured).
 3. **Objective** — maximize `val_accuracy − λ · max(0, latency − 30ms)`, a hard-ish latency penalty (λ tuned so the search respects the 30 ms wall).
+
+**In plain terms.** "Score every candidate on accuracy alone, and charge it a fine for each millisecond it runs over 30 — a fine so steep that no amount of extra accuracy is worth blowing the budget."
+
+The `max(0, ...)` is what makes this a *budget* rather than a tradeoff. Below 30 ms the penalty is exactly zero, so the search is free to chase accuracy without being nudged toward pointlessly fast models; the moment a candidate crosses the wall the fine switches on and grows linearly.
+
+| Symbol | What it is |
+|--------|------------|
+| `val_accuracy` | Validation accuracy of the candidate sub-net, as a fraction (0.926, not 92.6) |
+| `latency` | Predicted on-device milliseconds from the LUT — measured on the real SoC, never FLOPs |
+| `30ms` | The hard product budget. The point where the penalty starts biting |
+| `max(0, latency - 30)` | Milliseconds *over* budget. Zero for any model already fast enough |
+| `lambda` | Price per millisecond of overrun, in accuracy-fraction units. Sets how hard the wall is |
+
+**Walk one example.** The three models from the results table, priced at `lambda = 0.002` per millisecond (0.2 accuracy points per 10 ms over):
+
+```
+  model                    val_acc   latency   overrun   penalty        score
+  EfficientNet-B0 (INT8)    0.931     55 ms     25 ms    0.002x25=0.050  0.881
+  Manual MobileNet          0.904     28 ms      0 ms    max(0,-2)=0.000 0.904
+  Hardware-aware NAS        0.926     27 ms      0 ms    max(0,-3)=0.000 0.926
+                                                                        -----
+                                                          search picks:  NAS
+```
+
+EfficientNet-B0 has the highest raw accuracy and still finishes last, because 25 ms of overrun costs it 0.050 — ten times the 0.005 accuracy edge it holds over the NAS model. That inversion is the objective doing its job: it converts "fastest model that is accurate enough" into a single number the search can maximize. Set `lambda` too low (say 0.0001, a fine of 0.0025) and EfficientNet wins at 0.9285 and ships over budget; set it too high and the search stampedes toward trivially fast, inaccurate nets. Tuning `lambda` until the winner sits just under the wall is the practical recipe.
+
+**Why the latency term is a lookup table and not FLOPs.** Total latency is approximated as the sum of per-operation LUT entries measured on the actual SoC:
+
+```
+  block       measured on-device (ms)
+  stem                  6.2
+  stage 1               4.8
+  stage 2               7.1
+  stage 3               3.9
+  head                  3.0
+                      ------
+  predicted            25.0   vs 27.0 actually measured end-to-end
+  error = |25.0 - 27.0| / 27.0 = 7.4%          (inside the stated ~8% band)
+```
+
+A FLOP count would have ranked these blocks completely differently — depthwise convolutions are FLOP-cheap but memory-bandwidth-bound, so on this SoC they cost far more wall-clock than their arithmetic suggests. Putting measured milliseconds in the objective is what let the search find a 27 ms model when three weeks of FLOP-guided hand-tuning could not clear both budgets at once.
 4. **Estimation** — a Once-for-All-style elastic supernet trained once (~1200 GPU-hours across 8 GPUs via DDP — see [../distributed_training/README.md](../distributed_training/README.md)), then sub-nets extracted per latency budget with no retraining.
 5. **Search** — ASHA over sub-net candidates ranked by the supernet, top-10 retrained standalone to correct weight-sharing rank disorder.
 6. **Compression** — the chosen sub-net is INT8 quantization-aware-trained and pruned per [../model_compression_and_efficiency/README.md](../model_compression_and_efficiency/README.md), landing under both budgets.

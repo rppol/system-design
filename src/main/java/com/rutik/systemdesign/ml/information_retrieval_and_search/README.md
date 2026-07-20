@@ -240,6 +240,53 @@ With k1=1.2 (Lucene and Elasticsearch's own default) and a fixed IDF term of 2.0
 
 The b parameter does the equivalent job for length: holding term frequency fixed at f=2, the same term scores 3.200 in a 50-token document, 2.750 at the 100-token corpus average, and only 1.492 in a 400-token document -- a document four times the average length needs proportionally more genuine hits to earn the same score, which stops BM25 from being biased toward long documents that mention every term once by accident.
 
+**What the formula is telling you.** "Give a document credit for containing a rare query term, add more credit each time the term reappears but with rapidly shrinking returns, and dock that credit if the document only 'contains' the term because it is enormous."
+
+Every BM25 term contribution is that one sentence: rarity times saturated frequency divided by a length tax. The two knobs, `k1` and `b`, control how fast the saturation kicks in and how steep the tax is — nothing else in the formula is tunable.
+
+| Symbol | What it is |
+|--------|------------|
+| `f` | How many times the query term occurs in *this* document (the term frequency from the postings list) |
+| `idf` | Rarity weight. `log((N - n + 0.5)/(n + 0.5) + 1)`, where `N` = corpus size, `n` = documents containing the term |
+| `k1` | Saturation knob. Sets how quickly extra occurrences stop mattering. Lucene default `1.2` |
+| `b` | Length-normalization knob, `0` to `1`. `0` = ignore document length entirely, `1` = full proportional penalty. Lucene default `0.75` |
+| `doc_len / avgdl` | This document's length relative to the corpus average. `2.0` = twice as long as typical |
+| `1 - b + b*(doc_len/avgdl)` | The length tax itself. Always `1.0` for an average-length document, whatever `b` is |
+| `f*(k1+1) / (f + k1*L)` | The saturating TF factor. Climbs toward the ceiling `k1+1` and never passes it |
+
+**Walk the k1 knob.** Hold the document at exactly average length (so the length tax `L = 1.0`) and `IDF = 2.0`, then sweep `k1` across the same five term frequencies used above:
+
+```
+  score = IDF x  f x (k1 + 1) / ( f + k1 x L ),   IDF = 2.0,  L = 1.0
+
+  k1     f=1     f=2     f=4     f=8    f=16    what this k1 setting means
+  0.0   2.000   2.000   2.000   2.000   2.000   TF ignored entirely -- score = IDF, purely
+                                                "does the term occur at all"
+  0.5   2.000   2.400   2.667   2.824   2.909   saturates almost at once; ceiling IDF x 1.5 = 3.0
+  1.2   2.000   2.750   3.385   3.826   4.093   Lucene/Elasticsearch default; ceiling 4.4
+  2.0   2.000   3.000   4.000   4.800   5.333   repetition still buys real score; ceiling 6.0
+  5.0   2.000   3.429   5.333   7.385   9.143   nearly linear in f -- BM25 degenerating toward
+                                                raw, keyword-stuffable TF
+```
+
+Read the table left to right and `k1` is a dial between two extremes: at `k1 = 0` BM25 becomes a bag of yes/no term indicators weighted only by rarity, and as `k1` grows it slides back toward the unbounded raw TF that BM25 exists to fix. The ceiling of any single term's contribution is always `IDF x (k1 + 1)`, so raising `k1` from `1.2` to `5.0` more than doubles how much one repeated word can dominate a query.
+
+**Now walk the b knob.** Fix `f = 2` and `k1 = 1.2`, and score the same term in a 50-token, a 100-token (corpus average), and a 400-token document:
+
+```
+  length tax L = 1 - b + b x (doc_len / avgdl),   avgdl = 100
+
+  b        L at 50 / 100 / 400        score at 50    at 100    at 400
+  0.00    1.000 / 1.000 / 1.000          2.750      2.750      2.750   length-blind
+  0.50    0.750 / 1.000 / 2.500          3.034      2.750      1.760   half penalty
+  0.75    0.625 / 1.000 / 3.250          3.200      2.750      1.492   Lucene default
+  1.00    0.500 / 1.000 / 4.000          3.385      2.750      1.294   full proportional
+
+  The 100-token column never moves: L = 1 for an average-length doc at every b.
+```
+
+That fixed middle column is the useful mental hook — `b` rotates the scoring line around the corpus average. Turning `b` up rewards short focused documents and punishes long ones harder; turning it to `0` lets a 10,000-word page win simply by mentioning every term once. Without the length tax, the highest-scoring document for almost any query is the longest one in the index, which is exactly the failure mode BM25's authors were correcting.
+
 ```python
 from rank_bm25 import BM25Okapi
 
@@ -259,6 +306,38 @@ tfidf_scores = cosine_similarity(query_vector, doc_vectors)[0]
 # Unbounded raw term counts feed the TF factor here -- no k1 saturation, and
 # cosine's own length normalization is a single fixed L2 norm, not a tunable b.
 ```
+
+**Read it like this.** "A word earns its keep by being frequent *here* and rare *everywhere else* — TF-IDF is just those two numbers multiplied, and IDF is the half that decides whether a word carries any information at all."
+
+TF-IDF and BM25 share this rarity half unchanged; BM25 only replaces the frequency half (with the saturating `f*(k1+1)/(f + k1*L)` factor above). So understanding IDF once buys you both scorers.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total documents in the corpus (`index.doc_count`) |
+| `n` | Documents whose postings list contains the term (`len(postings)`) |
+| `N/n` | "One in how many documents has this word." Big = rare = informative |
+| `log(...)` | Compresses that ratio into a weight, so a 100x-rarer term is worth a few times more, not 100x more |
+| `+0.5` terms | Smoothing, so `n = 0` or `n = N` never divides by zero or blows up |
+| `+1.0` inside the log | Floors the weight at `0`: a term in literally every document contributes nothing rather than going negative |
+| `TF x IDF` | The classic product. Raw `f`, unbounded — this is what BM25's `k1` fixes |
+
+**Walk one example.** A one-million-document corpus, IDF computed exactly as the `bm25_score` code above computes it:
+
+```
+  idf = log( (N - n + 0.5) / (n + 0.5) + 1.0 ),   N = 1,000,000
+
+  term appears in n docs        idf      reading
+        1  (a typo, a serial)  13.410    almost a unique key -- one hit nearly decides the ranking
+      100  ("photoemission")    9.205    strongly discriminative jargon
+   10,000  ("mortgage")         4.605    ordinary topical word
+  500,000  ("system")           0.693    half the corpus -- weak signal
+  900,000  ("with")             0.105    near-stopword, contributes almost nothing
+1,000,000  ("the")              0.000    in every document -- exactly zero weight
+```
+
+Notice the last row: IDF is why search engines never needed a hand-maintained stopword list to stop "the" from dominating results — a term present in all `N` documents scores `log(0.0000005 + 1) = 0.000` and drops out on its own arithmetic. Notice also the compression: going from 10,000 documents to 100 makes a term 100x rarer but only about 2x more valuable (`4.605 -> 9.205`), which keeps one lucky rare token from swamping the four ordinary query terms around it.
+
+Multiply that column by raw `f` and you have TF-IDF; multiply it by the saturated, length-taxed frequency factor instead and you have BM25. The cosine similarity in the code above adds one more difference — it divides by the vector's L2 norm, which is a single fixed length normalization with no `b` to tune, so you cannot dial the length penalty per corpus the way BM25 lets you.
 
 ### 6.3 Dense Retrieval: Bi-Encoder Cosine Search
 
@@ -380,6 +459,76 @@ NDCG@5 = DCG@5 / IDCG@5 = 10.4840 / 10.8235 = 0.9686
 ```
 
 The retrieved order earns 96.9% of the ideal ordering's gain even though it placed a rel=2 document at rank 5 instead of rank 3, because the log2 discount only mildly penalizes a near-miss one rank away at that depth -- NDCG rewards getting the highest-relevance items as close to rank 1 as possible without demanding a perfect match to be useful.
+
+**Put simply.** "Precision@k asks *how many* good results you returned, MRR asks *how fast* you returned the first one, MAP asks *how early you returned all of them*, and NDCG asks *how well you ordered them by how good they are*." Four different questions about the same list, which is why they disagree.
+
+| Symbol | What it is |
+|--------|------------|
+| `rank` | Position in the returned list, counted from `1`. Every one of these metrics is a function of it |
+| `rel` | Graded relevance label, `0-3` here. Binary metrics collapse this to "relevant if `rel >= 1`" |
+| `P@k` | Relevant items in the top `k`, divided by `k`. Order *inside* the top `k` is invisible to it |
+| `RR` | `1 / rank` of the first relevant result. `1.0`, `0.5`, `0.33`... — nothing after the first hit matters |
+| `AP` | Average of `P@rank` taken only at the ranks where a relevant document sits |
+| `2^rel - 1` | Gain. Makes relevance exponential: `rel=3` is worth `7`, `rel=2` is worth `3` — a "perfect" hit outranks two "good" ones |
+| `1/log2(rank+1)` | The rank discount. `1.000, 0.631, 0.500, 0.431, 0.387` at ranks 1-5 |
+| `MRR` / `MAP` | Just `RR` and `AP` averaged over all queries in the eval set. The leading `M` is only "mean" |
+
+**Walk all four down one shared list.** A different query, five results returned, graded relevance in the order returned — everything below is computed from this one row:
+
+```
+  Returned order (rank 1..5), graded relevance 0-3:   [0, 2, 3, 0, 1]
+  Binary view (relevant if rel >= 1):                 [.,  R, R, .,  R]   3 relevant docs total
+
+  PRECISION@k -- counts, ignores order within the cut
+    P@1 = 0 relevant / 1 = 0.000        the top slot is a miss
+    P@3 = 2 relevant / 3 = 0.667
+    P@5 = 3 relevant / 5 = 0.600
+
+  MRR -- only the first hit exists
+    first relevant is at rank 2  ->  RR = 1/2 = 0.500
+    (ranks 3 and 5 change nothing; the rel=3 document at rank 3 is invisible here)
+
+  MAP -- precision re-measured at every hit, then averaged
+    hit at rank 2 :  1 hit  / 2 =  0.500
+    hit at rank 3 :  2 hits / 3 =  0.667
+    hit at rank 5 :  3 hits / 5 =  0.600
+    AP = (0.500 + 0.667 + 0.600) / 3 relevant = 0.589
+
+  NDCG@5 -- graded, discounted, normalized
+    rank   rel   gain=2^rel-1   discount   contribution
+      1     0          0         1.0000       0.0000
+      2     2          3         0.6309       1.8928
+      3     3          7         0.5000       3.5000
+      4     0          0         0.4307       0.0000
+      5     1          1         0.3869       0.3869
+                                    DCG@5  =  5.7796
+
+    ideal order [3, 2, 1, 0, 0]:
+      1     3          7         1.0000       7.0000
+      2     2          3         0.6309       1.8928
+      3     1          1         0.5000       0.5000
+      4     0          0         0.4307       0.0000
+      5     0          0         0.3869       0.0000
+                                   IDCG@5  =  9.3928
+
+    NDCG@5 = 5.7796 / 9.3928 = 0.615
+
+  SAME LIST, FOUR VERDICTS:   P@5 = 0.600   MRR = 0.500   MAP = 0.589   NDCG@5 = 0.615
+```
+
+The four numbers land close together here by coincidence, but they are measuring genuinely different failures. Shuffle the top five into any other order and `P@5` stays `0.600` — it cannot see order at all. Move the `rel=3` document from rank 3 up to rank 1 and `MRR` improves to `1.000` while `P@5` still does not move; `NDCG@5` jumps to `1.000` because gain `7` now collects the full `1.0` discount. Conversely, drag the rank-5 hit down to rank 20 and `MRR` is untouched at `0.500` while `MAP` and `NDCG` both fall — MRR is the only one of the four that stops looking after the first success.
+
+**Why the M is trivial and the metric underneath is not.** MRR and MAP are per-query numbers averaged across the eval set; the averaging is the easy part, and interview answers that describe only the mean miss the whole mechanism:
+
+```
+  query A (the list above) :  RR = 0.500    AP = 0.589
+  query B (perfect top-2)  :  RR = 1.000    AP = 1.000
+
+  MRR = (0.500 + 1.000) / 2 = 0.750
+  MAP = (0.589 + 1.000) / 2 = 0.794
+```
+
+Pick the metric that matches the product. A navigational search or a question-answering box where the user reads exactly one result is an MRR problem. A legal or patent search where the user must find every relevant document is a MAP problem. A feed or shopping results page with graded quality labels is an NDCG problem. Optimizing MRR for a use case that actually needs recall is a real and common way to ship a ranker that scores well offline and frustrates users online.
 
 ### 6.6 Learning to Rank: Pointwise, Pairwise, Listwise
 

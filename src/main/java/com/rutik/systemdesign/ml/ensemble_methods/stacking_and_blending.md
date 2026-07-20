@@ -42,6 +42,36 @@ Result: 1000 OOF predictions, each from a model that never saw that sample
 Meta-learner trains on these 1000 honest predictions
 ```
 
+**Read it like this.** "Every row's meta-feature is a prediction made by a model that was blind to that row, so the meta-learner sees exactly the quality of signal it will see in production."
+
+The fold loop is the only thing separating an honest meta-feature from a memorised one. Each training row gets predicted exactly once, by the one fold-model that excluded it.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Training rows. `1000` in the block above |
+| `K` | Number of folds, `5`. Each fold holds out `N/K = 200` rows |
+| `N - N/K` | Rows each fold-model actually trains on: `1000 - 200 = 800` |
+| fold `k` | The held-out slice. Predicted only by the model trained on the other `K-1` folds |
+| `B` | Number of base models, `3` in Section 6 (RF, XGB, LGB) |
+| OOF matrix | The meta-feature table, shape `N x B` — one column per base model, one row per sample |
+
+**Walk the fold arithmetic.** Three base models, 1000 rows, 5 folds:
+
+```
+  per fold      train rows = 1000 - 200 = 800      predict rows = 200
+  per model     5 fold-fits, each on 800 rows
+  all models    3 models x 5 folds        = 15 fold-fits
+  refit         3 models on all 1000 rows =  3 full fits  (for test-time predictions)
+                                            ---
+                total base-model trainings =  18
+
+  coverage      5 folds x 200 rows = 1000 rows = 100% of the training set
+                every row predicted exactly once, by the model that never saw it
+                OOF matrix shape = 1000 x 3
+```
+
+Coverage must be exactly once, not at-least-once. If any row appeared in two folds' predictions you would have to pick or average them, and the averaged column would no longer be a single model's honest opinion. If any row were missed, the meta-learner would train on fewer rows than the base models did. The `K` folds partition the data, so both failure modes are impossible by construction.
+
 ### Diversity Requirement
 
 Meta-learner gains come entirely from diversity between base models. If two base models are highly correlated (error correlation > 0.9), the second adds almost nothing. Diversity sources:
@@ -51,6 +81,39 @@ Meta-learner gains come entirely from diversity between base models. If two base
 3. Different feature sets or feature engineering
 4. Different training data (different time periods)
 5. Different random seeds on the same algorithm
+
+**Put simply.** "The correlation between two base models is the fraction of their behaviour that is redundant — at 0.99 the second model is a duplicate you are paying full training cost for."
+
+The meta-learner can only exploit disagreement. Two models that are wrong on the same rows give it nothing to arbitrate, no matter how accurate each is on its own.
+
+| Symbol | What it is |
+|--------|------------|
+| Pearson `r` | Correlation between two OOF prediction columns. `1.0` = identical rankings, `0` = unrelated |
+| `r > 0.9` | The threshold in the text above: past this the second model adds "almost nothing" |
+| `r > 0.95` | The drop-it line used in Pitfall 2 and Best Practice 4 |
+| error correlation | Whether two models are wrong on the *same rows* — what actually matters, and what `r` on OOF columns approximates |
+| RMSE | Root-mean-square error of a prediction column against the true labels; used below to price the redundancy |
+
+**Walk one example with three base models.** Eight rows, labels `0 0 0 0 1 1 1 1`:
+
+```
+  row               1      2      3      4      5      6      7      8     RMSE
+  label            0      0      0      0      1      1      1      1
+  model A       0.100  0.150  0.550  0.600  0.880  0.920  0.900  0.850    0.3058
+  model B       0.120  0.130  0.570  0.580  0.900  0.900  0.880  0.870    0.3049
+  model C       0.120  0.100  0.120  0.100  0.900  0.880  0.450  0.400    0.3033
+
+  r(A, B) = 0.998    B is a near-clone: it misses rows 3 and 4, exactly like A
+  r(A, C) = 0.749    C is diverse: it nails rows 3-4, but fumbles rows 7-8
+
+  avg(A, B)     0.110  0.140  0.560  0.590  0.890  0.910  0.890  0.860    0.3052
+  avg(A, C)     0.110  0.125  0.335  0.350  0.890  0.900  0.675  0.625    0.2576
+
+  A alone 0.3058 -> avg(A, B) 0.3052  =   0.20% better   (2x compute, nothing bought)
+  A alone 0.3058 -> avg(A, C) 0.2576  =  15.78% better   (same 2x compute, real gain)
+```
+
+All three models have nearly the same standalone RMSE — around 0.305 — so accuracy is not what separates them. What separates them is *where* they are wrong. B repeats A's mistakes and the average inherits them; C makes its mistakes somewhere else, so averaging cancels both models' errors and drops RMSE by 15.78%. This is why the fix in Pitfall 2 (five XGBoost seeds gaining 0.05%) is to swap in a different algorithm family rather than add a sixth seed.
 
 ### Meta-Learner Properties
 
@@ -323,6 +386,50 @@ print(f"Stacking ensemble test AUC: {stack_auc:.4f}")
 # Typical: stacking improves by 0.5-1.5% over best single model
 ```
 
+**What this actually says.** "Freeze each base model's OOF prediction column as a feature, then let a logistic regression learn how much each column's opinion is worth, and add the weighted opinions up."
+
+`meta_learner.fit(oof_train, y_train)` is doing something deceptively ordinary: an ordinary logistic regression on a three-column table. The three columns just happen to be other models' beliefs rather than raw features.
+
+| Symbol | What it is |
+|--------|------------|
+| `oof_train` | The meta-feature matrix, shape `(n_train, n_models)`. Column `j` is base model `j`'s OOF probabilities |
+| `oof_train[i, j]` | Base model `j`'s probability for row `i`, produced by the fold-model that excluded row `i` |
+| `w_j` | The meta-learner's learned coefficient for base model `j`. Larger = trust that model more |
+| `b` | The intercept — the ensemble's baseline when every base model reads zero |
+| `z = w . x + b` | The blended score for one row, before squashing |
+| `sigma(z)` | Logistic squash onto `0-1`; this is the ensemble's final probability |
+| `C=0.1` | Inverse regularisation strength. Small `C` shrinks `w` hard, so no single base model can run away with the vote |
+
+**Walk one example.** Eight training rows, three base models, `LogisticRegression(C=1.0)` fitted on the OOF matrix:
+
+```
+  meta-feature matrix (8 x 3)             individual base-model AUC
+  row  label     RF     XGB     LGB         RF  = 0.875
+   1     0      0.35    0.65    0.10         XGB = 0.750
+   2     0      0.80    0.45    0.10         LGB = 0.875
+   3     0      0.05    0.65    0.55
+   4     0      0.25    0.30    0.15       learned meta-weights
+   5     1      0.85    0.85    0.45         w_RF  =  0.691
+   6     1      0.65    0.90    0.80         w_XGB =  0.266
+   7     1      0.65    0.10    0.90         w_LGB =  0.618
+   8     1      0.95    0.85    0.20         b     = -0.802
+
+  row 4 (label 0)   z = 0.691(0.25) + 0.266(0.30) + 0.618(0.15) - 0.802
+                      = 0.1728     + 0.0798     + 0.0927     - 0.802
+                      = -0.4567          sigma(-0.4567) = 0.388
+
+  row 6 (label 1)   z = 0.691(0.65) + 0.266(0.90) + 0.618(0.80) - 0.802
+                      = 0.4492     + 0.2394     + 0.4944     - 0.802
+                      = +0.3810          sigma(+0.3810) = 0.594
+
+  blended scores    0.419  0.483  0.437  0.388  |  0.572  0.594  0.557  0.551
+                    <------ the four label-0 rows ---->  <-- label-1 rows -->
+
+  stacked AUC = 1.000      best single base model = 0.875
+```
+
+The blend separates the classes perfectly even though no base model does. Every label-0 row scores below `0.500` and every label-1 row above it, because each base model's individual ranking mistake lands on a row the other two get right. Note also that XGB — the weakest base at AUC `0.750` — received the smallest weight (`0.266` against RF's `0.691`), which is the meta-learner doing exactly the job voting cannot: discovering from data that one expert deserves less of the vote.
+
 ### Using sklearn's StackingClassifier
 
 ```python
@@ -506,6 +613,36 @@ print(f"Optimised blend test AUC: {opt_auc:.4f}")
 # This often beats equal-weight averaging by 0.1-0.3%
 ```
 
+**Stated plainly.** "Give each base model a share of the vote, force the shares to add up to 1, and the blended prediction is just the share-weighted average of their probabilities."
+
+This is stacking with the meta-learner stripped down to `B` numbers. With only three parameters to fit there is almost nothing to overfit, which is why Best Practice 12 recommends it on small datasets.
+
+| Symbol | What it is |
+|--------|------------|
+| `preds_matrix` | `(n, B)` matrix — one column of predictions per base model |
+| `weights` | Length-`B` vector of shares, one per base model |
+| `np.abs(weights)` | Forces every share non-negative, so no model may vote against the ensemble |
+| `weights /= weights.sum()` | Rescales the shares to sum to `1.0`, keeping the blend on the probability scale |
+| `preds_matrix @ weights` | Matrix-vector product — the weighted average, computed row by row |
+| `-roc_auc_score(...)` | Negated because `minimize` descends; minimising `-AUC` maximises AUC |
+| `bounds=[(0, 1)]` | Keeps the optimiser inside the legal share range before normalisation |
+
+**Walk the normalisation and one blended row.** SLSQP returns raw numbers; the division turns them into shares:
+
+```
+  raw result.x         0.50    0.90    0.60         sum = 2.00
+  divide by 2.00       0.25    0.45    0.30         sum = 1.00   <- the code's example
+
+  one test row         RF 0.30      XGB 0.80      LGB 0.55
+
+  weighted blend  = 0.25(0.30)  + 0.45(0.80)  + 0.30(0.55)
+                  = 0.0750     + 0.3600     + 0.1650     = 0.600
+
+  equal weights   = (0.30 + 0.80 + 0.55) / 3                = 0.550
+```
+
+The `0.050` gap is the optimiser moving share away from RF (`0.25` instead of `0.333`) and onto XGB (`0.45` instead of `0.333`), because the OOF data said XGB was the more trustworthy column. Drop the `weights /= weights.sum()` line and the blend stops being an average: raw weights summing to `2.00` would push every prediction toward `1.0` and destroy calibration, even though the *ranking* — and therefore AUC — would look unchanged.
+
 ---
 
 ## 7. Real-World Examples
@@ -580,6 +717,40 @@ Caption: the jump from best-single to level-1 stacking captures most of the gain
 
 Beyond level 2, each level adds marginal gain at exponential compute cost.
 
+**The idea behind it.** "Each stacking level multiplies the entire cost of the level beneath it by `K` folds, so price grows geometrically while AUC arrives in ever-thinner slices."
+
+The `18x` in that table is not a guess — it is a countable number of model fits, and understanding where it comes from is what lets you predict the cost of a design before you build it.
+
+| Symbol | What it is |
+|--------|------------|
+| `1x` | One training run of one base model — the unit of cost in the table |
+| `K` | Folds, `5` |
+| `B` | Base models, `3` |
+| `K x B` | Fold-fits needed to fill one OOF matrix: `5 x 3 = 15` |
+| `+ B` | Refits on the full training set for test-time predictions: `+3` (Pitfall 6) |
+| meta fit | The meta-learner's own fit, on an `N x 3` matrix — rounding error against a tree ensemble |
+
+**Walk the cost arithmetic.**
+
+```
+  level-1 stack   5 folds x 3 models  = 15 fold-fits
+                  + 3 full-data refits
+                  + 1 meta fit (negligible)
+                  = 18x                        <- the table's "18x"
+
+  level-2 stack   18x x 5 folds  =  90x        <- the table's "90x+"
+  level-3 stack   90x x 5 folds  = 450x        <- the table's "450x+"
+
+  AUC bought      0.880 -> 0.894   level 1   +0.014   at   18x
+                  0.894 -> 0.897   level 2   +0.003   at   90x
+                  0.897 -> 0.898   level 3   +0.001   at  450x
+
+  level 3 costs 450 / 18 = 25x what level 1 costs,
+  to buy 0.001 / 0.014 = 1/14th of what level 1 bought.
+```
+
+The `+ B` refit term is the one people forget, and dropping it does not save money — it costs accuracy. Skip the refits and your test predictions come from fold-models that each saw only `800` of the `1000` rows (Pitfall 6), so the ensemble is systematically weaker at serving time than its OOF numbers promised.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -626,6 +797,37 @@ meta.fit(meta_X_TRAIN, y_train)        # meta-learner trains on garbage signal
 
 # FIXED: use sklearn's StackingClassifier or manual OOF as shown in Section 6
 ```
+
+**In plain terms.** "A memorised prediction column looks like a flawless oracle to the meta-learner, so the meta-learner hands it most of the vote — and that oracle does not exist at serving time."
+
+Leakage here does not corrupt the data; it corrupts the *weights*. The meta-learner is behaving correctly given what it was shown. It was shown a lie.
+
+| Symbol | What it is |
+|--------|------------|
+| `rf.predict_proba(X_train)` | Scoring the very rows the model trained on — near-perfect by construction, not by skill |
+| training AUC `0.998` | XGBoost grading the rows it memorised (the retail incident above) |
+| `w_j` | The meta-learner's coefficient for base model `j` |
+| weight share | `\|w_j\|` divided by the sum of all `\|w\|` — the fraction of the ensemble's trust model `j` receives |
+| offline vs online gap | Offline AUC `0.912` with no online lift: the tell-tale signature of this bug |
+
+**Walk the weight inflation.** The same eight rows as Section 6, fitting the meta-learner twice — once on honest OOF columns, once with XGB's column swapped for memorised in-fold predictions:
+
+```
+  XGB column          row 1   2      3      4      5      6      7      8    AUC
+  honest OOF             0.65   0.45   0.65   0.30   0.85   0.90   0.10   0.85   0.750
+  memorised in-fold      0.02   0.03   0.01   0.02   0.98   0.97   0.99   0.98   1.000
+
+  meta fitted on honest columns     w = [ RF 0.691,  XGB 0.266,  LGB 0.618 ]
+  meta fitted on the leaked column  w = [ RF 0.508,  XGB 1.216,  LGB 0.448 ]
+
+  XGB weight             0.266 -> 1.216      4.57x larger
+  XGB share of total     16.9% -> 56.0%      majority of the vote, on one column
+
+  At serving time that column is a 0.750-AUC model, not a 1.000-AUC model.
+  The ensemble has handed most of its vote to the base model least able to carry it.
+```
+
+Notice that RF and LGB were *demoted* too — `0.691 -> 0.508` and `0.618 -> 0.448` — even though nothing about those two models changed. The weights are fitted jointly, so one leaking column silently starves every honest column. This is why the fix is never "regularise the meta-learner harder"; it is to make the meta-features honest in the first place.
 
 ### Pitfall 2: Correlated Base Models
 
@@ -931,3 +1133,36 @@ final_test = meta_learner.predict(test_predictions)
 | Ridge Ensemble | **45.7** |
 
 The stacking ensemble achieved RMSE 45.7 — a 2.6-point improvement (5.4% reduction) over the best single model. Meta-learner weights: LGB 0.55, XGB 0.28, RF 0.12, ET 0.05 — reflecting the models' relative quality while still benefiting from diversity. Training time: ~3.1 hours for all 5×4=20 fold models plus meta-learner — well within the 4-hour budget.
+
+**What it means.** "The Ridge meta-learner is a weighted average whose weights were chosen by least squares on the OOF matrix — the better models get bigger shares, but every model keeps a share, because each one covers rows the others miss."
+
+Read the four coefficients as a ranking that the data produced rather than one you asserted. LGB earned `0.55` because its OOF column tracked the target best; ET kept `0.05` rather than `0.00` because even the worst base model contributes something the other three do not.
+
+| Symbol | What it is |
+|--------|------------|
+| `oof_predictions` | The `30000 x 4` meta-feature matrix — one OOF column per base model |
+| `meta_learner.coef_` | The four learned weights: LGB `0.55`, XGB `0.28`, RF `0.12`, ET `0.05` |
+| `alpha=50.0` | Ridge shrinkage. Large alpha pulls the four weights toward zero and toward each other, so no one model dominates |
+| `Ridge.predict` | The dot product of one row's four base predictions with those four weights |
+| OOF RMSE | Root-mean-square error measured on out-of-fold predictions, so the number is honest |
+| `KFold(n_splits=5)` | Produces `5 x 4 = 20` fold-fits — the "20 fold models" in the timing note |
+
+**Walk one prediction through the weights.** One customer, four base models disagreeing:
+
+```
+  base model      OOF RMSE   weight   prediction   weight x prediction
+  LightGBM          48.3      0.55      120.00           66.00
+  XGBoost           49.1      0.28      132.00           36.96
+  Random Forest     51.2      0.12      145.00           17.40
+  Extra Trees       52.0      0.05      150.00            7.50
+                             -----                      ------
+                              1.00      blended         127.86
+
+  simple average = (120 + 132 + 145 + 150) / 4         = 136.75
+  true LTV                                             = 125.00
+
+  weighted-blend error   |127.86 - 125.00|  =   2.86
+  simple-average error   |136.75 - 125.00|  =  11.75
+```
+
+The weights sum to exactly `1.00`, which is what keeps the blend on the LTV scale rather than inflating it. Across all 30K rows the same arithmetic moves RMSE from `48.3` to `45.7` — a `2.6`-point, `5.38%` reduction — bought with `5 x 4 = 20` fold-fits. Equal weighting would have let ET (RMSE `52.0`) drag the blend as hard as LGB (RMSE `48.3`) pulled it, which is precisely the failure the single row above shows in miniature.

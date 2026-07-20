@@ -65,11 +65,81 @@ Key insight: Most neural network weights are redundant — studies show 50–90%
 - Intermediate distillation (FitNets): align student's intermediate features to teacher's via auxiliary regression losses
 - BERT distillation (DistilBERT): 40% smaller, 60% faster, retains 97% of BERT performance on GLUE
 
+**What this actually says.** "Train the student on two exams at once: the ground-truth answer key (cross-entropy), and the teacher's full opinion about every wrong answer too (KL) — and turn the volume up on that second signal so it does not vanish."
+
+The whole reason this beats plain training is the second term. A hard label says "this is a dog." The teacher's softened distribution says "this is a dog, and it looks 20x more like a cat than like a truck." That similarity structure is free supervision the one-hot label throws away.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Temperature. Divides the logits before softmax; `T=1` is the normal softmax, `T=3-5` flattens it |
+| `alpha` | How much you trust the ground truth. `0.3` = 30% hard labels, 70% teacher imitation |
+| `CE(student, hard)` | Ordinary cross-entropy against the true label. Keeps the student grounded on the real task |
+| `KL(p_student, p_teacher)` | Distance between the two softened distributions. Zero when the student matches the teacher exactly |
+| `T^2` | Gradient rescue factor. Softening shrinks soft-target gradients by `1/T^2`; this cancels it |
+| `1 - alpha` | Weight on the teacher term. The larger share, because the teacher carries more information per example |
+
+**Walk one example.** One batch, `T = 4`, `alpha = 0.3`:
+
+```
+  CE(student, hard labels)         = 1.80
+  KL(soft student, soft teacher)   = 0.05     <- tiny, because softening flattens both
+
+  soft term  = (1 - 0.3) x 16 x 0.05 = 0.560     (T^2 = 4^2 = 16)
+  hard term  =       0.3      x 1.80 = 0.540
+                                       -----
+  total loss                         = 1.100
+
+  Without the T^2 factor:
+  soft term  = 0.7 x 0.05            = 0.035     <- 6% the size of the hard term
+```
+
+Drop `T^2` and the KL term contributes 0.035 against the hard term's 0.540 — the teacher is effectively muted and you are back to ordinary supervised training with extra steps. The `T^2` restores the two terms to the same order of magnitude, which is why `alpha` then behaves like an honest mixing weight instead of a mystery knob.
+
+**Why the temperature has to be the same on both sides.** `softmax(student/T)` is compared against `softmax(teacher/T)`. Use different temperatures and the KL is measuring a distribution mismatch you deliberately created, not the student's error. At inference the student runs at `T=1` — temperature is a training-time device only.
+
 ### Low-Rank Factorization
 - Decompose weight matrix W (n x m) as product of two smaller matrices A (n x r) and B (r x m) where r << min(n, m)
 - Parameter reduction: n*m → r*(n+m); for n=m=1024 and r=64: 1M → 128K (87% reduction)
 - SVD-based: initialize A and B via truncated SVD of W; fine-tune to recover accuracy
 - LoRA (for fine-tuning): fix original weights, learn low-rank delta; does not reduce inference cost unless merged
+
+**Put simply.** "Instead of storing every cell of a big rectangle, store a tall skinny strip and a short wide strip and multiply them back together — you pay for the two strips instead of the rectangle."
+
+The saving is a shape argument, not a machine-learning one: a rectangle's cost grows as `n x m` (area), while two strips grow as `r x (n + m)` (perimeter, scaled by rank). Area beats perimeter badly once the matrix is large, which is why this technique pays off exactly where it is needed.
+
+| Symbol | What it is |
+|--------|------------|
+| `W` | The original weight matrix, `n` rows by `m` columns. Costs `n x m` numbers to store |
+| `n`, `m` | Input and output dimensions of the layer. For a 1024-wide transformer projection, both are 1024 |
+| `r` | Rank — the width of the bottleneck you squeeze through. The only knob you tune |
+| `A` (`n x r`) | First factor. Projects `n` dimensions down to `r` |
+| `B` (`r x m`) | Second factor. Projects the `r`-dim bottleneck back up to `m` |
+| `r << min(n, m)` | The condition that makes it worth doing. If `r` approaches `min(n, m)` you save nothing |
+
+**Walk one example.** A single 1024 x 1024 projection at rank 64:
+
+```
+  full matrix   : n x m       = 1024 x 1024        = 1,048,576 numbers
+  factored      : r x (n + m) = 64 x (1024 + 1024) =   131,072 numbers
+                                                      ---------
+  reduction     : 1 - 131,072 / 1,048,576          = 87.5%
+  compression   : 1,048,576 / 131,072              = 8.0x
+
+  In FP32 bytes : 4.19 MB  ->  0.52 MB  for this one layer
+```
+
+**Where the technique stops paying.** Set `r x (n + m) = n x m` and solve for `r`:
+
+```
+  break-even r = (n x m) / (n + m) = 1,048,576 / 2,048 = 512
+
+  r = 64   ->  8.0x smaller      (huge win)
+  r = 256  ->  2.0x smaller      (still worth it)
+  r = 512  ->  1.0x  no saving   (break-even, and now you do TWO matmuls)
+  r = 700  ->  1.4x LARGER       (strictly worse than the original)
+```
+
+Above `r = 512` you are storing more numbers *and* running two matrix multiplies instead of one, so latency gets worse too. That break-even at `min(n,m)/2` is the practical ceiling: rank must stay well under half the layer width for factorization to be worth the accuracy risk. This is also why LoRA uses tiny ranks like 8 or 16 — the goal there is a cheap trainable delta, not compression.
 
 ### TensorRT Optimization
 - NVIDIA's inference optimizer: layer fusion, kernel auto-tuning, precision calibration (FP32 → FP16 → INT8)
@@ -295,6 +365,75 @@ def static_quantize(
     return model
 ```
 
+### The Quantization Arithmetic Underneath
+
+`tq.convert` is doing one small piece of arithmetic per tensor. This is what the calibration pass computes and what every INT8 kernel then applies:
+
+```
+Affine (asymmetric) quantization, FP32 -> INT8:
+
+  scale      = (max_val - min_val) / (q_max - q_min)
+  zero_point = round(q_min - min_val / scale)
+
+  quantize   : q = clamp(round(x / scale) + zero_point, q_min, q_max)
+  dequantize : x_hat = (q - zero_point) x scale
+
+  For signed INT8: q_min = -128, q_max = 127  (256 representable levels)
+```
+
+**Read it like this.** "Find the smallest and largest number this tensor ever holds, chop that range into 256 evenly spaced buckets, and store which bucket each number fell into instead of the number itself."
+
+Everything hinges on the range being tight. Quantization does not compress information intelligently — it just rounds to a grid, and the grid spacing is set entirely by the widest value in the tensor. One outlier stretches the range and coarsens the grid for every other weight, which is the root cause of most INT8 accuracy loss.
+
+| Symbol | What it is |
+|--------|------------|
+| `min_val`, `max_val` | Observed range of the tensor. For weights, read directly; for activations, measured on the calibration set |
+| `scale` | How much real-world value one integer step is worth. The grid spacing |
+| `zero_point` | Which integer means exactly `0.0`. Lets an asymmetric range still represent zero without error |
+| `q_min`, `q_max` | The integer limits, `-128` and `127` for signed INT8 |
+| `round(...)` | Snap to the nearest grid point. This is where information is destroyed — and it is not differentiable, hence QAT's straight-through estimator |
+| `clamp(...)` | Saturate anything outside the calibrated range. Values beyond `max_val` all collapse onto `127` |
+| `x_hat` | The reconstructed float. Never exactly `x` — the gap is the quantization error |
+
+**Walk one example.** A weight tensor observed over the range `[-0.62, +1.14]`:
+
+```
+  scale      = (1.14 - (-0.62)) / (127 - (-128))
+             = 1.76 / 255
+             = 0.006902                <- one INT8 step is worth 0.0069
+
+  zero_point = round(-128 - (-0.62 / 0.006902))
+             = round(-128 + 89.83)
+             = -38                     <- the integer -38 means exactly 0.0
+
+  Round-trip four real weights:
+
+    x        x / scale   round   + zp    q      x_hat = (q - zp) x scale   error
+  ---------------------------------------------------------------------------------
+   0.350       50.71       51     -38     13      0.352000                0.002000
+  -0.620      -89.83      -90     -38   -128     -0.621176                0.001176
+   1.140      165.17      165     -38    127      1.138824                0.001176
+   0.007        1.01        1     -38    -37      0.006902                0.000098
+   0.000        0.00        0     -38    -38      0.000000                0.000000
+
+  Worst error seen: 0.002, which is 0.11% of the tensor's full range 1.76.
+  Theoretical ceiling: half a step = 0.006902 / 2 = 0.00345.
+```
+
+Two things fall out of that table. **Zero is exact** — `x = 0.0` maps to `q = zero_point` and reconstructs to precisely `0.0`, which matters enormously because padding, ReLU outputs, and pruned weights are overwhelmingly zero; a scheme that reconstructed zero as `0.0034` would inject bias into every one of them. And **error is bounded by half a step regardless of the value** — quantization error is absolute, not relative, so small weights suffer far worse *relative* error than large ones. A weight of `0.007` carries up to 49% relative error while a weight of `1.14` carries 0.3%.
+
+**What the outlier does to everyone else.** Suppose one weight in that tensor were `11.4` instead of `1.14`:
+
+```
+  range 1.76  ->  scale 0.006902,  half-step error 0.00345
+  range 12.02 ->  scale 0.047137,  half-step error 0.02357     <- 6.8x worse
+
+  Every other weight in the tensor is now quantized 6.8x more coarsely,
+  to buy exact representation of a single outlier.
+```
+
+That single mechanism explains three otherwise-unrelated techniques in this module: **per-channel scales** (give each output channel its own range so one bad channel cannot poison the rest), **LLM.int8()** (pull outlier dimensions out into FP16 entirely), and **AWQ** (rescale salient channels before quantizing). All three are the same fix — stop letting the widest value set the grid for everything.
+
 ### Knowledge Distillation Training Loop
 
 ```python
@@ -355,6 +494,62 @@ def train_student(
         print(f"Epoch {epoch + 1}: loss={total_loss / len(loader):.4f}")
 ```
 
+### What Temperature Actually Does to the Softmax
+
+The single line `F.softmax(teacher_logits / temperature, dim=-1)` is the whole idea of distillation. Written out:
+
+```
+  p_i(T) = exp(z_i / T) / sum_j exp(z_j / T)
+
+  T = 1   -> the ordinary softmax
+  T > 1   -> flattens the distribution, lifting the non-winning classes
+  T -> inf-> approaches uniform (every class equally likely)
+  T < 1   -> sharpens toward a one-hot vector (the opposite of what you want)
+```
+
+**The idea behind it.** "Divide every logit by T before softmaxing, which shrinks the gaps between them, which stops the winning class from swallowing all the probability mass and lets the runners-up become visible."
+
+The teacher's useful knowledge is not the argmax — the hard label already tells you that. It is the *ranking and spacing of the losers*: that a given image is somewhat cat-like and not at all truck-like. At `T = 1` that information exists but is numerically invisible, buried at the fourth decimal place, where it contributes essentially nothing to the gradient.
+
+| Symbol | What it is |
+|--------|------------|
+| `z_i` | Raw logit for class `i` — the pre-softmax score straight out of the final layer |
+| `T` | Temperature. Borrowed from statistical physics; higher temperature = more disorder = flatter distribution |
+| `z_i / T` | The softened logit. Every gap between logits shrinks by the same factor `T` |
+| `exp(...)` | Makes everything positive and amplifies differences — the reason gaps look so extreme at `T = 1` |
+| `sum_j exp(z_j / T)` | Normalizer. Forces the outputs to sum to 1 |
+| `p_i(T)` | The soft target the student is trained to reproduce |
+
+**Walk one example.** Four-class logits `z = [8.0, 2.0, 1.0, 0.5]` (dog, cat, horse, truck):
+
+```
+              logits    T = 1 probs      T = 4 probs
+  ------------------------------------------------------
+  dog           8.0       0.9961           0.6451
+  cat           2.0       0.0025           0.1439
+  horse         1.0       0.0009           0.1121
+  truck         0.5       0.0006           0.0989
+                          ------           ------
+                          1.0000           1.0000
+
+  At T = 1: the three non-dog classes together hold 0.0039 of the mass.
+  At T = 4: they hold 0.3549 -- 90x more signal for the student to learn from.
+```
+
+At `T = 1` the student is being told "dog, with a rounding error attached." At `T = 4` it is being told "mostly dog, but meaningfully cat-like, slightly less horse-like, least truck-like" — a graded similarity judgment over the whole label space, from a single training example.
+
+**Why you cannot just raise T forever.** Softening compresses the useful ordering too:
+
+```
+  cat-vs-truck probability ratio:
+
+    T = 1  ->  p_cat / p_truck = 4.48x    (cat is clearly more plausible)
+    T = 4  ->  p_cat / p_truck = 1.45x    (still ordered, but much weaker)
+    T -> inf ->                   1.00x    (uniform -- all knowledge destroyed)
+```
+
+`T` trades *visibility* of the dark knowledge against its *sharpness*. Too low and the signal is numerically negligible; too high and every class looks alike and the student learns nothing but the uniform distribution. `T = 3-5` is the empirical sweet spot for classification, and it is the reason the `T^2` correction in the loss exists at all: the same flattening that makes the signal visible also shrinks its gradient by `1/T^2`.
+
 ### Structured Pruning (Channel Pruning)
 
 ```python
@@ -382,6 +577,116 @@ def apply_structured_pruning(
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 ```
+
+### Sparsity Ratio vs Actual On-Disk Size
+
+`pruning_ratio = 0.3` is a promise about *zeros*, not about *bytes*. The conversion between them:
+
+```
+  sparsity      s = zeroed_params / total_params
+  surviving       = (1 - s) x total_params
+
+  Structured pruning (dense result):
+    bytes = (1 - s) x total_params x bytes_per_param
+    size ratio = 1 / (1 - s)
+
+  Unstructured pruning (sparse CSR result):
+    bytes = nnz x (bytes_per_value + bytes_per_index) + row_pointers
+    size ratio = (total x bytes_per_param) / bytes
+```
+
+**Stated plainly.** "Structured pruning shrinks the file by exactly the fraction you removed. Unstructured pruning shrinks it by much less, because a zero you deleted still costs you an address telling the machine where the surviving numbers went."
+
+That asymmetry is the single most misunderstood point in pruning. "80% sparse" sounds like "5x smaller" and is almost never 5x on disk.
+
+| Symbol | What it is |
+|--------|------------|
+| `s` | Sparsity ratio. `0.8` = 80% of weights set to zero |
+| `nnz` | Number of non-zeros — the weights that survived. Equals `(1 - s) x total_params` |
+| `bytes_per_param` | `4` for FP32, `2` for FP16, `1` for INT8 |
+| `bytes_per_index` | Cost of recording *where* each survivor lives. `4` for INT32 indices, `2` for INT16 |
+| `1 / (1 - s)` | The naive compression ratio everyone quotes. Only true for structured pruning |
+| CSR | Compressed Sparse Row — values array + column-index array + row-pointer array |
+
+**Walk one example.** ResNet-50, 25.6M parameters in FP32:
+
+```
+  Dense baseline : 25,600,000 x 4 bytes                      = 102.40 MB
+
+  Structured pruning, s = 0.30 (remove 30% of filters):
+    surviving    : 0.70 x 25,600,000                         = 17,920,000 params
+    bytes        : 17,920,000 x 4                            =  71.68 MB
+    ratio        : 102.40 / 71.68                            =   1.43x   as advertised
+
+  Unstructured pruning, s = 0.80 (zero 80% of individual weights):
+    naive claim  : 1 / (1 - 0.80)                            =   5.00x
+    nnz          : 0.20 x 25,600,000                         =  5,120,000 values
+    values       : 5,120,000 x 4 bytes                       =  20.48 MB
+    INT32 indices: 5,120,000 x 4 bytes                       =  20.48 MB
+                                                                -------
+    actual       :                                              40.96 MB
+    real ratio   : 102.40 / 40.96                            =   2.50x
+
+    Half the compression that "80% sparse" implied -- the index array is
+    exactly as large as the data it indexes.
+```
+
+Switching to INT16 column indices (viable when no row exceeds 65,535 columns) brings it to `20.48 + 10.24 = 30.72 MB`, a `3.33x` ratio — better, still not 5x.
+
+**And bytes are not the same question as speed.** The size table above says nothing about latency. A dense GEMM kernel on the 80%-sparse tensor runs at exactly the same speed as on the unpruned one, because it still multiplies every element including the zeros. Realizing a speedup requires either sparse kernels (cuSPARSE, which typically need `s > 0.9` to beat dense) or hardware structured sparsity (NVIDIA Ampere 2:4, which caps you at exactly `s = 0.5` and delivers up to 2x). This is precisely why Section 9 warns against unstructured pruning below 50% sparsity — you pay the index overhead in size and get nothing back in throughput.
+
+### Counting Parameters and FLOPs, Layer by Layer
+
+`count_parameters` answers "how much memory," which is a different question from "how much compute." The two formulas, for the two layer types that dominate real architectures:
+
+```
+  Conv2d(C_in, C_out, k x k), output H_out x W_out:
+    params = k x k x C_in x C_out   (+ C_out if bias)
+    MACs   = params x H_out x W_out
+    FLOPs  = 2 x MACs               (one multiply + one add per MAC)
+
+  Linear(C_in, C_out):
+    params = C_in x C_out + C_out
+    MACs   = C_in x C_out           (applied once, not per spatial position)
+```
+
+**What the formula is telling you.** "A convolution's weights are reused at every output pixel, so its compute is its parameter count multiplied by the size of the feature map — while a fully-connected layer uses each weight exactly once."
+
+That single `x H_out x W_out` factor is the reason parameter count and FLOP count rank layers in completely different orders, and the reason compressing for *size* and compressing for *speed* are different projects.
+
+| Symbol | What it is |
+|--------|------------|
+| `C_in`, `C_out` | Input and output channel counts of the layer |
+| `k` | Kernel side length. A 3x3 conv has `k = 3`, so 9 weights per input-output channel pair |
+| `H_out x W_out` | Spatial size of the output feature map. The weight-reuse multiplier |
+| MAC | Multiply-accumulate: one `a x b + c`. The natural unit of neural-network work |
+| FLOPs | Floating-point operations, conventionally `2 x MACs`. Watch for papers that quote MACs and call them FLOPs |
+| bias | One extra parameter per output channel. Usually negligible, and absent entirely when the layer is followed by batch norm |
+
+**Walk one example.** The first and last layers of ResNet-50 (25.6M params, 4.1 GFLOPs total):
+
+```
+  conv1: 7x7, C_in=3, C_out=64, output 112 x 112
+    params = 7 x 7 x 3 x 64                        =       9,408
+    MACs   = 9,408 x 112 x 112                     = 118,013,952
+    FLOPs  = 2 x 118,013,952                       =    0.236 GFLOPs
+
+  fc: Linear(2048, 1000)
+    params = 2048 x 1000 + 1000                    =   2,049,000
+    MACs   = 2048 x 1000                           =   2,048,000
+    FLOPs  = 2 x 2,048,000                         =    0.004 GFLOPs
+
+  Share of the whole network:
+
+    layer     params        % of params      FLOPs         % of FLOPs
+    ------------------------------------------------------------------
+    conv1        9,408          0.04%        0.236 G          5.76%
+    fc       2,049,000          8.00%        0.004 G          0.10%
+
+    fc holds 218x more parameters than conv1 -- and does 58x less work.
+```
+
+**Why that inversion decides your compression strategy.** If the constraint is model size, the `fc` layer is the obvious target: it is 8% of the parameters for a tenth of a percent of the compute, so factorizing or pruning it is nearly free in latency terms — this is exactly why the classic "compress the classifier head" trick works and why VGG (with 100M+ parameters in its FC layers) was so much more compressible than ResNet. If the constraint is latency, `fc` is irrelevant and you must attack the early high-resolution convolutions, where `H_out x W_out` is `112 x 112` and every weight is reused 12,544 times. Quantization happens to help both at once — fewer bytes per weight and cheaper arithmetic — which is why it is almost always the first technique to reach for.
 
 ---
 

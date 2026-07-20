@@ -42,6 +42,59 @@ Key insight for session-based recommendation: In many contexts (e-commerce, news
 
 **TF-IDF Similarity**: Represent items as TF-IDF vectors over their text content. Compute user profile as weighted mean of liked item TF-IDF vectors. Cosine similarity for recommendation scoring. Simple, fast, interpretable. Works well for news, job listings, legal documents.
 
+**Stated plainly.** "Weight each word by how much this item uses it, discounted by how many items in the catalog use it at all — then compare two items by the *angle* between those weighted vectors, never their length."
+
+The discount is the whole point. A word appearing in every description tells you nothing about which item to recommend, so its weight must collapse toward zero automatically, without a hand-maintained stop list.
+
+| Symbol | What it is |
+|--------|------------|
+| `tf(w, d)` | Raw count of term `w` inside item description `d` |
+| `df(w)` | Document frequency — how many of the `N` items contain `w` at all |
+| `N` | Catalog size, in documents |
+| `idf(w) = ln((1+N)/(1+df)) + 1` | The rarity discount (scikit-learn's smoothed form). Common term → near `1.0`; rare term → large |
+| `sublinear tf = 1 + ln(tf)` | Damping so a term used 100 times does not outweigh one used 10 times by 10x |
+| `w(t, d) = sublinear_tf x idf` | The TF-IDF weight of one term in one item, before normalization |
+| `L2 norm` | Vector length. Dividing by it makes every item a unit vector |
+| `cos(u, v) = dot(u, v) / (norm(u) x norm(v))` | Similarity. For unit vectors this is just the dot product |
+
+**Walk one example.** A four-item catalog over the vocabulary `{boot, waterproof, shoe}`:
+
+```
+  N = 4 item descriptions
+
+  term          df   idf = ln((1+N)/(1+df)) + 1
+  boot           3   ln(5/4) + 1 = 1.2231
+  waterproof     1   ln(5/2) + 1 = 1.9163    <- rare, so it carries the signal
+  shoe           4   ln(5/5) + 1 = 1.0000    <- in every item, discounted to nothing
+
+  Item A counts: boot 4, waterproof 1, shoe 2
+
+  term          sublinear tf = 1 + ln(tf)     x idf      = raw weight
+  boot          1 + ln 4 = 2.3863             1.2231       2.9188
+  waterproof    1 + ln 1 = 1.0000             1.9163       1.9163
+  shoe          1 + ln 2 = 1.6931             1.0000       1.6931
+
+  L2 norm = sqrt(2.9188^2 + 1.9163^2 + 1.6931^2) = 3.8805
+  unit A  = [0.7522, 0.4938, 0.4363]
+```
+
+Now build a profile from two liked items and score three candidates against it:
+
+```
+  unit A  "hiking boot"   = [0.7522, 0.4938, 0.4363]
+  unit B  "running shoe"  = [0.0000, 0.0000, 1.0000]
+
+  profile      = mean(A, B) = [0.3761, 0.2469, 0.7182]   length 0.8474
+  unit profile              = [0.4438, 0.2914, 0.8474]
+
+  candidate               unit vector                   cos with profile
+  D  "trail shoe"         [0.4315, 0.6760, 0.5973]          0.8947   <- top pick
+  E  "dress shoe"         [0.0000, 0.0000, 1.0000]          0.8474
+  C  "waterproof boot"    [0.6031, 0.7623, 0.2349]          0.6888
+```
+
+**Why the normalization is not a formality.** Without dividing by the L2 norm, the raw dot product rewards long descriptions: a 2,000-word listing has bigger weights in every coordinate and would outscore a tightly-written one on content it barely mentions. Normalizing first makes `cos(A, B) = 0.4363` a statement about *overlap of vocabulary emphasis*, invariant to how verbose either description happens to be — which is why the code in Section 6 normalizes item rows at fit time and turns cosine similarity into a single matrix multiply.
+
 **Neural Content Embeddings**: Use pre-trained sentence transformers (SBERT, E5) to embed item text into dense 384-768 dim vectors. Superior to TF-IDF for semantic matching ("comfortable shoes" matches "cushioned footwear"). These embeddings can feed directly into the item tower of a two-tower model.
 
 **Attribute-Based Filtering**: Structured item attributes (genre, director, year, price range). User profile = distribution over attribute values for liked items. Recommendation = items matching the modal attribute values. Used in product recommendation where attribute filters are explicit.
@@ -61,6 +114,52 @@ Case-Based Reasoning (CBR): given a target item the user likes, find other items
 **Cascade Hybrid**: CBF generates candidate set (high recall, interpretable). CF ranks the CBF candidates (high precision, serendipity). Best of both: content-based safety net + collaborative ranking.
 
 **Feature Augmentation Hybrid**: Item content features (text embeddings, category) fed as inputs to a CF model (two-tower). CF operates on both behavioral and content signal. This is the dominant production approach — two-tower models are inherently hybrid.
+
+**Read it like this.** "`alpha` is how much you trust this user's behavioral history. Give the CF score that much of the vote and hand the rest to content — and let `alpha` grow as the history does."
+
+| Symbol | What it is |
+|--------|------------|
+| `CF_score` | Collaborative score for this user-item pair. Needs interaction history to exist |
+| `CBF_score` | Content score — cosine between user profile and item vector. Always computable |
+| `alpha` | CF weight, in `[0, 1]`. `0` = pure content, `1` = pure collaborative |
+| `1 - alpha` | Content weight. The two always sum to 1, so the blend stays on the same scale |
+| `cold_start_threshold` | Interaction count below which `alpha` is pinned to `0` (default `5`) |
+| `warm_threshold` | Interaction count at or above which `alpha` is pinned to `1` (default `20`) |
+| `(n - cold) / (warm - cold)` | The linear ramp between the two thresholds — what turns a hard switch into a smooth blend |
+
+**Walk one example.** The `compute_alpha` ramp from Section 6, blending a content score of `0.62` with a CF score of `0.80`:
+
+```
+  n_interactions   alpha    score = (1 - alpha) x 0.62 + alpha x 0.80
+        3          0.000                  0.620    pure CBF, CF has no data
+        5          0.000                  0.620    ramp begins
+        8          0.200                  0.656
+       12          0.467                  0.704
+       17          0.800                  0.764
+       20          1.000                  0.800    pure CF
+       40          1.000                  0.800    pinned, no further change
+```
+
+The switching hybrid is this same table with the middle rows deleted: `alpha` jumps `0 -> 1` at `n = 5`, so a user's fifth interaction can reorder their entire feed in one request. Cascade sidesteps blending altogether — CBF returns, say, 500 candidates and CF only reorders them, so no shared score scale is ever needed. Feature augmentation goes further and never produces two scores to combine: the content vector is an *input* to the item tower, and the single dot product that comes out is already hybrid.
+
+**Why the blend needs normalized scores.** A weighted hybrid is only honest if both inputs live on the same scale. Cosine similarity is bounded in `[0, 1]`; a raw CF dot product is not bounded at all:
+
+```
+  CBF cosine   = 0.62   (bounded [0, 1])
+  CF raw dot   = 3.70   (unbounded -- magnitude depends on embedding norms)
+
+  alpha = 0.5 on raw scores:   0.5 x 0.62 + 0.5 x 3.70 = 2.16
+      -> the CF term contributes 1.85 of 2.16, i.e. 86% of the total.
+         You wrote alpha = 0.5 and got an 86/14 split.
+
+  Min-max the CF scores across the candidate set {4.5, 3.7, 2.9, 1.4, 0.6}:
+      (3.70 - 0.60) / (4.50 - 0.60) = 0.7949
+
+  alpha = 0.5 on normalized scores: 0.5 x 0.62 + 0.5 x 0.7949 = 0.7074
+      -> now each source genuinely contributes half.
+```
+
+Skip this step and `alpha` stops meaning anything: tuning it per user segment tunes a number that no longer controls the split you think it does.
 
 ### 4.4 Session-Based Recommenders
 
@@ -528,6 +627,40 @@ class LightGCN(nn.Module):
         )
         return bpr + reg
 ```
+
+**Put simply.** "Cold start is not a quality problem, it is an arithmetic one: a collaborative score is a function of interactions, and for a brand-new item that function is evaluated at zero."
+
+This is worth stating as arithmetic because "CF handles cold start poorly" undersells it. Item-item CF similarity is built from co-occurrence counts; with zero interactions every co-occurrence count is `0`, so every similarity is `0`, so the item is not merely ranked low — it is absent from the candidate set entirely.
+
+| Symbol | What it is |
+|--------|------------|
+| `n_interactions(item)` | Interaction count for an item. `0` for anything published a minute ago |
+| `co_count(i, j)` | How many users touched both items. The raw input to item-item CF |
+| `catalog_size` | Total items. The denominator of the cold-item fraction |
+| `new_per_day` | Items entering the catalog daily. The numerator |
+| `recall@20` | Fraction of relevant items appearing in the top 20 — measured separately on cold items |
+
+**Walk one example.** The legal-research platform from Section 14, at 20M documents and 5,000 new documents per day:
+
+```
+  cold fraction of the catalog
+
+    one day   :   5,000 / 20,000,000  = 0.025%
+    30 days   : 150,000 / 20,000,000  = 0.75%
+
+  collaborative signal for a document with n_interactions = 0
+
+    co_count(new_doc, anything) = 0
+    item-item similarity        = 0 for every pair
+    recall@20 from pure CF      = 0%     <- exactly zero, not merely low
+
+  content signal for the same document
+
+    TF-IDF / SBERT vector exists as soon as the text exists
+    recall@20 measured on cold documents = 71%
+```
+
+The `0.75%` looks negligible until you notice which documents it contains: the newest rulings are exactly what attorneys are searching for, so a system that is structurally blind to 0.75% of the catalog is blind to a much larger share of the demand. That asymmetry — a tiny slice of inventory carrying an outsized slice of intent — is the reason production systems keep a content path alive permanently instead of treating CBF as a bootstrap phase to be retired once CF warms up.
 
 ---
 

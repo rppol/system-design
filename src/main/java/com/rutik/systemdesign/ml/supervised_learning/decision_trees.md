@@ -37,12 +37,100 @@ Information gain: IG = H(parent) - [weighted_avg of H(left) + H(right)]
                   CART maximizes IG at each split
 ```
 
+**What this actually says.** "Score how mixed-up a node's labels are, then pick the split whose two children are — on average, weighted by how many samples land in each — the least mixed-up." Impurity is not a loss you optimize globally; it is a local scoring function for ranking candidate splits at one node. Every remaining detail of CART is bookkeeping around that one comparison.
+
+| Symbol | What it is |
+|--------|------------|
+| `t` | A single node — one box in the tree, holding some subset of the training samples |
+| `p_k` | Fraction of samples in node `t` that belong to class `k`. All `p_k` sum to 1 |
+| `sum_k p_k^2` | Chance two samples drawn from the node share a class. Higher = purer node |
+| `Gini(t)` | 1 minus that chance = probability two draws disagree. `0` = pure, `0.5` = 50/50 binary |
+| `H(t)` | Entropy in bits: how many yes/no questions to name a random sample's class. `0` = pure, `1.0` = 50/50 binary |
+| `log2(p_k)` | Negative for any probability below 1, which is why the minus sign out front makes `H` positive |
+| `weighted_avg` | `(n_left/n) * child_left + (n_right/n) * child_right` — big children count more |
+| `IG` | Parent impurity minus weighted child impurity. How much mixing this split removed |
+
+**Walk one example.** One parent node, two candidate splits, both criteria scored side by side. Parent: 100 customers, 60 stay (A) and 40 churn (B):
+
+```
+  Parent:  60 A / 40 B      p_A = 0.60   p_B = 0.40
+
+    Gini(parent) = 1 - (0.60^2 + 0.40^2) = 1 - (0.3600 + 0.1600) = 0.4800
+    H(parent)    = -(0.60*log2 0.60 + 0.40*log2 0.40)            = 0.9710 bits
+
+  ---- Split A:  tenure <= 12 months ----
+                       n     class mix      Gini      Entropy
+    left child        50      45 A / 5 B    0.1800     0.4690
+    right child       50      15 A / 35 B   0.4200     0.8813
+    weights           0.50 and 0.50
+
+    weighted Gini = 0.50*0.1800 + 0.50*0.4200 = 0.3000
+    Gini decrease = 0.4800 - 0.3000                     = 0.1800
+    weighted H    = 0.50*0.4690 + 0.50*0.8813 = 0.6751
+    info gain     = 0.9710 - 0.6751                     = 0.2958 bits
+
+  ---- Split B:  monthly_charges > 65 ----
+                       n     class mix      Gini      Entropy
+    left child        40      35 A / 5 B    0.2188     0.5436
+    right child       60      25 A / 35 B   0.4861     0.9799
+    weights           0.40 and 0.60
+
+    weighted Gini = 0.40*0.2188 + 0.60*0.4861 = 0.3792
+    Gini decrease = 0.4800 - 0.3792                     = 0.1008
+    weighted H    = 0.40*0.5436 + 0.60*0.9799 = 0.8053
+    info gain     = 0.9710 - 0.8053                     = 0.1656 bits
+
+  Verdict:  Gini    picks A (0.1800 > 0.1008)
+            Entropy picks A (0.2958 > 0.1656)   -- same winner
+```
+
+Both criteria rank the two splits the same way, and they disagree on the *scale* only: entropy's gain (0.2958 bits) is larger than Gini's (0.1800) because entropy peaks at 1.0 while Gini peaks at 0.5. Since CART only ever needs the *argmax* over candidate splits, a monotone rescaling changes nothing — which is the concrete reason Gini and entropy produce nearly identical trees, and why sklearn defaults to the one without a `log` call.
+
+**Why the weighting is not optional.** Drop `n_left/n` and `n_right/n` and CART would happily carve off a single-sample child: that child has impurity exactly `0`, so an unweighted average of child impurities looks fantastic. Weighting by size makes a 1-sample pure child contribute `1/100` of its perfection, so the split is scored on what it did for the *bulk* of the data. This is the same reasoning behind `min_samples_leaf`, enforced from a different direction.
+
 **Split criterion (regression)**:
 ```
 Variance reduction: Var(t) = (1/n_t) * sum_i (y_i - y_bar_t)^2
 Best split maximizes: Var(parent) - [n_left/n * Var(left) + n_right/n * Var(right)]
 Prediction in leaf: y_bar (mean of training samples in leaf)
 ```
+
+**Read it like this.** "For regression there is no 'class mix' to measure, so spread stands in for impurity: a good split is one whose two children each have targets tightly clustered around their own mean." Swap `Gini` for `Var` and the entire CART machinery above runs unchanged — same greedy scan, same size-weighted average, same argmax.
+
+| Symbol | What it is |
+|--------|------------|
+| `y_i` | The true target of one training sample in the node |
+| `y_bar_t` | Mean target of all samples in node `t` — also the value the leaf will predict |
+| `(y_i - y_bar_t)^2` | Squared error of predicting the node mean for that one sample |
+| `Var(t)` | Average of those squared errors = MSE if the node became a leaf right now |
+| `n_left/n`, `n_right/n` | Same size weighting as classification, for the same reason |
+| `Var(parent) - [...]` | Variance reduction. How much total squared error this split eliminated |
+
+**Walk one example.** Eight houses, target = price in units of $10k, sorted by square footage:
+
+```
+  Parent:  y = [3, 5, 7, 9, 20, 22, 24, 26]      y_bar = 14.5
+
+    Var(parent) = mean of (y_i - 14.5)^2 = 77.2500
+
+  ---- Split at sqft threshold between the 4th and 5th house ----
+                       n    y values           y_bar     Var
+    left child         4    [3, 5, 7, 9]         6.0     5.0000
+    right child        4    [20, 22, 24, 26]    23.0     5.0000
+
+    weighted Var = 0.50*5.0000 + 0.50*5.0000 = 5.0000
+    reduction    = 77.2500 - 5.0000           = 72.2500     <- 93.5% of the spread gone
+
+  ---- A badly placed split, same data, wrong grouping ----
+                       n    y values           y_bar     Var
+    left child         4    [3, 5, 7, 20]        8.75   44.1875
+    right child        4    [9, 22, 24, 26]     20.25   44.1875
+
+    weighted Var = 0.50*44.1875 + 0.50*44.1875 = 44.1875
+    reduction    = 77.2500 - 44.1875            = 33.0625   <- less than half as good
+```
+
+The good split leaves each child with variance `5.0`, so the tree predicts `6.0` for small houses and `23.0` for large ones and is off by about `2.2` on average. The bad split strands one cheap house among expensive ones in each child, and the leaf means (`8.75`, `20.25`) fit nobody well. Because the leaf always predicts the mean, variance reduction is not an analogy for squared error — it *is* the training squared error the tree would incur, which is why sklearn calls this criterion `"squared_error"`.
 
 **Best split search**: for each feature, sort the n samples by feature value (O(n log n)), then scan all n-1 split thresholds. Total per node: O(d * n log n). Full tree training: O(d * n * log^2(n)) amortized.
 
@@ -82,6 +170,33 @@ R_alpha(T) = R(T) + alpha * |T|
 
 where R(T) = misclassification rate of T, |T| = number of leaves in T, alpha = ccp_alpha parameter.
 
+**Put simply.** "Charge the tree rent for every leaf it owns, then keep whichever pruned version has the lowest total bill of errors-plus-rent." Alpha is the rent rate, and it is the only knob — sweep it from 0 upward and the tree shrinks in a fixed, nested sequence.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | A candidate tree — the full tree or any pruned version of it |
+| `R(T)` | Error rate of `T` on the training data. Always lowest for the biggest tree |
+| `\|T\|` | Leaf count — the complexity measure. Not depth: a lopsided deep tree can have few leaves |
+| `alpha` | Price per leaf, in units of error rate. `ccp_alpha` in sklearn |
+| `alpha * \|T\|` | The complexity rent. Grows linearly as the tree adds leaves |
+| `R_alpha(T)` | Total bill. The quantity actually minimized over the pruning path |
+
+**Walk one example.** Four nested trees from the same pruning path, scored at three rent rates:
+
+```
+  tree              leaves   R(T)      R_alpha at alpha = 0.00 / 0.01 / 0.10
+  full (depth 10)      50    0.000        0.000     0.500     5.000
+  pruned (depth 6)     18    0.030        0.030     0.210     1.830
+  pruned (depth 4)     10    0.120        0.120     0.220     1.120
+  pruned (depth 2)      4    0.270        0.270     0.310     0.670
+
+  winner per column:               full tree   18 leaves   4 leaves
+```
+
+At `alpha = 0` rent is free, so the memorizing 50-leaf tree wins on training error alone — this is exactly why `ccp_alpha=0` is not pruning. At `alpha = 0.01` the 50-leaf tree pays `0.500` in rent to save `0.030` in error and loses to the 18-leaf tree, the same optimum cross-validation finds in Section 5.4. Crank rent to `0.10` and even useful splits stop paying for themselves, collapsing the tree to 4 leaves and underfitting.
+
+**Where the alpha values in the path come from.** sklearn never guesses alphas; it computes, for each internal node `t`, the exact rent at which collapsing that node's subtree becomes break-even: `alpha_eff = (R(t) - R(T_t)) / (|T_t| - 1)`, where `R(t)` is the error if the subtree were replaced by one leaf. A 4-leaf subtree whose collapse raises error from `0.020` to `0.050` has `alpha_eff = 0.030/3 = 0.010`; an 8-leaf subtree going from `0.030` to `0.036` has `alpha_eff = 0.006/7 = 0.000857`. The second is the weakest link and gets pruned first, despite having more leaves — cost per leaf is what ranks, not size.
+
 At alpha=0: no pruning (full tree). As alpha increases, subtrees with the weakest benefit-to-size ratio are collapsed first. sklearn's cost_complexity_pruning_path returns all alpha values and their corresponding tree sizes, enabling selection of alpha via cross-validation.
 
 ### 4.4 Feature Importance
@@ -92,6 +207,39 @@ Importance(f) = sum over nodes t where feature f is used of:
     n_t / n * impurity_decrease(t)
 ```
 where n_t = samples reaching node t, n = total samples. Normalized to sum to 1.
+
+**What the formula is telling you.** "Every time a feature was used for a split, credit it with the impurity that split removed — scaled down by how few samples were actually affected — then add up each feature's credits." It is a bookkeeping sum over the tree that was already built, not a fresh statistical test, which is the root of every limitation below.
+
+| Symbol | What it is |
+|--------|------------|
+| `f` | The feature whose importance is being scored |
+| `t` | An internal node that split on `f`. A feature can win many nodes and collects from all |
+| `n_t` | Samples reaching node `t`. Deep nodes see few samples and earn little |
+| `n_t / n` | Weight of that node. Root = `1.0`, and it shrinks as you descend |
+| `impurity_decrease(t)` | The parent-minus-weighted-child gain from Section 3, at node `t` |
+| `sum over nodes` | Total credit for `f`, then divided by the tree's grand total so all features sum to 1 |
+
+**Walk one example.** A 3-internal-node tree on 1,000 customers, splitting on only two features:
+
+```
+  node    feature    n_t    weight     impurity   weighted child   decrease   contribution
+  root    tenure    1000    1.000       0.480         0.300         0.180        0.180
+  n1      charges    600    0.600       0.320         0.180         0.140        0.084
+  n2      tenure     400    0.400       0.375         0.250         0.125        0.050
+
+  raw totals:  tenure  = 0.180 + 0.050 = 0.230
+               charges = 0.084         = 0.084
+               grand total             = 0.314
+
+  normalized:  tenure  = 0.230 / 0.314 = 0.7325
+               charges = 0.084 / 0.314 = 0.2675
+                                         ------
+                                         1.0000
+```
+
+Note node `n2`: its raw impurity decrease (`0.125`) is nearly as large as the root's (`0.180`), yet after the `400/1000` weighting it contributes only `0.050`. Depth is a discount rate — a split that looks impressive locally earns little if it only sorts out a small slice of the data.
+
+**Why the `n_t / n` weight is the whole defense — and why it is not enough.** Without it, a hairline split affecting 5 samples would score the same as the root split affecting all 1,000, and the deepest, noisiest nodes would dominate the ranking. The weight fixes that. What it cannot fix is a `user_id`-style feature that wins the root: a high-cardinality column offers ~n candidate thresholds, so by sheer search volume one of them will look best on training data and collect the full `1.0` weight. MDI credits the split that *was chosen*, never asks whether it deserved to be — hence the pitfall in Section 10 and the standing advice to confirm with permutation importance.
 
 **Limitation of MDI**: biased toward high-cardinality features (features with many unique values can create many split points, inflating their apparent importance). Always validate with permutation importance.
 

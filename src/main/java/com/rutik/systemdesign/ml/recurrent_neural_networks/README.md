@@ -90,6 +90,47 @@ Parameters are shared across every step; the hidden state h is the only channel
 carrying the past forward. During BPTT the gradient flows back through all T of
 these cells, so the per-step multiply by W_hh compounds T times.
 
+Every box labelled `RNN` above is the same one line of math:
+
+```
+  h_t = f(W_hh · h_{t-1} + W_xh · x_t + b)
+```
+
+**Read it like this.** "The new summary is what you get when you mix a re-weighted copy of the old summary with the current input, then squash the result back into a bounded range."
+
+The reason this single equation deserves so much attention is that `W_hh` is reused at *every* timestep — it is not T different matrices, it is one matrix applied T times. Everything good about RNNs (constant parameter count for any sequence length) and everything bad about them (compounding gradients) falls out of that one fact.
+
+| Symbol | What it is |
+|--------|------------|
+| `h_t` | The hidden state at step t — a fixed-size vector holding a lossy summary of everything seen so far |
+| `h_{t-1}` | Last step's summary. The only memory the cell has; there is no other channel |
+| `x_t` | The input at step t — one token embedding, one audio frame, one sensor reading |
+| `W_hh` | The recurrent matrix. Decides how much of the past survives into the present. Shared across all T steps |
+| `W_xh` | The input matrix. Decides how the fresh observation enters the summary. Also shared across all T steps |
+| `b` | Bias — a constant nudge, letting the cell have a nonzero default state |
+| `f` | The squashing nonlinearity, usually `tanh`, which keeps h inside `(-1, 1)` so repeated mixing cannot blow up the forward pass |
+
+**Walk one example.** Three timesteps with a single hidden unit, so every number is visible:
+
+```
+  Setup (hidden size 1, f = tanh):  W_hh = 0.5   W_xh = 1.0   b = 0.1   h_0 = 0.0
+  Inputs:                           x_1 = +1.0   x_2 = -0.2   x_3 = +2.0
+
+  t=1   pre = 0.5 x 0.0000 + 1.0 x (+1.0) + 0.1 = +1.1000   h_1 = tanh(+1.1000) = 0.8005
+  t=2   pre = 0.5 x 0.8005 + 1.0 x (-0.2) + 0.1 = +0.3002   h_2 = tanh(+0.3002) = 0.2915
+  t=3   pre = 0.5 x 0.2915 + 1.0 x (+2.0) + 0.1 = +2.2458   h_3 = tanh(+2.2458) = 0.9778
+
+  Trace what is left of x_1 by t=3:
+    x_1 pushed h_1 to 0.8005
+    that contributed 0.5 x 0.8005 = 0.4002 to t=2's pre-activation
+    which contributed 0.5 x 0.2915 = 0.1458 to t=3's pre-activation
+
+  Each hop multiplies the echo by W_hh = 0.5, so the first token's voice halves
+  every single step. By t=10 it is 0.5^9 = 0.002 of its original strength.
+```
+
+`h_3 = 0.9778` is dominated by `x_3 = +2.0`; the influence of `x_1` has already faded to a rounding error. That fading is not a bug in this example's numbers — it is the forward-pass shadow of the vanishing gradient, and it is why the gated cells below exist.
+
 **LSTM cell — gate and cell-state flow:**
 
 ```mermaid
@@ -164,6 +205,49 @@ GRU merges forget and input into a single update gate z and drops the separate c
 state; h_t simply interpolates the old state and the new candidate, giving roughly
 2/3 the parameters of an LSTM.
 
+Written out, the three lines in that diagram are:
+
+```
+  r_t = sigmoid(W_r · [x_t, h_{t-1}])            reset gate
+  z_t = sigmoid(W_z · [x_t, h_{t-1}])            update gate
+  n_t = tanh(W_n · [x_t, r_t * h_{t-1}])         candidate state
+  h_t = (1 - z_t) * h_{t-1} + z_t * n_t          interpolation
+```
+
+**The idea behind it.** "Ask two questions — how much of the past should I even look at while drafting a new state, and how much of that draft should replace the old state — then slide between old and new by exactly that amount."
+
+The final line is a **convex combination**: the weights `(1 - z_t)` and `z_t` always sum to 1. LSTM's forget and input gates are independent, so an LSTM can erase and write at the same time (or do neither); GRU ties them together, which is precisely where its parameter saving comes from and also its one structural limitation.
+
+| Symbol | What it is |
+|--------|------------|
+| `r_t` | Reset gate. Near 0 = "ignore the history while drafting", letting the cell start fresh on a new sentence or segment |
+| `z_t` | Update gate. Near 0 = keep the old state verbatim; near 1 = overwrite it with the candidate |
+| `n_t` | Candidate state — the proposal for what h_t *could* be, computed from x_t and the reset-gated history |
+| `(1 - z_t) * h_{t-1}` | The share of the old state that survives this step |
+| `z_t * n_t` | The share of the new proposal that gets committed |
+| `*` | Element-wise multiply — every hidden dimension gets its own independent gate value |
+
+**Walk one timestep.** One hidden unit, `h_prev = 0.60`:
+
+```
+  Pre-activations from the weight matrices:  r raw = +1.5   z raw = +0.8
+                                             candidate raw (after reset gating) = +0.7
+
+    r_t = sigmoid(+1.5) = 0.8176     look at ~82% of the history while drafting
+    z_t = sigmoid(+0.8) = 0.6900     commit ~69% of the draft
+    r_t x h_prev        = 0.4905     the gated history that feeds the candidate
+    n_t = tanh(+0.7)    = 0.6044     the proposed new state
+
+  h_t = (1 - z_t) x h_prev + z_t x n_t
+      = 0.3100 x 0.60    + 0.6900 x 0.6044
+      = 0.1860           + 0.4170
+      = 0.6030
+
+  Read the split: 31% of h_t came from memory, 69% from this step's proposal.
+```
+
+**Why the reset gate exists.** Drop `r_t` (pin it to 1) and the candidate is always computed from the full previous state, so the cell can never cleanly start over — at a sentence boundary or a regime change in a time series it keeps dragging stale context into every new proposal. Setting `r_t` toward 0 gives GRU a "clear the desk" move that a gate-less RNN simply does not have.
+
 **Bidirectional LSTM — two directions concatenated:**
 
 ```mermaid
@@ -219,6 +303,55 @@ xychart-beta
 With a per-step gradient factor of 0.9 the magnitude decays as 0.9^t — effectively
 zero by ~30 steps (0.9^100 ≈ 2.7e-5). This is why vanilla RNNs cannot learn
 long-range dependencies and why the LSTM's additive cell-state path was needed.
+
+Where that per-step factor comes from is the chain rule applied to the recurrence:
+
+```
+  ∂h_t / ∂h_{t-1} = W_hh · f'(pre_t)
+
+  ∂h_T / ∂h_k    = Π_{t=k+1..T}  W_hh · f'(pre_t)      <- a product of (T - k) terms
+```
+
+**What this actually says.** "To learn from something that happened 100 steps ago, the gradient has to survive 100 consecutive multiplications by the same matrix — and a number multiplied by itself 100 times is either nothing or everything."
+
+There is no middle ground available. The product is exponential in `T - k`, so the *only* stable value is a factor of exactly 1.0, which nothing trains toward on its own.
+
+| Symbol | What it is |
+|--------|------------|
+| `∂h_T / ∂h_k` | How much a nudge to the step-k state changes the step-T state — i.e. how much the loss at T can teach step k |
+| `Π` | Product over every step between k and T. Not a sum — this is the whole problem |
+| `W_hh` | The same shared recurrent matrix, appearing once per timestep in the product |
+| `f'(pre_t)` | Slope of tanh at that step. `tanh'(z) = 1 - tanh(z)^2`, which is at most 1.0 and shrinks fast once the unit saturates |
+| `T - k` | The distance being learned across. The exponent — every extra step of distance is another multiply |
+| largest eigenvalue of `W_hh` | The effective per-step factor. Below 1 → vanish; above 1 → explode |
+
+**Walk one example.** Reuse the exact three timesteps computed above:
+
+```
+  Per-step backward factor = W_hh x tanh'(pre_t),  where tanh'(z) = 1 - tanh(z)^2
+
+    t=3 -> t=2   0.5 x (1 - 0.9778^2) = 0.5 x 0.0438 = 0.0219
+    t=2 -> t=1   0.5 x (1 - 0.2915^2) = 0.5 x 0.9150 = 0.4575
+
+    product across just those two hops                = 0.0100
+
+  Two steps back and 99% of the gradient signal is already gone. Note WHY t=3's
+  factor is so brutal: pre = 2.2458 saturated the tanh, and a saturated tanh has
+  almost no slope, so it throttles the gradient on top of the W_hh shrinkage.
+
+  Now hold the factor fixed and let the sequence get long:
+
+      T          factor 0.9        factor 1.1
+      ---        ----------        ----------
+       10          0.348678              2.59
+       30          0.042391             17.45
+      100          0.0000266         13,780.60
+
+  0.9 and 1.1 are both a mere 10% away from 1.0. Over 100 steps one becomes
+  three parts in a hundred thousand, the other becomes ~14,000x. Same 10%.
+```
+
+**Why gradient clipping only fixes half of this.** Clipping rescales the exploding column — a 13,780x gradient gets squashed back to a usable norm and training survives. Nothing rescales the vanishing column: `2.66e-5` is not a large number pointing the wrong way, it is an *absence* of signal, and multiplying an absence by anything leaves an absence. That asymmetry is why the exploding half was solved with a two-line utility (`clip_grad_norm_`, Section 6) while the vanishing half required redesigning the cell.
 
 **Seq2seq with attention:**
 
@@ -311,6 +444,65 @@ class LSTMCellManual(nn.Module):
 
         return h_t, c_t
 ```
+
+Stripped of the PyTorch scaffolding, that `forward` is six equations:
+
+```
+  f_t = sigmoid(W_f · [x_t, h_{t-1}] + b_f)      forget gate
+  i_t = sigmoid(W_i · [x_t, h_{t-1}] + b_i)      input gate
+  g_t = tanh(W_g · [x_t, h_{t-1}] + b_g)         candidate values
+  o_t = sigmoid(W_o · [x_t, h_{t-1}] + b_o)      output gate
+
+  c_t = f_t * c_{t-1} + i_t * g_t                cell state (memory)
+  h_t = o_t * tanh(c_t)                          hidden state (what escapes)
+```
+
+**In plain terms.** "Keep a private notebook. Each step, decide how much of each page to erase, how much of the new draft to write down, and how much of the notebook to read aloud."
+
+The split between `c_t` (the notebook) and `h_t` (what is read aloud) is the design's core move. A vanilla RNN has only one vector, so anything it wants to remember it is also forced to expose and re-squash every step. LSTM separates *storage* from *emission*, and only the storage path gets the additive update.
+
+| Symbol | What it is |
+|--------|------------|
+| `f_t` | Forget gate, in `(0,1)`. `1` = keep this memory slot untouched; `0` = wipe it. Its bias is initialized to `1.0` (see `_init_weights`) so the cell defaults to remembering |
+| `i_t` | Input gate, in `(0,1)`. How much of the new candidate is allowed into the notebook |
+| `g_t` | Candidate values, in `(-1,1)`. The *content* being proposed. Note it uses `tanh`, not `sigmoid` — it is a value, not a valve |
+| `o_t` | Output gate, in `(0,1)`. How much of the notebook is exposed as this step's hidden state |
+| `c_t` | Cell state. The long-term memory that flows forward with only `*` and `+` — no repeated matrix multiply |
+| `h_t` | Hidden state. What the next layer, the next timestep, and the output head actually see |
+| `[x_t, h_{t-1}]` | Concatenation of input and previous hidden state — the single vector all four gates read (the `torch.cat` above) |
+| `*` | Element-wise multiply. Every one of the 256 hidden dimensions carries its own independent gate value |
+
+**Walk one timestep.** One hidden unit, `c_prev = 0.80`, with the four raw pre-activations shown:
+
+```
+    gate          raw     squashed                    reading
+    ----          ---     --------                    -------
+    f (forget)   +2.2     sigmoid(2.2) = 0.9002       keep 90% of the old memory
+    i (input)    +0.4     sigmoid(0.4) = 0.5987       let 60% of the candidate in
+    g (cand.)    +0.9     tanh(0.9)    = 0.7163       the content being proposed
+    o (output)   +1.1     sigmoid(1.1) = 0.7503       expose 75% of the memory
+
+  c_t = f_t x c_prev  +  i_t x g_t
+      = 0.9002 x 0.80 +  0.5987 x 0.7163
+      = 0.7202        +  0.4288
+      = 1.1490                <- 63% carried over, 37% newly written
+
+  h_t = o_t x tanh(c_t)
+      = 0.7503 x tanh(1.1490)
+      = 0.7503 x 0.8174
+      = 0.6133                <- note h_t (0.61) < c_t (1.15): memory can hold
+                                 more than it currently reveals
+```
+
+**Why the `+` in `c_t` is the whole point.** Differentiate the cell-state line and you get `∂c_t / ∂c_{t-1} = f_t` — one gate value, with no `W_hh` and no `tanh'` attached. Compare the vanilla RNN's `W_hh · f'(pre_t)` decoded in Section 5, which pulled 100 steps of gradient down to `2.66e-5`. With the forget gate learned near `1.0`:
+
+```
+  vanilla RNN, factor 0.9      over 100 steps:  0.9^100  = 0.0000266   dead
+  LSTM, f_t = 0.99             over 100 steps:  0.99^100 = 0.366       alive
+  LSTM, f_t = 1.00             over 100 steps:  1.00^100 = 1.000       untouched
+```
+
+That is why `_init_weights` fills the forget-gate bias with `1.0`: `sigmoid(1.0) = 0.731` at initialization instead of `sigmoid(0) = 0.5`, so the network starts biased toward remembering and only learns to forget where forgetting pays. Start it at 0 and the cell halves its memory every step before training has any chance to intervene.
 
 ### Gradient Clipping — Production Standard
 

@@ -143,6 +143,52 @@ LambdaRank gradient for pair (B, C):
   Items that matter most for NDCG get the largest corrections
 ```
 
+**What this actually says.** "Fix the mis-orderings that would move the scoreboard the most, and fix them hardest where the model is least sure it got them right."
+
+The whole point is that not every mis-ranked pair is worth the same. Swapping positions 1 and 2 changes NDCG a lot; swapping positions 40 and 41 barely changes it at all. LambdaRank refuses to spend gradient on the second kind.
+
+| Symbol | What it is |
+|--------|------------|
+| `score_B`, `score_C` | The model's raw scores for the two items in the pair |
+| `delta_NDCG(B, C)` | How much NDCG would improve if you swapped these two in the ranked list |
+| `sigmoid(score_C - score_B)` | How confidently the model currently prefers C over B. Near `1.0` = badly mis-ranked |
+| `lambda_BC` | The gradient sent to this pair — the product of "how much it matters" and "how wrong we are" |
+| `NDCG` | Discounted Cumulative Gain divided by its ideal value. `1.0` = perfect ordering |
+
+**Walk one example.** Push the exact list above through the NDCG arithmetic. Relevance is
+`1` for high, `0` for low, and the rank discount is `1 / log2(position + 1)`:
+
+```
+  discounts       pos 1 = 1.0000   pos 2 = 0.6309   pos 3 = 0.5000   pos 4 = 0.4307
+
+  model order     A(rel 1)   C(rel 0)   B(rel 1)   D(rel 0)
+  DCG           = 1x1.0000 + 0x0.6309 + 1x0.5000 + 0x0.4307 = 1.5000
+
+  ideal order     A(rel 1)   B(rel 1)   C(rel 0)   D(rel 0)
+  IDCG          = 1x1.0000 + 1x0.6309 + 0x0.5000 + 0x0.4307 = 1.6309
+
+  NDCG now      = 1.5000 / 1.6309 = 0.9197
+  NDCG if swapped                 = 1.0000
+  delta_NDCG                      = 0.0803
+
+  sigmoid(score_C - score_B) = sigmoid(0.7 - 0.5) = sigmoid(0.2) = 0.5498
+
+  lambda_BC = 0.0803 x 0.5498 = 0.0441
+```
+
+Read the two factors separately. `0.0803` says "this swap is worth 8 points of NDCG" — a real
+but not catastrophic error. `0.5498` says "the model only mildly prefers C to B" — it is nearly
+a coin flip, so it is close to fixing itself. Multiply them and you get a modest correction. Now
+imagine the same pair sitting at positions 1 and 2 with scores `0.9` vs `0.1`: `delta_NDCG` would
+be larger *and* the sigmoid would be near `0.69`, so the gradient would be several times bigger.
+That multiplication is the entire difference between LambdaRank and plain RankNet.
+
+**Why the `|...|` around delta_NDCG.** The magnitude alone carries the "how much does this matter"
+signal; the *direction* of the correction is already supplied by which item is the more relevant
+one in the pair. Drop the absolute value and pairs that hurt NDCG and pairs that help it would
+partially cancel in the sum, and the model would stop learning the ordering at the top of the
+list — exactly the region NDCG cares about most.
+
 ### 5.4 Learning-to-Rank Families — Pointwise vs Pairwise vs Listwise
 
 ```mermaid
@@ -204,6 +250,53 @@ flowchart LR
 ANN skips the 10M-item brute-force scan: the item vectors are clustered offline into
 `n_lists` centroids, and at query time only the `nprobe` closest cells are scanned —
 trading a few percent recall for a ~100x latency win.
+
+**Put simply.** "Instead of comparing the query to all 10 million items, compare it to a few
+thousand cluster centres, then only to the items inside the handful of clusters that won."
+
+The cost of an IVF query is not one number but a sum of two, and they pull in opposite
+directions as you turn `n_lists`:
+
+```
+  distance computations per query
+      = n_lists                    (find the nearest centroids)
+      + N x (nprobe / n_lists)     (scan the items inside those cells)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Catalog size — number of item vectors in the index. `10,000,000` here |
+| `n_lists` | How many Voronoi cells K-means carved the catalog into. Build-time choice |
+| `nprobe` | How many of those cells to actually scan at query time. Runtime knob |
+| `nprobe / n_lists` | The fraction of the catalog you touch. `32/256` = one eighth of everything |
+| `N / total` | Speedup over brute force. This is the number that buys you the latency budget |
+
+**Walk one example.** Same catalog (`N` = 10M, `D` = 256), same `nprobe = 32`, three different
+build-time `n_lists`:
+
+```
+                       centroid     items          total distance
+  n_lists   nprobe     compares     scanned        computations     speedup vs brute
+  ------------------------------------------------------------------------------------
+  brute        -              0    10,000,000        10,000,000            1.0x
+    256       32            256     1,250,000         1,250,256            8.0x
+   1024       32          1,024       312,500           313,524           31.9x
+   4096       32          4,096        78,125            82,221          121.6x
+```
+
+Brute force at `D = 256` is `10,000,000 x 256 x 2 = 5.12 billion` multiply-add operations for a
+single user request — roughly the ~2 seconds quoted in Section 3. The `n_lists = 4096` row does
+`82,221` distance computations instead, which is the ~100x win the caption refers to and the
+reason the Section 12 rule of thumb lands on `sqrt(N)` to `4*sqrt(N)` cells (`sqrt(10M)` = 3,162).
+
+**Why `n_lists` cannot just be raised forever.** The first term (`n_lists` centroid compares) is
+paid on *every* query and grows linearly, while the second term shrinks. Past the crossover the
+centroid scan itself becomes the bottleneck: at `n_lists = 100,000` with `nprobe = 32` you would
+pay 100,000 centroid compares to save down to 3,200 item compares — worse than the 4096 row.
+There is also a recall cost: more cells means fewer items per cell, so a fixed `nprobe` covers a
+smaller slice of the neighbourhood and true neighbours fall outside the probed cells. That is the
+failure mode described in Pitfall 5, and it is why `nprobe` is tuned against a recall curve rather
+than set by arithmetic alone.
 
 ---
 
@@ -486,6 +579,179 @@ def mmr_rerank(
 
     return selected
 ```
+
+### Decoding the Ranking Loss
+
+`pairwise_bpr_loss` above is three symbols wide and does all the work:
+
+```
+  BPR loss = -mean( log( sigmoid( score_pos - score_neg ) ) )
+```
+
+**Read it like this.** "For every pair where we know which item the user preferred, all we ask is
+that the preferred item score higher. Not by any particular amount — just higher."
+
+| Symbol | What it is |
+|--------|------------|
+| `score_pos` | The model's score for the item the user actually clicked or bought |
+| `score_neg` | The model's score for a sampled item the user did not interact with |
+| `score_pos - score_neg` | The margin. Positive means the ordering is already correct |
+| `sigmoid(margin)` | The margin read as a probability: "chance we ranked this pair right" |
+| `-log(...)` | Loss. `0` when certain and correct; climbs without bound when confident and wrong |
+| `mean` | Average over every sampled pair in the batch |
+
+**Walk one example.** Four pairs, watching what the loss cares about:
+
+```
+              score_pos   score_neg   margin   sigmoid   loss = -log sigmoid
+  pair A         2.00        0.50      +1.50    0.8176        0.2014   correct, confident
+  pair B         3.00        0.50      +2.50    0.9241        0.0789   correct, more confident
+  pair C         0.50        0.50       0.00    0.5000        0.6931   coin flip, no signal
+  pair D         0.50        2.00      -1.50    0.1824        1.7014   backwards, punished hard
+```
+
+Pair D costs `1.7014` against pair A's `0.2014` — being wrong by the same margin is roughly 8x
+more expensive than being right by it. That asymmetry is what drives the gradient. Note also that
+only the *difference* enters the formula: shift both scores by `+100` and every number in the
+table is unchanged. This is why a BPR-trained ranker's raw scores are not calibrated
+probabilities, and why you cannot threshold them the way you can threshold the pointwise
+`binary_cross_entropy` output of `PointwiseRanker`. If the product needs "show only items above
+70% click probability", pointwise is the loss that gives you that; BPR only gives you an order.
+
+### Decoding the NDCG Discount in `lambda_rank_loss`
+
+The three lines that build `idcg` are the ranking metric itself:
+
+```
+  discounts = 1 / log2(position + 1)
+  DCG       = sum over positions of  relevance x discount
+  IDCG      = the same sum, computed on the perfectly sorted list
+  NDCG      = DCG / IDCG
+```
+
+**The idea behind it.** "Credit for a relevant item decays as you push it further down the page,
+and the whole score is graded against the best ordering that was possible."
+
+| Symbol | What it is |
+|--------|------------|
+| `position` | 1-indexed slot in the ranked list. Position 1 is the top of the page |
+| `1 / log2(position + 1)` | The positional discount. Slowly decaying, never negative, `1.0` at the top |
+| `relevance` | Ground-truth usefulness of the item. Binary `0/1` or graded `0..4` |
+| `DCG` | Sum of discounted relevance over the list the model actually produced |
+| `IDCG` | The same sum over the ideal list — the maximum DCG achievable for this user |
+| `NDCG` | `DCG / IDCG`, always in `[0, 1]`, comparable across users with different result counts |
+
+**Walk one example.** Why the `log2` discount and not `1/position`:
+
+```
+  position    1/log2(pos+1)     1/pos       ratio pos1 : pos4
+  ---------------------------------------------------------------
+      1          1.0000         1.0000
+      2          0.6309         0.5000
+      3          0.5000         0.3333
+      4          0.4307         0.2500      log2:  1.00 / 0.4307 = 2.3x
+                                            1/pos: 1.00 / 0.2500 = 4.0x
+```
+
+The `log2` discount is deliberately gentle. Under `1/position` a relevant item at slot 4 is worth
+only a quarter of one at slot 1, so the loss would obsess over the very top and ignore everything
+below the fold. Under `1/log2(position+1)` it is worth `0.43` — still penalised, but enough of the
+list stays in play that the model learns to order slots 2 through 10 too. Dividing by `IDCG` is
+the other half: a user with 1 relevant item and a user with 20 both end up on a `0` to `1` scale,
+so you can average NDCG across a test set without the heavy users dominating the mean.
+
+### Decoding Inverse Propensity Weighting
+
+`estimate_position_propensity` and `ipw_weighted_loss` implement one idea in two steps:
+
+```
+  propensity(p) = CTR at position p  /  CTR at position 1
+  weight(p)     = 1 / propensity(p)
+  IPW loss      = mean( BCE(pred, label) x weight(position) )
+```
+
+**Stated plainly.** "A click from the bottom of the page is rarer, so it is worth more. Pay each
+click in inverse proportion to how likely that slot was to be looked at at all."
+
+| Symbol | What it is |
+|--------|------------|
+| `propensity(p)` | Probability the user even *saw* slot `p`, measured relative to slot 1 |
+| `CTR at position p` | Click rate at that slot, measured on randomized traffic only |
+| `weight(p)` | `1 / propensity`. Slot 1 gets `1.0`; harder-to-see slots get more |
+| `BCE(pred, label)` | The ordinary pointwise loss for that example, before reweighting |
+| randomized traffic | The 5-10% of sessions with random ordering — the only place propensity is estimable |
+
+**Walk one example.** Feed the Section 5.2 measured CTR bars straight through:
+
+```
+  position   observed CTR   propensity = CTR / CTR@1   IPW weight = 1 / propensity
+  --------------------------------------------------------------------------------
+      1          8.0%              1.0000                        1.000
+      2          4.5%              0.5625                        1.778
+      3          3.0%              0.3750                        2.667
+      5          1.5%              0.1875                        5.333
+     10          0.8%              0.1000                       10.000
+```
+
+A click at position 10 now counts for `10x` a click at position 1, exactly undoing the `10x`
+exposure advantage position 1 had. The item that earned a click from the bottom of the page did
+something genuinely harder, and the loss finally says so. Airbnb's measured ratio was `7.3x`
+rather than `10x` — the weights are always estimated from your own randomized slice, never copied
+from someone else's paper.
+
+**Why this must come from randomized traffic.** On normal traffic the ranker chose the ordering,
+so good items are at the top *and* the top gets more clicks — you cannot separate "seen more" from
+"is better", and the estimated propensity would absorb item quality along with position effect. On
+randomized traffic the position is independent of the item, so any CTR gap across positions is
+pure exposure. Without that 5-10% holdout there is nothing to divide by, which is why Best
+Practice 4 says to build IPW in from day one rather than retrofit it.
+
+### Decoding Maximal Marginal Relevance
+
+The selection rule inside `mmr_rerank`:
+
+```
+  MMR(i) = lambda x relevance(i) - (1 - lambda) x max_{j in selected} sim(i, j)
+```
+
+**What the formula is telling you.** "Score each remaining candidate on how good it is, then
+charge it a fee for how much it duplicates something already on the page. Pick the best net
+score, add it, repeat."
+
+| Symbol | What it is |
+|--------|------------|
+| `relevance(i)` | The ranker's score for candidate `i` — how much this user should like it |
+| `sim(i, j)` | Cosine similarity between candidate `i` and an already-selected item `j` |
+| `max over selected` | The *worst offence*: how close `i` is to its nearest already-picked neighbour |
+| `lambda` | The dial. `1.0` = ignore diversity entirely; `0.0` = ignore relevance entirely |
+| `(1 - lambda)` | The redundancy penalty rate — what one unit of similarity costs you |
+
+**Walk one example.** Item A (relevance `0.90`) is already selected. Two candidates remain: B is
+slightly less relevant but nearly a duplicate of A, C is clearly less relevant but unrelated:
+
+```
+  candidate   relevance   max sim to selected
+      B         0.85            0.95            (near-duplicate of A)
+      C         0.70            0.20            (different category)
+
+  lambda = 0.9   MMR(B) = 0.9x0.85 - 0.1x0.95 = +0.670   MMR(C) = +0.610   -> picks B
+  lambda = 0.5   MMR(B) = 0.5x0.85 - 0.5x0.95 = -0.050   MMR(C) = +0.250   -> picks C
+  lambda = 0.1   MMR(B) = 0.1x0.85 - 0.9x0.95 = -0.770   MMR(C) = -0.110   -> picks C
+```
+
+At `lambda = 0.9` the `0.05` relevance edge outweighs the redundancy fee and you get two
+near-identical items back to back. At `0.5` the fee flips the decision and C takes the slot — this
+is the regime the Best Practices section recommends, and Pinterest's `0.6` sits just above it.
+At `0.1` both scores go negative and C wins only because it is *less bad*; relevance has stopped
+mattering and every choice is driven by dissimilarity. That is precisely the Pitfall 3 failure —
+`lambda_mmr = 0.1` produced maximally diverse, maximally irrelevant lists.
+
+**Why `max` and not `mean` similarity.** Averaging similarity across the selected set dilutes a
+single egregious duplicate: with nine unrelated items already picked, a tenth that is a perfect
+copy of one of them still averages out to a small penalty and slips through. Taking the maximum
+means one near-duplicate anywhere in the list is enough to disqualify a candidate, which is the
+behaviour the "max 3 items per category" business rule is trying to approximate with a blunter
+instrument.
 
 ---
 

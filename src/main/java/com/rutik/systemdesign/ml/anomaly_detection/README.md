@@ -95,6 +95,52 @@ score s(x) = 2^( -E[h(x)] / c(n) )
 
 Score near **1** = anomaly (isolated fast), near **0.5** = normal, below 0.5 = deeply normal. With the default subsample size 256, the expected tree depth is `c(256) ≈ 2·ln(255) ≈ 11`, and trees are capped at `ceil(log2(256)) = 8`. Defaults: `n_estimators=100`, `max_samples=256`. **See [`../ensemble_methods/random_forests.md`](../ensemble_methods/random_forests.md) §4.5 for the full treatment.** Isolation Forest is the sensible unsupervised default for tabular data > 10K rows.
 
+**In plain terms.** "Count how many random yes/no questions it took to fence this point off by itself, compare that against how many it *should* take for a typical point, and turn the shortfall into a 0-to-1 score."
+
+That framing is why the formula looks the way it does. `E[h(x)]` is the raw evidence (a depth, in splits); `c(n)` is the yardstick that makes depths comparable across differently-sized samples; and the `2^(-...)` wrapper squashes a ratio into a bounded, readable score. Without the `c(n)` division, a forest trained on 256-point subsamples and one trained on 1000-point subsamples would report incomparable numbers for the same point.
+
+| Symbol | What it is |
+|--------|------------|
+| `h(x)` | Path length for `x` in one tree — how many splits from root to the leaf that isolates it |
+| `E[h(x)]` | That path length averaged over all trees in the forest |
+| `n` | Subsample size used to build each tree (sklearn default `max_samples=256`) |
+| `H(i)` | Harmonic number `1 + 1/2 + ... + 1/i`, well approximated by `ln(i) + 0.5772` |
+| `c(n)` | Expected path length of a *failed* BST search on `n` points — the "normal depth" yardstick |
+| `-E[h]/c(n)` | Depth ratio, negated. Shallow point -> near `0`; deep point -> very negative |
+| `2^(...)` | Maps that exponent into `(0, 1]`. Ratio `0` -> score `1`; ratio `1` -> score `0.5` |
+
+**Walk one example.** Start by computing the yardstick for the default subsample `n = 256`:
+
+```
+  H(255)  =  ln(255) + 0.5772  =  5.5413 + 0.5772  =  6.1185
+
+  c(256)  =  2 x H(255)  -  2 x (255 / 256)
+          =  2 x 6.1185  -  2 x 0.99609
+          =  12.2370     -  1.99219
+          =  10.2448        <- "a typical point takes ~10.2 splits to isolate"
+```
+
+(The `2 x ln(n)` shorthand quoted above gives `11.08` — it drops the `-2(n-1)/n` term, which
+costs about 2 splits. Fine for intuition, but use the full expression when you compute a score
+by hand.)
+
+Now push four points with different average depths through `s(x) = 2^(-E[h]/c(256))`:
+
+```
+  point        E[h(x)]   -E[h]/c(n)    s(x) = 2^(...)   verdict
+  extreme        3.0       -0.2928        0.816         strong anomaly
+  suspicious     5.0       -0.4881        0.713         anomaly
+  borderline     8.0       -0.7809        0.582         mildly odd
+  typical       11.0       -1.0737        0.475         normal
+  deeply normal 14.0       -1.3666        0.388         core of the distribution
+```
+
+Read the anchor points off that table. When `E[h] = c(n)` exactly (a perfectly average point), the exponent is `-1` and `s = 2^-1 = 0.5` — which is why **0.5 is the "normal" pivot**, not 0. As `E[h] -> 0` the exponent goes to `0` and `s -> 2^0 = 1`, the theoretical maximum. The score can never actually reach 1 or 0; it asymptotes.
+
+**Why the depth axis is so compressed.** Look at the spread: going from depth 3 to depth 14 — more than a 4x change in path length — moves the score only from `0.816` to `0.388`. The exponential is doing that deliberately, because path length itself is logarithmic in how isolated a point is. The practical consequence is the one §6.2 hammers: **the gap between `0.582` and `0.475` is not "20% more anomalous", it is the difference between an alert and silence**, and that mapping shifts every time you retrain. Threshold the quantile, never the raw `s(x)`.
+
+**What breaks if you drop the subsample cap.** With `max_samples=256` the tree depth is capped at `ceil(log2(256)) = 8`, so any point still unisolated at depth 8 is simply assigned the estimated remaining depth. Raise `max_samples` to the full dataset and two things go wrong: `c(n)` grows (`c(1000) = 12.97`), so scores compress further toward 0.5, and *swamping* sets in — with more points per tree, a small anomalous cluster starts looking like a legitimate low-density region and stops isolating quickly. The 256 default is not an efficiency hack; it is what keeps anomalies rare *within each tree*.
+
 ### 4.5 One-Class SVM (summary — deep dive in support_vector_machines.md §6.3)
 
 Learns a boundary (in RBF-kernel feature space) enclosing the normal training data; points outside are anomalies. The `nu` parameter is simultaneously an **upper bound on the fraction of training points allowed outside** the boundary and a **lower bound on the fraction of support vectors**. Set `nu` ≈ the expected training contamination (e.g. `nu=0.01` for 1%). Scales O(n²)–O(n³) and is very sensitive to `gamma`; prefer Isolation Forest or `SGDOneClassSVM` (linear, O(n)) beyond ~50K rows. **See [`../supervised_learning/support_vector_machines.md`](../supervised_learning/support_vector_machines.md) §6.3.**
@@ -317,6 +363,58 @@ print(f"threshold={threshold:.4f}  flag_rate={alerts.mean():.4%}")
 # and directly tied to your tolerated false-positive budget.
 ```
 
+**Read it like this.** "Do not ask *how anomalous* a point is on some arbitrary scale — ask *what fraction of known-normal traffic it beats*. Set the bar so that only the fraction of normal traffic you can afford to interrupt sits above it."
+
+`np.quantile(ref_scores, 0.999)` is a translation step, not a modelling step. It converts a number with no units (`decision_function` output) into a number with a contract: "0.1% of clean traffic scores above me." That contract survives retraining, feature changes, and score-scale drift, because it is re-derived from the reference set each time.
+
+| Symbol | What it is |
+|--------|------------|
+| `ref_scores` | Anomaly scores on a set you believe is clean — the reference distribution |
+| `0.999` | The quantile. Directly equals `1 - (false-positive budget)` |
+| `threshold` | The score value at that quantile. Meaningful only relative to `ref_scores` |
+| `flag_rate` | Fraction of *all* traffic that alerts. Should land near `1 - 0.999` plus the true anomalies |
+| base rate | Fraction of traffic that is genuinely anomalous — here `100 / 100,100 = 0.1%` |
+
+#### What the threshold actually costs you: precision and recall
+
+The two metrics the threshold trades between:
+
+```
+  precision = TP / (TP + FP)      "of the alerts I fired, how many were real?"
+  recall    = TP / (TP + FN)      "of the real anomalies, how many did I catch?"
+```
+
+**Put simply.** "Precision is the analyst's question — am I wasting my afternoon? Recall is the auditor's question — what did we miss? Moving the threshold trades one directly for the other, and nothing else you do that day changes either."
+
+**Walk one example.** Use exactly the dataset from §6.1 — `100,000` normal points and `100`
+anomalies, a `0.1%` base rate — and sweep the reference quantile. The false-positive count is
+forced by arithmetic: a `p99.5` threshold means `0.5%` of `100,000` normal points alert, which
+is `500` false alarms, before you have caught a single fraud:
+
+```
+  threshold   FP rate    FP      TP    total alerts   precision   recall     F1
+  p95          0.05      5000     97       5097        0.0190      0.97     0.0373
+  p99          0.01      1000     85       1085        0.0783      0.85     0.1435
+  p99.5        0.005      500     78        578        0.1349      0.78     0.2301
+  p99.9        0.001      100     60        160        0.3750      0.60     0.4615
+  p99.99       0.0001      10     35         45        0.7778      0.35     0.4828
+
+  worked, p99.9 row:   FP = 0.001 x 100,000 = 100
+                       TP = 0.60  x     100 =  60
+                precision = 60 / (60 + 100) = 60 / 160 = 0.3750
+                   recall = 60 / 100                   = 0.60
+```
+
+Three things fall out of that table that people get wrong in interviews:
+
+**1. The base rate, not the model, dominates precision at loose thresholds.** At `p95` the detector caught 97 of 100 anomalies — near-perfect recall, genuinely good detection — and precision is still `1.9%`. It is buried under 5000 false alarms it could not avoid, because 5% of a 100,000-point normal population is 5000 points and there are only 100 anomalies in existence. **No model improvement fixes a `p95` threshold at a 0.1% base rate.** This is the same arithmetic that makes ROC-AUC look great here while precision is unusable.
+
+**2. Precision improves faster than recall degrades, up to a point.** From `p95` to `p99.9` precision rises `20x` (`0.019 -> 0.375`) while recall falls only `1.6x` (`0.97 -> 0.60`). That asymmetry is why the correct instinct on rare-event detection is almost always *tighten the threshold*. It stops paying off at `p99.99`, where precision gains `2.1x` but recall halves — F1 barely moves (`0.4615 -> 0.4828`).
+
+**3. Pick the threshold from the alert budget, not from F1.** If your on-call team can review 200 alerts a day, the table answers the question directly: `p99.9` fires 160 alerts and catches 60% of anomalies; `p99.5` fires 578 and would need three analysts to catch 78%. F1 would nominate `p99.99` (45 alerts, 35% recall), which under-uses the team you already have. **The alert budget is a hard capacity constraint and it selects the row — the metric only tells you what that row costs.**
+
+**Why the quantile is recomputed on a *clean* reference set.** If you fit the quantile on live traffic that already contains anomalies, the anomalies inflate the upper tail and push the threshold up, which suppresses the very alerts you want — a detector that quietly desensitizes itself in proportion to how bad the problem gets. On the `p99.9` row that is the difference between catching 60 anomalies and catching almost none during a real incident.
+
 ### 6.3 LOF from scratch (then sklearn)
 
 ```python
@@ -444,6 +542,83 @@ def gmm_anomalies(X_normal: np.ndarray, X: np.ndarray, k: int = 4,
 ```
 
 Mahalanobis assumes a single Gaussian; GMM generalizes to multimodal normal behavior (several distinct regimes). Both give a *probabilistic* score you can threshold with a real statistical meaning, unlike Isolation Forest's arbitrary scale.
+
+#### Decoding `D²(x) = (x-μ)ᵀ Σ⁻¹ (x-μ)`
+
+**What this actually says.** "Measure the distance from the center, but first ask the data how surprising a step in each direction really is — moving *along* the trend the features normally follow is cheap; moving *against* it is expensive."
+
+Euclidean distance treats every direction as equally suspicious. Mahalanobis re-weights directions by the inverse covariance, so it flags points that violate the *correlation structure* even when every individual feature looks perfectly ordinary. That is precisely the fraud/failure signature that per-feature z-scores cannot see.
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | The point being scored, as a column of feature values |
+| `μ` | Mean of the normal data — the center of the cloud |
+| `(x - μ)` | The offset from center. Raw, still in feature units |
+| `Σ` | Covariance matrix. Diagonal = per-feature variance; off-diagonal = how features move together |
+| `Σ⁻¹` | The inverse. This is the re-weighting: it *penalizes* directions the data rarely moves in |
+| `ᵀ` | Transpose — makes the row-times-matrix-times-column collapse to one number |
+| `D²` | A single squared distance in "standard deviations, correlation-aware" units |
+| `d` | Number of features; the degrees of freedom of the χ² threshold |
+
+**Walk one example in 2-D.** Two features on a spend model: `x₁ = monthly_spend` and `x₂ = transaction_count`, strongly correlated (people who spend more transact more).
+
+```
+  mu    = (100, 50)
+  sd    = (20, 10)          rho = 0.9
+
+  Sigma = [ 20^2          0.9 x 20 x 10 ]  =  [ 400   180 ]
+          [ 0.9 x 20 x 10        10^2   ]     [ 180   100 ]
+
+  det(Sigma) = 400 x 100 - 180 x 180 = 40000 - 32400 = 7600
+
+  Sigma^-1 = (1 / 7600) x [  100   -180 ]
+                          [ -180    400 ]
+```
+
+Now score two customers who are **equally far out on every individual feature** — both are exactly `+2` standard deviations on one axis and `2` on the other:
+
+```
+  customer A = (140, 70)   ->  d = (+40, +20)   per-axis z = (+2.0, +2.0)
+  customer B = (140, 30)   ->  d = (+40, -20)   per-axis z = (+2.0, -2.0)
+
+  A naive per-feature z-score check sees these as IDENTICAL:
+      both are 2 sd out on spend, both are 2 sd out on count,
+      Euclidean distance in z-space = sqrt(2^2 + 2^2) = 2.828 for BOTH.
+```
+
+Expand `D² = (1/7600) x [ 100·dx² - 360·dx·dy + 400·dy² ]` for each:
+
+```
+  customer A:  dx = +40, dy = +20
+      100 x 1600 / 7600  =  +21.0526
+     -360 x  800 / 7600  =  -37.8947        <- the cross term REWARDS moving on-trend
+      400 x  400 / 7600  =  +21.0526
+                            --------
+                     D2 =     4.2105        D = 2.05
+
+  customer B:  dx = +40, dy = -20
+      100 x 1600 / 7600  =  +21.0526
+     -360 x -800 / 7600  =  +37.8947        <- same term, now a PENALTY
+      400 x  400 / 7600  =  +21.0526
+                            --------
+                     D2 =    80.0000        D = 8.94
+```
+
+Identical inputs by every per-feature measure; `D²` differs by **19x**. Apply the χ² threshold the code uses (`df = 2`):
+
+```
+  chi2(0.999, df=2) = 13.816
+
+  customer A:  D2 =  4.21  <  13.816   ->  NORMAL   (big spender, transacts a lot -- consistent)
+  customer B:  D2 = 80.00  >>  13.816  ->  ANOMALY  (spends like a whale, barely any
+                                                      transactions -- a few huge charges)
+```
+
+Customer B is the textbook card-testing / account-takeover shape, and a per-feature `|z| > 3` rule never fires on it — neither feature is even at 3. **The whole value of Mahalanobis is that middle cross term.** Set `rho = 0` and `Σ` becomes diagonal, the cross term vanishes, and `D²` collapses to the plain sum of squared z-scores (`4 + 4 = 8` for both customers) — i.e. Mahalanobis degenerates exactly into the naive check it was supposed to beat.
+
+**Why the threshold is χ² and not a made-up constant.** If the normal data really is Gaussian, `D²` of a normal point follows a χ² distribution with `d` degrees of freedom by construction — so `chi2.ppf(0.999, d)` is a genuine "0.1% of normal points exceed this" bar, the same contract as the reference quantile in §6.2 but derived analytically instead of empirically. Note it scales with `d`: `13.82` at 2 features, and it keeps climbing as you add features, which is why you cannot carry a threshold across a feature-set change.
+
+**And why `MinCovDet` rather than `np.cov`.** `μ` and `Σ` are estimated from data that contains the outliers you are hunting. A handful of extreme points inflates `Σ`, the inverse shrinks, and every `D²` gets smaller — the outliers mask themselves. In the example above, a few B-shaped customers in the training data would drag `rho` down toward 0 and, as just shown, that is the setting where the method stops working at all.
 
 ### 6.7 Extreme Value Theory / Peaks-Over-Threshold (net-new)
 

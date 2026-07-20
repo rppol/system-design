@@ -33,6 +33,104 @@ h_v^(l) = UPDATE(h_v^(l-1), m_v^(l))
 
 Where MSG is a message function (often a linear transform), AGGREGATE is permutation-invariant (sum, mean, max), and UPDATE is typically an MLP or GRU.
 
+**Read it like this.** "Every node writes a note about itself, mails a copy to each neighbor, then rewrites its own state from the pile of notes it received plus what it already knew."
+
+The two lines are separate on purpose, because they are the only two things a GNN layer ever does. GCN, GraphSAGE, GAT and GIN differ only in which MSG and which AGGREGATE they plug in — the skeleton never changes, which is exactly the claim made in the Key insight above.
+
+| Symbol | What it is |
+|---|---|
+| `h_v^(l)` | Node v's embedding after l rounds. `h_v^(0)` is its raw input feature row from X |
+| `N(v)` | Neighbor set of v — every node with an edge to v |
+| `MSG(...)` | What u sends to v. Usually just `W h_u`, optionally conditioned on the edge |
+| `AGGREGATE` | Pools an unordered bag of messages into one vector. Must be order-blind |
+| `m_v^(l)` | The pooled neighborhood summary for v in this round |
+| `UPDATE` | Folds that summary back into v's own state. MLP, GRU, or a plain weighted sum |
+| `e_uv` | Edge features (bond type, relation, weight) when the graph carries them |
+| `{...}` | A multiset, not a set — duplicates count, which is why sum and mean differ |
+
+**Walk one example on a real graph.** Fix a concrete 5-node graph and push it through two GCN-style rounds by hand. Every later formula in this file is decoded against this same graph.
+
+```
+  The graph -- undirected, 5 nodes, 5 edges
+
+       1                 edges:  0-1, 0-2, 0-3, 2-3, 3-4
+       |
+       0 ---- 2          deg:    n0=3  n1=1  n2=2  n3=3  n4=1
+       |      |
+       3 -----+          with self-loops (A_hat = A + I) the degrees become
+       |
+       4                 d_hat:  n0=4  n1=2  n2=3  n3=4  n4=2
+
+  Adjacency A                    Input features X  (d_in = 2)
+
+        0  1  2  3  4              x_0 = [2, 0]
+    0 [ 0  1  1  1  0 ]            x_1 = [0, 4]
+    1 [ 1  0  0  0  0 ]            x_2 = [4, 2]
+    2 [ 1  0  0  1  0 ]            x_3 = [1, 1]
+    3 [ 1  0  1  0  1 ]            x_4 = [0, 2]
+    4 [ 0  0  0  1  0 ]
+
+  Nodes 0 and 3 are the hubs (degree 3). Nodes 1 and 4 are leaves (degree 1).
+```
+
+Round one. Set `W` to the identity and skip the ReLU, so nothing but the neighborhood mixing is visible in the numbers:
+
+```
+  Layer 1 = A_norm X,  where  A_norm[i][j] = 1 / sqrt(d_hat_i * d_hat_j)
+                              for every j in N(i) and for j = i itself
+
+  node 0  (neighbors 1, 2, 3, plus itself; d_hat_0 = 4)
+
+    coefficient to itself : 1/sqrt(4*4) = 0.2500
+    coefficient to node 1 : 1/sqrt(4*2) = 0.3536
+    coefficient to node 2 : 1/sqrt(4*3) = 0.2887
+    coefficient to node 3 : 1/sqrt(4*4) = 0.2500
+
+    h_0^(1) = 0.2500*[2,0] + 0.3536*[0,4] + 0.2887*[4,2] + 0.2500*[1,1]
+
+            = [0.5000, 0.0000]
+            + [0.0000, 1.4142]
+            + [1.1547, 0.5774]
+            + [0.2500, 0.2500]
+            -------------------
+            = [1.9047, 2.2416]
+
+  node 1  (a leaf -- its only neighbor is node 0; d_hat_1 = 2)
+
+    h_1^(1) = 1/sqrt(2*2) * [0,4]  +  1/sqrt(2*4) * [2,0]
+            = 0.5000*[0,4] + 0.3536*[2,0]
+            = [0.0000, 2.0000] + [0.7071, 0.0000]
+            = [0.7071, 2.0000]
+
+  all five after layer 1
+
+    h_0 = [1.9047, 2.2416]    h_1 = [0.7071, 2.0000]    h_2 = [2.1994, 0.9553]
+    h_3 = [1.9047, 1.5345]    h_4 = [0.3536, 1.3536]
+```
+
+Round two runs the identical coefficients over the layer-1 vectors:
+
+```
+  Layer 2 = A_norm H^(1)
+
+  node 1 again -- it still only touches node 0 directly
+
+    h_1^(2) = 0.5000*[0.7071, 2.0000] + 0.3536*[1.9047, 2.2416]
+            = [0.3536, 1.0000] + [0.6734, 0.7925]
+            = [1.0270, 1.7925]
+
+  all five after layer 2
+
+    h_0 = [1.8373, 1.9269]    h_1 = [1.0270, 1.7925]    h_2 = [1.8328, 1.4085]
+    h_3 = [1.7123, 1.6983]    h_4 = [0.8502, 1.2193]
+
+  Node 1 has no edge to node 2 or node 3. But node 0's layer-1 vector already
+  contained them, so node 1's layer-2 vector is a 2-hop summary reached purely
+  by relaying. L layers = an L-hop receptive field. That is the whole mechanism.
+```
+
+Notice what else happened between the two tables: at layer 0 the five feature rows are wildly different, at layer 1 they already sit in a narrower band, and at layer 2 they are closer still. That drift is over-smoothing, quantified in Section 8.
+
 **Graph representation:** an undirected graph with N nodes is represented as:
 - Node feature matrix X of shape (N, d_in)
 - Adjacency matrix A of shape (N, N), often sparse
@@ -64,8 +162,81 @@ H^(l+1) = sigma(D_hat^(-1/2) A_hat D_hat^(-1/2) H^(l) W^(l))
 ```
 Spectral interpretation: this is a localized first-order approximation of spectral graph convolution. The symmetric normalization prevents scale explosion for high-degree nodes.
 
+**What the formula is telling you.** "Average every neighbor's features into your own — but discount each edge by how popular both of its endpoints are — then push the result through one learned matrix and a nonlinearity."
+
+Read entry-by-entry, the whole `D_hat^(-1/2) A_hat D_hat^(-1/2)` sandwich collapses to a single scalar per edge: `1 / sqrt(d_hat_i * d_hat_j)`. That is all the matrix notation is hiding.
+
+| Symbol | What it is |
+|---|---|
+| `H^(l)` | The `N x d` stack of all node embeddings at layer l. `H^(0) = X` |
+| `A_hat = A + I` | Adjacency with self-loops, so a node keeps some of its own signal |
+| `D_hat` | Diagonal degree matrix of `A_hat`. `D_hat_ii = d_hat_i` = degree of i plus 1 |
+| `D_hat^(-1/2)` | Same diagonal, each entry replaced by `1/sqrt(d_hat_i)` |
+| `D_hat^(-1/2) A_hat D_hat^(-1/2)` | The fixed, untrainable mixing matrix. One weight per edge: `1/sqrt(d_hat_i * d_hat_j)` |
+| `W^(l)` | The only trainable thing in the layer — a `d_in x d_out` projection, shared by every node |
+| `sigma` | Elementwise nonlinearity, ReLU in the reference implementation |
+
+**Why the square root shows up twice.** Each edge gets discounted once for the sender's popularity and once for the receiver's. A message from a well-connected node is worth less because that node shouts at everybody; a message *into* a well-connected node is worth less because that node is already listening to everybody. Row normalization `D^-1 A` only applies the second discount, which is precisely the asymmetry called out in the Section 12 answer on this topic.
+
+**Walk one example — what breaks without it.** Run the same 5-node graph three ways and watch the per-node embedding magnitude `||h||`:
+
+```
+                 plain sum A_hat H       symmetric D^-1/2 A_hat D^-1/2 H
+  input X        n0 2.00  n1 4.00        n0 2.00   n1 4.00
+  after L = 1    n0 9.90  n1 4.47        n0 2.94   n1 2.12
+  after L = 2    n0 29.83 n1 14.21       n0 2.66   n1 2.07
+  after L = 3    n0 97.95 n1 43.86       n0 2.64   n1 1.96
+  after L = 4    n0 320.99 n1 141.77     n0 2.60   n1 1.91
+  after L = 8    n0 37967 n1 16504       n0 2.55   n1 1.82
+
+  Unnormalized magnitudes grow ~3.30x per layer. That factor is not arbitrary:
+  it is the largest eigenvalue of A_hat for this graph (3.3028). Eight layers
+  of it takes a feature of size 2 to roughly 38,000.
+
+  The normalized column stays inside [1.8, 2.9] forever, because the same
+  sandwich caps the largest eigenvalue of A_norm at exactly 1.0.
+```
+
+The hub-domination half of the story is visible in the layer-1 row. Under plain summation, hub node 0 (degree 3) lands at magnitude 9.90 while leaf node 1 sits at 4.47 — a 2.2x gap created by topology alone, before a single weight is learned. Stack that and any downstream classifier reads "high degree" as the dominant feature and ignores the actual node content; in a fraud graph that means every account that merely transacts a lot looks like every other account that transacts a lot. Symmetric normalization compresses the same gap to 2.94 versus 2.12 (1.4x) and holds it there.
+
 **GraphSAGE (Hamilton 2017):**
 Sample k neighbors per node (k=25 for hop-1, k=10 for hop-2 in the original paper). Concat own embedding with aggregated neighbor embedding, then apply linear + nonlinearity. Enables mini-batch training on billion-node graphs.
+
+**In plain terms.** "Do not look at all your neighbors — look at a fixed random sample of them, so the amount of work per node is a constant you choose rather than a number the graph chooses for you."
+
+| Symbol | What it is |
+|---|---|
+| `k` (fanout) | How many neighbors to sample at one hop. `25` at hop-1, `10` at hop-2 in the paper |
+| `L` | Number of layers, which equals the number of hops sampled |
+| `k^L` | Worst-case nodes pulled in per seed node — the `O(k^L * d)` in the Section 8 cost table |
+| `B` | Mini-batch size (seed nodes per step); `1024` in the training code in Section 6 |
+| concat | `[h_v \|\| h_N(v)]` — self and neighborhood kept separate, then projected together |
+
+**Walk the fanout arithmetic.** The product is the entire point:
+
+```
+  fanout [25, 10], one seed node
+
+    hop-1 sampled        =  25
+    hop-2 sampled        =  25 x 10   =  250
+    plus the seed itself =   1
+                            ----------------
+    subgraph per seed    = 276 nodes, ALWAYS -- independent of graph size
+
+  a full batch: 1024 seeds x 276 = 282,624 nodes touched per step
+
+  add a third layer, fanout [25, 10, 10]
+    25  +  250  +  2,500  =  2,775 nodes per seed
+
+  compare against NOT sampling, on graphs of different average degree D
+
+    D    2-hop full (D + D^2)   3-hop full (D + D^2 + D^3)   sampled 3-hop
+    10          110                     1,110                    2,775
+    50        2,550                   127,550                    2,775
+   100       10,100                 1,010,100                    2,775
+```
+
+The table shows exactly when sampling starts paying: on a sparse graph (`D = 10`) sampling is *more* work than just taking every neighbor, and the fanout should be lowered or dropped. At `D = 100` the same three layers cost 364x less than the exact computation, and — more importantly — the cost is a constant, so a mini-batch fits in fixed GPU memory no matter how large the graph grows. That constant is what makes the PinSage 3-billion-node graph in Section 7 trainable at all. It is also why GraphSAGE is inductive: nothing in `[25, 10]` refers to a specific node id, so an unseen node gets an embedding the moment it has neighbors.
 
 **GAT (Velickovic 2018):**
 ```
@@ -74,11 +245,98 @@ h_i^(l+1) = sigma(sum_j alpha_ij W h_j)
 ```
 Multi-head attention (K=8 heads typical) stabilizes training. Concatenate heads in hidden layers, average at final layer.
 
+**Put simply.** "Score how much node i should care about each neighbor j, force those scores to add to 1, then take that weighted average instead of GCN's fixed degree-based one."
+
+GCN's edge weight `1/sqrt(d_hat_i * d_hat_j)` is decided by topology before training starts. GAT's `alpha_ij` is decided by the *features* of the two endpoints, so it is learned and changes per input.
+
+| Symbol | What it is |
+|---|---|
+| `W h_i` | Neighbor and center both projected into the same space first. Call it `z_i` |
+| `[W h_i \|\| W h_j]` | Concatenation of the two projected vectors — a `2d`-long description of the edge |
+| `a` | A single learned vector that scores that edge description. Splits into `a_l` and `a_r` |
+| `LeakyReLU` | Slope `0.2` for negatives. Keeps a small gradient alive on down-weighted edges |
+| `e_ij` | The raw, unnormalized score for edge j -> i |
+| `softmax_j` | Normalizes over j in N(i) only, so each node's incoming weights sum to 1 |
+| `alpha_ij` | The final attention coefficient. In `[0, 1]`, row sums to exactly 1 |
+| `K` | Number of independent heads (8 typical). Concat in hidden layers, average at the output |
+
+**Walk one example.** Node 0 from the graph above, attending over itself and neighbors 1, 2, 3. Take `W = [[1, 0], [0, 2]]` and `a = [a_l ; a_r]` with `a_l = [0.5, 0.5]`, `a_r = [1.0, -1.0]`:
+
+```
+  project:   z_j = W h_j
+
+    h_0 = [1.0, 0.5]  ->  z_0 = [1.0, 1.0]
+    h_1 = [0.2, 0.9]  ->  z_1 = [0.2, 1.8]
+    h_2 = [0.8, 0.2]  ->  z_2 = [0.8, 0.4]
+    h_3 = [0.1, 0.1]  ->  z_3 = [0.1, 0.2]
+
+  score:  e_0j = LeakyReLU( a_l . z_0  +  a_r . z_j ),   a_l . z_0 = 1.0 for all j
+
+         a_r . z_j     raw sum        LeakyReLU(0.2)
+    j=0     0.0          1.0               1.00
+    j=1    -1.6         -0.6              -0.12    <- negative, slope 0.2 kicks in
+    j=2     0.4          1.4               1.40
+    j=3    -0.1          0.9               0.90
+
+  normalize:  alpha_0j = exp(e_0j) / sum_k exp(e_0k)
+
+    exp(1.00) = 2.7183      alpha_00 = 2.7183 / 10.1200 = 0.2686
+    exp(-0.12) = 0.8869     alpha_01 = 0.8869 / 10.1200 = 0.0876
+    exp(1.40) = 4.0552      alpha_02 = 4.0552 / 10.1200 = 0.4007
+    exp(0.90) = 2.4596      alpha_03 = 2.4596 / 10.1200 = 0.2430
+                 -------                                 ------
+                 10.1200                                 1.0000
+
+  output:  h_0' = 0.2686*z_0 + 0.0876*z_1 + 0.4007*z_2 + 0.2430*z_3
+                = [0.6310, 0.6353]
+
+  what GCN would have done with the SAME neighborhood (d_hat: 4, 2, 3, 4)
+
+    weights  0.2500,  0.3536,  0.2887,  0.2500   <- fixed by degree, sum = 1.1422
+    output   [0.5767, 1.0519]
+```
+
+Read the two weight rows against each other and the difference is the entire GAT pitch. GCN hands neighbor 1 the *largest* weight (0.3536) purely because it is a low-degree leaf. GAT hands it the *smallest* (0.0876) because its features scored badly, and reallocates that mass to neighbor 2 (0.4007). On a homophilous graph the two mostly agree and GAT buys little; on the heterophilous fraud graphs in Section 8, where a fraudster deliberately attaches to legitimate low-degree accounts, GCN's degree weighting actively amplifies the camouflage while GAT can learn to mute it.
+
+One more contrast worth noting: GAT's coefficients sum to exactly `1.0000` while GCN's sum to `1.1422`. GAT is a true convex average and cannot change a vector's scale; GCN's row sums drift with local degree structure, which is one of the smaller reasons it needs the symmetric sandwich to stay numerically calm.
+
 **GIN (Xu 2019):**
 ```
 h_v^(l+1) = MLP((1 + epsilon) * h_v^(l) + sum_{u in N(v)} h_u^(l))
 ```
 Epsilon is a learnable scalar or fixed to 0. Sum aggregation (not mean/max) is critical for injectivity. Theoretically the most expressive standard GNN.
+
+**The idea behind it.** "Add your neighbors up — do not average them — keep your own vector on a separate, tunable dial, and let an MLP decide what the combination means."
+
+| Symbol | What it is |
+|---|---|
+| `sum_{u in N(v)}` | Plain summation over neighbors. The count of neighbors survives into the output |
+| `(1 + epsilon)` | The dial on the node's own contribution relative to the neighbor pile |
+| `epsilon` | Learnable scalar (`train_eps=True` in the Section 6 code) or pinned to `0` |
+| `MLP` | A universal approximator applied after aggregation — needed for the injectivity proof |
+| injective | Distinct input multisets must produce distinct outputs. Sum is; mean and max are not |
+
+**Walk one example.** Take the graph above with every node carrying the identical one-hot feature `[1, 0]` — the normal situation in a molecular graph where every atom is the same element. Node 0 has 3 neighbors, node 2 has 2:
+
+```
+  pre-MLP aggregate, epsilon = 0
+
+    SUM      node 0 : (1+0)*[1,0] + ([1,0]+[1,0]+[1,0]) = [4, 0]
+             node 2 : (1+0)*[1,0] + ([1,0]+[1,0])       = [3, 0]
+             -> different vectors. Degree survived. Distinguishable.
+
+    MEAN     node 0 : [1,0] + mean([1,0],[1,0],[1,0])   = [2, 0]
+             node 2 : [1,0] + mean([1,0],[1,0])         = [2, 0]
+             -> IDENTICAL. The 3-vs-2 neighbor count was divided away.
+
+    MAX      node 0 : [1,0] + max([1,0],[1,0],[1,0])    = [2, 0]
+             node 2 : [1,0] + max([1,0],[1,0])          = [2, 0]
+             -> IDENTICAL. Max sees "a [1,0] was present", never how many.
+```
+
+No MLP downstream can recover a distinction that was destroyed at aggregation time, which is why the choice of AGGREGATE — not the depth or the width — is what caps a GNN's expressivity at the 1-WL test. This is also the mechanism behind Pitfall 3 in Section 10: the team's 3-ring and 6-ring molecules collapsed to the same embedding for exactly the reason the MEAN row above collapses, and swapping to sum aggregation is the one-line fix.
+
+Why `epsilon` exists: with `epsilon = 0` the node's own vector is just one more term in the sum, indistinguishable from having one extra neighbor that happens to look like you. A learnable `epsilon` lets the model scale self versus neighborhood independently, which is what makes the mapping provably injective over multisets rather than merely usually injective.
 
 ---
 
@@ -499,6 +757,48 @@ Road network as directed graph. Node = road segment, edge = connectivity. Diffus
 | Memory | O(N*d) | O(B*k^L) mini-batch | O(N*d + E*K) | O(N*d) |
 
 **Oversmoothing vs. depth:** adding more layers hurts after L=2–4 on most benchmarks. Deep GNNs push node representations toward the graph's dominant eigenvector, destroying discriminative information.
+
+**Stated plainly.** "Repeated averaging is repeated averaging. Run it enough times and every node holds the same answer, so the layer that was supposed to add context has erased the node instead."
+
+| Symbol | What it is |
+|---|---|
+| `A_norm^L` | Applying the GCN mixing matrix L times — what an L-layer GCN does to features |
+| dominant eigenvector | The one direction `A_norm` does not shrink. Here it is proportional to `sqrt(d_hat)` |
+| eigenvalue gap | How fast every other direction dies. Small gap = collapse arrives in fewer layers |
+| pairwise distance | Mean Euclidean distance between all `5*4/2 = 10` node pairs. Measures spread |
+| pairwise cosine | Mean cosine similarity over the same 10 pairs. Measures *direction* collapse |
+
+**Walk it layer by layer.** The same 5-node graph and features from Section 3, propagated with no weights and no nonlinearity so the collapse is not confounded by training:
+
+```
+   L    mean pairwise distance    mean pairwise cosine    min pairwise cosine
+   0            2.9754                  0.5859                  0.0000
+   1            1.2979                  0.8629                  0.6173
+   2            0.7300                  0.9759                  0.9229
+   3            0.5671                  0.9949                  0.9824
+   4            0.5041                  0.9988                  0.9956
+   6            0.4669                  0.9999                  0.9996
+   8            0.4549                  1.0000                  0.9999
+
+  Layer 1 alone erases 56% of the original spread (2.9754 -> 1.2979).
+  Layer 2 erases 44% of what was left. By layer 6 the most-dissimilar pair in
+  the entire graph has cosine 0.9996 -- matching the ">0.99 after layer 6"
+  figure reported in Pitfall 4 of Section 10.
+```
+
+Read the two right-hand columns together, because they say different things. Distance plateaus near `0.45` rather than reaching zero — the embeddings do not literally become one point. Cosine, meanwhile, goes to `1.0000`: every node ends up pointing in the *same direction* and differs only in length. That surviving length is not information the model can use, because it is fully determined by topology:
+
+```
+  ||h_i|| at layer 8, expressed as a ratio to node 0
+
+    n0  1.0000     n1  0.7136     n2  0.8614     n3  0.9891     n4  0.6926
+
+  sqrt(d_hat_i) as a ratio to node 0
+
+    n0  1.0000     n1  0.7071     n2  0.8660     n3  1.0000     n4  0.7071
+```
+
+The two rows agree to about two decimals, and they converge exactly because `sqrt(d_hat)` *is* the dominant eigenvector of `A_norm` (its eigenvalue is exactly `1.0`; the next largest here is `0.683`). Every component of the input along the other four eigenvectors is multiplied by at most `0.683` per layer — `0.683^8 = 0.047`, so 95% of the discriminative signal is gone after eight rounds. A deep GCN therefore does not learn a richer representation of a node; it converges to a scaled copy of the node's own degree, which is a feature you could have computed with one line of NetworkX. That is the precise reason the fixes in Pitfall 4 — residual connections, GCNII's initial residual, and Jumping Knowledge — all work by re-injecting `H^(0)`, deliberately reintroducing the components that repeated averaging keeps annihilating.
 
 **Heterophily:** GCN assumes similar nodes connect (homophily). Social networks of friends satisfy this; fraud graphs do not (fraudsters connect to legitimate nodes). Use GAT or heterophily-specific models (H2GCN, FAGCN) when homophily ratio < 0.3.
 

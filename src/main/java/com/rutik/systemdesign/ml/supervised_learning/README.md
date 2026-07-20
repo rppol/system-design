@@ -41,12 +41,70 @@ Key insight: the quality of supervision (label accuracy, label coverage) often m
 h* = argmin_h (1/n) * sum_i L(h(x_i), y_i)
 ```
 
+**What this actually says.** "Out of every function your model class can express, keep the one whose average mistake on the data you actually have is smallest."
+
+The word *empirical* is the entire caveat: you are minimizing error on a sample, not on reality. Everything else in this module — validation splits, regularization, the bias-variance tradeoff — exists because that substitution is only an approximation.
+
+| Symbol | What it is |
+|--------|------------|
+| `h` | One candidate function from the hypothesis space H; `h*` is the winner |
+| `argmin_h` | "the h that makes the following smallest" — returns the function, not the number |
+| `n` | Number of training examples |
+| `L(h(x_i), y_i)` | Loss on example `i`: how wrong the prediction was versus the true label |
+| `(1/n) * sum_i` | Plain average of that loss over all `n` examples — the *empirical* risk |
+
+**Walk one example.** Four training points, squared loss `L = (prediction - label)^2`:
+
+```
+                label y   model A pred   sq. error   model B pred   sq. error
+  sample 1        3.0         2.5          0.25          3.2          0.04
+  sample 2        5.0         5.5          0.25          4.6          0.16
+  sample 3        2.0         3.0          1.00          2.4          0.16
+  sample 4        6.0         5.0          1.00          5.4          0.36
+                                          ------                     ------
+  sum of losses                            2.50                       0.72
+  empirical risk = sum / n = 2.50 / 4  =   0.625     0.72 / 4     =   0.18
+
+  ERM picks model B: 0.18 < 0.625.
+```
+
+Note what ERM did *not* check: whether model B is simply flexible enough to have traced the noise. On these four points it wins outright, and only a held-out set can tell you if that win survives. That gap is exactly what the next principle quantifies.
+
 **Generalization**: the true goal is low loss on unseen data (test set), not just on training data.
 
 **Bias-Variance Tradeoff**:
 - High bias (underfitting): model too simple to capture the true pattern
 - High variance (overfitting): model memorizes noise in training data
 - Target: balance that minimizes total error = Bias^2 + Variance + Irreducible Noise
+
+**Read it like this.** "Your test error is three separate things added together: how wrong your model class is on average, how much your model jitters when the training data changes, and a floor you can never get under."
+
+The decomposition matters because the three terms respond to *opposite* interventions. Adding capacity cuts Bias^2 and raises Variance; adding data or averaging cuts Variance and leaves Bias^2 alone; nothing at all touches the noise floor. Diagnose which term dominates before you pick a fix, or you will make the error worse.
+
+| Symbol | What it is |
+|--------|------------|
+| `Bias^2` | Squared gap between the average prediction of your model class and the truth — the systematic error you get even with infinite data |
+| `Variance` | How much predictions swing if you retrain on a different sample of the same size — the instability term |
+| `Irreducible Noise` | Label noise and unmeasured causes. Fixed by the data-generating process; no model reduces it |
+| `total error` | Expected squared error on unseen data — the only number you actually care about |
+| `^2` on bias only | Bias is squared so it lives in the same (squared-error) units as variance and can be summed |
+
+**Walk one example.** Same three curves the chart in Section 5.2 plots, read at three complexity settings with the noise floor held at 5:
+
+```
+                       Bias^2   Variance   Noise   Total = B^2 + Var + Noise
+  underfit    (c = 1)     40        2        5       40 +  2 + 5  =  47
+  just-right  (c = 4)      9        9        5        9 +  9 + 5  =  23
+  overfit     (c = 7)      2       40        5        2 + 40 + 5  =  47
+
+  Bias^2 fell 40 -> 2   (a 20x drop -- the model got far more expressive)
+  Variance rose 2 -> 40 (the same 20x, in the opposite direction)
+  Total traced a U: 47 -> 23 -> 47. Best and worst differ by 24 points.
+```
+
+The two endpoints score an identical 47 for completely different reasons, which is why a single test number never tells you what to do next. At `c = 1` the fix is more capacity; at `c = 7` the fix is more data or regularization; applying either fix to the wrong end moves you further up the U.
+
+**Why the noise term is in the formula at all.** It is a constant 5 in all three rows, so it never changes the ranking — but it sets the floor. A model at `c = 4` scoring 23 is only 18 points above the best any model could ever do. Teams that forget the floor exists burn quarters chasing an error of 0 that the labels make unreachable, and the usual symptom is a "breakthrough" that turns out to be leakage.
 
 **No Free Lunch Theorem**: no single algorithm is best across all problems. Algorithm selection must be guided by domain knowledge and empirical validation.
 
@@ -70,6 +128,37 @@ h* = argmin_h (1/n) * sum_i L(h(x_i), y_i)
 | Naive Bayes | Classification | Feature conditional independence | O(nd) | O(d) |
 
 n = number of samples, d = number of features, iter = number of iterations, n_sv = number of support vectors
+
+**Put simply.** "Each entry says which quantity — rows, features, or iterations — the cost is chained to, and how badly it bites when that quantity grows."
+
+Big-O here is a shopping guide, not a benchmark. The point is that two algorithms with identical accuracy can sit four orders of magnitude apart in training cost, and the exponent on `n` is what decides whether a method survives contact with your dataset.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Training rows. The dimension that grows without your permission |
+| `d` | Features per row. Usually under your control via selection |
+| `O(nd^2)` | Linear in rows, *quadratic* in features — the closed-form normal equation, fine until `d` is large |
+| `O(n^2)` to `O(n^3)` | Quadratic-to-cubic in rows. SVM's kernel matrix is `n x n`, which is why the table calls it slow past 10k rows |
+| `O(nd log n)` | The `log n` is the sort needed to find split points per feature — near-linear, hence trees scale |
+| `O(1)` (lazy) | k-NN does no training at all; it just stores the data and defers all work to query time |
+| `O(n_sv * d)` | SVM inference touches only the support vectors, not all `n` rows. `n_sv` is typically a small fraction of `n` |
+
+**Walk one example.** Put `n = 100,000` rows and `d = 20` features through the training column, counting elementary operations:
+
+```
+  Linear Regression   n * d^2          = 100,000 x 400          =      40,000,000
+  Logistic Regression n * d * iter     = 100,000 x 20 x 200     =     400,000,000
+  Decision Tree       n * d * log2(n)  = 100,000 x 20 x 16.61   =      33,219,281
+  SVM (lower bound)   n^2              = 100,000^2              =  10,000,000,000
+  SVM (upper bound)   n^3              = 100,000^3              = 1e15 operations
+  k-NN                (nothing)        = 0                      =               0
+
+  SVM's lower bound alone is 250x the linear-regression cost; its upper bound
+  is roughly 30 million times larger. That single gap is the whole "<100k rows"
+  guidance in Section 9.
+```
+
+**Where k-NN's free lunch gets billed.** Training costs zero, but inference is `O(nd)` — `100,000 x 20 = 2,000,000` operations *per query*. At 1,000 queries per second that is 2 billion operations per second of steady load, against `O(d) = 20` for logistic regression. k-NN does not avoid the work; it moves the entire bill from a one-time training job onto every request you will ever serve.
 
 ### 4.2 Parametric vs Non-Parametric
 
@@ -147,6 +236,35 @@ Three curves: Bias² (falling — complex models underfit less), Variance (risin
 models memorize noise), and Total error = Bias² + Variance + irreducible noise (U-shaped).
 Generalization is best at the sweet spot near complexity 4 where the sum is minimized, not at
 either extreme.
+
+**What the formula is telling you.** "The third curve is not measured independently — it is literally the other two added together plus a constant, which is why it has to bend."
+
+Reading the chart as three unrelated trends misses the mechanism. The U is not an empirical observation about model behaviour; it is arithmetic. Any time one term falls faster than another rises, the sum drops, and the minimum sits exactly where the two rates of change cancel.
+
+| Symbol | What it is |
+|--------|------------|
+| x-axis `1..7` | Model complexity — tree depth, polynomial degree, parameter count. Higher = more expressive |
+| Falling line | `Bias^2`, from 40 down to 2. Expressiveness buys away systematic error |
+| Rising line | `Variance`, from 2 up to 40. Expressiveness buys instability at nearly the same rate |
+| U-shaped line | The sum, plus a constant noise floor of 5. Never lower than either component |
+| The minimum | Complexity 4, where the two component curves cross at 9 apiece |
+
+**Walk one example.** Every plotted point, summed left to right:
+
+```
+  complexity     1     2     3     4     5     6     7
+  Bias^2        40    25    15     9     5     3     2
+  Variance       2     3     5     9    16    26    40
+  Noise          5     5     5     5     5     5     5
+                --    --    --    --    --    --    --
+  Total         47    33    25    23    26    34    47
+
+  step 1 -> 2 : bias -15, variance +1  -> total -14   (worth it, keep going)
+  step 3 -> 4 : bias  -6, variance +4  -> total  -2   (gains thinning out)
+  step 4 -> 5 : bias  -4, variance +7  -> total  +3   (you have gone too far)
+```
+
+The turn happens between steps 4 and 5, the moment the variance increase first exceeds the bias decrease. Note that the crossing point of the two component curves (both 9 at complexity 4) coincides with the minimum here — that is a property of these particular numbers, not a general law, and treating "bias equals variance" as the stopping rule is a common interview trap. The rule that always holds is the marginal one: stop when the next unit of complexity costs more variance than it refunds in bias.
 
 ### 5.3 Decision Boundary Shapes by Algorithm
 
@@ -474,6 +592,45 @@ LogisticRegression with the default max_iter=100 often fails to converge on real
 **Pitfall 4 — Not scaling before SVM or k-NN**
 SVM with RBF kernel computes Euclidean distances in feature space. A feature measured in dollars (range 0–100,000) dominates features measured as ratios (range 0–1). The SVM effectively ignores the ratio features. Fix: StandardScaler before every distance-based model.
 
+**Stated plainly.** "Euclidean distance adds up squared per-feature gaps, so a feature with a big numeric range contributes big squared gaps and silently decides every neighbour by itself."
+
+This is the pitfall that most deserves numbers, because the failure is invisible: the model trains, predicts, and reports a plausible score while effectively using one feature out of twenty. Scaling does not tune the model — it changes which points are neighbours at all.
+
+| Symbol | What it is |
+|--------|------------|
+| `x, y` | Two points being compared — a query and a candidate neighbour |
+| `(x_j - y_j)` | Gap on feature `j`, carried in that feature's own units (dollars, ratio, years) |
+| squared gap | Squaring makes the gap sign-free, and makes large gaps count disproportionately |
+| sum over `j` | Every feature contributes to one total — no per-feature weighting unless you add it |
+| square root | Returns the total to distance units. It is monotone, so it never changes the ranking |
+| z-score `(x - mean) / std` | What StandardScaler applies first, restating every feature in standard deviations so the gaps are comparable |
+
+**Walk one example.** A query transaction against two candidate neighbours, using the ranges the pitfall names — `amount` in dollars, plus a ratio on `0-1`. Feature statistics: amount mean 50,000 with std 20,000; ratio mean 0.50 with std 0.25.
+
+```
+                       amount ($)     ratio
+  query                  50,000        0.90
+  candidate A            50,100        0.10      (near in $, opposite in ratio)
+  candidate B            49,000        0.85      (far in $, nearly identical ratio)
+
+  UNSCALED Euclidean distance
+    A: sqrt( (50,000-50,100)^2 + (0.90-0.10)^2 ) = sqrt(10,000 + 0.64) = 100.003
+    B: sqrt( (50,000-49,000)^2 + (0.90-0.85)^2 ) = sqrt(1,000,000 + 0.0025) = 1000.000
+    -> nearest neighbour is A. The ratio contributed 0.64 out of 10,000.64,
+       which is 0.006% of A's distance. It may as well not be a feature.
+
+  SCALED (z-scores, same three points)
+    query        -> ( (50,000-50,000)/20,000 , (0.90-0.50)/0.25 ) = ( 0.000,  1.60)
+    candidate A  -> ( (50,100-50,000)/20,000 , (0.10-0.50)/0.25 ) = ( 0.005, -1.60)
+    candidate B  -> ( (49,000-50,000)/20,000 , (0.85-0.50)/0.25 ) = (-0.050,  1.40)
+
+    A: sqrt( 0.005^2 + 3.20^2 ) = sqrt(0.000025 + 10.2400) = 3.2000
+    B: sqrt( 0.050^2 + 0.20^2 ) = sqrt(0.002500 +  0.0400) = 0.2062
+    -> nearest neighbour is now B, and by a factor of 15.5x.
+```
+
+The nearest neighbour flipped from A to B on identical data with an identical metric. Nothing about the algorithm changed; only the units did. With `k = 5` as in the Section 6.1 pipeline, that flip propagates to the whole neighbourhood and therefore to the predicted label — which is why the pipeline puts `StandardScaler` ahead of `KNeighborsClassifier` and `SVC` but not ahead of `DecisionTreeClassifier`. Trees split one feature at a time and compare thresholds within a single column, so they never sum across units and never need the correction.
+
 **Pitfall 5 — Class imbalance hidden by accuracy**
 A model predicting rare adverse drug events (1% positive rate) achieved 99% accuracy by predicting "no event" for every sample. Recall on the positive class was 0%. Fix: use stratified splits, monitor F1 / AUC-ROC / recall, apply class_weight="balanced" or oversample with SMOTE.
 
@@ -789,6 +946,36 @@ final_auc = roc_auc_score(y_test, pipeline.predict_proba(X_test)[:, 1])
 | Training time (8 cores) | 4 min | 38 min |
 | Model size | 2 MB | 1.4 GB |
 | Fraud caught ($M/day) | 4.2 | 7.1 |
+
+**The idea behind it.** "The `FPR @ recall=0.85` row means: hold both models to catching the same 85% of fraud, then count how many innocent customers each one blocks to get there."
+
+Pinning recall first is what makes the comparison honest. Any model can drive false positives to zero by approving everything, so a false-positive rate quoted without the recall it was measured at is unfalsifiable — and that pairing is what the 0.3% requirement in the scenario is really constraining.
+
+| Symbol | What it is |
+|--------|------------|
+| recall `0.85` | Share of actual fraud the model flags. The bar both models are held to |
+| FPR | False positives divided by legitimate transactions — the customer-annoyance rate |
+| `@` | "measured at". Ties the FPR to one specific operating threshold, not the whole curve |
+| AUC-PR | Area under precision-recall, averaged over every threshold. Threshold-free summary |
+| precision | Of everything flagged, the fraction that is genuinely fraud — what the review queue feels |
+
+**Walk one example.** One million scored transactions at the scenario's 0.08% fraud rate:
+
+```
+  fraud present     1,000,000 x 0.0008  =        800
+  legitimate        1,000,000 - 800     =    999,200
+
+  caught at recall 0.85    800 x 0.85   =        680     (identical for both models)
+
+                        FPR      false positives         alerts    precision
+  LR baseline          1.8%   999,200 x 0.018 = 17,986   18,666      3.6%
+  BalancedRF + calib   0.27%  999,200 x 0.0027 = 2,698    3,378     20.1%
+
+  false positives removed: 17,986 - 2,698 = 15,288  (a 6.7x reduction)
+  precision moves 3.6% -> 20.1%: 1 real fraud per 28 alerts becomes 1 per 5.
+```
+
+**Why accuracy is absent from the table.** Approving all 1,000,000 transactions scores `999,200 / 1,000,000 = 99.92%` accuracy while catching zero fraud — the exact number the broken code in Pitfall 2 prints. Accuracy is not merely a weak metric at this class ratio; it actively rewards the do-nothing model over both real ones, which is why every row of this table is a recall-anchored or threshold-free measure instead.
 
 **Interview discussion points:**
 

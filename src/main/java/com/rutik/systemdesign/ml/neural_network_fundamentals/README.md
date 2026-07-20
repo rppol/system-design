@@ -54,6 +54,46 @@ Key insight: the chain rule makes it possible to attribute the network's error t
 - `Sigmoid(x) = 1 / (1 + e^(-x))`: squashes to (0,1). Gradient max is 0.25 at x=0, decays toward 0 for large |x|. Causes vanishing gradients in deep networks. Use only in output layer for binary classification.
 - `Tanh(x) = (e^x - e^(-x)) / (e^x + e^(-x))`: squashes to (-1,1). Zero-centered unlike sigmoid. Still suffers vanishing gradients in deep networks; max gradient is 1.0 at x=0.
 
+**What this actually says.** "An activation is a per-number reshaper: feed it one scalar, get one scalar back — and the only thing that matters for training is the *slope* it hands to backprop."
+
+The formulas above look like five unrelated curves. They are really five different answers to one question: how much of the incoming gradient does this unit let through?
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | The pre-activation, `z = Wx + b`. One number, before any nonlinearity |
+| `max(0, x)` | A gate. Positive passes unchanged; negative is set to exactly 0 |
+| `sigma(x)` | Sigmoid. Squashes any real number into `(0, 1)` |
+| `sigma'(x)` | Sigmoid's slope, equal to `sigma(x) x (1 - sigma(x))`. Peaks at `0.25` when `x = 0` |
+| `Phi(x)` | Gaussian CDF: "what fraction of a standard normal is below x". Runs 0 to 1 |
+| `x * Phi(x)` | GELU. A soft gate — instead of on/off, keep `x` in proportion to how large it is |
+
+**Walk five inputs through all four.** Same `x` down the left, each activation's output beside it:
+
+```
+     x      ReLU     sigmoid     tanh      GELU      sigma'(x)    tanh'(x)
+   -2.0     0.0       0.1192    -0.9640   -0.0455      0.1050      0.0707
+   -0.5     0.0       0.3775    -0.4621   -0.1543      0.2350      0.7864
+    0.0     0.0       0.5000     0.0000    0.0000      0.2500      1.0000   <- sigma' peak
+   +0.5     0.5       0.6225     0.4621    0.3457      0.2350      0.7864
+   +2.0     2.0       0.8808     0.9640    1.9545      0.1050      0.0707
+```
+
+Read the two right-hand columns as "fraction of gradient surviving this unit". Sigmoid's best case is `0.25` — it throws away three quarters of the gradient *even at its most generous point*. Tanh's best case is `1.0`, which is why tanh beat sigmoid for hidden layers historically. Note also that GELU at `x = -0.5` returns `-0.1543`, not 0: unlike ReLU it keeps a small negative signal alive, so a unit that drifts slightly negative can still recover.
+
+**Why `0.25` is the whole vanishing-gradient story.** Backprop multiplies one `sigma'` per sigmoid layer, so an `N`-layer sigmoid stack scales the gradient by at most `0.25^N`:
+
+```
+  N layers    0.25^N            what reaches layer 1
+     1        0.25              a quarter
+     2        0.0625            1 in 16
+     4        0.00390625        1 in 256
+     6        0.000244          1 in 4,096
+     8        0.0000153         1 in 65,536
+    10        0.00000095        1 in ~1,000,000   <- layer 1 has effectively stopped
+```
+
+That is the *optimistic* bound; real pre-activations sit off zero, so the true factor is smaller still. This is exactly the decaying curve plotted in §5 — `1.0, 0.25, 0.0625, 0.0156, ...` is this column. ReLU's slope is exactly `1` for positive inputs, so `1^N = 1` and the gradient arrives at layer 1 undiminished, which is the entire reason hidden layers switched to ReLU/GELU.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -89,6 +129,36 @@ flowchart LR
 
 Forward pass runs left to right: each hidden block is Linear → BatchNorm → activation → Dropout, matching the `nn.Sequential` in §6. The original BatchNorm paper places normalization between the linear layer and the activation (Linear → BatchNorm → Activation, shown here); a debated alternative uses Linear → Activation → BatchNorm. Blue nodes are I/O tensors, green nodes hold trainable weights (Linear weights, BatchNorm gamma/beta), orange nodes are parameter-free ops.
 
+**In plain terms.** `y = f(Wx + b)` says: "mix the inputs together in a weighted blend, nudge the result by a constant, then bend it through a curve." Everything a network does is that one line, repeated.
+
+The mixing (`Wx`) is linear and does all the *combining*; the bend (`f`) is what makes stacking worthwhile. Without `f`, two stacked layers `W2(W1 x)` collapse into one matrix `(W2 W1) x` — a hundred layers would be no more expressive than one.
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | Input vector, one column of numbers. Length = number of input features |
+| `W` | Weight matrix, shape `[out_dim, in_dim]`. Row `i` is the recipe for output neuron `i` |
+| `Wx` | Each output neuron's dot product: "how much does this neuron care about each input" |
+| `b` | Bias vector, one per output neuron. Shifts the curve left/right; lets a neuron fire at `x = 0` |
+| `z` | The pre-activation `Wx + b`. What backprop calls the layer's raw score |
+| `f` | The activation, applied elementwise. `z` and `y` therefore have the same shape |
+
+**Walk one layer with real matrices.** Two inputs into two hidden units, ReLU activation:
+
+```
+  x  = [ 1.0 ]        W1 = [  0.5  -0.4 ]        b1 = [  0.1 ]
+       [ 2.0 ]             [  0.3   0.8 ]             [ -0.1 ]
+
+  Row 1:  0.5(1.0) + (-0.4)(2.0) + 0.1  =  0.5 - 0.8 + 0.1  =  -0.2
+  Row 2:  0.3(1.0) +   0.8 (2.0) - 0.1  =  0.3 + 1.6 - 0.1  =  +1.8
+
+  z1 = [ -0.2 ]   ->   a1 = ReLU(z1) = [ 0.0 ]   <- gated off, neuron 1 is silent
+       [ +1.8 ]                        [ 1.8 ]   <- passes through unchanged
+```
+
+Shapes are the sanity check interviewers want you to state out loud: `W1` is `[2, 2]`, `x` is `[2, 1]`, so `W1 x` is `[2, 1]` and the bias must also be `[2, 1]`. A `[out, in] x [in, 1] -> [out, 1]` mismatch is the single most common runtime error in a hand-built MLP.
+
+**Why the bias exists.** Drop `b` and every layer is forced through the origin: `x = 0` must give `z = 0`, so the unit can only ever learn a decision boundary passing through zero. Here `b1 = 0.1` is what pushes row 1 from `-0.3` up to `-0.2` — small, but it is the only knob that can move a neuron's firing threshold independently of the input scale.
+
 ### Backward Pass — Backpropagation Computation Graph
 
 ```mermaid
@@ -121,6 +191,96 @@ flowchart LR
 ```
 
 Solid arrows are the forward pass (compute predictions, then loss); dotted arrows are the backward pass, where the chain rule telescopes ∂L/∂· from the red loss node back through every intermediate to each weight. Because the stored forward activations (a1, z1) are reused, the backward pass costs roughly the same compute as the forward pass.
+
+**Read it like this.** The chain rule `dL/dx = (dL/dg)(dg/dx)` says: "to find out how much a knob deep inside affects the final loss, multiply together the sensitivities of every step between them." Backprop is nothing more than that product, computed once from the output end and cached so no step is recomputed.
+
+The reason it is efficient is bookkeeping, not cleverness. Every layer receives one number per neuron from the layer above — "how much does the loss change if this activation changes" — and its only job is to (a) turn that into gradients for its own weights, and (b) pass a correspondingly transformed message further down.
+
+| Symbol | What it is |
+|--------|------------|
+| `dL/dz2` | How much the loss moves per unit change in the output layer's raw score |
+| `dL/dW2` | The actual answer we want: how to nudge each weight in `W2` |
+| `dL/da1` | The message handed backward — "hidden layer, your output was this wrong" |
+| `f'(z1)` | The activation's local slope. For ReLU: `1` if `z1 > 0`, else `0` |
+| `x` (in `dL/dW`) | The input that a weight multiplied. Big input, big share of the blame |
+| `eta` | Learning rate. How far along the negative gradient the optimizer actually steps |
+
+**Walk a full backward pass with real numbers.** Continuing the exact same network from the forward walk above — `x = [1.0, 2.0]`, ReLU hidden layer, one sigmoid output, true label `y = 1`, learning rate `eta = 0.1`.
+
+Forward first, so we have something to differentiate:
+
+```
+  z1 = [ -0.2 ]      a1 = [ 0.0 ]        W2 = [ 0.6  -0.5 ]     b2 = 0.2
+       [ +1.8 ]           [ 1.8 ]
+
+  z2   = 0.6(0.0) + (-0.5)(1.8) + 0.2 = -0.9 + 0.2 = -0.7
+  yhat = sigmoid(-0.7)                = 0.331812
+  L    = -log(0.331812)               = 1.103186     <- loss to reduce
+```
+
+Now walk backward. Step 1, the output layer. Sigmoid + binary cross-entropy collapse into one famously clean expression, `dL/dz2 = yhat - y`:
+
+```
+  dL/dz2 = 0.331812 - 1 = -0.668188      <- negative: z2 must go UP
+
+  dL/dW2 = dL/dz2 x a1
+         = -0.668188 x [ 0.0 , 1.8 ]
+         = [ 0.000000 , -1.202738 ]      <- weight 1 gets ZERO blame (a1 was 0)
+
+  dL/db2 = dL/dz2 = -0.668188            <- bias always gets the raw signal
+```
+
+Step 2, hand the message back through `W2`, then through the ReLU gate:
+
+```
+  dL/da1 = dL/dz2 x W2
+         = -0.668188 x [ 0.6 , -0.5 ]
+         = [ -0.400913 , +0.334094 ]
+
+  ReLU'(z1) = [ 0 , 1 ]                  (z1 = -0.2 -> 0 ;  z1 = +1.8 -> 1)
+
+  dL/dz1 = dL/da1 * ReLU'(z1)            (elementwise)
+         = [ -0.400913 x 0 , 0.334094 x 1 ]
+         = [  0.000000     , 0.334094     ]   <- gradient DIES at the closed gate
+```
+
+Step 3, turn that into weight gradients. Each weight's gradient is "message arriving at my neuron" times "input I multiplied":
+
+```
+  dL/dW1 = dL/dz1  (outer)  x
+
+  row 1 (neuron dead):  [ 0.000000 x 1.0 , 0.000000 x 2.0 ] = [ 0.000000 , 0.000000 ]
+  row 2 (neuron live):  [ 0.334094 x 1.0 , 0.334094 x 2.0 ] = [ 0.334094 , 0.668188 ]
+
+  dL/db1 = [ 0.000000 , 0.334094 ]
+```
+
+Step 4, the update `w <- w - eta x dL/dw` with `eta = 0.1`:
+
+```
+  W2 : [ 0.6 , -0.5      ]  ->  [ 0.6 , -0.5 - 0.1(-1.202738) ] = [ 0.6 , -0.379726 ]
+  b2 : 0.2                  ->  0.2 - 0.1(-0.668188)            = 0.266819
+  W1 row 2 : [ 0.3 , 0.8 ]  ->  [ 0.3 - 0.033409 , 0.8 - 0.066819 ] = [ 0.266591 , 0.733181 ]
+  b1[2]    : -0.1           ->  -0.1 - 0.1(0.334094)            = -0.133409
+  W1 row 1 : [ 0.5 , -0.4 ] ->  unchanged (gradient was exactly zero)
+```
+
+Step 5, re-run the forward pass on the updated weights and confirm the loss actually fell:
+
+```
+  z1 = [ -0.200000 ]   a1 = [ 0.000000 ]
+       [ +1.599544 ]        [ 1.599544 ]
+
+  z2   = -0.379726(1.599544) + 0.266819 = -0.340570
+  yhat = sigmoid(-0.340570)             = 0.415671     (was 0.331812, moving toward 1)
+  L    = 0.877861                       (was 1.103186)
+
+  loss reduction = 1.103186 - 0.877861 = 0.225325   -- one step, 20.4% of the loss gone
+```
+
+**The three things this walk actually teaches.** First, `dL/dW = (incoming gradient) x (stored input)` — this is *why* the forward activations must be kept in memory, and therefore why activation memory, not weights, dominates training-time VRAM. Second, notice row 1 of `W1` never moved: because `z1 = -0.2` closed the ReLU gate, its gradient was multiplied by `0` and the neuron learned nothing this step. If that neuron's pre-activation stays negative for every input, it never receives a gradient again — that is precisely the "dead ReLU" failure named in §4, visible here as an arithmetic fact rather than a warning. Third, weight 2 of `W1` got twice the gradient of weight 1 (`0.668188` vs `0.334094`) purely because its input was `2.0` instead of `1.0` — unscaled features get proportionally larger updates, which is the concrete reason input normalization matters.
+
+**Why the sigmoid and cross-entropy cancel.** `dL/dz2 = yhat - y` looks too simple to be a derivative, and it is the most-asked backprop question. Cross-entropy's derivative contributes a `1/yhat` term and the sigmoid's derivative contributes `yhat(1 - yhat)`; multiplied, they cancel down to `yhat - y`. That cancellation is the entire reason these two are paired: the `sigma'` factor — capped at `0.25`, per §4 — would otherwise shrink the very first gradient of the backward pass before it even starts travelling. Pair sigmoid with MSE instead and you reintroduce that factor, which is why MSE-on-classification trains visibly slower.
 
 ### BatchNorm — Train vs Eval Statistics
 
@@ -224,6 +384,46 @@ def correct_init(model: nn.Module) -> None:
 **Xavier/Glorot**: `std = sqrt(2 / (fan_in + fan_out))`. Best for Sigmoid and Tanh because it keeps gradient variance stable through layers with near-linear regime activations.
 
 **He/Kaiming**: `std = sqrt(2 / fan_in)`. Best for ReLU/GELU because ReLU kills half the neurons on average, so variance needs to be doubled.
+
+**What the formula is telling you.** Both initializers answer one question: "how big should the random starting weights be so that a signal entering the network comes out the other end at roughly the same scale it went in?" Everything else is bookkeeping about which activation is in the way.
+
+Sum `fan_in` random terms and the variance grows by `fan_in`. So the weight variance has to shrink by about `1/fan_in` to cancel it. The `2` in the numerator is where the two schemes disagree — He spends it compensating for ReLU zeroing half the units, Xavier spends it averaging the forward and backward fan.
+
+| Symbol | What it is |
+|--------|------------|
+| `fan_in` | How many numbers feed into one neuron. The input dimension of the layer |
+| `fan_out` | How many neurons this layer feeds. The output dimension |
+| `std` | Standard deviation of the normal distribution the initial weights are drawn from |
+| `sqrt(1 / fan_in)` | The base "cancel the summing" scale. Everything else is a correction on top |
+| the `2` in He | Doubling to refund the variance ReLU destroys by zeroing negatives |
+| `fan_in + fan_out` | Xavier's compromise: forward signal wants `fan_in`, backward gradient wants `fan_out` |
+
+**Walk both formulas on one layer.** A `256 -> 256` hidden layer, so `fan_in = fan_out = 256`:
+
+```
+  Xavier :  std = sqrt(2 / (256 + 256)) = sqrt(0.003906) = 0.062500
+  He     :  std = sqrt(2 /  256       ) = sqrt(0.007813) = 0.088388
+
+  He is larger by exactly sqrt(2) = 1.4142x
+```
+
+Now push signal variance through ten such layers. With ReLU in between, one layer multiplies the variance by `0.5 x fan_in x Var(W)` — the `0.5` is ReLU discarding half the units:
+
+```
+                        Var(W)      per-layer gain    after 10 layers (variance)
+  He     (correct)      0.007813    0.5 x 256 x V = 1.00     1.000000
+  Xavier (mismatched)   0.003906    0.5 x 256 x V = 0.50     0.000977
+  std = 0.125 (too big) 0.015625    0.5 x 256 x V = 2.00  1024.000000
+
+  In signal std terms after 10 layers:
+    He      -> 1.000     stable, trains normally
+    Xavier  -> 0.031     32x smaller     -> gradients vanish
+    too big -> 32.000    32x larger      -> activations and gradients explode
+```
+
+**What actually breaks with the wrong one.** Pair Xavier with ReLU and each layer quietly halves the variance; ten layers in, activations are `32x` smaller than the input, so gradients arriving back at the early layers are correspondingly tiny and the first half of the network barely moves — training looks like it "works" but plateaus at a bad loss, which makes this a nasty silent bug rather than a crash. Go the other way and the damage is loud: at `std = 0.125` the same ten layers amplify std `32x`, and at twenty layers it is `1024x` — activations saturate, the loss prints `NaN`, and you lose the run. The asymmetry is worth remembering: too-small init fails quietly, too-large init fails immediately.
+
+Note that the shape of the `2` also explains the reverse mismatch. Use He with tanh and the units get pushed toward the flat `|x| > 2` region, where §4's table shows `tanh'` has already fallen to `0.0707` — you get vanishing gradients from saturation instead of from shrinkage. Xavier is right for tanh/sigmoid precisely because it keeps activations in the near-linear band around zero where the slope is still near `1.0`.
 
 ### Batch Normalization
 

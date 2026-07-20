@@ -525,6 +525,237 @@ def get_gpu_stats() -> list[GpuStats]:
     return stats
 ```
 
+### Decoding Arithmetic Intensity and the Roofline Ridge Point
+
+The roofline model plotted in Section 5 is three lines of arithmetic:
+
+```
+arithmetic_intensity (AI) = FLOPs_performed / bytes_moved_from_HBM
+
+achievable_FLOP_per_s     = min( peak_FLOP_per_s,  AI x peak_bandwidth )
+
+ridge_point               = peak_FLOP_per_s / peak_bandwidth
+```
+
+**What the formula is telling you.** "For every byte you drag out of HBM, you had better do a lot
+of math with it — because the hardware will only ever give you the smaller of what compute can do
+and what the memory pipe can feed."
+
+The `min(...)` is the entire model. There is no third bound, no clever middle case: a kernel is
+starved by one of exactly two ceilings, and the ridge point tells you which side of the wall it
+lives on.
+
+| Symbol | What it is |
+|--------|------------|
+| `FLOPs_performed` | Useful arithmetic in the kernel. For a GEMM, `2 x M x N x K` (one multiply, one add) |
+| `bytes_moved_from_HBM` | Bytes actually crossing the HBM boundary — inputs read plus outputs written |
+| `AI` | FLOP per byte. A property of the *algorithm*, not the GPU. Batch size raises it |
+| `peak_FLOP_per_s` | The compute roof. A100 BF16: 312 TFLOP/s |
+| `peak_bandwidth` | The slope of the memory roof. A100 HBM3: 2 TB/s |
+| `ridge_point` | Where the two roofs meet. Below it memory-bound, above it compute-bound |
+
+**Walk one example.** The A100 ridge point, then one kernel on each side of it:
+
+```
+  ridge point = 312 TFLOP/s / 2 TB/s = 156 FLOP/byte
+
+  LEFT OF THE RIDGE -- ReLU on a BF16 tensor
+    per element:  read 2 bytes, write 2 bytes, do 1 FLOP (a max)
+    AI          = 1 FLOP / 4 bytes            = 0.25 FLOP/byte
+    achievable  = 0.25 x 2 TB/s               = 0.5 TFLOP/s
+    vs peak     = 0.5 / 312                   = 0.16% of the compute roof
+
+  RIGHT OF THE RIDGE -- BF16 GEMM, M = N = K = 4096
+    FLOPs       = 2 x 4096^3                  = 137.44 GFLOP
+    bytes       = 3 matrices x 4096^2 x 2 B   = 100.66 MB
+    AI          = 137.44e9 / 100.66e6         = 1,365 FLOP/byte
+    1,365 >> 156  -> compute-bound
+    compute time = 137.44 GFLOP / 312 TFLOP/s = 0.441 ms
+    memory time  = 100.66 MB / 2 TB/s         = 0.050 ms   (8.8x faster: not the limit)
+```
+
+Read the ReLU line again: **99.84% of the A100's arithmetic units are idle** during a ReLU, and no
+amount of Tensor Core alignment will change that, because the kernel is starving, not thinking.
+That is the whole justification for kernel fusion — you cannot make a ReLU do less math, but you
+can make three of them share one HBM round-trip, tripling `AI` from 0.25 to 0.75 for free.
+
+The GEMM is the mirror image: its memory time is 8.8x shorter than its compute time, so shaving
+bytes buys nothing and only more FLOP/s (dimension alignment, Tensor Cores, higher precision
+throughput) helps. Optimizing the wrong side of the ridge is the most common way to spend a week
+and gain nothing.
+
+### Decoding the Memory-Bandwidth Ceiling
+
+When a kernel is memory-bound, you can predict its runtime without knowing anything about its math:
+
+```
+minimum_runtime = bytes_moved / peak_bandwidth
+
+achievable_FLOP_per_s = FLOPs / minimum_runtime      (equivalently: AI x peak_bandwidth)
+```
+
+**Stated plainly.** "Count the bytes, divide by the bandwidth, and you have a floor on the runtime
+that no kernel optimization can go below."
+
+This is the most useful back-of-envelope in GPU work because it needs only the tensor shapes and
+one datasheet number. If your measured time is close to this floor, the kernel is done — stop
+optimizing it and go fuse it into its neighbours instead.
+
+| Symbol | What it is |
+|--------|------------|
+| `bytes_moved` | Tensor elements x bytes per element x (reads + writes). Count both directions |
+| `peak_bandwidth` | Datasheet HBM number. Real kernels reach 70-85% of it; use peak for the floor |
+| `minimum_runtime` | Hard floor. A kernel cannot beat it; matching it means it is bandwidth-saturated |
+| `achievable_FLOP_per_s` | What the roofline promises at this kernel's `AI` — usually a tiny fraction of peak |
+
+**Walk one example.** A ReLU over an activation tensor of `batch 32 x seq 2048 x hidden 4096`, then
+the same reasoning applied to 7B-model token generation:
+
+```
+  ELEMENTWISE KERNEL
+    elements       = 32 x 2048 x 4096            = 268,435,456
+    bytes (BF16)   = 268.4M x 2 B x (1 R + 1 W)  = 1.074 GB
+    minimum time   = 1.074 GB / 2 TB/s           = 0.537 ms
+    FLOPs          = 268.4M                      (1 per element)
+    achievable     = 268.4e6 / 0.537 ms          = 0.5 TFLOP/s   <- matches AI x BW exactly
+
+  LLM DECODE (one token, 7B model, BF16 weights)
+    weight bytes   = 7e9 params x 2 B            = 14 GB
+    minimum time   = 14 GB / 2 TB/s              = 7.0 ms per token
+    FLOPs/token    = 2 x 7e9                     = 14 GFLOP
+    AI             = 14e9 FLOP / 14e9 bytes      = 1.0 FLOP/byte   (ridge is 156!)
+    achievable     = 1.0 x 2 TB/s                = 2 TFLOP/s = 0.64% of the 312 roof
+```
+
+The 7ms is a floor, not an estimate: at batch size 1 you must stream every weight through the
+memory pipe to produce one token, so no kernel trick beats it. `AI = 1.0` against a ridge of 156
+is why LLM decoding is the canonical memory-bound workload and why the only real fix is raising
+the numerator — batching (amortize one weight read across many sequences) or speculative decoding
+(get several tokens per weight read). Both are `AI` interventions dressed up as scheduling tricks.
+
+### Decoding Utilization — Occupancy, SM Utilization, and MFU
+
+Three different numbers get called "utilization" and they measure three different things:
+
+```
+occupancy       = active_warps_per_SM / max_warps_per_SM
+
+sm_utilization  = fraction of wall-clock time the SMs have any warp resident
+
+MFU             = measured_FLOP_per_s / peak_FLOP_per_s
+                = (6 x params x tokens_per_step) / (step_seconds x cluster_peak_FLOP_per_s)
+```
+
+**The idea behind it.** "Occupancy asks how full one SM's warp slots are, SM utilization asks
+whether the GPU had anything at all to do, and MFU asks whether the work it did was useful — you
+can score 100% on the first two and still waste most of the machine."
+
+The `6 x params x tokens` in MFU is the standard training-FLOPs approximation: roughly 2 FLOPs per
+parameter for the forward pass and 4 for the backward, per token. It is why MFU can be computed
+from a config file and a stopwatch, with no profiler involved.
+
+| Symbol | What it is |
+|--------|------------|
+| `active_warps_per_SM` | Warps actually resident, capped by registers/thread, shared memory, block size |
+| `max_warps_per_SM` | Hardware ceiling. A100: 2,048 threads / 32 = 64 warps per SM |
+| `occupancy` | Latency-hiding capacity. High occupancy means a stalled warp has substitutes |
+| `sm_utilization` | What `nvidia-smi` reports. Says "busy", says nothing about "useful" |
+| `6 x params x tokens` | Training FLOPs: 2 forward + 4 backward, per parameter, per token |
+| `cluster_peak` | Per-GPU peak x GPU count. 8x A100 BF16 = 2,496 TFLOP/s |
+| `MFU` | The only one of the three that correlates with your bill |
+
+**Walk one example.** First occupancy, driven purely by the register budget (65,536 registers per
+A100 SM, 256-thread blocks):
+
+```
+   regs/thread   regs/block        blocks/SM        threads   warps    occupancy
+                 256 x regs        65,536 / above
+
+       96        24,576            2                 512       16        25.0%
+       64        16,384            4                1,024       32        50.0%
+       32         8,192            8                2,048       64       100.0%
+```
+
+Dropping register pressure from 96 to 64 per thread doubles occupancy without touching a single
+line of math — the compiler was spilling the SM's warp slots, not the arithmetic. This is what
+Nsight Compute's "occupancy limited by registers" warning means.
+
+Now MFU on the Section 14 job (8x A100, 7B params, 128 sequences x 4,096 tokens per step):
+
+```
+  tokens/step   = 128 x 4,096                          = 524,288
+  FLOPs/step    = 6 x 7e9 x 524,288                    = 2.202e16 FLOP
+  cluster peak  = 8 x 312 TFLOP/s                      = 2,496 TFLOP/s
+
+  BEFORE  step time 25.20 s
+    achieved = 2.202e16 / 25.20                        = 874 TFLOP/s
+    MFU      = 874 / 2,496                             = 35.0%
+
+  AFTER   step time 15.18 s  (the 1.66x from the case study)
+    achieved = 2.202e16 / 15.18                        = 1,451 TFLOP/s
+    MFU      = 1,451 / 2,496                           = 58.1%
+
+  the 23-point MFU gain is 577 TFLOP/s recovered -- about 1.85 A100s' worth of
+  compute, from software changes only.
+```
+
+That reframes the Section 14 result: the team did not make the GPUs faster, they stopped wasting
+1.85 GPUs. And note that `nvidia-smi` would have reported high SM utilization the whole time — the
+SMs *were* busy, running unfused elementwise kernels at 0.16% of peak. **A GPU stuck at 35% MFU
+while showing 95% SM utilization is the normal case, not a contradiction**, and it is exactly why
+Section 3's "profile before optimizing" rule exists.
+
+### Decoding Mixed-Precision Memory Savings
+
+The precision decision is pure byte-counting, and the answer is smaller than people expect:
+
+```
+tensor_bytes = elements x bytes_per_element
+
+training_static_memory = params x bytes_per_param
+                       + params x 4         (gradients, kept in FP32)
+                       + params x 8         (Adam m and v, both FP32)
+```
+
+**What it means.** "Halving the precision halves only the tensors you actually store in half
+precision — and in an Adam training run, that is the smallest of the three terms."
+
+| Symbol | What it is |
+|--------|------------|
+| `bytes_per_element` | FP32 = 4, FP16/BF16 = 2, INT8 = 1 |
+| `params x bytes_per_param` | The weight copy. The *only* term mixed precision shrinks |
+| `params x 4` | Gradients. Stay FP32 for numerical stability — unchanged by autocast |
+| `params x 8` | Adam's two FP32 moment buffers, `m` and `v`. Unchanged by autocast |
+| activation memory | Not in this formula — it *does* halve, and scales with batch x seq |
+
+**Walk one example.** Per-tensor first, then the same model end to end:
+
+```
+  PER-TENSOR: one activation, batch 32 x seq 2048 x hidden 4096
+    elements  = 268,435,456
+    FP32      = 268.4M x 4 B  = 1,073.74 MB
+    BF16      = 268.4M x 2 B  =   536.87 MB
+    saved                     =   536.87 MB per tensor, a clean 2x
+
+  PER-MODEL: 7B parameters, AdamW, static memory (no activations)
+                       FP32 run        BF16 mixed-precision run
+    parameters          28 GB                14 GB          <- halved
+    gradients           28 GB                28 GB          <- unchanged (FP32)
+    Adam m + v          56 GB                56 GB          <- unchanged (FP32)
+                      -------              -------
+    total static       112 GB                98 GB
+
+    saved = 14 GB = 12.5% of static memory, NOT the 50% the "2x" headline implies
+```
+
+Both halves of this matter. The per-tensor 2x is real and it is where mixed precision earns its
+keep, because activation memory scales with `batch x seq x hidden` and is what actually caps your
+batch size — halving it is what lets the Section 14 team fit a 30% larger batch. But the per-model
+number is the interview trap: static memory falls only 12.5%, because Adam's 56 GB of FP32 moments
+dwarfs the 14 GB you saved and does not care what precision you compute in. That single row is why
+Section 4's note that "for 7B parameters, Adam uses 56 GB just for optimizer state" leads directly
+to FSDP/ZeRO sharding or 8-bit optimizers — precision alone cannot fix an optimizer-state problem.
+
 ---
 
 ## 7. Real-World Examples

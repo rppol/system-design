@@ -38,6 +38,35 @@ y* = argmax_k P(y=k | x)
    = argmax_k log P(x | y=k) + log P(y=k)
 ```
 
+**In plain terms.** "Start from how common each class is, multiply by how well that class explains what you just observed, and divide by the total so the numbers add to one."
+
+The division by `P(x)` is the only part that touches every class at once — and it is identical for all of them. That is why the argmax form above can throw it away, and why Naive Bayes never has to compute the hardest term in the equation.
+
+| Symbol | What it is |
+|--------|------------|
+| `P(y \| x)` | Posterior. The answer you want: which class, given the features you actually saw |
+| `P(x \| y)` | Likelihood. If the class really were `y`, how unsurprising would this data be |
+| `P(y)` | Prior. How often class `y` shows up before you look at any features |
+| `P(x)` | Evidence. Total probability of seeing this data at all, summed over every class |
+| `argmax_k` | "Return the `k` that scores highest" — the label, not the score |
+| `log` in line 3 | Products of many small numbers underflow; logs turn the product into a sum |
+
+**Walk one example.** The classic base-rate trap — a rare disease and a test that is 99% sensitive:
+
+```
+  prior            P(D)         = 0.01     1 person in 100 has the disease
+  likelihood       P(+ | D)     = 0.99     the test catches 99% of true cases
+  false positives  P(+ | no D)  = 0.05     it also flags 5% of healthy people
+
+  disease branch   = P(+ | D)    x P(D)     = 0.99 x 0.01 = 0.0099
+  healthy branch   = P(+ | no D) x P(no D)  = 0.05 x 0.99 = 0.0495
+  evidence  P(+)   = 0.0099 + 0.0495                      = 0.0594
+
+  P(D | +) = 0.0099 / 0.0594 = 0.167
+```
+
+A positive result on a 99%-accurate test means a **16.7%** chance of disease, not 99%. The prior is doing the damage: healthy people are 99x more numerous, so their 5% false-positive rate produces `0.0495` of wrong flags against only `0.0099` of right ones — five wrong for every one right. This is exactly the failure mode the "biased doctor" analogy in Section 2 is warning about, and it is why the class prior `P(y)` cannot be dropped from a Naive Bayes score even though `P(x)` can.
+
 **Naive independence assumption**:
 ```
 P(x | y=k) = prod_j P(x_j | y=k)   (features independent given class)
@@ -45,12 +74,57 @@ P(x | y=k) = prod_j P(x_j | y=k)   (features independent given class)
 
 This transforms the joint distribution over d features into d independent univariate distributions per class, dramatically reducing the number of parameters.
 
+**What this actually says.** "Assume the features never talk to each other, so you can multiply `d` easy one-feature answers instead of estimating one impossible `d`-dimensional answer."
+
+| Symbol | What it is |
+|--------|------------|
+| `prod_j` | Multiply over every feature `j = 1..d` |
+| `P(x_j \| y=k)` | One univariate estimate: how feature `j` behaves inside class `k` alone |
+| `d` | Number of features (vocabulary size for text) |
+| `k` | Class index; the product is recomputed once per class |
+
+**Walk one example.** Count the parameters for 20 binary features and 2 classes:
+
+```
+  full joint P(x | y=k)   : every combination of 20 binary features must get a number
+                            2 classes x (2^20 - 1) free params = 2,097,150
+
+  naive factorization     : one Bernoulli probability per feature per class
+                            2 classes x 20 features        =        40
+
+  reduction: 2,097,150 / 40 = 52,428x fewer parameters to estimate
+```
+
+Two million parameters cannot be estimated from a few thousand documents — most feature combinations would be observed zero times. Forty can be estimated from almost nothing. That is the entire trade: the assumption is false, but it converts an unlearnable estimation problem into a trivial one, and the bias it injects is the regularization that makes Naive Bayes strong on small data.
+
 **Likelihood models**:
 - Gaussian NB: P(x_j | y=k) = N(mu_kj, sigma_kj^2) — for continuous features
 - Multinomial NB: P(x | y=k) = multinomial distribution — for count features (word counts)
 - Bernoulli NB: P(x_j | y=k) = Bernoulli(p_kj) — for binary features (word presence/absence)
 
 **Log-sum trick** (numerical stability): multiply many small probabilities (underflow) → sum log probabilities.
+
+**What it means.** "Ranking by a product of probabilities and ranking by the sum of their logs give the same winner — but only the sum survives floating point."
+
+`log` is monotonic: if `a > b` then `log a > log b`. So swapping the product for a sum of logs cannot change which class wins, and it replaces multiplication of tiny numbers with addition of moderate negative numbers.
+
+| Symbol | What it is |
+|--------|------------|
+| `prod_j p_j` | The raw product across features — the quantity that underflows |
+| `sum_j log p_j` | The log-space equivalent — same ordering, no underflow |
+| float64 floor | Roughly `1e-308`; anything smaller rounds to exactly `0.0` |
+
+**Walk one example.** A 200-word document where each word has probability about `0.001`:
+
+```
+  raw product   : 0.001 ^ 200          = 1e-600     -> below 1e-308, stored as 0.0
+  log-space sum : 200 x log(0.001)     = -1381.55   -> a perfectly ordinary float
+
+  float64 can represent down to about 1e-308, i.e. log = -709.20
+  the document needed -1381.55, roughly twice as far down as the format reaches
+```
+
+Once the product hits `0.0`, every class scores `0.0` and argmax picks arbitrarily — the classifier silently degrades to guessing on exactly the long documents it should be most confident about. Working in log space costs nothing and removes the failure entirely.
 
 ---
 
@@ -89,6 +163,34 @@ A conjugate prior is a prior distribution that produces a posterior of the same 
 | Poisson | Gamma(alpha, beta) | Gamma(alpha + sum(x), beta + n) |
 
 Laplace smoothing in Naive Bayes = using a Dirichlet(1, 1, ..., 1) prior (uniform) on the multinomial parameters. The posterior mode is (count + alpha) / (total + alpha * V) where V = vocabulary size and alpha = smoothing parameter.
+
+**Read it like this.** "Before looking at any data, pretend you already saw every word in the vocabulary `alpha` times — then just count normally."
+
+| Symbol | What it is |
+|--------|------------|
+| `count` | Times word `j` actually appeared in class `k`'s training documents |
+| `alpha` | Pseudocount added to every word. `1` = Laplace, `<1` = Lidstone, `0` = no smoothing |
+| `V` | Vocabulary size — how many distinct words exist |
+| `total` | All word tokens seen in class `k` |
+| `alpha * V` | The pseudocounts you added, summed — it must appear in the denominator to keep the probabilities normalized |
+
+**Walk one example.** Reusing the Section 5.4 numbers — `total = 5,000` spam tokens, `V = 50,000`:
+
+```
+                                    alpha = 1              alpha = 0.1
+  denominator  total + alpha*V      5,000 + 50,000         5,000 + 5,000
+                                    = 55,000               = 10,000
+
+  unseen word  (count = 0)          1 / 55,000             0.1 / 10,000
+                                    = 0.0000182            = 0.0000100
+
+  common word  (count = 200)        201 / 55,000           200.1 / 10,000
+                                    = 0.003655             = 0.02001
+
+  unsmoothed truth for that word:   200 / 5,000 = 0.0400
+```
+
+At `alpha = 1` the denominator is inflated 11x (`55,000 / 5,000`) by pseudocounts alone, so a word genuinely occurring 4% of the time gets reported at 0.37% — the prior has swamped the data. Dropping to `alpha = 0.1` halves the denominator inflation and lands at 2.0%, much closer to the truth while still keeping unseen words finite. This is precisely why the Section 13 best practice recommends `alpha = 0.1` or `0.01` for large vocabularies: when `alpha * V` dwarfs `total`, Laplace smoothing stops being a safety net and starts being the model.
 
 ---
 
@@ -437,6 +539,32 @@ def predict_naive_bayes(
     return model["classes"][np.argmax(scores, axis=1)]
 ```
 
+**Put simply.** "Every class starts with a handicap — its log prior — and then earns points for each word in the document; highest total wins."
+
+| Symbol | What it is |
+|--------|------------|
+| `log P(y=k)` | The starting handicap. A rarer class begins further behind |
+| `c_j` | How many times word `j` appears in this document |
+| `log P(word_j \| y=k)` | Points per occurrence of that word for class `k`. Always negative; less negative = better |
+| `X_test @ log_likelihoods.T` | The whole per-word sum, done as one sparse matrix multiply |
+| `argmax` | Pick the class with the highest total; the total itself is not a probability |
+
+**Walk one example.** Using the Section 5.3 numbers — `P(spam) = 0.38`, `P(free | spam) = 0.042`, `P(free | ham) = 0.003` — for a document containing "free" twice and "meeting" once, with `P(meeting | spam) = 0.001` and `P(meeting | ham) = 0.008`:
+
+```
+                                        spam            ham
+  log prior                            -0.968          -0.478
+  "free"  x2   2 x log(P)              -6.340         -11.618
+  "meeting" x1     log(P)              -6.908          -4.828
+                                      --------        --------
+  total score                         -14.216         -16.925
+
+  gap = -14.216 - (-16.925) = +2.709 in favour of spam
+  P(spam | x) = 1 / (1 + exp(-2.709)) = 0.938
+```
+
+Notice that "meeting" pulls hard *toward* ham (`-6.908` vs `-4.828`, a 2.08 penalty) yet loses anyway, because "free" appearing twice contributes a 5.28 swing the other way. Only the gap between the two totals matters — the raw `-14.216` means nothing on its own, which is why these scores must be pushed through a softmax before anyone treats them as probabilities.
+
 ### 6.3 Bayesian Inference — Beta-Binomial Example
 
 ```python
@@ -500,6 +628,47 @@ def bayesian_a_b_test(
 # P(treatment > control) ≈ 0.94
 ```
 
+**The idea behind it.** "Add your successes onto the prior's first parameter and your failures onto its second — that is the entire posterior update, no integration required."
+
+| Symbol | What it is |
+|--------|------------|
+| `Beta(alpha, beta)` | A distribution over a rate between 0 and 1. Think "alpha successes and beta failures already imagined" |
+| `alpha` | Pseudo-successes. Grows by one per real conversion |
+| `beta` | Pseudo-failures. Grows by one per real non-conversion |
+| posterior mean | `alpha / (alpha + beta)` — the rate the posterior is centred on |
+| `P(treatment > control)` | Fraction of paired draws where treatment's rate beats control's; a direct probability, not a p-value |
+
+**Walk one example.** The exact call in the comment above — 1,000 users per arm, 80 vs 100 conversions, flat `Beta(1, 1)` prior:
+
+```
+                    prior        + successes  + failures     posterior
+  control        Beta(1, 1)         + 80         + 920      Beta(81, 921)
+  treatment      Beta(1, 1)        + 100         + 900      Beta(101, 901)
+
+                    posterior mean        95% credible interval
+  control            0.0808               [0.065, 0.098]
+  treatment          0.1008               [0.083, 0.120]
+
+  P(treatment > control) = 0.9406      <- the 0.94 in the comment above
+```
+
+The intervals overlap, yet treatment still wins 94% of the time — an overlap-based eyeball test would have called this inconclusive. Under Booking.com's 0.95 launch rule from Section 7, this experiment keeps running rather than shipping.
+
+**Why the prior's counts are a dial, not a formality.** Swap the flat `Beta(1, 1)` for the informative `Beta(5, 95)` of Section 13's best practice — a 5% historical conversion rate — and feed it the same 80-of-1,000 control data:
+
+```
+  posterior = Beta(5 + 80, 95 + 920) = Beta(85, 1015)
+  posterior mean = 85 / 1100 = 0.0773
+
+  prior mean 0.0500  ------  0.0773  ------  0.0800  data mean
+                              ^ posterior sits between the two
+
+  weighting: prior contributes  100 / 1100 =  9.1% of the pseudocounts
+             data  contributes 1000 / 1100 = 90.9%
+```
+
+The posterior is a weighted average of prior and data, and the weights are literally the counts. With 1,000 observations against a 100-count prior, the data already owns 91% of the answer — this is "the prior washes out" made arithmetic. Early in the test, when only 30 users have converted, that same prior holds most of the weight and is exactly what stops you from launching on noise.
+
 ### 6.4 GaussianNB with var_smoothing and Missing Feature Robustness
 
 ```python
@@ -535,6 +704,30 @@ def gaussian_nb_robustness_demo() -> None:
     print(f"GaussianNB with 5 informative features only: {gnb_5feat.score(X_test[:, :5], y_test):.4f}")
     # Performance is similar because irrelevant features contribute nearly zero signal
 ```
+
+**Stated plainly.** "For each class, ask how many standard deviations this value sits from that class's average, and let the more surprised class lose."
+
+| Symbol | What it is |
+|--------|------------|
+| `mu_kj` | Mean of feature `j` among class `k`'s training rows |
+| `sigma_kj^2` | Variance of feature `j` within class `k` — the class's tolerance for spread |
+| `N(mu, sigma^2)` | Gaussian density evaluated at the observed value; peaks at `mu`, decays with distance |
+| `(x - mu) / sigma` | The z-score. This is the only thing the density really reacts to |
+| `var_smoothing` | Tiny epsilon added to every variance so a zero-variance feature cannot divide by zero |
+
+**Walk one example.** A single feature — transaction amount of 150 — under two fitted classes:
+
+```
+                    fitted mu   fitted sigma   z = (x-mu)/sigma   density    log density
+  legit                 60           25             +3.60         0.0000245     -10.62
+  fraud                220           90             -0.78         0.0032757      -5.72
+                                                                            -----------
+                                          log-likelihood advantage to fraud:     +4.90
+```
+
+150 is a 3.6-sigma outlier for legit spending but an ordinary draw for fraud, so this one feature contributes `+4.90` of evidence toward fraud before any other feature is consulted.
+
+**Why irrelevant features cost almost nothing.** If a feature has the same fitted `mu` and `sigma` in both classes, its density is identical in both — and identical densities subtract to exactly `0.00` log-likelihood difference. The feature is evaluated, then contributes nothing to the ranking. That is why the 30-feature and 5-feature models in the code above score nearly the same: the 25 uninformative features each add roughly zero to the gap between classes, no matter how many of them there are.
 
 ---
 
@@ -613,6 +806,30 @@ TF-IDF vectors contain non-integer, non-negative values. MultinomialNB internall
 
 **Pitfall 3 — Naive Bayes probability outputs over-confident**
 A NB classifier on 20 features reported P(spam) = 0.9999998 for an email. The probability was so extreme that it was being used directly as a risk score by a downstream filter. The independence assumption caused individual probabilities to compound: if 15 features each vote with 80% confidence for spam, the product is 0.8^15 = 0.035 for the complement, so NB reports 0.96 confidence — higher than any individual feature justifies. Fix: calibrate probabilities with sklearn CalibratedClassifierCV(method="isotonic") after training, or use logistic regression for probability outputs.
+
+**What the formula is telling you.** "Every extra feature multiplies the confidence gap again, so independence turns fifteen mild opinions into one absolute verdict."
+
+| Symbol | What it is |
+|--------|------------|
+| `0.8^15` | The spam-side likelihood product: 15 features each voting spam at 80% |
+| `0.2^15` | The ham-side product for the same 15 features |
+| normalization | Dividing each product by their sum to get a reported probability |
+| log-odds | `log(0.8 / 0.2)` per feature — the additive form of the same compounding |
+
+**Walk one example.** Fifteen features, each only 80/20 confident, treated as independent:
+
+```
+  spam side   0.8 ^ 15   = 0.0352
+  ham side    0.2 ^ 15   = 0.0000000000328
+
+  reported P(spam) = 0.0352 / (0.0352 + 0.0000000000328) = 0.999999999
+
+  same thing in log-odds:
+    per feature   log(0.8 / 0.2) = log 4 = 1.386
+    fifteen of them   15 x 1.386          = 20.79 log-odds
+```
+
+No single feature claimed more than 80% confidence, yet the model reports essentially certainty — the log-odds add linearly, so confidence compounds exponentially with feature count. When the features are genuinely correlated (the "free"/"money"/"click" cluster of Section 7), the same evidence is being counted fifteen times over, and the reported probability becomes a number that should never be read as a risk score.
 
 **Pitfall 4 — Applying GaussianNB to non-Gaussian features**
 A team used GaussianNB on a fraud dataset with highly skewed features (transaction_amount was heavily right-skewed with a long tail). The Gaussian assumption P(x_j | y=k) = N(mu_kj, sigma_kj^2) fit poorly — the estimated mean and variance did not represent the actual distribution. Predictions were unreliable. Fix: log-transform skewed continuous features before GaussianNB, or use MinMaxScaler + BernoulliNB, or switch to a discriminative model.

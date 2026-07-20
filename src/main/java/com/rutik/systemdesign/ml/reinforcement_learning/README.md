@@ -118,6 +118,69 @@ Q*(s, a) = R(s, a) + gamma * sum_{s'} P(s'|s,a) * max_{a'} Q*(s', a')
            reward                            (bootstrapped)
 ```
 
+**In plain terms.** "The value of doing something is what you get right now, plus a discounted estimate of the best you could do from wherever you land." Everything else in value-based RL is a way of making that one sentence computable when you cannot enumerate the states.
+
+The reason this is the foundational equation is that it is *self-referential*: `Q*` appears on both sides. You never need to imagine an entire future trajectory — you only need the reward for one step and your current guess about the next state. That is what lets an agent learn from single transitions instead of complete episodes.
+
+| Symbol | What it is |
+|--------|------------|
+| `Q*(s, a)` | Best achievable total discounted reward, starting in state `s` and taking action `a` |
+| `R(s, a)` | The immediate reward. The only part you actually observe |
+| `gamma` | Discount factor, 0–1. How much a reward one step later is worth than one now |
+| `P(s'\|s,a)` | Environment dynamics: the chance action `a` in `s` lands you in `s'` |
+| `sum_{s'} P(...)` | Average over where you might land — the "expected" in expected return |
+| `max_{a'} Q*(s', a')` | Assume you play optimally *from there on*. This `max` is what makes it *optimality* |
+
+**Walk one example.** A three-state chain with two actions at the start, gamma = 0.9:
+
+```
+        [S0] --right--> [S1] --right--> [GOAL, r = +10]
+          |
+        left --> [EXIT, r = +2]
+
+  Work backwards -- the only way to solve a recursive equation:
+
+  Q*(S1, right) = 10 + 0.9 * 0            = 10.0     (GOAL is terminal)
+  Q*(S0, right) =  0 + 0.9 * 10.0         =  9.0     (bootstraps off S1)
+  Q*(S0, left)  =  2 + 0.9 * 0            =  2.0
+
+  argmax at S0 -> "right" (9.0 vs 2.0). Walk the long way to the big reward.
+```
+
+Now make one step stochastic — action `right` at S1 reaches GOAL only 80% of the time, otherwise a dead end worth 0. That is where the `sum_{s'} P(s'|s,a)` term earns its keep:
+
+```
+  Q*(S1, right) = 0 + 0.9 * (0.8 * 10  +  0.2 * 0)
+                = 0.9 * 8.0
+                = 7.2                     (down from 10.0)
+  Q*(S0, right) = 0 + 0.9 * 7.2  =  6.48
+
+  Still beats left (2.0), so the policy is unchanged -- but the *value* dropped 28%.
+```
+
+**What it means.** Fix gamma and you have fixed how far the agent can see. The identity `1/(1 − gamma)` is the effective horizon: the number of future steps that meaningfully contribute before the discount crushes them to nothing.
+
+| Symbol | What it is |
+|--------|------------|
+| `gamma^k` | The weight a reward `k` steps away carries in today's decision |
+| `1/(1 − gamma)` | Effective horizon in steps — also exactly the sum `1 + gamma + gamma² + …` |
+| `gamma = 0` | Myopic. Only the immediate reward exists; horizon of 1 step |
+| `gamma = 1` | No discount. Only valid for episodic tasks that provably terminate |
+
+**Walk one example.** The two settings the code defaults hover between, 0.9 and 0.99:
+
+```
+  gamma    1/(1-gamma)     gamma^10    gamma^50    gamma^100   half-life
+  -----    -----------     --------    --------    ---------   ---------
+   0.90       10 steps      0.3487      0.0052      0.000027    6.6 steps
+   0.99      100 steps      0.9044      0.6050      0.3660     69.0 steps
+
+  A reward 50 steps out is worth 0.52% of face value at gamma = 0.90,
+  but 60.50% of face value at gamma = 0.99 -- a 117x difference.
+```
+
+Two knobs, ten-to-one horizons. This is why gamma is the first hyperparameter to check when an agent "refuses" to pursue a delayed payoff: at gamma = 0.9 a goal 50 steps away is essentially invisible. Push gamma too close to 1 and the opposite failure appears — value estimates grow toward `R_max/(1−gamma)` (100× the per-step reward at 0.99), variance explodes, and bootstrapped TD learning becomes numerically unstable. Return to the tiny MDP above: at gamma = 0.9 the agent goes right (9.0 vs 2.0), but at gamma = 0.15 it goes left (1.5 vs 2.0), and gamma = 0.2 is the exact indifference point. The discount factor did not change the environment — it changed what counts as optimal in it.
+
 ### DQN Architecture
 
 ```mermaid
@@ -232,6 +295,32 @@ floor, so the agent explores aggressively early and exploits its learned
 Q-values late. Decaying too fast starves the agent of exploration before it has
 learned anything — a common cause of an agent that plateaus at a poor policy.
 
+**Read it like this.** "Flip a biased coin every step: with probability epsilon ignore everything you have learned and act at random, otherwise take your current best guess." It is the crudest possible solution to exploration, and it is still the default because it is unbiased about *what* it explores and impossible to get subtly wrong.
+
+| Symbol | What it is |
+|--------|------------|
+| `epsilon` | Probability of a uniformly random action this step |
+| `1 − epsilon` | Probability of the greedy action, `argmax_a Q(s,a)` |
+| `epsilon_decay` | Multiplier applied per episode, 0.995 here. Geometric, not linear |
+| `epsilon_end` | Floor, 0.01. Never stop exploring entirely — the environment may be non-stationary |
+| `epsilon * epsilon_decay` | The whole schedule: `epsilon_n = max(epsilon_end, epsilon_start · decay^n)` |
+
+**Walk one example.** Where the schedule in the chart above actually puts you:
+
+```
+  episode      0.995^n     epsilon    what the agent is doing
+  -------      -------     -------    --------------------------------------
+      0         1.0000       1.00     every action random; pure data gathering
+    100         0.6058       0.61     still mostly random, Q-table filling in
+    200         0.3670       0.37     roughly one random action in three
+    400         0.1347       0.13     mostly exploiting, occasional probe
+    919         0.0100       0.01     floor reached; 1 random action per 100
+```
+
+The subtlety worth carrying into an interview: with 4 actions, epsilon = 0.1 does **not** mean you take the best action 90% of the time. The random branch can also happen to pick the best action, so `P(greedy action) = 1 − 0.1 + 0.1/4 = 0.925`. Conversely the cost of exploration is only `0.1 · 3/4 = 7.5%` of steps spent on known-suboptimal actions — cheap insurance against a Q-table that is confidently wrong about an arm it has visited twice.
+
+**Why the floor exists and what breaks without it.** Decay epsilon to exactly 0 and the agent becomes deterministic: it will never again try the action it under-estimated early, so a single unlucky sequence of rewards can permanently lock in a bad policy. The 0.01 floor guarantees roughly one probe per 100 steps forever, which is enough to eventually correct a wrong estimate and enough to notice if the environment shifts under you.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -284,6 +373,34 @@ def q_learning(
 
     return Q
 ```
+
+**Stated plainly.** "Compare what you thought this action was worth against what one step of real experience says it is worth, and move your estimate a small fraction of the way toward reality." The Bellman equation says what the answer *is*; this update rule is how you crawl toward it without ever knowing `P(s'|s,a)`.
+
+| Symbol | What it is |
+|--------|------------|
+| `Q(s,a)` | Current stored estimate — one cell of the table |
+| `r + gamma · max_a' Q(s',a')` | The **TD target**: one real reward plus your own estimate of the rest |
+| `td_error` | Target minus estimate. Positive = pleasantly surprised, negative = disappointed |
+| `alpha` | Learning rate, 0.1. What fraction of the surprise you actually absorb |
+| `max_a'` | Taken over the *greedy* action, not the one exploration will actually pick — this is precisely what makes Q-learning off-policy |
+| `(1 - int(done))` | Kills the bootstrap at a terminal state: there is no future to discount |
+
+**Walk one example.** Three visits to the same chain from the Bellman section (`GOAL` pays +10, alpha = 0.1, gamma = 0.9), with the whole table starting at zero:
+
+```
+  visit  cell        target                       td_error   new value
+  -----  ----------  --------------------------   --------   ---------
+    1    Q(S1,R)     10 + 0.9*0    = 10.000        +10.000     0 + 0.1*10.000 = 1.000
+    2    Q(S0,R)      0 + 0.9*1.0  =  0.900        + 0.900     0 + 0.1*0.900  = 0.090
+    3    Q(S1,R)     10 + 0.9*0    = 10.000        + 9.000     1.000 + 0.900  = 1.900
+    4    Q(S0,R)      0 + 0.9*1.9  =  1.710        + 1.620     0.090 + 0.162  = 0.252
+    5    Q(S1,R)     10 + 0.9*0    = 10.000        + 8.100     1.900 + 0.810  = 2.710
+    6    Q(S0,R)      0 + 0.9*2.71 =  2.439        + 2.187     0.252 + 0.219  = 0.471
+
+  True values (from the Bellman walk):  Q*(S1,R) = 10.0    Q*(S0,R) = 9.0
+```
+
+Two things are visible here that no amount of prose conveys. First, **reward flows backwards one state per visit**: S0 knew nothing about the goal until S1 had learned something to bootstrap from — which is exactly why sparse-reward environments take so long, and why techniques like n-step returns and prioritized replay exist. Second, **the td_error shrinks geometrically** (10.0 → 9.0 → 8.1, a factor of `1 − alpha = 0.9` each visit), so convergence is smooth but slow: at alpha = 0.1 you need roughly 44 visits to close 99% of the gap. Raise alpha to speed that up and the estimates start chasing individual noisy rewards instead of averaging them — the classic stability-versus-speed dial.
 
 ### DQN with Experience Replay in PyTorch
 
@@ -451,6 +568,42 @@ def compute_ppo_loss(
         "clip_fraction": ((ratio - 1).abs() > clip_eps).float().mean().item(),
     }
 ```
+
+**What the formula is telling you.** "Increase the probability of actions that beat the baseline and decrease the ones that didn't — but refuse to give extra credit for any single update that moves an action's probability more than 20%." The policy gradient is the first half; the clip is the trust region that makes reusing one rollout for K epochs safe.
+
+| Symbol | What it is |
+|--------|------------|
+| `ratio` | `exp(log_probs_new − log_probs_old)` = how much more likely this action is now. `1.0` = unchanged |
+| `advantages` | `A_t` from GAE. Sign is what matters: `+` = better than the critic expected |
+| `clip_eps` | 0.2, so the ratio is pinned to `[0.8, 1.2]` |
+| `min(surr1, surr2)` | Always take the more pessimistic estimate — the source of the one-sided behavior below |
+| `policy_loss` | Negated because optimizers minimize while the objective is to be maximized |
+| `value_coef`, `entropy_coef` | 0.5 and 0.01 — weights on critic accuracy and on staying stochastic |
+| `clip_fraction` | Diagnostic: share of the batch that hit the clamp. Healthy PPO sits near 0.1–0.3 |
+
+**Walk one example.** Four transitions through the objective, `clip_eps = 0.2`:
+
+```
+  log-diff   ratio    A_t     surr1     surr2     min       clipped?
+  --------   ------   ----    -------   -------   -------   --------
+   +0.05     1.0513   +1.5    +1.5769   +1.5769   +1.5769   no
+   +0.40     1.4918   +1.5    +2.2377   +1.8000   +1.8000   YES, gain capped
+   +0.40     1.4918   -1.5    -2.2377   -1.8000   -2.2377   no, full penalty
+   -0.30     0.7408   -1.5    -1.1112   -1.2000   -1.2000   YES, escape capped
+```
+
+Rows 2 and 3 have the *identical* ratio of 1.4918 and behave completely differently. That asymmetry is the whole design: when an action was good (`A > 0`) and you already made it much likelier, the objective flattens and the gradient goes to zero — no reason to push further. When an action was bad (`A < 0`) and you nonetheless made it likelier, the penalty is *unclipped* at −2.2377, so the gradient shoves hard in the correct direction. PPO caps your enthusiasm but never caps your correction.
+
+Assembling the total from the same batch (`policy_loss = −1.8`, `value_loss = 0.4`, `entropy = 1.2`):
+
+```
+  total = policy_loss + value_coef*value_loss + entropy_coef*entropy_loss
+        = -1.8 + 0.5*0.4 + 0.01*(-1.2)
+        = -1.8 + 0.200 - 0.012
+        = -1.612
+```
+
+The entropy term contributes −0.012 out of −1.612 — under 1% of the loss — yet dropping it is a classic way to watch a policy collapse to a single deterministic action a few hundred updates in. It is a tiny, permanent thumb on the scale toward staying stochastic, and the coefficient is small precisely because it must never compete with the actual objective.
 
 ---
 

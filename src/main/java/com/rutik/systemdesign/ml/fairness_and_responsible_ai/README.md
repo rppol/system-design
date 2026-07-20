@@ -67,6 +67,37 @@ Three consequences follow from treating fairness as a first-class engineering co
 
 Read every condition above as "…given group = a", i.e. the equality holds after conditioning on group membership (and, for separation and sufficiency, on the true label or the prediction respectively).
 
+**Stated plainly.** "Every one of these definitions is a rate read off a per-group confusion matrix — they differ only in *what they divide by*, and that denominator is the entire disagreement."
+
+Demographic parity divides by everyone in the group. Equalized odds divides by the truly-positive and the truly-negative rows separately. Predictive parity divides by the predicted-positive column. Three denominators, three incompatible notions of "equal treatment".
+
+| Symbol | What it is |
+|--------|------------|
+| `ŷ` | The model's binary decision: `1` = approved / flagged / selected, `0` = not |
+| `true` | The actual outcome the label records (`1` = really did default, really was qualified) |
+| `a` | A value of the protected attribute — one group, e.g. `a = A` or `a = B` |
+| `p` | Base rate: `P(true=1)` within a group. The share of that group who genuinely are positives |
+| `TPR` | `TP / (TP + FN)` — of the group's true positives, the fraction the model caught. Divides by a *row* |
+| `FPR` | `FP / (FP + TN)` — of the group's true negatives, the fraction wrongly flagged. Divides by the other *row* |
+| `PPV` | `TP / (TP + FP)` — of the people the model flagged, the fraction who really are positive. Divides by a *column* |
+| `selection rate` | `(TP + FP) / n` — the fraction of the whole group the model said yes to. Divides by the *total* |
+| `P(A , B)` | Read the comma as "given": probability of A conditioned on B |
+
+**Which cell of the matrix each definition looks at.** The same four counts, sliced three ways:
+
+```
+                        pred=1        pred=0
+          true=1          TP            FN        <- equalized odds reads this row (TPR)
+          true=0          FP            TN        <- and this row too (FPR)
+                          ^
+                          |
+              predictive parity reads this column (PPV)
+
+          demographic parity reads the whole (TP + FP) total against n
+```
+
+That picture is the fastest way to answer "why can't we just satisfy all three?" in an interview: the three metrics condition on three different things, so once the groups' base rates differ, fixing one denominator necessarily moves another. Section 6.2 turns that intuition into the arithmetic.
+
 ### 4.2 Individual and counterfactual fairness
 
 **Individual fairness** (Dwork et al., 2012) requires that similar individuals receive similar predictions: formally, a Lipschitz condition `d_out(f(x), f(x')) <= L * d_in(x, x')` for some task-specific similarity metric `d_in`. It sidesteps group statistics entirely but shifts the hard problem onto defining `d_in` — a similarity metric is itself a value judgment, and two auditors can disagree on what "similarly situated" means for a loan applicant.
@@ -295,6 +326,71 @@ assert abs(fpr_b - 0.209) < 1e-3
 # This is Chouldechova's (2017) impossibility result, not a bug to "fix".
 ```
 
+**What this actually says.** "If two groups genuinely contain different fractions of positives, then a score that means the same thing for both groups must make mistakes at different rates for both groups — that is arithmetic, not a modelling failure you can engineer away."
+
+The identity is just Bayes' rule rearranged, which is why no clever architecture escapes it. `p/(1-p)` is the prior odds of being a positive; `(1-PPV)/PPV` is the odds that a flagged person is a mistake. Fix the second (calibration) and the first drags `FPR` along with it.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | The group's true base rate, `P(true=1)` |
+| `p / (1-p)` | Prior odds. `0.52 -> 1.083`, `0.35 -> 0.538` — the *only* term that differs between the two groups below |
+| `(1 - PPV) / PPV` | Odds that a flagged person is a false alarm. `PPV = 0.65 -> 0.538` |
+| `TPR` | Held equal across groups, so equal opportunity is satisfied by construction here |
+| `FPR` | Not a free variable once `p`, `PPV`, and `TPR` are pinned — the identity *computes* it |
+
+**Walk all three metrics on one pair of confusion matrices.** Two groups, same model, same single threshold, integer counts chosen to hit exactly the `p = 0.52 / 0.35`, `PPV = 0.65`, `TPR = 0.72` numbers used in Section 5.4:
+
+```
+  GROUP A   (n = 2500)                    GROUP B   (n = 6500)
+              pred=1   pred=0                        pred=1   pred=0
+   true=1       936      364   | 1300      true=1      1638      637   | 2275
+   true=0       504      696   | 1200      true=0       882     3343   | 4225
+              -----------------                      -----------------
+               1440     1060                          2520     3980
+
+  ---------------------------------------------------------------------------
+  PREDICTIVE PARITY   PPV = TP / (TP + FP)
+      A:  936 / (936 + 504)   =  936 / 1440  = 0.650
+      B: 1638 / (1638 + 882)  = 1638 / 2520  = 0.650
+      gap = 0.000                                            SATISFIED
+
+  EQUAL OPPORTUNITY   TPR = TP / (TP + FN)
+      A:  936 / 1300 = 0.720
+      B: 1638 / 2275 = 0.720
+      gap = 0.000                                            SATISFIED
+
+  EQUALIZED ODDS      needs equal TPR *and* equal FPR = FP / (FP + TN)
+      A:  504 / 1200 = 0.420
+      B:  882 / 4225 = 0.209
+      gap = 0.211  --  group A is falsely flagged 2.0x as often     VIOLATED
+
+  DEMOGRAPHIC PARITY  selection rate = (TP + FP) / n
+      A: 1440 / 2500 = 0.576
+      B: 2520 / 6500 = 0.388
+      ratio = 0.388 / 0.576 = 0.673  <  0.80 four-fifths rule       VIOLATED
+  ---------------------------------------------------------------------------
+```
+
+One model, one threshold, four verdicts — two green and two red, and no bug anywhere. The base rates are `1300/2500 = 0.52` and `2275/6500 = 0.35`, and that single difference is what splits the outcome.
+
+**Now try to fix it, and watch the damage move.** Re-threshold group B until its `FPR` matches A's `0.420`, so equalized odds is finally satisfied. Run the same identity forward to get the new `PPV`:
+
+```
+  PPV = TPR x p / ( TPR x p + FPR x (1-p) )
+
+  group A:  0.72 x 0.52 / (0.72 x 0.52 + 0.42 x 0.48)
+         =  0.3744 / (0.3744 + 0.2016) = 0.3744 / 0.5760 = 0.650
+  group B:  0.72 x 0.35 / (0.72 x 0.35 + 0.42 x 0.65)
+         =  0.2520 / (0.2520 + 0.2730) = 0.2520 / 0.5250 = 0.480
+
+  EQUALIZED ODDS  now SATISFIED   (TPR 0.72 / 0.72,  FPR 0.420 / 0.420)
+  PREDICTIVE PARITY now VIOLATED  (PPV 0.650 vs 0.480)
+```
+
+The damage did not disappear; it relocated. A "high risk" flag now means a 65% chance of being right for group A and only a 48% chance for group B — the same words on the screen carrying different meanings, which is precisely the harm predictive parity exists to prevent. And demographic parity is *still* not satisfied: selection rates are now `0.576` and `0.525`, a ratio of `0.911` — better than `0.673`, but equal only by coincidence of these particular numbers.
+
+**Why there is no third option.** The three constraints are `2` equations short of solvable. Equalized odds pins two numbers per group (`TPR`, `FPR`); predictive parity pins a third (`PPV`); demographic parity pins the weighted sum `TPR*p + FPR*(1-p)`. With `p` differing between groups, satisfying any two of them over-determines the fourth. The escape hatches are the two the theorem itself names — a perfect classifier (`PPV = 1`, so `(1-PPV)/PPV = 0` and every `FPR` collapses to `0`) or genuinely equal base rates (`p_A = p_B`, so the differing term vanishes). Neither is available in credit, hiring, or criminal-risk scoring, which is why the honest deliverable is a documented *choice* of metric and its justification, not a model that passes every fairness dashboard.
+
 ### 6.3 Disparate impact ratio and the four-fifths (80%) rule
 
 The EEOC's Uniform Guidelines on Employee Selection Procedures (1978, 29 CFR Part 1607) treat a selection rate for any group below four-fifths of the highest-selected group's rate as evidence of adverse impact. It is a screening heuristic, not a legal safe harbor — courts also weigh statistical significance, and the ratio is noisy at small sample sizes.
@@ -313,6 +409,34 @@ ratio, verdict = disparate_impact_ratio({"men": 0.60, "women": 0.45})
 # ratio = 0.45 / 0.60 = 0.75 -> "FAIL (adverse impact)": women are selected at
 # only 75% of men's rate, below the EEOC's 80% four-fifths threshold.
 ```
+
+**The idea behind it.** "Compare the group you select least often to the group you select most often; if the loser is picked at less than four-fifths the winner's rate, a regulator will want an explanation."
+
+It is deliberately the crudest metric in this module — one ratio, no labels, no confusion matrix, no notion of who was actually qualified. That crudeness is the point: it can be computed from decision logs alone, by someone with no access to ground truth.
+
+| Symbol | What it is |
+|--------|------------|
+| `selection rate` | Approvals divided by applicants, per group. Exactly demographic parity's quantity, unnormalized |
+| `lowest / highest` | Always the disadvantaged group over the advantaged one, so the ratio sits in `[0, 1]` |
+| `0.80` | The four-fifths threshold from 29 CFR Part 1607. A screening trigger, not a legal safe harbor |
+| ratio `= 1.0` | Perfect demographic parity |
+
+**Walk one example, then the module's own numbers.** Two selection-rate pairs pushed through the same ratio:
+
+```
+  EEOC textbook case
+    men   0.60      women 0.45
+    ratio = 0.45 / 0.60 = 0.750   -> FAIL, 5 points under the 0.80 line
+    to pass, women's rate must reach 0.80 x 0.60 = 0.480
+    per 1,000 women applicants that is 480 - 450 = 30 additional approvals
+
+  The Section 6.2 confusion matrices, same formula
+    group A 0.576   group B 0.388
+    ratio = 0.388 / 0.576 = 0.673   -> FAIL, and note that this model has
+    IDENTICAL PPV and IDENTICAL TPR across the two groups
+```
+
+That second row is the trap worth carrying into an interview: a model can be perfectly calibrated and perfectly equal-opportunity and still fail the four-fifths rule outright, because the rule measures a completely different denominator (Section 4.1). "We checked for bias" is not an answer — *which* metric, and against which base rates, is the answer.
 
 ### 6.4 Per-group metrics with fairlearn
 

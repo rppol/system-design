@@ -313,6 +313,57 @@ def fgsm_attack(
     return x_adv.clamp(0.0, 1.0).detach()
 ```
 
+**In plain terms.** "Ask the model which direction would hurt it most, then nudge *every single pixel* by the same tiny amount in whichever way that direction points."
+
+Two things make FGSM cheap. It takes the `sign()` of the gradient, throwing away the magnitude, so every feature moves by exactly `epsilon` — no learning rate, no line search. And it needs only one backward pass, the same cost as a single training step, which is why it is the attack you can afford to run inside a training loop.
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | The clean input. Pixels scaled to `[0, 1]`, hence the `clamp(0.0, 1.0)` |
+| `L(f(x), y)` | The ordinary cross-entropy loss — the thing training *minimizes* and this attack *maximizes* |
+| `dL/dx` | Gradient with respect to the **input**, not the weights. Same backprop, one node further back |
+| `sign(g)` | `+1`, `-1`, or `0`. Discards how strong the gradient is and keeps only its direction |
+| `epsilon` | The perturbation budget: the largest change any one pixel is allowed. `0.03` here |
+| `+` (not `-`) | Gradient *ascent*. Training subtracts to reduce loss; the attacker adds to raise it |
+| `clamp(0, 1)` | Keeps the result a real image. This is what makes the realized step smaller than `epsilon` at the edges |
+
+**Walk one example.** Five pixels, `epsilon = 0.03` (about `8/255 = 0.0314`, the standard CIFAR-10 budget):
+
+```
+  pixel        x      dL/dx     sign    x + eps*sign    after clamp(0,1)    realized delta
+    1        0.50    +0.412      +1        0.53              0.53               +0.03
+    2        0.99    +0.008      +1        1.02              1.00               +0.01   <- clipped
+    3        0.02    -1.930      -1       -0.01              0.00               -0.02   <- clipped
+    4        0.31    -0.663      -1        0.28              0.28               -0.03
+    5        0.74     0.000       0        0.74              0.74                0.00
+
+  Note pixel 2 vs pixel 3: gradient 0.008 and gradient -1.930 produce steps of
+  identical size. sign() erased the 240x difference in gradient magnitude.
+```
+
+That table is the whole method, and the last line is the interview point: FGSM does not move "important" pixels further, it moves everything the same distance. This is why one FGSM step is weak — it lands on a corner of the epsilon-ball chosen by the gradient at `x` alone, and the loss surface has usually curved away by the time you get there. PGD below fixes exactly that by re-measuring the gradient at every step.
+
+**Read it like this — the epsilon-ball and its three norms.** "Bounded perturbation" always means *bounded under some norm*, and the choice of norm decides what the attack is allowed to look like:
+
+```
+  Same perturbation delta = [+0.03, +0.01, -0.02, -0.03, 0.00]  (the FGSM row above)
+
+    L0(delta)   = count of changed features            = 4
+    Linf(delta) = max |delta_i|                         = 0.03
+    L2(delta)   = sqrt(0.03^2 + 0.01^2 + 0.02^2 + 0.03^2) = 0.0480
+    L1(delta)   = sum |delta_i|                         = 0.09
+
+  Now a ONE-PIXEL attack that repaints pixel 5 from 0.74 to 1.00:
+    delta = [0, 0, 0, 0, +0.26]
+    L0 = 1        (25x smaller -- an L0 attacker calls this the cheaper attack)
+    Linf = 0.26   (8.7x larger -- an Linf budget of 0.03 forbids it outright)
+    L2 = 0.26     (5.4x larger)
+```
+
+The two perturbations swap ranks depending on which norm you measure them with, and that is the entire reason threat models must name the norm before anything else. `Linf` says "change everything a little, change nothing much" — the classic imperceptible-image threat. `L0` says "change as few features as possible, by as much as you like" — a sticker on a stop sign, or a handful of tokens in a malware binary. `L2` says "spend a fixed total energy however you like", which is the norm certified defenses can actually prove things about (see randomized smoothing below).
+
+Scale matters too: an `Linf = 0.03` ball on a `32x32x3 = 3072`-pixel CIFAR image permits an `L2` distance of up to `sqrt(3072) * 0.03 = 1.663`, so a "tiny" `Linf` budget is a generous `L2` budget. Reporting `epsilon = 0.03` without naming the norm and the input dimension is not a threat model.
+
 ### PGD (Projected Gradient Descent) — the standard strong attack
 
 ```python
@@ -348,6 +399,31 @@ def pgd_attack(
             x_adv = x_adv.clamp(0.0, 1.0)
     return x_adv.detach()
 ```
+
+**Put simply.** "Take many small FGSM steps instead of one big one, and after every step drag the input back inside the epsilon-ball if it wandered out."
+
+| Symbol | What it is |
+|--------|------------|
+| `alpha` | Per-step size, `0.007`. Deliberately much smaller than `epsilon` so the path can curve |
+| `steps` | How many times the gradient is re-measured, `40` for evaluation, `7` inside adversarial training |
+| `max(min(x_adv, x+eps), x-eps)` | The projection. Element-wise clamp back into the `Linf` ball centred on the original `x` |
+| `uniform_(-eps, eps)` | Random start. Prevents every run from converging to the same corner of the ball |
+
+**Walk the budget arithmetic.** With `alpha = 0.007` and `steps = 40`, a pixel could in principle travel `0.007 x 40 = 0.28`, which is `9.3x` the `epsilon = 0.03` it is allowed:
+
+```
+  total possible travel  = alpha x steps = 0.007 x 40 = 0.280
+  allowed displacement   = epsilon                    = 0.030
+  ratio                  = 0.280 / 0.030              = 9.3x
+
+  So the projection fires constantly -- a pixel that keeps getting pushed the same
+  way is pinned at exactly x +/- 0.03 and can only slide sideways after that.
+  The extra 8.3x of travel is not wasted: it is how the attack explores the FACE
+  of the ball rather than committing to one corner, which is why PGD beats FGSM
+  at the identical epsilon.
+```
+
+Drop the projection and the attack drifts to a genuinely different image; drop the random start and the attack becomes deterministic and easier for a defense to overfit to. Both lines are load-bearing, and both are what people quietly omit when they report suspiciously high robust accuracy.
 
 ### Adversarial training (the strongest reliable defense)
 
@@ -400,6 +476,58 @@ def evaluate_robustness(
     # A standard CIFAR-10 model: clean ~0.95, robust ~0.00.
     # An adversarially trained model: clean ~0.87, robust ~0.45.
 ```
+
+**What the formula is telling you.** "Robust accuracy is ordinary accuracy measured on inputs an attacker was allowed to rewrite first — and attack success rate is just the same number read from the attacker's side of the table."
+
+`ASR = 1 - robust_accuracy` when the attack is untargeted and every test input is attacked. Two numbers, one measurement; interviewers ask for whichever one you did not memorize.
+
+| Symbol | What it is |
+|--------|------------|
+| `clean_accuracy` | Accuracy on untouched inputs. Says nothing about security — a `0.95` model can be `0.00` robust |
+| `robust_accuracy` | Accuracy on `x_adv` produced by a strong attack at a stated `epsilon`. Meaningless without both |
+| `ASR` | Attack success rate, `1 - robust_accuracy`. The fraction of inputs the attacker flipped |
+| `steps = 40` | Attack strength. Reporting robust accuracy under a 1-step attack inflates it — always name the attack |
+| the gap `clean - robust` | The price of the threat model. It is never zero |
+
+**Walk the two rows the code comments give.** Same test set, same `epsilon = 0.03`, same 40-step PGD:
+
+```
+  model                        clean    robust    ASR = 1 - robust    accuracy lost
+  standard training            0.95      0.00         100%             0.95  -> total collapse
+  Madry adversarial training   0.87      0.45          55%             0.42  -> real defense
+
+  Cost of the defense:   0.95 - 0.87 = 0.08 clean accuracy given up
+  Benefit:               0.45 - 0.00 = 0.45 robust accuracy bought
+  Trade:                 8 points of clean accuracy for 45 points of robustness
+```
+
+Two readings matter here. First, the standard model is not "somewhat vulnerable" — it is at `0.00`, worse than random guessing on 10 classes, because the attacker is choosing the wrong answer deliberately rather than sampling one. A clean accuracy of `0.95` and a robust accuracy of `0.00` are perfectly compatible, and any report quoting only the first is telling you nothing about security. Second, the best-known defense still fails more than half the time (`ASR = 55%`); robustness is a mitigation you budget for, not a box you check.
+
+**The idea behind the certified radius.** Randomized smoothing's `R = sigma * Phi_inverse(p_top)` reads as: "the more decisively the top class survives noise, the further you can prove no attack reaches."
+
+| Symbol | What it is |
+|--------|------------|
+| `sigma` | Standard deviation of the Gaussian noise added to each of the `10^3-10^5` copies |
+| `p_top` | Fraction of the noisy copies that still vote for the top class |
+| `Phi_inverse` | Inverse standard-normal CDF. Maps a probability to "how many standard deviations out" |
+| `R` | Certified `L2` radius. **No** perturbation with `L2 < R` can change the smoothed prediction |
+
+**Walk the radius.** At `sigma = 0.25`, vary how decisively the top class wins the vote:
+
+```
+  p_top    Phi_inverse(p_top)    R = 0.25 x Phi_inv    what it certifies
+  0.500          0.000                0.000            no guarantee at all
+  0.600          0.253                0.063            a barely-useful radius
+  0.900          1.282                0.320
+  0.990          2.326                0.582
+  0.999          3.090                0.773            diminishing: 10x more votes,
+                                                       only 1.33x the radius
+
+  Doubling the noise to sigma = 0.50 doubles every radius (0.99 -> 1.163) but
+  lowers p_top on hard inputs, because more noise means a less decisive vote.
+```
+
+Two properties fall straight out of the table. `p_top = 0.5` certifies a radius of exactly zero — a coin-flip vote proves nothing — and `Phi_inverse` grows so slowly past `0.99` that chasing certainty with more samples buys almost nothing. That is the sigma tradeoff in one line: `R` is linear in `sigma` but `p_top` degrades with it, so there is an optimal noise level per dataset, and unlike everything else in this section the resulting number is a proof rather than an empirical score that the next attack can erase.
 
 ### Randomized smoothing (certified robustness sketch)
 

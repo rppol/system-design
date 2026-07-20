@@ -24,6 +24,38 @@ Key insight: parameter sharing is the core efficiency gain. A 3x3 filter applied
 
 **Convolution operation**: a filter (kernel) of shape (K, K, C_in) slides over an input feature map. At each spatial position, it computes the dot product between the filter weights and the input patch, producing one scalar in the output feature map. Applying C_out different filters produces a feature map of shape (H_out, W_out, C_out).
 
+**Put simply.** "A conv layer's weight count depends only on the filter shape and the channel counts — never on how big the image is."
+
+That independence from `H` and `W` is the whole reason CNNs fit in memory. A dense layer wiring the same feature map to the same output must store one weight per (input unit, output unit) pair, and that product explodes quadratically with resolution.
+
+| Symbol | What it is |
+|--------|------------|
+| `K` | Filter side length. A `3x3` filter has `K = 3` |
+| `C_in` | Channels coming in — the depth of the input feature map |
+| `C_out` | Number of distinct filters, so the depth of the output feature map |
+| `K * K * C_in` | Weights inside one filter: it spans the full input depth, but only a small window wide |
+| `K * K * C_in * C_out` | Total conv weights. `H` and `W` appear nowhere in this product |
+| `(H*W*C_in) * (H*W*C_out)` | Dense-layer weights for the same map — every input unit wired to every output unit |
+
+**Walk one example.** One `3x3` conv, 64 channels in, 64 channels out, on a `56x56` map:
+
+```
+  conv layer
+    weights = K x K x C_in x C_out
+            = 3 x 3 x 64 x 64
+            = 36,864            <- plus 64 biases = 36,928 if bias is kept
+
+  dense layer producing the identical 56x56x64 output
+    input units  = 56 x 56 x 64 = 200,704
+    output units = 56 x 56 x 64 = 200,704
+    weights      = 200,704 x 200,704
+                 = 40,282,095,616        (40.3 billion)
+
+  ratio = 40,282,095,616 / 36,864 = 1,092,722x fewer weights in the conv layer
+```
+
+At fp32 the dense layer's weights alone would occupy `40,282,095,616 x 4 = 161 GB` — larger than any single GPU. The conv layer needs `36,864 x 4 = 147 KB`. Same input, same output shape, six orders of magnitude apart, and the entire gap is bought by reusing one filter across all `56 x 56 = 3,136` spatial positions.
+
 **Output size formula**: given input size W, filter size F, padding P, stride S:
 ```
 H_out = floor((H - F + 2P) / S) + 1
@@ -35,9 +67,79 @@ Common cases:
 - 3x3 conv, P=0, S=1: output shrinks by 2 each side
 - 3x3 conv, P=1, S=2: output halves (halved spatial resolution)
 
+**What the formula is telling you.** "Measure how far the filter's corner can slide before it falls off the edge, count how many stride-sized jumps fit in that distance, then add one for the starting position it occupied before jumping at all."
+
+Reading it as travel-then-jumps is what makes the `+ 1` stop looking arbitrary. The `floor` is equally load-bearing: a partial jump cannot happen, so leftover pixels at the far edge are silently discarded.
+
+| Symbol | What it is |
+|--------|------------|
+| `H`, `W` | Input height and width, in pixels of this layer's own grid |
+| `F` | Filter (kernel) side length |
+| `P` | Zeros added to **each** side, so the effective input grows by `2P` |
+| `S` | Stride — how many pixels the filter jumps between taps |
+| `H - F + 2P` | Travel distance: how far the filter's top-left corner can move before running off |
+| `(H - F + 2P) / S` | How many jumps of size `S` fit inside that travel distance |
+| `+ 1` | The starting tap, which happens before any jump |
+| `floor(...)` | Partial jumps are impossible — leftover edge pixels are dropped, never padded implicitly |
+
+**Walk three configurations.** One preserving, one halving, one that does not divide evenly:
+
+```
+  (a) "same" padding: 224x224 input, 3x3 conv, P=1, S=1
+        travel = 224 - 3 + 2x1 = 223
+        jumps  = 223 / 1       = 223
+        out    = 223 + 1       = 224      <- size preserved; P = floor(F/2) does it
+
+  (b) stride-2 downsample: 224x224 input, 7x7 conv, P=3, S=2
+        travel = 224 - 7 + 2x3 = 223
+        jumps  = 223 / 2       = 111.5  -> floor 111
+        out    = 111 + 1       = 112      <- the ResNet-50 stem, cleanly halved
+
+  (c) does not divide evenly: 112x112 input, 3x3 pool, P=0, S=2
+        travel = 112 - 3 + 0   = 109
+        jumps  = 109 / 2       =  54.5  -> floor 54
+        out    =  54 + 1       =  55
+        coverage = 3 + 2 x (55 - 1) = 111 of 112 columns
+                                       ^ the 112th column is never read at all
+```
+
+Case (c) is why torchvision's ResNet-50 sets `padding=1` on that max-pool: `(112 - 3 + 2)/2 + 1 = 56`, which keeps the clean `224 -> 112 -> 56 -> 28 -> 14 -> 7` ladder instead of a ragged 55 that then propagates odd sizes through every later stage. Whenever a stage's output is one pixel short of what you expected, the `floor` ate an edge — fix it with padding, not by patching the layer downstream.
+
 **Receptive field**: the region of the input that influences a given neuron's output. Grows with depth. For a stack of K layers of 3x3 conv with stride 1: RF = 1 + 2*K. For strided convolutions, the receptive field grows faster: RF(k) = RF(k-1) + (kernel_size - 1) * product_of_all_previous_strides.
 
 **Pooling**: reduces spatial dimensions to provide spatial invariance. Max pooling takes the maximum in each window (retains strongest activation). Average pooling takes the mean (smoother, often used in global pooling before FC layers).
+
+**Read it like this.** "Pooling runs the exact same output-size formula as convolution, with `F = S`, and it does it with zero learnable weights."
+
+There is no separate pooling arithmetic to memorize — set `F = S = 2` in `(W - F + 2P)/S + 1` and the answer is "half". What changes is the parameter column: a conv layer that halves the map costs weights, a pool layer that halves it costs none.
+
+| Symbol | What it is |
+|--------|------------|
+| `F_pool` | Pooling window side, typically 2 or 3 |
+| `S_pool` | Stride, usually set equal to `F_pool` so the windows tile without overlap |
+| `C` | Channel count — pooling acts per channel independently and never changes it |
+| params | Always `0`; max and mean are fixed functions with nothing to fit |
+| global average pool | The extreme case `F_pool = H = W`, collapsing each channel to a single number |
+
+**Walk one example.** A `2x2` max pool, stride 2, on a `56x56x64` map:
+
+```
+  out side = (56 - 2 + 0) / 2 + 1 = 28
+
+  shape     : 56 x 56 x 64  ->  28 x 28 x 64
+  values    :      200,704  ->       50,176      = 4x fewer activations
+  channels  :           64  ->           64      (unchanged)
+  params    :            0                       (nothing is learned)
+
+  global average pool at the end of ResNet-50:
+    7 x 7 x 2048 = 100,352 values  ->  2,048 values
+
+    head on the flattened map : 100,352 x 1000 = 100,352,000 weights
+    head after GAP            :   2,048 x 1000 =   2,048,000 weights
+                                                  ^ 49x smaller, same 1000 classes
+```
+
+The 4x activation drop is per pooling layer and it compounds: four such stages cut activations 256-fold, which is what keeps a 224x224 batch inside GPU memory. Global average pooling pays off differently — it deletes the flatten-to-dense parameter blowup outright, which is why ResNet and EfficientNet ship far smaller classifier heads than VGG did.
 
 **Skip connections (ResNet)**: add the input directly to the output of a block, bypassing the nonlinear transformations. Enables training of very deep networks by providing gradient highways that bypass vanishing gradient accumulation.
 
@@ -271,7 +373,8 @@ def conv_output_size(input_size: int, kernel: int, padding: int, stride: int) ->
 
 # Examples:
 # 224x224 input, 7x7 conv, P=3, S=2 -> (224 - 7 + 6) / 2 + 1 = 112
-# 112x112, 3x3 max pool, P=0, S=2  -> (112 - 3) / 2 + 1 = 56
+# 112x112, 3x3 max pool, P=1, S=2  -> (112 - 3 + 2) / 2 + 1 = 56
+# (with P=0 this would be (112 - 3) / 2 + 1 = 55, breaking the ladder)
 ```
 
 ### Transfer Learning Pattern
@@ -370,6 +473,36 @@ example_layers = [(7, 2), (3, 2), (3, 1), (3, 1), (3, 2), (3, 1), (3, 1), (3, 2)
 rf = compute_receptive_field(example_layers)
 # Effective RF covers large spatial region by final stage
 ```
+
+**What this actually says.** "Every layer widens the window by its kernel minus one — but scaled by how much the image has already been shrunk underneath it."
+
+| Symbol | What it is |
+|--------|------------|
+| `RF_k` | Receptive field after layer `k`, measured in original input pixels |
+| `RF_0 = 1` | Before any layer, a neuron sees exactly one pixel |
+| `kernel_size - 1` | The extra reach a layer adds, expressed on its own input grid |
+| `stride_product` | Product of all strides **before** this layer — the exchange rate from this layer's grid to input pixels |
+| `*= stride` | After the layer, one downstream pixel is worth `stride` times more input pixels |
+
+**Walk one example.** The `example_layers` list above, layer by layer:
+
+```
+  layer   kernel  stride    (k-1) x stride_product    RF    stride_product after
+  ------  ------  ------    ----------------------    ---   -------------------
+  start        -       -                         -      1                     1
+  L1           7       2          6 x  1 =      6       7                     2
+  L2           3       2          2 x  2 =      4      11                     4
+  L3           3       1          2 x  4 =      8      19                     4
+  L4           3       1          2 x  4 =      8      27                     4
+  L5           3       2          2 x  4 =      8      35                     8
+  L6           3       1          2 x  8 =     16      51                     8
+  L7           3       1          2 x  8 =     16      67                     8
+  L8           3       2          2 x  8 =     16      83                    16
+```
+
+L3 and L6 are the identical layer — `3x3`, stride 1 — yet L3 adds 8 pixels of reach and L6 adds 16. The only difference is that a stride-2 (L5) doubled the scale beneath L6. This is why stride, not kernel size, is the dominant lever on receptive field.
+
+**Why the stride_product term exists.** Delete it and the recurrence collapses to the stride-1 case `RF = 1 + 2K`: those same 8 layers would reach `1 + 2*8 = 17` pixels instead of 83, and covering a 224px image would take roughly 112 stacked `3x3` layers. Downsampling is what makes depth compound rather than accumulate — each stride-2 doubles the value of every layer after it, which is how ResNet-50 gets an 83px view out of 8 layers and sees the whole scene well before its final stage.
 
 ---
 

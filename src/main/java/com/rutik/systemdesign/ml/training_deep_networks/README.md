@@ -30,6 +30,42 @@ Key insight: learning rate is the single most important hyperparameter. A correc
 
 **Gradient clipping**: limits gradient norm before the optimizer step to prevent exploding gradients from destabilizing training.
 
+**Stated plainly.** Backpropagation through a depth-`L` network multiplies the gradient by one Jacobian factor per layer, so the gradient reaching layer 1 is roughly `g_L * r^L`: "whatever average per-layer factor `r` your network happens to have, depth raises it to the power `L` — and anything other than exactly 1.0 becomes an exponential." That is why "vanishing" and "exploding" are the same phenomenon with the exponent pointing in opposite directions, and why the fix is always to control `r` (normalization, careful init, residual connections) or to cap the result (clipping).
+
+| Symbol | What it is |
+|--------|------------|
+| `g_L` | The gradient arriving at the last layer — the healthy, un-amplified signal |
+| `r` | Average per-layer multiplicative factor (roughly the Jacobian's typical singular value) |
+| `L` | Network depth in layers — the exponent |
+| `r^L` | Total scaling applied to the gradient by the time it reaches layer 1 |
+| `r < 1` | Vanishing regime: early layers get near-zero gradient and stop learning |
+| `r > 1` | Exploding regime: early layers get huge gradients, weights jump, loss goes NaN |
+
+**Walk one example.** A 50-layer network, one factor per layer:
+
+```
+  per-layer factor r, depth L = 50, so layer 1 sees its gradient scaled by r^50
+
+      r = 0.9   ->  0.9^50  =   0.00515      194x smaller  (vanishing)
+      r = 1.0   ->  1.0^50  =   1.0          the knife edge
+      r = 1.1   ->  1.1^50  = 117.39         117x larger   (exploding)
+
+  a healthy upstream gradient of 0.01 arrives at layer 1 as:
+      r = 0.9   ->  0.01 x   0.00515 = 5.15e-05
+                    below fp16's smallest normal value 6.10e-05, so it lands in
+                    the subnormal range and loses precision -- layer 1 barely moves
+      r = 1.1   ->  0.01 x 117.39    = 1.17
+                    117x the intended step -- one batch can wreck the weights
+
+  the two factors differ by only 0.2 per layer, yet after 50 layers the paths are
+  117.39 / 0.00515 = 22778x apart
+
+  at depth 10 the same factors are nearly harmless:
+      0.9^10 = 0.3487        1.1^10 = 2.5937
+```
+
+Depth is the multiplier on the problem: the identical `r` that is a rounding error at 10 layers is a training failure at 50. Clipping does not fix `r` — it only truncates the exploding side, which is why it is a safety net layered on top of normalization and good initialization, never a substitute for them.
+
 **Regularization**: techniques that penalize model complexity to improve generalization: L2 weight decay, dropout, label smoothing, data augmentation.
 
 **Mixed precision**: use 16-bit floats (float16 or bfloat16) for most operations, keeping a float32 master copy for parameter updates. Reduces memory ~50% and speeds up matrix multiplications on Tensor Core GPUs.
@@ -67,6 +103,86 @@ Key insight: learning rate is the single most important hyperparameter. A correc
 | Label smoothing | Softens one-hot targets | 0.1 |
 | Batch size | Larger batches = less noise = less regularization | 32-256 for images |
 | Early stopping | Stop when val loss stops improving | patience=10 epochs |
+
+### Decoding Normalization and Dropout
+
+**What this actually says.** Batch normalization computes `y = gamma * (x - mu_B) / sqrt(var_B + eps) + beta`: "measure this activation's mean and spread across the current mini-batch, squash it onto a standard mean-0 variance-1 scale, then hand the layer two learnable dials to put back whatever scale and offset it actually wants."
+
+The two stages have opposite natures and that is the whole design: the normalize half is *fixed statistics* (no parameters, recomputed per batch), the scale-and-shift half is *learned*. Read war story 4 in Section 10 through this lens — applying weight decay to `gamma` and `beta` drags the learned dials toward 1.0 and 0.0, which is exactly the freedom the layer needs to keep.
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | One activation value for one channel, for one sample in the batch |
+| `mu_B` | Mean of that activation across the mini-batch — the `B` means "this batch only" |
+| `var_B` | Biased variance across the batch (divide by N, not N-1) |
+| `eps` | Numerical floor, PyTorch default 1e-5 — stops a divide-by-zero on a constant batch |
+| `x_hat` | The normalized value `(x - mu_B) / sqrt(var_B + eps)`, mean 0 and variance 1 |
+| `gamma` | Learned scale dial, initialized to 1.0 — lets the layer re-widen the distribution |
+| `beta` | Learned shift dial, initialized to 0.0 — lets the layer re-center the distribution |
+
+**Walk one example.** One channel, mini-batch of 4, with `gamma = 1.5` and `beta = 0.5`:
+
+```
+  x = [2.0, 4.0, 6.0, 8.0]
+
+  step 1  batch mean      mu_B  = (2 + 4 + 6 + 8) / 4                    = 5.0
+  step 2  batch variance  var_B = (9 + 1 + 1 + 9) / 4                    = 5.0
+                                  deviations are -3, -1, +1, +3
+  step 3  denominator     sqrt(var_B + eps) = sqrt(5.0 + 1e-5)           = 2.23607
+
+  step 4  normalize       x_hat = (x - 5.0) / 2.23607
+              2.0  ->  -1.3416
+              4.0  ->  -0.4472
+              6.0  ->  +0.4472
+              8.0  ->  +1.3416         mean(x_hat) = 0.0, var(x_hat) = 1.0
+
+  step 5  scale + shift   y = 1.5 * x_hat + 0.5
+             -1.3416  ->  -1.5125
+             -0.4472  ->  -0.1708
+             +0.4472  ->  +1.1708
+             +1.3416  ->  +2.5125      mean(y) = 0.5 = beta, std(y) = 1.5 = gamma
+
+  net effect: a batch spanning 2.0..8.0 around mean 5.0 became -1.5125..2.5125
+  around mean 0.5 -- the layer downstream now sees a stable, known scale
+```
+
+Without `gamma` and `beta`, every BN layer would force its output to mean 0 and variance 1 forever, which strips the network of the ability to represent an identity mapping or to sit in a saturating region of an activation on purpose. Setting `gamma = sqrt(var_B)` and `beta = mu_B` recovers the original activations exactly, so the layer can always undo the normalization if that is what minimizes the loss. Note the `_B` subscripts: these are *batch* statistics, which is why `model.eval()` swaps in the running averages instead, and why `drop_last=True` matters — a final batch of size 1 has `var_B = 0` and produces a meaningless normalization.
+
+**Put simply.** Inverted dropout multiplies each surviving activation by `1 / (1 - p)` during training: "delete a random `p` fraction of the units, then inflate the survivors by exactly enough that the layer's total output is unchanged on average — so inference, which drops nothing, sees the scale it was trained on."
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Drop probability — the fraction of units zeroed, 0.1-0.5 in the table above |
+| `1 - p` | Keep probability — the chance any given unit survives the mask |
+| `mask` | Fresh Bernoulli(`1 - p`) draw per unit per forward pass, resampled every batch |
+| `1 / (1 - p)` | The compensation factor applied to survivors, so `E[output]` matches the clean output |
+| `model.eval()` | Turns the mask off entirely — inference is deterministic and unscaled |
+
+**Walk one example.** A 4-unit layer with `p = 0.5`, so `1 / (1 - p) = 2.0`:
+
+```
+  TRAIN -- one sampled mask [0, 1, 0, 1]
+
+      unit    a     mask   after mask   x 1/(1-p) = x 2.0
+       u1    1.0     0        0.0            0.0
+       u2    2.0     1        2.0            4.0
+       u3    3.0     0        0.0            0.0
+       u4    4.0     1        4.0            8.0
+
+  averaged over all possible masks, u2 contributes:
+      E[u2] = (1-p) x (2.0 x 2.0) + p x 0.0
+            =  0.5  x  4.0        + 0.5 x 0.0   = 2.0   <- its clean value
+
+  INFERENCE -- model.eval(), no mask, no scaling:  [1.0, 2.0, 3.0, 4.0]
+      train-time expectation and inference output agree, unit for unit
+
+  WITHOUT the 1/(1-p) factor at train time:
+      E[u2] = 0.5 x 2.0 = 1.0     <- the next layer is calibrated on 1.0
+      inference then feeds it 2.0  -- every activation doubles, and the doubling
+      compounds layer over layer, so accuracy collapses the instant you eval()
+```
+
+The factor exists purely to keep train and inference statistics aligned. The alternative, "classic" dropout multiplies by `1 - p` at *inference* instead — mathematically equivalent, but it makes the deployed model pay a cost and makes the trained weights meaningless if you forget the step. PyTorch, TensorFlow, and JAX all use the inverted form so that inference is a plain forward pass.
 
 ---
 
@@ -178,6 +294,43 @@ The upper spiky line is the raw gradient norm; the lower line is the norm after
 down to 1.0. Healthy training sits in the stable 0.6-1.0 band; without clipping the
 occasional spike to 3-5 (or 142, as in the failed run in the case study) destabilizes
 or diverges the optimizer.
+
+**Read it like this.** Clip-by-norm is the two-line rule `if ||g||_2 > c: g <- g * (c / ||g||_2)`: "measure how long the whole gradient vector is; if it is longer than the budget `c`, shrink every component by the same ratio so it lands exactly at `c` — and if it already fits, leave it completely alone."
+
+The phrase "by the same ratio" is the part interviewers probe. Clipping by norm is a pure rescale, so the *direction* of the update — which parameter moves relative to which — is untouched. Only the step length changes. Clipping each element independently (`clip_grad_value_`) does not have this property: it bends the update direction and is why norm clipping is the default.
+
+| Symbol | What it is |
+|--------|------------|
+| `g` | The full gradient, all parameters flattened into one long vector |
+| `norm(g)` | Written `\|\|g\|\|_2` — the L2 norm `sqrt(sum of squares)`, one scalar for the whole model |
+| `c` | `max_norm`, the budget — 1.0 in the diagram above and in the GPT-3 recipe |
+| `c / norm(g)` | The shrink factor, always < 1 when the rule fires; identical for every component |
+| `g <-` | In-place overwrite: `clip_grad_norm_`'s trailing underscore means it mutates `.grad` |
+
+**Walk one example.** Three parameters, `max_norm = 1.0`:
+
+```
+  g = [3.0, 4.0, 12.0]
+
+  step 1  norm       ||g|| = sqrt(3^2 + 4^2 + 12^2)
+                           = sqrt(9 + 16 + 144) = sqrt(169)      = 13.0
+  step 2  compare    13.0 > 1.0   -> the rule fires
+  step 3  factor     c / ||g|| = 1.0 / 13.0                      = 0.076923
+  step 4  rescale    g' = [3.0, 4.0, 12.0] x 0.076923
+                        = [0.230769, 0.307692, 0.923077]
+  step 5  verify     ||g'|| = sqrt(0.053254 + 0.094675 + 0.852071)
+                            = sqrt(1.0)                          = 1.000
+
+  the third parameter still gets 4x the step of the first (12 : 3 before,
+  0.923077 : 0.230769 after) -- proportions preserved, length capped
+
+  a normal step, g = [0.6, 0.4, 0.2]:  ||g|| = 0.74833 < 1.0 -> passes untouched
+
+  the case study's 142 spike:  factor = 1.0 / 142 = 0.007042, an update shrunk
+  142x -- effectively a skipped step, which is precisely the intent
+```
+
+Note that clipping happens *after* `loss.backward()` and *before* `optimizer.step()`, and under mixed precision it must come after `scaler.unscale_()` — clipping scaled fp16 gradients would compare a 2^16-inflated norm against `c` and clip every single step to nothing.
 
 ---
 
@@ -317,6 +470,54 @@ def build_one_cycle_scheduler(
         final_div_factor=1e4, # final_lr = initial_lr / 10000
     )
 ```
+
+**What the formula is telling you.** `lr_lambda` returns a *multiplier* on the peak LR, built from two pieces glued at `warmup_steps`: the ramp `step / warmup_steps` and the decay `0.5 * (1 + cos(pi * progress))`. "For the first 5% of training climb linearly from nothing to full speed, then coast down a cosine curve that starts flat, falls fastest through the middle, and flattens again as it lands on zero."
+
+The cosine's shape is doing deliberate work at both ends. Flat at the start means the model gets a long stretch near peak LR to explore; flat at the end means the last thousands of steps are tiny, careful refinements rather than an abrupt stop. A linear decay spends the same total LR but distributes it uniformly — which is why BERT fine-tuning (short, 3-5 epochs) uses linear and long pretraining runs use cosine.
+
+| Symbol | What it is |
+|--------|------------|
+| `peak_lr` | The LR you pass to the optimizer — the multiplier's 1.0 point, 6e-4 for GPT-3 |
+| `warmup_steps` | `int(total_steps * warmup_fraction)` — where the ramp ends and the cosine begins |
+| `step / warmup_steps` | Warmup multiplier: 0.0 at step 0, rising linearly to 1.0 |
+| `progress` | Fraction of the *post-warmup* run completed: 0.0 at peak, 1.0 at the final step |
+| `cos(pi * progress)` | Sweeps +1 down to -1 across the decay phase — the shape of the curve |
+| `0.5 * (1 + ...)` | Remaps that -1..+1 sweep onto a 0.0..1.0 multiplier |
+
+**Walk one example.** GPT-3's `peak_lr = 6.0e-04` over `total_steps = 100000` with the default 5% warmup:
+
+```
+  warmup_steps = int(100000 x 0.05) = 5000
+
+  WARMUP PHASE   mult = step / 5000
+      step      0    mult = 0 / 5000    = 0.0000    lr = 0.000e+00
+      step   1000    mult = 1000 / 5000 = 0.2000    lr = 1.200e-04
+      step   2500    mult = 2500 / 5000 = 0.5000    lr = 3.000e-04
+      step   5000    mult = 1.0000  (peak)          lr = 6.000e-04
+
+  COSINE PHASE   progress = (step - 5000) / (100000 - 5000) = (step - 5000) / 95000
+                 mult     = 0.5 x (1 + cos(pi x progress))
+
+      step   20000   progress = 0.1579   cos =  0.8795   mult = 0.9397   lr = 5.638e-04
+      step   52500   progress = 0.5000   cos =  0.0000   mult = 0.5000   lr = 3.000e-04
+      step   80000   progress = 0.7895   cos = -0.7891   mult = 0.1054   lr = 6.326e-05
+      step  100000   progress = 1.0000   cos = -1.0000   mult = 0.0000   lr = 0.000e+00
+
+  read the spacing: the first 16% of the decay costs only 6% of the LR
+  (1.0000 -> 0.9397), the halfway point sits at exactly 0.5000, and the last 20%
+  crawls from 0.1054 to 0 -- fine-grained polish, not a cliff
+
+  STEP DECAY for contrast (the ResNet-50 recipe: lr0 = 0.1, x0.1 at epochs 30/60/90)
+      epoch  0-29    0.1 x 0.1^0  = 0.1
+      epoch 30-59    0.1 x 0.1^1  = 0.01
+      epoch 60-89    0.1 x 0.1^2  = 0.001
+      epoch 90+      0.1 x 0.1^3  = 0.0001
+
+  a 1000x total reduction like the cosine's tail, but delivered in three
+  discontinuous jumps -- the loss curve visibly steps down at each boundary
+```
+
+The `max(1, warmup_steps)` and `max(1, total_steps - warmup_steps)` guards exist for the degenerate configs: `warmup_fraction=0` would otherwise divide by zero on step 0, and a single-step run would divide by zero in `progress`. The outer `max(0.0, ...)` matters when the scheduler is stepped past `total_steps` — floating-point drift can push `cos` marginally below -1's remap and produce a tiny negative LR, which would reverse the update direction on every remaining step.
 
 ### Gradient Accumulation for Large Effective Batch Size
 

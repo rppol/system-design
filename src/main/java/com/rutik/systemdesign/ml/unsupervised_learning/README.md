@@ -93,6 +93,88 @@ flowchart TD
 
 The loop back to the assignment step is the heart of Lloyd's algorithm: assignment and centroid-update alternate until no point changes cluster, then k-means returns the labels and the final inertia (within-cluster sum of squares).
 
+The quantity that loop is grinding down is the **within-cluster sum of squares**, also called inertia:
+
+```
+J = sum_{k=1}^{K} sum_{x in C_k} ||x - mu_k||^2
+```
+
+**In plain terms.** "Add up how far every point sits from the center of its own cluster, squared — that single number is the score k-means is trying to make as small as possible."
+
+Framing it as one scalar matters because both halves of Lloyd's loop are provably descent steps on it: re-assigning a point to a nearer centroid cannot raise `J`, and moving a centroid to its cluster's mean cannot raise `J` either (the mean is the unique minimizer of squared distance). That is why k-means always terminates — `J` decreases monotonically and there are finitely many assignments.
+
+| Symbol | What it is |
+|--------|------------|
+| `C_k` | The set of points currently assigned to cluster k — a membership list, not a shape |
+| `mu_k` | Cluster k's centroid, the mean of the points in `C_k`. Recomputed every iteration |
+| `x - mu_k` | The offset vector from a point to its own centroid |
+| `\|\|x - mu_k\|\|^2` | Squared Euclidean distance. Squared, so a point twice as far hurts four times as much |
+| Inner sum | Total squared error inside one cluster |
+| Outer sum | Adds those per-cluster errors together — `J`, reported by sklearn as `km.inertia_` |
+| `K` | Number of clusters, fixed in advance. `J` always falls as `K` rises, hence the elbow method |
+
+**Walk one example — two full iterations.** Six 1-D points and a deliberately bad start (`mu_1 = 1.0`, `mu_2 = 2.0`, both stuck at the left edge), so you can watch the centroids crawl into place:
+
+```
+  data:  x = 1    2    4    8    9   11
+
+  ---- ITERATION 1 ----------------------------------------------------------
+  start:  mu_1 = 1.00     mu_2 = 2.00
+
+  ASSIGN  (distance to each centroid; the smaller one wins)
+      x           |x - mu_1|      |x - mu_2|      goes to
+      1              0.0             1.0            C1
+      2              1.0             0.0            C2
+      4              3.0             2.0            C2
+      8              7.0             6.0            C2
+      9              8.0             7.0            C2
+     11             10.0             9.0            C2
+
+  J at this assignment  = 0.0^2                                    (C1)
+                        + 0.0^2 + 2.0^2 + 6.0^2 + 7.0^2 + 9.0^2    (C2)
+                        = 0 + (0 + 4 + 36 + 49 + 81)
+                        = 170.00
+
+  RECOMPUTE (each centroid becomes the mean of what it was handed)
+      mu_1 = mean(1)                 = 1.00      (did not move)
+      mu_2 = mean(2, 4, 8, 9, 11)    = 34 / 5    = 6.80   (jumped right)
+  J with the moved centroids, same labels        = 54.80
+
+  ---- ITERATION 2 ----------------------------------------------------------
+  start:  mu_1 = 1.00     mu_2 = 6.80
+
+  ASSIGN
+      x           |x - mu_1|      |x - mu_2|      goes to
+      1              0.0             5.8            C1
+      2              1.0             4.8            C1   <- switched sides
+      4              3.0             2.8            C2
+      8              7.0             1.2            C2
+      9              8.0             2.2            C2
+     11             10.0             4.2            C2
+
+  J at this assignment  = 0.0^2 + 1.0^2                            (C1)
+                        + 2.8^2 + 1.2^2 + 2.2^2 + 4.2^2            (C2)
+                        = 1.00 + 31.76
+                        = 32.76
+
+  RECOMPUTE
+      mu_1 = mean(1, 2)              = 1.50
+      mu_2 = mean(4, 8, 9, 11)       = 32 / 4    = 8.00
+  J with the moved centroids                     = 26.50
+
+  ---- what happens next ----------------------------------------------------
+  Iteration 3: x = 4 switches to C1 (|4-1.5| = 2.5 beats |4-8.0| = 4.0).
+               J = 16.75, centroids move to mu_1 = 2.333, mu_2 = 9.333, J = 9.33.
+  Iteration 4: every point keeps its label, centroids do not move -> CONVERGED.
+
+  objective trail:  170.00 -> 54.80 -> 32.76 -> 26.50 -> 16.75 -> 9.33 -> 9.33
+                    (never once rises -- that is the guarantee)
+```
+
+The final answer is `C1 = {1, 2, 4}` and `C2 = {8, 9, 11}` with inertia `9.33`. Note that the assignment step and the recompute step each drop `J` on their own — the two `54.80 -> 32.76` and `26.50 -> 16.75` drops came from re-assigning points, the `170.00 -> 54.80` and `32.76 -> 26.50` drops from moving centroids.
+
+**Why the initialization matters so much.** Nothing above guarantees the *global* minimum — only that `J` stops falling. A different start can freeze into a worse local optimum with a higher final `J`, which is exactly why sklearn's `n_init=10` runs the whole loop ten times and keeps the lowest-inertia result, and why `init="k-means++"` spreads the initial centroids apart instead of dropping two of them on top of each other as this walk deliberately did.
+
 ### DBSCAN Reachability
 
 ```mermaid
@@ -120,6 +202,55 @@ flowchart TD
 
 A point seeds a cluster only when its eps-neighborhood holds at least min_samples points (a CORE point); sparser points are labeled noise (-1). Because clusters grow by chaining density-reachable neighbors, DBSCAN recovers arbitrary shapes that centroid-based k-means cannot.
 
+The whole algorithm rests on one test applied to every point:
+
+```
+N(p)  = { q in X : dist(p, q) <= eps }          the eps-neighborhood of p
+p is CORE     if |N(p)| >= min_samples
+p is BORDER   if |N(p)| <  min_samples  but  p in N(c) for some core point c
+p is NOISE    otherwise                                  (label = -1)
+```
+
+**Read it like this.** "Draw a circle of radius `eps` around a point; if at least `min_samples` points fall inside, that point is dense enough to start a cluster — and everything reachable by hopping from dense point to dense point joins it."
+
+That framing explains DBSCAN's two headline properties in one go. There is no `k` because the number of clusters is whatever the chaining produces, and there *is* a noise label because a point that neither is dense nor sits next to something dense simply never gets recruited.
+
+| Symbol | What it is |
+|--------|------------|
+| `eps` | Neighborhood radius. The "how close counts as close" dial, in the same units as your (scaled) features |
+| `min_samples` | How many neighbors make a point dense. Rule of thumb in the code below: `2 * n_features` |
+| `N(p)` | The set of points within `eps` of `p`. Conventionally **includes `p` itself** |
+| Core point | Dense enough to seed and grow a cluster |
+| Border point | Not dense itself, but inside some core point's circle — it joins, it never recruits |
+| Noise | Neither. Gets label `-1`, and must be masked out before `silhouette_score` (Pitfall 5) |
+
+**Walk one example.** Five 2-D points, `eps = 2.0`, `min_samples = 3`:
+
+```
+  A = (1.0, 1.0)   B = (1.5, 1.5)   C = (2.0, 1.0)   D = (3.5, 1.0)   E = (9.0, 9.0)
+
+  pairwise Euclidean distances
+            A       B       C       D       E
+     A     ---    0.707   1.000   2.500   11.314
+     B    0.707    ---    0.707   2.062   10.607
+     C    1.000   0.707    ---    1.500   10.630
+     D    2.500   2.062   1.500    ---     9.708
+     E   11.314  10.607  10.630   9.708     ---
+
+  who is within eps = 2.0 (counting the point itself)
+     A:  {A, B, C}          |N(A)| = 3  >= 3   -> CORE
+     B:  {B, A, C}          |N(B)| = 3  >= 3   -> CORE
+     C:  {C, A, B, D}       |N(C)| = 4  >= 3   -> CORE
+     D:  {D, C}             |N(D)| = 2  <  3   -> not core...
+                            ...but D is in N(C) and C is core -> BORDER
+     E:  {E}                |N(E)| = 1  <  3   -> not core, in nobody's circle -> NOISE
+
+  result:  cluster 0 = {A, B, C, D}      labels = [0, 0, 0, 0, -1]
+           E         = noise (-1)
+```
+
+Notice how sensitive the answer is to the two knobs. Drop `eps` to `1.2` and `D` (nearest neighbor at `1.500`) is cut loose as a second noise point; raise `min_samples` to `4` and only `C` stays core, so `A` and `B` demote to border and the cluster survives but nothing else could have seeded it. This knife-edge is Pitfall 4 in Section 10 — on unscaled data every distance is dominated by the largest-range feature, `eps = 0.5` becomes meaningless, and DBSCAN returns one giant blob.
+
 ### PCA Pipeline
 
 ```mermaid
@@ -146,6 +277,58 @@ flowchart TD
 
 Centering first is essential — PCA finds directions of maximum variance, and an off-center cloud would bias the first component toward the mean vector rather than the true spread. Keeping the top-k eigenvectors retains the most variance per dimension kept.
 
+The two equations doing the work in that pipeline:
+
+```
+C  = X_c^T X_c / (n - 1)            the d x d covariance matrix of the centered data
+C  v_i = lambda_i v_i               eigendecomposition: C = V diag(lambda) V^T
+
+explained_variance_ratio_i = lambda_i / sum_j lambda_j
+```
+
+**What this actually says.** "Measure how the features vary together, then ask which directions the cloud is genuinely stretched along — the eigenvectors are those axes, and each eigenvalue is how much stretch that axis carries."
+
+The payoff of that framing is that PCA is not choosing among your original columns; it is building new axes as rotations of them. A principal component is a *mixture* of features, which is why component loadings need interpreting rather than reading off, and why PCA on one-hot columns (Pitfall 6) produces mathematically valid but semantically empty axes.
+
+| Symbol | What it is |
+|--------|------------|
+| `X_c` | The centered data, `X - mean(X)`. Every column now averages exactly 0 |
+| `C` | Covariance matrix. Diagonal = each feature's variance; off-diagonal = how two features move together |
+| `n - 1` | Bessel's correction — divide by one less than the sample count for an unbiased variance |
+| `v_i` | The i-th eigenvector: a unit-length direction in feature space. This *is* principal component i |
+| `lambda_i` | The i-th eigenvalue: the variance of the data measured along `v_i`. Always >= 0 for a covariance matrix |
+| `C v = lambda v` | "Applying `C` to this direction only stretches it, never turns it" — that is what makes `v` an axis of the cloud |
+| `lambda_i / sum lambda` | The share of total variance that component i explains. sklearn's `explained_variance_ratio_` |
+
+**Walk one example.** Five 2-D points that clearly trend up-and-to-the-right:
+
+```
+  X = (2,1)  (3,3)  (4,4)  (5,6)  (6,6)          mean = (4.0, 4.0)
+
+  CENTER:  X_c = (-2,-3)  (-1,-1)  (0,0)  (1,2)  (2,2)
+
+  COVARIANCE (n - 1 = 4)
+    C[0][0] = (4 + 1 + 0 + 1 + 4) / 4   = 10 / 4  = 2.50     var of feature 1
+    C[1][1] = (9 + 1 + 0 + 4 + 4) / 4   = 18 / 4  = 4.50     var of feature 2
+    C[0][1] = (6 + 1 + 0 + 2 + 4) / 4   = 13 / 4  = 3.25     covariance (strongly positive)
+
+              [ 2.50   3.25 ]
+        C  =  [ 3.25   4.50 ]           trace = 2.50 + 4.50 = 7.00 = total variance
+
+  EIGENDECOMPOSITION
+    lambda_1 = 6.9004     v_1 = ( 0.594,  0.804)    <- the long axis of the cloud
+    lambda_2 = 0.0996     v_2 = (-0.804,  0.594)    <- perpendicular, the thin direction
+    check: 6.9004 + 0.0996 = 7.0000 = trace(C)      (eigenvalues repartition the variance)
+
+  EXPLAINED VARIANCE
+    PC1: 6.9004 / 7.0000 = 0.9858 = 98.58%     cumulative  98.58%
+    PC2: 0.0996 / 7.0000 = 0.0142 =  1.42%     cumulative 100.00%
+```
+
+Keeping only PC1 collapses 2-D to 1-D while throwing away 1.42% of the variance. That trade is the entire PCA decision, and the same arithmetic scales up — with four eigenvalues `4.0, 1.5, 0.4, 0.1` (total `6.0`) the ratios are `66.67%, 25.00%, 6.67%, 1.67%` and the cumulative curve reads `66.67%, 91.67%, 98.33%, 100%`, so a 95% target keeps 3 of 4 components. It is exactly the calculation behind "MNIST 784 pixels to 154 components at 95% variance" in Section 7.
+
+**Why centering is not optional, and why scaling comes first.** Skip the centering and `X^T X / (n-1)` measures spread around the *origin*, not around the data — PC1 then points at the mean vector and reports enormous "variance" that is really just offset. Skip the scaling and the covariance is denominated in whatever unit is biggest: with `age` in years and `salary` in rupees, `C[salary][salary]` dwarfs everything, `lambda_1` is ~100% salary, and PC1 is nothing but a re-labeled salary column.
+
 ### Choosing k — the Elbow Method
 
 ```mermaid
@@ -157,6 +340,59 @@ xychart-beta
 ```
 
 Inertia always falls as k rises, so you look for the "elbow" — the k where the marginal drop flattens (here k=4, where the curve bends from steep to shallow). Pair it with the silhouette peak; when the elbow is ambiguous on real high-dimensional data, the silhouette score is the more reliable signal.
+
+That second signal is the **silhouette score**, computed per point and then averaged:
+
+```
+a(i) = mean distance from point i to the other points in its OWN cluster
+b(i) = mean distance from point i to the points of the NEAREST OTHER cluster
+
+s(i) = (b - a) / max(a, b)              range: -1 to +1
+```
+
+**Put simply.** "How much closer are you to your own cluster than to the best rival cluster — expressed as a fraction, so it is comparable across datasets and across values of k."
+
+The normalization by `max(a, b)` is what makes silhouette usable where inertia is not. Inertia is an unbounded quantity in your data's units that mechanically shrinks as k grows, so it can never say "k=4 is better than k=7"; silhouette is capped at `+1`, so its peak across k is a real answer.
+
+| Symbol | What it is |
+|--------|------------|
+| `a(i)` | Cohesion. Mean distance to fellow cluster members — small means "I fit in here" |
+| `b(i)` | Separation. Mean distance to the single closest *other* cluster, not the average of all of them |
+| `b - a` | Raw margin. Positive means the rival cluster is farther away than home |
+| `max(a, b)` | The normalizer that squeezes the margin into `[-1, +1]` |
+| `s(i) = +1` | Perfectly clustered: `a` is ~0 next to `b` |
+| `s(i) = 0` | Point sits exactly on the boundary between two clusters |
+| `s(i) < 0` | The rival cluster is *closer* than your own — this point is likely mislabeled |
+
+**Walk one example.** Reuse the converged k-means result from the walk above: `C1 = {1, 2, 4}` and `C2 = {8, 9, 11}`. Score the point `x = 4`, the one nearest the boundary:
+
+```
+  x = 4,  own cluster C1 = {1, 2, 4},  other cluster C2 = {8, 9, 11}
+
+  a = mean distance to the OTHER members of C1
+    = (|4-1| + |4-2|) / 2  =  (3 + 2) / 2      = 2.5000
+      (note: 2 terms, not 3 -- the point never measures distance to itself)
+
+  b = mean distance to every member of C2
+    = (|4-8| + |4-9| + |4-11|) / 3  = (4 + 5 + 7) / 3  = 5.3333
+
+  s = (b - a) / max(a, b)
+    = (5.3333 - 2.5000) / 5.3333
+    = 2.8333 / 5.3333
+    = 0.5312          <- "my rival cluster is roughly twice as far as my own"
+
+  every point, for contrast
+      x =  1   a = 2.000   b = 8.333   s = 0.7600
+      x =  2   a = 1.500   b = 7.333   s = 0.7955
+      x =  4   a = 2.500   b = 5.333   s = 0.5312   <- weakest, it sits nearest C2
+      x =  8   a = 2.000   b = 5.667   s = 0.6471
+      x =  9   a = 2.000   b = 8.889   s = 0.7750
+      x = 11   a = 3.000   b = 10.400  s = 0.7115
+
+  overall silhouette = mean of the six = 0.7034     -> "strong structure" band
+```
+
+That `0.7034` lands just over the `> 0.7` threshold quoted in the `evaluate_clustering` docstring in Section 6, and the per-point spread is the more useful output: `x = 4` at `0.53` is the boundary case a silhouette *plot* would show as a short bar, flagging where the partition is least confident. Any point that came back negative would be a concrete instruction to reconsider k.
 
 ### Picking a Clustering Algorithm — Two-Axis Tradeoff
 
@@ -409,6 +645,66 @@ class Autoencoder(nn.Module):
 # loss_fn = nn.MSELoss()
 '''
 ```
+
+### Linkage criteria — four answers to "how far apart are two clusters?"
+
+`AgglomerativeClustering` needs a distance between two *sets* of points, not two points. The `linkage` argument picks which definition it uses:
+
+```
+single(A, B)    = min_{a in A, b in B} d(a, b)                closest pair
+complete(A, B)  = max_{a in A, b in B} d(a, b)                farthest pair
+average(A, B)   = (1 / |A||B|) * sum_{a in A} sum_{b in B} d(a, b)     every pair, averaged
+ward(A, B)      = (|A| |B| / (|A| + |B|)) * ||mu_A - mu_B||^2  SSE increase if merged
+```
+
+**The idea behind it.** "Distance between two points is obvious; distance between two *groups* is a choice — and single/complete/average/Ward are four different opinions about which pair of members should speak for the whole group."
+
+That choice is not cosmetic; it changes the dendrogram. Single linkage lets one bridging point drag two clusters together (the classic *chaining* effect, which is also why it alone can trace non-globular shapes). Complete linkage insists every member be close, producing tight compact clusters that fracture elongated ones. Ward does not use a pairwise distance at all — it merges whichever pair raises total within-cluster SSE the least, which makes it the k-means-flavored choice and sklearn's default.
+
+| Symbol | What it is |
+|--------|------------|
+| `A`, `B` | Two clusters being considered for a merge — sets of points, possibly of size 1 |
+| `d(a, b)` | The base point-to-point metric, usually Euclidean |
+| `single` | Nearest-neighbor rule. One close pair is enough to merge |
+| `complete` | Farthest-neighbor rule. The worst pair vetoes the merge |
+| `average` | Compromise between the two — mean over all `|A| x |B|` cross pairs |
+| `mu_A` | Centroid of cluster A. Only Ward needs it |
+| `\|A\| \|B\| / (\|A\| + \|B\|)` | Ward's size weighting: merging two big clusters costs more than absorbing a singleton |
+| `ward` | Merge cost = exactly how much inertia the merge would add (Euclidean only) |
+
+**Walk one example — single and complete disagree.** Four 1-D points:
+
+```
+  A = 0.0    B = 1.8    C = 4.0    D = 7.2
+
+  pairwise distances
+            A      B      C      D
+     A     ---    1.8    4.0    7.2
+     B     1.8    ---    2.2    5.4
+     C     4.0    2.2    ---    3.2
+     D     7.2    5.4    3.2    ---
+
+  ---- MERGE 1 (all criteria agree: the smallest pairwise distance is A-B = 1.8) ----
+  clusters now:  {A, B}   {C}   {D}          mu_{A,B} = 0.9
+
+  ---- MERGE 2 (now the criteria split) ------------------------------------------
+                            {A,B} vs {C}    {A,B} vs {D}    {C} vs {D}    merges
+    single   (min pair)        2.2              5.4             3.2      {A,B}+C
+    complete (max pair)        4.0              7.2             3.2      C + D
+    average  (mean pair)       3.1              6.3             3.2      {A,B}+C
+    ward     (SSE added)       6.4067          26.4600          5.1200   C + D
+
+    single  : min(4.0, 2.2) = 2.2  beats  3.2   -> C is absorbed by {A,B}
+    complete: max(4.0, 2.2) = 4.0  loses to 3.2 -> C pairs off with D instead
+    average : (4.0 + 2.2)/2 = 3.1  beats  3.2   -> C is absorbed by {A,B}
+    ward    : (2*1/3) * (4.0 - 0.9)^2 = 6.4067  loses to (1*1/2) * 3.2^2 = 5.1200
+
+  ---- RESULT AT 2 CLUSTERS ------------------------------------------------------
+    single / average  ->   {A, B, C}   |   {D}          chained left-to-right
+    complete / ward   ->   {A, B}      |   {C, D}       balanced pair of pairs
+```
+
+The same four points, the same metric, two completely different 2-cluster answers — decided entirely by the linkage argument. Single linkage chained `C` onto `{A, B}` because `B` happens to sit `2.2` away; complete linkage refused because `A` is `4.0` away and, under its rule, the whole cluster is only as close as its worst member. Report the linkage you used alongside any dendrogram; without it the tree is uninterpretable.
 
 ---
 

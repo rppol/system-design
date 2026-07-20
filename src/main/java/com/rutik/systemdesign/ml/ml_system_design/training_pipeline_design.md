@@ -356,6 +356,36 @@ def _compute_psi(baseline: np.ndarray, current: np.ndarray, n_bins: int = 10) ->
     return float(np.sum((p_curr - p_base) * np.log(p_curr / p_base)))
 ```
 
+**What the formula is telling you.** The five checks are one sentence in five clauses: "is there enough data, of the right shape, without holes, drawn from the same world as last time, and labelled at the same rate as last time?" Each has a number attached because a gate without a threshold is a comment.
+
+| Symbol | What it is |
+|--------|------------|
+| `min_rows = 100_000` | Volume floor. Below it the split leaves too few positives to evaluate |
+| `max_null_rate = 0.05` | Per-column hole budget. Checked per column, not averaged across them |
+| `max_psi = 0.2` | Distribution-shift ceiling versus the previous run's data |
+| `p_curr`, `p_base` | Today's and the reference run's mass in each decile bin of a numeric column |
+| `relative_change` | `abs(positive_rate - ref_rate) / ref_rate` — label drift measured as a fraction of itself |
+| `0.5` on `relative_change` | Allows the positive rate to halve or grow by half before failing |
+| `epsilon = 1e-8` | Guards `log(0)` in PSI and division by a zero reference rate |
+
+**Walk one example.** A CTR pipeline whose reference run had a 2% positive rate, checked against the label gate:
+
+```
+  ref_rate = 0.020
+
+  today   positive_rate   relative_change = |p - r| / r      verdict
+  ------------------------------------------------------------------
+  Mon        0.021        |0.021-0.020|/0.020 = 0.050        pass
+  Tue        0.014        |0.014-0.020|/0.020 = 0.300        pass
+  Wed        0.009        |0.009-0.020|/0.020 = 0.550        FAIL
+
+  pass band = ref_rate x [0.5, 1.5] = [0.010, 0.030]
+```
+
+Wednesday's 0.9% is still a perfectly plausible-looking CTR — nothing about the number screams broken — and that is the point. The gate does not judge the value, it judges the **move**, so a half-failed logging job that drops a click source is caught while the data still looks reasonable.
+
+**Why the null check is per column and not global.** One completely dead column among the 150 features of the Section 14 model moves the dataset-wide null rate by only `1 / 150 = 0.67%`, which sails under any global 5% threshold — averaging dilutes a total outage into noise. Per-column checking is what turns "a feature stopped being computed" into a pipeline failure rather than a silently degraded model — the exact failure mode Section 10's silent-Spark-failure story describes.
+
 ### Step 3: Model Training with Hyperparameter Optimization
 
 ```python
@@ -570,6 +600,38 @@ def _benchmark_latency_p99(model: lgb.Booster, X_sample: pd.DataFrame) -> float:
     return float(np.percentile(latencies, 99))
 ```
 
+**Put simply.** The four gates say: "be good enough in absolute terms, be *measurably* better than what is already serving, be fast enough to serve, and be roughly as good for every group." A candidate that clears three of four is rejected — the gates are an AND, never a score.
+
+| Symbol | What it is |
+|--------|------------|
+| `auc_threshold = 0.78` | Absolute floor. Catches a model that is broken regardless of what production does |
+| `auc_improvement` | `candidate_auc - production_auc`, both measured on the same held-out test set |
+| `min_improvement_pct = 0.005` | Effect-size floor: half an AUC point. Guards against shipping noise |
+| `p_value < 0.05` | Significance floor from Wilcoxon on per-example log-loss. Guards against luck |
+| `gap = (max_auc - min_auc) / max_auc` | Fairness spread, expressed as a fraction of the best group's AUC |
+| `max_fairness_gap = 0.10` | The widest acceptable spread across demographic groups |
+| `mask.sum() >= 100` | Minimum group size, so a 12-person slice cannot fail the build on noise |
+
+Effect size and significance are deliberately separate tests. A large dataset makes `p_value` tiny for improvements too small to matter, and a small one leaves a real improvement statistically indistinguishable from noise — requiring both means the model has to be better *and* the evidence has to be there.
+
+**Walk one example.** Section 14's daily CTR pipeline, whose production model sits at 0.798 AUC:
+
+```
+  gate 1  absolute AUC      0.802 >= 0.780                          pass
+  gate 2  improvement       0.802 - 0.798 = 0.0040
+                            vs case-study floor  0.003              pass
+                            vs code default      0.005              would FAIL
+          significance      Wilcoxon p = 0.01  <  0.05              pass
+  gate 3  P99 latency       benchmark returns 9.2 ms  <  10 ms      pass
+  gate 4  fairness gap      (0.81 - 0.75) / 0.81 = 0.0741 < 0.08    pass
+  ----------------------------------------------------------------------
+  result  all gates AND-ed                                          REGISTER
+```
+
+The gate-2 line is the one worth staring at. The same 0.0040 improvement **passes** the case study's 0.003 floor and **fails** the code's 0.005 default. Nothing about the model changed — the threshold decides. That is why the floor is a reviewed, versioned constant and not a value someone nudges when a promising model gets blocked.
+
+**Why the fairness gap is relative, not absolute.** An absolute spread of `0.06` means something very different at 0.81 AUC than at 0.55 AUC. Dividing by the best group's score makes the gate scale-free: `(0.82 - 0.72) / 0.82 = 0.122` fails the 0.10 rule even though a system already near chance level would treat the same 0.10 spread as unremarkable.
+
 ### Retraining Trigger Evaluation
 
 ```python
@@ -720,6 +782,43 @@ def evaluate_retraining_triggers(
 
 **Slow pipeline blocking rapid response to drift**: a performance drop is detected at 9am. The daily training pipeline runs at 3am and takes 6 hours. The team cannot trigger a manual retrain because the pipeline requires 4 manual steps. By the time a new model is deployed (next day at 3am + 6h training + deployment), 30 hours of degraded service have occurred. Fix: design the pipeline for triggered execution, not just scheduled; automate all deployment steps; target < 8 hours from trigger to deployment for high-urgency triggers.
 
+### Reading the Refresh-Cadence Arithmetic
+
+**What it means.** Time-to-fresh-model is a sum, not a duration: "wait for the next scheduled slot, then run, then deploy." Only the middle term is training — and it is usually the smallest one, which is why buying a faster GPU rarely fixes a slow response to drift.
+
+| Symbol | What it is |
+|--------|------------|
+| `wait` | Gap from detection to the next cron slot. Zero if the pipeline can be triggered on demand |
+| `run` | Actual pipeline wall-clock, validation and shadow included |
+| `deploy` | Manual steps between a registered model and live traffic |
+| `time_to_fresh` | `wait + run + deploy`. The real latency of the feedback loop |
+| `degraded hours` | `time_to_fresh` while the business metric is already down. What the incident costs |
+| `< 8h` target | The stated budget for a high-urgency trigger |
+
+**Walk one example.** The Section 10 incident, hour by hour:
+
+```
+  09:00 day 1   drift detected, business metric already dropping
+                |
+                |  wait 18 h    -- next cron slot is 03:00, and the pipeline
+                |                  cannot be triggered on demand
+  03:00 day 2   pipeline starts
+                |
+                |  run   6 h    -- training wall-clock
+                |
+  09:00 day 2   model registered
+                |
+                |  deploy 6 h   -- 4 manual steps
+                v
+  15:00 day 2   fresh model live
+
+  time_to_fresh = 18 + 6 + 6 = 30 h    vs target 8 h  ->  3.75x over budget
+```
+
+Training is `6 / 30 = 20%` of the elapsed time. **The other 80% is scheduling rigidity and manual steps** — both fixable without touching compute. Halving the training run buys 3 hours; making the pipeline triggerable buys 18.
+
+**Why the cadence choice is a cost tradeoff and not a preference.** Section 8 pairs full retraining with a daily-or-weekly cadence and incremental updates with hourly-or-continuous, and Section 12 gives the reason: a full retrain is expensive per run, so it can only be afforded rarely, while a warm start converges in minutes and can be afforded often. Picking a cadence is therefore picking how much staleness the business metric tolerates between runs, then buying the cheapest retraining strategy that fits in that window — which is why Section 9 flags "retraining takes more than 24 hours for a model that should retrain daily" as a design failure: the run no longer fits inside its own interval.
+
 ---
 
 ## 11. Technologies & Tools
@@ -857,5 +956,38 @@ Step 4 — Validation gate (automated): 15 minutes. AUC must exceed 0.802 (curre
 Step 5 — Shadow deployment: 45 minutes. Deploy to shadow replica; receive 100% traffic; log scores. Alert if P99 latency > 10ms or if NaN rate > 0.01%.
 
 Step 6 — Canary (5% traffic, 1 hour): monitor CTR in treatment vs control. Rollback if CTR drops > 0.5% for > 15 minutes.
+
+**The idea behind it.** The stage timings are not a schedule, they are a budget: "the whole loop must close inside one day, so each stage gets a slice, and any stage that outgrows its slice pushes the next run into the previous one."
+
+| Symbol | What it is |
+|--------|------------|
+| `200M events/day` | Raw arrival rate. Sets the size of every downstream dataset |
+| `> 150M` row floor | Validation gate at 75% of expected volume — a shortfall means a partial partition |
+| days 1-25 / 26-28 / 29-30 | Temporal train / val / test split. 30 days of history feed one run |
+| `50 nodes x 90 min` | Spark budget for the point-in-time join. The pipeline's single largest stage |
+| total runtime | Sum of the stage times, which must stay under the 24h retraining interval |
+
+**Walk one example.** Add up the day's pipeline and price the Spark stage:
+
+```
+  step 1  data validation       20 min
+  step 2  feature computation   90 min   <- 39% of the run
+  step 3  HPO + training        60 min
+  step 4  validation gate       15 min
+  step 5  shadow deployment     45 min
+  ------------------------------------
+  total                        230 min = 3 h 50 min   (fits the "4 hours" claim)
+  step 6  canary               +60 min
+  ------------------------------------
+  trigger to full rollout      290 min = 4 h 50 min
+
+  dataset size  :  30 days x 200M events/day     = 6,000,000,000 rows
+  Spark budget  :  50 nodes x 90 min             = 270,000 node-seconds
+  throughput    :  6e9 / 270,000                 = 22,222 rows per node-second
+```
+
+Two things fall out. First, the loop closes in `4h50m` against a 24-hour interval, leaving roughly 19 hours of slack — that slack is what absorbs a failed run and a same-day retry. Second, **feature computation is 39% of the run**, more than training, which is the usual shape: the point-in-time join over 6 billion rows costs more than fitting a LightGBM model on the result.
+
+**Why the row floor sits at 150M and not 200M.** A hard equality check would fail on every normal day, since event volume swings with traffic. Setting the floor at `150 / 200 = 75%` of expected tolerates ordinary variation while still catching the failure that matters — a partition that only half-landed. The gap between the floor and the expectation is the daily volume noise the team is willing to call normal.
 
 **Outcome**: daily retraining keeps CTR 4% above a weekly-retrained baseline. Pipeline succeeds 94% of runs; 6% failures are caught by validation gates (mostly data quality issues from upstream pipeline), never reaching production. Mean time to deploy a new model: 4.5 hours from trigger.

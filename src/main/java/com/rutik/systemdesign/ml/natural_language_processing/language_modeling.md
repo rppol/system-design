@@ -20,6 +20,34 @@ A **language model (LM)** assigns a probability to a sequence of tokens `P(w_1, 
 P(w_1, ..., w_T) = P(w_1) · P(w_2 | w_1) · P(w_3 | w_1, w_2) · ... · P(w_T | w_1, ..., w_{T-1})
 ```
 
+**Read it like this.** "The probability of a whole sentence is the probability of its first word, times the probability of the second word given the first, times the third given the first two — all the way to the end."
+
+That framing matters because it turns an impossible question ("how likely is this entire sentence?") into a chain of small, learnable questions ("what comes next?"). Every LM family in this file answers the same small question; they differ only in how much of the history they are willing to look at.
+
+| Symbol | What it is |
+|--------|------------|
+| `w_1, ..., w_T` | The tokens of the sentence, in order. `T` is its length |
+| `P(w_1, ..., w_T)` | The joint probability of that exact sequence occurring |
+| `P(w_t \| w_1, ..., w_{t-1})` | Probability of the `t`-th token given everything before it — the *next-token* prediction |
+| `·` (product) | Multiply the per-token conditionals together; independence is never assumed here |
+| history / prefix | The tokens to the left of position `t`. It grows by one at every step |
+
+**Walk one example.** Score the sentence "the cat sat", reusing `P(sat | the, cat) = 0.31` from the trigram diagram below:
+
+```
+  step   token   conditional               value    -log2(value)
+  1      the     P(the)                    0.05        4.322
+  2      cat     P(cat | the)              0.02        5.644
+  3      sat     P(sat | the, cat)         0.31        1.690
+                                          -------     -------
+  product P(the, cat, sat) = 0.05 x 0.02 x 0.31 = 0.00031
+  sum of -log2 terms                                  11.655
+  average per token = 11.655 / 3                       3.885
+  perplexity = 2 ^ 3.885                              14.78
+```
+
+Two things fall out of this table. First, the product shrinks fast — three tokens already put us at `3.1e-4`, and a 30-token sentence would underflow float64, which is why real code sums the `-log2` column instead of multiplying the middle one. Second, that same `-log2` sum is *exactly* what perplexity is built from (§6.2), so the chain rule and the evaluation metric are the same arithmetic read twice.
+
 The chain rule is exact but useless as written — conditioning on the entire history means every distinct prefix is its own event, and no corpus contains enough data to estimate `P(w_T | w_1, ..., w_{T-1})` for arbitrary histories. The history of language modeling is the history of *approximating* that conditional: n-gram models truncate the history to the last `n-1` tokens; neural LMs compress the history into a fixed-size hidden vector; transformer LMs attend over the whole history with self-attention.
 
 This file covers the first two families. A senior interview expects you to move fluently from "count the n-grams" to "why does that break" to "how smoothing patches it" to "why neural models generalize where counts cannot" — and to know the single number, **perplexity**, that ties them all together.
@@ -45,6 +73,32 @@ This file covers the first two families. A senior interview expects you to move 
 **Markov assumption.** An n-gram model assumes the next token depends only on the previous `n-1` tokens: `P(w_t | w_1..w_{t-1}) ≈ P(w_t | w_{t-n+1}..w_{t-1})`. n=1 is a unigram (no context), n=2 bigram, n=3 trigram; production LMs used 4-grams and 5-grams. The assumption is false (language has long-range structure) but tractable.
 
 **Maximum likelihood estimation (MLE).** The MLE of a conditional is a normalized count: `P(w_t | context) = count(context, w_t) / count(context)`. It maximizes the probability of the training data — and precisely because it does, it assigns probability **zero** to any n-gram it never saw, which is fatal (see §10).
+
+**What this actually says.** "To guess what follows a phrase, go find every place that phrase appeared in your training text and ask what fraction of the time each word came next."
+
+The Markov assumption above and this estimator are a matched pair: the assumption shrinks the context to something you can actually find repeats of, and the estimator then just tallies those repeats. The whole rest of the classical-LM literature exists because that tally is zero far more often than intuition suggests.
+
+| Symbol | What it is |
+|--------|------------|
+| `context` | The conditioning history — the previous `n-1` tokens for an n-gram model |
+| `count(context)` | How many times that history appeared anywhere in training |
+| `count(context, w_t)` | How many times the history appeared *and* was followed by `w_t` |
+| `n` | Order of the model. `n=2` bigram (1 token of context), `n=3` trigram (2 tokens) |
+| `≈` in the Markov line | "Throw away everything older than `n-1` tokens" — an approximation, not an identity |
+
+**Walk one example.** Bigram counts on the six-token corpus used throughout §6, `the cat sat on the mat`:
+
+```
+  contexts containing "the":     the -> cat        (once)
+                                 the -> mat        (once)
+  so count(the) = 2
+
+  P(cat | the) = count(the, cat) / count(the) = 1 / 2 = 0.50
+  P(mat | the) = count(the, mat) / count(the) = 1 / 2 = 0.50
+  P(ran | the) = count(the, ran) / count(the) = 0 / 2 = 0.00   <-- the whole problem
+```
+
+`ran` is an ordinary English verb, and the model has just declared it impossible after `the`. Nothing about MLE is broken — it is doing precisely its job, which is to maximize the likelihood of the *training* text, and the likelihood-maximizing choice for an event you never observed is exactly zero. Smoothing is the deliberate decision to be *worse* on training data in exchange for being finite on everything else.
 
 **Sparsity / the zero-probability problem.** With a 50k vocabulary, there are 50k² ≈ 2.5 billion possible bigrams and 1.25 × 10¹⁴ possible trigrams. No corpus observes more than a tiny fraction, so most counts are zero. Zipf's law makes this worse: a large share of tokens in *any* held-out text are rare, so unseen n-grams are the common case, not the edge case.
 
@@ -83,10 +137,69 @@ This file covers the first two families. A senior interview expects you to move 
 
 **Kneser-Ney continuation intuition.** Estimate a lower-order (unigram) term not by *how often* a word occurs, but by *how many distinct contexts* it follows. Classic example: "Francisco" is frequent, but it almost always follows "San". A raw unigram backoff would rank "Francisco" highly after any word; the continuation probability `P_cont(w) = |{v : count(v, w) > 0}| / (number of distinct bigram types)` recognizes that "Francisco" has only one predecessor and down-weights it. This is why KN dominates: it fixes the backoff distribution, not just the discount.
 
+**The idea behind it.** "When you have to fall back on a word's general reputation, judge it by how many different company it keeps — not by how loud it is."
+
+Raw frequency answers "how often does this word appear?" Continuation count answers "how *versatile* is this word — how many distinct words has it been seen to follow?" Those are different questions, and backoff needs the second one, because backoff fires exactly when you are in a context you have never seen before.
+
+| Symbol | What it is |
+|--------|------------|
+| `w` | The candidate next word being scored by the lower-order (unigram) term |
+| `v` | Any word that could precede `w`; ranges over the whole vocabulary |
+| `count(v, w) > 0` | "The bigram `v w` was observed at least once" — presence, not how many times |
+| `\|{v : count(v, w) > 0}\|` | The **continuation count**: how many distinct predecessors `w` has |
+| number of distinct bigram types | Total count of unique `(v, w)` pairs in training; the normalizer |
+| `P_cont(w)` | The resulting continuation probability, replacing the raw unigram estimate |
+
+**Walk one example.** A 29-token corpus in which `francisco` and `city` appear the *same* number of times, so raw frequency cannot tell them apart, but their predecessors can:
+
+```
+  corpus contains 24 distinct bigram types, 29 tokens
+
+  word        raw count   unigram MLE   distinct preceders     P_cont
+  francisco       3        3/29 = 0.1034   {san}          = 1   1/24 = 0.0417
+  city            3        3/29 = 0.1034   {a, every, the}= 3   3/24 = 0.1250
+
+  raw-frequency verdict : identical (ratio 1.0)  -> backoff ranks them equally
+  continuation verdict  : city is 3x more likely -> backoff ranks city above francisco
+```
+
+Katz backoff with a raw unigram would happily propose "I would like to read the francisco" — the word is common, so its unigram score is high. Kneser-Ney sees that in every single observation `francisco` was glued to `san`, gives it a continuation probability three times smaller than `city`'s, and the nonsense disappears. Delete this term and you keep the discount but lose most of KN's advantage over plain absolute discounting, which is precisely the difference the two rows in §4.2 are measuring.
+
 ### 4.3 Backoff vs interpolation
 
 - **Backoff (Katz):** use the highest-order n-gram that has a nonzero count; if unseen, drop to the next lower order, scaled by a backoff weight `alpha` so the distribution still normalizes.
 - **Interpolation (Jelinek-Mercer):** always compute a weighted mix of all orders, `P = λ_3 P_3 + λ_2 P_2 + λ_1 P_1`, with `Σ λ = 1`. Interpolated Kneser-Ney is the standard production form.
+
+**Stated plainly.** "Instead of picking one expert, poll all three — the trigram, the bigram, and the unigram — and average their opinions with fixed, trusted weights."
+
+The point of always blending rather than switching is continuity. Backoff's estimate jumps discontinuously the moment a count crosses from 1 to 0; interpolation's estimate slides, because the lower orders were already contributing before the higher one ran out.
+
+| Symbol | What it is |
+|--------|------------|
+| `P_3`, `P_2`, `P_1` | Trigram, bigram and unigram estimates of the *same* next word |
+| `λ_3`, `λ_2`, `λ_1` | Mixing weights — how much you trust each order. Tuned on held-out data |
+| `Σ λ = 1` | The weights sum to one, which is what keeps the blend a valid distribution |
+| `alpha` (backoff) | Katz's rescaling factor, applied only when dropping an order, so mass still sums to 1 |
+| "seen" | Has a nonzero training count at that order |
+
+**Walk one example.** The same word scored twice — once where the trigram exists, once where it does not — with `λ_3 = 0.6`, `λ_2 = 0.3`, `λ_1 = 0.1`:
+
+```
+                            P_3      P_2      P_1     blended P
+  trigram SEEN              0.31     0.04     0.002
+    0.6 x 0.31 = 0.186
+    0.3 x 0.04 = 0.012
+    0.1 x 0.002= 0.0002
+    total                                             0.1982
+
+  trigram UNSEEN            0.00     0.04     0.002
+    0.6 x 0.00 = 0.000
+    0.3 x 0.04 = 0.012
+    0.1 x 0.002= 0.0002
+    total                                             0.0122   <- still > 0
+```
+
+Notice what did *not* happen in the second row: no special case, no branch, no backoff weight to recompute. `P_3` simply went to zero and its 0.6 share of the vote vanished, leaving the lower orders to carry the estimate. The `λ_1 P_1` term is the structural guarantee behind the "never exactly zero" floor drawn in the §5 decision diagram — remove it and an out-of-context in-vocabulary word can still land on 0 and take perplexity to infinity.
 
 ### 4.4 Neural LM strategies
 
@@ -276,6 +389,50 @@ def perplexity(test_tokens: list[str], prob_fn: Callable[[tuple[str, ...]], floa
     return 2 ** (-log_sum / count)
 ```
 
+**What the formula is telling you.** "On average, how many equally-plausible words was the model torn between at each step? If it says 78, the model was as confused as someone guessing uniformly among 78 options."
+
+This is the single most useful reframing in language modeling, and it is what makes perplexity comparable to human intuition in a way a raw loss value never is. A loss of `4.36` means nothing on its own; "effectively choosing among 78 words" is immediately interpretable, and immediately tells you the model is doing far better than a 50,000-word coin flip.
+
+| Symbol | What it is |
+|--------|------------|
+| `P(w_i \| context)` | The probability the model assigned to the token that actually appeared |
+| `-log2 P(w_i)` | Surprise, in **bits**. `P = 0.5` costs 1 bit; `P = 0.02` costs 5.64 bits |
+| average of `-log2 P` | Cross-entropy `H` — the mean surprise per token over the held-out text |
+| `2 ^ H` | Perplexity in bits. Undoes the log, turning surprise back into a *count of options* |
+| `exp(H)` | The same thing when `H` is in nats (natural log) instead of bits — what PyTorch gives you |
+| `count` | Number of tokens scored; the denominator that makes PPL length-independent |
+
+**Walk one example.** Three tokens, from confident to badly surprised:
+
+```
+  token   P(correct word)   -log2 P (bits)
+  1            0.50             1.000
+  2            0.10             3.322
+  3            0.02             5.644
+                              --------
+  total surprise                9.966 bits
+  H = 9.966 / 3               = 3.322 bits per token
+  PPL = 2 ^ 3.322             = 10.00
+```
+
+Ten. Across those three predictions the model behaved, on average, exactly like something choosing uniformly among 10 words — even though not one of the three probabilities was `1/10`. Perplexity is the geometric mean of `1/P`, so a single confident hit cannot paper over a single bad miss; the log makes the disaster dominate.
+
+**From training loss to perplexity, in one exponential.** `nn.CrossEntropyLoss` reports mean negative log-likelihood in **nats**, which is `H` already — so `exp(loss)` is perplexity with no other conversion. That is the whole content of `torch.exp(loss)` in §6.4:
+
+```
+  model                       loss (nats)   exp(loss) = PPL   log2 PPL (bits/token)
+  LSTM + tying + dropout         4.357           78.0               6.285
+  Kneser-Ney trigram             4.942          140.0               7.129
+  uniform over |V| = 50,000     10.820       50,000.0              15.610
+
+  loss gap 4.942 - 4.357 = 0.585 nats
+  PPL ratio  e ^ 0.585 = 1.795   ->   140 / 78 = 1.79
+```
+
+The bottom line of that block is the reason practitioners quote perplexity rather than loss: a "0.585 improvement in loss" sounds like rounding, while "the model went from juggling 140 candidates to juggling 78" is obviously a large win. The exponential is what makes small loss deltas legible — and, symmetrically, why a loss that drifts up by 0.3 is much worse news than it looks.
+
+**Why the base matters and why it usually doesn't.** Base 2 gives bits and `PPL = 2^H`; base `e` gives nats and `PPL = exp(H)`. Both produce the *same* perplexity as long as you are consistent, because `2^(H_bits) = e^(H_nats)` — the row above shows `2^6.285 = 78.0 = e^4.357`. Mixing them (taking `exp()` of a base-2 entropy) is a common and silent bug that inflates the number.
+
 **BROKEN — unsmoothed MLE on held-out text:**
 
 ```python
@@ -306,6 +463,34 @@ print(ppl)   # a large but finite number -- the model is now usable
 ```
 
 Add-1 is finite but poor: with `|V| = 50000`, the denominator `count(ctx) + 50000` swamps the real counts, so seen and unseen n-grams get nearly equal probability. `k = 0.01` tuned on a held-out set is far better, and Kneser-Ney (next) is better still.
+
+**In plain terms.** "Pretend you saw every possible next word `k` extra times before you started counting, so nothing ends up at zero."
+
+The denominator is the part that bites. Adding `k` to `|V|` different numerators means you must add `k × |V|` to the denominator to keep the distribution normalized — and with a 50,000-word vocabulary, that correction can dwarf the real evidence you collected.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Phantom count added to every n-gram. `k = 1` is Laplace; `k = 0.01` is tuned add-k |
+| `ngrams[gram]` | Real observed count of the full n-gram `(context, w)` |
+| `contexts[ctx]` | Real observed count of the context alone |
+| `vocab_size` (`\|V\|`) | Number of distinct in-vocabulary words — how many phantom counts you just invented |
+| `k * vocab_size` | Total invented mass added to the denominator to renormalize |
+
+**Walk one example.** A context seen 10 times, followed by `w` on 7 of those occasions, with `|V| = 50,000`:
+
+```
+  estimator      numerator      denominator          P(w | ctx)     P(unseen | ctx)
+  MLE            7              10                    0.700          0.0
+  add-1          7 + 1  = 8     10 + 50,000 = 50,010  0.000160       0.0000200
+  add-k (0.01)   7 + 0.01=7.01  10 + 500    = 510     0.013745       0.0000196
+
+  how much better is a 7-observation word than a never-seen one?
+    MLE    :  infinitely (7/10 vs 0)
+    add-1  :  8 / 1    =   8x     <-- almost no preference left
+    add-k  :  7.01/0.01= 701x     <-- evidence largely preserved
+```
+
+Add-1 did not merely blunt the estimate, it demolished it: a word observed seven times is left only eight times more likely than a word never observed at all, because 50,000 phantom counts swamped ten real ones. Dropping `k` to `0.01` shrinks the invented mass from 50,000 to 500 and restores a 701x preference while still keeping every unseen n-gram strictly positive. That gap — 8x versus 701x — is the entire reason the §5 smoothing chart puts Add-1 at perplexity 220 and Add-k at 154 on the same corpus.
 
 ### 6.3 Interpolated Kneser-Ney (bigram) from scratch
 
@@ -349,6 +534,46 @@ class KneserNeyBigram:
 ```
 
 The continuation term is why "Francisco" (frequent, but only ever after "San") is *not* over-predicted after an unseen context: `p_continuation("Francisco")` is tiny because it has a single preceder, even though its raw count is large.
+
+**What it means.** "Shave a fixed sliver off every count you did observe, add up all the slivers, and hand that pooled mass to the lower-order model to distribute by versatility."
+
+The elegance is that the amount reserved is not a hyperparameter you tune separately — it falls out of the discount. A context with many distinct followers gives up many slivers and therefore reserves more mass; a context you saw once, followed by one word, reserves exactly `d`. The bookkeeping balances itself.
+
+| Symbol | What it is |
+|--------|------------|
+| `d` | The absolute discount, `0.75`. Subtracted once from every nonzero count |
+| `c_bi` = `bigram[(prev, w)]` | Times `w` actually followed `prev` |
+| `c_ctx` = `unigram[prev]` | Times `prev` appeared as a context at all |
+| `max(c_bi - d, 0.0) / c_ctx` | The discounted higher-order estimate — the shaved count, renormalized |
+| `len(followers[prev])` | How many *distinct* words followed `prev`; equals the number of slivers taken |
+| `lam` = `(d / c_ctx) * len(followers[prev])` | Total mass reserved by the shaving — the backoff weight |
+| `p_continuation(w)` | How that reserved mass is split, by distinct-predecessor count (§4.2) |
+
+**Walk one example.** `KneserNeyBigram(discount=0.75)` trained on `the cat sat on the mat`, scoring `P(cat | the)`. The corpus yields 7 distinct bigram types: `<s> the`, `the cat`, `cat sat`, `sat on`, `on the`, `the mat`, `mat </s>`.
+
+```
+  inputs
+    c_bi  = count(the, cat)          = 1
+    c_ctx = count(the) as a context  = 2      (the -> cat, the -> mat)
+    followers(the) = {cat, mat}      -> 2 distinct
+    preceders(cat) = {the}           -> 1 distinct
+    n_bigram_types                   = 7
+    d                                = 0.75
+
+  discounted term
+    max(1 - 0.75, 0) / 2  =  0.25 / 2               = 0.125
+
+  reserved mass (backoff weight)
+    lam = (0.75 / 2) x 2  =  0.375 x 2              = 0.750
+
+  continuation probability
+    p_cont(cat) = 1 / 7                             = 0.142857
+
+  final
+    P_KN(cat | the) = 0.125 + 0.750 x 0.142857      = 0.232143
+```
+
+Read the two contributions separately. The higher-order evidence alone would have said `0.5` (one of two follows); discounting cuts it to `0.125` and hands `0.75` of the mass to the backoff. That looks brutal, and on a six-token corpus it is — with `c_ctx = 2`, a discount of `0.75` removes a huge fraction of every count. On a realistic corpus where `c_ctx` is in the thousands, `lam` shrinks toward zero and the discounted term dominates, exactly as intended: **the model leans on backoff only where it is data-starved.** That self-scaling is why one fixed `d = 0.75` works across wildly different corpora, and why modified Kneser-Ney's refinement — separate discounts `d_1, d_2, d_3+` for counts of 1, 2, and 3-or-more — buys extra accuracy precisely at the low counts where a single flat `d` is crudest.
 
 ### 6.4 RNN/LSTM language model with weight tying (PyTorch)
 
@@ -403,6 +628,34 @@ Cross-entropy loss *is* the log-perplexity: `perplexity = exp(loss)`. A word-lev
 ## 7. Real-World Examples
 
 **Google Web1T / 1T n-grams (2006):** Google released n-gram counts (up to 5-grams) derived from ~1 trillion tokens of web text. The lesson, later formalized as "the unreasonable effectiveness of data": a simple 5-gram model with Stupid Backoff on a trillion tokens beat elaborately-smoothed models trained on millions of tokens. Stupid Backoff drops the normalization entirely (`S(w|ctx) = count/count if seen, else 0.4 · S(w|shorter ctx)`) because at web scale the missing normalization does not matter for ranking.
+
+**Put simply.** "If you have seen this exact phrase, just use the raw ratio. If not, chop the context by one word, look again, and multiply whatever you find by 0.4 as a penalty for having had to shorten it."
+
+The radical part is what Stupid Backoff *omits*: there is no computed backoff weight, no normalization, no guarantee the scores sum to one. It is not a probability distribution at all, which is why the paper's authors named it what they did — and it still wins at trillion-token scale, because with that much data the highest order is usually present, and when it isn't you only need the *ranking* of candidates to be right, not their absolute values.
+
+| Symbol | What it is |
+|--------|------------|
+| `S(w \| ctx)` | A **score**, deliberately not a probability — it does not sum to 1 over the vocabulary |
+| `count / count` | `count(ctx, w) / count(ctx)`, the plain MLE ratio, used whenever the n-gram was seen |
+| `0.4` | Fixed backoff penalty, applied once per order dropped. Empirically tuned, never derived |
+| shorter `ctx` | The context with its leftmost word removed — a 5-gram becomes a 4-gram, and so on |
+| recursion | `S` calls itself at the next lower order until something has a nonzero count |
+
+**Walk one example.** Scoring `york` after the trigram context `to new`, where `to new york` was never seen but `new york` was seen 8,000 times out of 10,000 occurrences of `new`, in a corpus of one billion tokens:
+
+```
+  order    context     count(ctx, w) / count(ctx)      penalty      score
+  trigram  to new      0 / ...          -> unseen      --           back off
+  bigram   new         8,000 / 10,000   = 0.8          x 0.4        0.32
+                                                                  ------
+  S(york | to, new) = 0.4 x 0.8                                    = 0.32
+
+  if the bigram had ALSO been unseen, it drops one more order:
+  unigram  --          12,000 / 1e9     = 0.000012     x 0.4 x 0.4  0.00000192
+                                                       (= 0.16)
+```
+
+Each dropped order costs a flat factor of `0.4`, so two drops cost `0.16` and three cost `0.064`. Contrast this with Katz backoff, where the equivalent weight `alpha` must be computed per context so the distribution renormalizes — an expensive step that Stupid Backoff simply refuses to pay. The tradeoff is stated exactly: you may no longer report perplexity (the scores are not probabilities, so `2^H` is meaningless), but you can rank candidates for a translation or speech decoder at nanosecond cost over a trillion tokens. When the data is big enough, the smoothing sophistication stops mattering — which is the "unreasonable effectiveness of data" lesson in one formula.
 
 **KenLM in machine translation and speech (Heafield, 2011):** The de facto production n-gram toolkit. Trains modified Kneser-Ney 5-grams over billions of tokens with a streaming, disk-based algorithm, and serves them with a quantized trie that answers a query in nanoseconds. Moses (statistical MT) and Kaldi (speech recognition) both used KenLM as the LM component that rescores hypotheses.
 

@@ -62,6 +62,35 @@ can hoard mass. Global normalization is the whole reason CRFs beat MEMMs.
 (Viterbi for the best path, forward-backward for marginals) exploits the first-order Markov
 structure to solve everything in `O(T · K^2)`.
 
+**What this actually says.** "There are astronomically many possible taggings, but you never have to
+look at them one by one — you only ever have to compare tags at *neighboring* positions."
+
+The first-order Markov assumption is what collapses an exponential search into a linear scan. Every
+algorithm in this file — Viterbi, forward, forward-backward — is the same left-to-right sweep with a
+different operator plugged in.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Number of tokens in the sentence |
+| `K` | Number of distinct tags (9 for CoNLL BIO, 45 for Penn Treebank POS) |
+| `K^T` | Size of the output space — every tag at every position, all combinations |
+| `O(T · K^2)` | Cost of dynamic programming: one sweep of `T` steps, each comparing all `K x K` tag pairs |
+
+**Walk one example.** A 10-token sentence with the 9 CoNLL BIO tags:
+
+```
+  brute force  :  K^T     = 9^10          = 3,486,784,401 sequences to score
+  Viterbi      :  T x K^2 = 10 x 9 x 9    =           810 cell updates
+
+  speedup      :  3,486,784,401 / 810     =     4,304,672 x
+
+  And the gap widens with length: every extra token multiplies the brute-force
+  count by 9, but adds only 81 cell updates to the DP.
+```
+
+The DP is exact, not an approximation — it returns the same answer brute force would, because the
+score of a path decomposes into per-edge terms that can be maximized (or summed) independently.
+
 **Emissions and transitions.** Every model in this family factors the score of a labeling into two
 kinds of terms: **emission** scores (how well tag `y_t` fits observation `x_t`) and **transition**
 scores (how compatible tag `y_{t-1}` is with tag `y_t`). HMMs make these probabilities; CRFs make
@@ -96,6 +125,36 @@ For the sentence `Elon Musk visited Paris`:
 BIO needs `2K + 1` tags for `K` entity types; BIOES needs `4K + 1`. Two adjacent same-type
 entities ("Paris London" as two LOCs) are only separable in BIO/BIOES, not IO.
 
+**Read it like this.** "Every entity type costs you a fixed number of tag slots, plus exactly one
+shared `O` for everything that is not an entity."
+
+The counting rule is worth internalizing because it sets the size of the CRF transition matrix, which
+is `K x K` — so the scheme you pick quadratically drives the parameter count and the Viterbi cost.
+
+| Symbol | What it is |
+|--------|------------|
+| `K` (in `2K + 1`) | Number of *entity types* — PER, ORG, LOC, MISC is `K = 4` |
+| `2K` (BIO) | One `B-` and one `I-` tag per type |
+| `4K` (BIOES) | `B-`, `I-`, `E-`, `S-` per type — End and Single are the extra two |
+| `+ 1` | The single `O` tag, shared by all types, for non-entity tokens |
+
+**Walk one example.** CoNLL-2003 with its four entity types:
+
+```
+  BIO    : 2 x 4 + 1 = 9 tags
+           O, B-PER, I-PER, B-ORG, I-ORG, B-LOC, I-LOC, B-MISC, I-MISC
+
+  BIOES  : 4 x 4 + 1 = 17 tags
+           O + {B-, I-, E-, S-} x {PER, ORG, LOC, MISC}
+
+  transition matrix cost:  BIO   9 x 9  =  81 entries
+                           BIOES 17 x 17 = 289 entries   (3.6x larger)
+```
+
+BIOES buys sharper boundaries — a one-token entity gets its own `S-` tag instead of a lone `B-` that
+looks like the start of something longer — at 3.6x the transition parameters and Viterbi work. On
+CoNLL the gain is usually under half an F1 point, which is why BIO stays the default.
+
 ### 4.2 Hidden Markov Model (HMM) — generative
 
 An HMM defines a joint distribution over hidden tags `y` and observed words `x`:
@@ -113,6 +172,50 @@ Two strong independence assumptions: (1) the current tag depends only on the pre
 (supervised) or Baum-Welch/EM (unsupervised), decoded with Viterbi. Simple and fast, but cannot use
 overlapping features (word shape, suffixes) because emissions are single-token multinomials.
 
+**Put simply.** "Pretend a machine picked a chain of hidden tags by rolling dice, and each tag then
+rolled a second die to spit out a word — the probability of what you saw is just all those dice
+multiplied together."
+
+The `Π` (capital pi) is a product over positions, the multiplicative twin of `Σ`. Everything in an
+HMM is a probability, so terms multiply; every later model in this file replaces the probabilities
+with unbounded real scores, at which point the products become sums.
+
+| Symbol | What it is |
+|--------|------------|
+| `P(x, y)` | The *joint* probability of the words AND the tags — the generative story of both |
+| `π(y_1)` | Chance the sentence starts in tag `y_1`. Sentences rarely start with `I-PER` |
+| `A[i, j]` | Chance of moving from tag `i` to tag `j`. One row per source tag, each row sums to 1 |
+| `B[i, w]` | Chance that tag `i` emits word `w`. One row per tag over the whole vocabulary `V` |
+| `Π_t` | Multiply the term across every position `t` in the sentence |
+
+**Walk one example.** Tagging `Elon Musk spoke` as `B-PER, I-PER, O` with three tags:
+
+```
+  parameters used
+    pi(B-PER)             = 0.4        a sentence often opens on a person
+    A[B-PER, I-PER]       = 0.5        half of B-PER tokens continue the span
+    A[I-PER, O]           = 0.6        person spans usually end after two tokens
+    B[B-PER, "Elon"]      = 0.02
+    B[I-PER, "Musk"]      = 0.03
+    B[O,     "spoke"]     = 0.01
+
+  transition part :  0.4 x 0.5 x 0.6              = 0.12
+  emission part   :  0.02 x 0.03 x 0.01           = 0.000006
+  P(x, y)         :  0.12 x 0.000006              = 0.00000072   = 7.2e-07
+
+  in log-space    :  log(7.2e-07)                 = -14.14
+```
+
+That absolute number is meaningless on its own — every tagging of this sentence is tiny. What matters
+is the *ranking*: swap in `O, O, O` and the emission of "Musk" from `O` will be far smaller, so the
+person reading loses. Note also how fast the product shrinks — three tokens already reach `1e-06`,
+which is the underflow problem Pitfall 4 fixes with log-space.
+
+Notice what `B[i, w]` cannot express: it is one multinomial over raw word identity, so there is no
+place to say "this token is Capitalized" or "this token ends in `-ing`". Every such feature would have
+to be folded into the vocabulary itself, and they overlap, which violates the independence the joint
+factorization assumes. That single limitation is the whole motivation for discriminative models.
+
 ### 4.3 Maximum-Entropy Markov Model (MEMM) and label bias
 
 An MEMM is discriminative — it models `P(y_t | y_{t-1}, x)` with a per-state logistic regression
@@ -127,6 +230,48 @@ fatal flaw. A state with only one outgoing transition must pass *all* its probab
 regardless of the observation, so low-entropy states effectively ignore their emissions. This is the
 **label-bias problem** (Lafferty et al., 2001): the model systematically prefers paths through
 states with fewer branches. CRFs fix it by deferring normalization to the end.
+
+**Stated plainly.** "Decide the tag at each step as if it were its own little classification problem,
+then multiply the per-step confidences together and call that the sentence score."
+
+The `Π_t` again means "multiply over positions". The catch is hidden in what is *not* written: each
+factor `P(y_t | y_{t-1}, x)` is required to sum to 1 over the possible next tags. That constraint is
+harmless when a state has many successors and toxic when it has one.
+
+| Symbol | What it is |
+|--------|------------|
+| `P(y \| x)` | Conditional probability of the whole tag sequence given the words |
+| `P(y_t \| y_{t-1}, x)` | One step's distribution over next tags, given the previous tag and the sentence |
+| "locally normalized" | Each factor sums to 1 *by itself*, before the sentence is finished |
+| "globally normalized" | Only the total over all sequences sums to 1 — the CRF's `Z(x)` |
+
+**Walk one example.** Two branches leaving a shared prefix; branch A has one successor, branch B has
+two. Watch branch A win despite the observation clearly favouring branch B:
+
+```
+  step 1 (both branches equally plausible from the first character)
+    P(A) = 0.50            P(B) = 0.50
+
+  step 2, observation strongly matches a successor of B
+    from A: only ONE outgoing arc exists
+            P(next | A, obs) = 1.00      <- forced; the observation cannot change it
+    from B: two outgoing arcs, and the observation favours one of them
+            P(b1 | B, obs)   = 0.90      P(b2 | B, obs) = 0.10
+
+  path totals
+    A -> a1  :  0.50 x 1.00  =  0.50     <- wins
+    B -> b1  :  0.50 x 0.90  =  0.45
+    B -> b2  :  0.50 x 0.10  =  0.05
+
+  Branch A wins by 0.05 while never having looked at the observation at all.
+```
+
+This is the `rib` vs `rob` example from Lafferty et al. in miniature. The low-branching state is
+*rewarded for being uninformative*: because its single arc must carry all 1.00 of the mass, it can
+never be penalized by a mismatching observation, while the informative state has to split its mass and
+pays for the privilege. A CRF removes the per-step sum-to-1 constraint entirely — path scores are free
+to be any real numbers, and normalization happens once at the end over whole sequences, so an
+observation at position `t` can still overturn a decision made at position 1.
 
 ### 4.4 Linear-chain CRF — discriminative, globally normalized
 
@@ -146,6 +291,64 @@ Z(x)     = Σ_{y'} exp( Σ_t Σ_k λ_k · f_k(y'_{t-1}, y'_t, x, t) )
 Training maximizes conditional log-likelihood (a **convex** objective → global optimum via L-BFGS).
 The gradient of each weight is `observed_feature_count − expected_feature_count`, and the expected
 counts come from forward-backward. L1 (`c1`) and L2 (`c2`) regularization control sparsity/overfitting.
+
+**In plain terms.** "Add up every reason to like this particular tagging, exponentiate it to make it
+positive, then divide by the same quantity computed for *every other possible tagging* — so the
+probabilities of all taggings of this sentence add to one."
+
+`Z(x)` is the only hard part, and it is hard for exactly one reason: it ranges over all `K^T`
+sequences. The forward algorithm computes it in `O(T · K^2)` without enumerating anything, which is
+why a CRF is trainable at all.
+
+| Symbol | What it is |
+|--------|------------|
+| `f_k(y_{t-1}, y_t, x, t)` | Feature function `k`: usually 1 if some pattern holds at position `t`, else 0 |
+| `λ_k` | Learned weight for feature `k`. Positive = evidence for, negative = evidence against |
+| `Σ_t Σ_k λ_k · f_k(...)` | The path score `s(x, y)` — sum the fired features' weights over all positions |
+| `exp(s(x, y))` | Turns the score into a positive, unnormalized "mass" for this tagging |
+| `Z(x)` | Partition function: that same mass summed over every one of the `K^T` taggings |
+| `y'` | A dummy variable ranging over candidate sequences inside `Z` — not the gold one |
+| `1 / Z(x)` | The divisor that makes the taggings' probabilities sum to exactly 1 |
+
+**Walk one example.** Two tokens, two tags, so all `2^2 = 4` sequences fit on the page and `Z` can be
+computed by brute force and checked. Sentence `Elon spoke`, tags `{B-PER, O}`:
+
+```
+  emission scores                    transition scores
+              B-PER     O              B-PER -> B-PER  = -0.5
+    Elon       2.0     0.1             B-PER -> O      = +0.8
+    spoke     -1.0     1.5             O     -> B-PER  = +0.3
+                                       O     -> O      = +1.0
+
+  score each of the 4 sequences:  s = emit(t=1) + trans + emit(t=2)
+
+    y = (B-PER, B-PER)   2.0 + (-0.5) + (-1.0)  =  0.5    exp(s) =  1.649
+    y = (B-PER, O    )   2.0 + ( 0.8) + ( 1.5)  =  4.3    exp(s) = 73.700   <- gold
+    y = (O,     B-PER)   0.1 + ( 0.3) + (-1.0)  = -0.6    exp(s) =  0.549
+    y = (O,     O    )   0.1 + ( 1.0) + ( 1.5)  =  2.6    exp(s) = 13.464
+                                                          -----------------
+                                       Z(x) = sum of all = 89.361
+                                       log Z(x)          =  4.4927
+
+  probabilities  =  exp(s) / Z
+    (B-PER, B-PER)   1.649 / 89.361 = 0.0185
+    (B-PER, O    )  73.700 / 89.361 = 0.8247   <- 82.5% of the mass
+    (O,     B-PER)   0.549 / 89.361 = 0.0061
+    (O,     O    )  13.464 / 89.361 = 0.1507
+                                      ------
+                                      1.0000  <- they sum to one, by construction
+```
+
+Two things to take from this. First, the *scores* are unbounded real numbers — `4.3` and `-0.6` are
+not probabilities and never need to be; only their exponentials, divided by `Z`, are. That freedom is
+what lets a CRF pile on overlapping features an HMM could not. Second, `Z` is what couples every
+sequence to every other: pushing the gold path's score up by 1.0 is not enough on its own, because if
+a competitor rises with it, the ratio is unchanged. Training is a tug-of-war over a fixed total.
+
+**Why `Z(x)` is written per-sentence, not once globally.** The `(x)` matters. Each sentence has its
+own normalizer computed from its own emissions, so `Z` must be recomputed on every forward pass of
+every example — it is the dominant cost of CRF training, and the reason the forward algorithm's
+`O(T · K^2)` (rather than `O(K^T)`) is the enabling trick and not a mere optimization.
 
 ### 4.5 BiLSTM-CRF
 
@@ -214,6 +417,67 @@ the backpointers `psi` that reconstruct the path.
 
 Independent per-column argmax (no transitions) could pick `O` at column 2 if its emission alone were
 highest, breaking the `I-PER` span; folding in transitions is what keeps the path valid.
+
+**What the formula is telling you.** "To find the best way to reach this tag at this position, look at
+the best way to reach each tag one step back, add the cost of stepping from there to here, keep only
+the winner — then add how well this tag fits the current word."
+
+The reason you may throw away every path but the winner is that the score decomposes over adjacent
+pairs: any losing prefix into state `s` can never be rescued by what happens later, because the future
+only ever sees `s`, never how you got there. That is the Markov property doing all the work.
+
+| Symbol | What it is |
+|--------|------------|
+| `delta[t][s]` | Log-score of the single best path that ends in tag `s` at position `t` |
+| `s'` | The candidate previous tag being considered — the loop variable of the `max` |
+| `trans[s' -> s]` | Score of following tag `s'` with tag `s`. `-inf` marks an illegal pair |
+| `emit[s][x_t]` | How well tag `s` explains the word at position `t` |
+| `max over s'` | Keep only the best predecessor — this is what makes it Viterbi and not the forward pass |
+| `psi[t][s]` | Backpointer: *which* `s'` won, remembered so the path can be reconstructed |
+
+**Walk one example.** These are the exact parameters that produce the trellis above, so every published
+cell can be checked by hand. Note `O -> I-PER = -inf`: that one entry is the BIO constraint.
+
+```
+  start scores            emission scores (log)              transitions (row -> col)
+    O      =  0.0                 Elon   Musk  spoke                  O    B-PER  I-PER
+    B-PER  =  0.0         O      -2.3   -2.0   -0.3          O      -0.2   -0.3    -inf
+    I-PER  = -5.0         B-PER  -1.2   -2.4   -3.2          B-PER  -0.9   -2.5    -0.3
+                          I-PER  -4.0   -0.6   -4.7          I-PER  -0.6   -0.8    -0.4
+
+  column t=1  "Elon"      delta = start + emit
+    O      =  0.0 + (-2.3) = -2.3
+    B-PER  =  0.0 + (-1.2) = -1.2   *winner of the column
+    I-PER  = -5.0 + (-4.0) = -9.0
+
+  column t=2  "Musk"      delta = max over s'(delta[t-1][s'] + trans) + emit
+    O      : from O     -2.3 + (-0.2) = -2.5
+             from B-PER -1.2 + (-0.9) = -2.1  <- best      -2.1 + (-2.0) = -4.1  psi=B-PER
+             from I-PER -9.0 + (-0.6) = -9.6
+    B-PER  : from O     -2.3 + (-0.3) = -2.6  <- best      -2.6 + (-2.4) = -5.0  psi=O
+             from B-PER -1.2 + (-2.5) = -3.7
+             from I-PER -9.0 + (-0.8) = -9.8
+    I-PER  : from O     -2.3 + (-inf) = -inf            (O -> I-PER is illegal in BIO)
+             from B-PER -1.2 + (-0.3) = -1.5  <- best      -1.5 + (-0.6) = -2.1  psi=B-PER
+             from I-PER -9.0 + (-0.4) = -9.4                                     *winner
+
+  column t=3  "spoke"
+    O      : from O     -4.1 + (-0.2) = -4.3
+             from B-PER -5.0 + (-0.9) = -5.9
+             from I-PER -2.1 + (-0.6) = -2.7  <- best      -2.7 + (-0.3) = -3.0  psi=I-PER
+    B-PER  : best is I-PER  -2.1 + (-0.8) = -2.9          -2.9 + (-3.2) = -6.1  psi=I-PER
+    I-PER  : best is I-PER  -2.1 + (-0.4) = -2.5          -2.5 + (-4.7) = -7.2  psi=I-PER
+
+  final argmax of column 3 : O at -3.0
+  backtrack via psi        : O <- I-PER <- B-PER
+  best path                : B-PER, I-PER, O      total log-score -3.0
+```
+
+Look at column 2 to see joint decoding earn its keep. On emissions alone `I-PER` scores `-0.6` for
+"Musk" while `O` scores `-2.0`, so a per-token argmax would also pick `I-PER` here — but it would have
+picked `O` at column 1 if `O`'s emission had edged out `B-PER`, producing the illegal `O, I-PER`. The
+`-inf` at `O -> I-PER` makes that path score negative infinity, so Viterbi cannot return it at any
+price. This is the mechanical reason a CRF head has a 0% invalid-sequence rate rather than a low one.
 
 ### Linear-chain CRF feature-function scoring
 
@@ -353,6 +617,50 @@ Viterbi uses `max` (best path); forward-backward uses `logsumexp` (sum over all 
 alone gives `P(obs)` — the HMM likelihood and the template for the CRF's `Z`; the backward pass adds
 the marginals needed for CRF gradients and per-token confidence.
 
+**The idea behind it.** `gamma = alpha + beta - log_likelihood` says: "the chance this token really
+carries tag `s` is the mass of everything that could have led here, times the mass of everything that
+could follow from here, divided by the mass of all paths through the sentence."
+
+In probability space that reads `gamma = (alpha x beta) / P(obs)`; in log-space multiplication becomes
+addition and division becomes subtraction, which is the only reason the line looks like a subtraction
+at all. `alpha` covers the past, `beta` covers the future, and they meet at position `t`.
+
+| Symbol | What it is |
+|--------|------------|
+| `alpha[t, s]` | Log-mass of all paths from the start that arrive at tag `s` at position `t` |
+| `beta[t, s]` | Log-mass of all paths that continue from tag `s` at `t` to the end of the sentence |
+| `log_likelihood` | `logsumexp(alpha[T-1])` — total mass of every path, the HMM twin of the CRF's `log Z` |
+| `gamma[t, s]` | Posterior marginal: `P(y_t = s | obs)`, a real probability that sums to 1 over `s` |
+| `logsumexp` | "Add in probability space while staying in log space" — see Pitfall 4 |
+
+**Walk one example.** One column of the trellis at some position `t`, three tags:
+
+```
+  tag       alpha[t,s]   beta[t,s]   alpha+beta
+  O           -2.6        -1.6         -4.2
+  B-PER       -3.4        -2.1         -5.5
+  I-PER       -6.0        -1.0         -7.0
+
+  log_likelihood = logsumexp(-4.2, -5.5, -7.0) = -3.9123
+
+  gamma (log)  = (alpha + beta) - log_likelihood      gamma (prob) = exp(...)
+    O          = -4.2 - (-3.9123) = -0.2877             0.7500
+    B-PER      = -5.5 - (-3.9123) = -1.5877             0.2044
+    I-PER      = -7.0 - (-3.9123) = -3.0877             0.0456
+                                                        ------
+                                                        1.0000
+```
+
+Read the last column as a calibrated per-token confidence: this position is `O` with 75% posterior
+probability. That is a genuinely different quantity from the Viterbi path score, and Best Practice 10
+is about not confusing them — Viterbi gives you one number for the whole sentence, so a 400-token
+document that is confidently tagged everywhere except one span still looks confident overall. The
+marginals expose the one uncertain span, which is exactly what active-learning selection needs.
+
+Note also that `I-PER` has the *best* future (`beta = -1.0`, the largest of the three) and still ends
+up least likely, because its past is so poor. Neither pass alone is a confidence score; only their
+sum, normalized, is.
+
 ### 6.3 CRF partition function and NLL loss (log-space)
 
 ```python
@@ -389,6 +697,48 @@ def crf_nll(emissions, tags, transitions, start_trans, end_trans) -> torch.Tenso
 
 The forward recursion for `Z` is the HMM forward pass with `+` scores instead of `×` probabilities.
 The loss `logZ − gold` is exactly `−log P(y | x)`, convex when emissions are linear features.
+
+**What it means.** `loss = log Z(x) - score(gold)` says: "how much better could some other tagging
+have scored than the correct one? Drive that gap to zero."
+
+It is a ranking loss disguised as a likelihood. `log Z` is a soft maximum over all `K^T` path scores,
+so the loss is roughly "best achievable score minus the gold score" — it is near zero when the gold
+path already dominates, and large when something else is winning.
+
+| Symbol | What it is |
+|--------|------------|
+| `score(gold)` | Unnormalized score of the ONE true tagging: its emissions plus its transitions, summed |
+| `log Z(x)` | Log of the total mass of every possible tagging — a soft max over all path scores |
+| `log Z - gold` | The loss. Exactly `-log P(gold \| x)`, so 0 means the gold path holds all the mass |
+| `start_trans` / `end_trans` | Scores for beginning and ending the sentence in a given tag |
+| `alpha` (in the code) | Running log-mass of all partial paths ending in each tag — the forward pass |
+
+**Walk one example.** Reusing the four-sequence CRF from §4.4, where the gold tagging is `(B-PER, O)`
+with score `4.3` and `Z(x) = 89.361`:
+
+```
+  score(gold) = 4.3                      log Z(x) = 4.4927
+
+  loss = 4.4927 - 4.3   = 0.1927
+  check: -log P(gold)   = -log(0.8247) = 0.1927   <- identical, as promised
+
+  what different situations look like
+    gold holds 82.5% of the mass   loss = 0.1927     already good
+    gold holds 50%  of the mass    loss = 0.6931     = log 2
+    gold holds 99%  of the mass    loss = 0.0101     nearly nothing left to learn
+    gold holds  1%  of the mass    loss = 4.6052     model is confidently wrong
+```
+
+The loss can never go below zero, because `log Z` is a sum that *includes* the gold path's own mass —
+`Z >= exp(score(gold))` always. That is the structural guarantee that makes this a valid likelihood
+rather than an arbitrary margin.
+
+**Why the gradient has the shape it does.** Differentiating `log Z - gold` gives
+`expected_feature_count − observed_feature_count`: the `gold` term contributes the features that
+actually fired in the true tagging, and the `log Z` term contributes each feature's *expected* count
+under the model, which is precisely what forward-backward's marginals compute. At the optimum the two
+match, and the model reproduces the training corpus's feature statistics exactly. Without the `log Z`
+term the objective would be unbounded — you could raise every score forever and never be penalized.
 
 ### 6.4 BiLSTM-CRF (PyTorch + torchcrf)
 
@@ -600,6 +950,56 @@ print(f1_score(true_bio, pred_bio))           # true_bio/pred_bio: list[list[str
 print(classification_report(true_bio, pred_bio, digits=4))
 ```
 
+**Reading the score sheet.** Entity-level `F1 = 2PR / (P + R)` says: "of the spans you claimed, what
+fraction were exactly right, and of the spans that existed, what fraction did you find — then take the
+harmonic mean so you cannot game one by sacrificing the other."
+
+The word doing the damage is **exactly**. A predicted span counts as a true positive only if its
+start, its end, AND its type all match a gold span. There is no partial credit, which means a
+one-token boundary slip is punished twice: once as a false positive for the wrong span you emitted,
+once as a false negative for the right span you missed.
+
+| Symbol | What it is |
+|--------|------------|
+| `TP` | Predicted spans matching a gold span on start, end, and type — all three |
+| `FP` | Predicted spans with no exact gold counterpart, including near-misses |
+| `FN` | Gold spans with no exact prediction, including the near-misses counted above |
+| `P = TP / (TP + FP)` | Precision: of what you claimed, how much was right |
+| `R = TP / (TP + FN)` | Recall: of what existed, how much you found |
+| `2PR / (P + R)` | Harmonic mean — pulled toward the *lower* of the two, unlike a plain average |
+
+**Walk one example.** A test set with 100 gold entities; the model emits 95 spans:
+
+```
+  how each prediction is scored against gold "Elon Musk" = PER, tokens 0-1
+
+    predicted span              verdict            counts as
+    (0,1,PER)  Elon Musk        exact match        TP
+    (0,0,PER)  Elon             boundary short     FP + FN   <- no partial credit
+    (0,2,PER)  Elon Musk spoke  boundary long      FP + FN
+    (0,1,ORG)  Elon Musk        right span, wrong  FP + FN
+                                type
+    nothing emitted             miss               FN
+    (3,3,LOC)  invented span    hallucination      FP
+
+  totals over the test set
+    TP = 88     FP = 7     FN = 12
+    predicted spans = TP + FP = 95        gold spans = TP + FN = 100
+
+  precision = 88 / 95  = 0.9263  = 92.63%
+  recall    = 88 / 100 = 0.8800  = 88.00%
+  F1        = 2 x 0.9263 x 0.8800 / (0.9263 + 0.8800) = 0.9026 = 90.26%
+
+  compare: the arithmetic mean would be 90.32% -- the harmonic mean sits lower,
+  and the gap widens as P and R diverge.
+```
+
+Contrast this with the token accuracy the broken snippet computes. In a corpus that is 90% `O`, a
+model predicting `O` everywhere scores 90% token accuracy with `TP = 0`, giving precision, recall, and
+F1 of exactly 0. The two metrics do not merely differ in magnitude — they disagree about whether the
+model works at all, which is why every published CoNLL number in this file (~93 F1, 84–88 F1) is
+entity-level and not token-level.
+
 ### Pitfall 4: forward algorithm underflow (multiplying probabilities)
 
 ```python
@@ -614,6 +1014,54 @@ log_alpha = start_lp + emit_lp[:, obs[0]]
 for t in range(1, T):
     log_alpha = logsumexp(log_alpha[:, None] + trans_lp, axis=0) + emit_lp[:, obs[t]]
 ```
+
+**Decoding the trick.** `logsumexp(v) = m + log( Σ_i exp(v_i − m) )` where `m = max(v)` says: "pull the
+biggest term out front, so the thing you actually exponentiate is at most `exp(0) = 1` and can never
+overflow, and at least one term is exactly 1 so the sum can never collapse to zero."
+
+It is algebraically an identity — factoring `exp(m)` out of the sum and taking its log back out — so it
+changes nothing mathematically and everything numerically. Every `logsumexp` in this file (§6.2, §6.3,
+`torchcrf` internally) is doing this under the hood.
+
+| Symbol | What it is |
+|--------|------------|
+| `v_i` | The log-space scores being combined — one per predecessor tag |
+| `m = max(v)` | The largest score, pulled out as a common factor |
+| `v_i − m` | Shifted scores, all `<= 0`, so `exp` of them lands safely in `(0, 1]` |
+| `m + log(Σ ...)` | Add the factor back after the log — the identity that makes the shift free |
+| float64 range | Smallest positive value ~`5e-324`; anything smaller silently becomes `0.0` |
+
+**Walk one example.** Three log-scores from deep inside a long sentence, where naive exponentiation
+has already died:
+
+```
+  v = [-800.0, -801.0, -803.0]
+
+  naive: exp(v_i) directly
+    exp(-800) = 0.0     exp(-801) = 0.0     exp(-803) = 0.0
+    sum = 0.0  ->  log(0.0) = -inf          the whole likelihood is destroyed
+
+  shifted: m = -800.0
+    exp(-800 - (-800)) = exp( 0.0) = 1.000000
+    exp(-801 - (-800)) = exp(-1.0) = 0.367879
+    exp(-803 - (-800)) = exp(-3.0) = 0.049787
+    sum                            = 1.417667
+    log(sum)                       = 0.349012
+    result = m + log(sum) = -800.0 + 0.349012 = -799.650988   <- correct, finite
+```
+
+The related underflow in the broken snippet is the same failure one level up. Multiplying raw
+probabilities with a typical per-step factor around `0.01`, you reach `1e-308` — the edge of the
+normal float64 range — after only 154 steps, and hit a hard `0.0` a few steps later:
+
+```
+  0.01 ^ 154  = 1.0e-308     still representable, barely
+  0.01 ^ 155  = 1.0e-310     subnormal; precision already degrading
+  0.01 ^ 162  = 0.0          gone. log-likelihood = -inf, gradients = NaN
+```
+
+A 200-token document is entirely ordinary in production, so this is not a theoretical edge case — it
+is why "do everything in log-space" is Best Practice 3 and not an optimization you add later.
 
 ### Pitfall 5: wrong BIO alignment for subword tokenizers
 

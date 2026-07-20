@@ -63,6 +63,34 @@ Key insight: Collaborative filtering exploits the wisdom of crowds — users who
 
 **The Cold Start Problem**: New users have no history (user cold start). New items have no interactions (item cold start). Content-based and popularity fallbacks are standard mitigations.
 
+**Stated plainly.** "The ratings table is almost entirely empty — and the emptiest rows belong to exactly the users you most need to serve." Sparsity and cold start are not two problems; cold start is what sparsity looks like from inside a single row.
+
+| Symbol | What it is |
+|--------|------------|
+| `n_users x n_items` | Total cells in the matrix — the denominator |
+| observed cells | Cells that actually contain an interaction — the numerator |
+| `sparsity` | `1 - observed / total`. 0.9999 means one filled cell in every 10,000 |
+| `k` | Latent factors per user, 50-200. The unknowns each user's row must pin down |
+
+**Walk one example.** The Netflix figures above, then what they imply for one user:
+
+```
+  cells     = 200,000,000 users x 6,000 items = 1,200,000,000,000
+  observed  = under 0.01% of that             <       120,000,000
+  sparsity  = 1 - 120,000,000 / 1.2e12        >           99.99%
+
+  Per-row view at exactly the 0.01% bound:
+    6,000 items x 0.0001 = 0.6 observed cells in the average row
+
+  Fitting a k = 100 user vector needs at least 100 constraints:
+    user with 300 ratings ->  300 equations, 100 unknowns -> over-determined, fine
+    user with 100 ratings ->  100 equations, 100 unknowns -> exactly determined
+    user with   3 ratings ->    3 equations, 100 unknowns -> 97 free dimensions
+    user with   0 ratings ->    0 equations, 100 unknowns -> no solution exists
+```
+
+The last two rows are the cold-start problem restated as arithmetic. Interaction counts are heavily skewed, so even a healthy-looking average is carried by a small population of very active users while the median new arrival sits in the 0-to-3 band, where the fit term constrains almost nothing and the regularizer — not the data — picks the answer. That is why the standard mitigation is never a better solver: it is a different code path. Popularity or editorial content until the row holds enough entries to determine a vector, then content features to seed one, then full personalization once the arithmetic can actually be solved.
+
 **Feedback Loops**: Recommending item A causes more clicks on A, which causes the model to recommend A even more. Left unchecked, this creates filter bubbles and popularity bias. Exploration (bandits, random injection) counteracts this.
 
 **Evaluation Offline vs Online**: Offline metrics (NDCG, Recall@K) measure held-out interaction prediction. Online metrics (CTR, session length, revenue) measure real user behavior. They frequently disagree — a model with better NDCG can have lower real-world CTR.
@@ -78,6 +106,33 @@ Key insight: Collaborative filtering exploits the wisdom of crowds — users who
 **Model-based CF — Matrix Factorization**: Decompose R into U (|users| x k) and V (|items| x k) such that R ≈ U @ V.T. SVD for explicit; ALS / SGD for implicit. k = 50–200 typical.
 
 **BPR (Bayesian Personalized Ranking)**: Pairwise loss — for each user, rank observed item above unobserved item. Optimized for ranking rather than rating prediction.
+
+**Read it like this.** "Stop storing an opinion for every user-item pair. Store a short taste vector per user and a short trait vector per item, and multiply them on demand."
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | The observed interaction matrix, n_users by n_items |
+| `U` | User factors, n_users by k. One row per user |
+| `V` | Item factors, n_items by k. One row per item |
+| `V.T` | Transpose, so that `U @ V.T` comes out shaped like `R` |
+| `k` | Latent dimension, 50-200. The compression knob |
+| `≈` | Approximate, deliberately — the low-rank fit is what forces generalization |
+
+**Walk one example.** What `k` actually buys, on the Netflix-scale numbers from Section 3:
+
+```
+  Full matrix R    : 200,000,000 x 6,000    = 1,200,000,000,000 cells
+
+  Factors at k = 100:
+    U : 200,000,000 x 100                   =    20,000,000,000 numbers
+    V :       6,000 x 100                   =           600,000 numbers
+    total                                   =    20,000,600,000 numbers
+
+  compression = 1.2e12 / 2.00006e10 = 60.0x fewer numbers stored
+  and all 1.2e12 cells stay answerable, each as one 100-term dot product
+```
+
+Drop to `k = 20` and the factors shrink to 4.0e9 numbers (300x compression), but the model can no longer represent 100 independent taste dimensions; push to `k = 500` and it starts memorizing individual ratings instead of taste. The `≈` is carrying the real weight here: an exact factorization would reproduce every quirk and noise spike in R, and it is precisely the *inability* to fit every cell that forces U and V to encode structure shared across users — which is the only reason a prediction for an unobserved cell means anything at all.
 
 ### 4.2 Content-Based Filtering
 
@@ -319,6 +374,83 @@ if __name__ == "__main__":
     print(f"NDCG@10: {ndcg_at_k([r[0] for r in recs], relevant_items):.4f}")
     print(f"Recall@100: N/A for 10-item demo")
 ```
+
+### Reading the item-item score
+
+**In plain terms.** "Score a candidate by letting the user's own history vote on it, and weight each vote by how similar that history item is to the candidate."
+
+| Symbol | What it is |
+|--------|------------|
+| `interacted` | The items this user already touched — the voters |
+| `item_sim[c, j]` | Cosine similarity between candidate c and history item j; the vote's weight |
+| `ratings[j]` | How much the user liked history item j — the vote itself |
+| `dot(sims, ratings)` | Weighted total; strong votes from similar items dominate the sum |
+| `abs(sims).sum()` | The normalizer. `abs()` stops a negative similarity from shrinking it |
+| `score` | The ratio — a weighted average, so it lands back on the rating scale |
+
+**Walk one example.** One candidate item, three items in the user's history:
+
+```
+  history item     sim to candidate     user's rating     sim x rating
+  Item A                 0.90                5.0              4.50
+  Item B                 0.40                3.0              1.20
+  Item C                 0.80                1.0              0.80
+                      ---------                            --------
+  sum(abs(sims))         2.10                                  6.50
+
+  score = 6.50 / 2.10 = 3.10       <- back on the same 1-5 scale as the ratings
+```
+
+Without the denominator the score would be `6.50`, which is off the rating scale entirely and, worse, grows with the *number* of neighbours: a candidate similar to twenty history items would beat one similar to three no matter how the user rated either. Dividing by `sum(abs(sims))` turns the total into an average, so the number answers "how much would this user like it" rather than "how many neighbours does it happen to have."
+
+### Reading the ranking metrics
+
+**Put simply.** "Hit rate asks *did anything land*, recall asks *how much of it landed*, NDCG asks *how high it landed*, and MAP asks *how early each one landed* — four different questions about one list."
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | The cut-off; only the top-k of the ranked list gets scored |
+| `relevant` | The held-out ground-truth set for this user |
+| `rank` | 1-based position of a hit inside the recommended list |
+| `1 / log2(rank + 1)` | Positional discount. Rank 1 is worth 1.00, rank 9 only 0.30 |
+| `DCG` | Sum of those discounts over the hits actually found |
+| `IDCG` | The same sum for a perfect list — the best score reachable here |
+| `NDCG@k` | `DCG / IDCG`, so 1.0 means "could not have been ordered better" |
+| `Recall@k` | hits found / total relevant. Ignores order completely |
+| `Hit Rate@k` | 1 if the list contains at least one relevant item, else 0 |
+| `AP` | Precision measured at each hit position, averaged. MAP averages AP over users |
+
+**Walk one example.** One user, 4 relevant items, a 10-item recommendation list. Hits land at ranks 2, 5 and 9; the fourth relevant item never appears at all.
+
+```
+  rank    1    2    3    4    5    6    7    8    9   10
+  hit?    .    X    .    .    X    .    .    .    X    .
+
+  Hit Rate@10 = 1, since at least one hit exists            -> 1.000
+  Recall@10   = 3 hits / 4 relevant                         -> 0.750
+
+  NDCG@10
+    DCG  = 1/log2(3) + 1/log2(6) + 1/log2(10)
+         =   0.6309  +   0.3869  +   0.3010            = 1.3188
+    IDCG = 1/log2(2) + 1/log2(3) + 1/log2(4) + 1/log2(5)
+         =   1.0000  +   0.6309  +   0.5000  +  0.4307 = 2.5616
+    NDCG = 1.3188 / 2.5616                                  -> 0.515
+
+  MAP@10 (one user, so this is just AP)
+    precision at rank 2 = 1/2 = 0.500
+    precision at rank 5 = 2/5 = 0.400
+    precision at rank 9 = 3/9 = 0.333
+    AP = (0.500 + 0.400 + 0.333) / 4 relevant                -> 0.308
+```
+
+Four scores for the same ten items: `1.000`, `0.750`, `0.515`, `0.308`. They disagree because they are asking different questions — hit rate calls this list a complete success and MAP calls it close to a failure. Now change nothing except where the same three hits sit:
+
+```
+  hits at ranks 2, 5, 9  ->  hit rate 1.000   recall 0.750   NDCG 0.515   MAP 0.308
+  hits at ranks 1, 2, 3  ->  hit rate 1.000   recall 0.750   NDCG 0.832   MAP 0.750
+```
+
+Recall and hit rate cannot see that improvement at all, while NDCG climbs 62% and MAP 143%. Use recall for the retrieval stage, whose only job is to get the relevant items into the candidate set where order does not yet matter; use NDCG or MAP for ranking, where order is the entire product. Reporting one number without naming the stage it scores is how a single model ends up described as both a win and a regression.
 
 ---
 

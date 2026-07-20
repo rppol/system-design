@@ -243,6 +243,97 @@ The same trained model produces either matrix — nothing was retrained,
 resampled, or reweighted; only the cutoff on `predict_proba` moved, which is
 why threshold moving is the cheapest imbalance fix available.
 
+### Decoding the Confusion Matrix: Why Accuracy Lies at 99:1
+
+Every metric in this module is assembled from the same four counts, so decode
+them once and the rest of the section reads itself:
+
+```
+accuracy  = (TP + TN) / (TP + TN + FP + FN)
+precision =  TP / (TP + FP)
+recall    =  TP / (TP + FN)
+```
+
+**What the formula is telling you.** "Accuracy asks *what fraction of my calls were right* — and on a 99:1 dataset that question is answered almost entirely by the 99, so the class you actually care about barely moves the number."
+
+The trap is structural, not a matter of degree. Because `TN` sits in accuracy's
+numerator with the same weight as `TP`, a classifier can maximize the metric by
+being excellent at the class nobody asked about.
+
+| Symbol | What it is |
+|--------|------------|
+| `TP` | True positives — real fraud the model flagged. The only count that pays |
+| `FP` | False positives — clean rows flagged anyway. The analyst review queue's workload |
+| `FN` | False negatives — fraud waved through. The dollars lost |
+| `TN` | True negatives — clean rows correctly ignored. At 99:1 this is ~99% of every row |
+| `TP + TN` | All correct calls, majority and minority counted identically. That equality is the bug |
+| `TP + TN + FP + FN` | Total rows. Under imbalance this denominator is dominated by `TN` |
+
+**Walk one example.** Two classifiers on the same 10,000-row test set:
+
+```
+Test set: 10,000 rows, 100 positives (1%), 9,900 negatives -- a 99:1 ratio
+
+Model A -- "always predict negative". Nothing was learned; there are no weights.
+              Pred +    Pred -
+   Actual +       0       100          <- every single positive missed
+   Actual -       0     9,900
+
+   accuracy  = (0 + 9,900) / 10,000 = 0.9900    <- 99.0%, looks shippable
+   recall    =  0 / (0 + 100)       = 0.0000    <- catches nothing, ever
+   precision =  0 / (0 + 0)         = 0 / 0     <- undefined; libraries report 0
+   F1        =                        0.0000
+
+Model B -- a real trained model, threshold 0.50
+              Pred +    Pred -
+   Actual +      60        40
+   Actual -     340     9,560
+
+   accuracy  = (60 + 9,560) / 10,000 = 0.9620   <- 96.2%
+   recall    =  60 / (60 + 40)       = 0.6000
+   precision =  60 / (60 + 340)      = 0.1500
+
+Accuracy ranks Model A ABOVE Model B by 99.0 - 96.2 = 2.8 points, while
+Model B catches 60 frauds and Model A catches zero. The metric is not
+merely uninformative here -- it is ordering the two models backwards.
+```
+
+The reason Model B loses on accuracy is that catching 60 positives cost it 340
+false positives, and accuracy charges full price for each one while paying only
+60 rows of credit. That exchange rate is exactly backwards from the business's,
+where one missed fraud costs far more than one extra review.
+
+**Read it like this.** "F1 scores you by your weaker half — you cannot buy a good F1 by being superb at precision and hopeless at recall, or the reverse."
+
+| Symbol | What it is |
+|--------|------------|
+| `precision` | Of the rows I flagged, what fraction were real. The alert queue's signal-to-noise |
+| `recall` | Of the real positives, what fraction I flagged. Coverage of the thing you care about |
+| `2pr / (p + r)` | Harmonic mean of precision and recall — identical to `2 / (1/p + 1/r)` |
+| `1/p` inside that form | Why one tiny value dominates: as `p -> 0`, `1/p -> infinity` and drags the mean down |
+| `2` in the numerator | Normalizer so that `p = r` gives back exactly `p`, not `p/2` |
+
+**Walk one example.** Four operating points, three of which share an identical
+arithmetic mean:
+
+```
+                      precision   recall   arithmetic mean   F1 (harmonic)
+  perfectly balanced     0.375     0.375        0.375            0.375
+  Model B above          0.150     0.600        0.375            0.240
+  flag almost everything 0.010     0.740        0.375            0.020
+  flag one row, be right 1.000     0.010        0.505            0.020
+
+The first three have the SAME arithmetic mean, 0.375, yet F1 spans
+0.375 -> 0.020. The last has the HIGHEST arithmetic mean of all (0.505)
+and one of the lowest F1s -- perfect precision on a single row is worthless.
+```
+
+That collapse toward the smaller term is the whole reason F1 uses a harmonic
+rather than arithmetic mean. An arithmetic mean lets a degenerate model average
+its way to a respectable score; the harmonic mean makes the weaker of the two
+numbers the binding constraint, which is what you want from a single headline
+metric on imbalanced data.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -261,6 +352,45 @@ SMOTE -- interpolate between a minority row and one of its k=5 neighbors
   x_new      = x_i + lambda * (x_neighbor - x_i)
              = [0.453, 1.815, 0.0596]         (a new point, not a copy)
 ```
+
+**Put simply.** "Don't photocopy a rare example — stand somewhere on the straight line between it and a neighbour that already looks like it, and call that a new example."
+
+| Symbol | What it is |
+|--------|------------|
+| `x_i` | A real minority row, chosen at random. The anchor |
+| `x_neighbor` | One of `x_i`'s `k=5` nearest *minority* neighbors, picked at random from those five |
+| `x_neighbor - x_i` | The direction and full distance from anchor to neighbor, per feature |
+| `lambda` | How far along that segment to land. Drawn fresh from `Uniform(0, 1)` for every new point |
+| `x_new` | The synthetic row. Always strictly on the segment — never an extrapolation past either end |
+
+**Walk one example.** The three coordinates above, computed one at a time with
+`lambda = 0.37`:
+
+```
+  x_i        = [0.42, 1.87, 0.03]        lambda = 0.37
+  x_neighbor = [0.51, 1.72, 0.11]
+
+  dim    x_i     x_nbr    delta = nbr - x_i    lambda x delta      x_new
+   1    0.42     0.51          +0.09              +0.0333         0.4533
+   2    1.87     1.72          -0.15              -0.0555         1.8145
+   3    0.03     0.11          +0.08              +0.0296         0.0596
+
+  Note dim 2 moves DOWN: lambda scales a signed delta, so each feature
+  travels toward the neighbor's value regardless of direction.
+
+  lambda = 0.00  ->  x_new = x_i exactly          (a duplicate)
+  lambda = 1.00  ->  x_new = x_neighbor exactly   (also a duplicate)
+  lambda = 0.37  ->  37% of the way along         (genuinely new)
+```
+
+The `Uniform(0, 1)` bound on `lambda` is the safety property: SMOTE interpolates,
+never extrapolates, so no synthetic point can land outside the convex hull of the
+real minority data. What it does *not* guarantee is that the segment stays inside
+minority territory — if `x_neighbor` sits across a pocket of majority points, the
+line runs straight through them and manufactures labelled-positive rows in a
+region that is empirically negative. That is the mechanism behind the "synthetic
+points bridge into majority territory" risk in Section 8.1, and why
+Borderline-SMOTE and `SMOTETomek` exist.
 
 ```python
 from __future__ import annotations
@@ -353,6 +483,44 @@ def xgboost_scale_pos_weight(y_train: np.ndarray) -> float:
     return n_neg / max(n_pos, 1)
 ```
 
+**In plain terms.** "Leave every row exactly where it is, and just charge the loss function 99 times more for each rare row it gets wrong."
+
+| Symbol | What it is |
+|--------|------------|
+| `w_c` | The multiplier applied to class `c`'s contribution to the loss. Data is untouched |
+| `n_samples` | Total rows in the training fold |
+| `n_samples_c` | Rows belonging to class `c`. The rarer the class, the smaller this is, so the bigger `w_c` |
+| `n_classes` | The normalizer, `2` for binary. It is what keeps the average weight at exactly `1.0` |
+| `scale_pos_weight` | XGBoost/LightGBM's single-scalar equivalent, `n_negative / n_positive` |
+
+**Walk one example.** The same 10,000-row, 100-positive set:
+
+```
+  n_samples = 10,000    n_classes = 2    positives = 100    negatives = 9,900
+
+  w_positive = 10,000 / (2 x   100) = 50.0000
+  w_negative = 10,000 / (2 x 9,900) =  0.5051
+
+  ratio = 50.0000 / 0.5051 = 99.0        <- exactly n_negative / n_positive
+
+  Weighted loss mass contributed by each class:
+      positives:    100 x 50.0000 = 5,000
+      negatives:  9,900 x  0.5051 = 5,000        <- deliberately identical
+
+  Average weight per row = (5,000 + 5,000) / 10,000 = 1.0
+
+  XGBoost's one scalar does the same job with one number:
+      scale_pos_weight = 9,900 / 100 = 99.0
+```
+
+The `n_classes` divisor is the term most people drop when reimplementing this by
+hand, and it matters. Without it the weights would be `10,000/100 = 100` and
+`10,000/9,900 = 1.0101`, whose average per row is `2.0` — every gradient step
+would be twice as large as in unweighted training, so a learning rate tuned
+before switching on class weights would suddenly be effectively doubled. Dividing
+by `n_classes` pins the mean weight at `1.0`, which is what makes
+`class_weight="balanced"` a drop-in change rather than a retuning event.
+
 ### 6.3 Focal Loss
 
 ```python
@@ -386,6 +554,55 @@ def focal_loss(
     alpha_t = np.where(y_true == 1, alpha, 1 - alpha)
     return -alpha_t * np.power(1 - p_t, gamma) * np.log(p_t)
 ```
+
+**The idea behind it.** "Charge full price for the examples the model still gets wrong, and almost nothing for the ones it already nails — so 9,900 easy negatives stop drowning out 100 hard positives in the gradient."
+
+| Symbol | What it is |
+|--------|------------|
+| `p_t` | Probability assigned to the *correct* class. `p` for a positive row, `1 - p` for a negative |
+| `-log(p_t)` | Plain cross-entropy. `0` when perfectly confident and right, growing without bound when wrong |
+| `(1 - p_t)^gamma` | The modulating factor. Near `0` for confident-correct rows, near `1` for rows the model is lost on |
+| `gamma` | How hard to down-weight easy rows. `gamma = 0` recovers plain cross-entropy exactly; `2` is the default |
+| `alpha_t` | A separate per-class constant (`0.25` positive / `0.75` negative). Handles class *frequency*, not difficulty |
+
+**Walk one example.** First, what the modulating factor keeps at `gamma = 2`:
+
+```
+     p_t     -log(p_t)     m = (1 - p_t)^2      m x -log(p_t)     fraction kept
+    0.99      0.0101           0.0001             0.0000010            0.01%
+    0.90      0.1054           0.0100             0.0010541            1.00%
+    0.50      0.6931           0.2500             0.1732868           25.00%
+    0.30      1.2040           0.4900             0.5899467           49.00%
+```
+
+Now push a realistic imbalanced batch through it:
+
+```
+One batch: 9,900 easy negatives at p_t = 0.90, plus 100 hard positives at p_t = 0.30
+
+  plain cross-entropy
+      easy negatives:  9,900 x 0.1054                = 1,043.10
+      hard positives:    100 x 1.2040                =   120.40
+      -> the easy negatives carry 8.66x the loss mass of the positives.
+         The gradient is majority-dominated even though every negative
+         is already being classified correctly.
+
+  focal loss, gamma = 2
+      easy negatives:  9,900 x 0.0100 x 0.1054       =    10.43
+      hard positives:    100 x 0.4900 x 1.2040       =    58.99
+      -> the hard positives now carry 5.66x the loss mass of the negatives.
+
+The dominance ratio flipped from 8.66 : 1 majority-favoring to 1 : 5.66
+minority-favoring, with the class distribution completely untouched.
+```
+
+`gamma` and `alpha` solve two different problems and are worth separating in an
+interview answer: `alpha` is a fixed per-class constant that knows nothing about
+any individual row, so it is just class weighting under another name; `gamma`
+looks at each row's own `p_t` and reweights by *difficulty*, which is what lets
+focal loss keep down-weighting a negative as the model gets better at it. Set
+`gamma = 0` and the modulating factor is `1` everywhere — you are back to
+alpha-weighted cross-entropy and have gained nothing.
 
 ### 6.4 Threshold Moving
 
@@ -463,6 +680,69 @@ def compare_auc_under_imbalance(y_true: np.ndarray, y_prob: np.ndarray) -> dict[
     return {"roc_auc": roc_auc, "pr_auc": pr_auc, "prevalence": prevalence}
 ```
 
+The two curves are more similar than they look. Both plot the same quantity up
+the y-axis; they differ only in what they pair it with:
+
+```
+ROC curve :  TPR    = TP / (TP + FN)      against   FPR       = FP / (FP + TN)
+PR  curve :  recall = TP / (TP + FN)      against   precision = TP / (TP + FP)
+
+TPR and recall are literally the same number. The entire difference between
+the two metrics is which denominator gets paired with FP:
+
+    (FP + TN)  for ROC        <- includes every true negative: huge at 99:1
+    (TP + FP)  for PR         <- includes only what you flagged: small
+```
+
+**Stated plainly.** "Both curves ask how much of the rare class you caught; ROC then asks what fraction of the *enormous* negative pile you falsely flagged, while PR asks what fraction of your *own alert queue* was junk — and under imbalance those two questions have wildly different answers."
+
+| Symbol | What it is |
+|--------|------------|
+| `TPR` / `recall` | Fraction of real positives caught. Identical in both curves |
+| `FPR` | `FP / (FP + TN)`. Its denominator is the whole negative class — 9,900 rows at 99:1 |
+| `precision` | `TP / (TP + FP)`. Its denominator is only the rows you flagged — a few hundred |
+| `FP` | Sits in both denominators, but is a rounding error in one and the dominant term in the other |
+| ROC-AUC baseline | Always `0.5`, whatever the prevalence. A prevalence-blind constant |
+| PR-AUC baseline | Equals prevalence itself. `0.01` here, so a PR-AUC must be read *relative to* it |
+
+**Walk one example.** Sweep the threshold down over the same 10,000-row set and
+record four operating points, then integrate both curves:
+
+```
+Test set: 10,000 rows, 100 positives (1%), 9,900 negatives.
+
+   TP      FP    recall    FPR = FP/9,900    precision = TP/(TP+FP)
+   30      40     0.30        0.004040             0.428571
+   60     340     0.60        0.034343             0.150000
+   90   2,000     0.90        0.202020             0.043062
+  100   9,900     1.00        1.000000             0.010000
+
+Read the middle row on its own. Going from 30 to 60 caught frauds cost
+340 - 40 = 300 extra false alarms:
+
+    FPR moved       0.0040 -> 0.0343      (+3.03 percentage points)
+    precision moved 0.4286 -> 0.1500      (-27.9 percentage points)
+
+Same 300 rows. ROC barely notices them because it divides by 9,900;
+precision is crushed because it divides by 400.
+
+Trapezoid area under each curve, using those four points plus the origin:
+
+    ROC-AUC = 0.8981        <- reads as "a strong model"
+    PR-AUC  = 0.2470        <- reads as "the alert queue is mostly noise"
+
+    random-baseline PR-AUC = prevalence = 100 / 10,000 = 0.0100
+    so PR-AUC 0.2470 is 24.7x better than chance -- genuine skill,
+    but nothing like what ROC-AUC 0.8981 advertises.
+```
+
+The asymmetry is entirely in the denominators, and it gets worse as prevalence
+falls: at 1:1000 you would need roughly ten times as many false positives to move
+`FPR` by the same amount, while precision degrades just as fast. This is also why
+ROC-AUC numbers are comparable across datasets and PR-AUC numbers are not — a
+PR-AUC of `0.25` is excellent at 1% prevalence and terrible at 40%, so always
+report the prevalence beside it.
+
 ### 6.6 Why Resampling Distorts Calibration
 
 Resampling changes the class prior the model sees during training (e.g. from
@@ -496,6 +776,72 @@ def prior_corrected_intercept(
     sample_odds = y_bar_resampled / (1 - y_bar_resampled)
     return beta_0_trained - float(np.log(true_odds * sample_odds))
 ```
+
+Written out, the correction that function implements is a single subtraction:
+
+```
+beta_0_corrected = beta_0_trained - log( ((1 - tau) / tau) x (y_bar / (1 - y_bar)) )
+```
+
+**What it means.** "Resampling taught the model a base rate that does not exist; because a logistic model stores the base rate in exactly one parameter, you can put the real one back by subtracting one constant."
+
+| Symbol | What it is |
+|--------|------------|
+| `tau` | The TRUE population prevalence. `0.01` here. What the world actually looks like |
+| `y_bar` | The prevalence in the RESAMPLED training set. `0.5` after balancing to 1:1 |
+| `(1 - tau) / tau` | True population odds *against* a positive. `99` at 1% prevalence |
+| `y_bar / (1 - y_bar)` | Odds *for* a positive in the resampled data. `1.0` at 1:1, `0.25` at 1:4 |
+| `log(...)` | Turns the odds ratio into an additive shift, which is the unit a logistic intercept lives in |
+| `beta_0` | The intercept — the model's log-odds when every feature is at zero, i.e. its stored base rate |
+
+**Walk one example.** Take the 100-positive / 9,900-negative set and rebalance it
+to two different target ratios:
+
+```
+True population: 100 positives, 9,900 negatives  ->  tau = 0.0100
+
+  target ratio    positives after    synthetic rows    y_bar    prior the
+   (pos : neg)      resampling          created                 model learns
+     1 : 1             9,900             9,800        0.5000       50.00%
+     1 : 4             2,475             2,375        0.2000       20.00%
+     no resample         100                 0        0.0100        1.00%
+
+Intercept correction for each target:
+
+  1 : 1     true_odds = 0.99 / 0.01 = 99.00     sample_odds = 0.5 / 0.5  = 1.00
+            log(99.00 x 1.00) = 4.5951      ->  beta_0 - 4.5951
+
+  1 : 4     true_odds = 99.00                   sample_odds = 0.2 / 0.8  = 0.25
+            log(99.00 x 0.25) = 3.2088      ->  beta_0 - 3.2088
+
+  The gap between the two corrections is 4.5951 - 3.2088 = 1.3863 = log(4),
+  exactly the factor by which 1:4 undersells the positive class relative
+  to 1:1. The correction tracks the resampling ratio precisely.
+```
+
+And here is what skipping the correction costs, in probabilities a downstream
+pricing system would actually consume:
+
+```
+  A row the resampled model scores at predict_proba = 0.50:
+
+     trained at 1 : 1   ->  true probability = 0.0100     50.0x too high
+     trained at 1 : 4   ->  true probability = 0.0388     12.9x too high
+
+  A row the 1:1 model scores at predict_proba = 0.80:
+
+     trained at 1 : 1   ->  true probability = 0.0388     20.6x too high
+```
+
+This is the arithmetic behind Pitfall 9's credit model. It also explains why
+teams that must resample usually pick a partial ratio like 1:4 rather than a full
+1:1: the milder ratio needs `9,800 / 2,375 = 4.13x` fewer synthetic rows, distorts
+the learned prior by `log(4)` less, and still hands the optimizer a large enough
+minority gradient to shape a boundary. The correction is exact only for logistic
+regression because it is a pure additive shift in log-odds space and a logistic
+model has exactly one parameter living there; a random forest or a neural net
+spreads its implied base rate across thousands of parameters, so those need
+empirical recalibration on un-resampled data instead.
 
 See [Model Evaluation & Selection](../model_evaluation_and_selection/README.md)
 for Platt scaling, isotonic regression, and the Brier score in depth, and
@@ -1240,6 +1586,64 @@ finally making the offline number trustworthy enough to use for capacity
 planning. The team also added adversarial validation as a pre-deployment CI
 gate, comparing each new training window against the most recent two weeks
 of live traffic before every redeploy.
+
+### Pricing the Leak: Offline vs Live, in Numbers
+
+Leakage is easiest to argue about when you put a number on it. Three quantities
+do all the work:
+
+```
+inflation            = offline_metric / live_metric
+lift over baseline   = PR-AUC / prevalence
+skill above chance   = ROC-AUC - 0.50
+```
+
+**What this actually says.** "A leaked feature never made the model better — it moved the offline number, and the whole distance between offline and live is the size of the lie."
+
+| Symbol | What it is |
+|--------|------------|
+| `offline_metric` | What cross-validation reported before anything shipped |
+| `live_metric` | What that same model scored on real production traffic |
+| `inflation` | How many times larger the offline claim was. `1.0` means the estimate was honest |
+| `prevalence` | Positive rate, `0.002` here. PR-AUC's random baseline — a raw PR-AUC is unreadable without it |
+| `ROC-AUC - 0.50` | The part of ROC-AUC that is not coin-flipping. Leakage inflates *this*, not the raw number |
+
+**Walk one example.** The v1 and v2 numbers from the table above, at this
+system's 1-in-500 fraud rate:
+
+```
+prevalence = 0.002  (1 fraud in 500 transactions)
+
+                offline   live    inflation   offline lift   live lift
+                 PR-AUC   PR-AUC              over baseline  over baseline
+  v1 (leaky)      0.81     0.14      5.79x        405x            70x
+  v2 (fixed)      0.58     0.55      1.06x        290x           275x
+
+  v1 overstated real performance by (0.81 - 0.14) / 0.14 = 479%
+  v2 overstated real performance by (0.58 - 0.55) / 0.55 =   5.5%
+
+v2's offline number is 0.23 points LOWER than v1's and is the better
+artifact, because 1.06x inflation is a usable planning input and 5.79x
+is not. You cannot staff a review queue against a number that is wrong
+by a factor of six.
+```
+
+The same arithmetic on the churn model from Pitfall 2 shows why raw metric points
+understate the damage:
+
+```
+  offline ROC-AUC 0.97   ->  skill above chance = 0.97 - 0.50 = 0.47
+  live    ROC-AUC 0.61   ->  skill above chance = 0.61 - 0.50 = 0.11
+
+  0.11 / 0.47 = 23.4% of the apparent skill was real signal.
+  76.6% of it was the cancellation_reason column reading the answer key.
+```
+
+Quoted as "AUC fell 36 points, from 0.97 to 0.61," that sounds like a model that
+degraded. Quoted as "three quarters of the model's skill was leakage," it sounds
+like what it is — a model that never worked. Always convert AUC deltas into
+skill-above-chance before reporting a leak's impact, because the bottom half of
+the ROC-AUC scale is unearned by construction.
 
 **Interview Q&A:**
 

@@ -239,6 +239,34 @@ def confident_pseudo_labels(
     return keep, hard[keep]
 ```
 
+**What this actually says.** "Only promote a guess to a training label when the model is at least `tau` sure of it — because every guess you promote becomes something the model will be trained to believe more strongly next round."
+
+`tau` is not a tuning knob you sweep for accuracy. It is a bound on how much wrong supervision you are willing to manufacture, and it compounds: a bad label admitted at round 1 is reinforced at rounds 2, 3, and 4.
+
+| Symbol | What it is |
+|--------|------------|
+| `tau` | Confidence bar. Standard is `0.95`; `0.9-0.95` is the usable range per §4.3 |
+| `max_probs` | The top softmax value per unlabeled example — the model's confidence in its own guess |
+| `hard` | The `argmax` class index. "Hard" = one-hot, all the soft probability discarded |
+| `keep` | Indices clearing the bar. Everything else is dropped this round, not labeled wrongly |
+| `@torch.no_grad()` | No gradient through pseudo-label generation. The target must be a constant, not something the model can optimize |
+
+**Walk one example.** Assume a *calibrated* model, so "confidence `p`" really does mean "right `p` of the time." Then `tau` directly bounds the wrong labels you inject:
+
+```
+   tau     worst-case wrong rate     wrong labels per 100,000 accepted
+   0.60           40%                          40,000
+   0.80           20%                          20,000
+   0.90           10%                          10,000
+   0.95            5%                           5,000
+```
+
+Moving `tau` from `0.90` to `0.95` halves the injected noise, from 10,000 wrong labels to 5,000. That is the entire argument for the high bar, and it is why `0.95` — not `0.5`, not `0.7` — is the FixMatch default.
+
+**Now the part the table hides.** That analysis assumed calibration, and deep networks are systematically *over*-confident: a network reporting `0.95` may be right only 70% of the time. Under that miscalibration, `tau = 0.95` is not admitting 5% noise — it is admitting 30%. The bound does not fail gracefully; it fails silently, because the accepted labels look maximally confident on the way in. This is why §3 states pseudo-labels are "only as good as their calibration," and why temperature scaling before thresholding is worth the small dev set it costs.
+
+**Why the confidence bar is a coverage dial too.** Raising `tau` does not only cut noise — it cuts how much of `U` you use at all. At the start of training almost nothing clears `0.95`, so a high bar means you train on `L` alone for a while. That is the intended behavior, not a failure: you want the model competent before it starts teaching itself.
+
 ### 6.2 FixMatch training step (the core recipe)
 
 ```python
@@ -278,6 +306,37 @@ def fixmatch_step(
 
 Early in training almost every unlabeled example is below `tau`, so `mask.mean()` is near 0 and the model learns mostly from `L`; as it improves, coverage climbs toward 1 and `U` dominates. This *self-paced* ramp is why FixMatch needs no explicit `lambda_u` schedule (it fixes `lambda_u = 1`).
 
+**The idea behind it.** "Ask the easy version of the question, and if you are confident in the answer, force yourself to give that same answer to the hard version."
+
+Everything in FixMatch follows from that asymmetry. The weak view exists to produce a target you can trust; the strong view exists to be difficult. Swap them and the method collapses — a target read off a heavily corrupted image is noise, and training on an easy view teaches nothing.
+
+| Symbol | What it is |
+|--------|------------|
+| `u_weak` | The unlabeled image under flip + shift only. Barely changed, so the prediction is reliable |
+| `u_strong` | The *same* image under RandAugment + Cutout. Deliberately hard; this is the training input |
+| `mask` | `1.0` where the weak view cleared `tau`, else `0.0`. Zeroes out the loss on unconfident examples |
+| `pseudo` | `argmax` of the weak view, hardened to one-hot — the target the strong view must reproduce |
+| `lambda_u` | Weight on the unsupervised term. Fixed at `1.0`; the mask does the scheduling instead |
+| `.mean()` on `loss_u_per * mask` | Averages over the **whole batch**, not over the kept examples — this is the self-pacing mechanism |
+
+**Walk one example.** A 64-example unlabeled batch, early in training and then late:
+
+```
+   phase     confident (>= 0.95)   mask.mean()   mean CE on kept   loss_unsup
+   early          6 / 64             0.0938           2.00       (6 x 2.00)/64 = 0.1875
+   late          58 / 64             0.9062           0.35      (58 x 0.35)/64 = 0.3172
+
+   what if the code divided by the kept count instead of the batch size?
+   early:  2.00                    <- 10.7x the masked value, driven by just 6 examples
+   late:   0.35                    <- and it would SHRINK as the model improves
+```
+
+Read the early row carefully. Six examples produce an unsupervised loss of `0.1875`, small next to the supervised term, so `L` dominates exactly as it should while the model is still weak. Dividing by `mask.sum()` instead would have let six lucky examples generate a loss of `2.00` and hijack training in the first epoch — and worse, the term would *decrease* as coverage improved, which is backwards. `.mean()` over the batch is not a stylistic choice; it is the schedule.
+
+**Why no ramp-up schedule is needed.** Methods like Pi-model and Mean Teacher need an explicit `consistency_ramp_up` (§6.6) because their unsupervised loss is live from step 0, when the targets are garbage. FixMatch's mask *is* a ramp: coverage goes `0.09 -> 0.91` on its own, driven by the model's actual competence rather than by a step counter you had to tune. That is why `lambda_u = 1` needs no sweeping, and it is the most quotable design win in the paper.
+
+**What the hardening throws away, and why that is deliberate.** `probs_weak.max()` gives `0.97`, but `pseudo` keeps only the class index — the `0.97` is discarded and the target is treated as certain. That hard target is entropy minimization smuggled in (§4.7): training toward a one-hot target pushes the prediction toward that corner of the simplex, driving the boundary out of dense regions. MixMatch does the same thing explicitly with temperature sharpening; FixMatch gets it for free from the `argmax`.
+
 ### 6.3 Mean Teacher: EMA weights as a stable target
 
 ```python
@@ -305,6 +364,39 @@ def mean_teacher_consistency(
 ```
 
 The teacher is never trained by gradient descent — only by the EMA update. Because its weights are a temporal average of the student, its predictions are smoother and more accurate than any single student snapshot, which is exactly what makes it a trustworthy consistency target.
+
+**Read it like this.** "Keep a slow-moving copy of the model that only ever inches toward the student. Because it averages away the student's step-to-step jitter, it is a steadier — and usually better — model than the student itself."
+
+The surprising claim is that the average is *more accurate*, not merely smoother. SGD bounces around a minimum rather than sitting in it; averaging the trajectory lands nearer the center of the basin than any point on the trajectory does.
+
+| Symbol | What it is |
+|--------|------------|
+| `decay` | How much of the old teacher to keep each step. `0.999` is standard; higher = slower and steadier |
+| `1 - decay` | How much of the student to absorb. At `0.999`, one part in a thousand per step |
+| `t_p.mul_(decay).add_(s_p, alpha=1-decay)` | The whole update, done in place on each weight tensor |
+| `t_b.copy_(s_b)` | BatchNorm running stats are **copied, not averaged** — averaging already-averaged statistics double-counts |
+| `1 / (1 - decay)` | The effective averaging window, in optimizer steps |
+
+**Walk one example.** What `decay = 0.999` actually buys, in steps:
+
+```
+   effective window   = 1 / (1 - 0.999)        = 1,000 steps
+   half-life          = ln(0.5) / ln(0.999)    =   693 steps
+
+   influence of a student snapshot taken N steps ago, = 0.999^N:
+        N =   100  ->  0.905      still nearly fully present
+        N =   693  ->  0.500      half faded, by definition
+        N = 1,000  ->  0.368
+        N = 3,000  ->  0.050      effectively forgotten
+
+   compare decay = 0.99:  half-life = ln(0.5)/ln(0.99) = 69 steps
+```
+
+Ten times less retention per step turns a 693-step memory into a 69-step one — a 10x shorter window. That is the tuning tradeoff in one line: too low and the teacher is just a laggy student with the same jitter you were trying to average out; too high and the teacher is stale, still teaching last epoch's mistakes long after the student has fixed them. `0.999` sits where a ~700-step memory is long enough to smooth SGD noise and short enough to track real progress.
+
+**Why weights are averaged instead of predictions.** Temporal Ensembling averages *predictions*, which forces you to store one probability vector per training example — on a million-image unlabeled set at 1,000 classes that is a gigabyte-scale table, and each example's target only refreshes when that example is revisited. Mean Teacher averages *weights*, so the storage cost is one extra copy of the model regardless of `|U|`, and the target improves every single step for every example. That is the scaling argument that made Mean Teacher the standard, and it is why §4.4 lists it as such.
+
+**The BatchNorm line is not a detail.** `t_b.copy_(s_b)` copies running means and variances verbatim rather than EMA-ing them. Those buffers are *already* exponential moving averages maintained by BatchNorm itself; applying a second EMA on top gives the teacher activation statistics that lag the student's by two compounded windows. The result is a teacher whose normalization no longer matches its own weights, and the consistency targets degrade for a reason that is genuinely hard to find.
 
 ### 6.4 Entropy minimization (the low-density assumption as a loss)
 
@@ -351,6 +443,37 @@ def consistency_ramp_up(step: int, ramp_steps: int, max_weight: float) -> float:
     phase = 1.0 - step / ramp_steps
     return float(max_weight * np.exp(-5.0 * phase * phase))
 ```
+
+**Stated plainly.** "Turn the consistency loss on gradually, starting from almost nothing — because at step zero the model's own predictions are the targets, and a random model teaching itself confidently is the fastest way to collapse."
+
+The shape matters as much as the schedule. A linear ramp spends its early steps at meaningfully non-zero weight; this Gaussian ramp starts at essentially off and stays near-off for the first quarter, which is exactly the window where the targets are worthless.
+
+| Symbol | What it is |
+|--------|------------|
+| `step` | Current optimizer step |
+| `ramp_steps` | Length of the warm-up. Typically the first several epochs' worth of steps |
+| `phase` | `1 - step/ramp_steps`. Counts *down* from `1.0` to `0.0` as the ramp completes |
+| `-5.0` | Curve sharpness. Sets the starting weight at `exp(-5) = 0.0067`, i.e. 0.67% of full |
+| `exp(-5·phase²)` | Gaussian ramp: flat-and-low early, steep in the middle, flat-and-high at the end |
+| `max_weight` | Final consistency weight once the ramp is done |
+
+**Walk one example.** The fraction of `max_weight` in force across the ramp:
+
+```
+   step / ramp_steps    phase    exp(-5 x phase^2)    fraction of max_weight
+        0.00            1.00          0.0067                  0.7%
+        0.25            0.75          0.0601                  6.0%
+        0.50            0.50          0.2865                 28.7%
+        0.75            0.25          0.7316                 73.2%
+        0.90            0.10          0.9512                 95.1%
+        1.00            0.00          1.0000                100.0%
+```
+
+The first quarter of the ramp delivers only 6% of the weight — the model trains almost purely supervised while it is still incompetent. The middle half does the real work, `6% -> 73%`. The last stretch is nearly flat, so the transition to full strength is smooth rather than a step change the optimizer has to absorb. Compare a linear ramp, which would already be at 25% by `step/ramp = 0.25`: roughly four times the early weight, at precisely the moment the targets deserve the least trust.
+
+**What breaks without it.** With full consistency weight from step 0, the model is rewarded for being *self-consistent* before it is rewarded for being *correct*. The cheapest way to satisfy that is to predict the same class for every input regardless of augmentation — a degenerate constant function that scores perfectly on the consistency term. Training collapses to one class and never recovers, because the supervised signal now has to fight an established minimum rather than merely find one. This is the same collapse §4.7 warns about for standalone entropy minimization, arriving by a different route.
+
+**And why FixMatch skips this entirely.** FixMatch has no ramp because its confidence mask already is one: at step 0 nothing clears `tau = 0.95`, so the effective unsupervised weight is near zero without anyone scheduling it. The difference is that this ramp is a function of `step` — you must guess `ramp_steps` correctly — whereas FixMatch's is a function of the model's measured competence, and so cannot be mistuned.
 
 ---
 

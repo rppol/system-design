@@ -597,6 +597,40 @@ class CanaryController:
         return float(result[0]["value"][1]) if result else self.baseline_auc
 ```
 
+**In plain terms.** A canary schedule is two numbers multiplied together — `len(stages) x stage_soak_minutes` sets how long the rollout takes, and `sum(stage x soak)` sets how much user traffic a bad model gets to touch before you catch it.
+
+Those two pull in opposite directions, which is the whole design tension: every soak minute you add buys confidence and costs rollout time.
+
+| Symbol | What it is |
+|--------|------------|
+| `stages` | Traffic fractions stepped through in order. `[0.05, 0.25, 0.50, 1.0]` |
+| `stage_soak_minutes` | How long each fraction runs before the next check. `30` |
+| `baseline_auc` | The current Production model's AUC — the number the canary is measured against, not an absolute floor |
+| `regression` | `baseline_auc - canary_auc`. Positive means the canary is worse |
+| `max_regression` | Rollback trigger. `0.02` — 2 AUC points, matching the gate in `ValidationGate` |
+
+**Walk one example.** The default schedule, in wall-clock time and in exposed traffic:
+
+```
+  stage    traffic    soak      traffic-minutes (traffic x soak)
+  ------   -------    ------    --------------------------------
+  1        5%         30 min    0.05 x 30 =  1.5
+  2        25%        30 min    0.25 x 30 =  7.5
+  3        50%        30 min    0.50 x 30 = 15.0
+  4        100%       30 min    1.00 x 30 = 30.0
+                      ------                -----
+  total                120 min                54.0
+
+  risk window (before 100%)  = 3 x 30      = 90 min of graduated exposure
+  exposure before full ramp  = 1.5+7.5+15  = 24 traffic-minutes
+  same 120 min at 100% from the start      = 120 traffic-minutes
+  reduction  = 1 - 54/120 = 55% less exposed traffic for the same two hours
+```
+
+Three checks fire before any user population is fully committed, and the first one costs only `1.5` traffic-minutes — a broken model is caught having touched 5% of users for half an hour rather than all of them.
+
+**Why the soak cannot be shortened to "just check once."** `_fetch_metric` reads an online AUC that needs labelled outcomes to accumulate; at 5% traffic a 5-minute soak may not produce enough labelled events for the AUC to be anything but noise, and the controller would roll back healthy models on sampling variance. The 30-minute soak is a sample-size decision disguised as a timer, which is also why the first stage is the riskiest one to shrink: it has both the smallest traffic share and the same window.
+
 ---
 
 ## 7. Real-World Examples
@@ -959,6 +993,51 @@ def validate_model_for_promotion(
     return results
 ```
 
+**Stated plainly.** `(candidate_pct - baseline_pct) * log(candidate_pct / baseline_pct)` asks, bin by bin, "how much mass moved, and how big a proportional move was that?" — then sums the answers into one number that is zero when nothing shifted and grows fast when mass piles up somewhere new.
+
+Both factors carry the same sign, so every term is non-negative: PSI can only be zero or positive, and it cannot cancel a shift in one bin against a shift in another.
+
+| Symbol | What it is |
+|--------|------------|
+| `baseline_scores` | Score distribution of the current Production model — the reference the candidate is compared to |
+| `n_bins = 10` | Number of buckets. Cut on baseline *percentiles*, so `baseline_pct` is 10% in every bin by construction |
+| `baseline_pct` | Expected fraction of scores in a bin. `0.10` here, because of the percentile binning |
+| `candidate_pct` | Actual fraction of the candidate's scores landing in that same bin |
+| difference term | `candidate_pct - baseline_pct` — absolute mass moved |
+| log-ratio term | `log(candidate_pct / baseline_pct)` — relative size of that move; `0` when the bin is unchanged |
+| `+ 1e-6` | Guard so an empty bin does not produce `log(0)` and blow the score up to infinity |
+| `psi_score: 0.15` | This pipeline's promotion gate — stricter than the usual `0.2` retraining trigger |
+
+**Walk one example.** Percentile binning makes the baseline column all `0.10`, so only the candidate row varies:
+
+```
+  bin  base   cand   diff    log(cand/base)   term
+   1   0.10   0.06   -0.04      -0.5108      0.02043
+   2   0.10   0.08   -0.02      -0.2231      0.00446
+   3   0.10   0.09   -0.01      -0.1054      0.00105
+   4   0.10   0.10    0.00       0.0000      0.00000
+   5   0.10   0.10    0.00       0.0000      0.00000
+   6   0.10   0.10    0.00       0.0000      0.00000
+   7   0.10   0.11   +0.01      +0.0953      0.00095
+   8   0.10   0.12   +0.02      +0.1823      0.00365
+   9   0.10   0.12   +0.02      +0.1823      0.00365
+  10   0.10   0.12   +0.02      +0.1823      0.00365
+                                             -------
+                                    PSI    = 0.0378   <- below 0.1: no meaningful shift
+```
+
+Push the same shape further and the gate starts biting:
+
+```
+  cand = [.03 .05 .07 .09 .10 .11 .13 .14 .14 .14]  ->  PSI = 0.1799
+         blocked by this pipeline's 0.15 promotion gate, but under the 0.2 retrain trigger
+
+  cand = [.02 .04 .06 .08 .10 .12 .14 .14 .15 .15]  ->  PSI = 0.2797
+         over 0.2 -- significant shift, retraining territory
+```
+
+**Why the extreme bins dominate.** Bin 1 alone contributes `0.02043`, over half the total `0.0378`, even though bins 8-10 each moved by a larger absolute `+0.02`. The log-ratio is what does it: losing 40% of a bin's mass (`0.10 -> 0.06`) is a bigger proportional move than gaining 20% (`0.10 -> 0.12`), so PSI is most sensitive to bins that empty out. That is deliberate — a score band the model has stopped producing at all is exactly the failure that breaks downstream thresholds calibrated on the old distribution.
+
 ```python
 import subprocess
 import time
@@ -1065,6 +1144,43 @@ subprocess.run(["kubectl", "patch", "virtualservice", "surge-pricing-vs",
 # Only then ramp to 100% after 30-minute clean window
 ```
 
+**What it means.** The canary window is a sample-size budget: `RPS x canary_weight x window_seconds` is the number of real requests you get to judge the model on, and it has to be large enough that a 2x error-rate spike is a signal rather than noise.
+
+A 30-minute window is not a superstition — it is the smallest window that clears three separate bars at this traffic level, shown below.
+
+| Symbol | What it is |
+|--------|------------|
+| `400 RPS` | Production request rate for the surge-pricing service |
+| `canary_weight = 0.1` | Fraction of that traffic routed to the new model version |
+| `canary_monitor_minutes = 30` | Observation window before the ramp to 100% |
+| `error_rate_multiplier_threshold = 2.0` | Rollback fires when canary error rate exceeds 2x the baseline model's |
+| scrape interval | Prometheus pull cadence, `15 s` — sets how many independent metric samples the window holds |
+| model refresh | Surge model updates every `5 min` — the window must span several of these to be representative |
+
+**Walk one example.** The 30-minute, 10% canary at 400 RPS:
+
+```
+  total requests in the window   = 400 x 30 x 60          = 720,000
+  requests hitting the canary    = 720,000 x 0.10         =  72,000
+  requests protected from a bad model                     = 648,000  (90%)
+
+  Prometheus samples in window   = 30 x 60 / 15           =     120 data points
+  surge model refresh cycles     = 30 / 5                 =       6 cycles observed
+```
+
+The alternative — the BROKEN branch above — exposes all `720,000` requests, and a latency regression from `12 ms` to `180 ms` (15x) hits every one of them from the first second.
+
+Widen the ramp and the same arithmetic gives the exposure at each step of the 5/25/50/100 schedule, per 30-minute stage:
+
+```
+   5%  ->  720,000 x 0.05 =  36,000 requests exposed
+  25%  ->  720,000 x 0.25 = 180,000
+  50%  ->  720,000 x 0.50 = 360,000
+ 100%  ->  720,000 x 1.00 = 720,000
+```
+
+**Why shrinking the window is the wrong economy.** Cut the canary to 5 minutes and the sample drops to `400 x 5 x 60 x 0.1 = 12,000` requests, `20` Prometheus points, and a single model refresh cycle — enough to catch a model that is broken outright, not enough to distinguish a real 2x error-rate move from one unlucky scrape. The 30-minute window is what makes the *automatic* rollback trustworthy; without the sample size behind it, the controller either flaps on noise or is quietly ignored by the on-call.
+
 **Metrics and results:**
 
 | Metric | Before (manual) | After (MLflow + GH Actions CI) |
@@ -1078,6 +1194,42 @@ subprocess.run(["kubectl", "patch", "virtualservice", "surge-pricing-vs",
 | Pricing accuracy (revenue impact) | baseline | +$4.2M/month |
 | Time-to-detect model drift | ~72 hr | 30 min |
 | Engineering hours per promotion | 8 hr | 0 (fully automated) |
+
+**What the formula is telling you.** Every row here is the same division — `before / after` — but only two of them are speedups that matter operationally: promotion cycle time and time-to-detect, because those two multiplied together are how long a bad model stays live.
+
+The model-quality rows (AUC, MAPE) are consequences, not causes; they improved because a faster cycle means production is running a fresher model, not because the model architecture changed.
+
+| Symbol | What it is |
+|--------|------------|
+| promotion cycle time | Wall clock from "passes offline eval" to "serving production traffic" |
+| 45 min | The stated target in the scenario — the number the 42 min result is judged against |
+| time-to-detect | Lag between drift starting and the pipeline noticing it |
+| stale model incidents | Quarters in which drift degraded pricing before anyone promoted a fix. `4-6` before, `0` after |
+| gate failure rate | `18%` of candidate models correctly rejected — evidence the gate is doing work, not a defect |
+
+**Walk one example.** The two rows that compound, converted to a common unit:
+
+```
+  promotion cycle
+    before : 3 days   = 3 x 24 x 60           = 4,320 min
+    after  :                                       42 min
+    ratio  : 4,320 / 42                       = 102.9x faster
+    saved  : 4,320 - 42 = 4,278 min           = 71.3 engineer-free hours per promotion
+    target : 42 min vs the 45 min goal        = 3 min of headroom -- it just cleared
+
+  time-to-detect drift
+    before : ~72 hr   = 72 x 60               = 4,320 min   (same figure, by coincidence)
+    after  :                                       30 min   = the canary window
+    ratio  : 4,320 / 30                       = 144x faster
+
+  worst-case exposure to a stale model = detect + promote
+    before : 4,320 + 4,320                    = 8,640 min = 6.0 days
+    after  :    30 +    42                    =    72 min = 1.2 hours
+```
+
+That 6 days versus 72 minutes is the actual explanation for `4-6 stale model incidents per quarter -> 0`: the incident window shrank below the timescale on which surge-pricing drift does damage.
+
+**Why the gate failure rate is a healthy number, not a problem.** An `18%` rejection rate means roughly one candidate in five was worse than the incumbent and got stopped — those are the 3 canary rollbacks plus the offline rejections. A gate that never fails is either mis-specified or measuring nothing; the number to watch is not the failure rate itself but whether it is drifting upward, which would say the training pipeline has started producing worse models.
 
 **Interview discussion points:**
 

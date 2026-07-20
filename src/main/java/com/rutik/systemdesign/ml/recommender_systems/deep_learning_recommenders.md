@@ -111,6 +111,57 @@ flowchart LR
     class dot mathOp
 ```
 
+The single `dot` node is the entire interaction between the two towers, and it is worth reading
+the arithmetic it stands for:
+
+```
+  score(u, i) = user_vec . item_vec = sum over d of  user_vec[d] x item_vec[d]
+
+  because both towers end in F.normalize(out, dim=-1):
+      ||user_vec|| = ||item_vec|| = 1
+      =>  score(u, i) = cosine(user_vec, item_vec)  in [-1, +1]
+```
+
+**In plain terms.** "Point the user at a direction in 256-dimensional space, point every item at a
+direction too, and the recommendation is whichever items point most nearly the same way."
+
+| Symbol | What it is |
+|--------|------------|
+| `user_vec` | The user tower's output, one 256-number direction summarising everything known about them |
+| `item_vec` | The item tower's output, same space, same 256 dimensions. Precomputed offline |
+| `.` (dot product) | Multiply the two vectors element by element and add it all up. One number |
+| L2 norm `= 1` | What `F.normalize` enforces — every vector is pushed onto the unit sphere, keeping only its direction |
+| `cosine` | The dot product of two unit vectors. `+1` = identical direction, `0` = unrelated, `-1` = opposite |
+
+**Walk one example.** A 4-dimensional toy to show what normalization removes:
+
+```
+  raw user vector       u = [ 3.0,  4.0,  0.0,  0.0 ]     ||u|| = sqrt(9+16) = 5.0
+  raw item vector A     a = [ 6.0,  8.0,  0.0,  0.0 ]     ||a|| = sqrt(36+64) = 10.0
+  raw item vector B     b = [ 0.0,  0.0,  1.0,  0.0 ]     ||b|| = 1.0
+
+  raw dot products      u . a = 3x6 + 4x8 = 50.0
+                        u . b = 0.0
+
+  after normalizing     u_n = [0.6, 0.8, 0, 0]   a_n = [0.6, 0.8, 0, 0]   b_n = [0, 0, 1, 0]
+  cosine scores         u_n . a_n = 0.36 + 0.64 = 1.0000   (same direction, perfect match)
+                        u_n . b_n = 0.0000                 (orthogonal, unrelated)
+```
+
+Item A's raw dot product of `50.0` is inflated purely because its vector is twice as long, not
+because it matches the user twice as well — `a` is literally `2 x u`, the same direction. Without
+normalization the model can cheat by growing the embeddings of popular items until they win every
+dot product regardless of direction, which is the "embedding magnitude domination" that Best
+Practice 1 warns about. Normalizing throws magnitude away and keeps only the angle.
+
+**Why this cheap interaction is the whole design.** Because the score is a plain dot product of
+two independently computed vectors, `item_vec` never depends on the user — so all `N` item vectors
+can be computed once in a nightly batch job and loaded into a FAISS index, and a request only pays
+for one user-tower forward pass plus an ANN lookup. Any richer interaction (concatenate the two
+and run an MLP, cross-attend between them) would make the item vector user-dependent and force you
+to re-score all 2M items per request. That tradeoff is the subject of the last question in
+Section 12.
+
 ### 5.2 Wide & Deep Architecture
 
 ```mermaid
@@ -489,6 +540,182 @@ def mine_hard_negatives(
 
     return hard_negs + easy_negs
 ```
+
+### Decoding the In-Batch Contrastive Loss
+
+`TwoTowerModel.forward` and `in_batch_loss` together are two lines of arithmetic:
+
+```
+  logits = (user_vecs @ item_vecs.T) / temperature        # (B, B) similarity matrix
+  loss   = cross_entropy(logits, labels=[0, 1, 2, ..., B-1])
+```
+
+**What this actually says.** "Build the full grid of every user in the batch against every item in
+the batch, then ask each user to pick their own item out of the lineup."
+
+The `labels = arange(B)` is doing quiet work: it declares that user `0`'s correct answer is item
+`0`, user `1`'s is item `1`, and so on — the diagonal of the matrix is the positives and
+everything off-diagonal is a negative that arrived for free.
+
+| Symbol | What it is |
+|--------|------------|
+| `user_vecs @ item_vecs.T` | The `(B, B)` grid. Entry `[i][j]` is the cosine score of user `i` against item `j` |
+| diagonal `[i][i]` | The true pair — user `i` and the item they actually interacted with |
+| off-diagonal `[i][j]` | A free negative: item `j` belongs to a different user in this batch |
+| `temperature` | Divisor that sharpens or flattens the scores before softmax. `0.07` here |
+| `cross_entropy` | Softmax over each row, then `-log` of the probability on the diagonal |
+| symmetric `(loss_user + loss_item) / 2` | Also run it column-wise so items must find their user too |
+
+**Walk one example.** One row of the grid, `B = 4`, cosines already computed by the towers. Watch
+what `temperature` does to the identical raw scores:
+
+```
+                              item 1     item 2     item 3     item 4
+  cosine similarity            0.8000     0.6000     0.3000     0.1000
+                              (positive)
+
+  T = 1.00   logits            0.8000     0.6000     0.3000     0.1000
+             softmax           0.3422     0.2802     0.2076     0.1700
+             loss = -log(p1) = 1.0722         <- barely distinguishes the positive
+
+  T = 0.07   logits           11.4286     8.5714     4.2857     1.4286
+             softmax           0.9449     0.0543     0.0007     0.0000
+             loss = -log(p1) = 0.0566         <- positive clearly wins
+```
+
+Dividing by `0.07` multiplies every score by `14.3`, so a `0.20` cosine gap becomes a `2.86` logit
+gap and softmax turns it into a `0.94` vs `0.05` verdict. At `T = 1.0` the positive gets only
+`34%` of the mass and the gradient is dominated by "make everything a bit more separable"; at
+`T = 0.07` the gradient concentrates on the few negatives that were nearly confused with the
+positive. Cosine is bounded in `[-1, +1]`, so without a small temperature the logits can never
+spread far enough for softmax to be decisive — that boundedness is the real reason L2-normalized
+towers need a temperature and unnormalized ones often do not.
+
+**Why the free negatives are such a good deal.** At `B = 1024` each user is scored against `1023`
+negatives at the cost of a single `(1024, 1024)` matrix multiply — `1,048,576` scored pairs from
+`2048` tower forward passes. Explicit negative sampling would need 1023 extra item-tower
+evaluations per user. This is the same superlinear payoff that makes contrastive learning cheap,
+and it is why batch size is a *quality* hyperparameter here, not just a throughput one: halving
+the batch halves the number of negatives each user must beat.
+
+### Decoding the logQ Sampling-Bias Correction
+
+The free negatives are not free of bias, and the fix is one subtraction:
+
+```
+  corrected_logit(u, i) = (user_vec . item_vec) / T  -  log Q(i)
+
+  where Q(i) = probability item i appears in a batch, proportional to its training frequency
+```
+
+**Read it like this.** "An item that shows up as a negative constantly is being punished for being
+popular, not for being wrong. Hand back exactly the amount of punishment that popularity alone
+explains."
+
+| Symbol | What it is |
+|--------|------------|
+| `Q(i)` | Sampling probability of item `i` — how often it lands in a random batch. Popular items: high |
+| `log Q(i)` | Always negative (Q is a probability), so subtracting it *raises* the logit |
+| `- log Q(i)` | The credit returned to item `i`. Small for popular items, large for rare ones |
+| corrected logit | What actually goes into the softmax. Popular items now start from a higher floor |
+
+**Walk one example.** A blockbuster that appears in 2% of batches versus a niche item in 0.01%:
+
+```
+                        Q(i)       log Q(i)    - log Q(i)    raw logit    corrected logit
+  blockbuster item     0.0200      -3.9120       3.9120        11.4286        15.3406
+  niche item           0.0001      -9.2103       9.2103         1.4286        10.6389
+```
+
+The blockbuster gets back `3.91` and the niche item gets back `9.21`. Read the direction carefully,
+because it is the part interviewers probe: raising the popular item's logit means it already
+accounts for more of the softmax denominator, so the gradient stops shoving it away from every
+user. Uncorrected, the blockbuster appears as a negative in nearly every batch and accumulates
+thousands of small "push away" gradients per epoch while the niche item accumulates a handful —
+so the model learns to systematically underrank exactly the items most users would enjoy. That is
+the Pitfall 1 failure, and the correction is cheap: one precomputed frequency table, one
+subtraction per logit.
+
+### Decoding Embedding-Table Sizing
+
+The arithmetic behind Pitfall 2 and the Section 14 index budget is the same three-factor product:
+
+```
+  table bytes = n_rows  x  embed_dim  x  bytes_per_float
+
+  where bytes_per_float = 4 for float32, 2 for float16, 1 for int8
+```
+
+**Put simply.** "Every distinct ID you give a private vector costs one row, and every row costs
+`dim x 4` bytes — the bill is set at design time by how many IDs you admit and how wide you make
+them."
+
+| Symbol | What it is |
+|--------|------------|
+| `n_rows` | Vocabulary size — how many distinct IDs get their own embedding |
+| `embed_dim` | Width of each vector. The single most expensive knob, because it multiplies everything |
+| `bytes_per_float` | `4` for float32. Halved by fp16, quartered by int8 quantization |
+| result | Pure parameter memory, before optimizer state. Adam adds 2 more copies on top |
+
+**Walk one example.** The Pitfall 2 model, and the two fixes it lists:
+
+```
+  configuration                                rows        dim   bytes    total
+  ------------------------------------------------------------------------------
+  50M users + 10M items, dim 128           60,000,000      128     4     30.72 GB
+  hash users into 5M buckets               15,000,000      128     4      7.68 GB
+  keep all rows, halve dim to 64           60,000,000       64     4     15.36 GB
+
+  Section 14 serving index:  2M items x 256-dim x 4 bytes  =  2.048 GB
+```
+
+`30.72 GB` of parameters will not fit an 80 GB A100 once Adam's momentum and variance buffers
+triple it to roughly `92 GB` — which is why the pitfall reports an out-of-memory failure. Note
+that hashing to 5M buckets saves `23.04 GB` while halving the dimension saves only `15.36 GB`:
+attacking `n_rows` beats attacking `embed_dim` here because the user vocabulary is what is
+oversized, not the vector width. The Section 14 index is a different question again — `2.048 GB`
+of item vectors is a serving-side RAM number with no optimizer state behind it, which is why a
+256-dim index over 2M items is unremarkable while a 128-dim table over 60M IDs is fatal.
+
+### Decoding the DLRM Pairwise Interaction
+
+The `inter` node in Section 5.4 — "upper triangle of all vector pairs" — is a count:
+
+```
+  n vectors  =  1 (bottom MLP output)  +  number of sparse embedding tables
+
+  explicit interactions = n(n - 1) / 2      # every unordered pair, dot-producted
+```
+
+**What it means.** "Take every vector the model has produced, dot every one against every other
+one exactly once, and feed that list of numbers to the top MLP."
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Total vectors entering the interaction layer. All must share one dimension for the dots to work |
+| `n(n-1)/2` | Number of unordered pairs — the upper triangle of the `n x n` dot-product matrix |
+| upper triangle | Skips the diagonal (`v . v` is just the squared norm) and the mirror half (`a.b` = `b.a`) |
+| each entry | A scalar measuring how aligned two feature representations are for this example |
+
+**Walk one example.** The Section 5.4 configuration against the full Criteo-scale one:
+
+```
+  sparse tables            n vectors    n(n-1)/2 dot products
+  -----------------------------------------------------------
+  user_id, item_id,
+  category  (3 tables)         4                 6
+  Criteo benchmark
+  (26 categorical tables)     27               351
+```
+
+The `n(n-1)/2` growth is the handshake count again — quadratic in the number of feature tables,
+which is why DLRM's interaction layer is the part that stops scaling first. At 26 tables you emit
+`351` scalars into the top MLP; at 60 tables it would be `1,770`. This is the concrete difference
+from DeepFM: FM also models all pairwise crosses, but folds them into a single sum via an algebraic
+shortcut, whereas DLRM keeps all `351` numbers separate and lets the top MLP decide what each one
+is worth. Keeping them separate is more expressive and far more hardware-friendly — it is one
+batched matrix multiply — but it is also why the interaction output width, and therefore the top
+MLP's first layer, grows quadratically with the feature count.
 
 ---
 

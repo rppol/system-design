@@ -39,9 +39,79 @@ Key insight: Attention doesn't just solve the bottleneck problem — it fundamen
 
 **Context vector:** `c_t = Σ_i α_{t,i} * h_i` — a weighted sum of encoder hidden states, emphasizing positions most relevant to the current decoding step.
 
+**What this actually says.** "Score every source position against where the decoder currently stands, turn those scores into percentages that add up to 100%, then blend the encoder states in exactly those proportions."
+
+The three bullets above are one pipeline, not three ideas: **score, normalize, blend**. Everything later in this file — Luong, scaled dot-product, cross-attention — only swaps out the *score* step. Normalize-and-blend never changes.
+
+| Symbol | What it is |
+|--------|------------|
+| `s_t` | Decoder hidden state at output step `t` — "what I am trying to say next" |
+| `h_i` | Encoder hidden state at source position `i` — "what the source says here" |
+| `e_{t,i}` | Raw relevance score (energy) of source position `i` for output step `t`. Unbounded, any real number |
+| `softmax` | Exponentiate each score, divide by the total — turns arbitrary reals into weights that sum to 1 |
+| `α_{t,i}` | Attention weight: the fraction of attention step `t` spends on position `i`. In `[0, 1]`, row sums to `1` |
+| `c_t` | Context vector — the weighted blend of encoder states the decoder actually reads this step |
+| `Σ_i` | Sum over every source position `i` |
+
+**Walk one example.** Four source positions, one decoder step, 2-dimensional encoder states:
+
+```
+  position i          1          2          3          4
+  energy e_ti      3.2000     1.1000     0.4000    -0.5000
+  exp(e_ti)       24.5325     3.0042     1.4918     0.6065   sum = 29.6351
+  alpha_ti         0.8278     0.1014     0.0503     0.0205   sum =  1.0000
+
+  encoder states
+    h_1 = ( 1.0,  0.0)      h_2 = ( 0.0,  1.0)
+    h_3 = (-1.0,  0.5)      h_4 = ( 0.2,  0.2)
+
+  c_t = 0.8278*h_1 + 0.1014*h_2 + 0.0503*h_3 + 0.0205*h_4
+
+        0.8278*h_1  = ( 0.8278,  0.0000)
+        0.1014*h_2  = ( 0.0000,  0.1014)
+        0.0503*h_3  = (-0.0503,  0.0251)
+        0.0205*h_4  = ( 0.0041,  0.0041)
+                      -------------------
+        c_t         = ( 0.7816,  0.1307)   <- sits almost exactly on h_1
+```
+
+Note how violently softmax amplifies: positions 1 and 2 differ by only `2.1` in raw energy, yet position 1 ends up with `0.8278 / 0.1014 = 8.16x` the weight. That exponential sharpening is what lets a soft, fully differentiable average behave like a hard "pick source word 1" selection — and it is also why an energy scale that is too large collapses the row to one-hot (see Pitfall 5).
+
 **Exposure bias:** During training with teacher forcing, the decoder receives the ground-truth previous token at each step. During inference, it receives its own (potentially wrong) prediction. This mismatch — exposure bias — is a systematic error source. Scheduled sampling (gradually mixing predicted and ground-truth tokens during training) partially mitigates it.
 
 **Label smoothing:** Replaces the hard 0/1 target distribution with a soft distribution (ε/(V-1) for non-target tokens, 1-ε for the target token, typically ε=0.1). Prevents the model from being overconfident on training targets and improves calibration and generalization.
+
+**Read it like this.** "Stop telling the model the right answer has probability exactly 1.0 — tell it 0.9, and spread the leftover 0.1 evenly over every other token in the vocabulary."
+
+The point is that the one-hot target is a *lie*: in translation there is rarely one uniquely correct next word, so demanding `P(target) = 1.0` trains the model to push its winning logit toward infinity, which is unreachable and produces miscalibrated probabilities.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Vocabulary size — number of tokens the model can emit (32,000 is typical for NMT) |
+| `ε` | Smoothing mass taken away from the correct token, standard `0.1` |
+| `1 - ε` | Probability the soft target assigns the correct token: `0.9` |
+| `ε/(V-1)` | Probability handed to each *wrong* token. At `V = 32,000` this is `0.1/31,999 = 3.13e-6` |
+| Cross-entropy | `-Σ_i q_i · log p_i` — `q` is the target distribution, `p` is what the model predicted |
+
+**Walk one example.** A toy `V = 5` so the arithmetic is visible; the target is token 0:
+
+```
+  target distributions
+    one-hot  q = (1.000, 0.000, 0.000, 0.000, 0.000)
+    smoothed q = (0.900, 0.025, 0.025, 0.025, 0.025)    0.025 = 0.1/(5-1)
+
+  model A -- reasonably confident
+    p = (0.70, 0.10, 0.10, 0.05, 0.05)
+    one-hot  loss = -log(0.70)              = 0.3567
+    smoothed loss = -sum q_i * log p_i      = 0.5859
+
+  model B -- wildly overconfident
+    p = (0.99, 0.004, 0.003, 0.002, 0.001)
+    one-hot  loss = -log(0.99)              = 0.0101   nearly free: keep going
+    smoothed loss = -sum q_i * log p_i      = 0.6204   WORSE than model A
+```
+
+That inversion is the whole mechanism. Under one-hot targets, model B is rewarded for its 0.99 spike (loss `0.0101` vs `0.3567`); under smoothing, B is *penalized* relative to A (`0.6204` vs `0.5859`) because it starved the other tokens below their `0.025` allowance. Remove the `ε` term and nothing stops the logit gap from growing without bound — which is exactly the overconfidence label smoothing exists to prevent. It also explains the reporting trap: perplexity is scored against the one-hot target, so a smoothed model always *looks* worse on perplexity while generating better text.
 
 ---
 
@@ -57,6 +127,40 @@ Key insight: Attention doesn't just solve the bottleneck problem — it fundamen
 | **Luong (concat)** | `v^T · tanh(W·[h_i; s_t])` | W, v | Closer to Bahdanau but with concatenation |
 | **Self-attention (transformer)** | `Q·K^T / sqrt(d_k)` | W_Q, W_K, W_V per head | Operates within the same sequence (not cross-attention) |
 | **Multi-head cross-attention** | Same QKV formula | Q from decoder, K/V from encoder | Used in encoder-decoder transformers for seq2seq |
+
+**The idea behind it.** Every row of that table answers one question — "how well does source position `i` match what the decoder wants right now?" — and they differ only in whether the match is *computed* (a dot product, free) or *learned* (a small neural net, expensive but flexible).
+
+| Symbol | What it is |
+|--------|------------|
+| `h_i` | Encoder state at source position `i`, dimension `d_enc` |
+| `s_t` | Decoder state at output step `t`, dimension `d_dec` |
+| `W_1, W_2` | Bahdanau's projections mapping `h_i` and `s_t` into a shared attention space of size `d_attn` |
+| `tanh` | Squashing nonlinearity, output bounded to `(-1, 1)` — this is what keeps additive energies small |
+| `v` | Bahdanau's final vector that collapses the `d_attn` blended features down to one scalar |
+| `h_i^T · s_t` | Dot product: sum of `d` element-wise products. Big when the two vectors point the same way |
+| `W` (Luong general) | One learned `d x d` matrix that rotates `s_t` into the encoder's space before dotting |
+| `[h_i ; s_t]` | Concatenation — stacks the two vectors into one of length `2d` |
+| `d_k` | Per-head key dimension. With `d_model = 512` and 8 heads, `d_k = 512/8 = 64` |
+
+**Walk one example.** Same two vectors through both energy functions, then the same vectors scaled up 10x. Take `W_1 = W_2 = I` and `v = (1, 1)` so the mechanics stay visible:
+
+```
+  h_i = ( 1.0,  2.0)      s_t = ( 0.5, -1.0)
+
+  dot-product (Luong)
+    h_i . s_t = 1.0*0.5 + 2.0*(-1.0) = 0.5 - 2.0 = -1.5000
+
+  additive (Bahdanau)
+    W1*h_i + W2*s_t = ( 1.5,  1.0)
+    tanh(...)       = ( 0.9051,  0.7616)
+    v^T * tanh(...) = 0.9051 + 0.7616 =  1.6667
+
+  now scale the encoder state 10x:  h_i = (10.0, 20.0)
+    dot-product  = 5.0 - 20.0                        = -15.0000   <- grew 10x
+    tanh(10.5, 19.0) = (1.0000, 1.0000), v^T sum     =   2.0000   <- capped at 2
+```
+
+That last pair is the punchline. The dot product is **unbounded** — it scales linearly with vector magnitude and with dimension `d`. The additive form is **bounded** by construction: `tanh` saturates, so `v^T tanh(...)` can never exceed `sum(|v|)`, here `2.0`, no matter how large the inputs get. Bahdanau got numerical stability for free from that `tanh`; the transformer abandoned `tanh` for the far cheaper dot product and had to buy the stability back with an explicit `/ sqrt(d_k)` divisor. Delete that divisor and you reintroduce exactly the blow-up shown above (worked through in Pitfall 5).
 
 ### 4.2 Encoder-Decoder Attention vs Self-Attention
 
@@ -233,6 +337,43 @@ Final beams (sorted by score/length):
   "La chat est belle"  score: -3.1 / length: 4 = -0.775
   -> Select: "Le chat est beau"
 ```
+
+**Put simply.** "Instead of committing to the single best word at every step, carry the K best half-finished sentences forward, and judge each one by the total log-probability of everything it has said so far — divided by how much it has said."
+
+A beam score is a running **sum of log-probabilities**, which is just multiplication of probabilities in log space. Sums are used because multiplying 40 probabilities near `0.5` underflows float32 almost immediately; adding 40 log-probabilities does not.
+
+| Symbol | What it is |
+|--------|------------|
+| `K` (beam width) | How many partial hypotheses survive each step. `K = 3` in the tree above, `K = 4-5` in production |
+| `score` | Cumulative `Σ log P(token)` over the whole hypothesis. Always negative; closer to 0 is better |
+| `length` | Number of tokens generated so far, excluding `<bos>` |
+| `score / length` | Per-token average log-probability — the crude normalizer shown in the tree |
+| `exp(score)` | Recovers the actual sequence probability, if you want it in `[0, 1]` |
+
+**Walk one example.** First the three final beams, converted back into real probabilities:
+
+```
+  hypothesis                 score    length   score/length   exp(score) = P(seq)
+  "Le chat est beau"         -2.1        4        -0.5250       0.122456
+  "Le chien est grand"       -2.8        4        -0.7000       0.060810
+  "La chat est belle"        -3.1        4        -0.7750       0.045049
+
+  All three are length 4, so dividing by length changes nothing about the ORDER.
+  Normalization only starts to matter once beams have DIFFERENT lengths.
+```
+
+Now the case beam search exists to catch — where greedy commits to a locally-best token and loses:
+
+```
+  step 1 choice     step-1 P     best step-2 P     total log-prob
+  "Le"                0.60           0.20          log .6 + log .2 = -2.1203
+  "Un"                0.40           0.90          log .4 + log .9 = -1.0217   <- better
+
+  greedy picks "Le" at step 1 (0.60 > 0.40) and is then stuck with a 0.20 follow-up.
+  Beam search keeps BOTH alive to step 2 and discovers "Un" wins: 0.36 vs 0.12 overall.
+```
+
+That is the entire value proposition of beam search in one table: it defers commitment. It is also why `K` has diminishing returns — the extra hypotheses past `K = 4-8` are branches the model already scored low for good reason, so they almost never overtake.
 
 ---
 
@@ -469,6 +610,70 @@ def nucleus_sampling(
     return sorted_indices[sampled_idx].item()
 ```
 
+**In plain terms.** The Wu length penalty `lp = ((5 + len) / 6)^alpha` says: "before comparing two candidate sentences, hand each one a handicap proportional to how long it is, so a long sentence is not punished merely for containing more words."
+
+Raw beam scores are a *sum* of negative numbers, so every extra token makes the score strictly worse. Without a correction, beam search would always prefer the shortest hypothesis that reaches `<eos>` — a real pathology, not a theoretical one.
+
+| Symbol | What it is |
+|--------|------------|
+| `log_prob` | The hypothesis's raw cumulative `Σ log P(token)`. Negative |
+| `len` | Token count of the hypothesis |
+| `5` and `6` | Wu et al.'s constants. They make `lp = 1.0` at `len = 1`, so short sequences get no free boost |
+| `alpha` | Penalty strength. `0` = off, `0.6` = Google NMT default, larger = more tolerant of length |
+| `lp` | The divisor itself. Always `>= 1` for `len >= 1` |
+| `log_prob / lp` | Final ranking score. Dividing a negative number by something `> 1` moves it *toward* zero |
+
+**Walk one example.** A short hypothesis versus a long one that is genuinely better per-token:
+
+```
+  hypothesis      log_prob    len      lp = ((5+len)/6)^alpha        score = log_prob / lp
+  ------------------------------------------------------------------------------------
+  alpha = 0.0  (no penalty)
+    short          -2.1        4       (9/6)^0.0    = 1.0000              -2.1000  <- wins
+    long           -3.0       12       (17/6)^0.0   = 1.0000              -3.0000
+
+  alpha = 0.6  (Google NMT default)
+    short          -2.1        4       (9/6)^0.6    = 1.2754              -1.6465
+    long           -3.0       12       (17/6)^0.6   = 1.8680              -1.6060  <- wins
+
+  alpha = 2.0  (summarization-strength)
+    short          -2.1        4       (9/6)^2.0    = 2.2500              -0.9333
+    long           -3.0       12       (17/6)^2.0   = 8.0278              -0.3737  <- wins big
+```
+
+The ordering flips between `alpha = 0` and `alpha = 0.6`, which is precisely the knob's job. Note the direction carefully, because it trips people up in interviews: because `log_prob` is negative, a **larger** `alpha` produces a **larger** divisor and therefore a **less negative** score, so raising `alpha` makes the decoder favour *longer* output. Set `alpha = 0` and beam search terminates as early as it can; that is the "beam search only outputs three words" bug.
+
+**What it means.** Nucleus sampling's rule — "keep the smallest set of tokens whose cumulative probability reaches `p`" — is really saying: "trust the model's own confidence to decide how many options are reasonable, instead of fixing that number in advance."
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Cumulative-probability budget, typically `0.9-0.95`. Not a count |
+| `sorted_probs` | Token probabilities sorted high to low |
+| `cumulative_probs` | Running total down that sorted list |
+| `temperature` | Divides logits before exponentiation. `< 1` sharpens the distribution, `> 1` flattens it |
+| Renormalization | After zeroing the tail, divide by the surviving mass so the kept probabilities sum to `1` again |
+
+**Walk one example.** The same `p = 0.9` applied to a flat distribution and a peaked one:
+
+```
+  FLAT step -- model is unsure
+    token          A       B       C       D       E       F       G
+    prob         0.40    0.25    0.15    0.08    0.05    0.04    0.03
+    cumulative   0.40    0.65    0.80    0.88    0.93    0.97    1.00
+                                                  ^ first to reach p=0.9, stop here
+    kept: A..E, surviving mass = 0.93
+    renormalized 0.4301  0.2688  0.1613  0.0860  0.0538   -> 5 live options
+
+  PEAKED step -- model is certain
+    token          A       B       C       D       E
+    prob         0.95    0.02    0.01    0.01    0.01
+    cumulative   0.95    0.97    0.98    0.99    1.00
+                   ^ already past p=0.9 on the first token
+    kept: A only  -> 1 live option, sampling degenerates to greedy (correctly)
+```
+
+The candidate set went from 5 tokens to 1 with no change to `p` — that adaptivity is the entire advantage over top-k. A fixed `k = 50` would have dragged 49 junk tokens with a combined probability of `0.05` into the peaked step, which is exactly how top-k produces the occasional nonsensical word mid-sentence.
+
 ### Encoder-Decoder Transformer for Translation
 
 ```python
@@ -577,6 +782,41 @@ class TranslationTransformer(nn.Module):
         memory = self.encode(src, src_key_padding_mask)
         return self.decode(tgt, memory, tgt_mask, src_key_padding_mask)
 ```
+
+**Stated plainly.** `PE(pos, 2i) = sin(pos / 10000^(2i/d))` says: "give every position a fingerprint built from a stack of clocks — a fast one that ticks every few tokens, a slow one that ticks every few thousand — and read all the hands at once."
+
+Attention is permutation-invariant: shuffle the input tokens and the raw attention output is unchanged. Something has to inject order, and adding a position-dependent vector to each embedding is the cheapest way to do it.
+
+| Symbol | What it is |
+|--------|------------|
+| `pos` | Absolute token index, `0, 1, 2, ...` |
+| `i` | Index of the sine/cosine *pair*. Pair `i` occupies embedding dimensions `2i` and `2i+1` |
+| `d` | Model dimension, `512` here — so there are `d/2 = 256` pairs |
+| `10000^(2i/d)` | The denominator, i.e. the clock's period divider. Runs `1` (pair 0) up to `~9647` (pair 255) |
+| `10000` | Chosen so the slowest clock's wavelength (`~60,600` tokens) far exceeds any real sequence |
+| sin / cos pairing | Each pair stores both, so `PE(pos + k)` is a fixed 2D rotation of `PE(pos)` |
+
+**Walk one example.** Denominators and wavelengths across the 512 dimensions, then the actual values at four positions:
+
+```
+  pair i    dims        denominator = 10000^(2i/512)     wavelength = 2*pi*denom
+      0     0,   1                    1.00                        6.28 tokens
+     32    64,  65                    3.16                       19.87 tokens
+     64   128, 129                   10.00                       62.83 tokens
+    128   256, 257                  100.00                      628.32 tokens
+    255   510, 511                 9646.62                   60611.48 tokens
+
+  values (sin, cos) at selected positions
+                  pair 0 (fast)         pair 32 (medium)      pair 64 (slow)
+  pos =  0     ( 0.0000,  1.0000)     ( 0.0000,  1.0000)    ( 0.0000,  1.0000)
+  pos =  1     ( 0.8415,  0.5403)     ( 0.3110,  0.9504)    ( 0.0998,  0.9950)
+  pos =  2     ( 0.9093, -0.4161)     ( 0.5911,  0.8066)    ( 0.1987,  0.9801)
+  pos = 10     (-0.5440, -0.8391)     (-0.0207, -0.9998)    ( 0.8415,  0.5403)
+```
+
+Two things fall out of that table. First, the fast pair has already wrapped around by `pos = 10` (its value there is nothing like `pos = 0`), while the slow pair has barely moved from `1.0000` to `0.9801` after two tokens — so short-range order is resolved by the fast clocks and long-range order by the slow ones, and no two positions under `~60,000` share a full fingerprint. Second, note that pair 64 at `pos = 10` reads `(0.8415, 0.5403)`, byte-for-byte what pair 0 reads at `pos = 1` — both are the angle `1.0` radian. That is the geometry the extrapolation claim rests on: a shift of `k` positions is the *same* rotation regardless of where you start, so relative offsets are linearly recoverable and unseen positions still produce well-formed vectors.
+
+**Why the embedding is multiplied by `sqrt(d_model)` first.** In `encode()` and `decode()` the token embedding is scaled by `self.d_model ** 0.5` before the positional encoding is added — `sqrt(512) = 22.6274`. Xavier-initialized embeddings have per-component magnitude near `1/sqrt(d)`, while the sinusoids are always in `[-1, 1]`. Skip the scaling and the position signal is roughly `22x` louder than the token identity it is annotating, so the early layers spend their capacity on position instead of meaning. The multiply simply puts the two signals on the same scale before the sum.
 
 ---
 
@@ -768,6 +1008,55 @@ def scaled_dot_product_attention(Q, K, V, d_k: int):
     return torch.bmm(weights, V), weights
 ```
 
+**What the formula is telling you.** `QK^T / sqrt(d_k)` says: "measure how well each query matches each key with a dot product, then shrink the result by the square root of the vector length so the numbers stay the same size no matter how wide the vectors are."
+
+The divisor is not a tuning constant and not a heuristic — it is the exact factor that cancels the growth of the dot product with dimension, and it is derived below.
+
+| Symbol | What it is |
+|--------|------------|
+| `Q` | Queries — "what this position is looking for", shape `(seq, d_k)` |
+| `K` | Keys — "what each position offers", shape `(seq, d_k)` |
+| `K^T` | Transpose, so `Q · K^T` produces one score per (query, key) pair: shape `(seq, seq)` |
+| `d_k` | Length of a single query/key vector. `d_model / n_heads`, so `512 / 8 = 64` |
+| `sqrt(d_k)` | The divisor. `sqrt(64) = 8`, `sqrt(512) = 22.6274` |
+| `Var[q · k]` | Variance of one dot product. Equals `d_k` when components are independent with variance 1 |
+
+**Walk one example — where the sqrt comes from.** A dot product is a sum of `d_k` independent products. Variances of independent terms add, so:
+
+```
+  q . k = q_1*k_1 + q_2*k_2 + ... + q_dk * k_dk        (d_k terms)
+
+  each term:  mean 0, variance 1  (unit-variance q and k)
+  sum:        mean 0, variance = d_k          <- variances ADD, they do not average
+
+  d_k         Var[q.k]      std dev = sqrt(d_k)
+     1              1                 1.0000
+    64             64                 8.0000       <- one head, d_model=512 / 8 heads
+   512            512                22.6274       <- single-head over the full d_model
+
+  divide by sqrt(d_k):  Var[ (q.k) / sqrt(d_k) ] = d_k / d_k = 1     for EVERY d_k
+```
+
+**Walk one example — what breaks without it.** Four keys scored against one query at `d_k = 512`, with scores spread across the natural `+/-1 std dev` range of `22.6274`:
+
+```
+  raw scores           22.6000    11.3000     0.0000   -11.3000
+
+  UNSCALED softmax
+    weights          0.99998763  0.00001237  0.00000000  0.00000000
+    -> effectively one-hot. Ratio between the top two weights: 80,822x.
+    -> d(softmax)/d(score) ~ w*(1-w) = 1.2e-5 for the winner, ~0 for everyone else.
+       Gradient vanishes for all non-maximum keys: they can never be learned into
+       relevance, so the alignment freezes wherever random init happened to put it.
+
+  SCALED by sqrt(512) = 22.6274
+    scores            0.9988      0.4994      0.0000     -0.4994
+    weights           0.4548      0.2760      0.1675      0.1017     (sums to 1.0000)
+    -> a real soft distribution. Every key still receives gradient and can compete.
+```
+
+Both failure modes named in the pitfall comment above are the same phenomenon seen from opposite ends. If the query/key scale is *too large* you get the one-hot freeze shown here; if training then drives the logits toward zero to escape it, every row flattens toward `1/src_len` — the near-uniform "attention collapse" the symptom describes, with `entropy -> log(src_len)`. The `/ sqrt(d_k)` divisor removes the dimension from the equation entirely so neither end is reached by accident, and it costs one scalar division per attention matrix. This is also the answer to why Bahdanau never needed it: `tanh` had already bounded the energies (Section 4.1).
+
 ---
 
 ## 11. Technologies & Tools
@@ -895,5 +1184,5 @@ gen_config = {
 - Beam width 4 vs 8: +0.3 ROUGE-L at 2x latency cost. Deployed with k=4.
 - Length penalty 1.5 vs 0.6: summaries at lp=0.6 were 40% shorter than gold; lp=1.5 matched gold length distribution.
 - Coverage attention monitoring: 3% of Arabic articles produced near-uniform attention (entropy >6.0) indicating alignment failure. Root cause: Arabic RTL encoding required explicit language token. Fixed by prepending `<ar_AR>` to source.
-- Cross-attention memory: 800 (source) × 128 (max target) × 6 layers × 16 heads × 4 bytes = 590MB per sequence in FP32. Using FP16 reduced to 295MB, enabling batch size 4 on 40GB A100.
+- Cross-attention memory: 800 (source) × 128 (max target) × 6 layers × 16 heads × 4 bytes = 39.3MB per sequence in FP32. Using FP16 reduced to 19.7MB, so even large batches fit comfortably on a 40GB A100.
 - Production throughput: 45 articles/second (800-token source, 80-token target) on 4x A100 GPUs. Target: 50/second. Optimization: ctranslate2 FP16 inference achieved 67 articles/second.

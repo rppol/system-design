@@ -158,6 +158,44 @@ flowchart LR
 
 Both distributions are mapped to the same reference-derived bin edges, converted to per-bucket proportions, then combined by the PSI formula into a single divergence score.
 
+**Read it like this.** "For every bucket, ask how much of the population moved in or out, and how many times over that bucket grew or shrank — then multiply those two and add up the buckets."
+
+The multiplication is the whole design. A bucket that moved a lot of population but barely changed shape contributes little; so does a bucket that quadrupled but only held 0.1% of traffic. PSI only gets large when a bucket is *both* heavily populated *and* proportionally distorted, which is exactly the shift that moves a model's decision boundary.
+
+| Symbol | What it is |
+|--------|------------|
+| `e` | Expected proportion — the fraction of the *reference* window that landed in this bucket |
+| `a` | Actual proportion — the fraction of the *current production* window in that same bucket |
+| `a - e` | Absolute movement. How many percentage points of population entered (+) or left (-) this bucket |
+| `ln(a / e)` | Relative movement. `1x` -> `0`; doubled -> `+0.69`; halved -> `-0.69`. Symmetric in log space |
+| `(a - e) * ln(a / e)` | Per-bucket contribution. Always `>= 0` — both factors flip sign together |
+| `Sigma` | Sum over the `k` buckets (`k = 10` in the code below, so reference deciles) |
+| bucket edges | Reference quantiles, frozen. Both windows are cut with the *same* knife or the comparison is meaningless |
+
+**Walk one example.** Reference deciles, so every bucket starts at exactly 10%. Production traffic has skewed toward the low end (younger applicants, shorter sessions — whatever the feature is):
+
+```
+  bucket   expected e   actual a   a - e    ln(a/e)   contribution   running PSI
+    1         0.10        0.16     +0.06    +0.4700     0.02820         0.02820
+    2         0.10        0.15     +0.05    +0.4055     0.02027         0.04847
+    3         0.10        0.13     +0.03    +0.2624     0.00787         0.05634
+    4         0.10        0.12     +0.02    +0.1823     0.00365         0.05999
+    5         0.10        0.10      0.00     0.0000     0.00000         0.05999
+    6         0.10        0.09     -0.01    -0.1054     0.00105         0.06104
+    7         0.10        0.08     -0.02    -0.2231     0.00446         0.06551
+    8         0.10        0.07     -0.03    -0.3567     0.01070         0.07621
+    9         0.10        0.06     -0.04    -0.5108     0.02043         0.09664
+   10         0.10        0.04     -0.06    -0.9163     0.05498         0.15162
+
+  PSI = 0.152   -> watch band (0.1 - 0.2): investigate, do not retrain yet
+```
+
+Two things to read off that table. First, **every contribution is non-negative** even for buckets that shrank — bucket 10 lost population (`a - e` negative) *and* has a negative log, and the product is positive. PSI is a distance, not a direction; it cannot tell you *which way* the feature moved, only how far. You need the per-bucket column for that, which is why production dashboards plot the contributions and not just the scalar.
+
+Second, **the tails dominate**. Bucket 10 alone contributes `0.05498`, more than a third of the total, because a bucket that drops to 40% of its old mass has a large `ln` factor. Bucket 4, which moved the same 2 percentage points as bucket 7, contributes `0.00365` versus `0.00446` — the log factor is what breaks the tie. This is why a single collapsing tail bucket can push PSI over threshold while nine stable buckets say nothing is wrong.
+
+**Why the epsilon in the code exists.** If a production bucket goes completely empty, `a = 0` and `ln(0 / 0.10) = -inf` — the whole PSI becomes `inf` or `nan` and the alert pipeline either crashes or silently swallows the metric. Adding `epsilon = 1e-6` caps that one bucket's contribution at `(1e-6 - 0.10) * ln(1e-6 / 0.10) = 1.1513`. That is still enormous — a single emptied decile alone drives PSI above `1.0`, roughly 4x the action threshold — which is the correct behaviour: an empty bucket usually means a broken feature pipeline, not gradual drift, and you want it screaming.
+
 ### PSI Interpretation Bands
 
 ```mermaid
@@ -169,6 +207,41 @@ xychart-beta
 ```
 
 The two thresholds carve three zones: below 0.1 is stable (age, session), 0.1–0.2 is a watch band (income at 0.12), and ≥ 0.2 fires an alert (device 0.31, geo 0.22). On small windows where PSI binning is noisy, a KS-test p-value complements these bars as the drift signal.
+
+**What the formula is telling you.** "0.1 and 0.25 are not statistical constants — they are credit-scoring folklore from the 1990s that survived because they happen to map cleanly onto three different *operational responses*."
+
+Nothing in the mathematics privileges those numbers; there is no null distribution behind them and no p-value. They are calibrated to a specific setup — roughly 10 buckets on 1,000+ samples — and the reason they are worth memorising is that each band corresponds to a different thing you actually do on Monday morning.
+
+| Symbol | What it is |
+|--------|------------|
+| `PSI < 0.1` | Green. Movement is indistinguishable from window-to-window sampling noise |
+| `0.1 <= PSI < 0.25` | Amber. A real shift exists, but not yet large enough to justify a retrain |
+| `PSI >= 0.25` | Red. The current population no longer resembles the one the model learned |
+| `0.2 vs 0.25` | Two conventions for the same red line. This file's code uses `0.2`; credit-risk practice often uses `0.25`. Pick one and write it down |
+| 10 buckets | The binning the thresholds assume. Change `k` and the numbers shift — 20 buckets inflates PSI, 5 deflates it |
+
+**Walk one example.** The same feature tracked over four weeks, drifting steadily. Each row is a full 10-bucket PSI against a frozen reference:
+
+```
+  week   PSI      band    what you actually do
+   1     0.020    green   nothing; the number goes on the dashboard and no-one looks
+   2     0.152    amber   open a ticket. Plot per-bucket contributions, find WHICH
+                          buckets moved. Check upstream: schema change? new client
+                          version? seasonality? Do NOT retrain yet.
+   3     0.198    amber   still amber, but now it is a TREND across three windows.
+                          Escalate on the slope, not the level. Pre-stage a
+                          retraining dataset so you are not starting cold in week 4.
+   4     0.256    red     retrain gate opens -- but only opens. Confirm with a
+                          performance signal (AUC on matured labels, or a proxy
+                          metric) before spending the compute.
+
+  Contrast: a one-day spike to 0.21 that returns to 0.03 the next day is NOT
+  week-4. It is a bad batch, a partial upload, or a window too small to trust.
+```
+
+The week-3 row is the one interviewers care about. A monotone climb `0.020 -> 0.152 -> 0.198` is far more alarming than a single isolated `0.26`, because gradual drift is precisely what threshold alerting is worst at: the feature sits at `0.19` for a month, never pages anyone, and the model quietly loses several points of AUC. Alert on the trend and use the absolute threshold only as a backstop.
+
+Note also what red does *not* authorise. PSI measures `P(X)`, so a red feature proves the input population changed — it says nothing about whether the model still predicts well on it. A model that learned the true causal relationship absorbs a `0.4` PSI with no accuracy loss at all. Crossing `0.25` opens the retraining gate; a measured performance drop is what walks through it.
 
 ---
 
@@ -250,6 +323,184 @@ def compute_chi_squared_test(
         "drift_detected": drift_detected,
     }
 ```
+
+### Reading the KS Statistic
+
+`stats.ks_2samp` returns two numbers that answer two different questions, and conflating them is the single most common drift-monitoring mistake.
+
+**What this actually says.** "Draw both samples as staircases climbing from 0 to 1, lay one on top of the other, and report the widest vertical gap you can find anywhere along the way."
+
+That is the entire statistic. `D` is a gap between two cumulative curves, so it is automatically bounded in `[0, 1]`, needs no binning decision, and does not care about the units of the feature — which is exactly why it works where PSI's fixed buckets do not.
+
+| Symbol | What it is |
+|--------|------------|
+| `F_ref(x)` | Empirical CDF of the reference sample: "what fraction of reference values are `<= x`" |
+| `F_prod(x)` | Same staircase built from the production window |
+| `D` | `max abs(F_ref(x) - F_prod(x))` over all `x`. The single widest vertical gap. `0` = identical, `1` = no overlap |
+| `p_value` | Probability of seeing a gap at least this wide if both samples came from the *same* distribution |
+| `significance_level` | `0.05`. The p-value threshold below which the code sets `drift_detected = True` |
+| `D` vs `p` | `D` is the **effect size** (how different). `p` is the **evidence** (how sure). They move independently |
+
+**Walk one example.** Session duration in seconds, 10 reference values against 10 production values. The gap is evaluated only at the observed points, because that is where the staircases step:
+
+```
+  reference  : 2  4  6  8  10  12  14  16  18  20
+  production : 1  2  3  4   5   6   7   9  11  13
+
+     x     F_ref   F_prod   |gap|
+    1.0     0.0     0.1      0.1
+    2.0     0.1     0.2      0.1
+    3.0     0.1     0.3      0.2
+    5.0     0.2     0.5      0.3
+    7.0     0.3     0.7      0.4
+    9.0     0.4     0.8      0.4   <- widest gap (ties at 7, 11, 13)
+   11.0     0.5     0.9      0.4
+   13.0     0.6     1.0      0.4
+   16.0     0.8     1.0      0.2
+   20.0     1.0     1.0      0.0   <- both staircases must meet at 1.0
+
+  D = 0.40    "at the worst point, the two populations disagree by 40 percentage
+               points on what fraction of traffic falls below that value"
+  p = 0.418   with only 10-vs-10 samples, a gap this wide is unremarkable.
+               NOT significant. The code returns drift_detected = False.
+```
+
+`D = 0.40` is a very large effect and the test still says nothing is wrong — with `n = 10` per side you simply cannot distinguish it from luck. Both curves are pinned at `0.0` below the minimum and `1.0` above the maximum, so the gap always vanishes at both ends; the maximum necessarily lives in the middle, which is why KS is insensitive to pure tail changes that PSI catches loudly.
+
+### Reading the Chi-Squared Test
+
+**What it means.** "For each category, ask how far the observed count sits from what the reference proportions predicted, square it so direction stops mattering, and divide by the expected count so a miss of 50 on a bucket of 100 outweighs a miss of 50 on a bucket of 10,000."
+
+The division by `expected` is the part worth internalising. It converts a raw count error into a *relative* one, which is why `stats.chisquare` needs `expected >= 5` per cell: below that, the denominator is so small that ordinary Poisson noise produces huge terms and the test starts hallucinating drift on rare categories.
+
+| Symbol | What it is |
+|--------|------------|
+| `scale` | `production_total / reference_total`. Shrinks the reference to the production window's size |
+| `expected` | Reference counts after scaling — "what this window should look like if nothing changed" |
+| `f_obs` | The production counts actually observed |
+| `(obs - exp)^2 / exp` | One category's contribution. Squared so over- and under-shoots both count |
+| `chi2` | Sum of contributions. Grows with both the size of the mismatch and the number of categories |
+| `df` | Degrees of freedom, `categories - 1`. Sets how large a `chi2` is normal, so it must be reported alongside |
+
+**Walk one example.** A four-value device-type feature. The reference window holds 10,000 rows; today's production window holds 2,000, so `scale = 2000 / 10000 = 0.2`:
+
+```
+  category   ref count   expected (x0.2)   observed   obs - exp   (obs-exp)^2/exp
+  mobile        5000          1000            900        -100         10.000
+  desktop       3000           600            620         +20          0.067
+  tablet        1500           300            330         +30          3.000
+  other          500           100            150         +50         25.000
+  ------------------------------------------------------------------------
+  totals       10000          2000           2000           0     chi2 = 38.667
+
+  df = 4 - 1 = 3
+  critical value at alpha = 0.05, df = 3  ->  7.815
+  38.667 >> 7.815     p = 2.04e-08     drift_detected = True
+```
+
+Note which category drove the verdict. `mobile` had the largest raw miss (100 rows) but contributed `10.0`; `other` missed by only 50 rows and contributed `25.0`, more than twice as much, because its expected count was ten times smaller. Chi-squared is dominated by *proportionally* distorted small categories, the mirror image of PSI's tail sensitivity — and the reason a long tail of rare categories must be aggregated into an "other" bucket before the test is trustworthy.
+
+### PSI's Relatives — KL and JS Divergence
+
+PSI is not a bespoke invention. Expand the sum and it decomposes exactly into two KL divergences pointing in opposite directions:
+
+```
+  PSI = Sigma (a - e) * ln(a / e)
+      = Sigma a * ln(a / e)  +  Sigma e * ln(e / a)
+      = KL(a || e)           +  KL(e || a)
+```
+
+**The idea behind it.** "KL asks 'how many extra nats do I pay per sample if I keep using the old distribution to describe the new traffic' — and PSI is just that surprise charged in both directions and added up."
+
+Because it is a sum of the two directions, PSI inherits KL's blow-up behaviour (hence the epsilon) while being symmetric, which is why swapping reference and production leaves PSI unchanged but flips KL to a completely different number.
+
+| Symbol | What it is |
+|--------|------------|
+| `KL(P \|\| Q)` | Expected extra surprise from modelling `P`-distributed data with `Q`. `0` only when `P = Q` |
+| asymmetry | `KL(P \|\| Q) != KL(Q \|\| P)`. There is no "distance between P and Q", only a direction |
+| unbounded | Any bucket with `P > 0` and `Q = 0` sends KL to `+inf`. One unseen category destroys the metric |
+| `M = (P + Q) / 2` | The pooled midpoint distribution. JS's whole trick |
+| `JS(P, Q)` | `0.5 * KL(P \|\| M) + 0.5 * KL(Q \|\| M)`. Symmetric by construction, bounded by `ln 2 = 0.693` nats |
+| `sqrt(JS)` | The Jensen-Shannon *distance* — a true metric, so it obeys the triangle inequality |
+
+**Walk one example.** A four-bucket feature. `P` is the reference, `Q` the production window:
+
+```
+  bucket      P      Q      M = (P+Q)/2
+    1       0.40   0.20        0.300
+    2       0.30   0.25        0.275
+    3       0.20   0.30        0.250
+    4       0.10   0.25        0.175
+
+  KL(P || Q) = 0.1592 nats     "cost of describing reference traffic with today's model"
+  KL(Q || P) = 0.1665 nats     "cost of the reverse"   <- different number, same pair
+  PSI        = 0.1592 + 0.1665 = 0.3257     (matches the direct sum, as it must)
+
+  KL(P || M) = 0.0406      KL(Q || M) = 0.0389
+  JS(P, Q)   = 0.5 * 0.0406 + 0.5 * 0.0389 = 0.0398 nats
+  JS / ln2   = 0.0398 / 0.6931 = 0.057      "5.7% of the maximum possible divergence"
+```
+
+Now break it the way production breaks it — bucket 4 is a category that stopped appearing at all:
+
+```
+  bucket      P      Q      M
+    1       0.40   0.45     0.425
+    2       0.30   0.33     0.315
+    3       0.20   0.22     0.210
+    4       0.10   0.00     0.050    <- production never produced this bucket
+
+  KL(P || Q) = inf         one term is 0.10 * ln(0.10 / 0) -> the metric is destroyed
+  KL(Q || P) = 0.1054      finite, because Q = 0 contributes nothing to this direction
+  JS(P, Q)   = 0.0360      finite. M[4] = 0.05, never zero while either side is non-zero
+```
+
+That contrast is the entire argument for JS. Averaging into `M` guarantees the denominator is non-zero wherever *either* distribution has mass, so a vanished category produces a large-but-finite number instead of `inf`. And because JS is capped at `ln 2`, `JS / ln2` is directly readable as "what percentage of the maximum possible disagreement is this" — a scale that transfers across features, unlike PSI's `0.15` which means nothing until you know the binning. The cost is sensitivity: JS compresses everything into `[0, 0.693]`, so severe drift and catastrophic drift look closer together than PSI would show them. Use PSI or KL for alert thresholds; use JS when you need to compare drift magnitudes across features that are binned differently.
+
+### Statistical Significance vs Practical Significance
+
+The KS wrapper above hard-codes `significance_level = 0.05` and flags drift whenever `p_value` falls below it. On a production window of a million rows, that check is worthless, and the arithmetic shows exactly why.
+
+**Stated plainly.** "The p-value scales with the square root of your sample size but the effect size does not — so on big enough data, every difference is 'significant' and the word stops carrying information."
+
+The KS p-value is driven by `lambda = D * sqrt(n_eff)`, where `n_eff = n*m/(n+m)`. Hold `D` fixed and grow the window: `D` never moves, `lambda` grows without bound, and `p` collapses toward zero. The test is answering "is the difference exactly zero" — and in production it never is.
+
+| Symbol | What it is |
+|--------|------------|
+| `D` | The effect size. Depends only on how different the two populations are, never on sample size |
+| `n_eff` | `n*m/(n+m)`. The effective sample size of a two-sample comparison; `n/2` when both sides are equal |
+| `lambda` | `D * sqrt(n_eff)`. What the p-value is actually computed from |
+| `D_crit` | `1.36 * sqrt((n+m)/(n*m))` — the smallest `D` that reaches `p < 0.05`. Shrinks as `1/sqrt(n)` |
+| `p < 0.05` | "This gap is unlikely to be pure sampling noise." Says nothing about whether the gap matters |
+| effect gate | A second condition on `D` or PSI. What actually makes large-window alerting usable |
+
+**Walk one example.** One fixed, operationally meaningless shift: the production mean moves by `0.05` standard deviations, shape unchanged. That is a true KS distance of `D = 0.0199` — two percentage points of CDF gap at the worst point — held constant while only the window size changes:
+
+```
+  effect held constant:  mean shift of 0.05 sd   ->   true D = 0.0199
+
+    n = m        D_crit(0.05)    lambda      p-value      verdict at p < 0.05
+    1,000          0.06082       0.446      0.989         no drift
+   10,000          0.01923       1.410      0.0374        DRIFT
+  1,000,000        0.00192      14.103      3.4e-173      DRIFT (overwhelmingly)
+
+  Same shift. Same D. p moved by 173 orders of magnitude on sample size alone.
+
+  D_crit fell from 0.0608 to 0.0019 -- a 32x drop, exactly sqrt(1000000/1000)
+  = sqrt(1000) = 31.6. Past ~n = 8,600 this shift crosses the line and every
+  window after that pages someone.
+```
+
+At `n = 1,000` the test misses a shift; at `n = 1,000,000` it flags one that would not change a single prediction. Neither answer is what monitoring needs. Now score that identical shift with an effect-size metric instead:
+
+```
+  same 0.05 sd shift, 10 reference deciles:   PSI = 0.0024
+
+  0.0024 vs the 0.1 watch threshold  ->  42x below it. Correctly ignored,
+  and the answer does not change whether the window holds 1e3 or 1e6 rows.
+```
+
+That is the practical rule. **PSI and `D` are sample-size invariant; p-values are not.** Alert on the effect size and use the p-value only as a secondary confirmation that the effect is real rather than noise — `p < 0.05 AND (PSI >= 0.2 OR D >= 0.1)`. The other standard mitigation is to cap the comparison window by subsampling to roughly 10,000 rows, which pins `D_crit` near `0.019` and stops significance from inflating as traffic grows. Both fixes attack the same root cause: statistical significance answers "is there any difference at all," and at production scale the answer is always yes.
 
 ### Feature-Level Drift Monitor
 
@@ -471,6 +722,34 @@ psi = compute_psi(reference[feature].dropna(), production[feature].dropna())
 
 **War story 3: Alerting on every feature independently causes alert fatigue.** A team with 150 features ran independent KS tests at p < 0.05. At any given time, 5% of tests fire by random chance (7–8 alerts per run). Operators stopped acknowledging alerts. Fix: applied Bonferroni correction (threshold = 0.05 / 150 = 0.00033); also prioritized high-importance features (top 20 by SHAP) for alerting, reducing alert volume by 80%.
 
+**In plain terms.** "A 5% chance of a false alarm is fine for one test — but you are not running one test, you are running 150, and the chance that *at least one* of them misfires is `1 - 0.95^150`, which is essentially certain."
+
+The family-wise error rate is what alert fatigue is, expressed as arithmetic. Bonferroni fixes it by dividing the budget: if you want a 5% chance of *any* false alarm across the whole run, each individual test gets `alpha / N`.
+
+| Symbol | What it is |
+|--------|------------|
+| `alpha` | Per-test false-positive rate. `0.05` — accept a 1-in-20 misfire on a single feature |
+| `N` | Number of features tested in the same run. Every one is another lottery ticket |
+| `alpha * N` | Expected count of false alarms per run. The number your on-call actually feels |
+| `1 - (1 - alpha)^N` | Family-wise error rate — probability that at least one of the `N` tests misfires |
+| `alpha / N` | The Bonferroni-corrected per-test threshold. Conservative, assumes tests are independent |
+
+**Walk one example.** The same `alpha = 0.05` applied to three monitoring setups:
+
+```
+  N features    expected false alarms    P(at least one false alarm)    Bonferroni alpha/N
+      1              0.05                        5.0%                     0.05
+     20              1.00                       64.2%                     0.0025
+    150              7.50                       99.95%                    0.00033
+
+  At N = 150 the on-call sees ~7-8 spurious pages EVERY run, and the odds of a
+  clean run are 0.05%. After a week of this, real alerts get acknowledged and
+  closed without being read. That is the actual failure mode -- not the
+  statistics, the human.
+```
+
+The catch worth stating in an interview: Bonferroni assumes the tests are independent, and drift tests on correlated features are not — `income`, `credit_limit`, and `spend` move together, so the correction over-penalises and you lose power to detect genuine drift. That is why the war-story fix pairs it with a second lever, restricting alerting to the top 20 features by SHAP importance. Dropping `N` from 150 to 20 raises the usable per-test threshold from `0.00033` to `0.0025` — 7.5x more sensitive — while cutting expected false alarms from 7.5 to 1.0 per run. Reducing `N` beats correcting for it.
+
 **War story 4: No monitoring of prediction score distribution masks silent model failure.** A feature pipeline bug introduced a constant value (0.0) for an important feature that was previously normally distributed. Input feature PSI caught it on that feature, but the alert was suppressed due to a misconfigured rule. The prediction score distribution shifted measurably (PSI = 0.28) but no alert was set up for output distribution. Revenue impact ran for 6 days before a business analyst flagged the anomaly. Fix: always monitor prediction score distribution as a secondary check independent of feature drift.
 
 ---
@@ -613,6 +892,32 @@ def drift_alert(reference: dict[str, np.ndarray],
         "psi": drifted,
     }
 ```
+
+**Put simply.** "One feature crossing 0.2 is a coin that came up heads; three features crossing together is a population that actually moved."
+
+The `min_features` gate is not a softer threshold, it is a different question. A per-feature threshold asks "did this feature drift?"; the `>= 3` gate asks "did the *applicant population* drift?" — and only the second one justifies waking someone at 3am.
+
+| Symbol | What it is |
+|--------|------------|
+| `psi_thr` | Per-feature breach line, `0.2`. Decides whether one feature counts as flagged |
+| `min_features` | How many simultaneous flags constitute a page, `3`. The alert-fatigue lever |
+| `flagged` | The list of breaching features. Always dashboarded, even when it is too short to page |
+| `q` | Per-feature probability of a spurious breach in one run. Empirical, not derived — measure it |
+| `N` | Features monitored, 20 here after SHAP-importance pruning |
+
+**Walk one example.** 20 monitored features, each with a 5% chance of a noise breach in any given week (`q = 0.05`), all stable in truth:
+
+```
+  gate                 P(false page per week)   expected weeks between false pages
+  any 1 feature > 0.2         0.6415                    1.6
+  any 2 features > 0.2        0.2642                    3.8
+  any 3 features > 0.2        0.0755                   13.2
+
+  Expected spurious breaches per week = 20 x 0.05 = 1.0
+  -- so a 1-feature gate pages on essentially every run, by construction.
+```
+
+Moving the gate from 1 to 3 stretches the mean time between false pages from 1.6 weeks to 13.2 weeks — an 8.5x improvement — without touching `psi_thr` at all. The cost is real: a genuine single-feature failure, such as one upstream API changing its encoding, no longer pages. That is why the flagged list still goes to a dashboard on every run. The gate decides who gets woken up, not what gets recorded.
 
 **Online AUC on lagged labels:**
 

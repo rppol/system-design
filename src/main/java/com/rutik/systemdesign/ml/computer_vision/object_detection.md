@@ -23,6 +23,38 @@ The key insight: detection is fundamentally a regression + classification proble
 
 **Anchor boxes**: pre-defined boxes of various aspect ratios and scales placed at each grid cell. The model predicts offsets relative to anchors rather than absolute coordinates, which stabilizes training. YOLOv3 uses 9 anchors (3 per scale); Faster R-CNN uses 9 per location.
 
+**Stated plainly.** "Anchor count is a multiplication, not a design mystery: every cell of every feature map gets one copy of every (scale × aspect-ratio) template, so the total is `cells × anchors_per_cell`."
+
+The number matters because it *is* the model's output width and the size of the label-assignment problem each training step. Anchors are cheap individually and enormous in aggregate.
+
+| Symbol | What it is |
+|--------|------------|
+| `stride` | How many input pixels one feature-map cell covers. Stride 16 turns an 800px side into 50 cells |
+| `cells` | Feature-map height × width. One prediction site per cell |
+| `k` | Anchors per cell — the (scales × aspect ratios) template count. Faster R-CNN: 3 × 3 = 9 |
+| `scales` | Template sizes in pixels, e.g. 32 / 64 / 128. Must bracket your dataset's real object sizes |
+| `aspect ratios` | Width:height shapes, typically 1:2, 1:1, 2:1 |
+
+**Walk one example.** Two detectors, same multiplication:
+
+```
+  Faster R-CNN, 800 x 1333 input, single stride-16 feature map
+    cells   = ceil(800/16) x ceil(1333/16) = 50 x 84 = 4200
+    anchors = 4200 x 9                              = 37800
+
+  YOLO-style, 640 x 640 input, three FPN levels, 3 anchors per cell
+    P3 stride  8 -> 80 x 80 = 6400 cells
+    P4 stride 16 -> 40 x 40 = 1600 cells
+    P5 stride 32 -> 20 x 20 =  400 cells
+                              -----
+    total cells             =  8400
+    anchors = 8400 x 3      = 25200
+```
+
+Those 25200 candidates are exactly what NMS has to sift through on every frame, and — since a typical image holds fewer than 10 objects — well over 99.9% of them are background. That extreme imbalance is the reason detection needs hard-negative mining or a re-weighted classification loss at all; the multiplication above is where the imbalance is born.
+
+**Why the scales must match your data.** Anchors only train the boxes they overlap: an anchor that never reaches IoU 0.5 with any ground-truth box is labelled background forever and its regression head gets no gradient. Ship COCO's 32px-and-up anchors onto 8–20px drones (Pitfall 2 in Section 10) and every one of the 25200 anchors is a negative — the model trains cleanly to a loss that never detects anything.
+
 **Feature Pyramid Network (FPN)**: combines features from multiple CNN stages at different resolutions via lateral connections and top-down pathways. Small objects are detected from high-resolution early features; large objects from low-resolution deep features. Used in Faster R-CNN + FPN, YOLOv5/8, RetinaNet.
 
 **IoU (Intersection over Union)**: the standard overlap metric.
@@ -32,7 +64,81 @@ IoU = |A ∩ B| / |A ∪ B|
 ```
 IoU >= 0.5 is the standard threshold for TP in PASCAL VOC; COCO uses 0.5:0.05:0.95.
 
+**In plain terms.** "Of all the area these two boxes cover between them, what fraction do they agree on?"
+
+The denominator is the whole trick. Dividing by the *union* rather than by either box means IoU cannot be gamed by shrinking a prediction to a safe pixel inside the object, nor by drawing one giant box over the whole image — both moves inflate the union and crash the score.
+
+| Symbol | What it is |
+|--------|------------|
+| `A`, `B` | The two boxes, in `[x1, y1, x2, y2]` corner format — top-left and bottom-right |
+| `A ∩ B` | Intersection: the overlap rectangle. Zero area when the boxes miss each other |
+| `A ∪ B` | Union: total area covered by either box. Always `area_A + area_B - intersection` |
+| `intersection_area` | `max(0, min(x2) - max(x1)) × max(0, min(y2) - max(y1))` — the `max(0, ·)` is the clamp in the code |
+| `IoU` | The ratio, always in `[0, 1]`. `1.0` = identical boxes, `0.0` = no overlap at all |
+
+**Walk one example.** Two concrete boxes, each 100 × 100 pixels:
+
+```
+  A = [ 10,  20, 110, 120]   ->  area_A = (110-10) x (120-20) = 100 x 100 = 10000
+  B = [ 50,  60, 150, 160]   ->  area_B = (150-50) x (160-60) = 100 x 100 = 10000
+
+  intersection rectangle: take the INNER edges
+    x1 = max(10, 50) =  50        x2 = min(110, 150) = 110
+    y1 = max(20, 60) =  60        y2 = min(120, 160) = 120
+
+    width  = 110 - 50 = 60        height = 120 - 60 = 60
+    intersection = 60 x 60 = 3600
+
+  union = 10000 + 10000 - 3600 = 16400
+
+  IoU = 3600 / 16400 = 0.2195
+```
+
+`0.2195` is below every COCO threshold, so this prediction scores as a **false positive** even though it lands squarely on the object — a 40-pixel drift in each axis is enough to fail. That sensitivity is why localization quality, not just classification, dominates detection metrics.
+
+**Why the `max(0, ·)` clamp exists.** With disjoint boxes the "inner edges" cross over and `x2 - x1` goes negative; multiplying two negative sides would produce a *positive* phantom intersection. The clamp forces zero. Drop it and two far-apart boxes can report a healthy IoU — a bug that silently corrupts NMS and mAP alike, which is why `.clamp(min=0)` appears on both `inter_w` and `inter_h` in the Section 6 code.
+
 **Non-Maximum Suppression (NMS)**: removes duplicate detections. Sort boxes by confidence score; greedily keep the highest-confidence box; suppress all remaining boxes with IoU > threshold (0.45 is YOLO default). Soft-NMS decays scores instead of hard removal, better for overlapping objects.
+
+**Read it like this.** "Trust the most confident box, then delete anything that looks too much like it — where 'too much' is a single number you choose."
+
+The threshold is a *precision-recall dial disguised as a hyperparameter*. Nothing about it is learned; it silently decides how many real neighbouring objects you are willing to throw away in exchange for killing duplicates.
+
+| Symbol | What it is |
+|--------|------------|
+| `iou_threshold` | The cut. Boxes overlapping a kept box by more than this are removed. YOLO default `0.45` |
+| `scores` | Per-box confidence. The sort order is everything — NMS never reconsiders a suppressed box |
+| `keep` | Survivor list, built greedily. Each pass takes the top remaining box and prunes its neighbours |
+| lower threshold | Stricter suppression → fewer duplicates, more real objects lost (worse recall) |
+| higher threshold | Looser suppression → real neighbours survive, duplicates leak through (worse precision) |
+
+**Walk one example.** One kept box `K = [100, 100, 200, 200]` and three overlapping candidates, all 100 × 100:
+
+```
+  candidate            intersection   union    IoU
+  B1 = [110,110,210,210]    8100      11900   0.6807
+  B2 = [125,125,225,225]    5625      14375   0.3913
+  B3 = [140,140,240,240]    3600      16400   0.2195
+
+  now slide the threshold -- the boxes never change, only the cut does:
+
+  threshold 0.30   suppress B1, B2      keep K, B3        aggressive
+  threshold 0.45   suppress B1          keep K, B2, B3    YOLO default
+  threshold 0.70   suppress nothing     keep K, B1, B2, B3  permissive
+```
+
+Move the dial from `0.45` to `0.30` and B2 — potentially a real second pedestrian — vanishes. That single step is exactly the crowd-counting failure in Pitfall 1 of Section 10, where a `0.3` threshold cost 40% recall.
+
+**How Soft-NMS changes the verdict.** Instead of deleting, Soft-NMS multiplies the neighbour's score by its non-overlap `(1 - IoU)` and lets it keep competing:
+
+```
+  candidate    original score   IoU vs K   decayed score = s x (1 - IoU)
+  B1               0.82          0.6807         0.2618      heavily punished
+  B2               0.71          0.3913         0.4322      survives, demoted
+  B3               0.65          0.2195         0.5073      barely touched
+```
+
+Nothing is destroyed, so a real object hidden behind a confident neighbour can still clear the final score threshold. The cost is that duplicates never fully disappear — they sink, and you now tune a score cutoff instead of an IoU cutoff. That trade is why Soft-NMS wins on crowded benchmarks and is usually unnecessary on sparse ones.
 
 **mAP**: see Section 6 for full calculation.
 
@@ -394,6 +500,71 @@ def compute_map(predictions: list[dict],
     return float(np.mean(aps)) if aps else 0.0
 ```
 
+**What this actually says.** "Walk your predictions from most confident to least, and after each one ask 'how much of the truth have I found, and how clean was I getting there?' — AP is the area under that trace."
+
+Reading down the score-sorted list is what makes AP threshold-free. You never pick a confidence cutoff; you evaluate *every* cutoff at once and integrate, which is why AP compares detectors fairly even when they are calibrated differently.
+
+| Symbol | What it is |
+|--------|------------|
+| `n_gt` | How many ground-truth boxes of this class exist. The denominator of recall — fixed, never grows |
+| `tp_cumsum` | Running count of correct detections so far, going down the sorted list |
+| `fp_cumsum` | Running count of wrong ones. Every prediction is exactly one of TP or FP |
+| `precision` | `tp / (tp + fp)` — of what I have claimed so far, what fraction was right |
+| `recall` | `tp / n_gt` — of everything that exists, what fraction have I found |
+| monotone step | The right-to-left `max` — replaces the jagged PR curve with its upper envelope |
+| `AP` | Area under that envelope. `sum((recall_i - recall_i-1) x precision_i)` |
+| `mAP` | Mean of the per-class APs. The `m` is just an average over classes, nothing more |
+
+**Walk one example.** One class, `n_gt = 4` real objects, 6 predictions already sorted by descending score:
+
+```
+  rank  correct?   tp_cum  fp_cum   precision = tp/(tp+fp)   recall = tp/4
+    1      TP        1       0        1/1 = 1.0000            0.25
+    2      TP        2       0        2/2 = 1.0000            0.50
+    3      FP        2       1        2/3 = 0.6667            0.50
+    4      TP        3       1        3/4 = 0.7500            0.75
+    5      FP        3       2        3/5 = 0.6000            0.75
+    6      FP        3       3        3/6 = 0.5000            0.75
+
+  recall stalls at 0.75 -- the 4th object was never detected at any score.
+
+  add sentinels, then take the right-to-left running max (the envelope):
+    recall     0.00  0.25  0.50  0.50  0.75  0.75  0.75  1.00
+    precision  1.00  1.00  1.00  0.75  0.75  0.60  0.50  0.00
+
+  integrate only where recall actually moved:
+    step 1:  (0.25 - 0.00) x 1.00  = 0.2500
+    step 2:  (0.50 - 0.25) x 1.00  = 0.2500
+    step 3:  (0.75 - 0.50) x 0.75  = 0.1875
+    step 4:  (1.00 - 0.75) x 0.00  = 0.0000   <- the missed object, unpaid
+
+  AP = 0.2500 + 0.2500 + 0.1875 + 0.0000 = 0.6875
+```
+
+The final term is the lesson: that last quarter of recall was never reached, so it contributes a hard zero and caps AP at `0.6875`. **A missed object costs you a full `1/n_gt` slice of AP no matter how good the rest of the ranking is** — you cannot recover it by being more precise elsewhere.
+
+**Why the right-to-left max exists.** Raw PR curves wobble: rank 3's FP dropped precision to `0.6667`, then rank 4's TP pushed it back to `0.75`. Integrating that sawtooth would make AP depend on where the noise happened to land. The envelope answers the fairer question — "at recall 0.5, what is the best precision achievable at *any* operating point that reaches at least this recall?" — which is why `precision[i] = max(precision[i], precision[i+1])` runs backwards through the array.
+
+**The idea behind it.** COCO's `mAP@[0.5:0.95]` says: "run this whole computation ten times at ten increasingly strict definitions of 'correct', and average the answers."
+
+| Symbol | What it is |
+|--------|------------|
+| `0.5:0.05:0.95` | Start 0.5, step 0.05, stop 0.95 — the ten IoU thresholds `0.50, 0.55, … 0.95` |
+| `mAP@0.5` | PASCAL VOC's metric. Only the first rung of the ladder — loose localization |
+| `mAP@0.75` | The strict rung. Roughly "the box edges are basically right" |
+| `mAP@[0.5:0.95]` | Plain mean of all ten. The single headline number in every COCO table |
+
+**Walk one example.** One detector's AP at each rung:
+
+```
+  IoU threshold   0.50  0.55  0.60  0.65  0.70  0.75  0.80  0.85  0.90  0.95
+  AP             0.72  0.70  0.66  0.61  0.55  0.48  0.39  0.28  0.16  0.05
+
+  sum = 4.60      mAP@[0.5:0.95] = 4.60 / 10 = 0.460   ->  reported as 46.0
+```
+
+Notice the collapse from `0.72` to `0.05` across the ladder: the same detections that pass at IoU 0.5 mostly fail at 0.95. This is why COCO numbers look so much lower than VOC numbers for the same model — `52.9 mAP` for YOLOv8-L in the Section 8 table is an average over the ladder, and its mAP@0.5 alone would be far higher. Averaging the rungs is deliberate: it makes tight boxes worth points, so a detector cannot top the leaderboard on classification accuracy with sloppy localization.
+
 ### Faster R-CNN with torchvision
 
 ```python
@@ -496,6 +667,58 @@ def giou_loss(pred_boxes: Tensor, target_boxes: Tensor) -> Tensor:
     giou = iou - (enc_area - union_area) / enc_area.clamp(min=1e-6)
     return (1 - giou).mean()
 ```
+
+**Put simply.** Smooth L1 says: "square the error while it is small so the gradient fades as you close in, but switch to plain absolute error once it is large so one bad box cannot blow up the update."
+
+It is two losses glued together at `beta`, chosen so the value and the slope match at the seam — the curve has no kink and no jump, which is why it trains stably where raw L2 does not.
+
+| Symbol | What it is |
+|--------|------------|
+| `diff` | `\|pred - target\|`, the absolute coordinate error for one box edge |
+| `beta` | The changeover point, default `1.0`. Below it quadratic, at or above it linear |
+| `0.5 × diff² / beta` | The quadratic arm. Gradient is `diff / beta` — shrinks toward 0 as the box lands |
+| `diff - 0.5 × beta` | The linear arm. Gradient is a constant `1` — capped, regardless of how wrong the box is |
+| `- 0.5 × beta` | The offset that makes the two arms meet at exactly the same value when `diff = beta` |
+
+**Walk one example.** `beta = 1.0`, four errors, against what pure L2 would have charged:
+
+```
+  diff    branch      smooth L1              pure L2 (0.5 x d^2)   gradient
+  0.2     quadratic   0.5 x 0.04   = 0.020   0.020                  0.2
+  0.5     quadratic   0.5 x 0.25   = 0.125   0.125                  0.5
+  1.0     seam        1.0 - 0.5    = 0.500   0.500                  1.0   <- arms agree
+  3.0     linear      3.0 - 0.5    = 2.500   4.500                  1.0
+  8.0     linear      8.0 - 0.5    = 7.500  32.000                  1.0
+```
+
+At `diff = 8` — one mislabelled or badly-matched anchor — L2 charges `32.0` and hands back a gradient of `8`, enough to wrench the whole batch. Smooth L1 charges `7.5` with a gradient of `1`. **The cap on the gradient, not the cap on the loss, is the point**: outliers stop steering training. Meanwhile the quadratic arm keeps the gradient proportional near zero, so a box that is already close is nudged rather than jerked, which is what makes the final pixel of localization converge.
+
+**What the formula is telling you.** GIoU says: "start from IoU, then charge a penalty for how much empty space the smallest box enclosing both of them wastes."
+
+That second term is a repair for IoU's fatal flaw as a *loss*. Two disjoint boxes both score IoU `0`, whether they are 10 pixels apart or across the image — identical loss, zero gradient, no signal about which direction to move. GIoU breaks the tie.
+
+| Symbol | What it is |
+|--------|------------|
+| `iou` | Ordinary IoU between the predicted and target box, in `[0, 1]` |
+| `enc_area` | Area of the smallest axis-aligned box containing both. Always ≥ union |
+| `union_area` | `area_pred + area_target - intersection` — the area the two boxes actually cover |
+| `(enc_area - union_area) / enc_area` | Fraction of the enclosing box that is empty. `0` when the boxes coincide |
+| `giou` | `iou - that fraction`. Range `(-1, 1]`, unlike IoU's `[0, 1]` |
+| `1 - giou` | The loss. `0` for a perfect box, approaching `2` for boxes flung far apart |
+
+**Walk one example.** All boxes 10 × 10, so `area_pred = area_target = 100`:
+
+```
+  case          pred            target          inter  union  enclosing   IoU     GIoU     loss
+  identical  [0,0,10,10]  [ 0, 0,10,10]          100    100      100    1.0000   1.0000   0.0000
+  overlap    [0,0,10,10]  [ 5, 5,15,15]           25    175      225    0.1429  -0.0794   1.0794
+  disjoint   [0,0,10,10]  [20,20,30,30]            0    200      900    0.0000  -0.7778   1.7778
+  far        [0,0,10,10]  [50,50,60,60]            0    200     3600    0.0000  -0.9444   1.9444
+```
+
+Look at the last two rows. IoU calls them identical — both `0.0000`, both flat. GIoU separates them, `1.7778` versus `1.9444`, and the gradient now points the far box toward the near box's position. **That is the entire contribution of GIoU: a usable gradient in the no-overlap regime**, which is exactly the regime a randomly-initialized detector starts in.
+
+Note the enclosing-box term is also what makes GIoU slower to converge early (the Section 8 tradeoff table): while boxes are disjoint the loss is dominated by "shrink the empty space", which drags boxes together before it starts refining edges. Once they overlap, the term shrinks toward zero and GIoU degenerates gracefully into plain IoU.
 
 ---
 

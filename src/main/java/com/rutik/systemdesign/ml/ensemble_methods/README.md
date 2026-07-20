@@ -29,6 +29,36 @@ One-line analogy: an ensemble is a panel of doctors — each with different trai
 
 Mental model: suppose you have 100 classifiers, each with 70% accuracy, but whose errors are independent. The probability that a majority vote is wrong is the probability that more than 50 of them err — by the binomial distribution this is roughly 0.006%. Independence of errors is the key assumption; diversity is how you achieve it in practice.
 
+**What this actually says.** "If every model beats a coin flip and their mistakes are unrelated, the majority vote is almost never wrong — and it gets there far faster than intuition suggests."
+
+The counting object is a binomial: with `n` models each right with probability `p`, the number that get a given example right is `Binomial(n, p)`, and the ensemble is correct whenever more than half of them are.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | How many models vote. Odd `n` avoids ties |
+| `p` | Accuracy of one model, assumed the same for all. Here `0.70` |
+| `X` | How many of the `n` models get this example right — a `Binomial(n, p)` count |
+| `P(X > n/2)` | Probability the majority is correct. This *is* the ensemble's accuracy |
+| "errors independent" | The load-bearing assumption: model A being wrong tells you nothing about model B |
+
+**Walk one example.** Fix `p = 0.70` and sweep the number of voters:
+
+```
+  p = 0.70 per model, errors independent, plain majority vote
+
+     n     P(majority correct)     P(majority wrong)
+     1          0.700000               0.300000
+     5          0.836920               0.163080
+    11          0.921775               0.078225
+    25          0.982530               0.017470
+    51          0.998636               0.001364
+   101          0.999987               0.000013
+
+  going 1 -> 101 voters shrinks the error 0.300000 / 0.000013 = ~23,000x
+```
+
+Nothing about any individual model improved — every one of the 101 is still a mediocre 70% classifier. The entire gain came from counting votes, which is why the rest of this module is really about one question: how do you keep the errors uncorrelated? Drop independence and this table is fiction; at correlation 1.0 the 101-model ensemble is exactly 70% accurate again.
+
 Why it matters: on structured/tabular data, gradient boosting ensembles (XGBoost, LightGBM) are the dominant approach in industry and competitions. Proper ensembling of 3-5 diverse models typically yields 0.5-2% AUC improvement over the best single model at the cost of training and serving complexity.
 
 Key insight: **bias-variance tradeoff governs which ensemble strategy to choose**. High-variance models (deep trees, neural nets) benefit from bagging. High-bias models (stumps, linear models) benefit from boosting. Stacking is algorithm-agnostic and exploits model diversity regardless of bias/variance profile.
@@ -49,6 +79,34 @@ E[(y - f(x))^2] = Bias[f(x)]^2 + Var[f(x)] + σ^2(irreducible noise)
 - **Variance**: error from sensitivity to training set fluctuations (overfitting)
 - Ensembles do not reduce irreducible noise
 
+**Read it like this.** "Your total error is three separate bills: what your model is structurally too simple to capture, how much it wobbles when the training data changes, and the noise nobody can ever remove."
+
+The reason this decomposition is the organising idea of the whole module is that each ensemble family attacks a *different* one of the three terms — and none of them can touch the third.
+
+| Symbol | What it is |
+|--------|------------|
+| `y` | The true label |
+| `f(x)` | Your model's prediction for input `x`, refit on a fresh training set each time |
+| `E[(y - f(x))^2]` | Expected squared error, averaged over both test points and training sets |
+| `Bias[f(x)]` | How far your *average* prediction sits from the truth. Wrong-shaped model |
+| `Var[f(x)]` | How much `f(x)` jumps around as the training set changes. Twitchy model |
+| `σ^2` | Irreducible noise. Label errors, missing features, genuine randomness. A hard floor |
+
+**Walk one example.** One deep tree versus 100 bagged deep trees on the same data:
+
+```
+                          bias^2     variance     noise      total MSE
+  single deep tree         0.090       0.400       0.100        0.590
+  bagged, B=100, rho=0.2   0.090       0.083       0.100        0.273
+                             |           |           |
+                     unchanged      cut ~5x     unchanged
+
+  bagged variance = 0.2 x 0.400 + 0.8 x 0.400 / 100 = 0.080 + 0.0032 = 0.0832
+  total MSE falls 0.590 -> 0.273, a 53.7% reduction -- all of it from one term
+```
+
+Notice what bagging did *not* do: bias stayed at `0.090` and noise stayed at `0.100`. That is the whole diagnostic. If your model underfits, bias dominates the bill and averaging 500 copies of an underfit model gets you an underfit model. Also note the floor: even with infinite trees, total MSE cannot drop below `0.090 + 0.080 + 0.100 = 0.270`.
+
 ### How Each Method Addresses the Decomposition
 
 ```
@@ -56,6 +114,34 @@ Bagging:    Reduces Variance        | Does NOT reduce Bias
 Boosting:   Reduces Bias            | Can increase Variance (overfitting)
 Stacking:   Reduces Both (indirectly) via diversity
 ```
+
+**The idea behind it.** "Bagging takes models that are already smart but jumpy and steadies them; boosting takes models that are steady but dumb and makes them smarter. You pick the one that matches which bill you are actually paying."
+
+| Symbol | What it is |
+|--------|------------|
+| "Reduces Variance" | Averaging `B` independent predictions shrinks their spread; the mean is unmoved |
+| "Does NOT reduce Bias" | The average of `B` equally wrong-shaped models is still wrong-shaped |
+| "Reduces Bias" | Each boosting round fits what the running ensemble still gets wrong |
+| "Can increase Variance" | Past the optimal round, the residuals being fitted *are* noise |
+| "Reduces Both (indirectly)" | The meta-learner can lean on whichever base model is right in each region |
+
+**Walk one example.** Same dataset, same three-term bill, two different starting models:
+
+```
+                                  bias^2   variance   noise    total
+  BAGGING route
+    one deep tree (low bias)       0.090     0.400     0.100    0.590
+    -> 100 bagged trees            0.090     0.083     0.100    0.273   variance term moved
+
+  BOOSTING route
+    one stump (high bias)          0.360     0.050     0.100    0.510
+    -> 300 boosted stumps          0.014     0.180     0.100    0.294   bias term moved
+
+  Bagging a stump  : 0.360 + 0.050/100 + 0.100 = 0.4605  <- barely helps, bias untouched
+  Boosting a deep tree: variance 0.400 already high, extra rounds push it higher
+```
+
+The last two lines are the practical warning. Bagging 100 stumps leaves you at `0.4605` — worse than a single deep tree — because you spent 100x the compute shrinking a term that was only `0.050` to begin with. Match the method to the dominant term, not to whichever library you like.
 
 ### Diversity Requirement
 
@@ -70,6 +156,36 @@ For ensemble improvements to materialise, base models must make **uncorrelated e
 ### Law of Condorcet (theoretical grounding)
 
 If each voter (model) has accuracy > 0.5 and votes are independent, majority vote accuracy approaches 1.0 as the number of voters grows. Real models are not independent — diversity management is the engineering problem.
+
+**Stated plainly.** "0.5 is a knife edge. Above it, adding voters drives you to certainty; below it, adding voters drives you to certainty about the *wrong* answer."
+
+| Symbol | What it is |
+|--------|------------|
+| `p > 0.5` | Each voter is better than chance. The precondition for the whole theorem |
+| `p = 0.5` | Exactly a coin flip. The ensemble stays at 0.5 no matter how many voters |
+| `p < 0.5` | Each voter is worse than chance. Majority accuracy *decreases* toward 0 |
+| "approaches 1.0" | The limit as `n -> infinity`, not a promise about `n = 5` |
+| "votes are independent" | The assumption that never holds exactly in ML. Everything hinges here |
+
+**Walk one example.** Three voter qualities, same sweep of `n`:
+
+```
+  majority-vote accuracy
+
+     n        p = 0.55     p = 0.50     p = 0.45
+     1          0.5500       0.5000       0.4500
+    25          0.6937       0.5000       0.3063
+   101          0.8438       0.5000       0.1562
+  1001          0.9992       0.5000       0.0008
+
+  p = 0.55 -> climbs to near-certainty, but needs ~1000 voters to get there
+  p = 0.50 -> pinned forever; a coin flip committee is still a coin flip
+  p = 0.45 -> collapses; 1001 weak-and-wrong voters are worse than one of them
+```
+
+Two things fall out of this table that matter in practice. First, the `p = 0.55` column shows why weak learners need *many* rounds — a barely-better-than-chance stump is useful, but only in bulk. Second, the `p = 0.45` column is the reason you never add a base model to an ensemble without first checking it beats chance on its own: a systematically wrong member does not average out, it actively drags the vote.
+
+Real base models also violate independence, so treat every number here as an optimistic ceiling. The correlation-adjusted version of exactly this effect is worked through numerically in Section 6.
 
 ---
 
@@ -209,6 +325,38 @@ flowchart LR
 
 Boosting is sequential: each model fits the residual errors left by the running ensemble, so every round shaves off more bias. The shrinkage factor lr (learning rate) scales each tree's contribution; too many rounds without early stopping eventually fit noise and raise variance.
 
+**Put simply.** `F(x) = lr*h1 + lr*h2 + ... + lr*hM` says: "the ensemble is a running total, and every new tree is allowed to nudge that total only a little bit toward whatever is still wrong."
+
+Written one round at a time it is `F_m(x) = F_{m-1}(x) + lr * h_m(x)`, where `h_m` was trained to predict the residual `y - F_{m-1}(x)`.
+
+| Symbol | What it is |
+|--------|------------|
+| `F_{m-1}(x)` | The ensemble's prediction *before* this round. The running total |
+| `r_m = y - F_{m-1}(x)` | What the ensemble still gets wrong. This is `h_m`'s training target |
+| `h_m(x)` | The new tree, fit to those residuals — a correction, not a prediction of `y` |
+| `lr` | Shrinkage, typically 0.01–0.3. How much of the correction you actually apply |
+| `F_M(x)` | The final prediction: the initial guess plus every shrunk correction |
+
+**Walk one example.** One row with true label `y = 10`, initial guess `F_0 = 6` (the mean), `lr = 0.1`, and a tree that fits its residual target perfectly:
+
+```
+   m    residual r = y - F_{m-1}    lr * r     F_m
+   1           4.0000               0.4000    6.4000
+   2           3.6000               0.3600    6.7600
+   3           3.2400               0.3240    7.0840
+   4           2.9160               0.2916    7.3756
+   5           2.6244               0.2624    7.6380
+  ...
+  10                                          8.6053
+  50                                          9.9794
+
+  each round closes exactly 10% of the remaining gap: F_m = 10 - 4 x 0.9^m
+```
+
+The gap never reaches zero, it decays geometrically — which is precisely the point of shrinkage. With `lr = 0.5` the same row lands at `9.875` after only 5 rounds, but each tree is then carrying 5x the influence, so a single tree that fit noise instead of signal moves the prediction 5x as far. Low `lr` plus many rounds plus early stopping is the standard trade: you buy generalisation with training time.
+
+**Why the residual target is what makes this "boosting" and not "bagging."** Each `h_m` is trained on a target that only exists *because* of the previous trees. Remove tree 3 from a boosted ensemble and trees 4 onward are fitting the wrong thing — they are not interchangeable. In bagging, every tree is fit to the same target `y` independently, so you can delete or reorder any of them freely. That structural difference is the reason boosting cuts bias and needs early stopping, while bagging cuts variance and does not.
+
 ### K-Fold Stacking Architecture
 
 ```mermaid
@@ -272,6 +420,57 @@ xychart-beta
 ```
 
 Ensemble variance ρσ² + (1-ρ)σ²/B falls steeply over the first few models, then flattens onto the correlation floor ρσ² = 0.2. Past ~50 models more trees barely help — only cutting pairwise correlation ρ (feature/data subsampling, algorithm diversity) lowers the floor itself. This is the mathematical root of the diminishing-returns effect discussed in §8.
+
+**In plain terms.** "Averaging `B` models splits their variance into a part you can wash out by adding models and a part you can never wash out, and correlation decides how big that second part is."
+
+The naive story everyone learns first is `Var = σ^2/B` — average `B` things, cut the variance by `B`. That is the `ρ = 0` special case, and it is a lie for real ensembles: two trees grown on 63% overlapping bootstrap samples of the same data make many of the same mistakes.
+
+| Symbol | What it is |
+|--------|------------|
+| `σ^2` | Variance of ONE base model's prediction, across training sets |
+| `B` | How many models you average |
+| `ρ` | Average pairwise correlation between base model predictions. `0` = fully diverse, `1` = clones |
+| `ρ*σ^2` | The floor. Shared error that survives any amount of averaging |
+| `(1-ρ)*σ^2/B` | The washable part. Independent error, shrinking as `1/B` |
+
+**Walk one example.** Fix `σ^2 = 1.0` and sweep `B` at three correlation levels:
+
+```
+  Variance(average) = rho*sigma^2 + (1-rho)*sigma^2/B      with sigma^2 = 1.0
+
+      B        rho = 0.0     rho = 0.05     rho = 0.2      rho = 0.5
+      1          1.0000        1.0000        1.0000         1.0000
+      2          0.5000        0.5250        0.6000         0.7500
+      5          0.2000        0.2400        0.3600         0.6000
+     10          0.1000        0.1450        0.2800         0.5500
+     25          0.0400        0.0880        0.2320         0.5200
+     50          0.0200        0.0690        0.2160         0.5100
+    100          0.0100        0.0595        0.2080         0.5050
+    300          0.0033        0.0532        0.2027         0.5017
+   1000          0.0010        0.0510        0.2008         0.5005
+
+  floor         -> 0.0000      -> 0.0500     -> 0.2000      -> 0.5000
+```
+
+**The plateau is the whole lesson.** Read the `rho = 0.0` column downward: variance keeps falling, heading to zero, exactly as `σ^2/B` promises. Now read any other column. At `ρ = 0.2` the variance has already reached `0.2080` by `B = 100`, and going all the way to `B = 1000` — ten times the trees, ten times the training cost, ten times the serving cost — buys you `0.2080 -> 0.2008`, an improvement of `0.0072`. The curve flattened onto `ρ*σ^2 = 0.2` and no amount of compute lifts it off.
+
+Put in terms of budget: correlation caps your benefit at `1/ρ`. At `ρ = 0.2` averaging can never do better than a 5x variance cut no matter how many models you buy; at `ρ = 0.5` the ceiling is 2x, which is why five XGBoost models with jiggled hyperparameters (Pitfall 3, §10) return almost nothing.
+
+```
+  Where the money goes: rho = 0.2, going from B = 100 to B = 1000
+
+    training cost      10x
+    serving latency    10x (or 10x the hardware to keep it parallel)
+    variance gained    0.0072   (3.5% of the variance you still have)
+
+  Same budget spent on cutting rho from 0.2 to 0.05, at B = 100:
+
+    variance           0.2080 -> 0.0595   (a 3.5x cut)
+```
+
+That comparison is why every real bagging algorithm is a correlation-reduction device rather than a model-count device. Bootstrap sampling, `max_features="sqrt"`, Extra Trees' random split thresholds, and stacking heterogeneous algorithms all exist for one reason: they lower `ρ`, which is the only term in the formula that moves the floor. `B` only decides how quickly you arrive at a floor that `ρ` already fixed.
+
+**What breaks without the `ρ*σ^2` term.** If you believe the `σ^2/B` version, you conclude that a 5000-tree Random Forest is meaningfully better than a 500-tree one and you size your serving cluster accordingly. The correlated form tells you the truth: past a few hundred trees you are paying linearly for a benefit that has already asymptoted, and the engineering effort belongs in feature subsampling and algorithm diversity instead.
 
 ### Quick comparison with sklearn
 
@@ -423,6 +622,29 @@ Regression  Tree    Forest                   |
 ```
 
 SHAP values work on tree ensembles (RF, XGBoost, LightGBM) efficiently via TreeSHAP (O(TLD^2) where T=trees, L=leaves, D=depth). Stacking adds another layer of opacity.
+
+**What it means.** `O(TLD^2)` says: "explaining one prediction costs you a walk over every leaf of every tree, with a small squared-depth penalty — which is polynomial, and therefore tractable, on ensembles of the size you actually deploy."
+
+The reason anyone quotes this complexity is the contrast: model-agnostic KernelSHAP is exponential in the number of features, `O(2^M)`, because exact Shapley values require every subset of features. TreeSHAP exploits tree structure to get the same exact values in polynomial time.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Number of trees in the ensemble |
+| `L` | Maximum leaves per tree. For a depth-`D` tree, at most `2^D` |
+| `D` | Maximum tree depth |
+| `D^2` | Cost of tracking every subset of features on the path from root to leaf |
+| `O(2^M)` | KernelSHAP's exact cost, `M` = number of features. The thing being avoided |
+
+**Walk one example.** A production LightGBM model: 500 trees, depth 6 (so up to 64 leaves), 30 features:
+
+```
+  TreeSHAP    : T x L x D^2 = 500 x 64 x 36  =        1,152,000 operations
+  KernelSHAP  : 2^M         = 2^30           =    1,073,741,824 subsets
+
+  ratio ~ 932x fewer operations, for the SAME exact Shapley values
+```
+
+The practical consequence is that TreeSHAP is cheap enough to run on every scored row in production, which is what makes per-prediction explanations and SHAP-based drift monitoring feasible on tree ensembles and nowhere else. Note the `D^2` term: doubling depth from 6 to 12 raises `L` from 64 to 4096 *and* `D^2` from 36 to 144, a 256x cost increase — deep trees are where TreeSHAP stops being free.
 
 ---
 
@@ -612,6 +834,40 @@ Set scale_pos_weight to the ratio of negative to positive examples (e.g. ~1000 f
 ```
 
 AUC-ROC = 0.987, precision@99%recall = 0.43 (i.e. to catch 99% of fraud, 57% of flagged transactions are false positives, routed to step-up auth rather than hard decline). End-to-end inference < 5ms because trees are shallow (max_depth 6-8) and the meta-learner is a 3-feature dot product.
+
+**What the formula is telling you.** `precision@99%recall = 0.43` says: "pick the threshold low enough to catch 99 out of every 100 frauds, and at that threshold fewer than half of everything you flag is actually fraud."
+
+Precision and recall are two ratios over the same confusion matrix, and pinning one of them is what turns an abstract AUC into an operational decision.
+
+| Symbol | What it is |
+|--------|------------|
+| recall = `TP / (TP + FN)` | Of all real fraud, what fraction did we catch. Pinned here at `0.99` |
+| precision = `TP / (TP + FP)` | Of everything we flagged, what fraction was really fraud. Here `0.43` |
+| `@99%recall` | "Slide the threshold until recall hits 0.99, then report precision there" |
+| `TP` / `FP` / `FN` | Caught fraud / false alarms / missed fraud |
+| AUC-ROC `0.987` | Averages over *all* thresholds. Says nothing about the one you ship |
+
+**Walk one example.** One day of traffic: 10M transactions, 0.1% fraud rate:
+
+```
+  total transactions       10,000,000
+  real fraud (0.1%)            10,000
+  legitimate               9,990,000
+
+  threshold set for 99% recall:
+    TP = 0.99 x 10,000                     =    9,900   fraud caught
+    FN = 10,000 - 9,900                    =      100   fraud missed
+    flagged total = TP / precision
+                  = 9,900 / 0.43           =   23,023   alerts raised
+    FP = 23,023 - 9,900                    =   13,123   false alarms
+
+  false-alarm share = 1 - 0.43 = 57% of every alert
+  alert volume      = 23,023 / 10,000,000 = 0.23% of all traffic
+```
+
+The `23,023` is the number that actually decides the design. It is why the playbook routes flagged transactions to step-up auth instead of a hard decline: hard-declining 13,123 legitimate customers a day would cost far more than the 100 frauds you still miss. It also sizes the ops team — no human queue absorbs 23,023 items/day, so the step-up must be automated.
+
+**Why `scale_pos_weight ≈ 1000` and not some tuned constant.** It is just the class ratio: `9,990,000 / 10,000 = 999`. Setting it there makes one fraud row contribute as much gradient as 999 legitimate rows, so the loss stops being dominated by the majority class. Leave it at the default `1` and the model discovers that predicting "not fraud" everywhere scores 99.9% accuracy — the exact failure shown in Pitfall 2 below.
 
 **Out-of-fold stacking (the correct way to generate meta-features):**
 

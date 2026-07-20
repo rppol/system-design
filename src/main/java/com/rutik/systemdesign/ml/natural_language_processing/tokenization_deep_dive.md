@@ -102,6 +102,53 @@ flowchart TD
 
 Worked trace on corpus `low×5, lower×2, newest×6, widest×3`: `("e","s")` appears 9 times → merge `es`; then `("es","t")`=9 → `est`; then `("l","o")`=7 → `lo`; and so on. The merges are recorded in order — that ordered list is the entire BPE model.
 
+**Read it like this.** "Count every adjacent pair in the corpus, glue the single most common one together, and repeat — the ordered list of winners *is* the model."
+
+There is no objective function and no gradient here. BPE is pure greedy counting, which is why it trains in minutes on gigabytes of text and why its output is fully reproducible from the corpus alone.
+
+| Symbol | What it is |
+|--------|------------|
+| `low x 5` | A word *type* and its corpus frequency; all 5 occurrences merge together |
+| `("e","s")` | One adjacent symbol pair — a merge candidate |
+| `count(pair)` | Sum of the frequencies of every word containing it, **not** a count of word types |
+| merge rank | Position in the ordered output list; rank 0 is applied first at encode time |
+| `</w>` | End-of-word marker used in the §6 code; omitted in this trace to match the prose |
+
+**Walk one example.** Four merges on the toy corpus, with the pair counts that decide each one:
+
+```
+  corpus: 16 word occurrences, 79 symbols to start
+
+    l o w        x5
+    l o w e r    x2
+    n e w e s t  x6
+    w i d e s t  x3
+
+  merge 1  counts: ("e","s")=9  ("s","t")=9  ("w","e")=8  ("l","o")=7  ("o","w")=7
+           9 = newest(6) + widest(3)        -> merge es    symbols 79 -> 70
+           l o w    l o w e r    n e w es t    w i d es t
+
+  merge 2  counts: ("es","t")=9  ("l","o")=7  ("o","w")=7  ("e","w")=6  ("n","e")=6
+           the symbol just created wins now  -> merge est   symbols 70 -> 61
+           l o w    l o w e r    n e w est    w i d est
+
+  merge 3  counts: ("l","o")=7  ("o","w")=7  ("e","w")=6  ("n","e")=6  ("w","est")=6
+           7 = low(5) + lower(2)             -> merge lo    symbols 61 -> 54
+           lo w     lo w e r    n e w est    w i d est
+
+  merge 4  counts: ("lo","w")=7  ("e","w")=6  ("n","e")=6  ("w","est")=6
+                                             -> merge low   symbols 54 -> 47
+           low      low e r     n e w est    w i d est
+
+  After 4 merges: 79 -> 47 symbols, a 40.5% shrink; 4.94 -> 2.94 symbols per word.
+
+  Merge 5 is a THREE-WAY TIE at 6 -- ("e","w"), ("n","e"), ("w","est") -- and the
+  implementation's tie-break picks the winner. Ties are exactly why two BPE
+  trainers can disagree on the same corpus and still both be "correct".
+```
+
+**Why the order is the artifact, not a detail.** Each merge changes the counts for the next round: after `es` exists, the pair `("es","t")` is created out of nothing and immediately wins. That dependency chain means the merge list is only meaningful read front-to-back — reorder it and rank 3 fires before the symbol it needs even exists, so the same text segments differently (§12, first question).
+
 ### Applying a Tokenizer at Inference
 
 ```mermaid
@@ -174,6 +221,42 @@ xychart-beta
 
 The two curves cross: the descending line is sequence length (fewer, longer tokens as vocab grows → less attention compute), the ascending line is the embedding + output-softmax table size (grows linearly with vocab). Monolingual models settle near 32k-50k; heavily multilingual ones push to 100k-250k to keep fertility low (§4.1, §8).
 
+**What the formula is telling you.** "Every extra vocabulary row costs you `d_model` parameters permanently, while every token it saves you costs nothing at all once training is done."
+
+The ascending curve is the arithmetic `V × d_model`; the descending curve is `L ∝ fertility`, and attention pays `L²`. That squared term is the whole reason the crossover exists rather than the vocab simply being as small as possible.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Vocabulary size — the number of rows in the embedding table |
+| `d_model` | Hidden width of the model; each vocab row is a vector of this length |
+| `V × d_model` | Parameters in the input embedding table |
+| `2 × V × d_model` | Total when the output softmax is a separate, untied matrix |
+| fertility | Tokens per word — what actually sets sequence length `L` for fixed text |
+| `L²` | Attention cost, which is why saving tokens pays back superlinearly |
+
+**Walk one example.** A 7B-class model, `d_model = 4096`, sweeping the vocab sizes on the chart:
+
+```
+  V        V x d_model     fp16 bytes    untied (x2)    share of a 7B budget
+  16k         65.5 M         131 MB        131.1 M           0.94%
+  32k        131.1 M         262 MB        262.1 M           1.87%
+  50k        205.9 M         412 MB        411.7 M           2.94%
+  100k       409.6 M         819 MB        819.2 M           5.85%
+  250k      1024.0 M        2048 MB       2048.0 M          14.63%
+
+  The trade, stated as one decision -- go from 32k to 128k:
+
+    parameters added   (128000 - 32000) x 4096 = 393.2 M   (1.87% -> 7.49% of 7B)
+    fertility falls    1.4 -> 1.1 tokens/word
+    sequence length    1.1 / 1.4 = 0.786          -> 21.4% shorter
+    attention work     1 - 0.786^2 = 0.383        -> 38.3% less
+
+  You buy a 38.3% cut in attention compute on EVERY token of EVERY request
+  with a one-time 5.6-percentage-point increase in parameter count.
+```
+
+That asymmetry — one-time parameter cost against per-request compute savings — is why large multilingual models keep pushing vocab upward, and why a 250k vocab still stops short: at 14.63% of the budget the embedding table starts competing with the layers that do the actual reasoning.
+
 ### Fertility Tax Across Languages
 
 ```mermaid
@@ -185,6 +268,36 @@ xychart-beta
 ```
 
 A tokenizer whose merges were learned mostly on English has few multi-character pieces for other scripts, so the same meaning fragments into 2-4x more tokens — directly raising latency, cost, and effective context loss for under-represented languages (§7).
+
+**Stated plainly.** "Fertility is just tokens divided by words — and because you are billed per token and your context window is measured in tokens, it is simultaneously an exchange rate on price and a divisor on how much you can say."
+
+| Symbol | What it is |
+|--------|------------|
+| fertility `f` | Tokens emitted ÷ words in the text, measured on *your* data with *your* tokenizer |
+| `f_other / f_en` | The tokenization tax — how many times more tokens the same meaning costs |
+| `f × words` | Sequence length for a fixed passage |
+| `C / f` | Words of real content that fit in a `C`-token context window |
+
+**Walk one example.** The same 1,000-word passage, translated, through one English-trained BPE tokenizer, with an 8,192-token window:
+
+```
+  language    fertility    tokens    tax vs English    words fitting in 8,192 tokens
+  English        1.1        1100         1.00x                  7447
+  Spanish        1.4        1400         1.27x                  5851
+  Russian        1.9        1900         1.73x                  4311
+  Hindi          2.5        2500         2.27x                  3276
+  Thai           3.1        3100         2.82x                  2642
+  Burmese        3.8        3800         3.45x                  2155
+
+  Read the Spanish row against the English row: 1.4 / 1.1 = 1.27, the same
+  "~27% longer" figure quoted in Section 2.
+
+  Read the Burmese row: identical meaning, identical per-token price, but
+  3.45x the bill AND 3.45x less of the window available for actual content.
+  Neither number appears anywhere in the model's accuracy metrics.
+```
+
+The tax compounds in a way a single ratio hides: the Burmese user pays 3.45x more *and* hits the truncation limit 3.45x sooner, so their long documents get cut while an English user's do not. That is why fertility, not accuracy, is the headline fairness metric for a multilingual tokenizer.
 
 ---
 
@@ -298,6 +411,41 @@ score(a, b) = freq(a, b) / (freq(a) * freq(b))
 
 This prefers merging pieces that occur together more often than chance would predict, so it favors statistically "bound" pairs over merely frequent ones. At inference, WordPiece does **greedy longest-match-first** from the start of each word, emitting `##` continuations.
 
+**In plain terms.** "Do not merge the pair you see most often — merge the pair that would be most *surprised* to be seen apart."
+
+| Symbol | What it is |
+|--------|------------|
+| `freq(a, b)` | How often `a` is immediately followed by `b` — the observed pair count |
+| `freq(a)`, `freq(b)` | How often each piece occurs anywhere, independent of the other |
+| `freq(a) * freq(b)` | The denominator: roughly what the pair count would be *by chance* |
+| the whole ratio | Observed ÷ expected — pointwise mutual information with the log stripped off |
+| `##` | Inference-side marker that a piece continues the previous one, not a training term |
+
+**Walk one example.** The same toy corpus BPE trained on in §5, scored both ways:
+
+```
+  corpus: low x5  lower x2  newest x6  widest x3
+  character counts: l=7  o=7  w=16  e=17  r=2  n=6  s=9  t=9  i=3  d=3
+
+  pair        freq(a,b)  freq(a)  freq(b)  count rank   score = ab / (a * b)
+  ("e","s")       9        17        9       1st        9 / (17 * 9) = 0.0588
+  ("s","t")       9         9        9       1st (tie)  9 / ( 9 * 9) = 0.1111
+  ("w","e")       8        16       17       3rd        8 / (16 *17) = 0.0294
+  ("l","o")       7         7        7       4th        7 / ( 7 * 7) = 0.1429
+  ("i","d")       3         3        3       8th        3 / ( 3 * 3) = 0.3333  <- wins
+
+  BPE picks ("e","s")  -- it is simply the most frequent pair, count 9.
+  WordPiece picks ("i","d") -- count only 3, but i and d appear 3 times each and
+  ALWAYS together, so the merge destroys no information and buys a piece whose
+  behaviour is fully predictable.
+
+  ("w","e") is the instructive loser: count 8, nearly the most frequent, but it
+  scores WORST (0.0294) because w and e are both everywhere. Seeing them adjacent
+  is what you would expect by chance, so merging them teaches the model nothing.
+```
+
+**Why the denominator has to be there.** Delete `freq(a) * freq(b)` and the score collapses to `freq(a,b)` — WordPiece becomes BPE exactly. The denominator is what converts "common" into "informative": it penalises pairs made of already-ubiquitous pieces and rewards pairs that are genuinely bound. In practice this is why BERT's vocabulary contains many morpheme-like pieces (`##ization`, `##able`) rather than the most frequent character bigrams of English.
+
 ### Unigram language model (pruning + Viterbi)
 
 ```python
@@ -314,6 +462,44 @@ This prefers merging pieces that occur together more often than chance would pre
 # Unigram supports "subword regularization": sample alternative segmentations
 # during training as data augmentation (improves robustness ~0.5-1 BLEU on MT).
 ```
+
+**What it means.** "Give every candidate piece a probability, score a whole split by multiplying its pieces' probabilities, keep the best split — then delete whichever pieces the best splits never actually needed."
+
+| Symbol | What it is |
+|--------|------------|
+| `p(piece)` | Unigram probability of a piece, fit by EM; all pieces sum to 1 |
+| `P(seg)` | Product of its pieces' probabilities — the "unigram" assumption is that pieces are independent |
+| `log P(seg)` | The same score written as a sum, which is what Viterbi actually accumulates |
+| corpus loss | `-Σ_x log P(best segmentation of x)` — the quantity EM minimises |
+| `loss(piece)` | Rise in corpus loss if that piece were deleted — the pruning criterion |
+| Viterbi | Dynamic program over character positions; `O(n × max_piece_len)`, not exponential |
+| EM | Expectation-Maximization: re-estimate `p(piece)` from how often the best splits use it |
+
+**Walk one example.** Segmenting `lowest` against a toy piece vocabulary whose probabilities sum to 1.0:
+
+```
+  low 0.30   est 0.25   e 0.10   s 0.09   w 0.08   t 0.07   lo 0.06   we 0.03   o 0.02
+
+  candidate segmentations of "lowest"
+    low | est          0.30 * 0.25                  = 0.075000    log = -2.590
+    lo  | w   | est    0.06 * 0.08 * 0.25           = 0.001200    log = -6.725
+    low | e   | s | t  0.30 * 0.10 * 0.09 * 0.07    = 0.000189    log = -8.574
+    lo  | we  | s | t  0.06 * 0.03 * 0.09 * 0.07    = 0.000011    log = -11.387
+
+  Viterbi returns the top row, low|est -- 62.5x more likely than the runner-up.
+  Note it does NOT simply take the longest first piece: it compares whole-word
+  products, which is the difference from WordPiece's greedy longest-match.
+
+  Now the PRUNING criterion -- how much would deleting each piece hurt?
+    delete "lo"   -> best split is still low|est     log stays  -2.590   loss = 0.000
+    delete "est"  -> best split becomes low|e|s|t    log falls  -8.574   loss = 5.984
+
+  "lo" is free to prune; "est" is load-bearing. Each round Unigram computes this
+  loss for every piece, drops the worst ~20%, re-runs EM on what remains, and
+  repeats until the vocabulary hits its target size.
+```
+
+**Why probabilities, and not just counts.** Because Unigram carries a real distribution over segmentations, it can *sample* from it rather than always taking the argmax — that is subword regularization, and it is impossible for BPE and WordPiece, which have only a deterministic rule and no notion of "the second-best split is 62.5x less likely." The same distribution is what makes pruning principled: the loss above is measured in nats of corpus likelihood, a comparable currency across every candidate piece.
 
 ### Using a production tokenizer
 
@@ -464,6 +650,35 @@ gpt2.tokenize(" hello")   # ['Ġhello']
 
 A 280-character tweet is not 280 tokens, and "4 chars per token" is only an English average. For code, JSON, or non-Latin scripts it can be 1-2 chars/token. Always measure with the actual tokenizer (`len(tok.encode(text))`) before enforcing a context or cost budget.
 
+**The idea behind it.** "Characters-per-token is an exchange rate that moves with the content — quoting a context budget in characters is quoting it in the wrong currency."
+
+| Symbol | What it is |
+|--------|------------|
+| `chars / tokens` | The observed exchange rate for one specific piece of text |
+| 4 chars/token | The English-prose rule of thumb, and *only* that |
+| `len(tok.encode(text))` | The only number a context limit or an invoice actually uses |
+| headroom | `context_limit - prompt_tokens` — what is left over for the model's answer |
+
+**Walk one example.** A 4,000-character input, budgeted with the rule of thumb as `4000 / 4 = 1000` tokens:
+
+```
+  content type              chars/token    actual tokens    vs the 1000 estimate
+  English prose                 4.0            1000                1.00x
+  minified JSON                 2.0            2000                2.00x
+  Python with indentation       1.6            2500                2.50x
+  Thai / Devanagari             1.2            3333                3.33x
+
+  Now spend it in a 4,096-token window:
+
+    planned    4096 - 1000 = 3096 tokens of headroom for the answer
+    actual     4096 - 3333 =  763 tokens of headroom on the Thai input
+
+  The answer gets truncated to a quarter of its intended length. No exception is
+  raised, no health check fails, and the metric that moves is user complaints.
+```
+
+Note the failure is one-sided: the estimate is never *too high*, only too low, because 4 chars/token is an upper bound reached only by clean English prose. Any budget built on it silently over-commits on exactly the inputs — code, JSON, non-Latin scripts — where headroom matters most.
+
 ### Pitfall 5: Adding special tokens but forgetting to resize embeddings
 
 ```python
@@ -591,6 +806,37 @@ def train_code_tokenizer(files: list[str], vocab_size: int = 50_000) -> Tokenize
 ```
 
 **Result.** Fertility drops from 2.3 to 1.35 tokens/word on held-out code; the median snippet now fits in 380 tokens instead of 650, eliminating truncation for ~95% of functions. Because the model is trained from the new tokenizer's embeddings, the swap is safe — they did not try to bolt the new tokenizer onto pretrained `bert-base` weights.
+
+**Put simply.** "The compression ratio is just new fertility over old — and since sequence length scales by exactly that factor, it is the single number that tells you whether the 512-token limit still bites."
+
+| Symbol | What it is |
+|--------|------------|
+| `f_old`, `f_new` | Tokens per word before and after retraining the tokenizer (2.3 and 1.35 here) |
+| `f_new / f_old` | The length multiplier applied to every sequence |
+| `1 - f_new/f_old` | Fraction of tokens removed — the compression win |
+| median tokens | The snippet-length statistic that decides whether truncation fires at 512 |
+
+**Walk one example.** Pushing this project's two fertility numbers through:
+
+```
+  f_old = 2.3 tokens/word        f_new = 1.35 tokens/word
+
+  length multiplier    1.35 / 2.3     = 0.587
+  tokens removed       1 - 0.587      = 41.3%
+  median snippet       650 x 0.587    = 381 tokens   (the reported 380, confirmed)
+
+  Why that clears the limit -- the whole point of the exercise:
+    before   median 650 > 512   the MEDIAN function was already being truncated
+    after    median 381 < 512   131 tokens of headroom on the median function
+
+  And the compute win is bigger than the token win, because attention is
+  quadratic in length:
+    (381 / 650)^2 = 0.344   ->   65.6% less attention work per snippet
+
+  A 41.3% cut in tokens buys a 65.6% cut in attention compute.
+```
+
+The lesson to carry into an interview: fertility is not a cosmetic metric. It multiplies straight through into truncation rate (a correctness bug), attention cost (a latency and dollar figure), and effective context (a capability ceiling) — which is why the team tracks it as a dataset metric alongside label balance rather than as a tokenizer implementation detail.
 
 **Broken -> fix encountered during the build:**
 

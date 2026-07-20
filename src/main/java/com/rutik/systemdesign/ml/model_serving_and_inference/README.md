@@ -369,6 +369,205 @@ def export_to_onnx(model: nn.Module, input_dim: int, path: str) -> None:
     print(f"Exported to {path}")
 ```
 
+### Decoding the Batching Latency/Throughput Tradeoff
+
+Every batched serving system obeys two equations, and they pull in opposite directions:
+
+```
+batch_latency(B)   = fixed_overhead + per_sample_cost x B
+throughput(B)      = B / batch_latency(B)
+request_latency(B) = max_wait_ms + batch_latency(B)
+```
+
+**In plain terms.** "One kernel launch costs the same whether you feed it 1 sample or 32, so the
+fixed cost is what you are amortizing — and the price of amortizing it is the time each request
+spends waiting for company."
+
+The `fixed_overhead` term is the whole reason batching works. It covers the kernel launch, reading
+the model weights out of HBM, and the Python/serialization frame around the call — none of which
+scale with `B`. If `fixed_overhead` were zero, batching would buy you nothing.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Batch size — how many requests ride in one forward pass |
+| `fixed_overhead` | Per-launch cost paid once per batch: kernel launch, weight read, framework frame |
+| `per_sample_cost` | Marginal cost of one extra sample once the batch is already running |
+| `throughput(B)` | Requests per second one replica sustains at that batch size |
+| `max_wait_ms` | The batcher's timeout — pure added latency, the fee you pay for the throughput |
+| `request_latency(B)` | Worst case a single request sees: full wait, then the full batch runs |
+
+**Walk one example.** A model with `fixed_overhead = 4.0ms` and `per_sample_cost = 0.25ms`, batcher
+set to `max_wait_ms = 5`:
+
+```
+   B     batch_latency        throughput          worst-case request latency
+         4.0 + 0.25 x B       B / latency         5ms wait + batch_latency
+
+    1    4.0 + 0.25 =  4.25ms      235 rps            9.25ms
+    8    4.0 + 2.00 =  6.00ms    1,333 rps           11.00ms
+   32    4.0 + 8.00 = 12.00ms    2,667 rps           17.00ms
+   64    4.0 + 16.0 = 20.00ms    3,200 rps           25.00ms
+
+  B = 1 -> B = 32 :  throughput x11.3,  worst-case latency +7.75ms
+  B = 32 -> B = 64:  throughput x1.20,  worst-case latency +8.00ms
+```
+
+That is the knee, and it is the number Section 13 means by "pick the knee". Going 1 -> 32 buys
+11.3x throughput for 7.75ms. Going 32 -> 64 buys 1.2x for another 8ms — you pay the same latency
+again for almost nothing, because past `B = 32` the `0.25 x B` term dominates and `fixed_overhead`
+is already fully amortized. Amortization only pays until there is nothing left to amortize.
+
+### Decoding Capacity Sizing — Little's Law
+
+Replica counts are not guesswork; they fall out of one 1961 queueing identity:
+
+```
+concurrency = QPS x latency_seconds            (Little's Law)
+
+replicas = ceil( QPS / (throughput_per_replica x target_utilization) )
+```
+
+**What this actually says.** "The number of requests in flight at any instant is just the arrival
+rate multiplied by how long each one sticks around."
+
+The identity holds for any stable system regardless of arrival distribution, service-time
+distribution, or scheduling policy — which is why it is the one capacity formula worth memorizing.
+It only requires that the system is not growing without bound.
+
+| Symbol | What it is |
+|--------|------------|
+| `QPS` | Arrival rate — requests per second entering the service |
+| `latency_seconds` | Mean time a request spends inside, queue wait included, not just inference |
+| `concurrency` | Requests resident in the system at any instant. Sizes your thread pool and queue |
+| `throughput_per_replica` | `B / batch_latency(B)` from the block above — one pod's sustainable rps |
+| `target_utilization` | Headroom factor, typically 0.6-0.7. Never size to 1.0 |
+| `ceil(...)` | Round up — you cannot deploy 6.43 pods |
+
+**Walk one example.** Size the fleet for 12,000 QPS at the `B = 32` operating point above:
+
+```
+  step 1  in-flight concurrency
+          12,000 rps x 0.012 s          = 144 requests resident at any instant
+
+  step 2  per-replica throughput (from the batching block)
+          32 / 0.012 s                  = 2,667 rps per replica
+
+  step 3  naive replica count
+          12,000 / 2,667                = 4.5   -> 5 replicas
+
+  step 4  same, with 70% utilization headroom
+          12,000 / (2,667 x 0.70)       = 6.43  -> 7 replicas
+
+  contrast: unbatched (B = 1, 235 rps/replica)
+          12,000 / (235 x 0.70)         = 72.9  -> 73 replicas
+```
+
+Seven pods versus seventy-three, for the same traffic and a 7.75ms latency concession. `144` is
+the other half of the answer: it is the number your connection pool, queue depth, and `max_num_seqs`
+must accommodate, and if any of them is set below 144 you will shed load at target QPS while the
+GPUs sit idle.
+
+**Why `target_utilization` exists.** Little's Law describes a stable system; at 100% utilization
+queueing theory says wait time goes to infinity. Traffic is bursty, so the mean is not what kills
+you — sizing to exactly 5 pods means the first 20% spike pushes latency past the SLA before the
+autoscaler's 300-500ms GPU cold start can respond. The 0.70 factor is what buys the autoscaler time.
+
+### Decoding Tail Latency — Why Percentiles Do Not Add
+
+The single most common capacity-planning error is summing percentiles across a call chain:
+
+```
+WRONG:  p99_end_to_end = p99_a + p99_b + p99_c + ...
+
+RIGHT:  P(all N services fast) = (1 - 0.01)^N        for N services each at p99
+        P(at least one slow)   = 1 - 0.99^N
+```
+
+**Read it like this.** "A percentile is a probability, and independent probabilities multiply
+rather than add — so chaining services does not stack their tails, it compounds their chances of
+being unlucky."
+
+| Symbol | What it is |
+|--------|------------|
+| `p99 = 10ms` | 99% of calls finish in 10ms or less; 1% do not. It is a probability statement |
+| `N` | Number of services on the critical path of one user request |
+| `0.99^N` | Probability every hop lands in its fast 99%. Shrinks fast as `N` grows |
+| `1 - 0.99^N` | Probability at least one hop is in its slow tail. This is what users feel |
+| `0.99^(1/N)` | The per-service percentile you must actually hit for an end-to-end p99 |
+
+**Walk one example.** Five services, each with p99 = 10ms:
+
+```
+  the naive answer:  5 x 10ms = 50ms "end-to-end p99"     <- wrong
+
+  what 50ms actually is:
+    P(all five fast) = 0.99^5 = 0.95099
+    So 50ms is the end-to-end p95.1, not the p99.
+
+  P(at least one hop in its tail) = 1 - 0.95099 = 4.90%
+    -> roughly 1 request in 20 exceeds 50ms, not 1 in 100.
+
+  chain length vs. fraction of requests hitting some tail:
+      N = 1    1.000%
+      N = 2    1.990%
+      N = 3    2.970%
+      N = 5    4.901%
+      N = 10   9.562%
+
+  to actually hit an end-to-end p99 across 5 hops, each hop needs:
+      0.99^(1/5) = 0.997992  ->  every service must hold its p99.8, not its p99
+```
+
+The last line is the operationally useful one. Meeting a 99th-percentile end-to-end SLA over five
+hops means each hop must meet its **99.8th** percentile — a far harsher bar than each hop's p99, and
+the reason deep microservice chains are so hostile to tail SLAs. Two fixes follow directly from the
+arithmetic: shorten `N` (fewer hops, parallel fan-out instead of serial chaining), or add hedged
+requests so one slow hop does not have to be waited on. Note also that these tails are only strictly
+independent in theory — a shared GC pause, a saturated NIC, or one hot downstream correlates them,
+which makes the real number worse than `1 - 0.99^N`, never better.
+
+### Decoding Cost per Prediction
+
+The number that decides GPU-vs-CPU and batch-size arguments, once and for all:
+
+```
+cost_per_prediction = (replicas x instance_cost_per_hour)
+                      / (QPS x 3600)
+```
+
+**Put simply.** "Take what the fleet bills you per hour, divide by how many predictions it produced
+in that hour."
+
+| Symbol | What it is |
+|--------|------------|
+| `replicas` | Pod count from the Little's Law block — the batching decision lands here |
+| `instance_cost_per_hour` | On-demand list price of one serving instance |
+| `QPS x 3600` | Predictions actually produced in an hour at target load |
+| `cost_per_prediction` | Dollars per single inference. Usually quoted per million to stay readable |
+
+**Walk one example.** Both fleets sized above, at $3.06/hour per instance (AWS `p3.2xlarge`
+on-demand) and 12,000 QPS:
+
+```
+  predictions per hour = 12,000 x 3,600 = 43,200,000
+
+  batched fleet  (B = 32, 7 replicas)
+    fleet cost   = 7  x $3.06  = $21.42 / hour
+    per million  = $21.42 / 43.2M x 1e6 = $0.4958 per million predictions
+
+  unbatched fleet (B = 1, 73 replicas)
+    fleet cost   = 73 x $3.06  = $223.38 / hour
+    per million  = $223.38 / 43.2M x 1e6 = $5.1708 per million predictions
+
+  ratio = 10.4x cheaper, for +7.75ms of worst-case latency
+  annual delta = ($223.38 - $21.42) x 24 x 365 = $1,769,170
+```
+
+That last line is the whole argument for dynamic batching stated in the only unit that ends
+budget debates. It is also why the Uber Michelangelo figure in Section 7 — "dynamic batching
+reduces GPU cost by 40% at peak" — is a conservative real-world result rather than a marketing
+number: their models had a smaller `fixed_overhead` share to amortize than this example does.
+
 ---
 
 ## 7. Real-World Examples

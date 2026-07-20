@@ -373,6 +373,223 @@ def check_schema_compatibility(current_schema: StructType, new_schema: StructTyp
     return breaking
 ```
 
+### Decoding the throughput and data-volume budget
+
+Sizing a pipeline is four divisions. The Section 14 case study states the inputs (500 GB/day of
+clickstream, ~2 GB/min sustained on a 20-node cluster, "roughly 4 hours") without showing the
+arithmetic that links them:
+
+```
+  job_minutes      = bytes_to_process / cluster_throughput
+  arrival_rate     = bytes_per_day / 86,400
+  headroom         = cluster_throughput / arrival_rate
+  per_node_rate    = cluster_throughput / node_count
+```
+
+**Put simply.** "How long the job runs is just volume divided by speed; whether the pipeline is
+viable at all is whether that speed beats the rate data is showing up."
+
+Those are two different questions and interviewers ask the second one. A job that finishes in 4
+hours is fine; a job that finishes in 26 hours on a daily schedule is a pipeline that falls
+permanently behind, one day per day, until the backlog is unrecoverable.
+
+| Symbol | What it is |
+|--------|------------|
+| `bytes_to_process` | The batch's input size. 500 GB for one daily partition here |
+| `cluster_throughput` | Sustained end-to-end rate the cluster achieves, not peak read bandwidth. 2 GB/min measured |
+| `86,400` | Seconds in a day. The only constant you need to turn "per day" into "per second" |
+| `arrival_rate` | How fast new data lands. The floor the cluster must beat |
+| `headroom` | Ratio of the two. `1.0` = exactly keeping up with zero margin; below `1.0` = falling behind forever |
+| `per_node_rate` | Throughput divided by node count. What you multiply when you scale out |
+
+**Walk one example.** The case study's own numbers, end to end:
+
+```
+  bytes_to_process   = 500 GB/day
+  cluster_throughput = 2 GB/min   on 20 nodes
+
+  job_minutes   = 500 / 2            = 250 min  = 4.17 hours     <- the "roughly 4 hours"
+  duty cycle    = 4.17 / 24          = 17.4% of the day busy
+
+  Now in absolute rates, to compare against arrival:
+  cluster       = 2 GB/min           = 2 x 1024 / 60      = 34.13 MB/s
+  arrival       = 500 GB/day         = 500 x 1024 / 86400 =  5.93 MB/s
+  headroom      = 34.13 / 5.93       = 5.76x
+
+  per_node_rate = 2 / 20 = 0.10 GB/min/node = 1.71 MB/s per node
+```
+
+Read the `5.76x` as the actual safety margin. It says the cluster could absorb a 5.7x traffic spike,
+or survive a 4-hour outage and still catch up within the same day. It also sizes the recovery
+question directly: at 34.13 MB/s a 3-day backlog of 1,500 GB takes `1500 / 2 = 750 min = 12.5 hours`
+to drain, which fits inside one day's 17.4% duty cycle with room to spare. Halve the cluster to 10
+nodes and headroom drops to 2.88x with a job time of 8.3 hours -- still viable; quarter it to 5
+nodes and the job takes 16.7 hours at 1.44x headroom, which is the point where a single bad day
+cascades.
+
+The `per_node_rate` is the number to scale with, and it is the one people skip. At 1.71 MB/s per
+node, hitting a 10 GB/min target needs `10 / 0.10 = 100 nodes` -- assuming the rate stays linear,
+which it does only for the narrow (shuffle-free) part of the job. The shuffle does not scale
+linearly, which is what the next two decoders are about.
+
+Volume estimation runs the same divisions backwards, from an event count. Section 7's Spotify figure
+of ~600 billion events/day, at an assumed 200 bytes per serialized event:
+
+```
+  events/sec  = 600e9 / 86,400        = 6,944,444 events/s     (~6.9M/s)
+  bytes/day   = 600e9 x 200 bytes     = 120 TB/day  (109.1 TiB)
+  at 34 MB/s  = 120e12 / 34.13e6      = 3.5e6 s = 40.7 days     <- one cluster cannot
+```
+
+That last line is the point of doing the estimate at all: it converts "600 billion events" from an
+impressive number into a hard verdict that the 20-node shape above is off by roughly two orders of
+magnitude, before anyone provisions anything.
+
+### Decoding the shuffle partition count
+
+Pitfall 3 below gives the sizing rule as a bare expression:
+
+```
+  shuffle_partitions = (input_size_gb * 1024) / 128
+```
+
+**What the formula is telling you.** "Convert the dataset to megabytes, then ask how many 128 MB
+chunks it takes -- because 128 MB is the amount of data one Spark task should hold at once."
+
+| Symbol | What it is |
+|--------|------------|
+| `input_size_gb` | Size of the data crossing the shuffle, in GB — not the raw source size if you filtered first |
+| `1024` | GB to MB. Purely a unit conversion |
+| `128` | Target MB per partition. The 128-256 MB rule of thumb from `create_spark_session` above |
+| result | Number of post-shuffle partitions, i.e. the number of tasks in the next stage |
+| `spark.sql.shuffle.partitions` | The knob this sets. Default `200`, which is a constant unrelated to your data |
+
+**Walk one example.** The default versus the rule, at two scales:
+
+```
+  dataset    default 200 partitions        rule: (GB x 1024) / 128        per partition
+  500 GB     500 / 200   = 2.5 GB each     (500 x 1024)/128   = 4,000       128 MB
+  5 TB       5120 / 200  = 25.6 GB each    (5120 x 1024)/128  = 40,960      128 MB
+
+  The default does not scale. It is a fixed 200 regardless of input, so
+  "MB per task" is whatever your data happens to make it -- 2.5 GB at 500 GB,
+  25.6 GB at 5 TB, both far past the 128-256 MB a task should carry.
+```
+
+The reason 128 MB is the target and not "as big as fits" is that partition size sets three things at
+once: task memory (a 25.6 GB partition cannot fit an executor heap, so it spills to disk or OOMs --
+exactly Pitfall 3's failure), scheduling granularity (fewer, longer tasks mean a straggler cannot be
+re-balanced, and a lost task re-does hours of work), and output file size (one task usually writes
+one file, so partition count is also file count).
+
+That last coupling is why the rule cuts both ways and why the small-files problem exists. Over-shoot
+the partition count and you get the mirror-image failure:
+
+```
+  500 GB with 4,000 partitions   -> 128 MB per output file      healthy
+  500 GB with 200,000 partitions -> 2.6 MB per output file      small-files problem
+  10 GB  with the default 200    -> 51 MB per output file       acceptable
+  10 GB  with 4,000 partitions   -> 2.6 MB per output file      small-files problem
+
+  Each file costs a metadata listing call and a task on every downstream read.
+```
+
+AQE (`spark.sql.adaptive.coalescePartitions.enabled`, set in `create_spark_session` above) exists
+precisely to repair the over-shoot direction at runtime: it starts with a deliberately high
+partition count and merges the small ones after it has measured the actual shuffle output. It cannot
+repair the under-shoot direction as well, which is why the explicit setting is still best practice.
+
+### Decoding skew and shuffle cost: what a bad partition key costs
+
+The partition-count rule assumes rows spread evenly across keys. They never do. `gold_user_features`
+in Section 14 salts the key for exactly this reason, and the arithmetic behind that choice is:
+
+```
+  ideal_bytes_per_partition = total_shuffle_bytes / partition_count
+  hot_key_bytes             = total_shuffle_bytes * hot_key_share
+  skew_ratio                = hot_key_bytes / ideal_bytes_per_partition
+  stage_wall_clock          = time of the SLOWEST task, not the average
+```
+
+**What it means.** "A shuffle stage is only as fast as its single fattest partition, and the
+partition key alone decides how fat that is."
+
+The last line is the whole lesson. Spark parallelism is bounded below by the largest key, because a
+single key's rows cannot be split across two reducers -- hashing sends them all to one place. Adding
+nodes does not help; the fat task is still one task on one core.
+
+| Symbol | What it is |
+|--------|------------|
+| `total_shuffle_bytes` | Bytes crossing the network at this shuffle boundary |
+| `partition_count` | Post-shuffle partitions, i.e. `spark.sql.shuffle.partitions` from the rule above |
+| `hot_key_share` | Fraction of all rows carried by the single most frequent key value |
+| `skew_ratio` | How many times bigger the hot partition is than a healthy one. `1.0` = perfectly even |
+| `salt_buckets` | How many sub-keys a hot key is split into (`salt_buckets = 50` in the code above) |
+
+**Walk one example.** 500 GB shuffled, correctly sized at 4,000 partitions, grouped by a key where
+one value (`country = 'US'`) holds 80% of rows. Assume a healthy 128 MB task takes 3 s:
+
+```
+  total_shuffle_bytes = 500 GB = 512,000 MB      partition_count = 4,000
+  ideal per partition = 512,000 / 4,000                     = 128.0 MB   (3 s)
+
+  hot key 'US' at 80% = 512,000 x 0.80 = 409,600 MB = 400 GB  -> ONE partition
+  the other 20%       = 102,400 MB spread over 3,999          = 25.6 MB each
+
+  skew_ratio  = 409,600 / 25.6                              = 16,000x
+
+  hot task    = 409,600 / 128 x 3 s = 9,600 s               = 2.67 hours
+  all 4,000 tasks of work = 4,000 x 3 s = 12,000 task-s
+  on 20 nodes x 8 cores = 160 slots  ->  12,000 / 160       = 75 s if even
+
+  stage wall clock = 9,600 s (the one fat task), not 75 s.
+  Cost of the bad partition key: 128x slower, on the same hardware.
+```
+
+The `128x` is the answer to "what does a bad partition key cost", and note what it is *not*: it is
+not a memory error, not a crash, not anything that appears in a log as a failure. The job succeeds.
+It just takes 2.67 hours instead of 75 seconds, and 3,999 of your 4,000 tasks finish in the first
+minute and then sit idle. The symptom is a Spark UI stage stuck at "3,999/4,000 completed" -- which
+is the single most recognizable skew signature there is.
+
+**What salting buys, in numbers.** Splitting the hot key across `salt_buckets` sub-keys divides its
+bytes by that factor, then a second aggregation re-combines them:
+
+```
+  salt_buckets = 50  (the default in gold_user_features above)
+
+    hot key per sub-key = 409,600 / 50 = 8,192 MB = 8 GB
+    hot task            = 8,192 / 128 x 3 s = 192 s = 3.2 min
+    speedup             = 9,600 / 192 = 50x        (exactly salt_buckets)
+
+  Speedup equals salt_buckets, so pick it from the target, not by habit:
+    buckets needed to reach 128 MB = 409,600 / 128 = 3,200
+
+  50 buckets: 2.67 h -> 3.2 min.  Good enough for most jobs.
+  3,200 buckets: fully even, but adds 3,200 partial rows per hot key
+                 to the second aggregation. Diminishing returns past ~a few hundred.
+```
+
+Salting is not free -- it turns one shuffle into two -- which is why it is a targeted fix for known
+hot keys rather than a default. The cheaper fix, when one side of a join is small, is to avoid the
+shuffle entirely:
+
+```
+  500 GB fact table joined to a 10 MB dimension table
+
+  shuffle join   : both sides re-partitioned by key across the network
+                   bytes moved ~ 500 GB + 10 MB    ~ 500 GB
+  broadcast join : dimension copied once to each executor, fact stays put
+                   bytes moved = 10 MB x 20 nodes  = 200 MB
+
+  ratio = 512,000 MB / 200 MB = 2,560x less network traffic
+```
+
+That 2,560x is why `spark.sql.autoBroadcastJoinThreshold` (default 10 MB) is the first thing to
+check on a slow join, and why the broadcast side must stay under ~100 MB: the driver collects it
+first, then every one of the 20 executors holds a full copy, so the memory cost is
+`table_size x (1 + node_count)` -- 200 MB total at 10 MB, but 2.1 GB at 100 MB and 21 GB at 1 GB.
+
 ---
 
 ## 7. Real-World Examples

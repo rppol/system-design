@@ -30,6 +30,106 @@ Key insight: the self-attention mechanism in ViT has O(n^2) complexity in the nu
 
 **Layer Normalization**: applied before (pre-norm in modern ViTs) rather than after each sub-layer, which stabilizes training of very deep models.
 
+### Decoding the patch-count formula
+
+```
+N = (H / P) x (W / P)          patches
+L = N + 1                      sequence length after prepending CLS
+```
+
+**In plain terms.** "Lay a grid of P-pixel squares over the image, count the squares, then add one extra slot for the token that will carry the whole-image summary."
+
+That framing matters because `L` — not the pixel count — is what every downstream cost scales with. Halving the patch size does not double the work; it quadruples the token count, and attention squares that again.
+
+| Symbol | What it is |
+|--------|------------|
+| `H`, `W` | Image height and width in pixels (224 for standard ViT) |
+| `P` | Patch side length in pixels — the `/16` in "ViT-B/16" |
+| `H / P` | How many patches fit across one axis; must divide evenly (the `assert` in the code) |
+| `N` | Number of patch tokens the encoder sees |
+| `L` | Actual sequence length, `N + 1`, because the learnable CLS token is prepended |
+| `D` | Embedding width every token is projected to (768 for ViT-B) |
+
+**Walk one example.** The three resolutions this file already mentions:
+
+```
+  config              H     P    H/P    N = (H/P)^2    L = N+1
+  ViT-B/16 @ 224     224   16     14        196          197
+  ViT-B/16 @ 384     384   16     24        576          577
+  ViT-B/8  @ 224     224    8     28        784          785
+
+  384px vs 224px at P=16:   576 / 196  = 2.94x more tokens
+  P=8 vs P=16 at 224px:     784 / 196  = 4.00x more tokens
+```
+
+The `197` in every diagram above is just `14 x 14 + 1`. The `(197, 768)` position-embedding
+shape in Pitfall 1 is `L x D` — which is exactly why moving to 384px breaks it: the tensor
+now needs to be `577 x 768`, so the stored 197 rows must be bicubically interpolated to 577.
+
+**Where the patch-embedding parameters go.** Flattening one patch gives `P x P x C` values,
+and the projection maps that to `D`:
+
+```
+  flattened patch = P x P x C = 16 x 16 x 3            =     768 values
+  projection W    = (P*P*C) x D = 768 x 768            = 589,824 weights
+  projection bias = D                                  =     768
+  patch embedding total                                = 590,592 params
+
+  CLS token       = 1 x D                              =     768 params
+  position embed  = L x D = 197 x 768                  = 151,296 params
+```
+
+For ViT-B/16 the flattened patch happens to be 768 values and `D` is also 768, so the
+projection is a square `768 x 768` matrix — that is the `W: 768x768` label in the second
+diagram, not a coincidence anyone designed for.
+
+### Decoding the scaled dot-product attention formula
+
+```
+A = softmax( Q K^T / sqrt(d_k) ) ;    output = A V
+d_k = D / num_heads = 768 / 12 = 64
+```
+
+**What this actually says.** "Score every token against every other token with a dot product, shrink those scores so they stay in a sane range, turn each row into a set of weights that sum to 1, and use those weights to average the value vectors."
+
+The division is not cosmetic. It is the difference between a distribution the gradient can move and a one-hot spike that is effectively frozen.
+
+| Symbol | What it is |
+|--------|------------|
+| `Q` | Queries — "what this token is looking for", shape `L x d_k` per head |
+| `K` | Keys — "what each token offers", shape `L x d_k` per head |
+| `V` | Values — the content actually mixed together, shape `L x d_k` per head |
+| `Q K^T` | The `L x L` raw score matrix; entry `(i, j)` = how much token i cares about token j |
+| `d_k` | Per-head dimension, `D / num_heads` (64 for ViT-B: 768 / 12) |
+| `sqrt(d_k)` | Variance corrector — `self.scale = head_dim ** -0.5` in the code, i.e. 1/8 |
+| `softmax(...)` | Turns each row of scores into non-negative weights summing to 1 |
+| `A V` | Weighted average of value vectors — the actual output mixing |
+
+**Walk one example.** Why `sqrt(d_k)` exists, in one row of four scores:
+
+```
+  If each q_i and k_i has mean 0 and variance 1, then a dot product of d_k terms has
+    variance = d_k = 64      ->   standard deviation = sqrt(64) = 8
+
+  So raw scores routinely land around +/- 8 to +/- 16. Take one such row:
+
+  raw scores  ->        16.0      8.0      0.0     -8.0
+  softmax(raw)     0.999665  0.000335   ~0.0     ~0.0     entropy 0.003 nats
+
+  divide by sqrt(d_k) = 8:
+  scaled       ->         2.0      1.0      0.0     -1.0
+  softmax(scaled)    0.6439   0.2369   0.0871   0.0321    entropy 0.947 nats
+
+  uniform-attention entropy for 4 tokens = ln(4) = 1.386 nats
+```
+
+Without the divisor the row is 99.97% on one patch — a hard argmax. Softmax gradients are
+proportional to `p_i (1 - p_i)`, which at `p = 0.999665` is `0.000335`: the gradient has all
+but vanished, so the model can never learn to attend anywhere else. Dividing by `sqrt(d_k)`
+puts the standard deviation back at 1, keeps the row spread across patches, and keeps the
+gradient alive. This is also the mechanism behind Best Practice 9's advice to monitor
+attention entropy — an entropy near 0 is precisely the saturated row above.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -42,6 +142,49 @@ Key insight: the self-attention mechanism in ViT has O(n^2) complexity in the nu
 | ViT-B/16 | 16×16 | 12 | 12 | 768 | 86M | 84.2% | ImageNet-21k |
 | ViT-L/16 | 16×16 | 24 | 16 | 1024 | 307M | 86.4% | ImageNet-21k |
 | ViT-H/14 | 14×14 | 32 | 16 | 1280 | 632M | 88.6% | JFT-3B |
+
+#### Where the 86M in that table comes from
+
+```
+params per encoder block ~ 4*D^2  (Q,K,V,out projections)
+                         + 8*D^2  (MLP: D -> 4D -> D)
+                         = 12*D^2
+```
+
+**Stated plainly.** "Almost every parameter in a ViT is a square `D x D` matrix, and each encoder block holds twelve of them — so the parameter count is essentially `12 x depth x D^2`."
+
+Once you internalize `12*D^2` per block you can size any ViT variant in your head, and you can see immediately why width (`D`, squared) dominates depth (linear).
+
+| Symbol | What it is |
+|--------|------------|
+| `D` | Embedding width — 384 for ViT-S, 768 for ViT-B, 1024 for ViT-L |
+| `4*D^2` | The four attention projections: Q, K, V, and the output `self.proj` |
+| `8*D^2` | The MLP's two layers, `D -> 4D` then `4D -> D`, each `4*D^2` |
+| depth | Number of stacked encoder blocks (12 for ViT-B, 24 for ViT-L) |
+| head_dim | `D / heads` = 64 for ViT-B; note `4*D^2` is independent of how you split heads |
+
+**Walk one example.** ViT-B/16 with `D = 768`, depth 12:
+
+```
+  attention per block   4 * 768^2                    =  2,359,296
+  MLP per block         2 * 768 * 3072               =  4,718,592
+  block subtotal        12 * 768^2                   =  7,077,888
+  x 12 blocks                                        = 84,934,656
+
+  biases + LayerNorm per block  (3D + D + 4D + D + 4D) ~     9,984
+  x 12 blocks                                        =    119,808
+
+  patch embedding (from section 3)                   =    590,592
+  position embeddings 197 x 768                      =    151,296
+  CLS token                                          =        768
+  final LayerNorm  2 * 768                           =      1,536
+  ---------------------------------------------------------------
+  total                                              = 85,798,656  ~ 86M
+```
+
+The 12 encoder blocks are 99.0% of the model; patch embedding, CLS, and position
+embeddings together are under 0.9%. That is why fine-tuning tricks target the blocks and
+why the classification head is treated as free.
 
 ### DeiT (Data-efficient Image Transformers)
 
@@ -56,6 +199,51 @@ Swin addresses ViT's quadratic attention cost by computing self-attention within
 | Swin-T | 29M | 81.3% | 50.5 | Tiny, comparable to ResNet-50 |
 | Swin-B | 88M | 83.5% | 51.9 | Base |
 | Swin-L | 197M | 86.3% | 53.5 | Large, SOTA before DINOv2 |
+
+#### Decoding O(n^2) vs O(n · W^2)
+
+```
+global attention   cost ~ n^2          (every token scores every token)
+window attention   cost ~ (n / W^2) x (W^2)^2 = n x W^2
+speedup            = n^2 / (n x W^2)  = n / W^2
+```
+
+**Read it like this.** "Global attention pays for one giant `n x n` score matrix; window attention pays for many tiny `W^2 x W^2` matrices instead, and because those small matrices shrink quadratically while their count grows only linearly, the total collapses to linear in `n`."
+
+The payoff is that the speedup is not a constant — it is `n / W^2`, so windowing helps *more* the larger the image gets, which is precisely the regime where global attention was breaking.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of tokens at the current stage (`56 x 56 = 3136` in Swin stage 1) |
+| `W` | Window side in tokens — 7 by default, so a window holds `W^2 = 49` tokens |
+| `n / W^2` | How many windows tile the feature map |
+| `(W^2)^2` | Score-matrix size inside one window: 49 x 49 = 2,401 entries |
+| `n x W^2` | Total window-attention score entries — linear in `n` |
+| `n^2` | Total global-attention score entries — quadratic in `n` |
+
+**Walk one example.** The quadratic jump first, then what windowing buys back:
+
+```
+  global attention, score-matrix entries per head
+    tokens n = 196   (224px, P=16)      196^2   =        38,416
+    tokens n = 576   (384px, P=16)      576^2   =       331,776    8.6x
+    tokens n = 4096  (512px, P=8)      4096^2   =    16,777,216  436.7x
+
+  2.3x the pixels (224 -> 384) costs 8.6x the attention.
+  Going to 512px with P=8 costs 436.7x -- 16.8M entries per head, per layer.
+
+  Swin stage 1, n = 3136 tokens, W = 7:
+    global                3136^2                =     9,834,496
+    windows               3136 / 49             =            64
+    per window            49 x 49               =         2,401
+    windowed total        64 x 2401 = 3136 x 49 =       153,664
+    speedup               3136 / 49             =         64.0x
+```
+
+That `n / W^2` factor is why Swin scales: at `n = 196` windowing would only save 4x, but at
+stage-1 resolution it saves 64x, and at `n = 4096` it saves 83.6x. The cost of the trick is
+that a token can only see its own 49-token window — which is exactly the hole the shifted
+windows (SW-MSA) in alternating blocks are there to patch.
 
 ### CLIP (Contrastive Language-Image Pretraining)
 
@@ -365,6 +553,45 @@ def build_vit_optimizer(model: nn.Module,
     return AdamW(param_groups)
 ```
 
+#### Decoding the layer-wise LR decay formula
+
+```
+lr_scale     = layer_decay ** (num_layers + 1 - layer_id)
+effective_lr = base_lr * lr_scale
+```
+
+**Put simply.** "Give the head the full learning rate, then multiply the rate by 0.65 for every step you walk backwards toward the input — so the layers that hold the most general pretrained knowledge barely move."
+
+The exponent is a *distance from the top*, not a depth index. That single sign flip is what people get backwards, and getting it backwards trains the pretrained early layers hardest — the exact catastrophic-forgetting failure Pitfall 2 describes.
+
+| Symbol | What it is |
+|--------|------------|
+| `layer_id` | 0 for patch embed / CLS / pos embed, `block_idx + 1` for blocks, 13 for the head |
+| `num_layers` | Number of transformer blocks — 12 for ViT-B |
+| `num_layers + 1 - layer_id` | Distance from the head; 0 at the head, 13 at the patch embedding |
+| `layer_decay` | Per-step shrink factor, 0.65 is the standard value used throughout this file |
+| `lr_scale` | Multiplier in `(0, 1]`; equals exactly 1.0 only at the head |
+| `base_lr` | Top-of-stack rate the head actually gets (1e-3 in this code, 1e-4 in Q&A guidance) |
+
+**Walk one example.** ViT-B, `base_lr = 1e-3`, `layer_decay = 0.65`, `num_layers = 12`:
+
+```
+  component            layer_id   exponent   lr_scale     effective_lr
+  head                    13          0      1.000000       1.00e-03
+  block 11                12          1      0.650000       6.50e-04
+  block 5                  6          7      0.049022       4.90e-05
+  block 0                  1         12      0.005688       5.69e-06
+  patch/CLS/pos embed      0         13      0.003697       3.70e-06
+
+  head LR / patch-embed LR = 1 / 0.65^13 = 270.5x
+```
+
+The head learns 270x faster than the patch embedding. That spread is the whole mechanism:
+edge and texture detectors in the earliest layers are already correct for any natural image,
+so they should drift only slightly, while the randomly initialized head must move a long way.
+Set `layer_decay = 1.0` and every row collapses to 1.00e-03 — that is the uniform-LR setup
+that scored 74% instead of 81% in Pitfall 2.
+
 ### CLIP Zero-Shot Classification
 
 ```python
@@ -414,6 +641,42 @@ def clip_zero_shot_classify(image_features: Tensor,
     logits = logits * 100  # CLIP temperature scaling
     return F.softmax(logits, dim=-1)
 ```
+
+#### Decoding the `* 100` temperature scaling
+
+```
+cos(u, v) = (u . v) / (||u|| ||v||)   in [-1, 1] ; with L2-normalized u, v this is just u . v
+probs     = softmax(100 * cosine_similarities)
+```
+
+**The idea behind it.** "Cosine similarities are trapped in a one-unit-wide band, which softmax reads as 'everything is roughly equally likely' — so multiply by 100 to stretch the real gaps into a range softmax can actually express."
+
+The `100` is `1 / temperature` with temperature 0.01, and CLIP learns it during training rather than fixing it. It is a readability knob on the probabilities, not new information — the argmax never changes.
+
+| Symbol | What it is |
+|--------|------------|
+| `u . v` | Dot product; after `F.normalize` both vectors have length 1 so this *is* the cosine |
+| `\|\|u\|\|` | L2 norm — divided out by normalization, which is why the code can skip it |
+| `image_features @ text_emb_matrix.T` | The `(B, C)` matrix of every image against every class prompt |
+| `100` | Inverse temperature; CLIP's learned logit scale, clamped near 100 |
+| `softmax` | Converts the scaled scores into a distribution over the C classes |
+
+**Walk one example.** Three class prompts scored against one image embedding:
+
+```
+  class            cosine    x 100
+  "a photo of a cat"   0.31      31
+  "a photo of a dog"   0.28      28
+  "a photo of a car"   0.24      24
+
+  softmax on raw cosines:    0.3445   0.3343   0.3212   <- looks like a coin flip
+  softmax on x 100 scores:   0.9517   0.0474   0.0009   <- the 0.03 gap now reads as 95%
+```
+
+Both rows rank cat > dog > car identically, so accuracy is unchanged — but only the second
+row is usable as a confidence score or a threshold. This is also why averaging the text
+embeddings across templates (and re-normalizing, as the code does) matters so much: at a
+100x logit scale, a 0.01 shift in cosine moves the probability by a full point.
 
 ---
 
@@ -595,3 +858,45 @@ ViTs keep gaining accuracy as data and model size grow, while CNNs hit diminishi
 **Fix**: Added a second stage of contrastive fine-tuning on sub-category hard negatives, mined by running k-NN at the sub-category level. Recall reached 87%.
 
 **Production deployment**: ViT-L/14 encoder exported to TensorRT FP16, 8ms per image on T4 GPU. FAISS IVFFlat with nlist=4096, nprobe=64: search over 5M vectors in ~3ms with recall@100 = 99.5% vs exact search. End-to-end query latency P99 = 25ms. Index stored in 5GB (d=768 float16 vectors, 5M items = 7.2GB raw, compressed by IVF-PQ to 5GB).
+
+### Decoding the index-size arithmetic
+
+```
+raw index bytes = num_items x d x bytes_per_component
+vectors scanned = (nprobe / nlist) x num_items
+```
+
+**What the formula is telling you.** "An embedding index costs one flat multiplication — how many things you stored, times how wide each vector is, times how many bytes each number takes — and IVF search cost is just the fraction of partitions you agree to open."
+
+Both numbers are fixed before you write a line of serving code, which makes embedding width and dtype capacity-planning decisions rather than modelling ones.
+
+| Symbol | What it is |
+|--------|------------|
+| `num_items` | Catalog size — 5M products here |
+| `d` | Embedding dimension, 768 (ViT-L/14 projects to this before indexing) |
+| `bytes_per_component` | 2 for float16, 4 for float32 — halving this halves the index |
+| `nlist` | Number of IVF partitions the vectors are clustered into (4096) |
+| `nprobe` | How many of those partitions a query actually scans (64) |
+| `nprobe / nlist` | Fraction of the catalog touched per query — the recall/latency dial |
+
+**Walk one example.** The 7.2GB and the ~3ms search quoted just above:
+
+```
+  raw storage
+    5,000,000 x 768 x 2 bytes = 7,680,000,000 bytes
+                              = 7.68 GB  (decimal)
+                              = 7.15 GiB (binary)   <- the "7.2GB" figure
+    float32 instead of float16 would be 15.36 GB.
+    IVF-PQ compresses 7.2 -> 5.0, a 1.44x reduction.
+
+  search work
+    nprobe / nlist = 64 / 4096         = 1/64 = 1.56% of partitions
+    vectors compared = 5,000,000 / 64  = 78,125 instead of 5,000,000
+                                       = 64x less work than exact search
+```
+
+Scanning 1.56% of the catalog still returns 99.5% recall@100 because IVF clusters put
+near-duplicates in the same partition, so the 64 probed lists contain nearly all true
+neighbours. Push `nprobe` to 128 and you double the scan for a fraction of a recall point;
+drop it to 16 and recall falls off a cliff — that tradeoff, not the encoder, is what sets
+the P99 = 25ms budget.

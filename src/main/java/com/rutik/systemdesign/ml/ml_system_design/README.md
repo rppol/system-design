@@ -574,7 +574,56 @@ Step 2 data flow:
    Step 6 retraining: daily full batch + hourly delta on fresh labels
 ```
 
+**Read it like this.** "The daily full run is the safety net; the hourly delta is the freshness lever. What the cadence actually buys is a bound on how old the model scoring a live impression is allowed to be."
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Refresh interval — how often a newly trained model replaces the serving one |
+| max staleness | `T`. The age of the model just before the next swap, i.e. the worst case |
+| mean staleness | `T / 2`, assuming impressions arrive uniformly across the interval |
+| `8760 / T` | Retrains per year at interval `T` hours. The cost side of the trade |
+| attribution window | The ~1h before a click label exists. A hard floor under any useful `T` |
+
+**Walk one example.** The two cadences above, side by side:
+
+```
+  T = 24h (daily full)    : max staleness 24h, mean 12h,     365 retrains/yr
+  T =  1h (hourly delta)  : max staleness  1h, mean  0.5h,  8,760 retrains/yr
+
+  The hourly delta cuts worst-case staleness 24x -- for 24x the training runs.
+  That is only affordable because a delta warm-starts from the daily model
+  rather than rebuilding it from scratch.
+```
+
+**Where the floor comes from, and why it is not arbitrary.** Labels arrive roughly an hour late because the click attribution window has to close first. So even at `T = 1h` the serving model was trained on data that is itself about an hour old, and pushing `T` to 15 minutes buys nothing — there is no fresher label to train on. The refresh cadence is bounded below by label latency, not by compute. This is the general shape of the tradeoff: shorten `T` until it hits the label-availability floor, then stop, and spend the remaining effort on shrinking that floor instead.
+
 LightGBM offline AUC = 0.78, log-loss = 0.39, calibration error < 2%. Serving p99 = 2ms (ONNX, batch of 1), throughput 5M/hr = ~1400 req/s sustained per replica. Online AUC tracked on labels that arrive ~1 hour after impression (click attribution window).
+
+**What the formula is telling you.** "Convert the traffic to a per-second rate, divide by what one replica absorbs, then divide again by the utilization you are willing to run at — the last division is the one people skip."
+
+| Symbol | What it is |
+|--------|------------|
+| `impressions/hour` | The stated arrival rate. Useless until converted to per-second |
+| `QPS = impressions / 3600` | Hourly volume as a rate comparable to a latency budget |
+| `1 / p99_model_seconds` | Predictions per second one serialized worker sustains |
+| `ceil(QPS / per-worker QPS)` | Fleet size at 100% utilization — a floor, never the plan |
+| utilization target | Fraction of peak you actually intend to run at. Divides into the fleet size |
+
+**Walk one example.** Sizing the CTR service from the two stated numbers:
+
+```
+  5,000,000 impressions / 3,600 s = 1,389 req/s          <- the "~1400 req/s" above
+
+  ONNX single-thread p99 = 2ms, so one worker sustains
+      1 / 0.002 = 500 predictions/s
+
+  workers at 100% util :  1,389 / 500          = 2.78  ->  3
+  workers at  70% util :  1,389 / (500 x 0.70) = 3.97  ->  4
+
+  Daily scored volume  :  5,000,000 x 24 = 120,000,000 impressions
+```
+
+The gap between 3 and 4 is the entire margin for a rolling deploy, a GC pause, or an evening traffic peak — and 1,389 req/s is an *average*, so the peak hour is already above it. Note also that 500 predictions/s per worker comes from a P99, not a mean: sizing on mean latency systematically under-provisions, because the requests that pile up in the queue are precisely the slow ones.
 
 **Step 1 requirements as code (latency-aware feature budget):**
 
@@ -590,6 +639,32 @@ class SLA:
     min_auc: float = 0.75
     max_calibration_error: float = 0.02
 ```
+
+**Put simply.** "The budget is a subtraction, not a target. Every millisecond one stage takes is a millisecond no other stage can ever have."
+
+| Symbol | What it is |
+|--------|------------|
+| `p99_latency_ms` | The promise: 10ms at the 99th percentile — not the mean, not the median |
+| `feature_fetch_ms` | Online store read, 5ms. Larger than inference here, which is typical |
+| `model_latency_ms` | Inference share, 2ms. The stage everyone reaches for first |
+| headroom | `p99 - sum(stages)`. Absorbs GC pauses, network jitter, and queueing |
+| `min_auc` | Quality floor. The latency work is only valid if this still holds |
+
+**Walk one example.** The budget in the dataclass, laid out as the subtraction it is:
+
+```
+    budget        10.0 ms
+  - feature fetch  5.0        (Redis online read)
+  - model          2.0        (ONNX Runtime, batch of 1)
+  -----------------------
+    headroom       3.0 ms     30% of the budget, deliberately unspent
+
+  That 3ms is also where the timeout below comes from: the fallback fires at
+  0.008s = 8ms, leaving 2ms to compute and return the historical CTR prior
+  and still land inside 10ms.
+```
+
+**Two things this layout makes obvious.** First, feature fetch is 2.5x inference — so "optimize the model" is the wrong first instinct here, and profiling before optimizing is not generic advice but a direct reading of the budget. Second, the headroom is not slack to be reclaimed later. Spend it and the arithmetic still balances at the *mean*, while the P99 quietly breaks, because tail events land in exactly the reserve you gave away. A budget with zero headroom is a budget that only holds when nothing goes wrong.
 
 **Step 3-4: training and ONNX export for low-latency serving:**
 

@@ -269,6 +269,43 @@ def predictive_entropy(probs: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     return -np.sum(probs * np.log(probs + eps), axis=1)
 ```
 
+**What this actually says.** "All three read the *same* predicted distribution and all three return 'how unsure is the model' — but they look at different parts of it, so they will not agree on which example to buy a label for."
+
+This is the point most people miss. These are not three names for one score. Least confidence reads one number, margin reads two, entropy reads the whole vector, and the choice is a real modeling decision with a real cost in labels.
+
+| Symbol | What it is |
+|--------|------------|
+| `probs` | One row per pool example, one column per class; each row sums to `1.0` |
+| `1 - max p` | Least confidence. How much probability mass is *not* on the top guess |
+| `p_top1 - p_top2` | Margin. How far the winner beats the runner-up. Small = a genuine two-way tie |
+| `-(...)` in `margin_sampling` | Sign flip so that "more uncertain" is always a *larger* score, matching the other two |
+| `-Σ p log p` | Entropy. Spread across *all* classes, in nats. `0` = certain; `ln(C)` = uniform over `C` classes |
+| `eps = 1e-12` | Guard so a predicted `0.0` does not make `log` return `-inf` |
+
+**Walk one example.** Three pool examples, four classes, one model — every row is a valid probability distribution, and every acquisition function picks a different winner:
+
+```
+  example      class probabilities        1 - max p    top1-top2    -SUM p log p
+     A      [0.50, 0.48, 0.01, 0.01]       0.5000       0.0200         0.7910
+     B      [0.45, 0.20, 0.20, 0.15]       0.5500       0.2500         1.2877
+     C      [0.40, 0.30, 0.28, 0.02]       0.6000       0.1000         1.1624
+
+  who does each function send to the human?
+     least confidence  -> C   (0.6000 is the largest)
+     margin sampling   -> A   (0.0200 is the smallest gap)
+     entropy           -> B   (1.2877 is the largest spread)
+```
+
+Three functions, one distribution, three different labels purchased. Work out *why* each one is defensible:
+
+- **A** is a knife-edge between two classes — `0.50` vs `0.48` — and the model has firmly ruled out the other two. One label resolves a clean binary question. Margin sees this; least confidence does not, because `0.50` still looks like a fairly confident top guess.
+- **C** has the least mass on its top guess, so by the "how sure is the winner" reading it is the least certain. But its runner-up is a full `0.10` behind, so it is not actually a tie.
+- **B** spreads mass over three plausible classes. Entropy rewards that breadth; margin ignores it entirely, seeing only `0.45 - 0.20`.
+
+**Which to reach for.** Margin is usually the best default for multi-class work: it targets the specific confusion a single label can settle, and it is the cheapest to compute. Entropy is right when several classes are genuinely live and you want the label that reduces total confusion the most. Least confidence is the weakest of the three — it throws away everything below the top class, which is why the §4.2 table flags it as "ignores runner-up."
+
+**A calibration warning that applies to all three.** Every one of these scores is a function of predicted probabilities, so an uncalibrated model corrupts all of them identically. A network that reports `0.95` when it is right only 70% of the time produces uncertainty scores that are confidently wrong, and active learning will dutifully spend the budget on the wrong examples. Calibrate before you acquire.
+
 ### One active-learning iteration (pool-based)
 
 ```python
@@ -385,6 +422,39 @@ def lf_summary(L_col: np.ndarray, y_dev: np.ndarray | None = None) -> dict:
     # An LF with 2% coverage and 95% accuracy and one with 40% coverage and 70%
     # accuracy are both useful for different reasons; track both.
 ```
+
+**Put simply.** "Coverage is how often the rule speaks; accuracy is how often it is right when it does. Neither number means anything without the other, so never rank labeling functions by one alone."
+
+The trap is that both metrics are computed over different denominators — coverage over the whole corpus, accuracy over only the fired subset — so an LF can score beautifully on either while being useless. Multiplying them out on the real corpus size is what makes the comparison honest.
+
+| Symbol | What it is |
+|--------|------------|
+| `L_col` | One column of the label matrix: this LF's vote on every example, `-1` where it abstained |
+| `fired` | Boolean mask of the rows where the LF actually voted. Its mean is the coverage |
+| `coverage` | Fraction of the whole corpus the LF labels. Denominator = all examples |
+| `accuracy` | Fraction correct *among fired rows only*. Denominator = the fired subset, not the corpus |
+| `y_dev` | A small hand-labeled dev set — the only way to estimate accuracy at all |
+| `ABSTAIN = -1` | The LF declining to vote. Abstention is not an error; it is the LF knowing its scope |
+
+**Walk one example.** The two LFs named in the docstring, scored against the case study's 4M-ticket corpus:
+
+```
+   LF        coverage   accuracy   tickets labeled   correct      wrong
+   narrow      2%         95%           80,000       76,000       4,000
+   broad      40%         70%        1,600,000    1,120,000     480,000
+
+   correct labels:  1,120,000 / 76,000  =  14.7x more from the broad LF
+   wrong labels:      480,000 /  4,000  =   120x more from the broad LF
+```
+
+The broad LF contributes about fifteen times more correct labels — and a hundred and twenty times more wrong ones. That asymmetry is exactly why you cannot pick one metric and sort. Both LFs belong in the set, and they belong there for different reasons:
+
+- The **narrow, accurate** LF is a near-gold signal on a small slice. When the label model learns per-LF accuracies, this one earns a heavy vote and can outvote several noisy LFs wherever it fires.
+- The **broad, noisy** LF is what gets you from 200 labels to a training set at all. Its 480,000 errors are tolerable *only because* the label model knows it is a 70% voter and discounts it accordingly.
+
+**Why majority vote is the wrong aggregator here.** `majority_label_model` gives every non-abstaining LF one equal vote, so three noisy 70% LFs that happen to agree will overrule the 95% LF on the slice where it is nearly always right. Snorkel's `LabelModel` estimates each LF's accuracy — and the correlations between LFs that share a heuristic — so the reliable voter keeps its weight and three copies of the same rule do not count as three independent votes. That distinction is the whole reason weak supervision works, and it is the standard interview probe on this topic.
+
+**The number to watch during LF development.** Coverage is what you optimize early — an LF set covering 40% of 4M tickets yields 1.6M weakly labeled examples, which is what the case study's v0 model trains on. Accuracy is what you optimize late, once coverage is adequate, because past a point adding noisy coverage starts costing more than the extra examples are worth.
 
 ---
 
@@ -630,6 +700,35 @@ batch = uncertainty_then_diversity(probs, embeddings, batch_size=300,
 A second issue: the team initially evaluated on the queried tickets and panicked at a 0.55 "accuracy" — until they realized those were the hardest examples by construction and moved evaluation to a held-out random gold set.
 
 **Outcome.** After weak supervision plus five active-learning rounds (1,500 gold labels total), macro-F1 reaches ~0.86 — versus ~0.71 from weak supervision alone and far above anything 200 labels could produce. The rare intents, deliberately targeted by active learning, go from ~0.3 to ~0.7 F1. The labeling functions remain in version control, so when the product adds a new feature the team edits an LF and regenerates labels instead of re-annotating from scratch.
+
+**Where the budget actually went.** The headline claim in §1 — active learning reaches a target with "often 2-5x fewer" labels — is worth pushing real numbers through, because it is the number that justifies the entire loop to a budget holder.
+
+**Stated plainly.** "If uncertainty sampling is `k` times more label-efficient than random, then the `N` labels you spent buy you what `k × N` random labels would have — and the saving is the `(k-1) × N` labels you never had to pay for."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Gold labels actually purchased. Here `1,500`, spread over 5 rounds of 300 |
+| `k` | Label-efficiency multiplier vs random sampling. The stated range is `2-5x` |
+| `k × N` | Random-equivalent budget: how many random labels would reach the same accuracy |
+| `(k-1) × N` | Labels saved outright |
+| `1 - 1/k` | The same saving as a percentage of the random-equivalent budget |
+
+**Walk one example.** The case study's own `1,500`-label spend, evaluated across the stated efficiency range:
+
+```
+   efficiency k    labels bought    random-equivalent    labels saved    % saved
+       2x             1,500              3,000              1,500        50.0%
+       3x             1,500              4,500              3,000        66.7%
+       5x             1,500              7,500              6,000        80.0%
+
+   round structure:  1,500 / 300 = 5 rounds, each retraining before the next
+```
+
+Even at the pessimistic end of the range the team avoids buying 1,500 expert labels; at the middle it avoids 3,000. That is the argument for the loop, and note it is a *multiplier on whatever budget you have*, so it grows in absolute terms exactly when labels are most expensive.
+
+**The saving compounds with weak supervision, it does not merely add.** The two techniques attack different denominators. Weak supervision moved the starting point from 200 labels to 1.6M weak ones (40% coverage of the 4M corpus), lifting macro-F1 from unusable to `0.71`. Active learning then spent 1,500 gold labels to move `0.71 -> 0.86`, a `+0.15` gain. Spending those same 1,500 labels from a cold start — no weak supervision, 30 classes, 50 labels per class — would not have produced a usable model at all. The gain per gold label is `0.15 / 1,500 = 0.0001 F1 per label`, which sounds negligible until you notice it is the difference between shipping and not shipping.
+
+**Where the biggest per-label return showed up.** The rare intents went from `~0.3` to `~0.7` F1 — a `+0.40` gain against the `+0.15` overall — precisely because acquisition was steered at the LF-uncovered classes. Uniform random labeling over 4M tickets would have allocated labels in proportion to class frequency, so the rare intents would have received almost none of the 1,500 and stayed at `0.3`. Choosing *where* the budget lands is worth more here than the size of the budget.
 
 **Interview discussion points.** Why 200 labels demanded weak supervision rather than straight active learning; why the downstream model must generalize beyond LF coverage; how a correlation-aware label model beats majority vote; why the first uncertainty-only batch was redundant and how diversity fixed it; and why evaluating on queried examples gave a misleadingly low number.
 

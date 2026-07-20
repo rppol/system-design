@@ -153,6 +153,35 @@ ASPP runs four parallel dilated convolutions plus global pooling to capture cont
 at rates 6/12/18 without downsampling, then fuses low-level detail before upsampling
 — dilation buys a large receptive field while keeping boundaries sharp.
 
+**What this actually says.** The rates 6/12/18 are not tuning noise — each one names how far apart the nine weights of a 3x3 kernel are spread. "Spacing a fixed 3x3 kernel further apart lets it see a much wider patch of the image for exactly the same nine multiplications."
+
+The rule that turns a dilation rate into a footprint is `k_eff = k + (k - 1) x (d - 1)`.
+
+| Symbol | What it is |
+|--------|-----------|
+| `k` | The real kernel size — how many weights per side. Always 3 in ASPP |
+| `d` | Dilation (atrous) rate. `d = 1` is an ordinary conv; `d = 2` inserts one hole between weights |
+| `k_eff` | The effective footprint the kernel covers after the holes are counted |
+| `(k - 1)` | Number of gaps between weights along one side — 2 for a 3x3 kernel |
+| `(d - 1)` | Holes inserted per gap. This is what grows for free |
+
+**Walk one example.** The four ASPP branches, all with `k = 3` (nine weights each):
+
+```
+  rate d    k_eff = 3 + 2 x (d - 1)     footprint    learned weights
+  ------    ----------------------      ---------    ---------------
+     1      3 + 2 x 0  =  3               3 x 3             9
+     2      3 + 2 x 1  =  5               5 x 5             9      <- the "d=2 acts 5x5" claim
+     6      3 + 2 x 5  = 13              13 x 13            9
+    12      3 + 2 x 11 = 25              25 x 25            9
+    18      3 + 2 x 17 = 37              37 x 37            9
+
+  widest branch, measured back on the input image (encoder stride 16):
+      37 x 16 = 592 input pixels of context, from 9 weights
+```
+
+Parameter count is flat down that whole column — 9 weights at every rate. That is the entire trade dilation makes: receptive field grows linearly in `d` while cost stays constant, and crucially resolution never drops, so boundaries stay where pooling would have smeared them. Without dilation the only way to reach 37x37 of context is to pool the feature map down and upsample back, which is exactly the boundary blur DeepLab was built to avoid. The cost is gridding artifacts — at large `d` neighbouring output pixels sample disjoint input pixels, which is why ASPP runs several rates in parallel rather than one big one.
+
 ### Mask R-CNN Additional Mask Branch
 
 ```mermaid
@@ -303,6 +332,95 @@ class FocalLoss(nn.Module):
         return focal[target != self.ignore_index].mean()
 ```
 
+**In plain terms.** The Dice coefficient `2 * |A ∩ B| / (|A| + |B|)` asks one question: "of all the pixels either of us called foreground, how much did we actually agree on — counted twice, because the overlap belongs to both of us."
+
+| Symbol | What it is |
+|--------|-----------|
+| `A` | The set of pixels the model predicted as foreground |
+| `B` | The set of pixels the ground-truth mask marks as foreground |
+| `A ∩ B` | The overlap — pixels both agree on. In code, `(pred_flat * target_flat).sum()` |
+| `\|A\| + \|B\|` | Total foreground pixels claimed by both masks, overlap counted twice |
+| `2 *` | Compensates for that double-count, so a perfect match scores exactly 1.0, not 0.5 |
+| `smooth` | A 1.0 added to both halves. Guards the empty-mask case where the ratio is 0/0 |
+| `1.0 - dice` | Flips a similarity score into a loss — higher agreement means lower loss |
+
+**Walk one example.** An 8x8 = 64-pixel tile with one small lesion. Ground truth marks 12 pixels; the model predicts 10; they overlap on 8:
+
+```
+  ground truth foreground |B| = 12 pixels
+  predicted foreground    |A| = 10 pixels
+  overlap        |A n B|      =  8 pixels
+  missed (FN) = 12 - 8 = 4        false alarms (FP) = 10 - 8 = 2
+  correct background (TN) = 64 - 8 - 2 - 4 = 50
+
+  Dice = 2 x 8 / (12 + 10) = 16 / 22 = 0.7273
+  loss = 1 - 0.7273                  = 0.2727
+
+  with smooth = 1.0:
+  Dice = (2 x 8 + 1) / (22 + 1) = 17 / 23 = 0.7391    <- barely moves; it only
+                                                         matters near 0/0
+
+  same tile, other scores:
+  IoU           =  8 / (12 + 10 - 8) = 8 / 14 = 0.5714
+  pixel accuracy = (8 + 50) / 64              = 0.9063   <- flatters the model
+```
+
+That last pair is the reason Dice exists. Pixel accuracy reads 90.6% because 50 of the 64 pixels are easy background the model got for free; Dice reads 0.727 and IoU 0.571 because both ignore the true negatives entirely. Predict all-background on this tile and accuracy still shows 81.3% while Dice collapses to 0. Note also that Dice is always the friendlier number of the two — for the same masks Dice 0.727 versus IoU 0.571 — since Dice weights the overlap twice, so never compare a Dice figure against an IoU figure from another paper.
+
+**The idea behind it.** The combined loss `(1 - w) * CE + w * Dice` is a hedge: "let cross-entropy grade every pixel independently, let Dice grade the shape as a whole, and trust each about half."
+
+| Symbol | What it is |
+|--------|-----------|
+| `CE` | Per-pixel cross-entropy. Gives a clean gradient on every pixel, but is dominated by background |
+| `Dice` | The region-overlap loss above. Cares about shape, ignores true negatives |
+| `w` | `dice_weight`, 0.5 by default. 0 is pure CE, 1 is pure Dice |
+| `(1 - w)` | CE's share — the two weights sum to 1, so the loss scale stays comparable across settings |
+
+**Walk one example.** Reusing the same 64-pixel tile, with the model assigning 0.9 confidence to its 58 correct pixels and 0.3 to the 6 it got wrong:
+
+```
+  CE  = [58 x -ln(0.9)  +  6 x -ln(0.3)] / 64
+      = [58 x 0.1054    +  6 x 1.2040  ] / 64
+      = [6.1109         +  7.2238      ] / 64
+      = 13.3348 / 64 = 0.2084
+
+  Dice loss (from above)                      = 0.2727
+
+  combined (w = 0.5) = 0.5 x 0.2084 + 0.5 x 0.2727
+                     = 0.1042 + 0.1364 = 0.2406
+```
+
+Look at the CE breakdown: 6 wrong pixels contribute 7.22 of the 13.33 total, slightly more than the 58 correct ones. That is CE working as intended on a mild imbalance — but push the background ratio to a realistic 99:1 and the 58 becomes 9,900 easy pixels whose tiny individual losses swamp the handful of hard ones. Dice cannot be swamped that way because its denominator only counts foreground. Drop the Dice term on a tumor task and the model converges to predicting all-background; drop the CE term and early training has almost no gradient at all, because with near-zero overlap the Dice ratio is flat.
+
+**What it means.** Focal loss `alpha * (1 - pt)^gamma * CE` says: "keep cross-entropy, but multiply each pixel's loss by how badly it was missed, so confident-and-correct pixels stop contributing."
+
+| Symbol | What it is |
+|--------|-----------|
+| `pt` | Probability the model gave the *correct* class. Recovered as `exp(-ce)` in the code |
+| `(1 - pt)` | How wrong the pixel is. Near 0 when confident and right, near 1 when badly wrong |
+| `gamma` | Focusing power, 2.0 by default. Higher means easy pixels are silenced harder |
+| `alpha` | Class-balance weight, 0.25 here. A flat rescale of the whole term |
+| `(1 - pt)^gamma` | The modulating factor — the entire mechanism, a number in 0..1 that dims easy pixels |
+
+**Walk one example.** One easy pixel (`pt = 0.9`) versus one hard pixel (`pt = 0.3`), at `gamma = 2`, `alpha = 0.25`:
+
+```
+                       easy pixel        hard pixel
+                       pt = 0.9          pt = 0.3
+  CE = -ln(pt)          0.1054            1.2040
+  (1 - pt)              0.1               0.7
+  (1 - pt)^2            0.01              0.49        <- 100x down vs 2.04x down
+  x alpha (0.25)
+  focal loss            0.000263          0.147487
+
+  attention ratio, hard : easy
+      under plain CE     1.2040 / 0.1054 =  11.4 : 1
+      under focal        0.147487 / 0.000263 = 559.9 : 1
+      amplification      559.9 / 11.4 = 49x   ( = (0.7 / 0.1)^2 )
+```
+
+The amplification is exactly `((1 - pt_hard) / (1 - pt_easy))^gamma = (0.7/0.1)^2 = 49`, which makes `gamma` legible: it is the exponent on the wrongness ratio. At `gamma = 0` the modulating factor is 1 everywhere and focal collapses back to plain weighted CE. At `gamma = 2` a pixel the model already calls correctly at 0.9 contributes 0.000263 — effectively nothing — so the gradient budget flows to boundary pixels and rare classes. Push `gamma` too high and training destabilizes, because the loss ends up driven by a shrinking handful of pixels, several of which are simply mislabeled ground truth.
+
 ### U-Net Implementation
 
 ```python
@@ -436,6 +554,42 @@ class SegmentationMetrics:
         self.confusion_matrix.zero_()
 ```
 
+**What the formula is telling you.** Per-class IoU is `tp / (tp + fp + fn)`, and the missing fourth cell is the whole story: "score each class on the pixels *someone* claimed for it, and refuse to award any credit for correctly ignoring it."
+
+| Symbol | What it is |
+|--------|-----------|
+| `cm[i][j]` | Confusion-matrix cell: pixels whose ground truth is class `i` and prediction is class `j` |
+| `tp` | The diagonal, `cm[i][i]` — pixels of class `i` correctly labelled `i` |
+| `fp` | `cm.sum(dim=0) - tp` — a column sum. Predicted class `i` but ground truth said otherwise |
+| `fn` | `cm.sum(dim=1) - tp` — a row sum. Ground truth was class `i` but the model called it something else |
+| `tn` | Absent by design. Including it would let rare classes score high for being skipped |
+| `1e-10` | Epsilon guarding a class with zero pixels in both masks, which would give 0/0 |
+| `mIoU` | The unweighted mean of the per-class IoUs — every class counts equally, however rare |
+
+**Walk one example.** A 10,000-pixel street scene over three classes, confusion matrix rows = ground truth, columns = prediction:
+
+```
+                        predicted
+                   road    car   pole   | GT total
+        road       8000    100      0   |   8100
+  GT    car         200   1500     50   |   1750
+        pole        100     30     20   |    150
+        ------------------------------------------
+   pred total      8300   1630     70   |  10000
+
+  class   tp     fp    fn    IoU = tp / (tp + fp + fn)
+  ----    ----   ---   ---   ------------------------
+  road    8000   300   100   8000 / 8400 = 0.9524
+  car     1500   130   250   1500 / 1880 = 0.7979
+  pole      20    50   130     20 /  200 = 0.1000
+
+  mIoU = (0.9524 + 0.7979 + 0.1000) / 3 = 1.8503 / 3 = 0.6168
+
+  pixel accuracy = (8000 + 1500 + 20) / 10000 = 9520 / 10000 = 0.9520
+```
+
+95.2% pixel accuracy, 61.7% mIoU — from one identical set of predictions. The gap is entirely the pole class, which is 150 of 10,000 pixels (1.5%) and scores an IoU of 0.10. Because accuracy is a pixel-weighted average, poles can only move it by 1.5 points no matter how badly they are segmented; because mIoU is a *class*-weighted average, that same failure drags a full third of the score. Report accuracy on a driving model and you can ship something that cannot see thin vertical objects. This is also why mIoU is the published Cityscapes number in the §4 table, and why the ignore_index=255 mask matters: annotators mark ambiguous boundary pixels as 255 so they never enter any cell of this matrix.
+
 ### Panoptic Quality Formula
 
 ```python
@@ -451,6 +605,36 @@ def panoptic_quality(tp: int, fp: int, fn: int,
     pq = sq * rq
     return {"PQ": pq, "SQ": sq, "RQ": rq}
 ```
+
+**Put simply.** `PQ = SQ x RQ` splits one score into two independent questions: "did you find the right objects, and once found, did you trace them well?" Multiplying means a model must do both — being excellent at one cannot rescue failure at the other.
+
+| Symbol | What it is |
+|--------|-----------|
+| `tp` | Matched segments — a predicted segment overlapping its ground-truth segment at IoU > 0.5 |
+| `fp` | Predicted segments that matched nothing. Hallucinated objects |
+| `fn` | Ground-truth segments no prediction matched. Missed objects |
+| `iou_sum` | Sum of the IoUs of the matched pairs only. Each term is > 0.5 by the matching rule |
+| `RQ` | `tp / (tp + 0.5 fp + 0.5 fn)` — this is exactly the F1 score, counted over segments not pixels |
+| `SQ` | `iou_sum / tp` — mean mask quality *of the segments you found*. Ranges 0.5 to 1.0 |
+| `0.5 x` | Splits each error evenly between precision and recall, which is what makes RQ an F1 |
+
+Note that the IoU > 0.5 matching threshold guarantees each match is unique — no two predictions can both exceed 0.5 IoU with the same ground-truth segment — so the matching needs no greedy tie-breaking.
+
+**Walk one example.** One image, 8 matched segments, 2 hallucinated, 3 missed, matched IoUs summing to 6.4:
+
+```
+  tp = 8    fp = 2    fn = 3    iou_sum = 6.4
+
+  RQ = 8 / (8 + 0.5 x 2 + 0.5 x 3)
+     = 8 / (8 + 1.0 + 1.5)
+     = 8 / 10.5 = 0.7619        <- did you find the right objects (F1)
+
+  SQ = 6.4 / 8 = 0.8000         <- how cleanly did you trace the ones you found
+
+  PQ = 0.8000 x 0.7619 = 0.6095 <- 60.95 PQ
+```
+
+The decomposition is what makes PQ useful for debugging rather than just ranking. Here SQ is 0.80, so the masks are decent; RQ is 0.76, driven by 3 missed segments against only 2 false alarms — the model is under-detecting, so the fix is detection recall (lower the confidence threshold, oversample rare things), not better mask heads. Had SQ been 0.55 with RQ at 0.95, the opposite fix applies. Note SQ can never drop below 0.5 by construction, since anything below IoU 0.5 is never counted as a match and instead lands in `fp` and `fn`, punishing RQ twice. For scale, Mask2Former's 57.8 PQ on COCO from the §4 table sits just under this worked example.
 
 ---
 

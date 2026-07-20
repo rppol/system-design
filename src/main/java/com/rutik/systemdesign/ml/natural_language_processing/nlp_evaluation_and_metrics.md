@@ -43,11 +43,94 @@ Key insight: Perplexity does not correlate with downstream task performance for 
 
 **n-gram precision clipping:** Raw n-gram precision can be gamed by repeating high-frequency words. BLEU clips each n-gram count to the maximum count in any reference: for "the the the the the" with reference "the cat sat on the mat," "the" is clipped to count 2 (max occurrences in any reference).
 
+**Read it like this.** "You only get credit for a word as many times as the reference actually used it. Say it a sixth time and the sixth one counts as a mistake."
+
+Clipping is the answer to the most obvious way to cheat a precision metric: precision is `matches / candidate_length`, so a candidate made entirely of one guaranteed-correct word would score 1.0.
+
+| Symbol | What it is |
+|--------|------------|
+| `count_cand(g)` | How many times n-gram `g` appears in the candidate |
+| `max_ref(g)` | The largest number of times `g` appears in any single reference |
+| `min(count_cand, max_ref)` | The clipped count — the credit actually granted |
+| `p_n` | Clipped matches divided by total candidate n-grams of size `n` |
+
+**Walk one example.** The repetition attack from the paragraph above, scored both ways:
+
+```
+  candidate : the the the the the       (5 tokens, all "the")
+  reference : the cat sat on the mat    ("the" appears 2 times)
+
+  unclipped 1-gram precision : 5 matches / 5 tokens = 1.0000   <- looks perfect
+  clip "the" to max ref count: min(5, 2) = 2
+  clipped   1-gram precision : 2 matches / 5 tokens = 0.4000   <- honest
+
+  The brevity penalty then fires as well, since c=5 < r=6:
+    BP = exp(1 - 6/5) = exp(-0.2) = 0.8187
+```
+
+Without clipping, the score goes from 0.40 to a perfect 1.00 for output that says nothing. Clipping and the brevity penalty close the two independent cheats — repeat a common word, or emit one short high-precision word — which is why BLEU needs both.
+
 **Brevity penalty:** BLEU's brevity penalty (BP) penalizes outputs shorter than the reference. `BP = exp(1 - r/c)` where r=reference length, c=candidate length. If c >= r, BP = 1 (no penalty). This prevents trivial cheating by generating a single common word with high precision.
+
+**What this actually says.** "Precision never punishes you for leaving things out, so charge a separate fine for being too short — and make the fine grow fast as the output shrinks."
+
+`exp(1 - r/c)` is a one-sided multiplier: it equals `1` at `c = r` and decays toward `0` as `c` falls, so it can only ever reduce a score, never inflate one.
+
+| Symbol | What it is |
+|--------|------------|
+| `c` | Candidate (generated) length in tokens, summed over the corpus |
+| `r` | Reference length — the *closest* reference length, not the mean or max |
+| `r/c` | How many times longer the reference is than the candidate |
+| `1 - r/c` | Zero when lengths match, increasingly negative as the candidate shortens |
+| `exp(...)` | Turns that into a multiplier in `(0, 1]`; the decay is exponential, not linear |
+
+**Walk one example.** Three candidates against the same 6-token reference:
+
+```
+  reference: "the cat sat on the mat"        r = 6 tokens
+
+  candidate                            c    c >= r ?   BP
+  "the cat sat on the mat quietly"     7      yes      1.0000   no penalty
+  "the cat sat on the"                 5      no       exp(1 - 6/5) = 0.8187
+  "the"                                1      no       exp(1 - 6/1) = 0.0067
+
+  Note the middle row: every n-gram it emits IS in the reference, so
+  p1 = p2 = p3 = p4 = 1.0 and the geometric mean is a perfect 1.0000.
+  BLEU = 1.0000 x 0.8187 = 0.8187 -- the brevity penalty is doing all
+  of the scoring work on that example.
+```
+
+The 1-token candidate is the case the penalty exists for: precision alone would call it perfect, and `0.0067` reduces its BLEU to essentially zero. Notice also that BP is *not* symmetric — an over-long candidate gets `BP = 1` and is punished only indirectly, through the precision denominator growing.
 
 **Entity-level vs token-level F1:** For NER, token-level F1 inflates performance because ~90% of tokens are class O (not an entity). A model predicting all-O achieves 90% token accuracy. Entity-level F1 requires that both the entity type AND the exact span boundaries are correct — a single-character offset counts as wrong. Always report entity-level F1 for NER.
 
 **Expected Calibration Error (ECE):** Measures whether confidence scores match actual accuracy. Group predictions by confidence buckets (0.0-0.1, 0.1-0.2, ..., 0.9-1.0); compute |accuracy - confidence| per bucket; take weighted average. A perfectly calibrated model has ECE=0. Production classifiers used for decision-making must be calibrated.
+
+**Put simply.** "Group the predictions by how confident the model claimed to be, check how often it was actually right in each group, and report the average size of the lie — weighted by how many predictions were in each group."
+
+ECE says nothing about accuracy. A model can be 60% accurate and perfectly calibrated (it says "60% confident" and is right 60% of the time), or 95% accurate and badly calibrated (it says "99%" every time).
+
+| Symbol | What it is |
+|--------|------------|
+| `B_b` | Bucket `b` — the set of predictions whose confidence fell in that range |
+| `\|B_b\|` | How many predictions landed in that bucket |
+| `n` | Total predictions, so `\|B_b\| / n` is the bucket's share of the data |
+| `conf(B_b)` | Mean stated confidence inside the bucket |
+| `acc(B_b)` | Fraction of that bucket the model actually got right |
+| `\|acc - conf\|` | The gap — the vertical distance from the diagonal in a reliability diagram |
+
+**Walk one example.** A fine-tuned BERT classifier over 1,000 held-out predictions:
+
+```
+  bucket     conf   count   accuracy   weight   |acc - conf|   contribution
+  0.5-0.6    0.55     200     0.48      0.20        0.07          0.0140
+  0.7-0.8    0.75     300     0.60      0.30        0.15          0.0450
+  0.9-1.0    0.95     500     0.72      0.50        0.23          0.1150
+                     -----                                       ------
+                    n=1000                                ECE =  0.1740
+```
+
+Read `ECE = 0.174` as "on average the stated confidence is 17.4 points too high." The 0.9-1.0 bucket contributes 0.115 of that 0.174 on its own — it holds half the data *and* has the widest gap, which is the typical shape for an uncalibrated BERT and matches the 0.15-0.25 range quoted in Section 6. Weighting by bucket size is what stops a nearly-empty bucket with a wild gap from dominating the number.
 
 ---
 
@@ -75,6 +158,72 @@ Key insight: Perplexity does not correlate with downstream task performance for 
 | Language modeling | Perplexity | `exp(H)` where H is average cross-entropy per token |
 | Semantic similarity | Pearson/Spearman correlation with human ratings | STS benchmark standard |
 | Information retrieval | NDCG@K, MRR@K, Recall@K | See text_representation_and_retrieval.md |
+
+#### Decoding perplexity = exp(H)
+
+**The idea behind it.** "Take the model's average per-token loss and un-log it. The result is the number of words the model was effectively choosing between at each step."
+
+That reading — the *effective branching factor* — is why perplexity is quoted instead of raw loss. `2.4849` means nothing to intuition; `12` means "it was picking from about a dozen plausible next words."
+
+| Symbol | What it is |
+|--------|------------|
+| `H` | Average cross-entropy per token, in nats: `-(1/N) * sum log p(token)` |
+| `exp(H)` | Undoes the logarithm, converting a loss into a count of choices |
+| perplexity | Effective branching factor — lower is a more confident, better-fitting model |
+| `N` | Token count, which is why a different tokenizer makes the number incomparable |
+
+**Walk one example.** The same loss expressed both ways, plus the two boundary cases:
+
+```
+  H = 3.5553 nats/token  ->  exp(3.5553)  =    35.0   "about 35 plausible next words"
+  H = 2.4849 nats/token  ->  exp(2.4849)  =    12.0   sharper model, same text
+  H = 0.0                ->  exp(0)       =     1.0   perfect: one word, p = 1.0
+  H = ln(50000) = 10.8198 -> exp(10.8198) = 50000.0   worst case: uniform over a
+                                                      50K-token vocabulary
+
+  Halving the loss does NOT halve perplexity -- 3.5553 -> 2.4849 is a drop of
+  1.07 nats but takes perplexity from 35 to 12, a 2.9x improvement. Perplexity
+  is exponential in the loss, so small loss deltas look large in perplexity.
+```
+
+The exponential relationship is the practical gotcha: a training curve that looks flat in loss can still be moving perplexity a lot, and a perplexity chart exaggerates late-training gains relative to a loss chart.
+
+#### Decoding macro vs micro vs weighted averaging
+
+**Stated plainly.** "Macro asks how the model does on an average *class*; micro asks how it does on an average *prediction*; weighted sits between them by scoring per class but paying attention in proportion to class size."
+
+The three only diverge when classes are imbalanced — which is exactly when the choice decides whether a report looks acceptable or alarming.
+
+| Symbol | What it is |
+|--------|------------|
+| macro-F1 | Compute F1 per class, then take the unweighted mean. Every class counts equally |
+| micro-F1 | Pool all classes' `tp`, `fp`, `fn` into one confusion matrix, then score once |
+| weighted-F1 | Per-class F1 averaged with each class weighted by its support (true count) |
+| support | Number of true examples of that class in the test set |
+
+Note that in single-label multi-class classification micro-precision, micro-recall, and micro-F1 all collapse to plain accuracy — every error is simultaneously somebody's false positive and somebody's false negative.
+
+**Walk one example.** The imbalanced 3-class clause classifier from Section 14 (30% favorable, 50% neutral, 20% unfavorable), over 1,000 documents:
+
+```
+  confusion matrix (rows = true, cols = predicted)
+                      pred_fav   pred_neu   pred_unf   support
+    true favorable       240         55          5        300
+    true neutral          40        450         10        500
+    true unfavorable      25         85         90        200
+
+  per-class scores
+    class           tp    fp    fn      P        R        F1     support
+    favorable      240    65    60    0.7869   0.8000   0.7934      300
+    neutral        450   140    50    0.7627   0.9000   0.8257      500
+    unfavorable     90    15   110    0.8571   0.4500   0.5902      200
+
+  macro-F1    = (0.7934 + 0.8257 + 0.5902) / 3                  = 0.7364
+  weighted-F1 = (0.7934*300 + 0.8257*500 + 0.5902*200) / 1000   = 0.7689
+  micro-F1    = pooled 780 tp / 1000 predictions                = 0.7800
+```
+
+Three numbers, one model, a 4.4-point spread. The unfavorable class — the one a legal reviewer most needs to catch — has recall `0.45`, meaning over half of the unfavorable clauses are missed. Micro-F1 hides that entirely because the 500-example neutral class dominates the pool; weighted-F1 softens it; only macro-F1 lets the weak class drag the headline number down. That is the whole reason Section 4.2 says "use Macro-F1 for imbalanced classes."
 
 ### 4.3 Text Augmentation Strategies
 
@@ -120,6 +269,43 @@ flowchart TD
 ```
 
 BLEU clips each n-gram count to its max count in any reference, takes the geometric mean of precisions p1–p4, and multiplies by the brevity penalty. Here the candidate (7 tokens) is longer than the reference (6 tokens) so BP=1, and BLEU ≈ 0.45.
+
+**What the formula is telling you.** "Score how much of what you said appears in the reference, at four different phrase lengths at once, then multiply those four scores together — and separately fine yourself for being short."
+
+The full assembled formula is `BLEU = BP * exp(sum_n w_n * log p_n)`, which is just a weighted geometric mean of `p_1` through `p_4` scaled by the brevity penalty.
+
+| Symbol | What it is |
+|--------|------------|
+| `p_n` | Clipped n-gram precision at size `n` — matches divided by candidate n-grams |
+| `w_n` | Weight per n-gram order, `0.25` each for the standard BLEU-4 |
+| `sum w_n log p_n` | Average of the logs, i.e. the log of the geometric mean |
+| `exp(...)` | Converts that back out of log space into the geometric mean itself |
+| `BP` | Brevity penalty, `1.0` unless the candidate is shorter than the reference |
+
+**Walk one example.** A candidate that adds one extra word to the reference:
+
+```
+  candidate : the cat sat on the mat quietly       c = 7 tokens
+  reference : the cat sat on the mat               r = 6 tokens
+
+  n     clipped matches / candidate n-grams      p_n
+  1              6 / 7                          0.8571
+  2              5 / 6                          0.8333
+  3              4 / 5                          0.8000
+  4              3 / 4                          0.7500
+
+  log-average = 0.25*ln(0.8571) + 0.25*ln(0.8333)
+              + 0.25*ln(0.8000) + 0.25*ln(0.7500)  = -0.2118
+  geometric mean = exp(-0.2118)                    =  0.8091
+
+  brevity penalty: c = 7 >= r = 6   ->   BP = 1.0000
+
+  BLEU = 1.0000 x 0.8091 = 0.8091     (sacrebleu prints this as 80.91)
+```
+
+Each added word costs a little at every order at once: the single extra token `quietly` breaks one unigram, one bigram, one trigram, and one 4-gram, which is why `p_n` slides steadily downward as `n` grows.
+
+**Why geometric and not arithmetic.** The geometric mean is unforgiving in a specific, deliberate way: if any single `p_n` is exactly `0`, then `log(0) = -inf` and the entire BLEU score collapses to `0`, no matter how strong the other three orders are. An arithmetic mean would have quietly averaged the zero away. This is the direct mechanical cause of the "never use sentence-level BLEU" rule in Section 3 — a short sentence often has no 4-gram match at all, so `p_4 = 0` and a perfectly good translation scores zero. Corpus-level BLEU pools n-gram counts across the whole test set first, so a zero at any single sentence cannot zero out the corpus, and `sacrebleu` additionally applies smoothing.
 
 ### BLEU Precision vs ROUGE Recall
 
@@ -174,6 +360,43 @@ Step 4: Recall: for each reference token, max similarity to any candidate token
 
 Step 5: F1 = 2PR/(P+R) = 0.923
 ```
+
+**What it means.** "Instead of asking whether two words are the same string, ask how close their meanings are — then let every word greedily pair with its single best partner on the other side."
+
+There is no alignment search and no bipartite matching here: each token independently takes the maximum of its row (precision) or its column (recall). That greedy `max` is the whole algorithm, and it is why BERTScore is `O(candidate x reference)` similarities rather than a combinatorial optimization.
+
+| Symbol | What it is |
+|--------|------------|
+| `c_i`, `r_j` | Contextual embedding vectors for candidate token `i` and reference token `j` |
+| `sim(c_i, r_j)` | Cosine similarity of those two vectors, roughly `-1` to `1` |
+| `max_j sim(c_i, r_j)` | Best reference partner for candidate token `i` — feeds precision |
+| `max_i sim(c_i, r_j)` | Best candidate partner for reference token `j` — feeds recall |
+| `2PR/(P+R)` | Harmonic mean; punishes an imbalance between P and R far harder than an average would |
+
+**Walk one example.** The same pair as the matrix above, made explicit:
+
+```
+  precision -- each candidate token takes its row max
+    the      -> the      0.99
+    feline   -> cat      0.87
+    rested   -> sat      0.91
+    P = (0.99 + 0.87 + 0.91) / 3 = 2.77 / 3 = 0.9233
+
+  recall -- each reference token takes its column max
+    the      -> the      0.99
+    cat      -> feline   0.87
+    sat      -> rested   0.91
+    R = (0.99 + 0.87 + 0.91) / 3 = 2.77 / 3 = 0.9233
+
+  F1 = 2 x 0.9233 x 0.9233 / (0.9233 + 0.9233) = 0.9233
+
+  BLEU on the identical pair: only "the" matches as a unigram, and no bigram
+  matches at all, so p_2 = 0 -> BLEU = 0.0000
+```
+
+`0.92` versus `0.00` on the same sentence pair is the entire argument for embedding-based metrics: "The feline rested" is a correct paraphrase of "The cat sat," and only BERTScore says so. The cost is the reproducibility problem in Pitfall 4 — those `0.87` and `0.91` similarities are properties of one specific checkpoint, so the score moves when the underlying model does.
+
+**Why the harmonic mean.** `2PR/(P+R)` is a deliberate choice over `(P+R)/2`. Because P and R are equal here (`0.9233` each), both give the same answer — but they diverge sharply when the model is lopsided. A summary that copies half the reference verbatim and adds nothing might score `P = 1.00, R = 0.50`: the arithmetic mean rewards it with `0.75`, while the harmonic mean gives `2*1.00*0.50/1.50 = 0.6667`. The harmonic mean always sits closer to the *worse* of the two, so you cannot buy a good F1 by maximizing one side alone.
 
 ### Metric Correlation with Human Judgment
 
@@ -388,6 +611,42 @@ def rouge_l(
     return precision, recall, f1
 ```
 
+**In plain terms.** "ROUGE-N asks what fraction of the reference's phrases you managed to reproduce; ROUGE-L asks the same question but lets the matching words be spread out, as long as they stay in order."
+
+The two share a numerator idea (overlap) and differ only in what counts as overlap: a fixed-width window for ROUGE-N, a longest in-order subsequence for ROUGE-L.
+
+| Symbol | What it is |
+|--------|------------|
+| `overlap` | Matched n-grams, clipped to `min(candidate count, reference count)` |
+| `precision` | `overlap / candidate n-gram count` — how much of what you wrote was wanted |
+| `recall` | `overlap / reference n-gram count` — how much of what was wanted you wrote |
+| `LCS(a, b)` | Longest common subsequence: longest in-order, not-necessarily-adjacent match |
+| `beta` | Recall weight in the F-measure. `beta = 1` is balanced; `beta > 1` favors recall |
+| `(1+b^2)PR / (b^2 P + R)` | F-beta — the harmonic mean generalized so recall counts `b^2` times as much |
+
+**Walk one example.** One inserted word, scored by all three ROUGE variants:
+
+```
+  candidate : the cat sat quietly on the mat        7 tokens
+  reference : the cat sat on the mat                6 tokens
+
+  ROUGE-1   overlap = 6   cand n-grams = 7   ref n-grams = 6
+            P = 6/7 = 0.8571   R = 6/6 = 1.0000   F1 = 0.9231
+
+  ROUGE-2   overlap = 4   cand n-grams = 6   ref n-grams = 5
+            P = 4/6 = 0.6667   R = 4/5 = 0.8000   F1 = 0.7273
+            ("sat quietly" and "quietly on" are novel; "sat on" is destroyed)
+
+  ROUGE-L   LCS = 6  ("the cat sat on the mat" survives intact, non-adjacently)
+            P = 6/7 = 0.8571   R = 6/6 = 1.0000
+            beta = 1.0 -> F = 0.9231
+            beta = 1.2 -> F = 0.9361      recall-weighted, so the score rises
+```
+
+One inserted word costs ROUGE-2 nearly 20 points (`0.9231 -> 0.7273`) but costs ROUGE-L nothing at all, because LCS does not require adjacency. That is precisely the structural difference the Section 4.1 table means by "captures sentence structure without order constraint" — and the reason all three are reported side by side rather than any one alone.
+
+**What `beta` is doing.** In F-beta, `beta` is the number of times recall matters more than precision. `beta = 1` weights them equally; `beta = 2` says one point of recall is worth four points of precision (`beta^2 = 4`); `beta = 0.5` flips it toward precision. Set `beta = 0` and the formula degenerates to precision alone; let `beta -> infinity` and it degenerates to recall alone. For summarization the community default leans recall-heavy, which is why ROUGE-L implementations often ship `beta = 1.2` rather than `1.0`.
+
 ### BERTScore Implementation
 
 ```python
@@ -532,6 +791,40 @@ def entity_level_f1(
     return precision, recall, f1
 ```
 
+**Decoded.** "Of the entities you claimed to find, what fraction were real? Of the entities that were really there, what fraction did you find? F1 is the single number that refuses to let you win on one at the expense of the other."
+
+Everything here is derived from three counts. The confusion matrix has no true-negative cell at all for NER — there is no meaningful count of "spans correctly not predicted," since the number of possible spans is quadratic in sentence length. That absence is exactly why accuracy is unusable and precision/recall/F1 are mandatory.
+
+| Symbol | What it is |
+|--------|------------|
+| `tp` | Predicted entity whose type AND both boundaries match a gold entity |
+| `fp` | Predicted entity with no exact gold match — a hallucinated or mis-bounded span |
+| `fn` | Gold entity the model failed to produce exactly |
+| `precision = tp/(tp+fp)` | Denominator is everything you predicted |
+| `recall = tp/(tp+fn)` | Denominator is everything that actually existed |
+| `f1 = 2PR/(P+R)` | Harmonic mean — drops toward whichever of P and R is worse |
+
+**Walk one example.** A CoNLL-scale evaluation: 900 gold entities, 920 predicted spans.
+
+```
+  tp = 830     exact type + exact boundaries
+  fp =  90     predicted, no exact gold match   (830 + 90 = 920 predicted)
+  fn =  70     gold, never produced exactly     (830 + 70 = 900 gold)
+
+  precision = 830 / (830 + 90) = 830 / 920 = 0.9022
+  recall    = 830 / (830 + 70) = 830 / 900 = 0.9222
+  F1        = 2 x 0.9022 x 0.9222 / (0.9022 + 0.9222) = 0.9121
+
+  same P and R under F-beta:
+    beta = 0.5  (precision-leaning)  F = 0.9061   pulled toward P = 0.9022
+    beta = 1.0  (balanced)           F = 0.9121
+    beta = 2.0  (recall-leaning)     F = 0.9181   pulled toward R = 0.9222
+```
+
+One boundary error is charged twice. A model that tags "Steve Jobs" as just "Jobs" produces one `fp` (the wrong span it emitted) and one `fn` (the right span it missed) — it is not scored as a near miss, and there is no partial credit. That double charge is why entity-level F1 sits so far below token-level F1 (Pitfall 3 shows a 0.95 vs 0.72 gap), and it is what makes the metric honest about downstream usability: a pipeline consuming "Jobs" as a person name is simply wrong.
+
+**Choosing beta in production.** The `beta` knob is a business decision, not a statistical one. For contract review, a missed PARTY entity (a false negative) may silently void an obligation, while a spurious one gets caught by a human reviewer in seconds — so recall is worth more and `beta = 2` reports the number you actually care about. For an automated redaction system with no human in the loop, a false positive deletes real text, so `beta = 0.5` is the honest framing. Reporting only `F1` implicitly asserts the two errors cost the same, which is almost never true.
+
 ### ECE and Calibration
 
 ```python
@@ -602,6 +895,36 @@ def temperature_scale_calibration(
     result = minimize_scalar(nll, bounds=(0.1, 10.0), method="bounded")
     return result.x  # Optimal temperature
 ```
+
+**The plain-English version.** "Divide every logit by the same number before the softmax. A bigger number squashes the logits closer together, which makes the resulting probabilities less extreme — without ever changing which class wins."
+
+The reason this works at all is that softmax is invariant to the *ordering* of logits under positive scaling: dividing all of them by `T > 0` cannot reorder them, so accuracy is mathematically untouched while the probability spread is fully under your control.
+
+| Symbol | What it is |
+|--------|------------|
+| `logits` | Raw pre-softmax scores, one per class, unbounded in either direction |
+| `T` | A single learned scalar, shared across every class and every example |
+| `logits / T` | The scaled logits fed to softmax. `T > 1` shrinks the gaps between them |
+| `nll(T)` | Negative log-likelihood on a held-out set — the thing `T` is fitted to minimize |
+| `minimize_scalar` | One-dimensional search over `T` in `[0.1, 10.0]`; seconds of compute |
+
+**Walk one example.** A 3-class classifier, using the `T = 1.8` fitted in the Section 14 case study:
+
+```
+  raw logits:  [4.00, 1.50, 0.50]
+
+  T = 1.0 (uncalibrated)
+    scaled : [4.0000, 1.5000, 0.5000]
+    softmax: [0.8991, 0.0738, 0.0271]   -> claims 89.9% confidence
+
+  T = 1.8 (calibrated)
+    scaled : [2.2222, 0.8333, 0.2778]
+    softmax: [0.7182, 0.1791, 0.1027]   -> claims 71.8% confidence
+
+  argmax is class 0 in BOTH cases -- accuracy is bit-for-bit identical.
+```
+
+That single number is the whole fix described in Section 7: the model said "90%" and was right about 72% of the time, and `T = 1.8` makes the stated confidence match the observed accuracy. Because there is exactly one parameter, it cannot overfit even on the 200 calibration examples the case study used. Its limitation follows from the same fact — one global `T` cannot correct a model that is overconfident on one class and underconfident on another, since it moves every class by the same factor.
 
 ### Text Augmentation
 
@@ -898,6 +1221,37 @@ def bits_per_character(
     """BPC is comparable across different tokenization schemes."""
     return -log_likelihood / (n_chars * math.log(2))
 ```
+
+**Said another way.** "Stop measuring surprise per token, because a token is whatever your tokenizer decided it was. Measure it per character instead — characters are the same unit for everybody."
+
+Bits-per-character is the standard escape hatch from the incomparability trap above. The `log(2)` in the denominator is purely a unit conversion: model losses come out in nats, and dividing by `ln 2` restates them in bits.
+
+| Symbol | What it is |
+|--------|------------|
+| `log_likelihood` | Total log-probability the model assigned to the whole corpus, in nats (negative) |
+| `-log_likelihood` | Total surprise in nats — the same quantity as `sum of per-token loss` |
+| `n_chars` | Characters in the raw text, independent of any tokenizer |
+| `math.log(2)` | `0.6931` — converts nats to bits |
+| result | Bits needed per character; lower is a better model, comparable across tokenizers |
+
+**Walk one example.** The two models from the broken example above, on the same 400-character passage:
+
+```
+  GPT-2 (50K BPE)      100 tokens, perplexity 35
+    loss per token = ln(35)        = 3.5553 nats
+    total surprise = 100 x 3.5553  = 355.53 nats
+    BPC = 355.53 / (400 x 0.6931)  = 1.2823 bits/char
+
+  LLaMA-2 (32K SentencePiece)   80 tokens, perplexity 12
+    loss per token = ln(12)        = 2.4849 nats
+    total surprise =  80 x 2.4849  = 198.79 nats
+    BPC = 198.79 / (400 x 0.6931)  = 0.7170 bits/char
+
+  raw perplexity ratio : 35 / 12       = 2.92x   <- meaningless, different units
+  BPC ratio            : 1.2823/0.7170 = 1.79x   <- the real quality gap
+```
+
+The raw perplexity comparison overstates the gap by roughly 63%, because LLaMA's coarser tokenizer packs more characters into each token and therefore takes fewer, individually harder, guesses. Normalizing to characters removes that artifact entirely. The same reasoning gives bits-per-word or bits-per-byte; the unit only has to be one the tokenizer cannot influence.
 
 ---
 

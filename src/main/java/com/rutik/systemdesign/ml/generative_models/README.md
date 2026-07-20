@@ -24,11 +24,119 @@ Key insight: the field has converged on diffusion models for image generation du
 
 **VAE ELBO**: the Evidence Lower BOund is the VAE training objective, derived by lower-bounding the log-likelihood log p(x): `ELBO = E[log p(x|z)] - KL(q(z|x) || p(z))`. The first term is reconstruction loss (push decoder to reproduce input); the second is KL divergence (push encoder distribution toward the standard Gaussian prior). Trading off these two terms is the core tension in VAEs.
 
+**What this actually says.** "Rebuild the input as faithfully as you can, while keeping the private code you invented for it close to plain N(0, I) noise." The framing matters because log p(x) itself is intractable — the ELBO is the closest tractable proxy — and every classic VAE pathology is one of these two terms winning outright.
+
+| Symbol | What it is |
+|--------|------------|
+| `log p(x)` | Log-likelihood of the real data under the model. What you actually want to maximize; intractable, hence the bound |
+| `ELBO` | Evidence Lower BOund. A quantity provably <= log p(x); push it up and you push the true likelihood up with it |
+| `q(z\|x)` | Encoder output — the Gaussian N(mu, sigma^2) the encoder proposes as "the code for this x" |
+| `p(x\|z)` | Decoder — how likely the real x is once you hand the decoder the code z |
+| `p(z)` | The prior, fixed to N(0, I). The shape you insist the whole cloud of codes must take |
+| `E[log p(x\|z)]` | The reconstruction term. Negative BCE/MSE in practice; larger = the decoder rebuilds x better |
+| `KL(q \|\| p)` | The regularizer. Nats of "distance" from your per-sample code distribution to N(0, I); 0 means identical |
+| `beta` | Weight on the KL term. 1 = vanilla VAE; >1 = beta-VAE disentanglement; <1 = reconstruction-first |
+
+**Term one — reconstruction.** `E[log p(x|z)]` is the only term that cares whether the output looks like the input. Delete it and the encoder's cheapest move is to emit mu = 0, sigma = 1 for every image: KL hits exactly 0 and the model has learned nothing but the prior.
+
+**Read it like this.** The KL term says "no single image is allowed its own private corner of latent space." It is what makes the latent space *samplable* — without it you have an ordinary autoencoder whose codes are scattered points, so drawing z ~ N(0, I) at generation time lands in empty space and decodes to noise.
+
+The closed form for a diagonal Gaussian against N(0, I) is what the code implements: `KL = -0.5 * sum(1 + log_var - mu^2 - sigma^2)`, summed over latent dims.
+
+**Walk one example.** Four latent dims from one encoder forward pass:
+
+```
+  Per-dim: KL = -0.5 * (1 + log_var - mu^2 - sigma^2),  log_var = log(sigma^2)
+
+  dim    mu       sigma    log_var    mu^2      sigma^2    KL (nats)
+  ------------------------------------------------------------------
+  z1    +0.00     1.00     +0.0000    0.0000    1.0000      0.0000
+  z2    +0.50     0.90     -0.2107    0.2500    0.8100      0.1354
+  z3    +1.20     0.50     -1.3863    1.4400    0.2500      1.0381
+  z4    -0.80     0.30     -2.4079    0.6400    0.0900      1.0690
+  ------------------------------------------------------------------
+                                              total KL =    2.2425
+
+  z3 longhand:  -0.5 * (1 + (-1.3863) - 1.4400 - 0.2500)
+             =  -0.5 * (-2.0763)
+             =   1.0381
+
+  z1 costs exactly 0 nats: mu = 0, sigma = 1 is the prior itself, so that dimension
+  is carrying no information about x at all -- it has already collapsed.
+```
+
+**When the KL term wins — posterior collapse.** Give the decoder enough capacity to model x without help (an autoregressive or very deep decoder) and ignoring z costs it only about 2 nats of reconstruction. Now the two routes compete on total loss:
+
+```
+  route                       recon    KL      beta    total = recon + beta*KL
+  ----------------------------------------------------------------------------
+  A: encoder uses latent      98.60   2.2425   0.2     98.60 + 0.4485 =  99.0485
+  B: decoder ignores z       100.60   0.0000   0.2    100.60 + 0.0000 = 100.6000
+  A: encoder uses latent      98.60   2.2425   1.0     98.60 + 2.2425 = 100.8425
+  B: decoder ignores z       100.60   0.0000   1.0    100.60 + 0.0000 = 100.6000
+  A: encoder uses latent      98.60   2.2425   4.0     98.60 + 8.9700 = 107.5700
+  B: decoder ignores z       100.60   0.0000   4.0    100.60 + 0.0000 = 100.6000
+
+  beta = 0.2  ->  A wins by 1.5515  ->  latent stays informative
+  beta = 1.0  ->  B wins by 0.2425  ->  collapse is already the cheaper route
+  beta = 4.0  ->  B wins by 6.9700  ->  full collapse; KL -> 0, samples are all
+                                        the dataset mean, latent is inert
+```
+
+The 2.24 nats of information the latent carries are simply not worth 8.97 nats of penalty. KL annealing (start beta near 0, ramp to 1 over the first few epochs) and free bits (clamp each dim's KL at a floor of ~0.05 nats so no dim can be driven to exactly 0) both exist to keep route A winning early, before the decoder gets strong enough to prefer route B.
+
+**When reconstruction wins — an unstructured latent.** Drive beta toward 0 and the KL barely constrains anything: mu drifts far from the origin and sigma shrinks toward 0, so `q(z|x)` becomes a set of isolated spikes rather than one continuous cloud. Reconstructions get sharp — the model is now a plain autoencoder — but the two abilities you built a VAE for are gone. Sampling z ~ N(0, I) lands in the gaps between spikes and decodes to garbage, and interpolating `(1-t)*z_a + t*z_b` crosses dead space instead of morphing smoothly. The characteristic VAE blur is the price of the *middle* of this tradeoff: a Gaussian decoder averaging over everything that plausibly maps to a given z.
+
 **Reparameterization trick**: to backpropagate through a sampling operation z ~ N(mu, sigma^2), reparameterize as z = mu + epsilon * sigma where epsilon ~ N(0,1). Gradients flow through mu and sigma (deterministic functions of the encoder), not through the sampling operation (epsilon is treated as a fixed random constant).
 
 **GAN min-max game**: the generator G minimizes and the discriminator D maximizes: `V(G,D) = E[log D(x)] + E[log(1 - D(G(z)))]`. At equilibrium, D(x) = 0.5 everywhere (cannot distinguish real from fake) and G generates samples matching the true data distribution.
 
 **Mode collapse**: the generator learns to produce one or a few modes of the distribution, ignoring the rest. D becomes confused and provides no useful gradient signal. The generator never improves beyond a narrow region.
+
+**Stated plainly.** "One number scores how well the detective is doing; the detective climbs it, the forger slides down it, and the game ends when neither can move." The value function is a single scalar both networks read in opposite directions, which is why a GAN has no loss curve that going down means progress.
+
+| Symbol | What it is |
+|--------|------------|
+| `V(G, D)` | The shared scoreboard. D maximizes it, G minimizes it — a saddle point, not a minimum |
+| `D(x)` | Discriminator's belief that x is real, in (0, 1). 1 = certain real, 0 = certain fake |
+| `G(z)` | Generator's output for a noise draw z ~ N(0, I). The counterfeit bill |
+| `E[log D(x)]` | "Reward D for calling real data real." Maximal (0) when D(x) = 1 on every real sample |
+| `E[log(1 - D(G(z)))]` | "Reward D for calling fakes fake." Maximal (0) when D(G(z)) = 0 on every fake |
+| `log` | Punishes confident mistakes without limit: log(0.5) = -0.69, log(0.01) = -4.61 |
+| `min_G max_D` | Read inner-first: for the current G, find D's best play; then move G against that |
+
+**Walk one example.** One batch, mid-training, with D scoring the real batch at 0.90 and the fake batch at 0.30:
+
+```
+  E[log D(x)]         = log(0.90)     = -0.1054
+  E[log(1 - D(G(z)))] = log(1 - 0.30) = -0.3567
+  V(G, D)             = -0.1054 + (-0.3567)
+                      = -0.4620
+
+  The two extremes of the same expression:
+
+    D dominant      D(x)=0.99, D(G(z))=0.01 -> -0.0101 + -0.0101 = -0.0201  <- V max
+    current batch   D(x)=0.90, D(G(z))=0.30 -> -0.1054 + -0.3567 = -0.4620
+    equilibrium     D(x)=0.50, D(G(z))=0.50 -> -0.6931 + -0.6931 = -1.3863  <- V min
+
+  G is pulling V down toward -1.3863 = 2*log(0.5); D is pulling it up toward 0.
+  V = -1.3863 is the theoretical optimum: D reduced to coin-flipping means G's
+  samples are indistinguishable from the data distribution.
+```
+
+**Why the generator loss is flipped in practice.** In the minimax form G minimizes `log(1 - D(G(z)))`, which is nearly flat exactly when G is losing badly — that is the vanishing-gradient failure at the start of training:
+
+```
+  D is winning early: D(G(z)) = 0.05
+
+    minimax form      log(1 - D(G(z))) = log(0.95)  = -0.0513   <- almost no slope
+    non-saturating   -log D(G(z))      = -log(0.05) = +2.9957   <- steep, usable
+
+  Same fixed point, far better gradients. Every real implementation uses the
+  non-saturating form -- it is the L_G = -E(log D(G(z))) in the GAN diagram above.
+```
+
+**The idea behind it.** Mode collapse falls straight out of this objective: nothing in `V(G, D)` counts *distinct* outputs. A generator that maps every z to one perfect image scoring D(G(z)) = 0.30 pays `-log(0.30) = 1.2040`, the identical loss a fully diverse generator pays for fooling D equally well. Diversity is never rewarded, only D's short memory punishes repetition — D eventually learns "that exact image is fake", G hops to another single mode, and the pair oscillates instead of converging. That is why the fixes are structural rather than a loss tweak: minibatch discrimination lets D see a whole batch at once (so identical samples are detectable), unrolled GANs let G see D's future response, and WGAN-GP swaps the whole objective for an Earth Mover distance whose critic keeps giving gradient even when the two distributions barely overlap.
 
 **Diffusion forward process**: add Gaussian noise over T steps (T=1000 typical) following a variance schedule: `q(x_t | x_{t-1}) = N(x_t; sqrt(1-beta_t)*x_{t-1}, beta_t*I)`. After T steps, x_T is approximately Gaussian noise. The reverse process learns to denoise: `p_theta(x_{t-1}|x_t)`.
 
@@ -313,6 +421,46 @@ class VAE(nn.Module):
         return self.decoder(zs)
 ```
 
+**Put simply.** `z = mu + sigma * eps` says "stop *drawing* a random z, and instead draw a fixed random number first, then build z out of it deterministically." The randomness is moved off the path between the encoder and the loss, which is the entire reason the trick exists.
+
+| Symbol | What it is |
+|--------|------------|
+| `mu` | Encoder head 1 — the center of this sample's code. A differentiable function of the weights |
+| `log_var` | Encoder head 2 — `log(sigma^2)`. Predicted in log space so it is unconstrained; `sigma = exp(0.5*log_var)` is then always positive |
+| `sigma` | Spread of this sample's code. How much noise the encoder is willing to tolerate on it |
+| `eps` | A draw from N(0, I), resampled each forward pass and treated as a constant in backward — `torch.randn_like`, no `requires_grad` |
+| `z` | The latent handed to the decoder. Same distribution as sampling N(mu, sigma^2) directly |
+
+**Why it has to exist.** `z ~ N(mu, sigma^2)` written directly is a *sampling node*: it has an input and an output but no derivative, because "the derivative of a random draw with respect to its mean" is not defined for a stochastic operator in the autograd graph. Backprop reaching that node stops dead, and the encoder — every layer producing mu and log_var — receives exactly zero gradient and never trains. Rewritten as `mu + sigma * eps`, the only stochastic thing is a leaf constant, and the path from loss to encoder weights is plain arithmetic.
+
+**Walk one example.** One latent dim, using the z2 values from Section 3:
+
+```
+  Forward:
+    encoder emits   mu = 0.50,  log_var = -0.2107
+    sigma = exp(0.5 * -0.2107) = 0.90
+    noise draw      eps = -0.30          <- sampled once, then frozen for this step
+
+    z = mu + sigma * eps
+      = 0.50 + 0.90 * (-0.30)
+      = 0.50 - 0.27
+      = 0.2300
+
+  Backward, given the decoder hands back dL/dz = 0.40:
+
+    dz/dmu          = 1                      -> dL/dmu      = 0.40 * 1       = +0.4000
+    dz/dsigma       = eps           = -0.30
+    dsigma/dlog_var = 0.5 * sigma   = 0.4500
+    dz/dlog_var     = -0.30 * 0.4500 = -0.1350
+                                             -> dL/dlog_var = 0.40 * -0.1350 = -0.0540
+
+  Both encoder heads get a real number. The negative dL/dlog_var pushes sigma up on
+  this dim -- with eps negative and the loss wanting z larger, widening the spread
+  is one way to get there. Without the trick both of these are undefined.
+```
+
+Note the `if self.training` branch above: at inference the code returns `mu` directly and skips the noise entirely. Sampling is only needed to make the ELBO's expectation an unbiased Monte-Carlo estimate during training; at eval time you want the deterministic code, so reconstructions do not jitter between runs.
+
 ### WGAN with Gradient Penalty
 
 ```python
@@ -485,6 +633,56 @@ def ddpm_training_step(
     optimizer.step()
     return loss.item()
 ```
+
+**What the formula is telling you.** `x_t = sqrt(alpha_bar_t)*x_0 + sqrt(1-alpha_bar_t)*eps` says "a noised image is just a weighted blend of the clean image and one noise draw, and the schedule alone decides the mixing ratio." That closed form is what makes DDPM trainable at all: you can jump to any timestep in one multiply instead of simulating t sequential noise additions.
+
+| Symbol | What it is |
+|--------|------------|
+| `x_0` | The clean training image, scaled to [-1, 1] |
+| `x_t` | The image after t steps of noising. What the U-Net actually sees as input |
+| `beta_t` | Variance added at step t alone. Linear from 1e-4 to 0.02 across T = 1000 |
+| `alpha_t` | `1 - beta_t`. Fraction of signal surviving that one step |
+| `alpha_bar_t` | Cumulative product `alpha_1 * ... * alpha_t`. Fraction of the *original* signal left at t |
+| `sqrt(alpha_bar_t)` | Weight on the clean image. Goes 1 -> 0 as t grows |
+| `sqrt(1-alpha_bar_t)` | Weight on the noise. Goes 0 -> 1. The two weights keep total variance at 1 |
+| `eps` | One N(0, I) draw. Also the U-Net's regression *target* — predict this and everything else follows |
+| `t` | Timestep, sampled uniformly per training example so the net sees all noise levels |
+
+**Walk one example.** One pixel with `x_0 = +0.80`, one fixed noise draw `eps = -1.50`, linear schedule from the scheduler above:
+
+```
+  t       beta_t      alpha_bar_t   sqrt(alpha_bar_t)  sqrt(1-alpha_bar_t)     x_t
+  --------------------------------------------------------------------------------
+   50     0.001076      0.971016         0.9854              0.1702         +0.5330
+  400     0.008048      0.195146         0.4418              0.8971         -0.9922
+  900     0.018008      0.000275         0.0166              0.9999         -1.4866
+
+  t =  50:  0.9854 * 0.80 + 0.1702 * (-1.50) =  0.7883 - 0.2553 = +0.5330
+  t = 400:  0.4418 * 0.80 + 0.8971 * (-1.50) =  0.3534 - 1.3457 = -0.9922
+  t = 900:  0.0166 * 0.80 + 0.9999 * (-1.50) =  0.0133 - 1.4998 = -1.4866
+```
+
+Read the three rows as three different learning problems handed to the same network. At t = 50 the pixel is still 98.5% its original value and the noise is a faint film — recovering x_0 is trivial, isolating eps from it is nearly hopeless. At t = 900 the signal coefficient has fallen 59.4x (0.9854 -> 0.0166) and x_t = -1.4866 is essentially eps itself — predicting eps is now trivial, recovering x_0 is hopeless. The useful gradient lives around t = 400, where the 0.4418/0.8971 split leaves both terms visible and the network must actually learn image structure. That imbalance is the whole argument for the cosine schedule: the linear one, as the Section 5 chart shows, blows past the interesting middle band and spends hundreds of steps in the near-pure-noise regime where there is little left to learn.
+
+**What the reverse step does with the prediction.** `x_prev = (x_t - (1-alpha_t)/sqrt(1-alpha_bar_t) * eps_pred) / sqrt(alpha_t)` subtracts one step's worth of the predicted noise, then rescales to undo that step's shrinkage:
+
+```
+  At t = 400, with a perfect prediction eps_pred = -1.50:
+
+    alpha_t          = 1 - 0.008048            = 0.991952
+    sqrt(alpha_t)                              = 0.995968
+    (1-alpha_t)/sqrt(1-alpha_bar_t) = 0.008048 / 0.8971 = 0.008971
+
+    x_prev = (-0.9922 - 0.008971 * (-1.50)) / 0.995968
+           = (-0.9922 + 0.013458)  / 0.995968
+           = -0.978743 / 0.995968
+           = -0.982706
+
+  One step removes ~0.9% of the noise. That tiny coefficient is exactly why DDPM
+  needs 1000 steps and DDIM's deterministic skipping (50 steps) matters so much.
+```
+
+The `if t > 0: x_prev += sqrt(beta_t) * noise` line puts a little noise back at every step but the last. Drop it and the reverse chain becomes deterministic given x_T, which collapses sample diversity — that stochastic re-injection is what makes the reverse process a genuine sampler of p(x) rather than a fixed function of the starting noise.
 
 ### Classifier-Free Guidance
 

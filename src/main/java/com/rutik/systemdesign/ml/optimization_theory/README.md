@@ -33,6 +33,46 @@ Understanding optimization theory explains why models sometimes fail to train (l
 - **Weight initialization**: critical for training dynamics; bad initialization puts you in pathological regions of the loss landscape before training begins.
 - **Adaptive learning rates**: scale the effective learning rate per parameter based on gradient history; parameters with noisy gradients get smaller effective steps.
 
+### Decoding the gradient descent rule
+
+**In plain terms.** "Feel which way the ground slopes under your feet, then step the other way — and make the step longer where the slope is steeper."
+
+Every optimizer on this page is a variation on that one sentence. Momentum changes *which direction* you step, Adam changes *how long* the step is per parameter, but the "walk downhill" skeleton never changes.
+
+| Symbol | What it is |
+|--------|------------|
+| `theta` | The parameters (weights). Your current position on the loss terrain |
+| `L` | The loss. The altitude of the terrain at that position — lower is better |
+| `grad_theta(L)` | The slope of the loss at your position. Points *uphill*, toward more loss |
+| the minus sign | Flips uphill into downhill. Drop it and you would climb toward worse loss |
+| `lr` | Step size multiplier. What fraction of the slope you actually walk each step |
+| `lr * grad` | The step itself. Steep ground gives a long step, flat ground a short one |
+
+**Walk one example.** A one-parameter bowl `L(theta) = theta^2`, so `grad = 2*theta`. Start at `theta = 1.0` with `lr = 0.1`:
+
+```
+  step   theta     L(theta)   grad = 2*theta   step = -lr*grad   new theta
+    1    1.0000     1.0000        +2.0000          -0.2000        0.8000
+    2    0.8000     0.6400        +1.6000          -0.1600        0.6400
+    3    0.6400     0.4096        +1.2800          -0.1280        0.5120
+    4    0.5120     0.2621        +1.0240          -0.1024        0.4096
+    5    0.4096     0.1678        +0.8192          -0.0819        0.3277
+
+  Loss fell 1.0000 -> 0.1678 across five steps, and each step is 20% shorter
+  than the last. Nobody shrank the step by hand -- the gradient shrinks as the
+  minimum nears, so the algorithm brakes automatically on its own approach.
+```
+
+**Why `lr` is the hyperparameter everything hinges on.** Same bowl, same start, three learning rates:
+
+```
+  lr = 0.10  ->  1.000,  0.800,  0.640,  0.512     converges smoothly, never overshoots
+  lr = 0.60  ->  1.000, -0.200,  0.040, -0.008     overshoots past 0 but still converges
+  lr = 1.10  ->  1.000, -1.200,  1.440, -1.728     overshoots further each time: diverges
+```
+
+At `lr = 1.10` each step jumps past the minimum to a point *farther* from it than where it started, so the next gradient is larger, so the next step is longer still. That runaway is the "too large = divergence" failure in the bullet above, and it is why the LR range test (Section 6) exists.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -44,6 +84,36 @@ Understanding optimization theory explains why models sometimes fail to train (l
 | Batch GD | All N samples | Exact | Stable convergence | Expensive per step; no noise to escape saddle points |
 | SGD | 1 sample | Very noisy | Cheapest per step; noise helps generalization | High variance; hard to tune lr |
 | Mini-batch SGD | 32-256 | Approximately unbiased | Balance of speed and stability | Still requires lr tuning |
+
+**What this actually says.** "Averaging more samples per step buys you a cleaner gradient, but the cleanliness improves only with the *square root* of the samples while the cost grows in a straight line."
+
+That square-root law is the entire reason mini-batch won. It is not a compromise chosen for tidiness — it is where the curve of diminishing returns bends.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total training samples in the dataset |
+| `B` | Batch size — samples averaged into one gradient estimate |
+| `N / B` | Optimizer steps per epoch. Small batch = many cheap updates |
+| noise ~ `1/sqrt(B)` | Standard error of the mean. Averaging `B` samples shrinks noise by `sqrt(B)` |
+| "unbiased" | The noisy estimate is *centred* on the true gradient — the errors cancel over steps |
+
+**Walk one example.** One epoch over `N = 50,000` samples, four batch sizes:
+
+```
+  batch B    steps per epoch    gradient noise ~ 1/sqrt(B)    samples touched per step
+       1          50,000               1.000                          1
+      32           1,562               0.177                         32
+     256             195               0.063                        256
+  50,000               1               0.0045                    50,000
+
+  B: 1 -> 32     32x the work per step, noise cut to 17.7%, still 1,562 updates/epoch
+  B: 32 -> 256    8x the work per step, noise cut only a further 2.83x, 195 updates left
+  B: 256 -> 50k  195x the work per step, noise cut a further 14x, and ONE update/epoch
+```
+
+The first jump is a bargain and the last is a disaster: full-batch GD buys the cleanest possible gradient and then spends it on a single parameter update per pass over the data. The 32-256 band in the table is simply where "noise low enough to be stable" first meets "steps numerous enough to make progress."
+
+**Why unbiased is the word that matters.** A mini-batch gradient is wrong on any given step, but wrong in a direction that averages out; ten noisy steps land close to where ten exact steps would. A *biased* estimate would drift somewhere else no matter how many steps you take. This is also why the noise is a feature rather than a defect — it is the perturbation that shakes parameters off saddle points and plateaus (Section 3).
 
 ### 4.2 Optimizer Families
 
@@ -63,6 +133,43 @@ Understanding optimization theory explains why models sometimes fail to train (l
 | Cosine annealing | lr = lr_min + 0.5*(lr_max-lr_min)*(1+cos(pi*t/T)) | Widely used for transformers |
 | Linear warmup | lr increases linearly for first W steps | Always use with Adam for transformers |
 | Cyclical LR | Cycles between lr_min and lr_max | Helps escape local minima; SGDR |
+
+**Put simply.** "Take long strides early while you are far from anywhere good, then shorten them so you can settle into the bottom instead of skating across it."
+
+Each formula in the table is just a different opinion about *how* to shorten the stride: step decay drops it in cliffs, exponential and cosine bleed it away smoothly, warmup handles the separate problem that stride zero should not already be full length.
+
+| Symbol | What it is |
+|--------|------------|
+| `lr_0` / `lr_max` | The peak learning rate — the biggest stride you ever take |
+| `lr_min` | The floor. Where decay bottoms out, typically `lr_max / 10` |
+| `gamma` | Step decay's cut factor. `gamma = 0.1` means "divide lr by 10 at each drop" |
+| `step_size` | How many epochs between step-decay cuts (30 is the classic vision setting) |
+| `t / T` | Fraction of training completed. Drives cosine from 0 (start) to 1 (end) |
+| `cos(pi * t/T)` | Runs `+1 -> -1` over training, so `0.5*(1 + cos)` runs `1 -> 0`: a smooth fade |
+| `W` | Warmup length in steps. Before `W`, lr ramps linearly `0 -> lr_max` |
+
+**Walk one example.** All three schedules with `lr_max = 3e-4`, `lr_min = 3e-5`, `T = 100` epochs, `gamma = 0.1` every 30 epochs, warmup `W = 10`:
+
+```
+  epoch    step decay    cosine annealing    warmup + cosine
+      0      3.00e-04        3.00e-04            0.00e+00   <- warmup starts from zero
+      5      3.00e-04        2.98e-04            1.50e-04      halfway up the ramp
+     10      3.00e-04        2.93e-04            3.00e-04   <- peak reached, decay begins
+     25      3.00e-04        2.60e-04            2.82e-04
+     30      3.00e-05        2.44e-04            2.68e-04   <- step decay's 10x cliff
+     50      3.00e-05        1.65e-04            1.88e-04
+     60      3.00e-06        1.23e-04            1.42e-04   <- second cliff: another 10x
+     75      3.00e-06        6.95e-05            7.82e-05
+     90      3.00e-07        3.66e-05            3.81e-05
+    100      3.00e-07        3.00e-05            3.00e-05
+
+  By epoch 100 step decay has fallen 1000x to 3.00e-07 while cosine stops at its
+  floor of 3.00e-05 -- a 100x difference in final stride length.
+```
+
+The staircase is visible in the numbers: step decay holds `3.00e-04` flat for 29 epochs then divides by 10 in one epoch, which is why its loss curve shows a sudden drop at every cliff. Cosine spreads the same total decay across every epoch, so nothing about training changes abruptly and there is no cliff epoch to tune.
+
+**Why warmup exists and what breaks without it.** Warmup is the only schedule here that is not about decay — it solves an Adam-specific startup problem. At step 0 the second moment `v` is 0, so the per-parameter scale is estimated from a single gradient and can be wildly off; multiplying an unreliable scale by a full-size `lr_max` is how a run reaches NaN in ten steps (Section 10, Pitfall 2). Ramping `0 -> 3e-4` over the first 10% of steps keeps the early updates small precisely while the moment estimates are least trustworthy. GPT-3 spent 375 million of its 300 billion tokens doing exactly this (Section 7).
 
 ---
 
@@ -92,6 +199,39 @@ Adam (beta1=0.9, beta2=0.999, eps=1e-8):
   v_hat = v / (1 - beta2^t)             (bias correction)
   theta = theta - lr * m_hat / (sqrt(v_hat) + eps)
 ```
+
+**Read it like this.** "Do not just step where the slope points right now — keep rolling in the direction you have already been going, and let the new slope nudge that rolling direction rather than replace it."
+
+Vanilla SGD is amnesiac: every step forgets the previous one. The velocity `v` is the memory, and it turns a sequence of small consistent pushes into real speed.
+
+| Symbol | What it is |
+|--------|------------|
+| `v` | Velocity. The running direction-and-speed you carry into the next step |
+| `beta` | How much velocity survives each step. `0.9` = keep 90%, forget 10% |
+| `beta * v` | The coasting term — where you would go with no new gradient at all |
+| `-lr * g` | This step's fresh push, *added to* the velocity instead of replacing it |
+| `theta + v` | Move by the accumulated velocity, not by the raw gradient |
+
+**Walk one example.** A long flat region where the gradient is weak but perfectly consistent — `g = 1.0` every step, `lr = 0.01`, `beta = 0.9`, starting from rest:
+
+```
+  step      v = 0.9*v - 0.01*g      distance travelled     plain SGD would be at
+    1           -0.01000                -0.01000                 -0.01000
+    2           -0.01900                -0.02900                 -0.02000
+    3           -0.02710                -0.05610                 -0.03000
+    4           -0.03439                -0.09049                 -0.04000
+    5           -0.04095                -0.13144                 -0.05000
+    6           -0.04686                -0.17830                 -0.06000
+    7           -0.05217                -0.23047                 -0.07000
+    8           -0.05695                -0.28742                 -0.08000
+
+  After 8 steps momentum has covered 0.287 of ground; plain SGD covered 0.080.
+  Same gradients, same lr, 3.6x the distance -- purely from not forgetting.
+```
+
+The per-step velocity is still climbing at step 8 and converges toward `lr / (1 - beta) = 0.01 / 0.1 = 0.10`, the `10 * lr` figure quoted in Section 6. That is the ceiling: on a perfectly consistent slope momentum eventually moves ten times faster per step than SGD, which is exactly what lets it coast across the shallow plateaus that would otherwise take thousands of steps.
+
+**Why the same term also kills oscillation.** Flip the sign of `g` every step instead of holding it constant, and the accumulation runs backwards: `+lr` and `-lr` contributions cancel inside `v` and the velocity stays near zero. So one term does both jobs — consistent directions compound, alternating directions annihilate. That is the ravine behaviour in the Section 12 answer, and it is why momentum both damps the zig-zag across a narrow valley and accelerates the crawl along it.
 
 ### Adam Update Flow
 
@@ -133,6 +273,75 @@ squared-gradient scale, beta2=0.999). Both are initialised to 0, so bias
 correction divides by (1 - beta^t) to undo the early-step shrinkage — at t=1 that
 rescales m by 1/0.1 and v by 1/0.001. The final node is the per-parameter
 adaptive update theta -= lr * m_hat / (sqrt(v_hat) + eps).
+
+**What the formula is telling you.** "Track two running averages per parameter — the usual direction of its gradient and the usual *size* of its gradient — then step in that direction, divided by that size. What survives is a step whose length is set by `lr`, not by how big the gradient happened to be."
+
+That division is Adam's whole personality. A parameter with huge gradients and one with tiny gradients receive updates of the same magnitude, so a single global `lr` can serve millions of parameters whose gradient scales differ by orders of magnitude.
+
+| Symbol | What it is |
+|--------|------------|
+| `g` | This step's raw gradient for one parameter |
+| `m` | First moment. Running average of `g` — *which way* this parameter usually wants to move |
+| `beta1` | Memory for `m`, `0.9`. Each step keeps 90% of the old average, mixes in 10% new |
+| `v` | Second moment. Running average of `g^2` — *how big* this parameter's gradients usually are |
+| `beta2` | Memory for `v`, `0.999`. Far longer memory: 99.9% kept, so the scale estimate is stable |
+| `t` | Step counter, starting at 1. Only bias correction uses it |
+| `m_hat`, `v_hat` | `m` and `v` with the startup shrinkage divided out (see below) |
+| `sqrt(v_hat)` | Typical gradient *magnitude*. Square root undoes the squaring in `v` |
+| `eps` | `1e-8`. A floor under the denominator so a near-zero `v_hat` cannot blow up the step |
+| `m_hat / sqrt(v_hat)` | Direction divided by scale — roughly a signed unit step, so `lr` sets the length |
+
+**Walk one example across three steps.** One parameter, Adam defaults `lr = 1e-3`, `beta1 = 0.9`, `beta2 = 0.999`, `eps = 1e-8`, both moments starting at 0. Gradients arrive as `0.100`, `0.120`, `0.080`:
+
+```
+  step    g      m         v          m_hat     v_hat      sqrt(v_hat)   update
+    1   0.100  0.010000  1.000e-05   0.100000  1.000e-02    0.100000    0.001000
+    2   0.120  0.021000  2.439e-05   0.110526  1.220e-02    0.110459    0.001001
+    3   0.080  0.026900  3.077e-05   0.099262  1.027e-02    0.101319    0.000980
+
+  m  crawls 0.010 -> 0.027, still far below the true average gradient of 0.100,
+     because beta1=0.9 only lets 10% of each new gradient in.
+  v  is even further behind at 3.08e-05 vs the true g^2 average of ~1.0e-02,
+     because beta2=0.999 admits only 0.1% of each new value.
+  m_hat and v_hat undo exactly that lag: 0.0269/(1-0.9^3) = 0.0993, which IS
+     about the running average gradient, and 3.077e-05/(1-0.999^3) = 1.027e-02,
+     which IS about the running average of g^2.
+
+  Every update lands within 2% of lr = 0.001, even though the gradients
+  ranged 0.080 to 0.120. That is the point: the step size is lr, not the gradient.
+```
+
+**Why `m` and `v` need different memories.** `beta1 = 0.9` gives `m` a ~10-step memory: direction should react quickly when the landscape turns. `beta2 = 0.999` gives `v` a ~1000-step memory: the scale estimate is a denominator, and a denominator that jitters would make step lengths jitter. Long memory there is what makes the per-parameter learning rate *stable* rather than reactive.
+
+**Why bias correction matters most at step 1.** Both moments start at 0, so the first update to `m` is `0.9*0 + 0.1*g = 0.1*g` — a tenth of the truth. `v` is worse: `0.001*g^2`, a thousandth. The two errors do not cancel, because `v` sits under a square root:
+
+```
+  at t = 1, with g = 0.100
+
+  raw     m = 0.010000        v = 1.000e-05       sqrt(v) = 0.003162
+  correct m_hat = m/(1-0.9^1)   = 0.010/0.1   = 0.100000   <- 10x rescale
+          v_hat = v/(1-0.999^1) = 1e-05/0.001 = 1.000e-02  <- 1000x rescale
+
+  update WITH    correction = 1e-3 * 0.100 / 0.100000 = 0.001000  = lr, as designed
+  update WITHOUT correction = 1e-3 * 0.010 / 0.003162 = 0.003162  = 3.16x too large
+
+  The m error shrinks the step 10x; the v error, halved by the square root,
+  inflates it 31.6x. Net: 3.16x oversized on the very first step.
+```
+
+Uncorrected, that ratio is `(1 - beta1^t) / sqrt(1 - beta2^t)` — `3.16x` at `t = 1`, still `3.24x` at `t = 100`, and only near `1.0` after a few thousand steps. So this is not a one-step blemish you can shrug off; without correction the entire early phase of training runs at an inflated effective learning rate, which is precisely the regime where oversized steps put weights somewhere unrecoverable (Section 10, Pitfall 2).
+
+**What `eps` prevents.** `eps = 1e-8` is a floor under the denominator, and the failure it blocks is not subtle:
+
+```
+  v_hat      sqrt(v_hat)    update with eps=1e-8    update with no eps
+  1e-04        1e-02              0.010000               0.010000
+  1e-08        1e-04              0.999900               1.000000
+  1e-12        1e-06             99.009901             100.000000
+  0            0              10000.000000           division by zero -> NaN
+```
+
+A parameter whose gradient has been ~0 for many steps — a frozen embedding row, a dead ReLU, a masked token — drives `v_hat` toward 0, and the update explodes or becomes NaN the instant a gradient finally arrives. `eps` caps the worst case at `lr / eps`. Note it also means `eps` is not purely cosmetic: raise it to `1e-4` and you meaningfully shrink the steps of every small-gradient parameter, which is why some transformer recipes tune it deliberately rather than leaving the default.
 
 ### Optimizer Convergence Trajectories
 
@@ -191,6 +400,49 @@ theta=-1 to 1, and the true global minimum near theta=4; first-order methods can
 stall in the local minimum or crawl across the plateau, and it is SGD's
 mini-batch noise that perturbs parameters out of them (Section 2 key insight,
 Section 3).
+
+The formal test for that shape is the definition of convexity: for any two points `x` and `y` and any blend weight `a` in `[0, 1]`,
+
+```
+  f(a*x + (1-a)*y)  <=  a*f(x) + (1-a)*f(y)
+```
+
+**Stated plainly.** "Pick any two points on the curve and stretch a straight line between them. If the curve never pokes up above that line, anywhere, for any pair of points, the function is convex."
+
+The left side is the curve's height at a blended point; the right side is the straight line's height there. Convex means the curve always sits on or below its own chords — which is exactly what guarantees no second valley can exist to trap you.
+
+| Symbol | What it is |
+|--------|------------|
+| `x`, `y` | Any two parameter values you choose to compare |
+| `a` | Blend weight in `[0, 1]`. `a = 0.5` is the midpoint; `a = 0.25` is closer to `y` |
+| `a*x + (1-a)*y` | A point *between* `x` and `y` — the blend, on the horizontal axis |
+| `f(a*x + (1-a)*y)` | Height of the **curve** at that in-between point |
+| `a*f(x) + (1-a)*f(y)` | Height of the **straight chord** at that same point |
+| `<=` | The whole claim: curve never rises above chord. Flip it once and convexity is dead |
+
+**Walk one example.** First the convex curve `f(theta) = theta^2`, testing `x = -2`, `y = 4`:
+
+```
+   a      blend point       curve f(blend)     chord a*f(x)+(1-a)*f(y)     holds?
+  0.50    0.5*(-2)+0.5*4 = 1.00      1.00      0.5*4 + 0.5*16  = 10.00      yes
+  0.25   0.25*(-2)+0.75*4 = 2.50     6.25     0.25*4 + 0.75*16 = 13.00      yes
+
+  The curve sits far below the chord at every blend, and no choice of x, y, a
+  can change that. One bowl, one bottom -- gradient descent cannot get lost.
+```
+
+Now the non-convex curve from the chart above, using its own plotted values — `x = -4` (loss `2.3`), `y = 4` (loss `0.4`), midpoint `theta = 0` (loss `2.6`):
+
+```
+   a      blend point     curve f(blend)      chord a*f(x)+(1-a)*f(y)      holds?
+  0.50    0.5*(-4)+0.5*4 = 0     2.60      0.5*2.3 + 0.5*0.4 = 1.35        NO
+
+  2.60 > 1.35: the curve pokes 1.25 above its own chord. One counterexample is
+  all it takes -- the function is non-convex, and the bump between theta=-4 and
+  theta=4 is a wall gradient descent has no way to see over.
+```
+
+**Why this test is the one that matters for optimization.** Convexity is what licenses the guarantee in Section 3 — "gradient descent converges to the global minimum." The proof needs exactly this property: if the curve can never rise above a chord, then any point where the gradient vanishes must be the global minimum, so "keep going downhill until you stop" is a complete algorithm. Break the chord test even once, as the second walk does, and a vanishing gradient no longer proves anything about where you are. That is the entire theoretical gap between logistic regression and a neural network.
 
 ---
 
@@ -402,6 +654,45 @@ def lr_range_test(
     return lrs, losses
 ```
 
+### Convergence Criteria — Deciding When to Stop
+
+Two thresholds decide when an optimization run is finished:
+
+```
+  gradient-norm criterion:   ||grad||           <= tol_g
+  relative-loss criterion:   (L_prev - L) / L_prev  <= tol_r
+```
+
+**What it means.** "Stop when the ground under you has gone flat, or when the last pass barely lowered your altitude — whichever you can measure more reliably."
+
+The two answer different questions. The gradient norm asks "am I at a critical point?", a statement about geometry. Relative loss change asks "is further training still paying for itself?", a statement about economics. Production runs almost always stop on the second.
+
+| Symbol | What it is |
+|--------|------------|
+| `grad` | The full gradient vector over all parameters |
+| `\|\|grad\|\|` | Its L2 norm — one number for "how steep is it here, overall" |
+| `tol_g` | Flatness threshold, e.g. `1e-5`. Below it, the slope is indistinguishable from zero |
+| `L_prev`, `L` | Loss before and after the epoch |
+| `L_prev - L` | Absolute improvement. Meaningless alone — depends on the loss scale |
+| `(L_prev - L)/L_prev` | *Relative* improvement, scale-free. `1e-4` = "gained 0.01% this epoch" |
+| `tol_r` | Patience threshold, e.g. `1e-4`, usually required for several epochs running |
+
+**Walk one example.** A run whose loss is easing toward its floor, with `tol_r = 1e-4`:
+
+```
+  epoch    loss      L_prev - L     relative change      ||grad||    verdict
+    1     2.86000     0.04000          1.379e-02          0.500      keep going
+    2     2.85200     0.00800          2.797e-03          0.100      keep going
+    3     2.85010     0.00190          6.662e-04          0.020      keep going
+    4     2.84966     0.00044          1.544e-04          0.004      borderline
+
+  At epoch 4 the loss still moves in the 4th decimal, but relative change is
+  1.544e-04 -- just above tol_r = 1e-4. One more epoch of this decay rate
+  crosses it, and further training is buying ~0.01% per epoch. Stop.
+```
+
+**Why the relative form and not the absolute one.** `L_prev - L = 0.00044` means nothing on its own: it is a triumph if the loss is `0.001` and noise if the loss is `2.85`. Dividing by `L_prev` removes the scale, so the same `tol_r` transfers unchanged between a cross-entropy run sitting at `2.8` and an MSE run sitting at `0.003`. The gradient-norm criterion has the opposite problem — it is rigorous but, on a mini-batch, the norm you measure is a noisy sample rather than the true gradient, so it rarely falls below a tight `tol_g` even at a genuine minimum. That is why the practical rule is relative-loss plus patience, with the gradient norm logged as a diagnostic (Section 13) rather than used as the stop button.
+
 ---
 
 ## 7. Real-World Examples
@@ -413,6 +704,46 @@ def lr_range_test(
 **Adam vs SGD generalization gap**: ResNet-50 trained on ImageNet with SGD + momentum achieves ~76% top-1 accuracy; the same architecture with Adam typically achieves ~74-75%. This 1-2% gap is well-documented: SGD with momentum finds flatter minima (wider basins) that generalize better, while Adam's adaptive learning rates find sharper, narrower minima. For NLP tasks the gap reverses — Adam converges faster and often to better solutions than SGD.
 
 **Saddle points in high dimensions**: A network with 10^8 parameters has a loss landscape with critical points in 10^8-dimensional space. A saddle point in high dimensions has positive curvature in many directions and negative curvature in at least one. Gradient noise from mini-batches helps escape saddle points; in practice, true local minima (positive curvature in all directions) are extremely rare in overparameterized networks.
+
+**The idea behind it.** "A zero gradient only tells you the ground is level right here — it takes the *curvature* to tell you whether you are in a bowl, on a ridge, or at the top of a hill."
+
+Every critical point looks identical to a first-order optimizer: gradient zero, nowhere obvious to step. The distinction lives one derivative up, in the Hessian, which first-order methods never compute — and that is exactly why saddle points, not local minima, are the real obstacle.
+
+| Symbol | What it is |
+|--------|------------|
+| critical point | Any location where the gradient is zero. Minimum, maximum, or saddle |
+| curvature | How the slope changes as you move. Positive = valley floor, negative = hilltop |
+| Hessian | The matrix of all second derivatives — curvature in every direction at once |
+| eigenvalues of Hessian | The curvature along each independent direction. Signs are what matter |
+| local minimum | Gradient zero **and** every curvature positive: uphill whichever way you go |
+| saddle point | Gradient zero, curvatures **mixed**: uphill some ways, downhill others |
+| global minimum | A local minimum that no other point in the landscape beats |
+
+**Walk one example.** Two surfaces, both with a critical point at the origin:
+
+```
+  f(x, y) = x^2 + y^2        f(x, y) = x^2 - y^2
+  gradient at (0,0) = (0,0)  gradient at (0,0) = (0,0)      <- identical so far
+  curvatures = (+2, +2)      curvatures = (+2, -2)          <- here they diverge
+
+  step to (0, 0.01):         step to (0, 0.01):
+    f = +0.0001  (uphill)      f = -0.0001  (downhill!)
+
+  Same zero gradient, opposite meaning. The bowl is a real minimum; the saddle
+  has an escape route along y that costs nothing to find -- if you look.
+```
+
+**Why dimension count decides which one you meet.** A critical point is a minimum only if *all* its curvatures are positive. Treating each sign as a coin flip gives a rough sense of scale:
+
+```
+  dimensions        P(all curvatures positive) = 2^-d
+       2                       0.25
+      10                       9.77e-04
+     100                       7.89e-31
+     10^8                      2^-100000000, effectively zero
+```
+
+The model in the paragraph above has `10^8` parameters. Requiring a hundred million curvatures to come out positive simultaneously is why true local minima are, as stated, extremely rare — nearly every point where the gradient vanishes has at least one downhill direction available. This reframes the escape problem completely: you are not trapped, you are on a plateau where the gradient is too small to move you. The fix is therefore not "restart from a new initialization" but the perturbation sources already in the pipeline — mini-batch noise (Section 4.1) and momentum's carried velocity (Section 5), which coasts through a flat region rather than stalling in it.
 
 ---
 

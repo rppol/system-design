@@ -68,6 +68,57 @@ Key insight: the test set must remain completely unseen until final evaluation. 
 | AUC-PR     | Area under precision-recall curve | Highly imbalanced (< 5% positives)   |
 | MCC        | Matthews Correlation Coefficient  | Imbalanced, all 4 cells of CM matter |
 
+**In plain terms.** "Precision asks *of everything I flagged, how much was actually right*; recall asks *of everything that was really out there, how much did I catch*; F1 is the one number that refuses to let you cheat at either."
+
+The two questions look symmetric but have completely different denominators, and that is the whole source of confusion. Precision divides by what the **model** claimed; recall divides by what **reality** contained. You can max out either one alone — flag one certain case (precision 1.0) or flag everybody (recall 1.0) — which is why neither is ever reported by itself.
+
+| Symbol | What it is |
+|--------|------------|
+| `TP` | True positive — model said yes, reality said yes. The hits |
+| `FP` | False positive — model said yes, reality said no. The false alarms |
+| `FN` | False negative — model said no, reality said yes. The misses |
+| `TN` | True negative — both said no. Usually the overwhelming majority, and usually irrelevant |
+| `TP + FP` | Everything the model flagged. Precision's denominator |
+| `TP + FN` | Everything that was truly positive. Recall's denominator |
+| `b` (beta) | How many times more you care about recall than precision. `b = 2` weights recall `b^2 = 4x` |
+
+**Walk one example.** The cancer-screening model from Section 7 (recall 0.94, precision 0.61), applied to 10,000 screened patients of whom 200 genuinely have cancer:
+
+```
+                    predicted YES      predicted NO
+  actually YES    TP =    188        FN =     12      200 real cancers
+  actually NO     FP =    120        TN =   9680     9800 healthy people
+
+  precision = TP / (TP + FP) = 188 / 308  = 0.6104
+              "of the 308 people I sent for biopsy, 188 really had cancer"
+
+  recall    = TP / (TP + FN) = 188 / 200  = 0.9400
+              "of the 200 real cancers, I caught 188 and missed 12"
+
+  F1 = 2 x P x R / (P + R)
+     = 2 x 0.6104 x 0.9400 / (0.6104 + 0.9400) = 1.1476 / 1.5504 = 0.7402
+
+  F2 = 5 x P x R / (4 x P + R)                 <- beta = 2, recall weighted 4x
+     = 5 x 0.6104 x 0.9400 / (2.4416 + 0.9400) = 2.8689 / 3.3816 = 0.8484
+
+  accuracy = (188 + 9680) / 10000 = 0.9868     <- looks superb, says nothing
+```
+
+Note what accuracy did: 0.9868, almost entirely earned by the 9,680 healthy people correctly left alone. A model that predicts "no cancer" for every single patient scores 0.9800. The real model's entire contribution is that 0.68-point gap — which is exactly the trap in Pitfall 3, and why F2 (0.8484, recall-weighted) is the CV objective the team actually optimized.
+
+**Why F1 is a harmonic mean and not a plain average.** The harmonic mean is dragged down by the smaller of the two numbers instead of splitting the difference, so a model cannot buy a good F1 by being brilliant at one side and useless at the other:
+
+```
+                       precision   recall   arithmetic mean   F1 (harmonic)
+  balanced model         0.7000    0.7000       0.7000           0.7000
+  lopsided model         0.9000    0.1000       0.5000           0.1800
+  screening model        0.6104    0.9400       0.7752           0.7402
+
+  F1(0.90, 0.10) = 2 x 0.90 x 0.10 / (0.90 + 0.10) = 0.18 / 1.00 = 0.18
+```
+
+The lopsided model flags almost nothing but is right when it does — 90% precision, 10% recall. The arithmetic mean rewards it with a respectable-sounding 0.50. F1 answers 0.18, roughly "as good as a model that is 18% right at both", which is the honest reading. When precision and recall are equal the two means coincide (0.70 for both), so the harmonic mean only ever costs you something when the model is imbalanced — which is precisely when you want to be told.
+
 ### Regression Metrics
 
 | Metric | Formula                    | Outlier sensitivity | Interpretable |
@@ -131,6 +182,37 @@ The 20% test set (purple, locked) stays untouched until the single final evaluat
   fold 4:  T  V  T  T  T
   fold 5:  V  T  T  T  T     every fold uses a fresh validation slice
 ```
+
+**The idea behind it.** "Do not trust one train/test split — split five different ways, score five times, and report both where the scores landed *and* how far apart they were."
+
+The spread is the half of the result everyone forgets. `cross_val_score` returns five numbers and the code in Section 6 deliberately prints `mean +/- std`, because a mean without its standard deviation cannot tell you whether a 0.01 improvement over a baseline is a real gain or fold noise.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Number of folds. Every row above is one fold; `k = 5` means 5 fits and 5 scores |
+| `s_i` | The score from fold `i` — the model trained on `k-1` slices, scored on the held-out one |
+| `mean` | `(1/k) * sum(s_i)`. The point estimate you would quote as "the model's AUC" |
+| `std` | Spread of the `s_i` around that mean. How much the answer depends on which rows you held out |
+| `n_splits * 1 fit` | The cost: `k` full model trainings, which is why LOO (`k = n`) is unaffordable |
+
+**Walk one example.** Two candidate models, both averaging about 0.80 AUC across 5 folds:
+
+```
+                    fold1   fold2   fold3   fold4   fold5    mean     std
+  model A           0.83    0.79    0.85    0.71    0.82     0.800   0.0490
+  model B           0.81    0.80    0.82    0.80    0.81     0.808   0.0075
+
+  model A mean = (0.83 + 0.79 + 0.85 + 0.71 + 0.82) / 5 = 4.00 / 5 = 0.800
+  model A std  = sqrt( mean of squared deviations )     = 0.0490
+
+  roughly-95% band (mean +/- 2 std):
+    model A -> 0.800 +/- 0.098  ->  [0.702, 0.898]    <- an 0.20-wide answer
+    model B -> 0.808 +/- 0.015  ->  [0.793, 0.823]    <- an 0.03-wide answer
+```
+
+Report only the means and model B wins by 0.008 — a rounding error. Report the spreads and the picture inverts: model B is the trustworthy one not because it scored higher but because it scored *consistently*. Model A's fold 4 came in at 0.71 while fold 3 hit 0.85; that 0.14 swing means one unlucky slice of data can move the headline number more than most modelling improvements ever will.
+
+**What a wide std is actually telling you.** It is a warning that the point estimate is fragile, and it usually has a diagnosable cause: too few rows (each fold's validation slice is tiny, so scores bounce), a heavily imbalanced target where one fold caught few positives (fix with `StratifiedKFold`), or genuine heterogeneity — a group, region, or time period that behaves differently and lands wholly inside one fold (fix with `GroupKFold` or `TimeSeriesSplit`). If the std stays wide after stratification, use `RepeatedStratifiedKFold`: 5 folds x 3 repeats gives 15 scores whose mean is a far steadier estimate, at 3x the compute. And never declare a winner on a gap smaller than the folds' own spread — that is what the paired t-test in Section 6 formalizes.
 
 ### k-Fold and Nested Cross-Validation
 
@@ -203,6 +285,53 @@ xychart-beta
 
 Precision starts near 1.0 and decays toward the positive prevalence (the flat line at 0.05). The model curve staying high as recall grows is exactly what a large AUC-PR measures — the reason AUC-PR is preferred over AUC-ROC below 5% positives.
 
+**What this actually says.** "AUC-ROC is the probability that, if you pick one random positive and one random negative, the model scores the positive higher. AUC-PR is the probability that something the model flagged is actually positive, averaged across every recall level you might operate at."
+
+That first sentence is the definition worth memorizing — `P(score(pos) > score(neg))` in the metrics table is literally a probability about a ranking contest, not an abstract area. It also explains both numbers' baselines: coin-flip ranking wins half its contests, so random AUC-ROC = 0.50, while a random flagger is right at the base rate, so random AUC-PR = prevalence.
+
+| Symbol | What it is |
+|--------|------------|
+| `TPR` (recall) | `TP / (TP + FN)`. Of the real positives, the fraction caught. ROC's y-axis |
+| `FPR` | `FP / (FP + TN)`. Of the real negatives, the fraction falsely flagged. ROC's x-axis |
+| `precision` | `TP / (TP + FP)`. Of what was flagged, the fraction that was right. PR's y-axis |
+| `AUC-ROC` | Area under TPR-vs-FPR. Equals `P(score of a random positive > score of a random negative)` |
+| `AUC-PR` | Area under precision-vs-recall (sklearn's `average_precision_score`) |
+| baseline `0.5` | A coin flip wins half its ranking contests, so random AUC-ROC is always 0.50 |
+| baseline `prevalence` | Random flagging is right at the base rate, so random AUC-PR is the positive rate |
+
+**Walk one example.** A deliberately imbalanced set — 1,000 negatives and 10 positives (prevalence 0.99%) — scored by a model that genuinely does rank positives higher, then read both ways:
+
+```
+  setup (reproduce with numpy + sklearn):
+    negatives ~ Normal(0.0, 1), n = 1000
+    positives ~ Normal(1.3, 1), n =   10
+    roc_auc_score          -> 0.9076        <- "impressive"
+    average_precision_score-> 0.1029        <- dismal
+    AUC-PR random baseline  = 10 / 1010 = 0.0099
+
+  the same model read at four operating points:
+
+    recall    TP    FP     precision = TP/(TP+FP)    FPR = FP/1000
+    0.30       3     23        0.1154                   0.023
+    0.50       5     41        0.1087                   0.041
+    0.80       8     45        0.1509                   0.045
+    0.90       9    205        0.0421                   0.205
+    1.00      10    466        0.0210                   0.466
+```
+
+Look at the 0.90-recall row. To catch 9 of the 10 positives the model drags in **205 false alarms** — a queue that is 95.8% junk. FPR barely notices: 205 / 1000 = 0.205, still deep in the good region of the ROC curve, because ROC divides those 205 errors by the 1,000 negatives it has in abundance. Precision divides the same 205 by the 214 things flagged, and collapses to 0.0421.
+
+**Why the denominators decide everything.** ROC-AUC's x-axis has `TN` in its denominator, and under imbalance `TN` is enormous. Adding 200 false positives to a pool of 1,000 negatives moves FPR by 0.20; adding them to a pool of 100,000 negatives moves it by 0.002 — invisible on the curve, while the human reviewing the alert queue drowns. Precision never touches `TN` at all, so it feels every false positive at full weight. That is the entire argument in one line:
+
+```
+  AUC-ROC = 0.9076   vs random 0.5000   ->  1.8x better than chance
+  AUC-PR  = 0.1029   vs random 0.0099   -> 10.4x better than chance
+
+  Same model, same scores. ROC flatters it; PR shows the alert queue you must staff.
+```
+
+Both readings are mathematically correct — the model really does win 91% of its ranking contests. But 89.7% of what it flags at useful recall is wrong, and only AUC-PR says so. This is exactly the fraud case in Section 7, where Model A and Model B looked 0.02 apart on AUC-ROC (0.96 vs 0.94) and 0.31 apart on AUC-PR (0.72 vs 0.41), and the AUC-PR ranking was the one that held up in production.
+
 ### Precision / Recall vs Decision Threshold
 
 ```mermaid
@@ -230,6 +359,41 @@ xychart-beta
 
 Bias (the falling line) shrinks and variance (the rising line) grows with complexity, so total error (the U-shaped line) bottoms out at moderate complexity. A low training and low CV score together sit on the left (underfit, high bias); a high training but low CV score sits on the right (overfit, high variance).
 
+**Read it like this.** "Your total error is three things added together: how wrong your model's *shape* is, how much your answer *wobbles* depending on which data you trained on, and noise nobody can ever remove — and only the first two respond to complexity, in opposite directions."
+
+The decomposition is `total error = bias^2 + variance + irreducible noise`. It matters because it turns "the model is bad" into a diagnosis with two different prescriptions: high bias needs a *more* expressive model, high variance needs *less*, and doing the wrong one makes things worse.
+
+| Symbol | What it is |
+|--------|------------|
+| `bias^2` | Error from the model being too simple to represent the truth. A straight line fitting a curve |
+| `variance` | Error from sensitivity to the training sample. Retrain on different rows, get a different model |
+| `irreducible noise` | Error nothing can fix — label noise, missing causal features, genuine randomness |
+| `total error` | The sum. The only one you can actually measure, via a held-out set or CV |
+| complexity | Tree depth, polynomial degree, `n_estimators`, layer count — whatever knob adds capacity |
+
+**Walk one example.** The three curves plotted above, at every complexity setting from 1 (a constant) to 10 (an unpruned deep model):
+
+```
+  complexity   bias^2   variance   noise   total = bias^2 + variance + noise
+       1        0.80      0.05      0.05    0.90     underfit -- model too rigid
+       2        0.55      0.07      0.05    0.67
+       3        0.38      0.10      0.05    0.53
+       4        0.26      0.14      0.05    0.45
+       5        0.18      0.20      0.05    0.43   <- MINIMUM: the sweet spot
+       6        0.13      0.28      0.05    0.46
+       7        0.10      0.38      0.05    0.53
+       8        0.08      0.50      0.05    0.63
+       9        0.07      0.64      0.05    0.76
+      10        0.06      0.80      0.05    0.91     overfit -- memorizing noise
+
+  check at complexity 5:  0.18 + 0.20 + 0.05 = 0.43
+  check at complexity 10: 0.06 + 0.80 + 0.05 = 0.91
+```
+
+Complexity 1 and complexity 10 score almost identically (0.90 vs 0.91) for opposite reasons — one is too dumb to fit, the other has memorized the training rows. A single error number cannot tell them apart, which is why you compare *training* score against *CV* score: both low means you are at complexity 1, training-high-but-CV-low means complexity 10.
+
+**Why the irreducible term exists and why it is the useful one.** It never moves — 0.05 in every row — so it sets a floor no amount of modelling can cross. Going from complexity 5 to complexity 10 bought a bias^2 reduction of 0.12 and paid 0.60 in variance, a terrible trade; and even a perfect model would still score 0.05. Knowing that floor is what stops a team burning a quarter chasing an error target that the data itself forbids. Practically, you estimate it as the residual error of your best-ever model or of a human annotator, and the gap between your current error and that floor is the only headroom actually on the table.
+
 ### Reliability Diagram (Calibration)
 
 ```mermaid
@@ -242,6 +406,42 @@ xychart-beta
 ```
 
 The diagonal is perfect calibration; the lower curve is an overconfident model — where it predicts 0.9 the event actually occurs only ~0.6 of the time (the churn-model failure in Pitfall 4). The vertical gap between the two lines is the calibration error that Platt scaling or isotonic regression removes.
+
+**Put simply.** "Round up every case where the model said 70% and check: did roughly 70 out of every 100 of them actually happen? Calibration is that check, repeated at every confidence level."
+
+A reliability diagram is nothing more than that check drawn as a plot — bucket the predictions, put the bucket's average prediction on the x-axis and the bucket's observed positive rate on the y-axis. Perfect honesty is the diagonal. Below it means overconfident, above means underconfident. Note this is entirely separate from ranking skill: a model can have AUC-ROC 0.95 and still be wildly overconfident, because AUC only cares about order and calibration only cares about the numbers.
+
+| Symbol | What it is |
+|--------|------------|
+| `bin b` | A bucket of predictions, e.g. everything the model scored between 0.8 and 1.0 |
+| `p_b` | Mean predicted probability inside bin `b` — the model's claimed confidence. The x-axis |
+| `o_b` | Observed fraction that were actually positive inside bin `b` — reality. The y-axis |
+| `n_b` | How many predictions fell in bin `b`. The weight; a huge gap in a tiny bin barely matters |
+| `\|p_b - o_b\|` | The vertical gap in the diagram. Per-bin calibration error |
+| `ECE` | Expected Calibration Error = `sum over bins of (n_b / N) * \|p_b - o_b\|`. Size-weighted average gap |
+| `Brier` | `mean((p_i - y_i)^2)` over individual rows, `y_i` in {0,1}. 0 = perfect, 0.25 = always guessing 0.5 |
+
+**Walk one example.** The churn model from Pitfall 4, on a 10,000-row held-out set, bucketed into five bins:
+
+```
+  bin   p_b     o_b     n_b     |p_b - o_b|    weight n_b/N    contribution
+  0.1   0.10    0.11    4000        0.01          0.40           0.00400
+  0.3   0.30    0.27    2500        0.03          0.25           0.00750
+  0.5   0.50    0.43    1800        0.07          0.18           0.01260
+  0.7   0.70    0.55    1200        0.15          0.12           0.01800
+  0.9   0.90    0.60     500        0.30          0.05           0.01500
+                       ------                                   -------
+                        10000                            ECE  =  0.0571
+
+  Brier = sum over bins of n_b * [ o_b*(1 - p_b)^2 + (1 - o_b)*p_b^2 ] / N
+        = 0.1826
+
+  Brier this model would score if perfectly calibrated (o_b = p_b) = 0.1632
+```
+
+Read the 0.5 row against Pitfall 4: marketing set the retention-offer threshold at 0.5, and of the 1,800 customers the model scored there, only 43% actually churned. Read the 0.9 row for the worst damage: the model claims 90% certainty and reality delivers 60%, a 0.30 gap — but that bin holds only 500 rows, so it contributes 0.015 of the 0.0571 ECE, less than the 0.7 bin's 0.018. The size weighting is the point: a spectacular miscalibration on 5% of traffic is a smaller business problem than a moderate one on 12%.
+
+**Why Brier and ECE are not redundant.** Brier is a *proper scoring rule* — it scores both ranking and calibration at once, so it drops if you either separate the classes better or state your confidence more honestly. That makes it a good single-number monitor but a bad diagnostic: the 0.1826 above is only 0.0194 above the 0.1632 floor that perfect calibration would give this model, so most of the Brier score is just the difficulty of the problem, not the dishonesty. ECE isolates the dishonesty alone. Track Brier to know if the model got worse; read the reliability diagram and ECE to know *why*. And note the insurance example in Section 7 has the same shape — Brier 0.18 at AUC-ROC 0.87, fixed to 0.12 by Platt scaling on a 10,000-row held-out set *without changing AUC at all*, because calibration is a monotonic rescaling of the scores and monotonic rescaling cannot change any ranking.
 
 ---
 

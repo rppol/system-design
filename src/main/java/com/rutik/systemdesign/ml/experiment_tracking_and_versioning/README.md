@@ -68,6 +68,41 @@ Open-source, git-native. Tracks data files and pipeline stages (not experiments 
 - Bayesian optimization (Optuna TPE, SMAC): fit a surrogate model (tree-structured Parzen estimator or Gaussian process) to past results; sample next configuration in regions likely to improve over the current best — ~3-5x more sample-efficient than random search
 - Population-based training (PBT): asynchronously train a population of models; exploit good performers by copying their weights, explore by perturbing their hyperparameters mid-training
 
+**What this actually says.** `O(N^k)` means "every hyperparameter you add multiplies the entire search you already had by N" — grid search does not get gradually more expensive, it gets exponentially more expensive.
+
+That is why the guidance is a hard cutoff ("feasible only for 1-2 hyperparameters") rather than a soft preference. The exponent is the number of knobs, and you rarely have only two.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | How many values you list for one hyperparameter (e.g. lr in `[1e-5, 1e-4, 1e-3, 1e-2, 1e-1]` -> N = 5) |
+| `k` | How many hyperparameters you are tuning at once — the exponent, and the thing that hurts |
+| `N^k` | Total configurations grid search must train. Every one is a full training run |
+| "within 5% of optimal" | The bar the 60-trial random-search result is measured against — near-best, not provably best |
+
+**Walk one example.** Hold `N = 5` fixed and add one hyperparameter at a time:
+
+```
+  k = 1   ->  5^1  =         5 configs    a coffee break
+  k = 2   ->  5^2  =        25 configs    still fine -- this is grid search's home turf
+  k = 3   ->  5^3  =       125 configs    already an overnight job
+  k = 5   ->  5^5  =     3,125 configs    a GPU-week
+  k = 10  ->  5^10 = 9,765,625 configs    never finishing
+
+  Adding ONE hyperparameter at k = 5 does not add 5 runs -- it adds 4 x 3,125 = 12,500.
+```
+
+The 10-dimensional comparison in the text is the same arithmetic seen from the other side:
+
+```
+  grid  : 10,000 trials to cover 10 dims  ->  10,000^(1/10) = 2.51 values per dimension
+                                              a grid so coarse it tests ~2 values per knob
+  random:     60 trials                   ->  10,000 / 60 = 167x fewer runs, same 5% gap
+  TPE   :  a further 3-5x on top of random -> a 100-trial random budget becomes
+                                              100 / 5 = 20  to  100 / 3 = 33 trials
+```
+
+**Why the exponent, not the base, is the enemy.** Halving `N` (5 values -> 2 or 3 per knob) buys you one factor; that is what the 2.51-per-dimension grid above already did, and it still needs 10,000 runs. Random search escapes because its cost is set by the trial budget you choose, not by `N^k` — the space's dimensionality never enters the count. Bayesian optimization then spends that fixed budget better by fitting a surrogate over the trials already finished.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -558,6 +593,35 @@ A team retrained the same model config 3 months later and got 2% lower accuracy.
 **Pitfall 4 — Hyperparameter search without pruning**
 A team ran 200 Optuna trials without early stopping (no pruner). Each trial trained for 50 epochs. 60% of trials were clearly worse by epoch 5 (val_loss 2x the best trial's loss at epoch 5) but ran to completion, consuming 60% of the GPU budget for no information gain. Fix: add `MedianPruner(n_startup_trials=5, n_warmup_steps=5)` — prune any trial worse than the median at each step. In practice, this reduces GPU hours needed by 40-60% for a hyperparameter search with the same number of useful trials.
 
+**Read it like this.** The unit of GPU spend in a sweep is not the trial, it is the *trial-epoch* — so a pruner does not remove trials from the budget, it truncates them, and the saving is whatever fraction of the epoch grid you never ran.
+
+| Symbol | What it is |
+|--------|------------|
+| `n_trials` | Configurations the sampler will propose. `200` here |
+| `epochs` | Full training length of one trial. `50` here |
+| trial-epochs | `n_trials x epochs` — the real budget, since GPU time scales with epochs, not trials |
+| `n_warmup_steps` | Epochs a trial is immune from pruning. `5` — a config cannot be judged at epoch 0 |
+| `n_startup_trials` | Trials run in full before pruning turns on. `5` — the pruner needs a median to compare against |
+| prune rate | Fraction of trials killed at the warmup boundary. `60%` in this incident |
+
+**Walk one example.** The exact 200-trial study from the incident, with and without the pruner:
+
+```
+  no pruner : 200 trials x 50 epochs                    = 10,000 trial-epochs
+
+  pruner on : 120 pruned trials (60%) x  5 epochs       =    600
+              80 surviving trials      x 50 epochs      =  4,000
+                                                          ------
+                                                           4,600 trial-epochs
+
+  saved     = 10,000 - 4,600 = 5,400   ->  5,400 / 10,000 = 54%   <- inside the 40-60% band
+  useful results are unchanged: the same 80 good configs still trained to epoch 50.
+```
+
+The band's low end is just a lower prune rate, not a different mechanism — at 40% pruned the arithmetic is `80 x 5 + 120 x 50 = 6,400`, a 36% saving. Every extra point of prune rate converts a 50-epoch run into a 5-epoch run, which is why the headline number tracks the prune rate almost linearly.
+
+**Why the warmup epochs exist.** With `n_warmup_steps = 0` the pruner would compare trials at epoch 0, where the ranking is pure initialization noise, and would happily kill the eventual winner — a config with a warmup learning-rate schedule looks terrible for its first few epochs by design. The 5-epoch grace period costs `200 x 5 = 1,000` trial-epochs of the 10,000 and buys the signal that makes the median comparison meaningful.
+
 **Pitfall 5 — Shared artifact directory across experiments**
 A team saved all model checkpoints to `s3://bucket/models/best_model.pt` — overwriting on every run. After a weekend sweep of 50 runs, the checkpoint corresponded to the last run (not the best run). The best run's model was gone. Fix: always save artifacts to paths keyed by run ID: `s3://bucket/models/{run_id}/best_model.pt`. MLflow and W&B do this automatically when you use `mlflow.log_artifact()` or `wandb.log_artifact()`.
 
@@ -802,6 +866,37 @@ for step, (X_batch, y_batch) in enumerate(dataloader):
 # Alternatively: use mlflow.log_metrics() with a dict to batch multiple metrics
 # in a single API call, reducing call count further
 ```
+
+**Put simply.** Blocked training time is `steps x metrics x latency` — three numbers you fully control, and the one that silently explodes is the count of API calls, not the latency of any single one.
+
+| Symbol | What it is |
+|--------|------------|
+| steps/epoch | Batches per epoch. `10,000` here — one logging opportunity each |
+| metrics/step | Distinct scalars logged per step. `5` (loss, acc, val_loss, val_acc, lr) |
+| latency | Round-trip cost of one tracking API call. `5 ms` to a remote server |
+| `LOG_INTERVAL` | Log only every Nth step. `100` — the single knob that divides call count |
+| batching | One `log_metrics(dict)` instead of five `log_metric()` calls — divides by metrics/step |
+
+**Walk one example.** The same epoch, logged three ways:
+
+```
+  every step, one call per metric
+    10,000 steps x 5 metrics       = 50,000 calls
+    50,000 x 5 ms                  =    250 s blocked per epoch  (4 min 10 s)
+    over a 20-epoch run            =  5,000 s = 1 h 23 m of pure logging wait
+
+  every 100th step, one call per metric
+    10,000 / 100 = 100 log points x 5 = 500 calls    <- 100x fewer
+    500 x 5 ms                        = 2.5 s per epoch, 50 s over 20 epochs
+
+  every 100th step, batched log_metrics(dict)
+    100 log points x 1 call           = 100 calls
+    100 x 5 ms                        = 0.5 s per epoch
+```
+
+The two fixes compose: throttling divides by `LOG_INTERVAL` (100x) and batching divides by metrics-per-step (a further 5x), for 500x fewer calls than the broken loop. What you give up is resolution — 100 points per epoch instead of 10,000 — which no chart can render anyway.
+
+**Why this shows up as "slow training" and not "slow logging."** The calls are synchronous and sit inside the step loop, so the 250 s is charged to wall-clock training time and shows as poor GPU utilization; profilers point at the data loader and the real culprit hides in a one-line `log_metric`. The tell is that utilization drops as the metric count grows, which no data-loading bug would explain.
 
 **How do you version datasets alongside models to ensure reproducibility?** Use DVC (Data Version Control) to track datasets in Git-compatible fashion without storing large files in Git. `dvc add data/features.parquet` creates `data/features.parquet.dvc` (a small JSON pointer) that is committed to Git. The actual data is stored in a remote (S3, GCS). When reproducing a historical experiment, check out the Git commit and `dvc pull` — you get the exact dataset used. Link the DVC dataset hash to the MLflow run via `mlflow.log_param("dataset_hash", dvc_hash)`. This creates an auditable chain: Git commit → MLflow run ID → DVC dataset hash → S3 data.
 

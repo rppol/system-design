@@ -458,6 +458,301 @@ def create_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 ```
 
+### Decoding the two scalers: min-max normalization and z-score standardization
+
+The `MinMaxScaler` and `StandardScaler` rows in the tables above hide two one-line formulas that
+behave very differently the moment an outlier shows up:
+
+```
+  min-max (normalization)  :  x' = (x - min) / (max - min)
+  z-score (standardization):  x' = (x - mean) / std
+```
+
+**In plain terms.** "Min-max asks *where does this value sit between the smallest and the largest
+one I ever saw* — and answers on a 0-to-1 ruler."
+
+The denominator `max - min` is the entire range of the training column. That is the whole story of
+min-max's fragility: the ruler is defined by exactly two data points, and either of them can be a
+typo.
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | The raw value being rescaled |
+| `min`, `max` | Smallest and largest value **in the training set** — fitted parameters, not recomputed at inference |
+| `max - min` | The range. The full width of the ruler; everything is measured as a fraction of it |
+| `x'` | Output, guaranteed in `[0, 1]` for training data (test values outside the fitted range go outside it) |
+
+**What this actually says.** "Z-score asks *how many typical wobbles away from average is this
+value* — and answers in units of standard deviation."
+
+| Symbol | What it is |
+|--------|------------|
+| `mean` | The training column's average. Subtracting it re-centres the column on 0 |
+| `std` | Standard deviation — the average size of a deviation from the mean. The unit of the new ruler |
+| `x - mean` | The raw deviation, still in the original units (dollars, years) |
+| `x'` | Output in "sigmas". `0` = exactly average, `+2` = two standard deviations above, unbounded |
+
+**Walk one example.** The same five values through both, then the same five with one outlier added:
+
+```
+  clean column: 10, 20, 30, 40, 50      min=10  max=50  range=40
+                                        mean=30.0  std=14.1421
+
+     x     min-max = (x-10)/40     z-score = (x-30)/14.1421
+    10          0.0000                   -1.4142
+    20          0.2500                   -0.7071
+    30          0.5000                    0.0000
+    40          0.7500                   +0.7071
+    50          1.0000                   +1.4142
+
+  Both spread the five values evenly. Nothing to choose between them yet.
+```
+
+Now add a single outlier -- one fat-fingered `500` in a column of two-digit numbers:
+
+```
+  with outlier: 10, 20, 30, 40, 50, 500  min=10  max=500  range=490
+                                         mean=108.3333  std=175.6338
+
+     x     min-max = (x-10)/490    z-score = (x-108.3333)/175.6338
+    10          0.0000                   -0.5599
+    20          0.0204                   -0.5029
+    30          0.0408                   -0.4460
+    40          0.0612                   -0.3891
+    50          0.0816                   -0.3321
+   500          1.0000                   +2.2300
+
+  min-max: the five real values now live in [0.0000, 0.0816] -- 8% of the ruler.
+           They were spread over 100% of it before. The signal is crushed flat.
+  z-score: the five real values live in [-0.5599, -0.3321] -- a 0.23-wide band.
+           Crushed too, but less: they stay distinguishable to 2 decimal places.
+```
+
+The asymmetry is worth stating precisely, because interviewers ask for the *mechanism*, not the
+verdict. Min-max is hurt because `max` enters the denominator **directly** — one bad value moves the
+range from 40 to 490, a 12.25x dilation, and every other value shrinks by that exact factor.
+Standardization is hurt **indirectly**: the outlier inflates `std` from 14.1421 to 175.6338 (12.4x),
+which is a comparable dilation, but it also drags `mean` from 30.0 to 108.3333, so the surviving
+values at least keep a sign and a rank that a model can read. Neither is safe. `RobustScaler` is,
+because it swaps in statistics an outlier cannot move:
+
+```
+  robust: x' = (x - median) / IQR      median=35.0  Q1=22.5  Q3=47.5  IQR=25.0
+
+     x     robust = (x-35)/25
+    10         -1.00
+    20         -0.60
+    30         -0.20
+    40         +0.20
+    50         +0.60
+   500        +18.60      <- the outlier is flagged, not the other five
+
+  The five real values keep their original 1.6-wide spread. Only the outlier moves.
+```
+
+That is the entire argument for `RobustScaler` on fraud amounts and sensor spikes: the median and
+the IQR are order statistics, so a value at 500 or at 5,000,000 changes them identically -- not at
+all.
+
+### Decoding smoothed target encoding, and exactly how it leaks
+
+The `TargetEncoder` docstring above gives the smoothing formula:
+
+```
+  encoded(c) = (n_c * mean_c + m * global_mean) / (n_c + m)
+```
+
+**The idea behind it.** "Trust a category's own default rate only in proportion to how many rows
+back it up; borrow the rest of your belief from the global average."
+
+| Symbol | What it is |
+|--------|------------|
+| `c` | One category value, e.g. the employer name `ACME` |
+| `n_c` | How many training rows carry that category. The evidence count |
+| `mean_c` | Mean target for those rows — the raw, unsmoothed encoding |
+| `global_mean` | Mean target over the whole training set. The fallback belief |
+| `m` | Smoothing strength (`smoothing=10.0` in the code). Read it as "m imaginary rows already voting for the global mean" |
+| `n_c / (n_c + m)` | The trust weight. This is the formula rewritten as a blend, and it is the useful reading |
+
+**Walk one example.** Rewriting the formula as a weighted average makes the behaviour obvious. Six
+training rows, `global_mean = 0.5` (3 defaults of 6), `m = 10`:
+
+```
+  employer   rows (labels)   n_c   mean_c    weight = n_c/(n_c+10)   encoded
+  ACME       1, 1, 0          3    0.6667          0.2308            0.5385
+  BOLT       0, 0             2    0.0000          0.1667            0.4167
+  ZORP       1                1    1.0000          0.0909            0.5455
+
+  ACME check: (3 x 0.6667 + 10 x 0.5) / (3 + 10) = (2.0 + 5.0) / 13 = 0.5385
+```
+
+Read the `weight` column: with only 1-3 rows of evidence, every category is pulled to within 0.05 of
+the global 0.5. Raw `mean_c` said ZORP was a certain default (`1.0000`) and BOLT a certain repayer
+(`0.0000`); smoothing says both are basically unknown. Push `n_c` up and the weight climbs -- at
+`n_c = 40` the weight is 0.80, and at `n_c = 4000` it is 0.9975, so a large category is encoded at
+essentially its own mean. That is the design goal: **`m` sets the sample size at which a category
+earns the right to speak for itself** (at `n_c = m` the weight is exactly 0.5).
+
+The case study in Section 14 runs this same formula for a 2-borrower employer at `k = 10` with an 8%
+global rate: `(2 x 0.5 + 10 x 0.08) / 12 = 1.8 / 12 = 0.150`, i.e. 15.0% instead of the raw 50%.
+
+**Now watch it leak.** The danger is not the formula, it is *which rows you feed it*. Look at ZORP
+again -- one row, label `1`:
+
+```
+  Fitted on the FULL training set, then used as a training feature:
+
+    row for ZORP:  label = 1     encoded feature = 1.0000  (raw)  or 0.5455 (smoothed)
+                                                    ^
+                                    this number was computed FROM this row's own label
+
+  Unsmoothed, a singleton category's encoding IS its label, copied into a feature column.
+  The model does not learn "employer risk". It learns "read column 7, that is the answer."
+
+  ACME, row 1 (label 1):
+    encoded with all 3 rows        = (1 + 1 + 0) / 3 = 0.6667   <- includes own label
+    encoded with the other 2 rows  = (1 + 0) / 2     = 0.5000   <- leave-one-out, honest
+    gap = 0.1667 of pure label information handed to the model for free
+```
+
+That gap is why Pitfall 2 above reports validation AUC 0.88 against a real test AUC of 0.74. The
+model scored a feature it will never have at inference time -- in production, a new applicant's own
+label does not exist yet.
+
+**What out-of-fold encoding fixes.** Split the training rows into K folds and encode fold `k` using
+target statistics computed from the other `K-1` folds only:
+
+```
+  5-fold OOF, encoding fold 3:
+
+    statistics come from folds 1, 2, 4, 5      fold 3 rows are encoded, never counted
+    -> a row's own label is arithmetically absent from its own encoded value
+    -> a category that appears ONLY in fold 3 is unseen in folds 1,2,4,5
+       and falls back to global_mean = 0.5 -- exactly what would happen
+       to a brand-new employer at inference time
+
+  Test set: encode with the FULL-train means. Safe, because the test labels
+  played no part in computing them.
+```
+
+The second bullet is the underrated one. OOF does not merely remove the leak; it makes the training
+distribution of the feature *match the serving distribution*, because rare categories hit the
+global-mean fallback during training exactly as often as they will in production. Smoothing and OOF
+solve two different problems and you need both: smoothing fixes **noisy** estimates, OOF fixes
+**leaked** ones. Smoothing alone still leaks (ZORP's 0.5455 is still a function of its own label);
+OOF alone still produces a wild 0.0000/1.0000 encoding for any category with 1-2 rows in the
+training folds.
+
+### Decoding binning: equal-width vs equal-frequency
+
+Discretizing a numeric column into `k` bins has two standard cut rules, and they answer different
+questions:
+
+```
+  equal-width      : edge_i = min + i * (max - min) / k        for i = 0..k
+  equal-frequency  : edge_i = the (100 * i / k)-th percentile  for i = 0..k
+```
+
+**Read it like this.** "Equal-width chops the *ruler* into k equal pieces; equal-frequency chops the
+*sorted rows* into k equal piles."
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Number of bins requested (`pd.cut(x, bins=k)` / `pd.qcut(x, q=k)`) |
+| `min`, `max` | Column extremes — used by equal-width only, which is why it inherits min-max's outlier fragility |
+| `(max - min) / k` | Bin width. Constant across bins; bin *counts* are whatever they turn out to be |
+| percentile edges | Equal-frequency's cut points. Bin *counts* are constant; widths are whatever they turn out to be |
+
+**Walk one example.** Ten ages, `k = 3`, so both rules cut at two interior edges:
+
+```
+  ages (sorted): 22 25 27 31 35 38 42 55 61 78
+  min = 22   max = 78   range = 56   width = 56/3 = 18.6667
+
+  EQUAL-WIDTH   edges: 22.00 | 40.67 | 59.33 | 78.00     (each bin 18.67 wide)
+    bin 0  [22.00, 40.67]   22 25 27 31 35 38      -> 6 rows
+    bin 1  (40.67, 59.33]   42 55                  -> 2 rows
+    bin 2  (59.33, 78.00]   61 78                  -> 2 rows
+    widths equal (18.67 each), counts lopsided (6 / 2 / 2)
+
+  EQUAL-FREQUENCY  edges: 22 | 31 | 42 | 78       (33rd and 67th percentiles)
+    bin 0  [22, 31]         22 25 27 31           -> 4 rows   width  9
+    bin 1  (31, 42]         35 38 42              -> 3 rows   width 11
+    bin 2  (42, 78]         55 61 78              -> 3 rows   width 36
+    counts near-equal (4 / 3 / 3), widths lopsided (9 / 11 / 36)
+```
+
+The trade reads straight off the two tables. Equal-width keeps the bin labels **interpretable** -- a
+regulator can be told "bin 1 is ages 41 to 59" -- but on the skewed columns that dominate real data
+(income, purchase amount, session length) it will pile 90% of rows into bin 0 and leave the top bins
+nearly empty, which is a feature carrying almost no information. Equal-frequency guarantees every
+bin has enough rows to estimate a target rate from, which is what you want when the bin is about to
+be target-encoded or used as a scorecard band -- at the cost of a bin 2 that lumps ages 55 and 78
+together, 36 years wide, because that is where the data thinned out.
+
+Equal-width also inherits the min-max failure mode exactly: one age typed as `780` moves `max` to
+780, the width to 252.67, and drops all ten real ages into bin 0. Equal-frequency does not move at
+all, because percentiles are order statistics.
+
+### Quantifying the curse of dimensionality
+
+Principle 3 above says one-hot encoding a 500-value column "makes the curse of dimensionality apply
+immediately", and the Section 12 answer says points "become equidistant". Both are true; neither is
+a number. Here are the two counts that make it concrete:
+
+```
+  points to keep a fixed density :  N = b^d        (b points per axis, d dimensions)
+  fraction of a hypercube's volume
+  lying in its outer 10% shell   :  f = 1 - 0.8^d  (inner cube has side 1 - 2 x 0.1)
+```
+
+**Stated plainly.** "Every dimension you add multiplies the volume you have to fill, but your row
+count stays the same -- so the same data gets exponentially more spread out, and nearly all of it
+ends up hugging the boundary rather than sitting in the middle."
+
+| Symbol | What it is |
+|--------|------------|
+| `d` | Number of features (dimensions) after encoding |
+| `b` | Sampling resolution per axis. `b = 10` means "10 points along each feature, enough to see its shape" |
+| `b^d` | Rows needed to keep that resolution in `d` dimensions. The exponent is the curse |
+| `0.8^d` | Volume of the inner cube (side `0.8`) as a fraction of the unit cube's volume `1^d` |
+| `1 - 0.8^d` | Everything left over: the fraction of the space within 10% of some face — the "shell" |
+
+**Walk one example.** Both quantities, side by side, as `d` climbs:
+
+```
+    d      rows for 10 per axis (10^d)     fraction in the outer 10% shell
+    1              10                              0.2000
+    2             100                              0.3600
+    3           1,000                              0.4880
+    5         100,000                              0.6723
+   10  10,000,000,000                              0.8926
+   20           1e+20                              0.9885
+   50           1e+50                              0.9999
+  100          1e+100                              1.0000
+
+  d = 3 : 1,000 rows give you 10-per-axis coverage. Easy.
+  d = 10: you would need 10 billion rows. You have 3.2 million (Section 14).
+  d = 20: 89% -> 99% of the space is boundary. "Interior" stops existing.
+```
+
+Read the right-hand column as the death of nearest-neighbour reasoning. At `d = 1` a point is
+usually in the middle of the interval and its neighbours surround it. At `d = 20`, 98.85% of points
+sit in the outer shell, so almost every point is near a face and *far from most other points* --
+which is the equidistance the interview answer names. k-NN, RBF-kernel SVM, and k-means all rank
+candidates by distance, so when every distance converges to the same value, the ranking is noise.
+
+Now put the file's own numbers into the left-hand column. The fintech's `zip_code` had 12,000 unique
+values; one-hot encodes it as `d = 12,000`. The Section 14 platform has 3.2M borrowers -- which is
+`10^6.5`, enough for roughly `d = 6` at 10-per-axis density, not 12,000. That gap, not the memory
+cost, is the real reason the 12,000-column sparse matrix bought "no accuracy gain": each column had
+on average `3,200,000 / 12,000 = 266.7` rows to learn from, and thousands of zip codes had single
+digits. Target encoding collapses those 12,000 axes to **one**, and the smoothing term above is what
+protects the 266-row (and 2-row) categories once they get there. Feature selection attacks the same
+exponent from the other side -- dropping 280 of 342 features, as the RTB example did, takes the
+volume the model must generalize over from `10^342` to `10^62` at the same 10-per-axis density,
+which is why the same AUC (0.764) survived on 18% of the features.
+
 ---
 
 ## 7. Real-World Examples
@@ -924,7 +1219,7 @@ model = lgb.train(params, dtrain)
 
 **Interview discussion points:**
 
-**Why is smoothing in TargetEncoder critical for high-cardinality credit features?** Without smoothing, rare employer names (e.g., a company with 2 borrowers in training, 1 defaulted) get encoded as 50% default rate - wildly overestimated. Smoothing shrinks rare category estimates toward the global mean proportionally to sample size: encoded_value = (n * category_mean + k * global_mean) / (n + k) where k is the smoothing factor. With k=10, the 2-sample employer gets 2/(2+10) * 50% + 10/(2+10) * 8% = 14.3% rather than 50%, preventing the model from over-indexing on rare employers.
+**Why is smoothing in TargetEncoder critical for high-cardinality credit features?** Without smoothing, rare employer names (e.g., a company with 2 borrowers in training, 1 defaulted) get encoded as 50% default rate - wildly overestimated. Smoothing shrinks rare category estimates toward the global mean proportionally to sample size: encoded_value = (n * category_mean + k * global_mean) / (n + k) where k is the smoothing factor. With k=10, the 2-sample employer gets 2/(2+10) * 50% + 10/(2+10) * 8% = 15.0% rather than 50%, preventing the model from over-indexing on rare employers.
 
 **How do you prevent feature staleness from silently corrupting model scores?** Each feature in the Feast feature store is registered with a TTL (time-to-live) metadata field. The serving layer checks feature_timestamp - now() against the TTL before returning features. For bureau features (TTL=30d), stale data triggers a re-pull request queued for next-day batch; the application is placed in a "pending bureau refresh" queue rather than scored with stale data. For behavioural features (TTL=24h), the fallback is global-mean imputation, logged as a data quality event for monitoring.
 

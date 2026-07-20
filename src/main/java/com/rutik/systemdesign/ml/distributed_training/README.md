@@ -33,7 +33,75 @@ Key insight: communication is the bottleneck in distributed training, not comput
 
 **Linear scaling rule**: when scaling from 1 GPU to N GPUs, the global batch size scales proportionally (local_batch × N), and the learning rate should scale by the same factor. For large scale-ups (> 32x), linear LR scaling diverges; use warmup (ramp LR over 5 epochs) to stabilize.
 
+**What this actually says.** "Adding GPUs does not make each step better-informed for free — it silently makes your batch N times bigger, and a batch N times bigger deserves a step N times longer, or you are throwing away the extra information you just paid for."
+
+The rule is a statement about *keeping training equivalent*, not about going faster. Scale the GPUs and leave the LR alone, and you will train the same number of steps on N times more data per step while moving the same distance each step — you have bought N times the compute and converted it into nothing.
+
+| Symbol | What it is |
+|--------|------------|
+| `local_batch` | Samples processed per GPU per step. Set by what fits in VRAM, not by the math |
+| `N` | Number of data-parallel workers (`world_size`). The multiplier on everything |
+| `global_batch` | `local_batch x N`. The batch the optimizer actually sees, since AllReduce averages across all ranks |
+| `base_lr` | The learning rate tuned for the single-GPU baseline. Meaningless without the batch size it was tuned at |
+| `scaled_lr` | `base_lr x N`. The rate that keeps per-epoch progress equivalent |
+| warmup | Ramping `base_lr -> scaled_lr` over the first few epochs, because the full scaled LR is unstable on a randomly-initialized model |
+
+**Walk one example.** A run tuned at `local_batch = 64`, `base_lr = 1e-3` on one GPU, moved to 8 GPUs:
+
+```
+  1 GPU  : global batch =  64 x 1 =   64      lr = 0.001
+  8 GPUs : global batch =  64 x 8 =  512      lr = 0.001 x 8 = 0.008
+
+  Steps per epoch on a 1M-sample dataset:
+    1 GPU  : 1,000,000 /  64 = 15,625 steps
+    8 GPUs : 1,000,000 / 512 =  1,953 steps    <- 8x fewer optimizer steps
+
+  Same ground covered per epoch: 1,953 steps x 0.008 == 15,625 steps x 0.001
+```
+
+The published reference point is Goyal et al.'s ResNet-50 result: batch 256 at `lr = 0.1`, scaled to batch 8,192 (a `32x` jump) at `lr = 3.2`, matching single-node accuracy — but only with a 5-epoch warmup. Without warmup that same run diverges in the first few hundred steps, because an untrained network's gradients are large and nearly random, and a `32x` step on a random direction destroys the initialization before the loss surface has any structure to follow.
+
 **Gradient accumulation**: simulate a larger batch without more GPUs by accumulating gradients over M steps before calling `optimizer.step()`. Effective batch = local_batch × n_gpus × accumulation_steps. Useful when a single step's batch does not fit in VRAM.
+
+**Put simply.** "Run the batch you can afford several times in a row, add up the gradients instead of applying them, and only step the optimizer once at the end — the optimizer cannot tell the difference between that and one big batch."
+
+Trading wall-clock time for VRAM is the entire deal. Accumulation buys you the *statistics* of a large batch on hardware that can only hold a small one; it buys you no speed whatsoever, and if implemented carelessly it costs speed.
+
+| Symbol | What it is |
+|--------|------------|
+| `M` | `accumulation_steps` — how many micro-batches you sum before stepping |
+| `local_batch` | The micro-batch that actually fits in VRAM. The binding constraint |
+| `n_gpus` | Data-parallel world size. Multiplies in exactly as it does without accumulation |
+| effective batch | `local_batch x n_gpus x M`. The batch the optimizer's update statistically corresponds to |
+| `loss / M` | The rescaling you must not forget — summing `M` gradients without it gives an `M`-times-too-large step |
+| `no_sync()` | Suppresses AllReduce on the `M-1` intermediate backward passes. Without it you pay `M x` the communication |
+
+**Walk one example.** Target effective batch of 256, reached three different ways:
+
+```
+  route                     local  x  gpus  x  M   =  effective   optimizer steps/epoch
+  ------------------------------------------------------------------------------------
+  32 GPUs, no accumulation     8   x   32   x  1   =    256           N
+  8 GPUs, M = 4                8   x    8   x  4   =    256           N
+  1 GPU,  M = 32               8   x    1   x 32   =    256           N
+
+  All three produce the SAME update. They differ only in wall-clock time.
+```
+
+**What it costs.** On the 8-GPU, `M = 4` route:
+
+```
+  forward+backward passes per optimizer step :  4x   (unavoidable -- this IS the mechanism)
+  wall-clock per optimizer step              :  ~4x
+  activation memory held                     :  1x   (freed after each micro-batch)
+  gradient memory held                       :  1x   (accumulated in place, not stacked)
+
+  AllReduce calls per optimizer step:
+    with    no_sync()  :  1     <- correct
+    without no_sync()  :  4     <- 4x the communication for zero benefit
+```
+
+The memory rows are the point: activations are freed after each micro-batch, and gradients accumulate into the same buffer rather than stacking, so peak VRAM tracks `local_batch` and not the effective batch. The `no_sync()` row is Pitfall 5 in Section 10 — a team that skipped it paid `4x` the communication and ran 2.8x slower than plain DDP.
 
 **Checkpointing discipline**: in distributed training, only rank 0 should write checkpoints to avoid N processes writing the same file simultaneously. With FSDP, each rank holds a shard — use FSDP's built-in `state_dict_type` context manager to gather and save.
 
@@ -63,6 +131,60 @@ Split model layers into stages, each stage on a different node. Data flows forwa
 
 **3D Parallelism**
 DP × TP × PP: data parallel across super-nodes, tensor parallel within a node, pipeline parallel across nodes. Used for 100B+ parameter models. Megatron-Turing NLG (530B) used 280 × 8-way TP × 35-way PP.
+
+### The Scaling Math: Data Parallel vs Model Parallel
+
+The two strategies divide different quantities, and that single difference determines everything else:
+
+```
+  Data parallel across N devices:
+    memory per device      = M                (unchanged -- full replica)
+    throughput             = N x single       (each device does a full step)
+    sync points per step   = 1                (one gradient AllReduce)
+    max trainable model    = whatever fits on ONE device
+
+  Model parallel across N devices:
+    memory per device      = M / N            (each holds a slice)
+    throughput             = ~1 x single      (devices work on the SAME sample)
+    sync points per step   = 2 per layer (TP) or 1 per stage boundary (PP)
+    max trainable model    = N x device VRAM
+```
+
+**The idea behind it.** "Data parallel divides the *work* and leaves the memory alone; model parallel divides the *memory* and leaves the work alone. You add data parallelism to go faster, and model parallelism only when you have no choice."
+
+Reading them as substitutes is the classic mistake. Model parallelism does not make training faster — eight GPUs holding eight slices of one model process roughly the same samples per second as one GPU would if the model fit, minus the sync overhead. It is a technique for making the impossible possible, not the slow fast.
+
+| Symbol | What it is |
+|--------|------------|
+| `M` | Total resident state per model replica: params + grads + optimizer state (see the 16 bytes/param breakdown in Section 5) |
+| `N` | Number of devices the strategy spans |
+| throughput | Samples processed per second, relative to one device |
+| sync point | A collective every device must reach before proceeding. Each one exposes network latency |
+| TP | Tensor parallel — splits a single matmul. Two AllReduces per transformer block, so it needs NVLink |
+| PP | Pipeline parallel — splits the layer stack. Only activations cross stage boundaries, so it tolerates Ethernet |
+
+**Walk one example.** A 7B model in BF16 with Adam needs `M = 112 GB` of resident state against an 80 GB A100:
+
+```
+  8 GPUs, pure data parallel:
+    memory per GPU   = 112 GB        -> EXCEEDS 80 GB. Will not launch.
+    throughput       = 8x
+    verdict          : fastest option, but impossible for this model
+
+  8 GPUs, pure model parallel (8-way TP):
+    memory per GPU   = 112 / 8 = 14 GB   -> fits comfortably
+    throughput       = ~1x               -> all 8 GPUs serve one sample stream
+    verdict          : it runs, but you bought 8 GPUs of compute and got 1
+
+  8 GPUs, FSDP / ZeRO-3 (shards state, keeps data parallelism):
+    memory per GPU   = 112 / 8 = 14 GB   -> fits
+    throughput       = ~7x               -> still 8 independent data shards
+    verdict          : the reason FSDP exists
+```
+
+FSDP is the resolution of the dilemma: it achieves model-parallel *memory* while preserving data-parallel *throughput*, paying for it with roughly 2x the communication of DDP. That is why the decision tree in Section 9 sends you to DDP first, FSDP when memory fails, and true tensor parallelism only when even a single layer will not fit — at which point you are forced into the 1x-throughput regime and must recover the loss by stacking data parallelism on top, which is exactly what 3D parallelism is.
+
+**Why 3D parallelism has the shape it does.** Megatron-Turing NLG's `280 x 8-way TP x 35-way PP` layout is not arbitrary: TP is set to 8 because that is the number of GPUs sharing one node's NVLink fabric, PP spans nodes because it only ships activations across the slow link, and DP takes whatever is left over to recover throughput. Each axis is matched to the interconnect that can afford its traffic.
 
 ---
 
@@ -191,6 +313,66 @@ xychart-beta
 
 The straight line is perfect linear scaling; the bars are realistic measured throughput. The gap widens with scale because AllReduce communication grows with GPU count — the reason well-tuned DDP lands at ~90-95% efficiency and why communication, not compute, is the scaling bottleneck.
 
+Where those bar heights come from:
+
+```
+  efficiency = T_compute / (T_compute + T_comm_exposed)
+  speedup    = N x efficiency
+
+  T_comm_exposed = T_comm x (1 - overlap_fraction)
+```
+
+**Stated plainly.** "You only get credit for the fraction of the step spent doing math. Every millisecond a GPU spends waiting on the network — and cannot hide behind computation it was going to do anyway — comes straight off your speedup."
+
+The `overlap_fraction` term is the one people forget, and it is what DDP's `bucket_cap_mb=25` setting exists to control. Gradients for the last layers are ready long before the backward pass reaches the first layer, so DDP fires an AllReduce per full 25 MB bucket while the backward pass continues. Communication that overlaps with compute is invisible; only the leftover is charged.
+
+| Symbol | What it is |
+|--------|------------|
+| `T_compute` | Time for one local forward + backward. Constant per GPU under weak scaling — this is why the batch grows with `N` |
+| `T_comm` | Total wall-clock the AllReduce would take if nothing overlapped it |
+| overlap_fraction | Share of `T_comm` hidden behind the backward pass by gradient bucketing. `0.75` is typical for a well-tuned run |
+| `T_comm_exposed` | The un-hidden remainder. The only communication that actually costs you |
+| efficiency | Fraction of ideal linear scaling achieved. `1.0` would be perfect |
+| `N x efficiency` | The bar height on the chart above |
+
+**Walk one example.** A 1.5B model (gradients in BF16 = 3.0 GB) on 8 GPUs, `T_compute = 100 ms`, intra-node NVLink at 250 GB/s effective NCCL bandwidth:
+
+```
+  ring volume per GPU = 2 x (8 - 1) / 8 x 3.0 GB     = 5.25 GB
+  T_comm              = 5.25 GB / 250 GB/s           = 21.0 ms
+
+  Without overlap:
+    step time  = 100 + 21.0                          = 121.0 ms
+    efficiency = 100 / 121.0                         = 82.6%
+    speedup    = 8 x 0.826                           = 6.6x
+
+  With 75% of communication hidden behind the backward pass:
+    T_comm_exposed = 21.0 x 0.25                     =   5.25 ms
+    step time      = 100 + 5.25                      = 105.25 ms
+    efficiency     = 100 / 105.25                    = 95.0%
+    speedup        = 8 x 0.950                       = 7.60x    <- the chart's bar
+```
+
+That 6.6x-to-7.6x jump is bought entirely by bucketing, with no change to hardware, batch size, or model — which is why `bucket_cap_mb` is worth tuning and why `find_unused_parameters=True` (which forces DDP to wait and re-scan the graph before it can bucket) is called out as costly in the Section 6 code.
+
+**Why the gap widens at 64 GPUs.** Not because the volume grows — it barely does:
+
+```
+    N = 8   ->  ring volume 5.250 GB
+    N = 64  ->  ring volume 5.906 GB     (only 12.5% more data)
+```
+
+The damage is that the traffic now crosses node boundaries. At 80 GB/s effective inter-node bandwidth instead of NVLink's 250 GB/s:
+
+```
+  T_comm         = 5.906 GB / 80 GB/s   = 73.8 ms
+  T_comm_exposed = 73.8 x 0.25          = 18.5 ms
+  efficiency     = 100 / 118.5          = 84.4%
+  speedup        = 64 x 0.844           = 54.0x    <- the chart's 64-GPU bar
+```
+
+Efficiency fell from 95% to 84% almost entirely because the interconnect got ~3x slower, not because there is more to send. This is the quantitative version of "communication is the bottleneck": the scaling curve bends at the node boundary, and every mitigation in this module — mixed precision (halves the gradient bytes), gradient compression, hierarchical AllReduce (reduce within a node over NVLink first, then across nodes) — is an attack on one of the three numbers in that division.
+
 ### Per-GPU memory by sharding strategy (7B model)
 
 ```mermaid
@@ -203,6 +385,47 @@ xychart-beta
 ```
 
 DDP replicates all ~16 bytes/param (params + grads + fp32 master + Adam m/v) = 112 GB, which does not fit under the 80 GB A100 ceiling (the flat line); ZeRO-1 shards optimizer state, ZeRO-2 adds gradients, and ZeRO-3/FSDP shards everything down to ~14 GB — each stage trading more communication for less resident memory.
+
+The "16 bytes/param" is not a rule of thumb; it is an itemized bill:
+
+```
+  bytes_per_param = 2 (BF16 param) + 2 (BF16 grad)
+                  + 4 (FP32 master weight) + 4 (Adam m) + 4 (Adam v)
+                  = 16
+
+  memory_per_gpu = params x bytes_per_param, with each term divided
+                   by N only if that ZeRO stage shards it
+```
+
+**In plain terms.** "Every parameter you train drags four extra copies of itself around — a gradient, a full-precision master copy, and Adam's two running statistics — so the weights themselves are only one-eighth of what actually sits in VRAM."
+
+This is the number that decides whether a job launches at all, and it explains why "the model is 7B, the GPU has 80 GB, it should fit" is wrong by a factor of 1.4. The parameters are 14 GB. The other 98 GB is bookkeeping.
+
+| Symbol | What it is |
+|--------|------------|
+| BF16 param | 2 bytes. The working copy used in the forward and backward pass |
+| BF16 grad | 2 bytes. One per parameter, produced every backward pass |
+| FP32 master | 4 bytes. The authoritative copy the optimizer updates — BF16 has too few mantissa bits to accumulate small updates without losing them |
+| Adam `m` | 4 bytes. Exponential moving average of the gradient (first moment) |
+| Adam `v` | 4 bytes. Exponential moving average of the squared gradient (second moment) |
+| activations | Not in this 16 — they scale with batch and sequence length, and are what gradient checkpointing attacks |
+
+**Walk one example.** A 7B model on 8 GPUs, tracing each ZeRO stage:
+
+```
+  Total state = 7e9 x 16 bytes = 112 GB   (per replica)
+
+                params    grads          optimizer (12 B/param)     total/GPU
+  ---------------------------------------------------------------------------
+  DDP           14 GB     14 GB          84 GB                      112.00 GB
+  ZeRO-1        14 GB     14 GB          84 / 8 = 10.5 GB            38.50 GB
+  ZeRO-2        14 GB     14 / 8 = 1.75  84 / 8 = 10.5 GB            26.25 GB
+  ZeRO-3        1.75 GB   1.75 GB        10.5 GB                     14.00 GB
+
+  A100 ceiling: 80 GB.  DDP is 1.4x over. Every ZeRO stage fits.
+```
+
+Notice where the big win is: going DDP -> ZeRO-1 removes 73.5 GB by sharding *only* the optimizer state, because optimizer state is 12 of the 16 bytes — three-quarters of the bill. That is why Stage 1 is nearly free (optimizer state is touched once per step, so sharding it costs almost no extra communication) and delivers the single largest reduction, while Stage 3 sheds only another 12 GB but must AllGather parameters before *every* layer's forward pass. The stages are ordered by exactly this ratio of memory saved to communication added.
 
 ---
 
@@ -321,6 +544,68 @@ def train_ddp(
 # Launch with: torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
 #              --master_addr=<ip> --master_port=29500 train.py
 ```
+
+### Ring AllReduce — the Communication Volume Formula
+
+The `DDP(...)` wrapper above hides one collective, and this is its cost model. Ring AllReduce runs in two phases around a logical ring — ReduceScatter, then AllGather — and the bytes each GPU pushes onto the wire are:
+
+```
+  bytes_per_gpu = 2 x (N - 1) / N x params x bytes_per_param
+
+  Phase 1, ReduceScatter : N - 1 steps, each sending params/N   (the "2 x" first half)
+  Phase 2, AllGather     : N - 1 steps, each sending params/N   (the "2 x" second half)
+
+  total steps = 2 x (N - 1)
+  chunk size  = params / N
+```
+
+**Read it like this.** "Chop the gradient into N pieces, pass the pieces around the circle twice — once to add them up, once to hand the finished sums back — so nobody ever sends the whole tensor and nobody ever sits idle."
+
+The naive alternative is the reason this matters: a single-master gather would push `(N-1) x params` into one GPU's NIC, so cost grows linearly with cluster size and the master's link becomes the ceiling. The ring makes every GPU send and receive simultaneously and caps the per-GPU volume at a constant.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of GPUs in the ring (`world_size`) |
+| `params` | Parameter count. The gradient tensor has exactly one entry per parameter |
+| `bytes_per_param` | `2` for BF16/FP16 gradients, `4` for FP32. Halving this halves the whole bill — the hidden reason mixed precision speeds up multi-GPU runs |
+| `(N - 1)` | Number of hops each chunk makes to visit every other GPU. Both phases need it |
+| `/ N` | Each hop carries only `1/N` of the tensor, because the work was split into `N` chunks |
+| `2 x` | Two phases. ReduceScatter leaves each GPU owning one fully-reduced chunk; AllGather distributes those chunks back |
+
+**Walk one example.** A 1.5B-parameter model with BF16 gradients (`3.0 GB`) on 8 GPUs:
+
+```
+  chunk size    = 1.5e9 / 8               = 187.5 M params = 0.375 GB
+
+  ReduceScatter : 7 steps x 0.375 GB      = 2.625 GB sent
+  AllGather     : 7 steps x 0.375 GB      = 2.625 GB sent
+                                            ---------
+  bytes_per_gpu                           = 5.250 GB
+
+  Check against the formula:
+    2 x (8 - 1) / 8 x 3.0 GB = 2 x 0.875 x 3.0 = 5.25 GB   agrees
+
+  At 250 GB/s effective NCCL bandwidth: 5.25 / 250 = 21 ms per step.
+```
+
+**The property the whole design rests on.** Watch the coefficient `2(N-1)/N` as the cluster grows:
+
+```
+    N        2(N-1)/N     bytes moved per GPU      total hops
+  --------------------------------------------------------------
+      2        1.000            3.00 GB                2
+      4        1.500            4.50 GB                6
+      8        1.750            5.25 GB               14
+     16        1.875            5.63 GB               30
+     64        1.969            5.91 GB              126
+   1024        1.998            6.00 GB             2046
+
+                                 ^ converges to 2 x gradient size
+```
+
+Per-GPU communication volume is **bounded by twice the gradient size no matter how many GPUs you add** — going from 8 GPUs to 1,024 raises it by only 14%. This is what "bandwidth-optimal" means, and it is why data-parallel training scales to thousands of GPUs at all.
+
+**So why does scaling still degrade?** Because the right-hand column is not bounded. Step count is `2(N-1)`, growing linearly forever, and every step pays one network latency. At `N = 8` you eat 14 latencies; at `N = 1024`, 2,046 of them. With a 5 microsecond hop that is 70 microseconds versus 10 milliseconds — the volume stayed flat while the latency floor rose 146x. That is the real reason large clusters move to hierarchical AllReduce: reduce inside each node over NVLink first, then run a much shorter ring of 128 nodes rather than one ring of 1,024 GPUs.
 
 ### PyTorch FSDP — Large Model Training
 

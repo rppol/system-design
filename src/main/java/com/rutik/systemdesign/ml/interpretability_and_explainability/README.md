@@ -257,6 +257,64 @@ Here f(S) is the model's expected output using only the features in coalition S 
 
 The catch is the sum over all 2^n coalitions — intractable beyond ~20 features. SHAP provides two escapes: sampling (KernelSHAP) and an exact polynomial algorithm for trees (TreeSHAP).
 
+**Read it like this.** "Line the features up in every possible order, pay each one exactly what it added to the prediction when it walked in the door, then average that payout over all the orders."
+
+The averaging-over-orderings is the whole point. Any single ordering gives one feature an unfair advantage — whoever goes first collects all the credit for a signal two features share. Averaging over every ordering is the only way to split shared credit symmetrically, and that fairness requirement is what makes the answer *unique* rather than one attribution among many.
+
+| Symbol | What it is |
+|--------|------------|
+| `phi_i` | The payout to feature `i` — how much of the prediction it is credited with |
+| `N`, `n` | The full feature set, and how many features there are |
+| `S` | A coalition: some subset of the *other* features that are already "known" |
+| `f(S)` | Model output when only `S` is known; everything else marginalized out over background data |
+| `f(S union {i}) - f(S)` | The marginal contribution — what changed the moment feature `i` joined `S` |
+| `|S|! (n-|S|-1)! / n!` | Fraction of all `n!` orderings in which `i` arrives exactly after `S`. The weights sum to 1 |
+| `E[f(x)]` | The base value: average prediction with nothing known. `phi_i` are measured relative to it |
+
+**Walk one example.** Three features, so `2^3 = 8` coalitions and `3! = 6` orderings — small enough to enumerate by hand:
+
+```
+  Three features: I = income, D = debt_ratio, A = age.  f(S) = model output knowing only S.
+
+    f({})      = 0.20      <- base value, nothing known
+    f({I})     = 0.50        f({D})   = 0.30        f({A})   = 0.25
+    f({I,D})   = 0.70        f({I,A}) = 0.55        f({D,A}) = 0.35
+    f({I,D,A}) = 0.80      <- the actual prediction
+
+  All 6 orderings. Each feature is paid what it added at the moment it walked in:
+
+    order        I          D          A
+    I D A      +0.30      +0.20      +0.10
+    I A D      +0.30      +0.25      +0.05
+    D I A      +0.40      +0.10      +0.10
+    D A I      +0.45      +0.10      +0.05
+    A I D      +0.30      +0.25      +0.05
+    A D I      +0.45      +0.10      +0.05
+    ---------------------------------------
+    total      +2.20      +1.00      +0.40
+    / 6        +0.3667    +0.1667    +0.0667    <- phi_I, phi_D, phi_A
+
+  Efficiency check: 0.3667 + 0.1667 + 0.0667 = 0.60 = f({I,D,A}) - f({}) = 0.80 - 0.20
+```
+
+Notice income is worth `+0.30` when it arrives first but `+0.45` when it arrives last — debt and age had already "used up" part of the shared signal in the first case. That spread is exactly what the averaging smooths out. The weighted-coalition form in the formula is the same computation, reorganized so you sum over 4 coalitions instead of 6 orderings:
+
+```
+  phi_I via the weighted-coalition form, n = 3:
+
+    S        weight = |S|!(n-|S|-1)!/n!    f(S u {I}) - f(S)      product
+    {}       1 x 2 / 6 = 0.3333            0.50 - 0.20 = 0.30     0.1000
+    {D}      1 x 1 / 6 = 0.1667            0.70 - 0.30 = 0.40     0.0667
+    {A}      1 x 1 / 6 = 0.1667            0.55 - 0.25 = 0.30     0.0500
+    {D,A}    2 x 1 / 6 = 0.3333            0.80 - 0.35 = 0.45     0.1500
+    ---------------------------------------------------------------------
+    weights sum to 1.0                                    phi_I = 0.3667
+```
+
+**Why the factorial weight exists.** Without it you would simply average over the `2^n` coalitions, which double-counts: there are many more mid-sized coalitions than empty or full ones, so mid-sized contexts would dominate. The `|S|!(n-|S|-1)!/n!` term re-weights each coalition by how many orderings produce it, restoring one vote per ordering. Drop it and Efficiency breaks — the attributions no longer sum to `f(x) − E[f(x)]`, and the force plot stops reconciling with the prediction.
+
+Scale this to the module's 12-feature dataset and the enumeration goes from 6 orderings to `12! = 479,001,600`, or `2^12 = 4,096` coalitions — which is why TreeSHAP's polynomial algorithm and KernelSHAP's sampling both exist.
+
 ### 6.2 KernelSHAP vs TreeSHAP
 
 KernelSHAP reframes Shapley estimation as a *weighted local linear regression*. It samples coalitions z' (binary masks of present features), evaluates the model with absent features replaced by background samples, and fits a linear model whose weights are the Shapley values — using the SHAP kernel weight so the linear regression's solution provably equals the Shapley values.
@@ -340,6 +398,38 @@ for r in runs:
 stable = {f: (float(np.mean(v)), float(np.std(v))) for f, v in agg.items()}
 ```
 
+**What the formula is telling you.** The "weighted by proximity" step is a Gaussian falloff, `pi_x(z) = exp(-D(x, z)^2 / sigma^2)`: "a perturbed point counts fully if it sits on top of the instance you are explaining, and its vote decays fast — squared-distance fast — as it drifts away."
+
+That single line is where "local" in *Local* Interpretable Model-agnostic Explanations comes from. The surrogate is a plain linear model; nothing about it is local except these sample weights.
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | The one instance being explained |
+| `z` | A perturbed sample drawn near `x` — the surrogate's training data |
+| `D(x, z)` | Distance between them (Euclidean on scaled tabular features; cosine for text) |
+| `sigma` | Kernel width, the bandwidth. Small = a tight neighborhood; large = nearly global |
+| `pi_x(z)` | The weight this sample carries in the surrogate's weighted least-squares fit, in `(0, 1]` |
+
+**Walk one example.** Weights at five distances, with `sigma = 0.75` versus `sklearn`-style default `sigma = sqrt(n_features) * 0.75 = sqrt(12) * 0.75 = 2.598` for this module's 12-feature data:
+
+```
+                    sigma = 0.75            sigma = 2.598
+    D(x,z)   D^2    (sigma^2 = 0.5625)      (sigma^2 = 6.75)
+    ------   -----  --------------------    --------------------
+     0.10     0.01        0.9824                  0.9985
+     0.50     0.25        0.6412                  0.9636
+     1.00     1.00        0.1690                  0.8623
+     2.00     4.00        0.0008                  0.5529
+     4.00    16.00        0.0000                  0.0934
+
+    Narrow kernel: the point at D = 2.00 contributes 0.0008 -- effectively deleted.
+    Wide kernel:   the same point contributes 0.5529 -- over half a vote.
+```
+
+A sample 2.0 away is worth **691x more** under the wide kernel than the narrow one (`0.5529 / 0.0008`). Nothing about the model changed; only `sigma` did — yet the surrogate is now fit to a completely different cloud of points and can easily rank a different feature first. This is the concrete mechanism behind LIME's reputation for instability, and it is why a single LIME run is a hypothesis rather than a fact.
+
+**Why the squaring matters.** Squaring the distance before the exponential makes the falloff *superlinear*: doubling the distance quadruples the exponent, so the weight falls by a power of four rather than a factor of two. At `sigma = 0.75`, moving from `D = 0.5` to `D = 1.0` drops the weight from `0.6412` to `0.1690` — a 3.79x cut for a 2x move. Without the square (a plain `exp(-D/sigma)`) the tail is much heavier and distant, off-manifold points keep meaningful influence, which is exactly the failure mode LIME is trying to avoid.
+
 LIME's instability comes from three choices with no principled default: the *kernel width* (proximity bandwidth), the *number of perturbations*, and the *random seed*. Small changes flip the sign or ranking of features. It also perturbs features independently, so for correlated data it queries the model off-manifold. Treat a single LIME run as a hypothesis, not a fact.
 
 ### 6.4 Permutation importance vs impurity importance
@@ -361,6 +451,35 @@ perm_imp = pd.Series(perm.importances_mean, index=cols)
 ```
 
 Impurity importance counts how often and how much each feature reduced node impurity during training — it is free (already computed) but systematically inflates high-cardinality and continuous features, which get more split opportunities, and it is a *training-set* quantity that can reward overfitting. Permutation importance measures the metric drop on held-out data when a feature is shuffled — model-agnostic and honest about generalization — but has a well-known trap:
+
+**In plain terms.** Permutation importance is one subtraction, `imp_j = metric(model, X) - mean over R repeats of metric(model, X with column j shuffled)`: "break one column on purpose, see how much worse the model gets, and call that number the column's importance."
+
+Shuffling rather than deleting the column is the design choice that makes this work on any fitted model. Dropping a column would require retraining; shuffling keeps the column's marginal distribution intact while destroying its relationship to the label, so the same fitted model can be scored twice.
+
+| Symbol | What it is |
+|--------|------------|
+| `metric(model, X)` | The baseline held-out score — `roc_auc` in the code above |
+| `X with column j shuffled` | Same data, but feature `j`'s values randomly reordered across rows |
+| `R` | `n_repeats` (10 above). Each repeat is a different shuffle, so the estimate is an average |
+| `imp_j` | The drop. Large = the model leaned on `j`; near zero = it did not, *or* a correlated twin covered |
+| Held-out `X` | Must be held-out. On training data this measures memorization, not generalization |
+
+**Walk one example.** Baseline held-out AUC is `0.910`; each row is the mean shuffled AUC over `R = 10` repeats:
+
+```
+    feature        baseline    shuffled     imp_j = drop
+    -----------    --------    ---------    ------------
+    debt_ratio      0.910       0.842          +0.068     model relies on it heavily
+    income          0.910       0.869          +0.041     real but smaller contribution
+    age             0.910       0.907          +0.003     barely used
+    zip_hash        0.910       0.911          -0.001     NEGATIVE -- see below
+
+    Ranking: debt_ratio > income > age > zip_hash
+```
+
+A **negative** importance is not a bug and not noise to be clipped at zero: it means the model scored *better* with the feature destroyed, i.e. it was fitting noise in that column. `zip_hash` at `-0.001` is within shuffle noise, but a clearly negative value (say `-0.02`) is a live signal that the feature is hurting generalization and is a candidate for removal.
+
+**Why `n_repeats` exists.** A single shuffle is one random draw; with a weak feature the drop can land on either side of zero purely by luck. Averaging `R = 10` shuffles shrinks that variance by roughly `sqrt(10) = 3.16x`, which is what separates `age`'s real `+0.003` from `zip_hash`'s noise-level `-0.001`. Set `n_repeats=1` and you cannot tell those two apart at all — always report the spread (`perm.importances_std`) alongside the mean.
 
 **The correlated-feature trap.** If features A and B are highly correlated, shuffling A alone barely hurts the model because B still carries the signal — so *both* look unimportant, hiding a driver the model actually relies on. Fix: cluster correlated features (e.g. hierarchical clustering on Spearman correlation) and permute whole clusters, or use conditional/grouped permutation. Never conclude "the model doesn't use X" from a low permutation importance without checking X's correlations.
 

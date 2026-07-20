@@ -28,6 +28,34 @@ Key insight: alignment is the problem, not classification. Once you accept that 
 
 **Sampling rate and the Nyquist theorem**: a continuous audio signal must be sampled at more than twice the highest frequency it contains to be reconstructed without aliasing (Nyquist-Shannon theorem). Human speech intelligibility lives mostly below 8 kHz, so 16 kHz sampling (Nyquist frequency 8 kHz) is the de facto standard for ASR research and production models (LibriSpeech, wav2vec 2.0, and Whisper all use 16 kHz). Telephone audio is sampled at 8 kHz (Nyquist 4 kHz) — this is exactly why phone calls sound muffled: everything above 4 kHz, including consonant fricatives like "s" and "f", is discarded before transmission.
 
+**Stated plainly.** Nyquist, `f_max = sample_rate / 2`, says: "a recording can only represent frequencies below half its sample rate — everything above that is not merely quiet, it is gone before your model ever loads the file."
+
+The asymmetry is what makes this an operational rule rather than trivia. Upsampling 8 kHz audio to 16 kHz creates a 16 kHz-shaped tensor with an 8 kHz-shaped hole in it, and no exception is raised anywhere.
+
+| Symbol | What it is |
+|--------|------------|
+| `sample_rate` | Samples captured per second. 8 kHz phone, 16 kHz ASR standard, 44.1 kHz CD |
+| `f_max` (Nyquist frequency) | `sample_rate / 2` — the highest frequency the recording can represent |
+| Aliasing | What happens to content above `f_max`: it folds back down and masquerades as a lower tone |
+| "more than twice" | The strict inequality: a tone exactly at `f_max` can be sampled to a flat line |
+
+**Walk one example.** The three sample rates that show up in practice, and what each throws away:
+
+```
+    sample rate        Nyquist = sr/2      what survives           what is lost
+    ---------------    ------------      --------------------    ----------------------
+    8 kHz  (phone)       4,000 Hz        vowels, low formants    /s/ /f/ fricative energy
+    16 kHz (ASR)         8,000 Hz        all speech content      nothing that matters
+    44.1 kHz (CD)       22,050 Hz        full audible band       (overkill for ASR)
+
+    Storage at 16-bit mono, 16 kHz: 16,000 samples/s x 2 bytes = 32,000 bytes/s = 32 kB/s
+
+    Going 16 kHz -> 32 kHz doubles storage and compute and buys ASR nothing: speech is
+    already fully captured under the 8 kHz Nyquist limit. Going 16 kHz -> 8 kHz halves
+    the cost and destroys the fricatives, which is the entire "phone calls sound
+    muffled" phenomenon in one division.
+```
+
 **Framing and windowing**: speech is non-stationary over long spans (formants shift as the mouth moves) but quasi-stationary over short spans, so every pipeline chops the waveform into short overlapping frames. The industry-standard values are a 25 ms window with a 10 ms hop (60% overlap), which at 16 kHz is exactly 400 samples per window and 160 samples per hop — clean integers, which is part of why this combination became the default. A window function (Hamming or Hann) is applied to each frame before the FFT to taper its edges to zero, reducing the spectral leakage a hard rectangular cut would introduce.
 
 **STFT (Short-Time Fourier Transform)**: applying an FFT to each windowed frame produces a complex spectrum per frame; stacking these across time gives a spectrogram. Most speech tasks discard the phase and keep only the magnitude (or power) spectrogram, because phase is largely perceptually redundant for recognition tasks — though vocoders for TTS must reconstruct or predict it to synthesize audible waveforms.
@@ -233,6 +261,47 @@ hop = 10 ms between frame starts; window = 25 ms -> 15 ms (60%) overlap
 
 Every point in the middle of the signal is covered by 2-3 overlapping windows, which is why a 1-second clip yields a nominal 100 frames rather than 40 non-overlapping ones — the overlap is what lets short-lived acoustic events (a stop-consonant burst) land fully inside at least one frame.
 
+**Put simply.** The whole front-end is four divisions: "milliseconds become samples by multiplying by the sample rate, the hop sets how many frames per second you get, and the FFT size sets how finely you can tell two frequencies apart."
+
+Every one of these numbers is baked into the trained model. Feature-extraction parameters are model weights in disguise — change the hop from 10 ms to 12.5 ms after training and every frame index the model learned now points at the wrong moment in time.
+
+| Symbol | What it is |
+|--------|------------|
+| `win_length` | Window length in *samples* = `sample_rate x win_ms / 1000`. 400 at 16 kHz / 25 ms |
+| `hop_length` | Samples between consecutive frame *starts* = `sample_rate x hop_ms / 1000`. 160 here |
+| `n_fft` | FFT size. Set equal to `win_length` (400) in Whisper's convention — no zero-padding |
+| frames/sec | `sample_rate / hop_length` — set by the hop alone, not by the window |
+| bins | `n_fft / 2 + 1` — real-valued input gives a symmetric spectrum, so half of it plus DC |
+| bin spacing | `sample_rate / n_fft` Hz — the frequency resolution of one FFT bin |
+| overlap | `(win_ms - hop_ms) / win_ms` — how much of each frame it shares with its neighbour |
+
+**Walk one example.** Every front-end number in this module, derived from four inputs:
+
+```
+    Given: sample_rate = 16,000 Hz, window = 25 ms, hop = 10 ms, n_fft = 400
+
+    Time axis
+      win_length  = 16000 x 0.025  =  400 samples    <- one FFT input frame
+      hop_length  = 16000 x 0.010  =  160 samples    <- distance between frame starts
+      overlap     = (25 - 10) / 25 = 0.60            <- 15 ms shared with each neighbour
+      coverage    = 25 / 10        = 2.5             <- each instant sits in 2-3 frames
+      frames/sec  = 16000 / 160    = 100             <- the "nominal 100 fps" figure
+
+    Frequency axis
+      bins        = 400 / 2 + 1    = 201             <- matches the 201 in the diagram
+      bin spacing = 16000 / 400    = 40 Hz per bin   <- frequency resolution
+      top bin     = 200 x 40       = 8,000 Hz        <- exactly the Nyquist frequency
+
+    Exact frame count, 10-second clip = 160,000 samples
+      1 + (160000 - 400) // 160 = 1 + 997 = 998 frames
+
+    998, not 1000: the first frame consumes a full 400-sample window before any hop
+    happens, and the leftover tail at the end is too short to start another window.
+    "100 frames per second" is the nominal rate; the exact count is the floor formula.
+```
+
+**Why window and hop are two separate knobs.** The window sets *frequency* resolution (longer window = narrower bins = finer pitch detail) while the hop sets *time* resolution (smaller hop = more frames per second). They trade against each other — this is the time-frequency uncertainty principle. A 100 ms window would give 10 Hz bins but smear a 30 ms stop consonant into mush; a 5 ms window would catch every transient but at 200 Hz bins, too coarse to separate formants. 25 ms / 10 ms is the empirical compromise, and the fact that it lands on the round integers 400 and 160 at 16 kHz is a large part of why it stuck.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -320,6 +389,51 @@ def extract_features(waveform: Tensor) -> tuple[Tensor, Tensor]:
     mfcc = mfcc_transform(waveform)                          # (13, T)
     return log_mel, mfcc
 ```
+
+**The idea behind it.** The MFCC pipeline is a chain of deliberate compressions: "start with 400 raw samples of a 25 ms slice and squeeze them down to 13 numbers, throwing away — in order — phase, then linear frequency resolution, then dynamic range, then inter-band correlation."
+
+Each stage discards something a specific downstream consumer did not need. Reading it as a lossy funnel rather than a list of transforms is what makes the modern "skip the DCT" decision obvious.
+
+| Stage | What it is |
+|-------|------------|
+| Power spectrum | The squared FFT magnitude. Squaring discards phase, keeping only "how much energy" |
+| Mel filterbank | 80 overlapping triangular filters, dense at low Hz, wide at high Hz, per `mel(f)` |
+| `log(.)` | Compresses dynamic range — matches loudness perception and turns products into sums |
+| DCT | Decorrelates the 80 correlated mel bands; energy concentrates in the first few coefficients |
+| Keep first 13 | Cepstral truncation: the low coefficients are the vocal-tract shape, the rest is pitch/noise |
+| delta / delta-delta | First and second time-derivatives, `13 x 3 = 39`, giving velocity and acceleration |
+
+**Walk one example.** One 25 ms frame at 16 kHz, dimension by dimension:
+
+```
+    stage                          dims/frame     what just happened
+    --------------------------     ----------     -----------------------------------
+    windowed samples                    400       25 ms of audio, Hamming-tapered
+    |FFT|^2 power spectrum              201       40 Hz per bin, spanning 0 - 8000 Hz
+    mel filterbank (80 triangles)        80       201 / 80 = 2.51x compression
+    log(.)                               80       dynamic range compressed
+    DCT, keep the first 13               13       decorrelated; 80 / 13 = 6.2x more
+    + delta + delta-delta                39       13 x 3, the classic GMM-HMM feature
+
+    Total funnel: 400 -> 39 is a 10.3x reduction per frame, before any model runs.
+
+    Deep pipelines (Whisper, wav2vec 2.0) stop after log(.) and feed all 80 dims.
+```
+
+**Why the mel warp is not just "fewer bins".** It is a *non-uniform* rebinning, and the `mel(f) = 2595 * log10(1 + f/700)` curve is where the non-uniformity comes from:
+
+```
+    band            mel span              Hz span      mel units per Hz
+    -----------     -----------------     -------      ----------------
+    250 -> 500      344.2 -> 607.4        250 Hz            1.053
+    4000 -> 8000    2146.1 -> 2840.0     4000 Hz            0.173
+
+    Ratio: 1.053 / 0.173 = 6.07x more mel resolution per Hz down where speech lives.
+```
+
+Both bands are a single doubling of frequency, yet the low one earns `263.3` mel units and the high one only `694.0` across a range 16x wider. That is the filterbank spending its 80 filters where phonetic information actually is. A uniform 80-bin rebinning of the 201 FFT bins would give every 40 Hz slice equal weight and waste most of its capacity above 4 kHz.
+
+**Why modern models drop the DCT.** The DCT exists to decorrelate, and it exists only because GMM-HMM systems assumed diagonal-covariance Gaussians — a model that literally cannot represent correlations between input dimensions. A CNN or transformer models correlations natively, so the DCT now only destroys information (the discarded coefficients 14-80) for no benefit, and it also breaks the local structure a convolution wants to exploit along the frequency axis. That is the whole reason Whisper and wav2vec 2.0 stop at the log-mel.
 
 ### CTC loss and greedy decoding
 
@@ -587,6 +701,51 @@ print(f"S={s} D={d} I={ins} N={n} WER={wer:.1f}%")
 # hallucinates many extra words can push WER past 100% - something that
 # cannot happen with a bounded, per-instance classification accuracy.
 ```
+
+**What it means.** `WER = (S + D + I) / N` reads: "count every edit a proofreader would have to make to turn the model's transcript into the truth, then divide by how long the truth was."
+
+The denominator is the reference length, not the hypothesis length — and that single asymmetry is the source of every WER surprise, including the >100% one.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Substitutions — a reference word the model got wrong ("THIRTY" heard as "THIRTEEN") |
+| `D` | Deletions — a reference word the model never emitted ("IN" dropped) |
+| `I` | Insertions — a word the model emitted that is not in the reference ("OK" hallucinated) |
+| `N` | Reference word count. **Only the reference** — insertions never grow the denominator |
+| `C` | Correct words. `N = S + D + C`, so `I` is the one term outside that identity |
+| minimum-edit-distance | The alignment is the *cheapest* S/D/I combination, found by the DP table above |
+
+**Walk one example.** The exact transcript pair from the code, aligned word by word:
+
+```
+    ref:  -   PLEASE  SET  AN  ALARM  FOR  SEVEN  THIRTY    IN  THE  MORNING
+    hyp:  OK  PLEASE  SET  AN  ALARM  FOR  SEVEN  THIRTEEN  -   THE  MORNING
+    op:   I   ok      ok   ok  ok     ok   ok     S         D   ok   ok
+
+    N = 10   reference words (OK is not in the reference, so it never counts toward N)
+    C =  8   correct
+    S =  1   THIRTY -> THIRTEEN
+    D =  1   IN dropped
+    I =  1   OK hallucinated at the front
+             check: N = S + D + C = 1 + 1 + 8 = 10  ok
+
+    WER = (S + D + I) / N = (1 + 1 + 1) / 10 = 0.30 = 30.0%
+```
+
+Note that only `S` and `D` are capped by `N` — together they can never exceed 10 here. `I` has no ceiling at all:
+
+```
+    Same 10-word reference, a model that hallucinates 15 extra words and gets the
+    rest right:
+
+      S = 0,  D = 0,  I = 15,  N = 10
+      WER = (0 + 0 + 15) / 10 = 1.50 = 150%
+
+    A "150% error rate" is not a bug. It is what happens when a metric divides an
+    unbounded numerator by a fixed denominator.
+```
+
+**Why the alignment must be minimum-edit-distance.** Without the "cheapest edit path" rule, `S`, `D`, and `I` are not well defined — a single misheard word could be scored as one substitution *or* as one deletion plus one insertion, and the second reading costs twice as much. The DP table above forces the cheapest reading, which is why WER is reproducible across implementations. What is *not* standardized is text normalization: casing, punctuation, and number formatting ("SEVEN THIRTY" vs "7:30") each shift WER by several points, which is why two WER numbers computed under different normalizers cannot be compared at all.
 
 ---
 

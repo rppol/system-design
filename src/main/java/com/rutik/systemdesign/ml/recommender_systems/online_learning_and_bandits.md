@@ -46,11 +46,81 @@ With probability 1-epsilon: select the arm with highest empirical mean (exploita
 Epsilon decay schedule: epsilon_t = epsilon_0 / sqrt(t) (decreasing exploration as confidence grows)
 Simplest algorithm; works well when arm rewards are stationary. Poorly adapts to non-stationary reward distributions.
 
+**In plain terms.** "Before every decision, flip a biased coin. On epsilon of the flips, throw away everything you have learned and pick uniformly at random; otherwise take the current leader."
+
+| Symbol | What it is |
+|--------|------------|
+| `epsilon` | Probability of exploring on any single step. `0.1` = 10% of traffic goes to a random arm |
+| `mu_hat_i` | Empirical mean reward of arm `i` — total reward divided by pulls |
+| `mu_star` | True mean of the genuinely best arm. Unknown to the algorithm, used only to score it |
+| `Delta_i = mu_star - mu_i` | The gap: what each pull of arm `i` costs you versus the best arm |
+| `epsilon_0 / sqrt(t)` | Decay schedule — exploration shrinks as evidence accumulates |
+| `K` | Number of arms. Exploration is spread uniformly over all `K`, good and bad alike |
+
+**Walk one example.** The five arms from the simulation in Section 6, with true CTRs `[0.08, 0.04, 0.05, 0.02, 0.06]`:
+
+```
+  mu_star = 0.08 (arm 1), so the gaps are
+
+    arm     mu_i     Delta_i
+     1      0.08      0.00
+     2      0.04      0.04
+     3      0.05      0.03
+     4      0.02      0.06
+     5      0.06      0.02
+                      ----
+            sum = 0.15,  mean Delta = 0.15 / 5 = 0.03
+
+  Once the leader is correct, exploit steps cost ~0 and only the coin costs you:
+
+    regret per step = epsilon x mean Delta = 0.10 x 0.03 = 0.0030 clicks
+
+    T =   10,000 steps  ->    30 clicks of regret
+    T =  100,000 steps  ->   300 clicks of regret
+    T = 1,000,000 steps -> 3,000 clicks of regret
+```
+
+**Why this is the algorithm's fatal flaw.** That per-step cost never decreases. Multiply the horizon by 10 and the regret multiplies by 10 — regret is `O(T)`, linear, forever. Even after a million steps have made arm 1's superiority statistically overwhelming, epsilon-greedy still spends 10% of traffic re-testing arm 4 at its known `0.02` CTR. Lowering epsilon to `0.05` merely halves the toll to 15 clicks per 10,000 steps; it does not change the shape. The `epsilon_0 / sqrt(t)` decay is the minimum fix, and UCB and Thompson Sampling are the principled ones: they shrink exploration *per arm* in proportion to how much is already known about that specific arm.
+
 ### 4.2 UCB1 (Upper Confidence Bound)
 
 Select arm i maximizing: mu_hat_i + sqrt(2 * ln(t) / n_i)
 No hyperparameter tuning for the exploration term (C = sqrt(2) is theoretically optimal for Bernoulli rewards).
 Achieves O(K * log(T)) regret — provably optimal for stationary arms.
+
+**What this actually says.** "Do not judge an arm by the average it has shown. Judge it by the best it could still plausibly be — and an arm you have barely tried could plausibly be excellent."
+
+| Symbol | What it is |
+|--------|------------|
+| `mu_hat_i` | What arm `i` has actually delivered so far — the exploitation half |
+| `n_i` | Pulls of arm `i`. The only thing that shrinks its bonus |
+| `t` | Total pulls across all arms. Grows even on steps where arm `i` is not chosen |
+| `ln(t)` | Grows without bound but very slowly, so the bonus never dies completely |
+| `sqrt(2 ln(t) / n_i)` | The optimism bonus — roughly the width of a confidence interval on `mu_hat_i` |
+| `sqrt(...)` shape | Bonus falls as `1 / sqrt(n_i)`: 4x the pulls halves the uncertainty |
+
+**Walk one example.** Two arms from the Section 5.1 chart, and the exact moment the bonus stops carrying the weaker one:
+
+```
+  arm 1 (action) : mu_hat = 0.08, n_1 = 40 pulls
+  arm 4 (new)    : mu_hat = 0.03, n_4 =  5 pulls
+  t = 100 total pulls, ln(100) = 4.6052
+
+  UCB_1 = 0.08 + sqrt(2 x 4.6052 / 40) = 0.08 + 0.4799 = 0.5599
+  UCB_4 = 0.03 + sqrt(2 x 4.6052 /  5) = 0.03 + 1.3572 = 1.3872   <- arm 4 wins
+
+  Arm 4 gets pulled, which raises n_4 and t together. Holding the empirical
+  means fixed at 0.08 and 0.03, watch the bonus drain away:
+
+      t      n_4     UCB_1      UCB_4     picked
+     100       5     0.5599     1.3872       4
+     105      10     0.5624     0.9948       4
+     115      20     0.5671     0.7188       4
+     125      30     0.5713     0.5974       4
+     128      33     0.5725     0.5723       1     <- the flip
+```
+
+**What the flip is worth.** It took 28 further pulls of arm 4 to settle the question, and those pulls were not waste — they were the price of confirming that a `0.03` estimate from 5 samples was real rather than unlucky. Note the two forces: arm 4's bonus shrinks as `1 / sqrt(n_4)` while arm 1's *grows* as `sqrt(ln t)`, so exploration is never switched off, only starved. That asymmetry — fast shrink per pull, slow universal growth — is exactly what buys `O(K log T)` regret instead of epsilon-greedy's `O(T)`: an arm that has been convincingly beaten gets revisited at a rate that thins out logarithmically rather than at a fixed 10%.
 
 ### 4.3 UCB-tuned
 
@@ -65,12 +135,75 @@ At each step: sample p_i ~ Beta(alpha_i, beta_i) for each arm; select arm with h
 
 Thompson Sampling outperforms epsilon-greedy by 20-30% cumulative reward in first 10K trials in typical recommendation settings.
 
+**The idea behind it.** "Do not hold one number per arm; hold a *belief* per arm. Then let each round be decided by one random draw from every belief, so an arm gets its turn in proportion to the chance it is genuinely best."
+
+| Symbol | What it is |
+|--------|------------|
+| `alpha_i` | Successes on arm `i`, plus the prior. Literally a click counter |
+| `beta_i` | Failures on arm `i`, plus the prior. A no-click counter |
+| `Beta(alpha, beta)` | A distribution over the arm's unknown click rate, living on `[0, 1]` |
+| `alpha / (alpha + beta)` | Posterior mean — the best point estimate of the arm's CTR |
+| `sqrt(ab / ((a+b)^2 (a+b+1)))` | Posterior standard deviation — the width of the belief, i.e. how much is unknown |
+| `Beta(1, 1)` | The uninformative prior: uniform on `[0, 1]`, "any CTR is equally plausible" |
+| `p_i ~ Beta(...)` | One random draw. Replaces every explicit explore/exploit rule |
+
+**Walk one example.** The four posteriors from the Section 5.2 diagram, with their means and widths made explicit:
+
+```
+  posterior         alpha   beta    mean       sd      a + b
+  Beta(1, 1)            1      1    0.5000    0.2887        2    prior, knows nothing
+  Beta(82, 920)        82    920    0.0818    0.0087    1,002    sharp
+  Beta(41, 960)        41    960    0.0410    0.0063    1,001    sharp
+  Beta(52, 950)        52    950    0.0519    0.0070    1,002    sharp
+  Beta(4, 11)           4     11    0.2667    0.1106       15    wide, barely tested
+
+  Arm 4's sd is 0.1106 / 0.0087 = 12.7x arm 1's, so its draws scatter 12.7x wider:
+
+    arm 1 draws land in  [0.0644, 0.0992]   (mean +/- 2 sd) -- almost always
+    arm 4 draws land in  [0.0455, 0.4879]   -- often above arm 1, sometimes far below
+```
+
+**Why no exploration parameter is needed.** Exploration falls out of the arithmetic instead of being configured. Every observation adds exactly `1` to `alpha` or `beta`, so `a + b` grows by one per pull and the `(a+b+1)` in the denominator drives the sd down like `1 / sqrt(n)`. An arm that keeps winning draws keeps getting pulled, keeps narrowing, and stops producing surprising samples; an arm that is never pulled keeps its wide belief and stays permanently eligible for a lucky draw. This self-regulation is why Section 14 retires a video arm after 500 pulls: by then the posterior is narrow enough that further draws add nothing, and its posterior mean is a good enough CTR estimate to hand to the offline model. It is also why Pitfall 2 is fatal — adding raw session minutes to `alpha` inflates `a + b` by tens per observation instead of by one, collapsing the sd and killing exploration within days.
+
 ### 4.5 LinUCB (Contextual Bandit)
 
 For each arm i, maintain A_i (d x d matrix, initialized to identity) and b_i (d-vector, initialized to zeros).
 theta_i = A_i^{-1} b_i (ridge regression estimate of reward model)
 UCB score: x.T theta_i + alpha * sqrt(x.T A_i^{-1} x)
 After observing reward r: A_i += x x.T; b_i += r x
+
+**What it means.** "Fit a ridge regression per arm from context to reward, then add a bonus that is large in exactly the directions of context space you have not seen much data from."
+
+The step from UCB1 to LinUCB is the step from "how many times have I pulled this arm?" to "how many times have I pulled this arm *for a user like this one*?" — uncertainty becomes directional.
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | The context vector for this request: user, item, time-of-day features. Dimension `d` |
+| `A_i` | Running sum `I + sum(x x.T)` over contexts where arm `i` was played. An unnormalized covariance |
+| `b_i` | Running sum `sum(r x)` — contexts weighted by the reward they earned |
+| `theta_i = A_i^-1 b_i` | The ridge-regression solution. Identity initialization *is* the ridge penalty |
+| `x.T theta_i` | Predicted reward for this arm in this context — the exploit term |
+| `sqrt(x.T A_i^-1 x)` | How novel `x` is for this arm. Large in directions with little data, small in well-covered ones |
+| `alpha` | Exploration scale on that bonus. Higher = more exploration; tuned, unlike UCB1 |
+
+**Walk one example.** Two orthogonal context directions, `d = 2`, `alpha = 1.0`, arm starting from `A = I` and `b = [0, 0]`:
+
+```
+  x1 = [1, 0]      x2 = [0, 1]
+
+  step  event             theta        UCB for x1             UCB for x2
+   t0   nothing seen      [0.00, 0]    0.00 + 1.000 = 1.000   0.00 + 1.000 = 1.000
+   t1   x1 shown, r = 1   [0.50, 0]    0.50 + 0.707 = 1.207   0.00 + 1.000 = 1.000
+   t2   x1 shown, r = 1   [0.67, 0]    0.67 + 0.577 = 1.244   0.00 + 1.000 = 1.000
+   t3   x1 shown, r = 0   [0.50, 0]    0.50 + 0.500 = 1.000   0.00 + 1.000 = 1.000
+
+  A after the three x1 updates = [[4, 0], [0, 1]]  -- only the x1 direction grew.
+
+  x1's bonus decayed 1.000 -> 0.707 -> 0.577 -> 0.500
+  x2's bonus never moved off 1.000, because no x2 data ever arrived.
+```
+
+**Why `A_i` must be a matrix and not a counter.** Three pulls happened, but the arm learned nothing about `x2`-shaped users — and the maths knows it. Replace `A_i` with a scalar pull count and the bonus would have dropped for *every* context after those three pulls, so the arm would look confidently characterized for a population it has never served. Keeping the full `d x d` matrix is what lets one arm be simultaneously well-understood for mobile evening traffic and wide open for desktop morning traffic. The cost is the `O(d^3)` inverse and the numerical fragility described in Pitfall 3 — with `d = 500` and few pulls, `A_i` is barely distinguishable from the identity it started as, which is precisely when the inverse misbehaves.
 
 ### 4.6 Neural Bandits (NeuralUCB, NeuralTS)
 
@@ -223,6 +356,32 @@ The upper line is fixed-epsilon exploration: it keeps sampling bad arms at a con
 rate, so regret grows linearly, O(T). The lower line is UCB / Thompson Sampling, which
 concentrate exploration on uncertain arms and achieve O(K log T) regret — the curve
 flattens once the optimal arm is confidently identified.
+
+**What the formula is telling you.** "Linear regret means you keep paying the same toll on every single request, forever. Logarithmic regret means the toll per request shrinks toward zero."
+
+| Symbol | What it is |
+|--------|------------|
+| `Cumulative_Regret(T) = T mu_star - sum mu(a_t)` | Clicks the optimal policy would have earned, minus what you earned |
+| `T` | Time horizon — total requests served |
+| `mu_star` | Mean reward of the best arm. The ceiling you are measured against |
+| `O(T)` | Regret proportional to the horizon: 10x the traffic, 10x the loss |
+| `O(K log T)` | Regret proportional to the *logarithm*: 10x the traffic adds a fixed constant |
+| `K` | Arm count. It multiplies the log term — which is why bandits break at 10,000 arms |
+
+**Walk one example.** The same five arms (mean gap `0.03`) at `epsilon = 0.1`, so fixed-epsilon regret is exactly `0.003` per step, against the *shape* of `K ln T` at `K = 5`:
+
+```
+       T        fixed-epsilon regret      shape of K x ln T
+       1,000              3.0                     34.5
+      10,000             30.0                     46.1
+     100,000            300.0                     57.6
+   1,000,000          3,000.0                     69.1
+
+  Multiply T by 10  ->  linear regret multiplies by 10
+                    ->  the log term only adds 5 x ln(10) = 11.5
+```
+
+**Read the crossover, not just the asymptotics.** Below roughly `T = 16,000` the constant factors make the log curve the *larger* number — UCB genuinely looks worse than epsilon-greedy early on, because it insists on pulling every arm at least once and then keeps probing the near-contenders. Past that point the curves cross and never meet again: at `T = 1,000,000` the linear policy has thrown away 3,000 clicks while the logarithmic one has effectively stopped paying. This is the whole argument for bandits over a fixed exploration rate, and it is also the honest caveat — on a short campaign that ends at `T = 5,000`, the asymptotic advantage never arrives.
 
 ---
 
@@ -603,6 +762,42 @@ Thompson Sampling achieves 20-30% better cumulative reward vs epsilon-greedy in 
 ## 10. Common Pitfalls
 
 **Pitfall 1 — Not separating exploration traffic from training data**: A team used the same click logs for both bandit reward updates and offline model training. The bandit had explored bad arms frequently (by design) — the offline model was trained on those low-quality impressions and learned to score bad arms higher. Fix: tag exploration impressions with an "exploration" flag; exclude them from offline batch model training; use only exploitation impressions or apply IPW to reweight exploration impressions.
+
+**Put simply.** "Divide every logged reward by the chance the logging policy had of showing that item, so a rare exploration impression counts for as much as the common exploited ones it was drowned out by."
+
+| Symbol | What it is |
+|--------|------------|
+| `pi_0(a \| x)` | The logging (behaviour) policy — the probability the live bandit actually had of choosing arm `a` |
+| `p_t` | That probability for the specific impression at time `t`. Must be logged at serve time; it cannot be recovered later |
+| `r_t` | The observed reward for the arm that was actually shown. Rewards for unshown arms do not exist |
+| `1 / p_t` | The importance weight. A 10%-probability impression stands in for 10 impressions |
+| `1[a_t = a]` | Indicator: 1 if the target policy would have picked what was logged, 0 otherwise |
+| `V_hat = (1/N) sum 1[...] r_t / p_t` | The IPS estimate of a policy you never ran |
+
+**Walk one example.** 10,000 logged impressions from a bandit that showed arm A on 70% of requests and arms B, C, D on 10% each:
+
+```
+   arm    shown    clicks   on-policy CTR   p_t     weight 1/p_t
+    A     7,000       420       0.060       0.70        1.43
+    B     1,000        60       0.060       0.10       10.00
+    C     1,000        30       0.030       0.10       10.00
+    D     1,000        20       0.020       0.10       10.00
+
+  Naive pooled CTR over the whole log = 530 / 10,000 = 0.053
+    -> a blend of four policies; answers no question anyone asked.
+
+  Naive "B's share of the log"        =  60 / 10,000 = 0.006
+    -> makes a 6% arm look like a 0.6% arm, purely because it was shown less.
+
+  IPS value of the always-B policy:
+    V_hat(B) = (1/N) x sum over logs of 1[a_t = B] x r_t / p_t
+             = (60 x 10.00) / 10,000
+             = 0.060                <- recovers B's true 6% CTR
+
+  Same computation for always-D: (20 x 10.00) / 10,000 = 0.020.
+```
+
+**Why the estimator is fragile.** The `1 / p_t` weight is unbounded, so an impression logged at `p_t = 0.001` gets weight 1,000 and a single lucky click on it can swing the whole estimate. Variance grows as the target policy diverges from the logging policy — evaluate a policy that would pick arms the bandit almost never showed and the estimate becomes noise wearing a decimal point. The standard mitigations are weight clipping (cap `1 / p_t` at, say, 10), self-normalized IPS (divide by the sum of weights rather than by `N`), and doubly-robust estimators that add a reward model to absorb the variance. All of them depend on one operational discipline: **log `p_t` at serve time on every impression**, because no amount of later analysis can reconstruct the probability the model had at the moment it chose.
 
 **Pitfall 2 — Thompson Sampling with non-Bernoulli rewards**: A team applied Beta(alpha, beta) Thompson Sampling to continuous rewards (session time in minutes, range 0-120). Adding raw session time to alpha as if it were binary click counts caused alpha to grow to millions within days, making the Beta distribution extremely narrow and eliminating all exploration. Fix: for continuous rewards, use Gaussian Thompson Sampling (maintain mean and variance estimates) or truncate/discretize rewards to binary (session > 60 seconds = success).
 

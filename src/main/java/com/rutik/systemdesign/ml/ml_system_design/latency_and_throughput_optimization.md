@@ -100,6 +100,36 @@ flowchart TD
 
 Total latency is the sum of stage latencies, so per Amdahl's Law you optimize the largest stage first — here model inference (30ms of 65ms). Each stage must meet its own P99 budget; none can borrow slack from another at the tail.
 
+**What this actually says.** "Latency adds up, but a tail does not — fan a request out across enough backends and the one-in-a-hundred slow call becomes the ordinary case."
+
+This is the arithmetic behind the rule that no stage may borrow slack from another. A sum of means is still a mean, so budgets add cleanly at P50. Tails compose multiplicatively instead, and the multiplication runs against you.
+
+| Symbol | What it is |
+|--------|------------|
+| `P99` | The latency 1 request in 100 exceeds. A threshold, not an average — it cannot be summed |
+| `q` | Probability one call exceeds its P99. By definition `q = 0.01` |
+| `N` | Fan-out width: parallel calls a single user request spawns |
+| `(1 - q)^N` | Chance **all** `N` calls stay fast. Requires independence between calls |
+| `1 - (1 - q)^N` | Chance the user hits at least one slow call — the number that reaches the user |
+
+**Walk one example.** Every backend call meets a clean 20ms P99, and the user waits for the slowest:
+
+```
+  N =   1 call  : P(all fast) = 0.99^1   = 0.990  ->  1.0% of requests are slow
+  N =   5 calls : P(all fast) = 0.99^5   = 0.951  ->  4.9% of requests are slow
+  N =  10 calls : P(all fast) = 0.99^10  = 0.904  ->  9.6% of requests are slow
+  N = 100 calls : P(all fast) = 0.99^100 = 0.366  -> 63.4% of requests are slow
+  N = 200 calls : P(all fast) = 0.99^200 = 0.134  -> 86.6% of requests are slow
+
+  At N = 100, a "1-in-100" event is happening to nearly two requests in three.
+  Every backend is meeting its SLO. The user experience is still broken.
+
+  To hold a 1% request-level tail at N = 100, each call needs a p99.99:
+      0.9999^100 = 0.9900   ->  1.0% of requests slow    <- four nines per call
+```
+
+**The practical rule this forces.** Per-service SLOs must be set a percentile *deeper* than the one you promise the user, and how much deeper is set by the fan-out width, not by taste. A team that promises a 100ms P99 to users and then asks each of 100 backends for a 100ms P99 has promised something arithmetically impossible. The two escapes are to shrink `N` (batch the 100 calls into one, which is exactly what the batching section does) or to stop waiting for all of them — hedged requests, or returning partial results once 95 of 100 candidates are back.
+
 ### Model Cascade Architecture
 
 ```mermaid
@@ -154,6 +184,44 @@ flowchart LR
 ```
 
 Firing on size-or-timeout keeps the tail bounded — the oldest request waits at most max_wait (5ms) before its batch fires. Batching lifts GPU utilization from ~5% to ~25% and throughput from 67 to 250 req/s, at the cost of ~5ms added wait on the earliest arrivals.
+
+**In plain terms.** "Throughput is not a dial you turn. It is whatever falls out of how many requests you keep in flight divided by how long each one takes."
+
+That is Little's Law, `QPS = concurrency / latency`, and it explains why batching is the highest-leverage serving optimization there is: it raises the numerator without touching the denominator much, because a GPU processes 32 rows in roughly the time it processes one.
+
+| Symbol | What it is |
+|--------|------------|
+| `concurrency` | Requests in flight simultaneously. For a batching server, the batch size |
+| `latency` | Seconds each request takes end to end — **including** its time queued |
+| `QPS = concurrency / latency` | Little's Law. Fix any two and the third is no longer yours to choose |
+| `max_wait` | Queue time a request tolerates before its batch fires. Added latency, pure cost |
+| `max_batch_size` | Ceiling on concurrency, and the other trigger that can fire a batch |
+
+**Walk one example.** The 67 to 250 req/s jump in the diagram above falls straight out of the law:
+
+```
+  Unbatched: one request at a time, 15ms of inference
+      concurrency = 1
+      latency     = 0.015 s
+      QPS = 1 / 0.015 = 66.7 req/s              <- the "67" above
+
+  Batched: 5 requests share one 15ms forward pass, after a 5ms wait
+      concurrency = 5
+      latency     = 0.015 + 0.005 = 0.020 s
+      QPS = 5 / 0.020 = 250 req/s               <- the "250" above
+
+  throughput  x3.75          latency  15ms -> 20ms  (+33%)
+```
+
+Now push only the batch size, leaving `max_wait` alone:
+
+```
+  batch = 32, same 15ms pass, same 5ms wait
+      QPS = 32 / 0.020 = 1,600 req/s            <- 24x the unbatched rate
+      latency still 0.020 s                     <- unchanged
+```
+
+**Why the two knobs are not symmetric.** Concurrency is nearly free — the GPU was idle across most of its cores anyway, so rows 2 through 32 ride along inside the same 15ms. `max_wait` is never free: every millisecond of it lands directly on the P99 of whichever request arrived first. So raise `max_batch_size` aggressively and `max_wait` grudgingly. The Section 8 batching table shows exactly this shape — throughput gain flattens out past 5ms of wait while the P99 penalty keeps tracking `max_wait` almost 1:1 — which is where the "cap max_wait at 20% of the P99 budget" rule comes from. The catch is that `max_batch_size` only delivers concurrency if requests actually arrive fast enough to fill it, which is why the same configuration that gives 24x at high QPS gives pure added latency at low QPS.
 
 ### Prediction Caching Path
 
@@ -716,6 +784,51 @@ result = compute_break_even(InfrastructureCostModel(
 ))
 # Output: GPU serving costs 4x more, but revenue lift makes it net positive
 ```
+
+**What it means.** "Cost per prediction is rent divided by output — and an idle GPU pays exactly the same rent as a busy one."
+
+Every term in `compute_break_even` reduces to that one division. The subtlety is that the denominator is the throughput you *actually* drive, not the throughput the hardware is capable of, and those two numbers are usually nothing alike.
+
+| Symbol | What it is |
+|--------|------------|
+| `$/hr` | Instance rent. Billed whether or not a single request arrives |
+| `predictions/hr` | `sustained QPS x 3600`. The rate you really run at, not the benchmark peak |
+| `$/hr / predictions/hr` | Cost per prediction — the only figure comparable across CPU and GPU |
+| `utilization` | actual QPS / peak QPS. It divides straight into cost per prediction |
+| `replicas` | `ceil(target QPS / (per-replica QPS x utilization target))` |
+
+**Walk one example.** Take the two options from the code above at their full rated throughput:
+
+```
+                    $/hr     QPS      predictions/hr     cost per 1M predictions
+    CPU (4-core)    0.10    2,000       7,200,000              $0.0139
+    GPU (T4)        0.80   20,000      72,000,000              $0.0111
+
+  8x the rent for 10x the output, so the GPU wins -- at full load.
+```
+
+Now send both exactly the same real traffic, 2,000 QPS, and the conclusion inverts:
+
+```
+    CPU : 0.10 / 7,200,000  = $0.0139 per 1M      (100% utilized)
+    GPU : 0.80 / 7,200,000  = $0.1111 per 1M      ( 10% utilized)
+
+  The GPU is now 8x MORE expensive per prediction -- exactly its rent ratio.
+  No hardware changed. Only the utilization did.
+```
+
+**This is the whole reason "GPU is cheaper at scale" is a conditional, not a fact.** At 10% utilization you are paying for 18 idle GPU-seconds out of every 20, and the cost-per-prediction ratio degrades to the raw rent ratio (8x) because the throughput advantage never gets exercised. It also explains why batching and cost are the same conversation: batching is what converts rated throughput into sustained throughput, and sustained throughput is the denominator.
+
+**Sizing the fleet from the same number.** Once cost per prediction is a division, replica count is too:
+
+```
+  Per-replica capacity 20,000 QPS, target 100,000 QPS:
+
+    at 100% utilization :  100,000 / 20,000          = 5.00  ->  5 replicas
+    at  70% utilization :  100,000 / (20,000 x 0.70) = 7.14  ->  8 replicas
+```
+
+The 5-replica answer is a floor, never a plan: it leaves nothing for a rolling deploy, a lost node, or a traffic spike, and it assumes a queue that never forms. A replica held at 100% utilization queues by definition — and queue time is latency, which is the numerator of the very P99 budget you are trying to protect.
 
 ---
 

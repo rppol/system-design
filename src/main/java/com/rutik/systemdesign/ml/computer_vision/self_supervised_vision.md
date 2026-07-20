@@ -60,6 +60,47 @@ DINO (Self-DIstillation with NO labels) trains a student-teacher pair where both
 - **Sharpening**: teacher uses a lower temperature (0.04) than the student (0.1) to produce sharper target distributions.
 - **Multi-crop**: 2 global views (224×224) + 8 local views (96×96). Student sees all 10 views; teacher sees only the 2 global views. This forces the student to predict global from local ("local-to-global correspondence").
 
+The centering and sharpening bullets are two halves of one expression — the teacher's target distribution is `P_t = softmax((g_t(x) - c) / tau_t)`, where `c` is a running mean of recent teacher outputs and `tau_t = 0.04`.
+
+**What this actually says.** "Before turning the teacher's raw scores into a target, subtract off whatever the teacher has been saying lately, then divide by a small number so the winner stands out sharply."
+
+The two operations pull in opposite directions on purpose. Sharpening (small `tau_t`) makes the target confident, which stops the student from drifting toward a flat uniform output. Centering removes any dimension that is winning *every* image, which stops the opposite failure where one dimension eats the whole distribution. Remove either one and DINO collapses.
+
+| Symbol | What it is |
+|--------|-----------|
+| `g_t(x)` | The teacher head's raw output vector for image `x` — one score per prototype dimension |
+| `c` | The center: an EMA of recent teacher outputs. Big entry = "this dimension always fires" |
+| `tau_t` | Teacher temperature, 0.04. Divide-by-small makes the softmax peaky |
+| `tau_s` | Student temperature, 0.1. Larger, so the student's own output stays softer than the target |
+| `softmax` | Turns scores into a probability distribution summing to 1 |
+
+**Walk one example.** Five prototype dimensions, one image, teacher scores `[0.30, 0.24, 0.20, 0.16, 0.10]`:
+
+```
+  step 1 -- sharpening only, tau_t = 0.04 vs the student's tau_s = 0.1
+
+    dimension          d1      d2      d3      d4      d5    entropy
+    raw score         0.30    0.24    0.20    0.16    0.10
+    softmax @ 0.10   0.4350  0.2388  0.1600  0.1073  0.0589   1.4036
+    softmax @ 0.04   0.7451  0.1662  0.0612  0.0225  0.0050   0.8004
+
+    Same scores, smaller tau -> top mass 0.4350 -> 0.7451, entropy 1.4036 -> 0.8004.
+    The teacher hands the student a decisive target, not a shrug.
+
+  step 2 -- now add centering. Suppose d1 has been winning every image, so the
+  running center is c = [0.28, 0.10, 0.10, 0.10, 0.10]
+
+    centered = score - c
+    dimension          d1      d2      d3      d4      d5    entropy
+    centered          0.02    0.14    0.10    0.06    0.00
+    softmax @ 0.04   0.0314  0.6316  0.2324  0.0855  0.0191   1.0239
+
+    d1 falls from 0.7451 to 0.0314 -- it was only "winning" because it wins
+    always, which carries no information about THIS image. d2 takes over.
+```
+
+Entropy is the collapse detector: sharpening alone drives it toward 0 (one dimension for every image — full collapse), centering alone drives it toward `ln(5) = 1.609` (uniform — the other collapse). Together they hold it at the useful middle, here 1.0239.
+
 DINO emergent behavior: attention maps from the last layer reliably segment foreground objects without any segmentation training. DINOv2 scales this up with a curated dataset, adding iBOT (masked token prediction) objective and register tokens.
 
 ### Masked Autoencoder: MAE
@@ -78,6 +119,33 @@ BYOL (Bootstrap Your Own Latent) removes negative pairs entirely:
 - **Online network**: encoder + projector + predictor MLP. Only the online network receives gradients.
 - **Target network**: encoder + projector only (no predictor). Updated as EMA of online network.
 - **Loss**: MSE between online predictor output and target projector output (stop-gradient on target).
+
+Written out, the loss is `L = || p(z_online) - stopgrad(z_target) ||^2` with both vectors L2-normalized, which for unit vectors is exactly `2 - 2 * cos(p, z_target)`.
+
+**The idea behind it.** "Predict what the slow copy of yourself says about the other view of this image — and never let that prediction leak back into the slow copy."
+
+| Symbol | What it is |
+|--------|-----------|
+| `p(z_online)` | Predictor output — the online net's guess at the target embedding, unit length |
+| `z_target` | Target projector's embedding of the *other* augmented view, unit length |
+| `stopgrad` | Gradient blocker. The target branch is read, never differentiated through |
+| `\|\| . \|\|^2` | Squared distance between the two unit vectors |
+| `cos(p, z)` | Their cosine similarity, in `[-1, +1]` — 1 means the guess landed exactly on target |
+
+**Walk one example.** Both vectors are unit length, so the squared distance collapses to `2 - 2*cos`:
+
+```
+  cos(p, z_target)     loss = 2 - 2*cos      reading
+      +1.0                   0.0             perfect prediction, nothing to learn
+      +0.9                   0.2             typical mid-training
+      +0.5                   1.0             early training
+       0.0                   2.0             orthogonal, no agreement at all
+      -1.0                   4.0             worst case, pointing opposite
+
+  The whole loss range is 0 to 4, and it is driven by one number: the angle.
+```
+
+Note what the collapsed solution looks like here: if both networks emit the same constant vector for every image, `cos = 1` and the loss is `0.0` — a perfect score for a useless model. Nothing in the loss forbids it. What forbids it is the asymmetry: the extra predictor MLP exists only on the online side, and `stopgrad` means the target cannot chase the online net back down into the constant. Delete the predictor, or delete the `stopgrad`, and the model finds that `0.0` within a few hundred steps.
 
 Without negatives, the trivial solution is for both networks to output a constant. Collapse is prevented by the asymmetry: the predictor on the online side must predict the target, but the target has no corresponding predictor and is updated only via EMA. Batch normalization in the predictor MLP is also critical.
 
@@ -313,6 +381,71 @@ class SimCLRProjectionHead(torch.nn.Module):
         return F.normalize(self.mlp(x), dim=-1)
 ```
 
+The `cross_entropy(sim, labels)` line above is the NT-Xent loss in one call. Spelled out for a single anchor `i`, it is:
+
+```
+                       exp( sim(z_i, z_j) / tau )
+  L_i = -log  -------------------------------------------
+              sum over all k != i of exp( sim(z_i, z_k) / tau )
+```
+
+**What the formula is telling you.** "Out of every other embedding in the batch, how much of the probability mass does the true partner view get? Take the log of that share and flip the sign."
+
+It is a `2B - 1`-way classification problem invented on the fly: the anchor must pick its own other view out of a lineup. No labels are needed because the augmentation pipeline already knows the answer.
+
+| Symbol | What it is |
+|--------|-----------|
+| `z_i` | The anchor — one L2-normalized 128-d projection of one augmented view |
+| `z_j` | Its positive: the *other* augmentation of the same source image |
+| `z_k` | Every other embedding in the batch, all `2(N-1)` of them, used as negatives |
+| `sim(a,b)` | Cosine similarity. Both vectors are unit length, so this is just `a . b`, in `[-1, +1]` |
+| `tau` | Temperature, 0.07. Divides every similarity before the softmax, stretching the gaps |
+| `exp(.)/sum exp(.)` | Softmax — turns similarities into a probability over "which one is my partner" |
+| `-log` | Costs 0 when the model is certain and correct, and climbs without bound as it errs |
+
+**Walk one example.** One anchor, `tau = 0.07`, positive similarity 0.90. Same positive, two different negative sets — that is the entire difference:
+
+```
+  EASY negatives (unrelated images)
+    sim              0.90    0.10    0.05    0.00   -0.05    0.10    0.02
+    sim / 0.07      12.86    1.43    0.71    0.00   -0.71    1.43    0.29
+    exp(.)      383518.39    4.17    2.04    1.00    0.49    4.17    1.33
+                    ^pos     ---------- negatives sum to 13.21 ----------
+
+    p_positive = 383518.39 / 383531.60 = 0.999966
+    L = -log(0.999966) = 0.000034        <- essentially free, no gradient
+
+  HARD negatives (other dogs, same breed)
+    sim              0.90    0.85    0.80    0.75    0.70    0.82    0.78
+    sim / 0.07      12.86   12.14   11.43   10.71   10.00   11.71   11.14
+    exp(.)      383518.39 187748  91911   44994   22026  122307   69069
+                    ^pos     -------- negatives sum to 538054.58 --------
+
+    p_positive = 383518.39 / 921572.97 = 0.416156
+    L = -log(0.416156) = 0.876694        <- 25,785x the easy-negative loss
+
+  Chance level for a 7-way choice is -log(1/7) = 1.9459, so 0.8767 means the
+  model is right but not comfortably so -- exactly where learning happens.
+```
+
+That ratio is why SimCLR needs batches of 4096–8192. A small batch is almost all easy negatives, the loss sits near zero, and the gradient carries no signal; scale the batch and hard negatives appear by accident, which is the cheap substitute for hard-negative mining.
+
+**Why the divide by tau exists.** Cosine similarity is trapped in `[-1, +1]`, so an un-scaled softmax over it is nearly flat and cannot express confidence. Dividing by `tau` rescales that narrow band into a range the exponential can act on. Push the same two negative sets through a large and a small temperature:
+
+```
+  tau      easy-negative loss     hard-negative loss     what it does
+  0.05          0.0000                 0.6227            sharp: obsesses over the
+                                                         single hardest negative
+  0.07          0.0000                 0.8767            SimCLR default
+  0.50          0.7292                 1.7533            flat: every negative gets
+                                                         near-equal weight
+
+  Note tau = 0.50 charges 0.7292 even on easy negatives -- the model is punished
+  for a lineup it already got right, and real signal drowns in that noise.
+```
+
+Small `tau` concentrates the gradient on whichever negative is closest, which is what makes representations separable, but too small and one mislabeled near-duplicate dominates the whole batch's update. `tau` is a hyperparameter worth sweeping, not inheriting.
+
 ### MoCo Momentum Update
 
 ```python
@@ -394,6 +527,47 @@ class MoCoModel(nn.Module):
         return F.cross_entropy(logits, labels)
 ```
 
+The single line inside `_momentum_update` is the whole mechanism: `theta_k <- m * theta_k + (1 - m) * theta_q`, with `m = 0.999`.
+
+**Put simply.** "The key encoder never trains. Each step it just slides one-thousandth of the way toward the query encoder, so it is always a blurred, lagging copy of it."
+
+| Symbol | What it is |
+|--------|-----------|
+| `theta_q` | Query (online) encoder weights — the ones gradient descent actually updates |
+| `theta_k` | Key (momentum) encoder weights — receives no gradient, only this blend |
+| `m` | Momentum coefficient, 0.999. How much of the old key encoder survives each step |
+| `1 - m` | 0.001 — the sliver of the online encoder mixed in per step |
+| `<-` | In-place assignment, run once per training step under `torch.no_grad()` |
+
+**Walk one example.** Take one scalar weight. Say `theta_k = 0.500` and `theta_q` has settled at `0.600`:
+
+```
+  step 1:  0.999 * 0.500    + 0.001 * 0.600 = 0.500100
+  step 2:  0.999 * 0.500100 + 0.001 * 0.600 = 0.500200
+  step 3:  0.999 * 0.500200 + 0.001 * 0.600 = 0.500300
+  step 4:  0.999 * 0.500300 + 0.001 * 0.600 = 0.500399
+  step 5:  0.999 * 0.500399 + 0.001 * 0.600 = 0.500499
+
+  After 5 steps it has closed 0.5% of a 0.1 gap. It is in no hurry.
+```
+
+Unrolling the recursion tells you the memory span — the weight still carried by a value from `n` steps ago is `m^n`:
+
+```
+  steps ago n        m^n = 0.999^n      how much of it is left
+      1                 0.999000        99.9% -- yesterday is still today
+    100                 0.904792        90.5%
+    693                 0.500000        50.0%  <- the half-life
+   1000                 0.367695        36.8%  <- 1/e, the effective window
+   5000                 0.006721         0.7% -- fully forgotten
+
+  Effective averaging window = 1 / (1 - m) = 1 / 0.001 = 1000 steps.
+```
+
+That 1000-step window is the number that has to match the queue. The queue holds `K = 65,536` keys; at batch size 256 that is `65536 / 256 = 256` steps of history sitting in the queue. Because the encoder that produced the oldest of those keys is still ~77% (`0.999^256 = 0.7740`) the same encoder as today's, every key in the queue is comparable to the current query. That consistency is the only reason contrasting against stale keys works at all.
+
+Set `m` too low and the guarantee evaporates: `m = 0.9` gives a half-life of 6.6 steps and a 10-step window, so keys from 256 steps ago were produced by an effectively unrelated network (`0.9^256` is about `1e-12` of the old weights) and the loss is contrasting against noise. Set it too high and the key encoder stops tracking the online encoder at all, which stalls learning from the other end.
+
 ### MAE Training Step
 
 ```python
@@ -460,6 +634,45 @@ def mae_loss(pred_pixels: Tensor,
     loss = (loss_per_patch * mask).sum() / mask.sum()
     return loss
 ```
+
+Two lines carry the whole idea. The masking line, `N_visible = int(N * (1 - mask_ratio))`, decides how much the encoder ever sees; the loss line, `(loss_per_patch * mask).sum() / mask.sum()`, decides what it is graded on.
+
+**In plain terms.** "Throw away three of every four patches, run the expensive encoder on only the survivors, and score the model solely on the patches it was never shown."
+
+Multiplying by `mask` before summing is a masked mean, not a plain mean: the numerator zeroes out every visible patch, and dividing by `mask.sum()` instead of `N` keeps the scale right. Divide by `N` by mistake and the loss silently shrinks by 4x, taking the effective learning rate with it.
+
+| Symbol | What it is |
+|--------|-----------|
+| `N` | Patches per image — `(224/16)^2 = 196` for a ViT-B/16 at 224x224 |
+| `mask_ratio` | 0.75. The fraction of patches deleted before the encoder runs |
+| `N_visible` | `196 * 0.25 = 49` — the only tokens the encoder ever processes |
+| `mask` | `(B, N)` indicator, 1 = masked. Used as a multiplier to select loss terms |
+| `mask.sum()` | Count of masked patches, 147 per image — the divisor of the masked mean |
+| `patch_size^2 * 3` | `16*16*3 = 768` raw pixel values reconstructed per patch |
+
+**Stated plainly, in numbers.** One 224x224 image through ViT-B/16:
+
+```
+                                     tokens    share
+    total patches                      196     100%
+    masked, never seen by encoder      147      75%
+    visible, encoder input              49      25%
+
+  encoder cost, relative to a full-image ViT
+    attention is quadratic in tokens:  (196/49)^2 = 4^2 = 16x cheaper
+    MLP / projections are linear:       196/49    =        4x cheaper
+
+  decoder cost
+    input = 49 encoded tokens + 147 learned mask tokens = 196 tokens
+    but the decoder is deliberately shallow -- 8 blocks at width 512 vs the
+    encoder's 12 blocks at width 768 -- so it does not undo the saving.
+
+  loss
+    graded on 147 patches x 768 pixel values = 112,896 regression targets
+    divisor is mask.sum() = 147, NOT N = 196
+```
+
+The compute saving is not a side benefit — it is what makes a 75% ratio affordable in the first place, and the 75% ratio is what makes the task non-trivial. At a 15% mask ratio (BERT's setting) a patch can be reconstructed by copying its neighbours, and the encoder learns a low-level interpolation filter instead of image semantics. At 75%, with 3 of every 4 patches gone, local copying has nothing left to copy from, so the only way to fill the gaps is to represent what the object actually is.
 
 ### Linear Probing Evaluation
 

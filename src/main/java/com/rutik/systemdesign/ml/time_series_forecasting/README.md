@@ -107,6 +107,43 @@ flowchart LR
 Additive decomposition sums the three components; switch to multiplicative
 (`y_t = T_t × S_t × R_t`) when the seasonal swing grows with the series level.
 
+**The idea behind it.** "Every observation is three things stacked on top of each other — where the series is heading, what time of year it is, and what nobody could have predicted — so pull them apart and forecast each separately."
+
+The decomposition is the single most useful preprocessing step in forecasting, and its real payoff is diagnostic: once you have `R_t`, anything left in it that looks like structure is a component you failed to model. A residual with visible weekly bumps means your seasonal period is wrong.
+
+| Symbol | What it is |
+|--------|------------|
+| `y_t` | The observed value at time `t` — the only thing you actually measured |
+| `T_t` | Trend: the slow, non-repeating direction of travel |
+| `S_t` | Seasonality: the part that repeats on a fixed known period (day, week, year) |
+| `R_t` | Residual: what is left. Ideally structureless noise |
+| `+` vs `×` | Whether the seasonal effect is a fixed *amount* or a fixed *percentage* |
+
+**Walk one example.** Four months of sales, additive form (`R_t = 0` for clarity):
+
+```
+  month   T_t     S_t      y_t = T_t + S_t + R_t
+  Sep    1000    -200      800
+  Oct    1050       0     1050
+  Nov    1100    +300     1400        <- holiday peak
+  Dec    1150    -100     1050
+```
+
+The trend climbs a steady `+50/month`; the seasonal term is a fixed *number of units* that repeats each year regardless of how big the business gets. That last clause is the whole additive-vs-multiplicative decision.
+
+**Now watch the two forms diverge as the business grows.** Same `+300` November bump, expressed additively versus as a `×1.30` multiplier:
+
+```
+  trend level    additive peak (T + 300)      multiplicative peak (T x 1.30)
+     1000            1300   (gap  300)             1300   (gap   300)
+     2000            2300   (gap  300)             2600   (gap   600)
+     4000            4300   (gap  300)             5200   (gap  1200)
+```
+
+**Stated plainly.** If the business quadruples and November is still only `300` units above trend, use additive. If November is still `30%` above trend, use multiplicative. Real retail and web-traffic series are almost always multiplicative, which is why `seasonality_mode="multiplicative"` appears in the Prophet config in §6 — get this wrong and the model systematically under-forecasts your peaks in growth years and over-forecasts them in decline years, with the error growing over the horizon.
+
+**The log trick.** Multiplicative decomposition is additive decomposition on `log(y_t)`, since `log(T × S × R) = log T + log S + log R`. That is why "take logs first" is standard advice for series whose variance grows with level — it converts a multiplicative problem into one every additive model can already handle. It requires `y_t > 0` throughout, which is the one condition that rules it out.
+
 ### ARIMA Model
 
 ```mermaid
@@ -136,6 +173,85 @@ flowchart LR
 
 Differencing makes the series stationary so the AR and MA terms can be estimated;
 the fit is then inverted (integrated) back to the original scale — the "I" in ARIMA.
+
+#### What `p`, `d`, `q` actually mean
+
+**In plain terms.** "`d` says how many times to subtract the series from itself to flatten it, `p` says how many past *values* to look back at, and `q` says how many past *mistakes* to look back at."
+
+The order of operations matters and is not obvious from the notation: `d` happens first and to the raw series; `p` and `q` then operate on the flattened result, never on the original. This is why an `ARIMA(2,1,1)` fitted on differenced data cannot be read as "2 lags of sales" — it is 2 lags of *month-over-month change in* sales.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | AR order — how many past observations feed the forecast. "Momentum from the level" |
+| `d` | Differencing order — how many times you take `y_t - y_(t-1)` to kill the trend |
+| `q` | MA order — how many past forecast *errors* feed the forecast. "Correcting for recent shocks" |
+| `y'_t` | The differenced (stationary) series that AR and MA actually see |
+| `phi` (`φ`) | The AR coefficients — weight on each past value |
+| `theta` (`θ`) | The MA coefficients — weight on each past error |
+| `e_t` | The shock at time `t`; what the model could not predict |
+
+**What each letter is for, and what breaks without it.** Drop `d` on a trending series and the AR coefficients drift toward 1 while the model happily forecasts a flat line at the historical mean — the classic non-stationarity failure. Drop `q` and the model has no way to absorb a one-off shock, so a single spike propagates through the AR terms for `p` periods. Drop `p` and you have thrown away the level information entirely.
+
+**Walk one example — `ARIMA(1,1,1)`, one step ahead.** The `d = 1` means the model works on first differences, so the equation it fits is:
+
+```
+  y'_t = phi x y'_(t-1)  +  theta x e_(t-1)  +  e_t
+```
+
+With `phi = 0.6`, `theta = 0.3`, and the recent history below:
+
+```
+  step 1 -- difference (this is the "I"):
+      y_(t-2) = 200
+      y_(t-1) = 210          ->  y'_(t-1) = 210 - 200 = +10
+
+  step 2 -- last period's forecast error, already known:
+      e_(t-1) = -4           (we over-forecast by 4 last month)
+
+  step 3 -- AR + MA on the DIFFERENCED scale (E[e_t] = 0, so it drops out):
+      y'_hat_t = 0.6 x (+10)  +  0.3 x (-4)
+               = 6.0          +  (-1.2)
+               = 4.8                        <- forecast CHANGE, not forecast level
+
+  step 4 -- undo the differencing (the "integrated" step):
+      y_hat_t  = y_(t-1) + y'_hat_t
+               = 210 + 4.8
+               = 214.8
+```
+
+Note the two terms pulling in opposite directions in step 3. The AR term says "you rose 10 last month, expect to keep rising"; the MA term says "you over-shot last month, ease off." The net `+4.8` is smaller than the AR term alone — **that damping is exactly the job of `q`**, and it is why pure AR models overshoot after a shock.
+
+**Reading `phi` and `theta`.** `phi = 0.6` means 60% of last period's change carries forward, so a shock decays as `0.6, 0.36, 0.216, ...` — roughly gone in 5 periods. `|phi| >= 1` is non-stationary (shocks never die, the series explodes), which is precisely the condition differencing exists to fix.
+
+#### The seasonal half: `SARIMA(p,d,q)(P,D,Q,s)`
+
+**What it means.** "Run the same three-part machinery twice — once on adjacent time steps, and once on time steps exactly one season apart."
+
+| Symbol | What it is |
+|--------|------------|
+| `s` | Season length in observations. `12` monthly, `7` daily-with-weekly, `24` hourly-with-daily |
+| `D` | Seasonal differencing: `y_t - y_(t-s)`. Subtracts the *same period last year* |
+| `P` | Seasonal AR — how many past *seasons* feed in (lags `s`, `2s`, ...) |
+| `Q` | Seasonal MA — how many past seasonal errors feed in |
+
+**Walk one example.** `ARIMA(1,1,1)(0,1,1,12)` on monthly data — the model §6 names as the typical best fit for monthly business series. Read it right to left:
+
+```
+  s  = 12   ->  the season is 12 months
+  D  = 1    ->  subtract the same month last year:   y_t - y_(t-12)
+  d  = 1    ->  then subtract last month:            take a first difference of THAT
+  P  = 0    ->  no seasonal AR term
+  Q  = 1    ->  one seasonal MA term: correct using the error from 12 months ago
+  p  = 1, q = 1  ->  one ordinary AR lag, one ordinary MA lag
+
+  Total differencing applied: d + D = 2 passes.
+  Observations consumed before the model can produce its first fit:
+      d x 1  +  D x s  =  1 + 12  =  13 months.
+```
+
+That last line is the practical trap. With `s = 12` and `D = 1` you burn a full year of history before fitting anything, so **a 24-month series gives you 11 usable points** — nowhere near enough to estimate 4 coefficients reliably. The working rule is at least 2 full seasons to detect the seasonality and preferably 4+ to fit it, i.e. 3-4 years of monthly data. Below that, use Holt-Winters or Fourier seasonality features instead, which is the tradeoff the §4 table flags with "short series."
+
+**Why `D` and not just a bigger `p`.** You could in principle capture yearly seasonality with `p = 12` ordinary AR lags. But that costs 12 coefficients estimated from limited data, and it models the seasonal relationship as a weighted blend of all 12 intervening months rather than the direct year-over-year link. Seasonal differencing captures it with **zero** parameters. This is the same economy that makes `d` preferable to a very high `p` for trend.
 
 ### Prophet Additive Model
 
@@ -238,6 +354,64 @@ xychart-beta
 For an AR(p) process the PACF cuts off sharply after lag p while the ACF decays
 slowly; for an MA(q) process the mirror holds (ACF cuts off after q, PACF decays).
 The PACF's drop to near-zero after lag 2 here identifies an AR(2) term.
+
+**Put simply.** "Autocorrelation at lag `k` is just the ordinary correlation between the series and a copy of itself slid `k` steps to the right — how much does today resemble `k` days ago?"
+
+The *partial* version answers a sharper question: how much does today resemble `k` days ago **once you have subtracted everything explained by the days in between?** That single distinction is what makes the two plots readable, and it is the most common thing candidates cannot articulate.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | The lag — how many steps back you are comparing against |
+| ACF at lag `k` | Total correlation between `y_t` and `y_(t-k)`, including indirect routes |
+| PACF at lag `k` | Correlation *left over* after removing the effect of lags `1 .. k-1` |
+| `+1 / 0 / -1` | Move together / no relation / move oppositely, as with any correlation |
+| significance band | The dashed lines on a real plot; spikes inside it are indistinguishable from noise |
+
+**Why the ACF decays even when the true dependence is short.** This is the crux. Suppose today genuinely depends only on the last two days. Lag 3 still shows correlation, because day `t` correlates with day `t-1`, which correlates with day `t-2`, which correlates with day `t-3` — the influence **leaks down the chain** even though there is no direct link. The ACF sees the whole chain; the PACF cuts it.
+
+**Walk one example — the AR(2) chart above.** Read the actual bar values off the two plots:
+
+```
+  lag        1      2      3      4      5      6      7      8      9     10
+  ACF     0.85   0.72   0.60   0.50   0.41   0.34   0.28   0.23   0.19   0.15
+  PACF    0.85   0.45   0.05  -0.03   0.02  -0.01   0.02  -0.02   0.01   0.00
+                        ^^^^ cuts off here
+```
+
+Check the ACF against a geometric decay by taking successive ratios:
+
+```
+  0.72/0.85 = 0.847     0.41/0.50 = 0.820     0.23/0.28 = 0.821
+  0.60/0.72 = 0.833     0.34/0.41 = 0.829     0.19/0.23 = 0.826
+  0.50/0.60 = 0.833     0.28/0.34 = 0.824     0.15/0.19 = 0.789
+
+  Every ratio sits near 0.83 -> the ACF is shrinking by a constant FACTOR each lag.
+  That is textbook geometric decay: the signature of an AR process, not an MA one.
+```
+
+Now the diagnosis:
+
+```
+  ACF  decays smoothly, never cuts off        ->  AR component present
+  PACF is 0.85, 0.45, then collapses to 0.05  ->  direct dependence stops after lag 2
+
+  Read off:  p = 2,  q = 0   ->  ARIMA(2, d, 0)
+```
+
+The lag-3 PACF value of `0.05` is the payoff. The ACF still shows `0.60` at lag 3 — a correlation you would swear was real — and the PACF proves it is entirely inherited through lags 1 and 2. **Fitting `p = 3` because "the ACF is still high at lag 3" is the classic over-parameterization error**, and it costs you a coefficient estimated on noise.
+
+**The mirror rule, and why it works that way.** An MA(q) process is a weighted sum of the last `q` shocks. Two observations more than `q` apart share *no* shocks at all, so their correlation is exactly zero — the ACF cuts off hard at `q`. There is no chain to leak down, because MA has no dependence on past *values*. Summarized:
+
+```
+  process    ACF                      PACF                     read the order from
+  AR(p)      decays (geometric)       cuts off after lag p     PACF
+  MA(q)      cuts off after lag q     decays                   ACF
+  ARMA(p,q)  decays                   decays                   neither -- use AIC/BIC
+```
+
+That bottom row is the honest caveat: when both plots decay, visual identification fails and you fall back to searching orders by information criterion — which is exactly what `auto_arima` in §6 automates. Use ACF/PACF to bound the search and sanity-check the winner, not to replace it.
+
+**One thing to check before reading either plot: differencing.** Both plots assume a stationary series. On a trending series the ACF is near `1.0` at every lag and decays in a straight line rather than geometrically — that pattern is not "high AR order", it is "you forgot to difference." Fix `d` first, then read the orders off the differenced series.
 
 ---
 
@@ -549,6 +723,80 @@ def create_lag_features(
 | MAPE | mean(|y - y_hat| / y) * 100 | Scale-free comparison | Undefined when y=0; asymmetric |
 | SMAPE | mean(2|y-y_hat|/(|y|+|y_hat|)) * 100 | Near-zero actuals | Bounded 0-200% |
 | Pinball (quantile) | asymmetric L1 | Probabilistic forecasting | Different per quantile level |
+
+**What the formulas are telling you.** "MAE reports the error in your own units, RMSE reports it after punishing big misses extra, MAPE reports it as a percentage *of the truth*, and SMAPE reports it as a percentage of the truth and the forecast averaged together."
+
+Those are four genuinely different questions, so they can and do rank the same two models differently. Picking one before you look at the data is a decision about what kind of mistake hurts your business, not a formatting choice.
+
+| Symbol | What it is |
+|--------|------------|
+| `y` | The actual observed value |
+| `y_hat` | The forecast |
+| `\|y - y_hat\|` | Absolute error at one point, in the series' own units |
+| `mean(...)` | Averaged over every point in the evaluation window |
+| `/ y` in MAPE | Divides by the **actual** — so small actuals blow the ratio up |
+| `/ (\|y\| + \|y_hat\|)` in SMAPE | Divides by both, which is what bounds it at 200% |
+| `x 100` | Both percentage metrics are reported on a 0-100+ scale, not 0-1 |
+
+**Walk one example — one forecast, four scores.** Eight days of demand. Note day 5, a near-zero day (a holiday closure), where the forecast missed by 15 units:
+
+```
+  day       1     2     3     4     5     6     7     8
+  actual  100   120    90   110     5   130   115   105
+  forecast110   115   100   105    20   125   120   100
+  error   -10    +5   -10    +5   -15    +5    -5    +5
+  |error|  10     5    10     5    15     5     5     5
+```
+
+The absolute errors are all in a tight `5-15` band — by eye this is a uniformly decent forecast. Now score it:
+
+```
+  MAE   = mean(|error|)
+        = (10 + 5 + 10 + 5 + 15 + 5 + 5 + 5) / 8  =  60 / 8   =   7.50 units
+
+  RMSE  = sqrt( mean(error^2) )
+        = sqrt( (100+25+100+25+225+25+25+25) / 8 ) = sqrt(68.75) =   8.29 units
+
+  per-point APE = 100 x |error| / actual:
+      10.00   4.17  11.11   4.55  300.00   3.85   4.35   4.76
+                                  ^^^^^^ day 5: 15 / 5 = 300%
+  MAPE  = mean of that row                                   =  42.85 %
+
+  per-point sAPE = 100 x 2|error| / (|actual| + |forecast|):
+       9.52   4.26  10.53   4.65  120.00   3.92   4.26   4.88
+                                  ^^^^^^ 2 x 15 / (5 + 20) = 120%
+  SMAPE = mean of that row                                   =  20.25 %
+```
+
+**Four scores for one forecast: `7.50`, `8.29`, `42.85%`, `20.25%`.** MAPE says this model is catastrophic. SMAPE says it is poor. MAE says it is off by about 7 units a day. All four are computed correctly from identical inputs.
+
+**Where the disagreement comes from.** Delete day 5 and rescore:
+
+```
+                 with day 5      without day 5
+      MAE          7.50             6.43        <- barely moves
+      MAPE        42.85 %           6.11 %      <- collapses by 7x
+      SMAPE       20.25 %           6.00 %      <- collapses by 3.4x
+
+  MAPE and SMAPE now agree (6.11 vs 6.00). One low-actual day out of eight
+  was producing the entire gap between "42.85%" and "6.11%".
+```
+
+That is the headline result: **a single low-value observation contributed `300/8 = 37.5` percentage points of the `42.85%` MAPE** — 88% of the metric — while contributing `15/8 = 1.9` units of the `7.50` MAE. MAPE is not measuring the forecast here, it is measuring how close one actual got to zero. This is why the table above flags "undefined when `y=0`": the pathology starts long before you hit exactly zero.
+
+**The asymmetry, and the fact that the two metrics are biased in opposite directions.** Hold the actual at `100` and sweep the forecast:
+
+```
+  forecast     50      80     100     120     150     200     300       0
+  APE       50.0%   20.0%    0.0%   20.0%   50.0%  100.0%  200.0%  100.0%
+  sAPE      66.7%   22.2%    0.0%   18.2%   40.0%   66.7%  100.0%  200.0%
+```
+
+Read the two ends. **MAPE caps under-forecasting at 100%** (you cannot be more than 100% below the truth — forecast `0` scores 100%) but leaves over-forecasting unbounded (forecast `300` scores 200%, forecast `1000` would score 900%). So a model tuned to minimize MAPE learns to **systematically under-forecast** — a real and expensive failure in inventory planning, where under-forecasting is what causes stockouts.
+
+SMAPE was designed to fix this and overcorrects: at the extremes it charges `66.7%` for halving versus `18.2%` for a `+20%` overshoot, and forecasting `0` scores the maximum `200%`. **SMAPE penalizes under-forecasting harder.** Neither is neutral; they are merely biased opposite ways, which is why "symmetric" in the name is misleading and why the table caps it at 200%.
+
+**How to choose, in one pass.** Use **MAE** when the series has a stable scale and you want a number stakeholders can act on ("we are off by 7 units a day"). Use **RMSE** when large misses are disproportionately costly — note it read `8.29` against MAE's `7.50`, and that gap *is* the outlier signal, since RMSE equals MAE only when every error is identical. Use **MAPE** only to compare across series of different scales, and only when every actual is comfortably above zero. Reach for **SMAPE** when actuals approach zero, knowing you have swapped one bias for another. And never report a single number: the metrics agree when the data is clean and diverge exactly where the data is interesting, so the divergence itself is a diagnostic.
 
 ---
 

@@ -263,6 +263,41 @@ xychart-beta
 
 The rising line is precision, the falling line is recall: raising the threshold buys precision at the cost of recall. Pick the operating point with F_beta = (1 + beta²)·P·R / (beta²·P + R) — beta > 1 weights recall (medical diagnosis), beta < 1 weights precision (spam), beta = 1 is F1.
 
+**What this actually says.** "Blend precision and recall into one number, but let `beta` declare how many times more you care about recall than about precision."
+
+The interview-relevant fact is that `beta` has a concrete meaning, not a vibe: `beta = 2` says one unit of recall is worth twice as much as one unit of precision. Being able to state that — rather than "beta weights recall more" — is what separates a memorized formula from an understood one.
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | Precision. Of the items you flagged, the fraction that were right |
+| `R` | Recall. Of the items that were actually positive, the fraction you caught |
+| `beta` | How many times more you value recall than precision. `1` = equal |
+| `beta²` | Where `beta` actually enters. Squaring is why `beta = 2` is a 4x tilt in the arithmetic, not 2x |
+| `(1 + beta²)` | Normalizer that keeps `F_beta` in `[0, 1]` and equal to `P` when `P = R` |
+| `F_beta` | The harmonic-style blend. Always closer to the *smaller* of `P` and `R` |
+
+**Walk one example.** The fraud operating point this module specifies elsewhere — 85% precision at 65% recall — scored under all three common betas:
+
+```
+   P = 0.85    R = 0.65        (fraud requirement stated in the Step-2 template)
+
+   beta = 0.5  (precision-weighted, spam)
+       (1 + 0.25) x 0.85 x 0.65 / (0.25 x 0.85 + 0.65)
+       = 0.690625 / 0.8625 = 0.8007
+
+   beta = 1.0  (F1, balanced)
+       2 x 0.85 x 0.65 / (0.85 + 0.65)
+       = 1.105 / 1.500   = 0.7367
+
+   beta = 2.0  (recall-weighted, medical)
+       5 x 0.85 x 0.65 / (4 x 0.85 + 0.65)
+       = 2.7625 / 4.050  = 0.6821
+```
+
+One fixed model, three scores spanning `0.68` to `0.80` — a 12-point swing produced entirely by the choice of `beta`, with no change to the model at all. That is the trap: a candidate who reports "F-score 0.80" without naming `beta` has reported nothing. Note the direction each beta pulls: `beta = 2` drags the score toward recall (`0.65`, the weaker rate) and lands at `0.6821`; `beta = 0.5` drags it toward precision (`0.85`) and lands at `0.8007`. F1 sits at `0.7367`, *below* the arithmetic mean of `0.75` — that harmonic pull toward the weaker rate is the point, and it is what stops a model with 99% precision and 2% recall from looking good.
+
+**How to pick `beta` in an interview.** Derive it from the cost asymmetry rather than guessing. If missing a positive costs roughly `k` times what a false alarm costs, `beta ≈ sqrt(k)` is the defensible starting point. Say that out loud and then sanity-check it against the business, which is exactly the "state your assumptions explicitly" principle from §3.
+
 ### Cascade Model — Latency vs Accuracy
 
 ```mermaid
@@ -497,6 +532,14 @@ def tune_threshold(
     }
 
 
+# ── Cost-optimal threshold (the version interviewers actually probe) ──────────
+#
+# When the two error types have different dollar costs, the F-beta search above
+# is a proxy; the direct object is expected cost:
+#     cost(t) = FP(t) * cost_fp + FN(t) * cost_fn
+# For a CALIBRATED model the minimizing threshold has a closed form:
+#     t* = cost_fp / (cost_fp + cost_fn)
+
 # ── Feature importance and selection ─────────────────────────────────────────
 
 def feature_importance_analysis(
@@ -639,6 +682,123 @@ def minimum_sample_size(
     print(f"Total sample: {2*int(np.ceil(n)):,}")
     return int(np.ceil(n))
 ```
+
+### 6.1 Decoding the four numbers interviewers push on
+
+The toolkit above hides four pieces of arithmetic that get probed directly in loops. Each one has a threshold attached, and each threshold has a reason.
+
+#### Cost-optimal threshold
+
+**Read it like this.** "Do not ask where the probability crosses one half. Ask how much a miss costs relative to a false alarm, and put the threshold exactly there."
+
+`0.5` is only optimal when the two mistakes cost the same amount, which is almost never true in fraud, medical, or safety work. The closed form below is the single most useful line to have memorized for a threshold question.
+
+| Symbol | What it is |
+|--------|------------|
+| `cost_fp` | Price of a false alarm — a human reviewing something that turned out fine |
+| `cost_fn` | Price of a miss — the fraud loss, the undetected disease, the churned customer |
+| `t*` | The optimal cutoff, `cost_fp / (cost_fp + cost_fn)` |
+| Calibration prerequisite | The formula reads predicted probabilities as literal probabilities; miscalibration invalidates it |
+| `0.5` | What you get when `cost_fp == cost_fn` — the default is a special case, not a rule |
+
+**Walk one example.** The fraud economics this module cites — a `$2` manual review against a `$200` loss per missed fraud:
+
+```
+   cost_fp = $2        cost_fn = $200        ratio = 100 : 1
+
+   t* = 2 / (2 + 200) = 2 / 202 = 0.0099
+
+   at t = 0.5     : flag only near-certain fraud. Every miss costs $200.
+   at t = 0.0099  : flag anything with >= ~1% fraud probability.
+                    Justified because 100 wasted reviews ($200) cost exactly
+                    the same as one missed fraud ($200) -- so the 100th review
+                    is still break-even.
+```
+
+That last line is the whole intuition. The threshold drops to `~1%` not because recall is nice to have but because the cost ratio says one hundred false alarms and one miss are *the same amount of money*. A candidate who says "I would lower the threshold for fraud" is fine; one who derives `0.0099` from `$2` and `$200` is hired.
+
+#### Expected Calibration Error
+
+**Put simply.** "Bucket predictions by confidence, and in each bucket check whether the model was right as often as it claimed. ECE is the size-weighted average of how far off those claims were."
+
+| Symbol | What it is |
+|--------|------------|
+| `n_bins` | Confidence buckets, usually 10. Each holds predictions in one probability band |
+| `bin_conf` | Average predicted probability in the bucket — what the model *claimed* |
+| `bin_acc` | Actual fraction correct in the bucket — what the model *delivered* |
+| `bin_size` | Fraction of all predictions in this bucket. Weights the bucket's contribution |
+| `abs(bin_acc - bin_conf)` | The calibration gap for that bucket. Sign is discarded |
+| `ECE > 0.05` | The action threshold stated in the docstring: fit Platt scaling or isotonic regression |
+
+**Walk one example.** A typically over-confident boosted-tree model, three populated buckets:
+
+```
+   bucket    claimed (conf)   delivered (acc)   share   gap    contribution
+     mid          0.55            0.50          0.30    0.05      0.0150
+     high         0.75            0.62          0.40    0.13      0.0520
+     top          0.95            0.80          0.30    0.15      0.0450
+                                                shares sum to 1.00
+   ECE = 0.0150 + 0.0520 + 0.0450 = 0.1120
+```
+
+`0.1120` is more than twice the `0.05` action threshold, so this model needs calibration before its probabilities drive anything. Read the top bucket: it says `0.95` and delivers `0.80`. Under the cost formula above, a decision engine treating that `0.95` as real would be pricing a 20-point error into every high-confidence action. Note also that the largest bucket contributes most — a big gap in a rarely-populated bucket matters less than a moderate gap where most traffic lands, which is exactly what the `bin_size` weighting encodes.
+
+#### Population Stability Index
+
+**The idea behind it.** "Compare this week's feature distribution against the reference bin by bin, and add up how much probability mass moved — weighted by how far, in relative terms, it moved."
+
+| Symbol | What it is |
+|--------|------------|
+| `ref_pct`, `cur_pct` | Fraction of records in each bin, then and now. Each vector sums to `1.0` |
+| `cur_pct - ref_pct` | How much mass moved into or out of this bin. Signed |
+| `log(cur_pct / ref_pct)` | How much it moved *relatively*. A bin going 1% to 2% counts as much as 20% to 40% |
+| Product of the two | Always non-negative — the signs of the difference and the log always agree |
+| `+ 1e-6` | Guard so an empty bin does not produce `log(0)` and poison the whole sum |
+| `0.1 / 0.2` | The stated action bands: below `0.1` fine, `0.1-0.2` monitor, above `0.2` retrain |
+
+**Walk one example.** Five equal reference bins (a uniform 20% each) against a current week that has drifted toward the high end:
+
+```
+   bin   ref    cur    cur-ref    ln(cur/ref)    term
+    1    0.20   0.10    -0.10       -0.6931     0.0693
+    2    0.20   0.15    -0.05       -0.2877     0.0144
+    3    0.20   0.20     0.00        0.0000     0.0000
+    4    0.20   0.25    +0.05       +0.2231     0.0112
+    5    0.20   0.30    +0.10       +0.4055     0.0405
+                                        PSI  =  0.1354   -> MONITOR band
+
+   a milder shift (0.16 / 0.18 / 0.20 / 0.22 / 0.24):  PSI = 0.0202  -> OK
+```
+
+Two things to notice. The asymmetry: bin 1 lost `0.10` and bin 5 gained `0.10`, yet bin 1 contributes `0.0693` against bin 5's `0.0405` — because halving a bin is a bigger relative move than adding half again to it. And the sensitivity: shrinking the shift from `±0.10` to `±0.04` at the extremes drops PSI from `0.1354` to `0.0202`, nearly 7x. PSI moves fast, which is why the `0.1` and `0.2` bands are usefully far apart and why a reading of `0.2` genuinely warrants a retrain rather than a shrug.
+
+#### A/B test sample size
+
+**What it means.** "The smaller the lift you want to prove and the rarer the event you are measuring, the more traffic you need — and the relationship with effect size is quadratic, not linear."
+
+| Symbol | What it is |
+|--------|------------|
+| `p1` | Control conversion rate, the baseline |
+| `p2` | `p1 × (1 + mde)`. Treatment rate you want to be able to detect |
+| `p2 - p1` | The absolute effect. It sits **squared** in the denominator — the source of the quadratic blow-up |
+| `alpha = 0.05` | False-positive tolerance. `z_alpha = 1.96` two-sided |
+| `power = 0.80` | Probability of detecting a real effect of that size. `z_beta = 0.84` |
+| `n` | Required users **per arm**; total traffic is `2n` |
+
+**Walk one example.** A 10% baseline conversion rate at `alpha = 0.05`, `power = 0.80`, run at three ambition levels:
+
+```
+   MDE (relative)     absolute effect      n per arm      total traffic
+      10%             0.100 -> 0.110         14,751          29,502
+       5%             0.100 -> 0.105         57,763         115,526
+     2.5%             0.100 -> 0.1025       228,555         457,110
+
+   halving the MDE 5% -> 2.5%:  228,555 / 57,763 = 3.96x  (~4x, as theory says)
+```
+
+Halving the effect you want to detect very nearly *quadruples* the traffic — `3.96x`, not `2x`. That is the single fact to volunteer when asked about experiment sizing, and it is why chasing a 1% lift is often infeasible rather than merely slow. The baseline rate bites the same way: hold the MDE at 5% but drop the baseline from 10% to 1%, and the requirement jumps from `57,763` to `637,010` per arm, an 11x increase, because rare events carry proportionally more variance.
+
+**The practical move.** Compute this *before* launch and convert `2n` into days at your actual traffic. If the answer exceeds what the business will wait for, you have three levers and should name all three: accept a larger MDE, accept lower power, or switch to a lower-variance metric (continuous revenue instead of binary conversion, or CUPED variance reduction). Discovering an underpowered test after four weeks of running it is the failure this function exists to prevent.
 
 ---
 
@@ -888,6 +1048,37 @@ A/B testing:
   Gradual rollout: 5% -> 25% -> 50% -> 100% over 4 weeks
   Holdback: keep 5% on old model for 6 months to measure long-term impact
 ```
+
+**Stated plainly.** "A latency budget is a subtraction problem, not a target. Add up what every stage costs, subtract from the SLO, and whatever is left is the only room you have for anything you add later."
+
+Interviewers ask for the budget breakdown specifically because it forces you to notice which stage owns the time — and therefore which stage is the only one worth optimizing.
+
+| Symbol | What it is |
+|--------|------------|
+| Feature retrieval | `20ms` — one Redis round trip for the user's online features |
+| Stage 1 retrieval | `5ms` — ScaNN ANN narrowing 20M products to a candidate list |
+| Stage 2 ranking | `150ms` — DCN-v2 scoring 100 products in a batched forward pass |
+| Post-processing | `5ms` — business rules, inventory filter, diversity cap |
+| Budget | `200ms`, the stated SLO for the full ranked list |
+| Headroom | Budget minus total. What survives for network, retries, and next quarter's feature |
+
+**Walk one example.** The stack above, added up:
+
+```
+   stage                        cost      share of total
+   Feature retrieval (Redis)     20ms         11.1%
+   Stage 1 retrieval (ScaNN)      5ms          2.8%
+   Stage 2 ranking (DCN-v2)     150ms         83.3%
+   Post-processing                5ms          2.8%
+   ------------------------------------------------
+   total                        180ms
+   budget                       200ms
+   headroom                      20ms         10.0% of budget
+```
+
+Ranking owns `83.3%` of the time. That single number decides the entire optimization conversation: shaving the Redis lookup from `20ms` to `10ms` buys `10ms`, while a 30% cut to the ranker buys `45ms`. Optimizing anything other than stage 2 is measurable effort for unmeasurable gain — quantization, distillation, or scoring fewer than 100 candidates are the only levers that matter here.
+
+**Why `20ms` of headroom should make you uncomfortable.** That is 10% of budget, and these are *mean* figures while the SLO is almost certainly a p99 commitment. Tail latency is not the mean: a p99 Redis lookup can be several times its average, and one GC pause in the ranker eats the whole margin. Two moves to name in an interview: state the budget in p99 terms rather than averages, and put a hard timeout on stage 2 that degrades to the stage-1 ordering rather than blowing the SLO. Serving a slightly worse ranking on time beats serving a perfect one late.
 
 Step 6 — Monitoring and Iteration (5 min):
 ```

@@ -45,6 +45,41 @@ Key insight: dependency structure maps almost directly onto predicate-argument s
 
 6. **Projectivity is a structural restriction, not a linguistic universal.** A tree is projective if no arcs cross when words stay in linear order. English is ~99% projective; free-word-order languages (Czech, German) are not, forcing non-projective algorithms.
 
+**What it means.** Principle 2 in one sentence: "every parse tree has a probability — multiply the probability of every rule the derivation used — and the parser returns whichever tree multiplies out highest."
+
+The grammar does not resolve the telescope ambiguity from Section 2; both readings are legal derivations. Arithmetic resolves it.
+
+| Symbol | What it is |
+|--------|------------|
+| `P(A -> B C)` | Probability of rewriting `A` as `B C`; all rules sharing a left-hand side sum to 1 |
+| `P(tree)` | Product of every rule probability used in the derivation, lexical rules included |
+| `VP -> VP PP` | Attach the PP to the verb — "I used the telescope to see him" |
+| `NP -> NP PP` | Attach the PP to the noun — "the man who had the telescope" |
+| `argmax P(tree)` | What Viterbi CKY returns: the single highest-scoring derivation |
+
+**Walk one example.** Two legal parses of "I saw the man with the telescope" over one toy grammar. Both use the identical seven lexical rules (their product is `0.24`), so only the structural rules differ:
+
+```
+  rule                          verb-attach     noun-attach
+  S  -> NP VP                      1.0             1.0
+  NP -> Pron        (I)            0.1             0.1
+  VP -> VP PP                      0.4              -
+  VP -> V NP                       0.6             0.6
+  NP -> NP PP                       -              0.2
+  NP -> Det N       (the man)      0.7             0.7
+  PP -> P NP                       1.0             1.0
+  NP -> Det N       (telescope)    0.7             0.7
+  --------------------------------------------------------
+  structural product             0.011760        0.005880
+  x lexical product 0.24         0.0028224       0.0014112
+  --------------------------------------------------------
+  ratio                          2.0x  <- verb attachment wins
+```
+
+Every difference traces to two numbers: `VP -> VP PP` at `0.4` versus `NP -> NP PP` at `0.2`. Swap them in the treebank counts and the parser changes its mind about who held the telescope.
+
+**Why vanilla PCFGs are weak.** Notice that neither deciding rule mentions "telescope" or "saw" — the choice is made entirely by category-level statistics, word-blind. That is the known failure of unlexicalized PCFGs, and the reason lexicalized parsers (Collins, Charniak) condition each rule probability on the head word, buying back several F1 points.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -185,6 +220,34 @@ flowchart LR
 
 A biaffine parser scores every ordered word pair `(i, j)` for "is i the head of j", producing an n×n matrix, then a non-differentiable MST decoder extracts a single-root tree. Decoupling scoring (learned) from decoding (combinatorial) is why these parsers dominate leaderboards. Biaffine attention is a specialized bilinear *scoring* form — distinct from the encoder-decoder attention that produces the contextual states, covered in [attention_and_seq2seq.md](attention_and_seq2seq.md).
 
+**In plain terms.** `s_ij = h_i^T U d_j` says: "project every word twice — once as a possible boss, once as a possible subordinate — then let a learned matrix `U` report how compatible any boss-vector is with any subordinate-vector."
+
+| Symbol | What it is |
+|--------|------------|
+| `h_i` | Word `i` after the head MLP: what it looks like when it is the governor |
+| `d_j` | Word `j` after the dependent MLP: what it looks like when it is attached |
+| `U` | Learned compatibility matrix — the only place head and dependent meet |
+| `s_ij` | Raw score that `i` heads `j`. Not a probability; unbounded, sign-free |
+| n x n matrix | Every `s_ij` at once — one matmul scores all candidate arcs |
+
+**Walk one example.** Two-dimensional vectors, dependent `j = "she"`, three candidate heads:
+
+```
+  U = [ 2.0  0.5 ]          d_she = (0.7, 0.2)
+      [ 0.5  1.5 ]
+
+  U d_she = (2.0*0.7 + 0.5*0.2,  0.5*0.7 + 1.5*0.2) = (1.50, 0.65)
+
+  candidate head   h_i           s_ij = h_i . (1.50, 0.65)      softmax
+  ROOT             (1.0, 0.0)    1.0*1.50 + 0.0*0.65 = 1.500     0.391
+  eats             (0.8, 0.6)    0.8*1.50 + 0.6*0.65 = 1.590     0.428  <- argmax
+  apples           (0.1, 0.9)    0.1*1.50 + 0.9*0.65 = 0.735     0.182
+```
+
+`eats` wins, correctly — but by `0.428` to `0.391`, a margin of under four points. That thinness is the practical argument for Pitfall 2 below: with scores this close, an independent per-token `argmax` across all `n` columns will eventually pick a set of heads that forms a cycle or a second root. The MST decoder exists to reconcile columns that the scorer never compared.
+
+**Why two separate MLPs and not one shared vector.** Headedness is asymmetric: "eats heads she" must be able to score high while "she heads eats" scores low. A single shared vector per word with a symmetric similarity gives `s_ij = s_ji` and cannot express direction at all. Splitting into `h` and `d` and inserting a non-symmetric `U` is what makes the score directional.
+
 ### CKY chart (constituency, dynamic programming)
 
 The CKY table `chart[i][j]` holds every category spanning words `i..j`; it is filled bottom-up by combining shorter spans. Alignment carries the meaning here, so it stays ASCII:
@@ -203,6 +266,28 @@ The CKY table `chart[i][j]` holds every category spanning words `i..j`; it is fi
 ```
 
 Each cell is computed once and reused, turning an exponential search into O(n³·|G|). The upper-right cell containing the start symbol `S` means the sentence is grammatical.
+
+**Read it like this.** `chart[i][j]` answers exactly one question — "which categories can cover words `i` through `j`?" — and a longer span is only ever built by gluing two shorter spans whose answers are already in the table.
+
+| Symbol | What it is |
+|--------|------------|
+| `chart[i][j]` | The categories spanning words `i..j`, each stored with its best score |
+| `width` | `j - i + 1`, how many words the span covers; cells fill in increasing width |
+| `k` | Split point, `i <= k < j` — where the left child ends and the right child begins |
+| `chart[1][n]` holds `S` | The whole sentence derives from the start symbol: accept |
+
+**Walk one example.** Which cells exist for this 4-word sentence, and the order they fill:
+
+```
+  width 1 : [1,1] [2,2] [3,3] [4,4]        4 cells   lexical rules only
+  width 2 : [1,2] [2,3] [3,4]              3 cells   1 split point each
+  width 3 : [1,3] [2,4]                    2 cells   2 split points each
+  width 4 : [1,4]                          1 cell    3 split points
+  ----------------------------------------------------------------------
+  total                                   10 cells = n(n+1)/2 = 4*5/2 = 10
+```
+
+Only the upper triangle exists: `[3,1]` is meaningless because a span cannot end before it starts. Every cell is written once and read many times — that reuse, not a smarter search, is the entire trick.
 
 ---
 
@@ -282,6 +367,59 @@ result = cky_parse(["she", "eats", "red", "apples"], binary, lexical)
 # result[0] is the log-prob of the single valid S-rooted parse.
 ```
 
+**What this actually says.** The scoring line `score = lp + left[B][0] + right[C][0]` is nothing more than "probability of this rule, times the best probability of the left half, times the best probability of the right half" — written as a sum because logs turn products into additions.
+
+| Symbol | What it is |
+|--------|------------|
+| `lp` | `log P(rule)`. `log 1.0 = 0.0`; `log 0.4 = -0.9163`; `log 0.2 = -1.6094` |
+| `left[B][0]` | Best log-prob already found for category `B` over the left sub-span |
+| `chart[i][j][A]` | `(best log-prob, backpointer)` for category `A` over this span |
+| `("bin", B, C, k)` | Backpointer: rebuild the tree by recursing left of `k`, then right of `k` |
+| `chart[0][n][start]` | Root cell. Present means the sentence parsed; absent means ungrammatical |
+
+**Walk one example.** The grammar defined above run on "she eats red apples", probability column first, log column second:
+
+```
+  span              category  built from                  P        log P
+  [she]             NP        lexical rule               1.0       0.0000
+  [eats]            V         lexical rule               1.0       0.0000
+  [red]             Adj       lexical rule               1.0       0.0000
+  [apples]          N         lexical rule               1.0       0.0000
+  [apples]          NP        lexical rule (unused)      0.2      -1.6094
+  [red apples]      NP        NP -> Adj N  0.4*1.0*1.0   0.4      -0.9163
+  [eats..apples]    VP        VP -> V  NP  1.0*1.0*0.4   0.4      -0.9163
+  [she..apples]     S         S  -> NP VP  1.0*1.0*0.4   0.4      -0.9163
+  -----------------------------------------------------------------------
+  P(tree) = 0.4                  log P(tree) = -0.9163    exp(-0.9163) = 0.4
+```
+
+Exactly one rule in the derivation is below `1.0`, so the tree probability collapses to that one number. Cell `[apples]` also holds `NP` at `0.2`, but nothing above it can consume a bare `NP` in that position — the chart stores it anyway, because a different sentence would need it.
+
+**Why logs instead of raw probabilities.** A 40-token sentence uses about `2n - 1 = 79` rules. At a realistic average treebank rule probability of `1e-4`, the raw product is `1e-316` — below float64's smallest normal value `2.2e-308`, so it lands in the subnormal range where precision degrades and long parses start tying at zero. In log space the same derivation is a sum near `-728`, comfortably inside range. Drop the logs and CKY silently stops being able to rank long sentences.
+
+**Put simply.** `O(n^3 * |G|)` says: "visit every span, cut it every possible way, and try every grammar rule at each cut."
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Sentence length in tokens |
+| `n^3` | The three nested loops — span width, span start, split point |
+| `\|G\|` | Binary rules in the grammar; tens of thousands for a real treebank PCFG |
+| `n(n^2-1)/6` | Exact count of `(i, k, j)` visits — `n^3/6` asymptotically |
+
+**Walk one example.** A 15,000-rule treebank grammar at three sentence lengths:
+
+```
+  n =  4    (i,k,j) visits =      10   x 15,000 =         150,000 rule tries
+  n = 20    (i,k,j) visits =   1,330   x 15,000 =      19,950,000 rule tries
+  n = 40    (i,k,j) visits =  10,660   x 15,000 =     159,900,000 rule tries
+
+  doubling 20 -> 40 tokens multiplies the work by 8.0x  (10,660 / 1,330)
+```
+
+Grammar size is the term people forget. Going from a 1,500-rule toy grammar to a 15,000-rule treebank grammar costs the same 10x as quadrupling the sentence length — which is why practical parsers prune the rule set per cell (coarse-to-fine filtering) rather than looping over all of `|G|`.
+
+**Why the chart is worth building at all.** The number of distinct binary trees over `n` words is the Catalan number: `14` for n=4, `16,796` for n=10, and `6,564,120,420` for n=20. Enumerating parses for a 20-token sentence means scoring 6.56 billion trees; CKY answers the identical question in 1,330 cell-visits times the grammar, because every shared sub-span is scored once and reused by every tree that contains it.
+
 ### Arc-standard transition system with a static oracle (pure Python)
 
 Given a gold projective tree, the **static oracle** deterministically reconstructs the transition sequence a classifier should learn to imitate. Convention: `s1` = top of stack, `s2` = the element below it.
@@ -340,6 +478,40 @@ seq, arcs = static_oracle(gold_heads, gold_rels, n=4)
 # seq = SHIFT, SHIFT, LEFT-ARC(nsubj), SHIFT, SHIFT, LEFT-ARC(amod),
 #       RIGHT-ARC(obj), RIGHT-ARC(root)   -> 8 = 2n transitions
 ```
+
+**The idea behind it.** The `2n` bound says: "every token is pushed onto the stack exactly once and popped exactly once, so the derivation length is fixed before the parser makes a single decision."
+
+| Symbol | What it is |
+|--------|------------|
+| `s1`, `s2` | Stack top and the element beneath it — the only two the oracle inspects |
+| SHIFT | Move the front buffer token onto the stack; fires exactly `n` times |
+| LEFT-ARC | `s1` is the head of `s2`; record the arc and pop `s2` |
+| RIGHT-ARC | `s2` is the head of `s1`; record the arc and pop `s1` |
+| `remaining[h]` | Gold dependents of `h` not yet attached; guards against a premature pop |
+| `2n` | `n` SHIFTs plus `n` arc actions — one arc per token, since each has one head |
+
+**Walk one example.** The complete derivation for "she eats red apples" (`n = 4`, so 8 steps):
+
+```
+  step  stack                     buffer                 action
+   1    ROOT                      she eats red apples    SHIFT
+   2    ROOT she                  eats red apples        SHIFT
+   3    ROOT she eats             red apples             LEFT-ARC(nsubj)
+   4    ROOT eats                 red apples             SHIFT
+   5    ROOT eats red             apples                 SHIFT
+   6    ROOT eats red apples      -                      LEFT-ARC(amod)
+   7    ROOT eats apples          -                      RIGHT-ARC(obj)
+   8    ROOT eats                 -                      RIGHT-ARC(root)
+  --------------------------------------------------------------------
+  4 SHIFTs + 4 arc actions = 8 = 2n
+
+  arcs produced:  eats -> she (nsubj)     apples -> red  (amod)
+                  eats -> apples (obj)    ROOT   -> eats (root)
+```
+
+Cost is `O(n)` because the step count is `2n` and each step looks at a constant number of stack and buffer slots. Nothing in the loop scales with sentence length — that is the whole reason spaCy parses thousands of sentences per second on a CPU, against `O(n^2)`-`O(n^3)` for graph-based decoding.
+
+**Why `remaining` exists.** Look at step 4: the stack is `ROOT eats`, and ROOT is genuinely the gold head of `eats`, so RIGHT-ARC(root) appears legal and would finish the parse in four steps. But `eats` still owes an arc to `apples`, which is sitting untouched in the buffer. `remaining[eats] = 1` blocks the action and the parser SHIFTs instead; only at step 8, after `obj` is attached and the counter reaches `0`, does RIGHT-ARC(root) fire. Delete this guard and the oracle emits derivations that strand dependents — arcs that no projective tree can contain.
 
 At training time a classifier learns `configuration -> action`; at inference time it applies the predicted actions. Features (classical): top-3 stack words, next-3 buffer words, their POS tags, and already-built arc labels. Neural parsers replace hand-built features with the BiLSTM/BERT states of `s1`, `s2`, `b1`.
 
@@ -429,6 +601,31 @@ Each generation added roughly 1–2 UAS points; the biggest single jump came fro
 | Complexity | O(n³) DP | O(n²) dense (Tarjan) |
 | Guarantee | Optimal projective tree | Optimal spanning tree, single root enforced |
 | Use when | Language is ~projective (English) | Non-projective languages (Czech, German) |
+
+**What the formula is telling you.** The `O(n^3)` versus `O(n^2)` line means: "Eisner pays a chart over spans and split points to guarantee no arcs cross; CLE only has to look at each candidate arc, and there are `n^2` of those."
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Tokens in the sentence, plus one artificial ROOT as a candidate head |
+| `O(n^3)` | Eisner — a chart over spans times split points, the same shape as CKY's triple loop |
+| `O(n^2)` | CLE on a dense graph. The score matrix already has `n^2` entries, so this is optimal |
+| arborescence | A directed spanning tree with every arc pointing away from one root |
+
+**Walk one example.** Decoder work at two sentence lengths, in abstract units:
+
+```
+  n = 20 tokens
+    arcs to score (biaffine)   (n+1) x n =     420    one matmul
+    CLE decode                 n^2       =     400    units
+    Eisner decode              n^3       =   8,000    units    20x more
+
+  n = 50 tokens
+    arcs to score              (n+1) x n =   2,550    one matmul
+    CLE decode                 n^2       =   2,500    units
+    Eisner decode              n^3       = 125,000    units    50x more
+```
+
+The Eisner/CLE ratio is exactly `n` — it grows with the sentence, so the gap is 20x at 20 tokens and 50x at 50. In absolute terms both are microseconds beside the BiLSTM or BERT forward pass that produced the scores, so the choice is almost never about speed. You pick Eisner because you *want* the projectivity constraint enforced on a projective language, and CLE because you need crossing arcs to be expressible at all.
 
 ---
 
@@ -534,6 +731,52 @@ Taking `head[j] = argmax_i s(i, j)` independently per token can create cycles ("
 ### Pitfall 4: Measuring token accuracy instead of attachment score
 
 Reporting "95% of arcs correct" without saying labeled or unlabeled is meaningless. UAS ignores relation labels; LAS requires both head and label. A parser can have 94% UAS but 88% LAS if it attaches correctly but mislabels `nmod` vs `obl`. Always report both.
+
+**Stated plainly.** UAS asks "did you hang this word off the right word?"; LAS asks "and did you also name the relationship correctly?" — same denominator, strictly harder numerator.
+
+| Symbol | What it is |
+|--------|------------|
+| UAS | Correct-head tokens divided by scored tokens. Labels ignored entirely |
+| LAS | Correct-head **and** correct-label tokens divided by scored tokens |
+| UAS minus LAS | Tokens attached to the right head but given the wrong relation label |
+| scored tokens | The shared denominator. Whether punctuation counts is a convention — state it |
+
+**Walk one example.** The 2,000-sentence internal gold set from Section 14, at 24 tokens per sentence:
+
+```
+  scored tokens              2,000 x 24              = 48,000
+
+  UAS 92.1%  correct head                            = 44,208 tokens
+  LAS 90.0%  correct head AND correct label          = 43,200 tokens
+  --------------------------------------------------------------------
+  right head, wrong label    44,208 - 43,200         =  1,008 tokens
+  wrong head entirely        48,000 - 44,208         =  3,792 tokens
+```
+
+The 2.1-point gap is 1,008 concrete tokens whose attachment is correct and whose label is not — a labeling problem (`obj` vs `iobj`, `nmod` vs `obl`), addressable by the second biaffine layer that scores relations. The 3,792 are a genuine attachment problem, addressable only by a better encoder or decoder. Reporting one blended "95% correct" hides which of the two you actually have, and therefore which fix to fund.
+
+**Why bracketing F1 is a different shape of metric.** Constituency parses have no per-token denominator to divide by — the parser may propose more or fewer phrase nodes than the gold tree, so PARSEVAL scores set overlap instead of per-token accuracy.
+
+| Symbol | What it is |
+|--------|------------|
+| bracket | One `(label, start, end)` triple, e.g. `NP` covering words 2 through 4 |
+| precision | Matched brackets divided by predicted brackets — "how much of my output was real" |
+| recall | Matched brackets divided by gold brackets — "how much of the truth did I find" |
+| F1 | `2PR / (P + R)`, the harmonic mean; punishes lopsided precision or recall |
+
+**Walk one example.** A Penn-Treebank-scale constituency run, at the ~95 F1 level Section 12 quotes:
+
+```
+  gold brackets       4,200
+  predicted brackets  4,180
+  matched             3,980
+
+  precision = 3,980 / 4,180 = 0.9522  = 95.22%
+  recall    = 3,980 / 4,200 = 0.9476  = 94.76%
+  F1        = 2 * 0.9522 * 0.9476 / (0.9522 + 0.9476) = 0.9499 = 94.99%
+```
+
+Here precision and recall are within half a point of each other, so F1 lands between them and the harmonic mean barely differs from a plain average. The two separate the moment the parser is lopsided: a bracket-happy parser scoring precision `0.99` and recall `0.60` averages to `0.795` but has F1 `0.7472` — over four points lower. That penalty for imbalance is exactly why PARSEVAL reports F1 rather than a mean, and why over-producing brackets to chase recall does not pay.
 
 ### Pitfall 5: Out-of-domain collapse
 

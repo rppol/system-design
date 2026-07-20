@@ -34,6 +34,102 @@ A neural network is, mechanically, a sequence of matrix multiplications and nonl
 - **Jacobian**: J_{ij} = df_i/dx_j; m x n matrix for a function mapping R^n -> R^m.
 - **Hessian**: H_{ij} = d^2f/(dx_i dx_j); n x n matrix of second-order partial derivatives; encodes curvature.
 
+### Decoding: the dot product
+
+`a . b = sum(a_i * b_i) = ||a|| ||b|| cos(theta)`
+
+**In plain terms.** "Slide `a` sideways onto the line that `b` points along, measure the length of the shadow it casts, then scale that by how long `b` is."
+
+That framing is why the dot product doubles as a similarity score: the shadow is longest when the two vectors point the same way, zero when they are perpendicular, and negative when they oppose. Cosine similarity is just this number with both lengths divided out, so only the angle survives.
+
+| Symbol | What it is |
+|--------|------------|
+| `a . b` | One scalar. Multiply matching coordinates, add them up |
+| `a_i` | The i-th coordinate of `a` |
+| `\|\|a\|\|` | Length of `a`, `sqrt(sum a_i^2)`. The L2 norm |
+| `theta` | Angle between the two vectors |
+| `cos(theta)` | Alignment, from `+1` (same direction) through `0` (perpendicular) to `-1` (opposite) |
+| `(a . b) / \|\|b\|\|` | The projection: how far `a` reaches along `b`'s direction |
+
+**Walk one example.** Two vectors in the plane:
+
+```
+  a = (3, 4)      b = (4, 3)
+
+  a . b   = 3*4 + 4*3 = 12 + 12 = 24
+  ||a||   = sqrt(3^2 + 4^2) = sqrt(25) = 5
+  ||b||   = sqrt(4^2 + 3^2) = sqrt(25) = 5
+
+  how much of a lies along b  = (a . b) / ||b|| = 24 / 5 = 4.8
+  the shadow vector itself    = 4.8 * (b/||b||) = 4.8 * (0.8, 0.6) = (3.84, 2.88)
+
+  recover the angle:
+      cos(theta) = (a . b) / (||a|| ||b||) = 24 / 25 = 0.96
+      theta      = arccos(0.96) = 16.26 degrees
+```
+
+`a` is 5 units long and its shadow on `b` is 4.8 units, so almost all of `a` points `b`'s way
+— a 16-degree gap. Had `b` been `(-3, 4)`, the dot product would be `3*(-3) + 4*4 = 7`, a much
+shorter shadow and a much wider angle. The two forms are the same number: the coordinate sum is
+what you compute, the `||a|| ||b|| cos(theta)` form is what it means.
+
+**Why the `||b||` factor matters.** The raw dot product mixes two effects — alignment and
+magnitude — so a long, badly-aligned vector can outscore a short, perfectly-aligned one. That is
+exactly why retrieval systems L2-normalise embeddings before indexing: once every vector has
+length 1, `a . b` reduces to `cos(theta)` alone and the score means only "how similar," never
+"how big."
+
+### Decoding: matrix multiplication
+
+`(AB)_{ij} = sum_k A_{ik} B_{kj}`
+
+**Read it like this.** "Every entry of the answer is one dot product: row `i` of the left matrix against column `j` of the right matrix."
+
+The index `k` is the one that appears twice and never appears in the answer — it is the axis being summed away. That single observation is the whole shape rule: the inner dimensions must match because they are what gets contracted, and the surviving outer dimensions become the output shape.
+
+| Symbol | What it is |
+|--------|------------|
+| `A_{ik}` | Element of `A` at row `i`, column `k` |
+| `B_{kj}` | Element of `B` at row `k`, column `j` |
+| `k` | The shared inner index. Appears on both factors, in neither the result — it is summed over |
+| `i` | Which row of the output. Inherited from `A`'s rows |
+| `j` | Which column of the output. Inherited from `B`'s columns |
+| `sum_k` | Add over every value of `k`, i.e. over the whole shared dimension |
+
+**Walk one example, cell by cell.** A `(2 x 3)` times a `(3 x 2)`:
+
+```
+  A (2x3)              B (3x2)
+  [ 1  2  3 ]          [  7   8 ]
+  [ 4  5  6 ]          [  9  10 ]
+                       [ 11  12 ]
+
+  shape check:  (2 x 3) @ (3 x 2)
+                     ^     ^
+                     +--+--+   these must match; 3 == 3, so it is legal
+                the two 3s contract away, leaving (2 x 2)
+
+  C[0][0] = row 0 of A . col 0 of B = 1*7 + 2*9  + 3*11 =  7 + 18 + 33 =  58
+  C[0][1] = row 0 of A . col 1 of B = 1*8 + 2*10 + 3*12 =  8 + 20 + 36 =  64
+  C[1][0] = row 1 of A . col 0 of B = 4*7 + 5*9  + 6*11 = 28 + 45 + 66 = 139
+  C[1][1] = row 1 of A . col 1 of B = 4*8 + 5*10 + 6*12 = 32 + 50 + 72 = 154
+
+  C = [  58   64 ]     (2 x 2)
+      [ 139  154 ]
+```
+
+Four output cells, each one an independent 3-term dot product — that is why matrix multiply is
+`O(n^3)` for `n x n` inputs: `n^2` cells, `n` multiply-adds apiece. It also explains
+non-commutativity directly: `B @ A` is `(3 x 2) @ (2 x 3)`, a perfectly legal but entirely
+different `(3 x 3)` result, and for most shapes the reversed product is not even defined.
+
+**Why the shape rule is the bug you actually hit.** Nearly every "silent" ML shape bug is a
+contraction over the wrong axis. `X @ W` with `X` as `(32 x 784)` and `W` as `(784 x 256)`
+contracts the 784 features and keeps batch 32 and width 256 — matching the diagram in Section 5.
+Transpose `W` by accident and the inner dims read `784` against `256`; NumPy raises. Far worse is
+when both happen to match by coincidence (square layers, `d_model` equal on both sides): the code
+runs, contracts the batch axis instead of the feature axis, and the model simply never learns.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -42,7 +138,130 @@ A neural network is, mechanically, a sequence of matrix multiplications and nonl
 
 **Eigendecomposition**: A = Q Lambda Q^T for symmetric positive semi-definite matrices. Lambda is diagonal with eigenvalues. Q is orthogonal with eigenvectors as columns. Tells you the principal directions of a transformation.
 
+**What it means.** "Almost every direction gets rotated when you apply a matrix. A handful of special directions do not — they only get longer or shorter. Those are the eigenvectors, and the stretch factor on each is its eigenvalue."
+
+Once you have those directions, the matrix stops being a grid of numbers and becomes a list of "stretch this axis by 5, that one by 2." Everything a matrix does repeatedly — powering it up in an RNN, iterating PageRank, propagating gradients through depth — is governed by those stretch factors and nothing else.
+
+| Symbol | What it is |
+|--------|------------|
+| `A v = lambda v` | Defining equation: applying `A` to `v` just rescales `v`, no rotation |
+| `v` | An eigenvector — a direction the transform leaves on its own line through the origin |
+| `lambda` | The eigenvalue — the stretch factor. `>1` amplifies, `0..1` shrinks, negative flips |
+| `I` | Identity matrix. `1`s on the diagonal, `0`s elsewhere |
+| `det(A - lambda I) = 0` | The characteristic equation. It hunts for the `lambda` that makes `A - lambda I` collapse space |
+| `Q`, `Lambda` | Eigenvectors stacked as columns; eigenvalues laid on a diagonal |
+
+**Walk one example, all the way through.** A `2 x 2` matrix, both eigenpairs, then verified:
+
+```
+  A = [ 4  1 ]
+      [ 2  3 ]
+
+  step 1 -- solve det(A - lambda I) = 0
+
+      A - lambda I = [ 4-lambda      1     ]
+                     [    2       3-lambda ]
+
+      det = (4-lambda)(3-lambda) - (1)(2)
+          = lambda^2 - 7 lambda + 12 - 2
+          = lambda^2 - 7 lambda + 10
+          = (lambda - 5)(lambda - 2)      ->   lambda_1 = 5,  lambda_2 = 2
+
+  step 2 -- eigenvector for lambda_1 = 5:  solve (A - 5I) v = 0
+
+      [ -1   1 ] v = 0   ->   -v_x + v_y = 0   ->   v_y = v_x    ->   v_1 = (1, 1)
+      [  2  -2 ]
+
+  step 3 -- eigenvector for lambda_2 = 2:  solve (A - 2I) v = 0
+
+      [  2   1 ] v = 0   ->   2 v_x + v_y = 0  ->   v_y = -2 v_x ->   v_2 = (1, -2)
+
+  step 4 -- verify A v = lambda v
+
+      A (1,  1) = (4*1 + 1*1,    2*1 + 3*1)    = ( 5,  5) = 5 * (1,  1)   OK
+      A (1, -2) = (4*1 + 1*(-2), 2*1 + 3*(-2)) = ( 2, -4) = 2 * (1, -2)   OK
+
+  contrast a non-eigen direction:
+      A (1, 0) = (4, 2)   -- not a multiple of (1, 0), so it got rotated as well as stretched
+```
+
+Two independent sanity checks come free and are worth memorising: the eigenvalues sum to the
+trace (`5 + 2 = 7 = 4 + 3`) and multiply to the determinant (`5 * 2 = 10 = 4*3 - 1*2`). If your
+computed eigenvalues fail either, you made an arithmetic error before you wrote a line of code.
+
+**Why the determinant appears at all.** `A v = lambda v` rearranges to `(A - lambda I) v = 0`.
+A non-zero `v` can only be squashed to zero by a matrix that collapses space — and "collapses
+space" is exactly what a zero determinant means. So `det(A - lambda I) = 0` is not a trick; it is
+the only condition under which a non-trivial eigenvector can exist. Without it you would only
+ever find `v = 0`, which solves the equation for every `lambda` and tells you nothing.
+
 **Singular Value Decomposition (SVD)**: A = U Sigma V^T. Always exists for any m x n matrix. U (m x m) and V (n x n) are orthogonal; Sigma (m x n) is diagonal with non-negative singular values in decreasing order. Rank-k approximation uses only the top-k singular values; minimizes Frobenius norm error.
+
+**Stated plainly.** "Whatever a matrix does to space, it can always be broken into exactly three steps: rotate, then stretch along the new axes, then rotate again."
+
+That is a stronger claim than eigendecomposition makes. Eigen requires the matrix to have a full set of eigenvectors and gives you one basis; SVD uses two bases — one for the input side, one for the output side — which is why it works on rectangular matrices, defective matrices, and matrices of any rank whatsoever.
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | The `m x n` matrix being factored |
+| `V^T` | First rotation, in input space. Its rows are the input directions that get stretched cleanly |
+| `Sigma` | `m x n`, non-negative on the diagonal, zero elsewhere. The pure stretch step |
+| `sigma_i` | The i-th singular value — how much axis `i` is stretched. Always sorted largest first |
+| `U` | Second rotation, in output space. Its columns are where those axes land |
+| `A^T A` | Symmetric `n x n` helper. Its eigenvectors are `V`; its eigenvalues are `sigma_i^2` |
+| `A_k` | Rank-k truncation: keep only the top-k of each factor |
+
+**Walk one example.** A small square matrix, factored and then reassembled:
+
+```
+  A = [ 3  0 ]      shapes here:   A (2x2) = U (2x2) . Sigma (2x2) . V^T (2x2)
+      [ 4  5 ]      in general:    A (m x n) = U (m x m) . Sigma (m x n) . V^T (n x n)
+
+  step 1 -- find the input axes from A^T A
+
+      A^T A = [ 25  20 ]     eigenvalues 45 and 5
+              [ 20  25 ]     v_1 = (1, 1)/sqrt(2),   v_2 = (1, -1)/sqrt(2)
+
+  step 2 -- singular values are the square roots of those eigenvalues
+
+      sigma_1 = sqrt(45) = 6.7082
+      sigma_2 = sqrt(5)  = 2.2361
+
+  step 3 -- output axes: u_i = A v_i / sigma_i
+
+      A v_1 = (2.1213, 6.3640)   ->  u_1 = (1,  3)/sqrt(10) = (0.3162,  0.9487)
+      A v_2 = (2.1213, -0.7071)  ->  u_2 = (3, -1)/sqrt(10) = (0.9487, -0.3162)
+
+  step 4 -- reassemble and check
+
+      sigma_1 u_1 v_1^T + sigma_2 u_2 v_2^T = [ 3  0 ]     exactly A
+                                              [ 4  5 ]
+```
+
+Read the three steps geometrically: `V^T` swings the plane so the two stretch axes line up with
+the coordinate axes, `Sigma` stretches one of them by 6.71 and the other by 2.24, and `U` swings
+the result into its final orientation.
+
+**Walk the rank-k truncation arithmetic.** "Energy" is the sum of squared singular values:
+
+```
+  sigma_1^2 = 45      sigma_2^2 = 5      total energy = 50
+
+  keep k = 1:   45 / 50 = 0.90    ->  90% of the energy in a single direction
+
+  A_1 = sigma_1 u_1 v_1^T = [ 1.5  1.5 ]
+                            [ 4.5  4.5 ]
+
+  ||A - A_1||_F = 2.2361 = sigma_2
+
+  the leftover error is exactly the discarded singular value -- nothing else is thrown away
+```
+
+That last line is the Eckart-Young theorem in miniature: truncating the SVD is *provably* the
+best rank-k approximation under the Frobenius norm, and the residual is precisely the tail you
+dropped. It is why the energy formula `sum(sigma[0:k]^2) / sum(sigma^2)` in the Section 5 chart
+is a real accounting of retained information, not a heuristic — and why Netflix's 480,000 x 17,770
+rating matrix collapsed usefully to 50 factors while the discarded tail was mostly noise.
 
 **LU Decomposition**: A = LU; used to solve linear systems efficiently (O(n^3) one-time factorization, then O(n^2) per solve).
 
@@ -55,6 +274,57 @@ A neural network is, mechanically, a sequence of matrix multiplications and nonl
 **Numerical differentiation**: (f(x+h) - f(x)) / h; approximate; used for gradient checking only; O(n) evaluations per parameter.
 
 **Automatic differentiation (autodiff)**: exact derivatives via operator overloading; forward mode for few inputs, reverse mode (backpropagation) for few outputs (scalar loss); O(1) overhead factor over the forward pass.
+
+### Decoding: gradients and partial derivatives
+
+`grad f = (df/dx_1, df/dx_2, ..., df/dx_n)`
+
+**Put simply.** "Stand at a point on the loss surface and ask each variable separately 'if I nudge only you, how fast does the output rise?' Stack those answers into a vector and it points straight uphill, as steeply as the surface allows."
+
+The stacking is the part people skip over, and it is the whole payoff. Each partial derivative on its own is a one-dimensional slope; assembled into a vector they compose into a genuine direction in n-dimensional space, which is what makes "step downhill" a well-defined instruction for a model with millions of weights.
+
+| Symbol | What it is |
+|--------|------------|
+| `df/dx_i` | Partial derivative: slope in the `x_i` direction with every other variable frozen |
+| `grad f` | The gradient. All the partials collected into one vector, same length as the input |
+| `\|\|grad f\|\|` | How steep the steepest slope is. Zero at a flat point — minimum, maximum, or saddle |
+| `grad f / \|\|grad f\|\|` | Pure direction, magnitude stripped off. Unit vector pointing uphill |
+| `-grad f` | Downhill. The direction gradient descent actually moves |
+| `lr` | Step size. How far you walk before re-measuring the slope |
+
+**Walk one example.** A bowl-shaped surface, evaluated at a concrete point:
+
+```
+  f(x, y) = x^2 + 3 y^2            evaluate at the point (x, y) = (2, 1)
+
+  freeze y, differentiate in x:  df/dx = 2x   ->  2 * 2 = 4
+  freeze x, differentiate in y:  df/dy = 6y   ->  6 * 1 = 6
+
+  grad f (2, 1) = (4, 6)
+
+  ||grad f||  = sqrt(4^2 + 6^2) = sqrt(52) = 7.2111    <- steepest slope available here
+  uphill unit direction = (4, 6) / 7.2111 = (0.5547, 0.8321)
+
+  take one gradient-descent step with lr = 0.1, moving along -grad f:
+
+      (2, 1) - 0.1 * (4, 6) = (2 - 0.4, 1 - 0.6) = (1.6, 0.4)
+
+      f(2,   1  ) = 2^2   + 3 * 1^2   = 4.00 + 3.00 = 7.00
+      f(1.6, 0.4) = 2.56  + 3 * 0.16  = 2.56 + 0.48 = 3.04
+
+  loss fell 7.00 -> 3.04 in a single step, purely by walking opposite the gradient
+```
+
+Notice the `y` partial is larger (6 versus 4) even though `y` is the smaller coordinate: the `3 y^2`
+term makes that axis three times more curved, so the surface responds harder to a nudge in `y`.
+The gradient step therefore moves further in `y` than in `x`. That asymmetry is exactly the
+elongated, ill-conditioned loss surface that feature standardisation exists to flatten.
+
+**Why "partial" and not "total".** Each `df/dx_i` deliberately holds every other variable fixed,
+which is the only reason the derivative of a million-parameter loss is computable at all — you
+never need to reason about how the weights interact, only about one wire at a time. The
+interactions come back in the second-order picture, which is what the Hessian records; first-order
+methods like SGD and Adam simply ignore them, which is both why they scale and why they zig-zag.
 
 ### 4.3 Norm Types and Their ML Role
 
@@ -174,6 +444,92 @@ via the chain rule. Each dotted edge multiplies the upstream gradient by one loc
 Jacobian (`W_3^T` for a linear layer, the mask `z_2 > 0` for relu). Reverse-mode autodiff
 walks these dotted edges exactly once — cheap because the loss is a scalar, so every
 intermediate gradient is a vector rather than a full Jacobian matrix.
+
+### Decoding: the chain rule, the engine of backpropagation
+
+`d(f(g(x)))/dx = f'(g(x)) * g'(x)`
+
+**What the formula is telling you.** "If a change in `x` moves `g` three times as fast, and a change in `g` moves `f` twice as fast, then `x` moves `f` six times as fast — multiply the rates along the path."
+
+Backpropagation is nothing more than this rule applied along a chain of layers, evaluated right-to-left. Every layer only has to know its own local derivative; the chain rule stitches the locals together, which is why you can add a new layer type to PyTorch by writing one `backward()` method and never touching the rest of the network.
+
+| Symbol | What it is |
+|--------|------------|
+| `g(x)` | The inner function. In a network: whatever the earlier layer produced |
+| `f(g)` | The outer function. The later layer, ultimately the loss |
+| `g'(x)` | Local sensitivity of the inner step to its own input |
+| `f'(g(x))` | Local sensitivity of the outer step, evaluated at the value the forward pass produced |
+| `*` | Ordinary multiplication for scalars; matrix product of Jacobians for vectors |
+| `dL/dw` | What you actually want: how the loss responds to one weight |
+| `relu'(z)` | `1` when `z > 0`, `0` otherwise. A gate that either passes the gradient or kills it |
+
+**Walk one example end to end.** A two-layer scalar network — real weights, forward pass, loss,
+then every gradient as an explicit product of locals:
+
+```
+  network:  z1 = w1*x + b1      a1 = relu(z1)      z2 = w2*a1 + b2      L = 0.5*(z2 - y)^2
+
+  inputs and initial weights:
+      x = 3.0    y = 2.0    w1 = 0.5    b1 = 0.2    w2 = 2.0    b2 = -0.5
+
+  FORWARD PASS
+      z1 = 0.5 * 3.0 + 0.2   =  1.5 + 0.2  =  1.7
+      a1 = relu(1.7)         =  1.7                   (z1 > 0, relu passes it through)
+      z2 = 2.0 * 1.7 - 0.5   =  3.4 - 0.5  =  2.9     <- the prediction
+      L  = 0.5 * (2.9 - 2.0)^2 = 0.5 * 0.81 = 0.405   <- the loss
+
+  LOCAL DERIVATIVES  (each is trivial on its own; none knows about the others)
+      dL/dz2  = z2 - y          =  0.9      derivative of 0.5*(z2-y)^2
+      dz2/dw2 = a1              =  1.7      the input that weight multiplied
+      dz2/db2 = 1               =  1
+      dz2/da1 = w2              =  2.0      the weight that input passed through
+      da1/dz1 = 1 (since z1>0)  =  1        relu gate: open
+      dz1/dw1 = x               =  3.0
+      dz1/db1 = 1               =  1
+
+  BACKWARD PASS  (walk right to left, multiplying locals along the path)
+
+      layer 2:
+          dL/dw2 = dL/dz2 * dz2/dw2                    = 0.9 * 1.7        = 1.53
+          dL/db2 = dL/dz2 * dz2/db2                    = 0.9 * 1          = 0.90
+
+      hand the gradient back across the layer boundary:
+          dL/da1 = dL/dz2 * dz2/da1                    = 0.9 * 2.0        = 1.80
+          dL/dz1 = dL/da1 * da1/dz1                    = 1.8 * 1          = 1.80
+
+      layer 1:
+          dL/dw1 = dL/dz1 * dz1/dw1                    = 1.8 * 3.0        = 5.40
+          dL/db1 = dL/dz1 * dz1/db1                    = 1.8 * 1          = 1.80
+
+      fully expanded, dL/dw1 is one unbroken chain of four local factors:
+          dL/dw1 = (z2 - y) * w2 * relu'(z1) * x = 0.9 * 2.0 * 1 * 3.0 = 5.40
+
+  CHECK against central finite differences, (L(w+h) - L(w-h)) / 2h  with h = 1e-6:
+          w1 -> 5.400000     b1 -> 1.800000     w2 -> 1.530000     b2 -> 0.900000
+          every analytic gradient matches to six decimals
+
+  APPLY ONE UPDATE, lr = 0.01:  param <- param - lr * gradient
+          w1: 0.5  - 0.01*5.40 = 0.4460       b1:  0.2  - 0.01*1.80 =  0.1820
+          w2: 2.0  - 0.01*1.53 = 1.9847       b2: -0.5  - 0.01*0.90 = -0.5090
+          loss after the update: 0.405 -> 0.128902
+```
+
+`dL/dw1 = 5.40` is the single most instructive number here. It is bigger than `dL/dw2 = 1.53` not
+because `w1` matters more, but because the chain that reaches it happens to multiply by `x = 3.0`
+and `w2 = 2.0` on the way. Every factor in that product is a number the forward pass already
+computed and cached — which is exactly why frameworks store activations during the forward pass
+and why activation memory, not weight memory, dominates training footprints.
+
+**Why one term in that chain is the whole story of deep-network training.** The `relu'(z1)` factor
+is `1` here because `z1 = 1.7` was positive. Had `z1` been negative, that factor would be `0`, and
+`dL/dw1 = 0.9 * 2.0 * 0 * 3.0 = 0` — the gradient dies at the gate and `w1` never updates on this
+example. Stack fifty layers and the same multiplication runs fifty times: with local factors
+averaging 0.5 the product is `0.5^50`, effectively zero (vanishing gradients); with factors
+averaging 1.5 it is `1.5^50`, astronomically large (exploding gradients). Nothing in backprop is
+doing anything but multiplying local derivatives — so the entire vanishing/exploding-gradient
+problem, and every fix for it (residual connections that add a `1` into the product, gating in
+LSTMs, orthogonal initialisation keeping singular values near 1, gradient clipping), is a
+statement about keeping this product near unit scale.
 
 ---
 
@@ -339,6 +695,38 @@ def numerical_gradient_check(
 ## 7. Real-World Examples
 
 **Transformers — attention is matrix multiplication**: The attention operation computes scores = QK^T / sqrt(d_k), then output = softmax(scores) @ V. For a layer with d_model=4096, d_k=128, and sequence length 2048: the QK^T computation is (2048, 128) @ (128, 2048) = (2048, 2048) matrix — this is why attention is quadratic in sequence length.
+
+**What this actually says.** "Score every token against every other token with a dot product, shrink the scores so they do not blow up, turn them into weights that sum to 1, and use those weights to average the value vectors."
+
+The quadratic cost falls straight out of the shape rule decoded in Section 3: the `d_k` axis contracts away, and both sequence axes survive.
+
+| Symbol | What it is |
+|--------|------------|
+| `Q`, `K`, `V` | Query, Key, Value matrices. One row per token, `d_k` columns |
+| `QK^T` | Every query dotted with every key. Row `i`, column `j` = how much token `i` attends to `j` |
+| `d_k` | Width of each head, here 128. The dimension being contracted |
+| `sqrt(d_k)` | Variance corrector. Keeps the scores out of softmax's flat, near-zero-gradient tails |
+| `softmax` | Turns a row of raw scores into non-negative weights summing to 1 |
+| `@ V` | Weighted average of the value rows, using those weights |
+
+**Walk the shapes and the memory.** Using the numbers already given, `d_k = 128` and `n = 2048`:
+
+```
+  Q (2048 x 128) @ K^T (128 x 2048)  ->  scores (2048 x 2048)
+        ^               ^
+        +-------+-------+   the 128 contracts away; both 2048 axes survive
+
+  entries in the score matrix = 2048 * 2048 = 4,194,304
+  memory at fp16              = 4,194,304 * 2 bytes = 8 MiB   per head, per layer
+  multiply-adds for QK^T      = 2048 * 2048 * 128  = 537 million
+
+  now double the sequence length to 4096:
+      4096 * 4096 = 16,777,216 entries = 4x the memory and 4x the arithmetic
+```
+
+Doubling the sequence quadruples both cost and memory while `d_k` stays put — that asymmetry is
+the whole reason FlashAttention (never materialising the full score matrix) and linear-attention
+variants exist.
 
 **PCA for image compression**: MNIST digits are 28x28 = 784-dimensional. PCA to 50 components retains ~85% of variance. SVD on the 60000 x 784 training matrix (economy SVD) produces 50 components in seconds. Reconstruction error = ||X - X_k||_F^2 / ||X||_F^2 ≈ 15%.
 

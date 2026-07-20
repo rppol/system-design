@@ -151,11 +151,63 @@ SAMPLE SIZE CALCULATION INPUTS:
 
   n = (z_alpha/2 + z_beta)^2 * [p1*(1-p1) + p2*(1-p2)] / (p1-p2)^2
   n = (1.96 + 0.84)^2 * [0.05*0.95 + 0.055*0.945] / (0.005)^2
-  n ≈ 156,080 per variant (total 312,160 users)
+  n ≈ 31,195 per variant (total 62,390 users)
 
   At 10,000 unique users/day:
-  Required experiment duration = 312,160 / 10,000 = 32 days
+  Required experiment duration = 62,390 / 10,000 = 6.2 days
 ```
+
+**What the formula is telling you.** "Noise sets the price. To detect an effect half as large, you must buy four times as many users."
+
+Everything in the expression is one of two things: how much the metric bounces around on its own (the variance term on top) or how big the effect you are hunting is (the squared MDE underneath). The `z` constants are a fixed toll you pay once for your chosen alpha and power.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Users needed **per variant**. Double it for the experiment total |
+| `p1`, `p2` | Control and treatment rates, with `p2 = p1 + mde` |
+| `delta = p2 - p1` | The MDE in **absolute** terms. `0.005` is half a percentage point, not 0.5% relative |
+| `p*(1-p)` | Variance of a coin flip at rate `p`. Largest at `p = 0.5`, small for rare events |
+| `z_alpha/2 = 1.96` | How deep into the tail a result must sit to be called significant at alpha = 0.05 |
+| `z_beta = 0.84` | The extra margin bought so a real effect is actually caught 80% of the time |
+| `(z_alpha/2 + z_beta)^2` | The fixed toll for that alpha/power pair: `2.80^2 = 7.85` |
+
+**Why the "16 sigma^2 / delta^2" shortcut works.** Replace both variance terms with a single `sigma^2` and the formula collapses to `n = 2 * 7.85 * sigma^2 / delta^2`, and `2 * 7.85 = 15.70`, which rounds to 16. That is the version worth memorizing: the whole toll for "alpha = 0.05, power = 80%, two variants" is the single number 16.
+
+**Walk one example.** The under-powering trap — a 1% *relative* lift on a 5% baseline CTR:
+
+```
+  baseline p1      = 0.05                     (5% CTR)
+  1% RELATIVE lift = 0.05 x 1.01 = 0.0505     so p2 = 0.0505
+  delta            = 0.0005                   <- one twentieth of a percentage point
+
+  numerator   = 7.848880 x (0.05 x 0.95 + 0.0505 x 0.9495)
+              = 7.848880 x (0.0475000 + 0.0479498)
+              = 7.848880 x 0.0954498 = 0.749174
+  denominator = 0.0005^2 = 0.00000025
+
+  n     = 0.749174 / 0.00000025 = 2,996,695 per variant
+  total = 5,993,390 users
+
+  At the 10,000 unique users/day above:
+      5,993,390 / 10,000 = 599 days = 1.6 YEARS
+```
+
+Now double the MDE and watch the cost collapse:
+
+```
+  2% relative lift -> p2 = 0.051, delta = 0.001
+
+  n = 7.848880 x (0.05 x 0.95 + 0.051 x 0.949) / 0.001^2
+    = 7.848880 x 0.0958990 / 0.000001
+    = 752,700 per variant       (total 1,505,400)
+
+  days at 10,000/day :  delta = 0.0005  ->  599 days
+                        delta = 0.0010  ->  151 days
+
+  Halving the MDE multiplied n by 3.98x -- almost exactly 4x, because delta is squared.
+```
+
+**Why teams consistently under-power.** The MDE is the only input a team can pick freely, so it gets picked out of ambition ("surely we can move CTR 1%") rather than out of the traffic actually available. But `delta` sits squared in the denominator, so ambition is the most expensive knob on the panel: the difference between "we want to see 1%" and "we want to see 2%" is the difference between a 1.6-year experiment and a 5-month one. Run the calculation *first*, then set the MDE to whatever the traffic and a two-week window can actually support — and if that MDE is larger than the lift you expect, the honest conclusion is that this experiment cannot be run, not that it should be run and squinted at.
 
 ### Sequential Testing (SPRT): Peek Without Penalty
 
@@ -360,7 +412,7 @@ if __name__ == "__main__":
     )
     print(f"CTR test: {result_ctr.n_per_variant:,} per variant, "
           f"{result_ctr.required_days:.1f} days")
-    # Output: ~156,080 per variant, 6.2 days at 50K users/day
+    # Output: ~31,195 per variant, 1.2 days at 50K users/day
 
     # Revenue experiment: $25 mean, $15 std, detect $0.50 change
     # Revenue has much higher variance -> needs far more samples
@@ -540,6 +592,40 @@ def _empty_result(metric_name, control_mean, treatment_mean, alpha, mde, n_c, n_
                         1.0, (0.0, 0.0), False, False, (n_c, n_t))
 ```
 
+**Read it like this.** "How many standard errors apart are the two rates? One is a shrug, two is a maybe, three is a finding."
+
+The z-statistic is a unit conversion, nothing more: it restates the raw lift in units of "how much this metric wobbles by chance at this sample size." The p-value then just reads that off a normal table, and the confidence interval is the same standard error pointed the other way — a range instead of a verdict.
+
+| Symbol | What it is |
+|--------|------------|
+| `p_pooled` | Both groups' conversions over both groups' users, as if the treatment did nothing |
+| `se` | Standard error under the null. The wobble you would see with no real effect |
+| `z_stat = lift / se` | The lift measured in standard errors. The entire test in one number |
+| `stats.norm.cdf(z)` | Share of the normal curve left of `z`. `1 - cdf` is the tail beyond it |
+| `2 * (1 - cdf(abs(z)))` | Two-tailed p-value: chance of a gap this big **in either direction**, by luck |
+| `se_diff` | Standard error using each group's own rate. Used for the interval, not the test |
+| `lift +/- 1.96 * se_diff` | 95% CI. Excludes zero exactly when `p < 0.05` |
+
+**Walk one example.** Run the experiment sized two blocks above (n = 752,700 per variant) and observe exactly the effect it was designed to detect:
+
+```
+  control   :  37,635 clicks / 752,700 users = 0.05000
+  treatment :  38,388 clicks / 752,700 users = 0.05100
+  lift      =  0.05100 - 0.05000 = 0.00100
+
+  p_pooled  = (37,635 + 38,388) / (752,700 + 752,700) = 0.050500
+  se        = sqrt(0.0505 x 0.9495 x (1/752,700 + 1/752,700)) = 0.00035694
+
+  z_stat    = 0.00100 / 0.00035694 = 2.80
+  p_value   = 2 x (1 - cdf(2.80)) = 0.0051      <- significant at alpha = 0.05
+
+  se_diff   = sqrt(0.05 x 0.95/752,700 + 0.051 x 0.949/752,700) = 0.00035694
+  95% CI    = 0.00100 +/- 1.96 x 0.00035694
+            = [0.00030, 0.00170]  =  [+0.030 pp, +0.170 pp]
+```
+
+**That `z = 2.80` is not a coincidence.** It is `1.96 + 0.84` — exactly `z_alpha/2 + z_beta`, the constant from the sample-size formula. Sizing `n` for an MDE means, by construction, placing the designed effect right at the significance boundary plus the power margin. Two consequences follow, and both are routinely missed. First, an experiment that lands *exactly* on its MDE is barely significant, not comfortably so — `p = 0.0051`, a hair under 0.05. Second, look at the confidence interval: its lower edge, `+0.030 pp`, is within a whisker of zero. Rerun this same experiment with the same true effect and roughly one time in five it will come back non-significant. That is not a bug; that is precisely what "80% power" was purchased. Power is the probability of *success*, and 80% means a 1-in-5 failure rate on effects that are genuinely real.
+
 ### CUPED: Variance Reduction for Faster Experiments
 
 ```python
@@ -595,6 +681,34 @@ def apply_cuped(
     return cuped_treatment, cuped_control
 ```
 
+**Put simply.** "Subtract off the part of each user's metric you could already have predicted before the experiment started; whatever is left over is quieter, and a quieter metric needs fewer users."
+
+The subtraction is safe because it is centered: `X - E[X]` averages to zero, so `Y_cuped` has the same expected value as `Y`. You are removing noise, not shifting the answer — which is why CUPED is free power rather than a thumb on the scale.
+
+| Symbol | What it is |
+|--------|------------|
+| `Y` | The experiment metric, e.g. this week's revenue per user |
+| `X` | A **pre-experiment** covariate, e.g. last week's revenue for the same user |
+| `E[X]` | Mean of the covariate across everyone. Subtracting it re-centers the adjustment on zero |
+| `theta = Cov(Y,X)/Var(X)` | The regression slope of `Y` on `X`. How much of `Y` that `X` explains |
+| `Y - theta*(X - E[X])` | `Y` with the predictable part removed. Same mean, smaller spread |
+| `rho` | Correlation between `Y` and `X`. The single number that decides the payoff |
+
+**Walk one example.** Variance surviving CUPED is `1 - rho^2`, and required `n` scales with variance:
+
+```
+  rho = 0.5  ->  variance -25%  ->  n x 0.75  ->  a 30-day test becomes 23 days
+  rho = 0.7  ->  variance -49%  ->  n x 0.51  ->  a 30-day test becomes 16 days
+  rho = 0.9  ->  variance -81%  ->  n x 0.19  ->  a 30-day test becomes  6 days
+
+  Applied to the revenue test above (3,457,920 per variant raw, rho = 0.7):
+
+      3,457,920 x 0.51 = 1,763,539 per variant
+      138 days  x 0.51 = 70 days
+```
+
+Note the shape of that ladder: the payoff is quadratic in `rho`, so a mediocre covariate is nearly worthless while a strong one is transformative. At `rho = 0.3` you save 9% of the sample — not worth the pipeline. This is why the covariate is almost always *the same metric from the prior period*: nothing else correlates with a user's revenue like that user's own past revenue.
+
 ---
 
 ## 7. Real-World Examples
@@ -640,6 +754,37 @@ def apply_cuped(
 | Bonferroni | Family-wise error rate | Very conservative | Few hypotheses, critical decisions |
 | Benjamini-Hochberg | False discovery rate | Moderate | Many hypotheses, exploratory |
 | No correction | Nothing | None (inflated Type I error) | Never appropriate for primary metrics |
+
+**Stated plainly.** "Every extra metric you check is another ticket in a lottery you do not want to win — and alpha = 0.05 is the per-ticket odds, not the odds for the whole handful."
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Number of hypotheses tested together — the "family" |
+| `alpha` | Per-test false positive rate, conventionally 0.05 |
+| `(1 - alpha)^k` | Chance **every** test correctly stays quiet when nothing is real |
+| `1 - (1 - alpha)^k` | Family-wise error rate: chance of at least one false positive |
+| `k * alpha` | Expected **count** of false positives. Passes 1.0 at k = 20 |
+| `alpha / k` | Bonferroni per-test threshold. Shrinks the tickets to keep the total at 5% |
+| `(i / k) * alpha` | Benjamini-Hochberg threshold for the i-th smallest p-value |
+
+**Walk one example.** All nulls true — no metric is actually moving — at alpha = 0.05:
+
+```
+     k      P(at least one false positive)      expected false positives
+     1        1 - 0.95^1  = 0.050                       0.05
+     3        1 - 0.95^3  = 0.143                       0.15
+    10        1 - 0.95^10 = 0.401                       0.50
+    20        1 - 0.95^20 = 0.642                       1.00
+
+  At k = 20, you expect exactly one "significant" metric from a change that
+  does nothing at all -- and you will find it, because you looked 20 times.
+
+  Bonferroni pulls this back by shrinking each ticket:
+    k = 10  ->  test each metric at 0.05 / 10 = 0.005
+            ->  family-wise rate = 1 - 0.995^10 = 0.049      <- back to ~5%
+```
+
+**Why Bonferroni feels so punishing, and what BH trades away.** Holding the family-wise rate at 5% across 10 metrics means a metric now needs `p < 0.005` — roughly `z > 2.81` instead of `z > 1.96` — and that extra margin costs sample size in the same squared way the MDE does. Benjamini-Hochberg refuses that trade: instead of guaranteeing zero false positives, it caps the *share* of your declared winners that are false. If BH hands you 10 significant metrics at FDR = 0.05, roughly one is expected to be noise. That is the right bargain for exploratory secondary metrics and the wrong one for a ship/no-ship decision — which is exactly why the primary metric is pre-registered as a family of one, where no correction is needed at all.
 
 ---
 
@@ -731,7 +876,7 @@ The randomization unit should be the user (not the request or session) to ensure
 The novelty effect is a short-term increase in engagement with a new UI or model caused by users' curiosity about the change, not because of lasting value. A model with a better UI may show a significant CTR lift in the first 3 days that fades to zero after a week. To detect and account for it: (1) run the experiment for at least 1-2 weeks; (2) plot the daily effect size over the experiment period — a decaying effect suggests novelty; (3) compute separate estimates for the first 3 days vs the remaining days; (4) for high-stakes decisions, run a "holdback" analysis — maintain a 10% holdback group to measure the long-term effect after novelty fades. Declare success only if the effect is sustained, not just significant in the first few days.
 
 **Q: How many users do you need to detect a 0.5% absolute change in CTR from a 5% baseline?**
-Using the two-proportion z-test formula with alpha = 0.05, power = 0.80: n = (1.96 + 0.84)^2 * (0.05*0.95 + 0.055*0.945) / (0.005)^2 ≈ 156,080 per variant, total 312,160 users. At 50,000 daily users (total across both variants), this requires 312,160 / 50,000 ≈ 6.2 days. This assumes independence between observations. If the randomization unit is sessions (a user has multiple sessions), the effective sample size is smaller due to intra-user correlation — apply the design effect correction: n_effective = n_sessions / (1 + (m-1) * rho), where m = average sessions per user and rho = intra-user correlation.
+Using the two-proportion z-test formula with alpha = 0.05, power = 0.80: n = (1.96 + 0.84)^2 * (0.05*0.95 + 0.055*0.945) / (0.005)^2 ≈ 31,195 per variant, total 62,390 users. At 50,000 daily users (total across both variants), this requires 62,390 / 50,000 ≈ 1.2 days. This assumes independence between observations. If the randomization unit is sessions (a user has multiple sessions), the effective sample size is smaller due to intra-user correlation — apply the design effect correction: n_effective = n_sessions / (1 + (m-1) * rho), where m = average sessions per user and rho = intra-user correlation.
 
 **Q: What is the difference between Bonferroni and Benjamini-Hochberg correction?**
 Bonferroni correction controls the Family-Wise Error Rate (FWER) — the probability of any false positives. Each test is evaluated at alpha/k where k is the number of tests. It is very conservative (low Type I error) but has low power — it is difficult to detect true effects when testing many metrics. Benjamini-Hochberg (BH) controls the False Discovery Rate (FDR) — the expected proportion of false positives among rejected hypotheses. BH allows more rejections (higher power) but permits some false positives. For ML A/B tests: use Bonferroni for the primary metric and a small set of guardrail metrics (few tests, critical decisions); use BH for large-scale secondary metric analysis where some false positives are acceptable.

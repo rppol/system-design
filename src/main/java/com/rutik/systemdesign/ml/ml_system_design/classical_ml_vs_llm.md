@@ -147,6 +147,48 @@ def paradigm_cost_comparison(daily_predictions: int,
 print(paradigm_cost_comparison(1_000_000))
 ```
 
+**The idea behind it.** `breakeven_daily = build_cost / (per_call_savings x 365)` says: "how many calls a day do I need before a year of saved pennies pays off the build?" It is a payback-period calculation wearing ML clothing — the LLM rents capability by the call, the trained model buys it outright.
+
+| Symbol | What it is |
+|--------|------------|
+| `llm_cost_per_call_usd` | Marginal price of one LLM prediction, `$0.002` here. Paid forever, per call |
+| `gbdt_cost_per_call_usd` | Marginal price of one GBDT prediction, `$0.0000002` — 10,000x smaller |
+| `per_call_savings` | The difference. Effectively just the LLM's price, since the GBDT's is a rounding error |
+| `classical_build_usd` | One-time `$40,000` for labeling plus engineering. The bet you are amortizing |
+| `x 365` | Turns a per-call saving into an annual one, fixing the payback window at a year |
+| `breakeven_daily` | Daily volume at which the two totals cross. Above it, build; below it, prompt |
+
+**Walk one example.** Run the stated 1M predictions/day through both arms:
+
+```
+  annual calls    :  1,000,000/day x 365          =   365,000,000 calls
+
+  LLM arm         :  365e6 x $0.002               =      $730,000 / yr
+  GBDT arm        :  365e6 x $0.0000002           =           $73 marginal
+                     + $40,000 build              =       $40,073 / yr
+  ----------------------------------------------------------------------
+  ratio           :  730,000 / 40,073             =         18.2x cheaper
+
+  break-even      :  per_call_savings = 0.002 - 0.0000002 = $0.0019998
+                     $40,000 / ($0.0019998 x 365) =    54,800 calls/day
+
+  payback at 1M/day :  $40,000 build / $2,000 per day of LLM spend = 20 days
+```
+
+Two numbers do the persuading. The break-even sits at **54,800 calls/day** — a volume most production features clear in their first week, which is why "the LLM is cheaper to start with" stops being true so quickly. And at 1M/day the build pays for itself in **20 days**, after which the GBDT arm is essentially free: its entire annual marginal cost is `$73`, less than one hour of the LLM arm's spend.
+
+**Read the latency the same way.** The comparison is not close enough to need a formula:
+
+```
+  LLM     :  800.0 ms
+  GBDT    :    0.5 ms
+  ratio   :  800 / 0.5  =  1600x
+```
+
+That is the "~1000x" the Section 8 tradeoff table and the Section 12 answers refer to. A 1ms ad-ranking SLO is not missed by a little — it is missed by three orders of magnitude, which is why latency acts as a **hard veto** rather than something to trade against accuracy. Cost is negotiable at low volume; a 1600x latency gap never is.
+
+**Why the build cost sits in the denominator's shadow.** Doubling the build to `$80,000` only doubles the break-even to about 110,000 calls/day — still small. Halving the LLM's per-call price, however, doubles it too, because `per_call_savings` is the term doing all the work. The practical reading: **falling token prices move the break-even far more than better engineering estimates do**, so a design that is marginally on the LLM side of the line today should be re-checked against current pricing rather than treated as settled.
+
 The mechanics also include a *capability* gate that cost cannot override: if you have no labels and cannot obtain them cheaply, classical supervised ML is simply not available, and the LLM's zero-shot ability is the only path — until you have used it to *generate* labels and can then train a cheap model (the distillation/flywheel move).
 
 ## 7. Real-World Examples

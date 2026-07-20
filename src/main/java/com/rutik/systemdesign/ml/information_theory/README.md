@@ -32,6 +32,158 @@ The core insight of information theory is that the more uncertain an outcome is,
 - **Information gain**: IG = H(parent) - [weighted sum of H(children)]; used as split criterion in decision trees.
 - **Log base convention**: log_2 gives bits; ln gives nats; log_10 gives hartleys. ML almost always uses ln (natural log) for gradient compatibility.
 
+### Decoding Entropy: H(X) = -sum_x p(x) log p(x)
+
+**In plain terms.** "Entropy is the average surprise you feel when you watch this random variable, measured in bits — how many yes/no questions you need, on average, to pin down the outcome."
+
+That framing explains why the formula multiplies two things. `-log p(x)` is the surprise of one outcome (rare outcome, big surprise), and `p(x)` is how often you actually feel it. Entropy is the surprise *weighted by how often it happens*, which is why a lopsided coin has low entropy: the surprising outcome almost never occurs.
+
+| Symbol | What it is |
+|--------|------------|
+| `X` | The random variable — the thing whose outcome you do not yet know |
+| `p(x)` | How often outcome `x` happens. All the `p(x)` add to 1 |
+| `-log2 p(x)` | Surprise of outcome `x`, in bits. `p = 0.5` gives 1 bit; `p = 0.1` gives 3.32 bits; `p = 1` gives 0 bits |
+| `sum_x` | Go through every possible outcome and add up its contribution |
+| `p(x) x -log2 p(x)` | This outcome's share of the average — surprise, discounted by how rare it is |
+| `H(X)` | The total. Bits of uncertainty per draw |
+
+**Walk one example with real numbers.** Three distributions, all in bits (`log2`), rounded to 3 decimals:
+
+```
+  outcome           p       surprise = -log2(p)     contribution = p x surprise
+  ------------------------------------------------------------------------------
+  FAIR COIN
+    heads         0.500          1.000 bits                 0.500
+    tails         0.500          1.000 bits                 0.500
+                                       H = 0.500 + 0.500  = 1.000 bits
+
+  BIASED COIN (0.9 / 0.1)
+    heads         0.900          0.152 bits                 0.137
+    tails         0.100          3.322 bits                 0.332
+                                       H = 0.137 + 0.332  = 0.469 bits
+
+  FAIR DIE (six faces, each p = 1/6)
+    each face     0.167          2.585 bits                 0.4308
+                                       H = 6 x 0.4308     = 2.585 bits
+```
+
+Read the middle case carefully — it is the one that teaches the formula. Tails is by far the
+more surprising outcome (3.322 bits versus 0.152), yet it contributes *less than the whole
+distribution's average would suggest* once you weight it by its 0.1 probability. The fair coin
+needs a full 1 bit per flip to transmit; the 0.9/0.1 coin needs only 0.469 bits, because a good
+code spends a short symbol on the common outcome; the die needs 2.585 bits because there are more
+ways to be wrong. Entropy is exactly the compression floor: you cannot encode fair-die rolls in
+fewer than 2.585 bits each, no matter how clever the scheme.
+
+**Why the minus sign is there and what breaks without it.** Probabilities are at most 1, so
+`log p(x)` is always zero or negative. Without the leading minus, entropy would come out negative
+and "more uncertain" would read as "more negative" — the sign flip is what turns a log-probability
+into a positive surprise count. The other convention that matters is `0 x log 0 = 0`: an outcome
+that never happens should contribute nothing, but NumPy evaluates it as `0 x -inf = nan`, which is
+why the code below clips probabilities to `1e-12` before taking the log.
+
+### Decoding Cross-Entropy and KL Divergence
+
+**What this actually says.** "Cross-entropy H(p,q) is what you actually pay to encode reality `p` using a codebook built for your belief `q`; KL divergence is the *surcharge* — the extra bits you burn purely because your codebook was wrong."
+
+The framing matters because it explains the identity `H(p,q) = H(p) + KL(p||q)` without algebra: total bill = unavoidable floor + penalty for being wrong. Training a classifier can only shrink the penalty, never the floor.
+
+| Symbol | What it is |
+|--------|------------|
+| `p(x)` | The true distribution — reality, what actually shows up |
+| `q(x)` | Your model's predicted distribution — the codebook you built |
+| `-log2 q(x)` | Length of the codeword *your* scheme assigns to outcome `x` |
+| `H(p,q)` | Average codeword length you actually pay, since `x` arrives at rate `p(x)` |
+| `H(p)` | The floor. What a perfect codebook built for `p` would cost |
+| `log2(p(x)/q(x))` | Per-outcome overpayment. Zero when you predicted that outcome exactly right |
+| `KL(p to q)` | The average overpayment. Always >= 0, and exactly 0 only when `q = p` |
+
+**Walk one example with real numbers.** True distribution `p = [0.50, 0.25, 0.25]`, model `q = [0.25, 0.25, 0.50]` — the model has the first and third classes backwards. All values in bits, exact:
+
+```
+  class    p       q      -log2 q    p x -log2 q     -log2 p    p x -log2 p    p x log2(p/q)
+  -----------------------------------------------------------------------------------------
+    A     0.50    0.25     2.0         1.00           1.0         0.50            +0.50
+    B     0.25    0.25     2.0         0.50           2.0         0.50             0.00
+    C     0.25    0.50     1.0         0.25           2.0         0.50            -0.25
+  -----------------------------------------------------------------------------------------
+                        H(p,q) =       1.75         H(p) =        1.50    KL =    +0.25
+
+  Check the identity:   H(p) + KL(p||q)  =  1.50 + 0.25  =  1.75  =  H(p,q)   exact
+```
+
+The result means: reality carries 1.50 bits of genuine uncertainty that no model can remove, and
+this particular wrong model makes you spend 1.75 bits per sample — a 0.25-bit-per-sample tax, about
+17% waste. Train `q` toward `p` and the 0.25 falls toward 0; the 1.50 never moves.
+
+Note the class-C row: `p x log2(p/q)` is *negative* there, because the model put more mass on C
+than reality does, which is locally cheap. KL is still positive overall — that is exactly the
+content of Gibbs' inequality. Individual outcomes can be bargains; the average never is.
+
+**Why KL is asymmetric and what breaks if you forget.** The sum is weighted by `p(x)`, the *first*
+argument, so the two directions ask different questions. `KL(p||q)` is huge wherever `p` has mass
+and `q` has none — it punishes a model for missing something real, so it spreads `q` out
+(mean-seeking). `KL(q||p)` is huge wherever `q` has mass and `p` has none — it punishes
+hallucination, so `q` shrinks onto one peak (mode-seeking). Pick the wrong direction and your VAE
+either smears across a valley that has no data or collapses onto a single mode; see the two
+xychart panels in Section 5 for exactly this pair of failures.
+
+### Decoding Mutual Information: I(X;Y) = H(X) - H(X|Y)
+
+**What it means.** "Mutual information is how much your uncertainty about one variable shrinks the moment somebody tells you the other — measured in bits of uncertainty removed."
+
+Written that way, the two standard forms stop looking like separate facts. `H(X) - H(X|Y)` is literally "uncertainty before minus uncertainty after," and `H(X) + H(Y) - H(X,Y)` is the same quantity counted from the overlap side: add the two circles, subtract the union, what is left is the intersection.
+
+| Symbol | What it is |
+|--------|------------|
+| `H(Y)` | Uncertainty about `Y` before you know anything |
+| `H(Y given X)` | Uncertainty about `Y` that survives after `X` is revealed |
+| `H(X,Y)` | Uncertainty in the pair, treating each `(x,y)` cell as one outcome |
+| `p(x,y)` | Joint probability — how often that specific combination occurs |
+| `p(x)p(y)` | What the joint *would* be if the two were independent |
+| `I(X;Y)` | Bits of uncertainty removed. `0` means knowing `X` tells you nothing about `Y` |
+
+**Walk one example with real numbers.** `X` = weather (rain / dry), `Y` = did the person carry an umbrella. The joint table, all four cells summing to 1:
+
+```
+                     Y = umbrella    Y = none     p(x)
+    X = rain             0.40          0.10       0.50
+    X = dry              0.10          0.40       0.50
+    p(y)                 0.50          0.50       1.00
+
+  Marginals are both fair coins:   H(X) = 1.000 bits    H(Y) = 1.000 bits
+
+  Joint entropy over the four cells:
+    H(X,Y) = -[0.40 log2 0.40  x2  +  0.10 log2 0.10  x2]
+           = -[2(0.40)(-1.3219) + 2(0.10)(-3.3219)]
+           = 1.058 + 0.664
+           = 1.722 bits
+
+  I(X;Y) = H(X) + H(Y) - H(X,Y) = 1.000 + 1.000 - 1.722 = 0.278 bits
+```
+
+Cross-check it the other way, which is the reading that actually builds intuition:
+
+```
+  Told "it rained", the umbrella odds become 0.40/0.50 = 0.80 vs 0.10/0.50 = 0.20.
+  That is the 0.8/0.2 coin from the entropy table:            H(Y | X = rain) = 0.722 bits
+  By symmetry the dry branch is identical, so                 H(Y | X)        = 0.722 bits
+
+  I(X;Y) = H(Y) - H(Y|X) = 1.000 - 0.722 = 0.278 bits        same answer
+```
+
+The result means: knowing the weather removes 0.278 of the 1.000 bits of uncertainty about the
+umbrella — roughly 28% of the question answered, no more. The two are clearly related but far from
+determined. Push the table to a perfect `0.50 / 0.00 / 0.00 / 0.50` diagonal and `H(Y|X)` drops to
+0, so `I(X;Y) = 1.000` bits, the maximum: weather would tell you everything. Flatten it to `0.25`
+in every cell and `H(X,Y) = 2.000`, so `I(X;Y) = 0` — independence, and a useless feature.
+
+**Why this is the right feature-selection score and where it fails.** `I(feature; target)` needs no
+assumption of linearity; `Y = X^2` with symmetric `X` has Pearson correlation 0 but high MI, so MI
+catches dependencies correlation is blind to. What it does not catch is *redundancy*: two duplicate
+copies of the same good feature both score 0.278 here, and ranking by MI alone would keep both.
+That is the gap mRMR closes by subtracting the MI between already-selected features.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -54,6 +206,44 @@ The core insight of information theory is that the more uncertain an outcome is,
 
 **For k classes**: Entropy is maximized (= log_2(k)) when all classes are equally probable. Gini is maximized (= 1 - 1/k) at the same point. Both are minimized (= 0) for pure nodes.
 
+#### Decoding Information Gain: IG = H(parent) - sum_c (n_c / n) H(child_c)
+
+**The idea behind it.** "Measure how confused the node is, split it, measure how confused the two halves are on average, and keep the difference — that difference is how many bits of confusion the question bought you."
+
+The weighting is the part people skip and it is the part that makes the score honest. A split that carves off three perfectly pure samples out of a thousand is nearly useless, and multiplying each child's entropy by its share of the data is what says so.
+
+| Symbol | What it is |
+|--------|------------|
+| `H(parent)` | Entropy of the class labels before the split — the confusion you start with |
+| `n_c / n` | Share of the samples that landed in child `c`. The children's shares add to 1 |
+| `H(child_c)` | Entropy of the labels inside that child — leftover confusion in that branch |
+| `sum_c (n_c/n) H(child_c)` | Weighted average confusion after the split |
+| `IG` | Bits of confusion removed. `0` = the split told you nothing |
+
+**Walk one example with real numbers.** A node of 100 samples, 50 positive and 50 negative, split by a feature that sends 50 samples each way:
+
+```
+  parent   100 samples   50 pos / 50 neg   p = 0.500        H = 1.000 bits
+
+  child L   50 samples   45 pos /  5 neg   p = 0.900        H = 0.469 bits
+  child R   50 samples    5 pos / 45 neg   p = 0.100        H = 0.469 bits
+
+  weighted children = (50/100) x 0.469 + (50/100) x 0.469 = 0.469 bits
+
+  IG = 1.000 - 0.469 = 0.531 bits
+```
+
+Each child is the 0.9/0.1 coin from the entropy table — same 0.469 bits. The result means this one
+question resolved 0.531 of the node's 1.000 bits, a bit over half the uncertainty. A split that
+left both children at 50/50 would score `1.000 - 1.000 = 0` bits and would be rejected; a split
+producing two pure children would score `1.000 - 0 = 1.000` bits, the ceiling for a binary label.
+
+**Why IG alone is not enough.** Because `H(child)` collapses to 0 whenever a child holds a single
+sample, a high-cardinality feature like a user ID scores near-maximum IG by shattering the node
+into 100 pure singletons — perfect on the training set, worthless afterward. C4.5's gain ratio
+divides IG by `H(feature)` (the entropy of the split itself, which is large exactly when the
+feature has many values), and that denominator is what cancels the cheat.
+
 ### 4.3 Information Theory in Neural Networks
 
 **Cross-entropy loss**: standard for classification; connects to MLE under categorical distribution.
@@ -75,12 +265,12 @@ xychart-beta
     title "Cross-entropy decomposes: H(p,q) = H(p) + KL(p||q), in nats"
     x-axis ["H(p) entropy", "H(p,q) cross-entropy", "KL(p||q) divergence"]
     y-axis "nats" 0 --> 1.0
-    bar [0.802, 0.897, 0.095]
+    bar [0.802, 0.829, 0.027]
 ```
 
 For the true labels p = [0.7, 0.2, 0.1] and model softmax q = [0.6, 0.3, 0.1], the
-irreducible entropy H(p) = 0.802 nats plus the KL penalty 0.095 nats sum exactly to the
-cross-entropy 0.897 nats. Since H(p) is fixed by the data, training can only shrink the
+irreducible entropy H(p) = 0.802 nats plus the KL penalty 0.027 nats sum exactly to the
+cross-entropy 0.829 nats. Since H(p) is fixed by the data, training can only shrink the
 small KL bar toward zero — minimizing cross-entropy is minimizing KL(p||q).
 
 ### Information Gain in Decision Tree
@@ -98,10 +288,10 @@ flowchart TD
 
     root["Root: 60 pos / 40 neg\nH(root) = 0.971 bits"]
     root -->|"split on Feature A"| aL["Left: 50p / 5n\nH = 0.439"]
-    root -->|"split on Feature A"| aR["Right: 10p / 35n\nH = 0.781"]
-    aL --> aW["Weighted children\n0.55×0.439 + 0.45×0.781 = 0.593 bits"]
+    root -->|"split on Feature A"| aR["Right: 10p / 35n\nH = 0.764"]
+    aL --> aW["Weighted children\n0.55×0.439 + 0.45×0.764 = 0.586 bits"]
     aR --> aW
-    aW --> aIG["IG(A) = 0.971 - 0.593 = 0.378 bits"]
+    aW --> aIG["IG(A) = 0.971 - 0.586 = 0.385 bits"]
     root -->|"split on Feature B"| bL["Left: 30p / 20n\nH = 0.971"]
     root -->|"split on Feature B"| bR["Right: 30p / 20n\nH = 0.971"]
     bL --> bW["Weighted children\n0.50×0.971 + 0.50×0.971 = 0.971 bits"]
@@ -119,7 +309,7 @@ flowchart TD
 ```
 
 Both candidate features start from the same parent entropy, 0.971 bits. Feature A's
-split purifies the children (weighted child entropy drops to 0.593), so IG = 0.378 bits;
+split purifies the children (weighted child entropy drops to 0.586), so IG = 0.385 bits;
 Feature B leaves each child as impure as the parent, so IG = 0. The tree greedily selects
 the highest-IG feature — Feature A.
 
@@ -340,6 +530,38 @@ def kl_divergence_vae_loss(
     return float(kl_per_sample.mean())
 ```
 
+**Stated plainly.** "The closed form `KL = -0.5 * sum(1 + log_var - mu^2 - exp(log_var))` charges the encoder two separate fines: one for putting the latent code off-center, and one for making its spread anything other than 1."
+
+Seeing it as two independent fines is what makes the VAE's failure mode obvious. The whole expression is zero exactly when `mu = 0` and `sigma^2 = 1` — which is also the state where the latent code carries no information about the input at all. Posterior collapse is not a bug in the formula; it is the formula's global minimum.
+
+| Symbol | What it is |
+|--------|------------|
+| `mu` | Center of the encoder's Gaussian for this input, per latent dimension |
+| `log_var` | Log of the variance. The network predicts the log so the variance is positive by construction |
+| `exp(log_var)` | The variance `sigma^2` itself, recovered |
+| `mu^2` | The off-center fine. Grows quadratically as the code drifts from the origin |
+| `log_var - exp(log_var) + 1` | The wrong-spread fine, negated. Peaks at 0 when `sigma^2 = 1` |
+| `-0.5 * sum(...)` | Sum the per-dimension fines, flip the sign so the total is >= 0. Units: nats |
+
+**Walk one example.** A 2-dimensional latent, one sample, all values in nats:
+
+```
+  dim   mu     log_var   sigma^2 = exp(log_var)   term = -0.5 x (1 + log_var - mu^2 - sigma^2)
+  --------------------------------------------------------------------------------------------
+   1    0.5      0.0            1.000             -0.5 x (1 + 0.0 - 0.25 - 1.000) = 0.1250
+   2    0.0     -1.0            0.368             -0.5 x (1 - 1.0 - 0.00 - 0.368) = 0.1839
+  --------------------------------------------------------------------------------------------
+                                                             KL = 0.1250 + 0.1839 = 0.3089
+```
+
+Dimension 1 is fined only for being off-center (its spread is already perfect); dimension 2 is
+fined only for being too narrow (`sigma^2 = 0.368` instead of 1). The result means this sample's
+posterior costs 0.309 nats of regularization pressure. Set `mu = 0` and `log_var = 0` in both
+dimensions and every term becomes `-0.5 x (1 + 0 - 0 - 1) = 0` — KL is exactly 0, and the encoder
+has stopped saying anything. That is why practitioners anneal the KL weight from 0 upward and use
+free bits: both tricks stop the optimizer from taking the free 0 before the decoder has learned to
+use `z`.
+
 ### Mutual Information for Feature Selection
 
 ```python
@@ -375,6 +597,47 @@ def select_features_by_mutual_information(
 **Information gain in random forests**: sklearn's `DecisionTreeClassifier` with `criterion='entropy'` uses information gain at each split. For the Iris dataset (3 balanced classes), the root entropy is log_2(3) = 1.585 bits. The best first split on petal_length reduces entropy to ~0.45 bits for IG ≈ 1.14 bits — the single most informative feature.
 
 **Mutual information in CLIP**: The InfoNCE loss used in CLIP training maximizes a lower bound on mutual information I(image; text) for matching pairs while minimizing it for non-matching pairs. For a batch of N pairs, the loss for an image embedding i is -log(exp(sim(i, t_i)/tau) / sum_j exp(sim(i, t_j)/tau)) — exactly a cross-entropy over N "classes" where the correct class is the matching text.
+
+### Decoding Perplexity: PPL = exp(H) in nats, or 2^H in bits
+
+**Put simply.** "Perplexity converts a cross-entropy loss back into a headcount: it is the number of equally-likely options the model is effectively torn between at each token."
+
+The value of that translation is that loss numbers are not intuitive but headcounts are. "Loss dropped from 3.5 to 3.0" means nothing to most people; "the model went from juggling 33 plausible next words to juggling 20" is immediately legible, and it is the same statement.
+
+| Symbol | What it is |
+|--------|------------|
+| `H` | Cross-entropy loss per token — average `-log` of the probability assigned to the correct token |
+| `exp(H)` | Undo the natural log, when `H` is in nats. This is what PyTorch losses give you |
+| `2^H` | Undo the base-2 log, when `H` is in bits. Same number, different units in, same PPL out |
+| `PPL` | Effective branching factor. Lower is better. `PPL = 1` means perfectly certain, every time |
+| vocabulary size `V` | The worst case. A model that has learned nothing scores `PPL = V` |
+
+**Walk one example with real numbers.** GPT-3-scale English text, using the 50,000-token vocabulary and the ~3.0-nat loss quoted above:
+
+```
+  untrained model, uniform over 50,000 tokens
+    H   = ln(50000) = 10.820 nats            (the same as log2(50000) = 15.61 bits)
+    PPL = exp(10.820) = 50,000               <- guessing blind across the whole vocabulary
+
+  trained model, cross-entropy loss 3.0 nats
+    H   = 3.000 nats = 3.000 / ln(2) = 4.3281 bits
+    PPL = exp(3.000) = 20.09                 <- via nats
+        = 2^4.3281   = 20.09                 <- via bits, identical as it must be
+
+  what training bought:  50,000 -> 20 effective choices, a ~2,490x narrowing
+```
+
+The result means: at every position the trained model is behaving as if it were picking uniformly
+among about 20 plausible continuations — not that it literally considers 20, but that its spread of
+belief is worth exactly that much uncertainty. Since perplexity is an exponential of the loss, the
+scale is deceptive near the bottom: shaving the loss from 3.0 to 2.3 nats moves perplexity from
+20.09 to 9.97, so the last fraction of a nat is where most of the visible quality lives.
+
+**Why perplexity is only comparable within a fixed tokenizer.** `H` is measured per *token*, so a
+tokenizer that splits English into more, smaller pieces makes each individual prediction easier and
+drives perplexity down without the model understanding anything more. Two models with different
+vocabularies therefore cannot be ranked by perplexity at all; convert to bits-per-character first,
+which divides the total bits by a unit both models agree on.
 
 ---
 

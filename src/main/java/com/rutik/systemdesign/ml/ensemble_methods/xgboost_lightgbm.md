@@ -42,6 +42,38 @@ w_j = leaf weights (predicted values)
 α = L1 regularisation on leaf weights
 ```
 
+**What this actually says.** "Fit the data, but pay a fee for every leaf you add and a second fee for every leaf whose prediction is large."
+
+The framing matters because the fees are *inside* the thing being optimised. Vanilla gradient boosting grows a tree to minimise loss and only afterwards prunes or shrinks it; XGBoost's split search already knows the price, so a split that is not worth γ is never made in the first place.
+
+| Symbol | What it is |
+|--------|------------|
+| `Σ_i l(y_i, ŷ_i)` | The ordinary training loss, summed over rows. "Am I predicting well?" |
+| `Σ_k Ω(f_k)` | Complexity fee, summed over every tree `f_k` built so far |
+| `T` | Number of leaves in the tree. A proxy for "how many rules did I invent?" |
+| `w_j` | The value leaf `j` predicts (in log-odds for classification, not probability) |
+| `γ` | Price per leaf. A split only survives if it buys more loss reduction than γ costs |
+| `λ` | L2 rate. Shrinks every `w_j` toward zero, smoothly, without deleting leaves |
+| `α` | L1 rate. Pushes small `w_j` exactly to zero — the sparsity-flavoured version |
+
+**Walk one example.** Two trees fitting the same data equally well, γ = 1.0, λ = 1.0, α = 0:
+
+```
+                        leaves T    sum w_j^2    training loss
+  tree P (simple)          4          0.90          42.0
+  tree Q (complex)        12          3.20          40.4
+
+  Omega(P) = 1.0 x 4  + (1.0/2) x 0.90 = 4.00 + 0.45 = 4.45
+  Omega(Q) = 1.0 x 12 + (1.0/2) x 3.20 = 12.00 + 1.60 = 13.60
+
+  Obj(P) = 42.0 + 4.45  = 46.45      <- wins
+  Obj(Q) = 40.4 + 13.60 = 54.00
+
+  Q fits the data better by 1.6, but pays 9.15 more in fees. XGBoost keeps P.
+```
+
+**What each knob actually buys you.** γ buys you *fewer rules*: it is a floor on split quality, so raising it deletes whole branches and the tree gets structurally smaller. λ buys you *quieter rules*: the leaf count is untouched, but every prediction is pulled toward zero so no single leaf can swing the ensemble hard. With γ = 0 and λ = 0 the objective collapses back to plain gradient boosting, and a tree is free to grow one leaf per row and memorise the training set.
+
 This is built into the objective — every split must overcome the γ penalty, every leaf weight is shrunk by λ/2. This is regularisation at the model structure level, not just the training algorithm level.
 
 ### Second-Order Taylor Expansion
@@ -55,6 +87,33 @@ where g_i = ∂l/∂ŷ^{(t-1)}   (first derivative = gradient)
       h_i = ∂^2l/∂(ŷ^{(t-1)})^2  (second derivative = Hessian)
 ```
 
+**Read it like this.** "Replace the real loss curve with the parabola that touches it at the current prediction — then you can solve for the best next step in closed form instead of searching for it."
+
+A parabola is the simplest shape that has both a slope and a curvature, and those two numbers are exactly what you need to jump straight to a minimum. That is the entire reason XGBoost only ever asks a custom objective for `(g_i, h_i)`: given those, every downstream formula is fixed.
+
+| Symbol | What it is |
+|--------|------------|
+| `ŷ_i^{(t-1)}` | The prediction the ensemble already makes for row `i`, before this round's tree |
+| `f_t(x_i)` | The correction this round's tree wants to add for row `i` |
+| `g_i` | Slope of the loss at the current prediction. Sign = which way is downhill, size = how urgent |
+| `h_i` | Curvature. Large = the loss punishes overshooting, so take a small step |
+| `g_i * f_t(x_i)` | Linear term: reward for moving downhill |
+| `(h_i/2) * f_t(x_i)^2` | Quadratic term: penalty for moving far. This is what caps the step |
+| `l(y_i, ŷ_i^{(t-1)})` | A constant this round — it does not depend on the new tree, so it drops out |
+
+**Walk one example.** Log loss, `g_i = p_i - y_i` and `h_i = p_i(1-p_i)`, for three rows:
+
+```
+                   y     p        g = p - y     h = p(1-p)     reading
+  row 1 (fresh)    1    0.50        -0.50          0.2500      undecided, max influence
+  row 2 (solid)    1    0.90        -0.10          0.0900      mostly right, some pull
+  row 3 (settled)  1    0.99        -0.01          0.0099      done; contributes ~nothing
+
+  Ratio of influence, row 1 vs row 3:  h = 0.2500 / 0.0099 = 25x
+```
+
+Row 3 is already correct and confident, so both its gradient and its Hessian have nearly vanished — it neither steers the split nor votes on leaf size. This self-damping is what makes the Hessian a *natural sample weight*, and it is the same fact GOSS exploits below when it throws small-gradient rows away.
+
 This lets you derive the optimal leaf weight analytically:
 
 ```
@@ -65,6 +124,68 @@ where G_j = Σ_{i∈leaf_j} g_i
 
 Split gain = (G_L^2/(H_L+λ) + G_R^2/(H_R+λ) - (G_L+G_R)^2/(H_L+H_R+λ)) / 2 - γ
 ```
+
+**The idea behind it.** "A leaf should predict the average error it is asked to fix, damped by how confidently that error is measured — and a split is worth making only if cutting the group in two explains more than keeping it whole."
+
+The quantity `G^2/(H+λ)` is worth naming: it is the **similarity score**, and it measures how *agreeing* the rows in a node are. Rows whose gradients all point the same way add up to a big `G`, so `G^2` is big. Rows whose gradients cancel leave `G` near zero and the score collapses — which is precisely the signal that the node holds a mixture worth splitting.
+
+| Symbol | What it is |
+|--------|------------|
+| `G_j` | Sum of gradients in leaf `j`. "Total error, with sign" |
+| `H_j` | Sum of Hessians in leaf `j`. "How much confident evidence is in here" |
+| `w_j* = -G_j/(H_j+λ)` | The leaf's output. Minus sign = step opposite the gradient, i.e. downhill |
+| `G^2/(H+λ)` | Similarity score. High = rows agree; near zero = rows disagree and cancel |
+| `G_L, H_L` | Sums over rows going left; `G_R, H_R` over rows going right |
+| `(G_L+G_R)^2/(H_L+H_R+λ)` | The parent's score — what you already had before splitting |
+| `/ 2` | Falls out of the `h/2` in the Taylor quadratic; scales gain, never changes its ranking |
+| `- γ` | The toll booth. Pay γ or the split does not happen |
+
+**Walk one example.** A node holding 8 rows on the first boosting round, so every `p_i = 0.5`, giving `g_i = 0.5 - y_i` and `h_i = 0.25` for all of them. Candidate split sends 3 rows left, 5 right; `λ = 1`:
+
+```
+  LEFT   y = [1, 1, 1]           g = [-0.5, -0.5, -0.5]
+         G_L = -1.5              H_L = 3 x 0.25 = 0.75
+
+  RIGHT  y = [0, 0, 0, 0, 1]     g = [+0.5, +0.5, +0.5, +0.5, -0.5]
+         G_R = +1.5              H_R = 5 x 0.25 = 1.25
+
+  PARENT G = -1.5 + 1.5 = 0.0    H = 0.75 + 1.25 = 2.00
+
+  similarity(left)   = (-1.5)^2 / (0.75 + 1) = 2.25 / 1.75 = 1.2857
+  similarity(right)  = (+1.5)^2 / (1.25 + 1) = 2.25 / 2.25 = 1.0000
+  similarity(parent) = ( 0.0)^2 / (2.00 + 1) = 0.00 / 3.00 = 0.0000
+
+  Gain = 0.5 x (1.2857 + 1.0000 - 0.0000) - gamma
+       = 0.5 x 2.2857 - gamma
+       = 1.1429 - gamma
+```
+
+The parent's score is exactly `0` because its gradients cancel perfectly: three rows pull down, three of the five pull up with equal force. That is a node with no usable single answer, and the split rescues 1.1429 of structure from it. Note that a *useless* split — one that scatters the same mix into both children — would leave both child scores near zero too, and the gain would be near zero. **Gain measures un-mixing, not size.**
+
+**Now watch γ act as a toll booth.** Same split, same 1.1429 of raw gain, three settings:
+
+```
+  gamma = 0.0   ->  net gain = 1.1429 - 0.0 = +1.1429   ACCEPT  (default; nothing pruned)
+  gamma = 1.0   ->  net gain = 1.1429 - 1.0 = +0.1429   ACCEPT  (barely clears the toll)
+  gamma = 2.0   ->  net gain = 1.1429 - 2.0 = -0.8571   REJECT  (split never made)
+```
+
+At `gamma = 2.0` this split — a genuinely informative one that cleanly separates three positives — is discarded, and the node stays a leaf. This is why γ is *pre-pruning* and why raising it past 1-2 shrinks trees fast: it is applied to every candidate at every node, so a small increase compounds down the depth of the tree.
+
+**And watch λ shrink the leaf toward zero.** Left leaf only, `G_L = -1.5`, `H_L = 0.75`, so `w_L* = 1.5/(0.75+λ)`:
+
+```
+  lambda    w_L* = 1.5 / (0.75 + lambda)      raw gain 0.5 x (simL + simR - simP)
+  ------    ----------------------------      ---------------------------------
+    0            2.0000                                   2.4000
+    1            0.8571                                   1.1429
+    5            0.2609                                   0.3757
+   20            0.0723                                   0.1071
+```
+
+Two things move together. The leaf's output collapses from `2.0000` to `0.0723` — a 28x reduction — so the tree still has the same shape but whispers instead of shouting. And the gain shrinks too, from `2.4000` to `0.1071`, which means **λ quietly does γ's job as well**: at `λ = 20` this split would fail even a modest `gamma = 0.2` toll. That coupling is why tuning both at once is confusing, and why the standard advice is to move λ first and reach for γ only when the tree is still too bushy.
+
+The `+λ` in the denominator also does defensive work. A leaf holding one confidently-predicted row has `H_j ≈ 0.0099`; without λ the weight would be `G/H`, a division by nearly zero that explodes into an enormous prediction. With `λ = 1` the denominator can never drop below 1, so the weight is bounded no matter how sparse the leaf. Set `λ = 0` on noisy data and this is the failure you get.
 
 The Hessian H_j acts as a natural weight for each split candidate, giving more accurate gain estimates for convex losses. For log loss: h_i = p_i(1-p_i), which is small for confident predictions (p near 0 or 1) — those samples have little influence on the tree structure.
 
@@ -82,6 +203,38 @@ Variance of gain estimate with GOSS: nearly identical to using all samples
 when a≥5% and b≥10% (theoretical bound in the paper)
 ```
 
+**Put simply.** "Keep every row the model is still getting badly wrong, throw away most of the rows it has already mastered — then shout the survivors' votes louder so the tally still comes out right."
+
+The amplification factor `(1-a)/b` is the whole trick and the only subtle part. Dropping rows is easy; dropping them *without biasing the split scores* is what needs the correction. The kept small-gradient sample is a stand-in for a much larger group, so it must vote with that group's weight.
+
+| Symbol | What it is |
+|--------|------------|
+| `\|gradient\|` | How wrong the model still is on a row. Large = hard/informative, small = already solved |
+| `a` | Fraction kept from the top of the sorted list. All of these survive, none are sampled away |
+| `b` | Sampling rate for the small-gradient remainder |
+| set `A` | The large-gradient rows. Kept whole, weight 1 |
+| set `B` | The random small-gradient survivors. Kept few, weight `(1-a)/b` |
+| `(1-a)/b` | Amplification. "Each survivor speaks for this many rows that were dropped" |
+
+**Walk one example.** `N = 100,000` rows, `a = 0.2`, `b = 0.1`:
+
+```
+  sort by |g|, keep top 20%       ->  set A =  20,000 rows, weight 1.0
+  remainder                       ->            80,000 rows, small gradients
+  sample b x N from the remainder ->  set B =  10,000 rows, weight (1-a)/b
+
+  amplification = (1 - 0.2) / 0.1 = 0.8 / 0.1 = 8.0
+
+  set B's represented mass = 10,000 x 8.0 = 80,000   <- exactly the group it stands for
+
+  rows actually scanned = 20,000 + 10,000 = 30,000 = 30% of N
+  histogram work saved  = 70%
+```
+
+The line `10,000 x 8.0 = 80,000` is the check that matters: the amplified survivors carry precisely the mass of the 80,000-row remainder they replaced, so `G` and `H` sums come out unbiased and the gain formula above is unaffected. (Reading `b` instead as "10% of the remaining 80%" gives 8,000 sampled rows and the `(a + b*(1-a)) * N = 0.28 * N` figure quoted in the Q&A and intuition sections — same story, ~70% of rows skipped either way.)
+
+**What breaks without the amplification.** Drop the `(1-a)/b` factor and every small-gradient row counts once instead of eight times. The easy rows are then massively under-represented in `G_L`, `G_R`, `H_L`, `H_R`, so the model sees a training set that looks far harder than it is, over-corrects on the difficult tail, and the split gains are systematically wrong. GOSS without its weight is just biased subsampling.
+
 ### LightGBM EFB (Exclusive Feature Bundling)
 
 High-dimensional sparse datasets (one-hot encoded categoricals, text features) have many features that are mutually exclusive: a sample is non-zero for at most one feature in a group. EFB bundles such features into a single dense feature:
@@ -92,6 +245,30 @@ Feature B (binary): [1, 0, 0, 1, 0, 0]
 Feature C (binary): [0, 0, 1, 0, 0, 1]
 → Bundled: [B=1, A=2, C=3, B=4, A=5, C=6]  (encode which feature is active)
 ```
+
+**Stated plainly.** "If two columns are never non-zero on the same row, they were never really two columns — store them as one, and remember which one was active by the value you write."
+
+The encoding above is doing exactly that: A occupies value range 1-2, B occupies 3-4, C occupies 5-6, so a single integer says both *which feature* fired and *what it held*. Nothing is lost because, by construction, no row needed to say two things at once.
+
+| Symbol | What it is |
+|--------|------------|
+| "mutually exclusive" | At most one of the group is non-zero on any given row. One-hot columns are the pure case |
+| "conflict" | A row where two candidate features are non-zero together. The reason a bundle may be refused |
+| bundle value | An offset integer: which feature is live, plus its value, packed into one number |
+| bundle count | The new feature count after packing. This is what split search now iterates over |
+
+**Walk one example.** A one-hot dataset with 1,000 sparse columns that pack into 100 bundles, LightGBM's 256-bin histograms:
+
+```
+  histogram work per node = n_features x n_bins
+
+  before EFB : 1,000 features x 256 bins = 256,000 accumulate ops
+  after  EFB :   100 bundles  x 256 bins =  25,600 accumulate ops
+
+  reduction = 256,000 / 25,600 = 10x fewer operations per node
+```
+
+Compare that to what binning alone already bought, on 100K rows and 100 dense features: exact split search touches `100 x 100,000 = 10,000,000` values per node, histograms touch `100 x 256 = 25,600` — a 390x cut. EFB and binning attack different axes of the same `n_features x n_rows` cost: binning shrinks the row axis to a constant 256, EFB shrinks the feature axis. Stack them and a wide sparse dataset becomes tractable.
 
 EFB reduces n_features from thousands to hundreds for one-hot data, dramatically reducing the number of splits to evaluate.
 
@@ -109,6 +286,33 @@ Level-wise: balanced trees, lower variance, slower bias reduction
 Leaf-wise: asymmetric trees, faster bias reduction, higher overfitting risk on small data
 → Control with num_leaves (not max_depth) for LightGBM
 ```
+
+**In plain terms.** "Level-wise spends its next split on every leaf at the current depth whether they deserve it or not; leaf-wise spends it on the one leaf that will pay back the most."
+
+Both strategies are just different answers to "which node do I split next?", and the gain formula from Section 3 is the scorer in both cases. Level-wise ignores the ranking and expands a whole row; leaf-wise sorts by gain and takes the top one.
+
+| Symbol | What it is |
+|--------|------------|
+| depth `d` | Levels below the root. Level-wise fills each one completely before descending |
+| `2^d` | Leaves a full level-wise tree has at depth `d` — growth is forced and exponential |
+| `num_leaves` | LightGBM's hard cap on leaf count. The real complexity knob when growth is leaf-wise |
+| "highest gain leaf" | The leaf whose best candidate split scores highest under `Gain` from Section 3 |
+| `min_child_samples` | Floor on rows per leaf. The guard that stops leaf-wise from carving out tiny leaves |
+
+**Walk one example.** Getting to 64 leaves under each strategy:
+
+```
+  LEVEL-WISE (must complete each level)
+    depth 5  ->  2^5 =  32 leaves,  31 splits
+    depth 6  ->  2^6 =  64 leaves,  63 splits      <- 64 is reachable only as a full level
+    depth 7  ->  2^7 = 128 leaves, 127 splits      <- next stop; no way to stop at 80
+
+  LEAF-WISE (one split = one extra leaf)
+    63 splits -> 64 leaves, and the depths are whatever the gains dictated
+    stopping at 80 leaves costs exactly 79 splits
+```
+
+Leaf-wise makes the leaf count a *continuous* dial while level-wise makes it a power of two, which is the practical reason LightGBM tunes `num_leaves` and XGBoost tunes `max_depth`. The cost is that the 63 splits are free to pile onto one branch: 63 leaves could mean a balanced depth-6 tree or a depth-30 chain isolating a handful of rows. Setting `max_depth=-1` and forgetting `min_child_samples` is exactly how the small-data overfitting in Pitfall 2 happens.
 
 ---
 
@@ -619,6 +823,29 @@ num_leaves    Equivalent max_depth    Complexity    Use Case
 511+          9+                      Very High     Rarely needed; overfit risk
 ```
 
+**What it means.** "The 'equivalent max_depth' column is just `log2(num_leaves)` — the depth a *balanced* tree would need to hold that many leaves, which is the fairest way to compare a LightGBM setting to an XGBoost one."
+
+| Symbol | What it is |
+|--------|------------|
+| `num_leaves` | Actual cap on terminal nodes in one LightGBM tree |
+| `2^max_depth` | Leaf count of a fully-grown balanced XGBoost tree at that depth |
+| "equivalent max_depth" | `log2(num_leaves)`, rounded — the balanced-tree depth of the same capacity |
+| `num_leaves < 2^max_depth` | The safety rule: stay under what a balanced tree of that depth could hold |
+
+**Walk one example.** Checking the table's own rows:
+
+```
+  num_leaves   2^max_depth at listed depth   num_leaves < 2^depth ?
+      31            2^5  =   32                 31 <  32   ok, just under
+      63            2^6  =   64                 63 <  64   ok, just under
+     127            2^7  =  128                127 < 128   ok, just under
+     255            2^8  =  256                255 < 256   ok, just under
+
+  Each row sits exactly one leaf below a full balanced tree: num_leaves = 2^d - 1.
+```
+
+That `2^d - 1` pattern is why the defaults look like 31, 63, 127, 255 rather than round numbers. Violating the rule — say `num_leaves=200` with `max_depth=6`, which caps capacity at 64 — means the leaf budget can never be spent and `num_leaves` silently stops being the knob you are turning.
+
 Rule: num_leaves should be < 2^max_depth. Setting num_leaves=127 with no max_depth allows asymmetric trees that are effectively depth-7 in the best-case branch.
 
 ### Regularisation Parameters Reference
@@ -633,6 +860,50 @@ Min split gain gamma           min_split_gain      0 – 5
 Row subsample  subsample       subsample           0.5 – 1.0
 Col subsample  colsample_bytree colsample_bytree   0.5 – 1.0
 ```
+
+**What the formula is telling you.** Three of these rows hide arithmetic that the parameter name does not reveal — the shrinkage update, the column-sampling product, and the fact that `min_child_weight` counts Hessians rather than rows.
+
+| Symbol | What it is |
+|--------|------------|
+| `learning_rate` (η) | Shrinkage. Each tree's leaf weights are multiplied by η before being added |
+| `F_t = F_{t-1} + η * w*` | The actual update rule. Without η, one tree could jump the whole distance |
+| `colsample_bytree/bylevel/bynode` | Feature fractions at tree, level, and node scope — they multiply |
+| `min_child_weight` | Minimum **sum of Hessians** in a leaf, not a row count |
+| `min_child_samples` | LightGBM's literal row count. Different quantity, similar name |
+| `min_split_gain` | LightGBM's name for γ — the same toll booth from Section 3 |
+
+**Walk one example — shrinkage.** The left leaf computed earlier had `w* = 0.8571` in log-odds, starting from `p = 0.5` (logit 0):
+
+```
+  eta = 0.30   step = 0.30 x 0.8571 = 0.2571   p after 1 round = 0.5639
+  eta = 0.05   step = 0.05 x 0.8571 = 0.0429   p after 1 round = 0.5107
+
+  applying the full weight at once  ->  p = 0.7021
+  eta = 0.05 needs 1 / 0.05 = 20 rounds to accumulate that same 0.8571
+  eta = 0.02 needs 1 / 0.02 = 50 rounds
+```
+
+Halving η exactly doubles the rounds needed for the same cumulative movement — that is the `0.1 -> 0.05` doubling rule, arrived at arithmetically. The 20 small steps beat 1 big step because each intervening step recomputes `g_i` and `h_i` against the updated predictions, so later trees correct what earlier ones overshot.
+
+**Walk one example — column sampling.** All three set to 0.8, on 150 features:
+
+```
+  per tree  : 150 x 0.8 = 120 features available
+  per level : 120 x 0.8 =  96 features available
+  per node  :  96 x 0.8 =  76 features available (76.8 rounded)
+
+  fraction seen at a single split = 0.8 x 0.8 x 0.8 = 0.512  -> about 51%
+```
+
+**Walk one example — min_child_weight is not a row count.** With log loss `h_i = p_i(1-p_i)`, so `min_child_weight=5` translates into wildly different row counts depending on confidence:
+
+```
+  rows at p = 0.50  ->  h = 0.2500 each  ->  need ceil(5 / 0.2500) =  20 rows
+  rows at p = 0.90  ->  h = 0.0900 each  ->  need ceil(5 / 0.0900) =  56 rows
+  rows at p = 0.99  ->  h = 0.0099 each  ->  need ceil(5 / 0.0099) = 506 rows
+```
+
+Same setting, `20` rows or `506` rows depending only on how confident the model already is. Late in boosting most rows are confident, so `min_child_weight` tightens automatically as training proceeds — a useful property, and a genuine trap if you read it as "at least 5 samples."
 
 ---
 

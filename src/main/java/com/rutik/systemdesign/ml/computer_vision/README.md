@@ -282,6 +282,53 @@ def build_val_transform(img_size: int = 224,
     ])
 ```
 
+**Stated plainly.** "`RandomResizedCrop(224, scale=(0.08, 1.0))` says: cut out a patch holding
+anywhere from 8% to 100% of the original image's *area*, then resize that patch to 224x224 —
+so the model never sees the same framing of the same photo twice."
+
+The two numbers that matter are an *area* fraction and an *output side*, and they are in
+different units. Mixing them up is the usual source of "why does my augmentation look so
+aggressive" confusion.
+
+| Symbol | What it is |
+|--------|------------|
+| `scale=(0.08, 1.0)` | Fraction of the ORIGINAL image AREA the crop keeps. Not a side-length fraction — 0.08 area is a 0.28x side |
+| `224` | Side length of the square handed to the network, after the crop is resized |
+| `p=0.5` | Probability the horizontal flip fires — half the batch flipped, half not |
+| `brightness=0.4` | Multiply pixel brightness by a factor drawn uniformly from [1-0.4, 1+0.4] = [0.6, 1.4]. Same for contrast and saturation |
+| `hue=0.1` | Rotate hue by up to +/-0.1 of the full colour wheel, i.e. +/-36 degrees |
+| `mean` / `std` | Per-channel ImageNet statistics; every pixel becomes `(x - mean) / std` |
+
+**Walk one example.** One 640x480 source photo through `build_train_transform(224)`:
+
+```
+source image                 640 x 480      = 307,200 px of area
+
+smallest legal crop          0.08 x 307,200 =  24,576 px of area
+  as a square, side          sqrt(24,576)   =     156.8 px
+  resize to output           224 / 156.8    =      1.43x  UPSCALE (a zoomed detail)
+
+largest legal crop           1.00 x 307,200 = 307,200 px of area
+  as a square, side          sqrt(307,200)  =     554.3 px
+  resize to output           224 / 554.3    =      0.40x  downscale (the whole frame)
+
+=> across epochs the same photo arrives as anything from a 157 px detail blown
+   up 1.43x to the entire 554 px frame shrunk to 0.40x
+
+then Normalize, red channel, a mid-grey pixel x = 0.5:
+  (0.5 - 0.485) / 0.229 = 0.066     <- near zero, as ImageNet-centred input should be
+blue channel, same pixel:
+  (0.5 - 0.406) / 0.225 = 0.418     <- blue is dimmer on average, so 0.5 reads as "bright"
+```
+
+**Why the 0.08 lower bound exists, and what it costs.** It is what forces scale invariance: a
+model that only ever sees the full frame learns object size as a cue and collapses when the
+camera moves closer. The price is listed in the augmentation table in Section 8 — "crops lose
+context" — and the validation pipeline deliberately does *not* use it (resize 256, center-crop
+224) so evaluation stays deterministic. Pitfall 4 is exactly what happens when that pairing is
+broken. The heavier automated policies cost wall-clock too: RandAugment's "+~20% training time"
+turns a 100-epoch run at 1.0 h/epoch into 120 h.
+
 ### Fine-Tuning ResNet-50 with Layer-Wise LR
 
 ```python
@@ -360,6 +407,102 @@ def evaluate(model: nn.Module,
         "top5": top5_correct / total,
     }
 ```
+
+### Detection Metrics Decoded — IoU, then AP, then mAP
+
+Classification accuracy above is a counting exercise. Detection is not: a box is never exactly
+right, so every detection metric in this file — the `mAP COCO` column in Section 4, the
+`mAP@0.5 of 0.92+` PCB number in Section 7, the `IoU=0.5` in the case study — is built on one
+geometric ratio. Decoding it once makes all three readable.
+
+**Read it like this.** "IoU asks: of all the pixels either box touches, what fraction do *both*
+boxes touch?" It is deliberately a ratio, not a distance — that is what makes a single threshold
+like 0.5 mean the same thing for a 40 px screw and a 400 px car.
+
+| Symbol | What it is |
+|--------|------------|
+| `(x1, y1, x2, y2)` | A box as top-left and bottom-right corners, in pixels. Width is `x2 - x1`, height is `y2 - y1` |
+| intersection | Area of the overlap rectangle: `max(0, min(x2s) - max(x1s))` times the same in y. The `max(0, ...)` is what makes disjoint boxes score 0 instead of negative |
+| union | `area(A) + area(B) - intersection`. Subtracting once is essential — the overlap sits in both areas and would otherwise be counted twice |
+| `IoU` | intersection / union. Always in [0, 1]: 0 = no contact, 1 = pixel-identical boxes |
+| threshold (0.5) | The line above which a prediction is allowed to be called a true positive |
+
+**Walk one example.** One ground-truth box, two candidate predictions:
+
+```
+ground truth  G = (100, 100, 200, 200)      100 x 100 = 10,000 px
+
+--- prediction P1 = (140, 120, 260, 210) ------------------------------------
+overlap x span   max(100,140)=140 .. min(200,260)=200   ->  60 px wide
+overlap y span   max(100,120)=120 .. min(200,210)=200   ->  80 px tall
+intersection     60 x 80                                =   4,800 px
+area(P1)         120 x 90                               =  10,800 px
+union            10,000 + 10,800 - 4,800                =  16,000 px
+IoU              4,800 / 16,000                         =   0.30   -> FALSE POSITIVE
+
+--- prediction P2 = (115, 110, 215, 205) ------------------------------------
+overlap x span   max(100,115)=115 .. min(200,215)=200   ->  85 px wide
+overlap y span   max(100,110)=110 .. min(200,205)=200   ->  90 px tall
+intersection     85 x 90                                =   7,650 px
+area(P2)         100 x 95                               =   9,500 px
+union            10,000 + 9,500 - 7,650                 =  11,850 px
+IoU              7,650 / 11,850                         =   0.65   -> TRUE POSITIVE
+```
+
+Both boxes clearly "found the object" to a human eye. P1 is 40 px off in x and loses half its
+score for it — IoU is far harsher than intuition, which is why 0.5 (not 0.9) is the classic
+threshold and why COCO reports a whole sweep rather than one number.
+
+**What this actually says.** "AP is the area under one class's precision-recall curve; mAP is
+that number averaged — across classes, and for COCO across IoU thresholds as well." The averaging
+is the whole point: it stops a detector from looking good by being confident about one easy class
+at one forgiving threshold.
+
+| Symbol | What it is |
+|--------|------------|
+| rank | Predictions sorted by confidence, highest first. Every metric below is computed walking down this list |
+| TP / FP | A prediction is TP if it clears the IoU threshold against an unmatched ground truth; otherwise FP. Second box on an already-matched object is FP, not a duplicate credit |
+| precision at rank k | `cumulative TP / k` — of the k boxes accepted so far, what share were real |
+| recall at rank k | `cumulative TP / total ground truths` — what share of real objects have been found |
+| `AP` | Area under that precision-recall curve for ONE class at ONE IoU threshold |
+| `mAP` | Mean of AP over classes (the "m"); COCO additionally means over IoU 0.50:0.05:0.95 |
+| `mAP@0.5` | The single-threshold, lenient variant — the 0.92+ figure quoted for PCB inspection |
+
+**Walk one example.** One class ("scratch"), 3 ground-truth objects, 5 predictions at IoU 0.5:
+
+```
+rank  conf   best IoU   verdict   cumTP  cumFP   precision       recall
+  1   0.95     0.82       TP        1      0     1/1 = 1.000    1/3 = 0.333
+  2   0.88     0.65       TP        2      0     2/2 = 1.000    2/3 = 0.667
+  3   0.71     0.30       FP        2      1     2/3 = 0.667    2/3 = 0.667
+  4   0.60     0.55       TP        3      1     3/4 = 0.750    3/3 = 1.000
+  5   0.42     0.11       FP        3      2     3/5 = 0.600    3/3 = 1.000
+
+interpolated precision (best precision seen at this recall or beyond):
+  at recall 0.333   max(1.000, 1.000, 0.667, 0.750, 0.600) = 1.000
+  at recall 0.667   max(1.000, 0.667, 0.750, 0.600)        = 1.000
+  at recall 1.000   max(0.750, 0.600)                      = 0.750
+
+AP = sum of (recall step) x (interpolated precision)
+   = (0.333 - 0.000) x 1.000  = 0.333
+   + (0.667 - 0.333) x 1.000  = 0.333
+   + (1.000 - 0.667) x 0.750  = 0.250
+   = 0.917                         <- AP@0.5 for the scratch class
+
+mAP across the 3 defect classes:
+  scratch 0.917 + dent 0.810 + missing_component 0.660 = 2.387
+  2.387 / 3 = 0.796                <- the "m" in mAP: mean over CLASSES
+
+COCO-style mAP for the scratch class, same detector, IoU swept 0.50 -> 0.95:
+  0.50  0.55  0.60  0.65  0.70  0.75  0.80  0.85  0.90  0.95
+  .917  .884  .851  .802  .740  .661  .552  .410  .238  .061
+  sum 6.116 / 10 = 0.612           <- mean over THRESHOLDS
+```
+
+Note the 0.917 headline collapsing to 0.612 once tighter thresholds are included. That gap is
+the localization quality the lenient number hides, and it is why the Section 4 detection table
+(`YOLOv8-L 52.9`, `Faster R-CNN 37.4`) uses COCO mAP: those are averaged over both classes and
+all ten thresholds, so they are not comparable to a quoted `mAP@0.5` such as the PCB 0.92+.
 
 ---
 
@@ -620,6 +763,55 @@ keep = nms(boxes, scores, iou_threshold=0.7)
 # nearby true positives are not suppressed (see per_class_nms above).
 keep = per_class_nms(boxes, scores, classes, {0: 0.3, 1: 0.5})
 ```
+
+**Put simply.** "NMS keeps the highest-confidence box, then deletes every remaining box that
+overlaps it by more than `iou_threshold` — so the threshold is a dial between 'too many
+duplicate boxes' and 'nearby real objects erased'."
+
+There is no safe default, only a tradeoff bought with the IoU ratio decoded in Section 6.
+
+| Symbol | What it is |
+|--------|------------|
+| `order` | Indices sorted by confidence descending. `order[0]` is the survivor of this round and is kept unconditionally |
+| `ious` | IoU of the kept box against every lower-confidence box still in the running |
+| `iou_thr` | Delete anything at or above this. RAISE it to keep more boxes; LOWER it to delete more |
+| `ious < iou_thr` | The survivors mask — note it is strictly less-than, so a box exactly at the threshold is suppressed |
+| `{0: 0.3, 1: 0.5}` | Per-class thresholds: class 0 (clustered scratches) tight, class 1 (dents) looser |
+
+**Walk one example.** Two situations, one global threshold, opposite failures:
+
+```
+CASE A - a genuine duplicate: two boxes on the SAME scratch
+  kept box    (100, 100, 200, 200)   100 x 100 =  10,000 px
+  other box   (112, 108, 212, 208)   100 x 100 =  10,000 px
+  overlap     88 x 92                          =   8,096 px
+  union       10,000 + 10,000 - 8,096          =  11,904 px
+  IoU         8,096 / 11,904                   =    0.68
+
+CASE B - two DISTINCT scratches sitting 19 px apart
+  kept box    (100, 100, 140, 140)    40 x 40  =   1,600 px
+  other box   (119, 100, 159, 140)    40 x 40  =   1,600 px
+  overlap     21 x 40                          =     840 px
+  union       1,600 + 1,600 - 840              =   2,360 px
+  IoU         840 / 2,360                      =    0.36
+
+now move the single global threshold and watch both cases at once:
+
+  iou_thr    case A (0.68)          case B (0.36)          net result
+  -------    -------------------    -------------------    ---------------------------
+  0.70       0.68 < 0.70  KEPT      0.36 < 0.70  KEPT      duplicate survives -> FP
+  0.45       0.68 >= 0.45 KILLED    0.36 < 0.45  KEPT      both correct
+  0.30       0.68 >= 0.30 KILLED    0.36 >= 0.30 KILLED    real scratch erased -> FN
+
+the window where ONE threshold serves both is 0.36 < iou_thr <= 0.68
+```
+
+That window is exactly what disappears when defect types have different packing densities —
+0.7 sits above case A and leaks duplicates, 0.3 sits below case B and eats true positives. Hence
+`per_class_nms`: give clustered scratches their own tight value and dents a looser one instead of
+searching for a single number that satisfies neither. This is also why DETR (Section 4) is
+listed as "No NMS" — Hungarian matching assigns one prediction per object during training, so
+there is no threshold to tune at all.
 
 **Pitfall 3 — Resolution mismatch between training and deployment.** Training at 640x640 but feeding raw 1920x1080 frames stretches geometry and shifts box coordinates.
 

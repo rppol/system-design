@@ -272,6 +272,39 @@ weights   = compute_inverse_propensity_weights(positions, eta=0.8)
 # XGBClassifier(...).fit(X, y, sample_weight=weights)
 ```
 
+**Stated plainly.** `P(click | position k) proportional to 1/k^eta`, so `weight = 1/propensity = k^eta` says: "a click at the bottom of the page is rarer *because it is at the bottom*, not because the item is worse — so count it for more."
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | The 1-indexed slot the item was shown in. Rank 1 is the top of the page |
+| `eta` | Bias strength. `0` = position does not matter at all; `1.0` = strong position bias |
+| `1/k^eta` | Propensity — the chance the user even *examined* that slot |
+| `k^eta` | The inverse-propensity weight. Rises with depth, undoing the exposure penalty |
+| division by the mean | Renormalization so the weights average `1.0` and the gradient scale is unchanged |
+
+**Walk one example.** The eight logged impressions above, at `eta = 0.8`:
+
+```
+  position k    k^0.8     weight = k^0.8 / mean      label
+  ------------------------------------------------------------
+      1         1.000            0.398                 1
+      1         1.000            0.398                 0
+      2         1.741            0.692                 1
+      3         2.408            0.958                 0
+      5         3.624            1.441                 0
+     10         6.310            2.509                 0
+      1         1.000            0.398                 1
+      4         3.031            1.206                 1
+  ------------------------------------------------------------
+  mean(k^0.8) = 2.5143            mean(weight) = 1.000
+
+  rank 10 vs rank 1 :  10^0.8 / 1^0.8 = 6.31x
+```
+
+A click at rank 10 counts **6.31 times** a click at rank 1. Without that correction the model learns "items shown at the top get clicked", which is a fact about the old ranker's layout rather than about relevance — and retraining on it locks the current ordering in place, a feedback loop that never surfaces a good item the previous model happened to bury.
+
+**Why `eta` is tuned rather than fixed at 1.0.** `eta = 1.0` assumes examination probability falls exactly as `1/k`, which over-corrects on interfaces where users scan the whole page; `eta = 0` disables the correction entirely. It is normally estimated from result-randomization or swap experiments. Two directions to check when weights look wrong: an over-large `eta` makes deep-position clicks dominate the loss and blows up gradient variance, and a weight column that *falls* with depth means the propensity was normalized in place of its inverse — the correction is then running backwards, amplifying exactly the bias it was meant to remove.
+
 ### Step 3: Point-in-Time Feature Join (the critical data correctness step)
 
 ```python
@@ -753,6 +786,41 @@ Plan for graceful degradation at every layer: if the feature store is slow (circ
 - Data: click logs (available immediately), watch time (available after video ends, median 4 minutes delay)
 - Infrastructure: Kubernetes on GCP, $40K/month GPU budget
 
+**In plain terms.** A scale line like "100M DAU, 10K QPS, 2B events/day, 1TB/day" is four numbers that must agree with each other. Read it as: "divide the daily totals by 86,400 seconds, and check that the per-second and per-day views describe the same system."
+
+| Symbol | What it is |
+|--------|------------|
+| `DAU` | Distinct users in a day. The population, not a rate |
+| `86,400` | Seconds in a day. The only conversion factor in the whole estimate |
+| `QPS` | Requests per second the serving path must absorb |
+| `QPS x 86,400` | Requests per day — the bridge from the serving view to the user view |
+| peak multiplier | Ratio of busy-hour QPS to daily average. Decides whether `10K` is the average or the ceiling |
+| `bytes/day / events/day` | Average bytes per event. The cross-check that ties storage to traffic |
+
+**Walk one example.** Turn each stated number into the others and see whether they close:
+
+```
+  requests per day    :  10,000 QPS x 86,400 s        =    864,000,000 req/day
+  per user per day    :  864M / 100M DAU              =           8.64 req/user
+    ...if 10K QPS is the daily average
+
+  ...if 10K QPS is instead the busy-hour peak at 2x average:
+  average QPS         :  10,000 / 2                   =          5,000 QPS
+  requests per day    :  5,000 x 86,400               =    432,000,000 req/day
+  per user per day    :  432M / 100M DAU              =           4.32 req/user
+
+  event volume        :  2,000,000,000 events/day
+  average event rate  :  2e9 / 86,400                 =         23,148 events/s
+  events per request  :  2e9 / 864,000,000            =           2.31 events/req
+
+  storage cross-check :  1 TB/day / 2e9 events        =      500 bytes/event
+  annual raw volume   :  1 TB/day x 365               =         365 TB/year
+```
+
+Both readings of the QPS number are plausible for a streaming product, and the design changes with the answer: **at 8.64 requests per user per day the 10K figure is already the ceiling; at 4.32 the peak is 20K and every capacity number above doubles.** "Is that average or peak?" is therefore a requirements question, not a nitpick — it is the difference between provisioning for 10K and for 20K.
+
+The last two lines are the cheap sanity check most candidates skip. 500 bytes per interaction event is entirely believable for a row of ids, timestamps, and a few context fields, so the `1TB/day` and `2B events/day` claims are consistent rather than two unrelated guesses. Had it come out at 50KB per event, one of the two numbers would be wrong — and 365 TB/year is the figure that actually drives the retention policy and the offline store bill.
+
 **Step 2 — Problem Formulation**:
 - Task: two-stage (retrieval + ranking) — 10M videos requires ANN retrieval
 - Label: watch_time_ratio = watched_seconds / video_duration; threshold 0.3 = positive
@@ -779,6 +847,35 @@ Plan for graceful degradation at every layer: if the feature store is slow (circ
 - Ranking server: LightGBM on CPU, 32 cores; P99 < 18ms
 - Load balancer: round-robin with health checks
 - Total: ~40ms P50, ~80ms P99 — within 100ms budget with 20ms headroom
+
+**What it means.** The serving budget reads: "each stage owns a slice, the slices are P99s, and P99s do not add." The gap between the summed stage P99s and the reported total is where the uncomfortable truths of a distributed serving path live.
+
+| Symbol | What it is |
+|--------|------------|
+| stage P99 | The 99th-percentile latency of one component measured in isolation |
+| `P99 budget = 100ms` | The end-to-end promise. What the product actually committed to |
+| headroom | Budget left unspent on purpose, absorbing GC, retries, and cold caches |
+| tail amplification | Why summed stage P99s understate the total: a request need only be slow *somewhere* |
+
+**Walk one example.** Sum the stated stage P99s and compare against the stated total:
+
+```
+  retrieval, FAISS ANN         12 ms
+  feature server, Redis         8 ms
+  ranking, LightGBM CPU        18 ms
+  --------------------------------
+  sum of stage P99s            38 ms
+
+  reported end-to-end P99      80 ms
+  unaccounted                  80 - 38 = 42 ms   <- more than the stages themselves
+
+  budget                      100 ms
+  headroom                    100 - 80 = 20 ms   (20% of budget)
+```
+
+**The unexplained 42ms is larger than every modelled stage combined**, and it is not a mistake in the design — it is network hops, serialization, queueing, load-balancer time, and the fact that a request lands in the tail if *any* stage is slow, not only if all of them are. Adding stage P99s gives an optimistic lower bound; the real number always sits above it.
+
+**Why the 20ms headroom is not slack to be reclaimed.** It is the only budget left for a Redis failover, a JVM pause on the ranking server, or a FAISS index reload. Spending it on a richer model means the first bad minute breaches the SLO — which is precisely the argument for the earlier design principle of serving the simplest model that meets the requirement.
 
 **Step 6 — Monitoring**:
 - Feature drift: hourly PSI on user embedding distribution, 7d genre distribution; alert PSI > 0.2

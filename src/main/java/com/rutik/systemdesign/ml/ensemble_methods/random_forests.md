@@ -26,6 +26,37 @@ Key insight: the feature subsampling at each split (not just at tree level) is w
 
 A bootstrap sample of size N is drawn with replacement from the training set of size N. Probability a given sample is NOT selected: (1 - 1/N)^N → e^{-1} ≈ 0.368 as N → ∞. Each tree sees approximately 63.2% of training samples; the remaining ~36.8% form the OOB (out-of-bag) set for that tree.
 
+**Stated plainly.** "Draw N tickets out of a hat of N, putting each one back after you read it — and about a third of the tickets never come out at all."
+
+That leftover third is not waste, it is a free validation set. Every tree can be scored on exactly the rows it never trained on, which is why a Random Forest needs no separate hold-out to report an honest error estimate.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Training-set size — and also the number of draws, since a bootstrap is the same size as the original |
+| `1/N` | Chance one specific row is picked on one specific draw |
+| `1 - 1/N` | Chance that row is missed on one draw |
+| `(1 - 1/N)^N` | Chance it is missed on all N draws in a row — draws are independent, so multiply |
+| `e^{-1}` | The value that expression converges to, `0.368`. Euler's constant turning up where a "miss it every time" product does |
+
+**Walk it across dataset sizes.** The fraction stabilises almost immediately:
+
+```
+      N          (1 - 1/N)^N        % out-of-bag     % in-bag (unique rows)
+      5           0.327680             32.77                67.23
+     10           0.348678             34.87                65.13
+     25           0.360397             36.04                63.96
+     50           0.364170             36.42                63.58
+    100           0.366032             36.60                63.40
+   1000           0.367695             36.77                63.23
+  10000           0.367861             36.79                63.21
+  N -> infinity   1/e = 0.367879       36.79                63.21
+
+  At N = 100 the value is already within 0.002 of the limit, so the
+  "63.2% in-bag / 36.8% out-of-bag" split is safe to quote for any real dataset.
+```
+
+**Why the answer does not depend on N.** As N grows, a miss on any single draw becomes *more* likely (`1 - 1/N` rises toward 1), but you take proportionally more draws. The two effects cancel exactly in the limit, which is what `(1 - 1/N)^N -> e^{-1}` encodes. Without that cancellation the OOB set would shrink to nothing on large data and the free validation signal would disappear.
+
 ### Feature Subsampling at Each Split
 
 At every node, m features are randomly sampled from all p features. Only these m features are candidates for splitting. sklearn defaults:
@@ -34,6 +65,56 @@ At every node, m features are randomly sampled from all p features. Only these m
 - Regression: m = p/3 — Breiman's recommendation; sklearn uses max_features=1.0 by default (changed in 1.1; before it was "auto" = sqrt)
 
 Setting max_features=1.0 gives bagging of full trees (no extra randomisation); decreasing it increases diversity at the cost of individual tree accuracy.
+
+**What the formula is telling you.** "At every node, hide all but `m` of the columns, so the one dominant feature cannot be chosen everywhere by every tree."
+
+This is the lever that sets `ρ` in the variance formula below. Bootstrap alone leaves trees highly correlated because they all still find the same strong feature at the root; `m` is what breaks that tie.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Total number of features in the dataset |
+| `m` (mtry / `max_features`) | How many features are offered as split candidates at one node — redrawn at every node |
+| `sqrt(p)` | Classification default. `p = 40` → `m ≈ 6` |
+| `p/3` | Breiman's regression recommendation. `p = 40` → `m ≈ 13` |
+| `m/p` | Probability any one named feature is even offered at a given node |
+| `1 - (1 - m/p)^d` | Probability it is offered at least once along a path of `d` nodes |
+
+**Push the p = 40 dataset through it.** These are the 40 features used by the fitting code in Section 6:
+
+```
+  p = 40, classification default m = sqrt(40) = 6.325 -> 6 candidates per node
+
+  P(the single strongest feature is offered at the root)
+      = m / p = 6.325 / 40 = 0.1581
+
+  So only ~16% of trees can split on the best feature first. The other ~84%
+  are forced to build their root on a substitute.
+
+  P(offered at least once along a path of d nodes) = 1 - (1 - 0.1581)^d
+      d =  1   ->  0.1581
+      d =  5   ->  0.5771
+      d = 10   ->  0.8211
+      d = 20   ->  0.9680
+
+  Contrast max_features = 1.0 (plain bagging of trees):
+      m / p = 40 / 40 = 1.0  ->  EVERY tree splits on the strongest feature
+      at the root. Every tree starts identically, so rho stays high.
+```
+
+The squeeze gets tighter as `p` grows, which is the point: `sqrt(p)/p = 1/sqrt(p)`, so wider data is randomised harder.
+
+```
+  p =   40   ->  m = 6.325    ->  m/p = 0.1581   (15.81% of columns per node)
+  p =  100   ->  m = 10.000   ->  m/p = 0.1000   (10.00%)
+  p =  500   ->  m = 22.361   ->  m/p = 0.0447   ( 4.47%)
+  p = 2048   ->  m = 45.255   ->  m/p = 0.0221   ( 2.21%)
+
+  The 2048-feature medical case in Section 7 sets max_features = 0.1 instead
+  (~205 candidates), deliberately loosening this because its features are
+  sparse and individually weak -- 45 random columns often contain no signal.
+```
+
+Each tree gets slightly *worse* on its own — it is frequently denied its best split. The ensemble gets better anyway, because the individual-accuracy loss is smaller than the correlation win, which the next formula makes numeric.
 
 ### Variance Reduction Math
 
@@ -46,6 +127,68 @@ Var(average of B trees) = ρ*σ^2 + ((1-ρ)/B) * σ^2
 - First term ρ*σ^2: irreducible variance floor (correlated errors)
 - Second term decreases with B
 - Feature subsampling reduces ρ; more trees reduce the second term
+
+**Read it like this.** "Averaging B trees divides away only the part of their error that is independent. The part they share survives untouched, no matter how many trees you add."
+
+Start from the textbook case everyone quotes. Average `B` **independent** estimators each with variance `σ^2` and you get `σ^2/B` — the classic "variance divided by n" result behind every ensemble. That is the second term of the formula with `ρ = 0`. The whole reason Random Forest needs a *second* source of randomness is that decision trees trained on bootstraps of the same data are nowhere near independent, and `ρ` is the correction term that admits it.
+
+| Symbol | What it is |
+|--------|------------|
+| `σ^2` | Variance of a single tree's prediction — how much one tree's answer jumps if you reshuffle its training data |
+| `B` | Number of trees in the forest (`n_estimators`) |
+| `ρ` | Average pairwise correlation between two trees' predictions. `0` = fully independent, `1` = identical trees |
+| `ρ*σ^2` | The floor. Shared, correlated error. `B` does not appear in it, so no amount of trees touches it |
+| `((1-ρ)/B) * σ^2` | The independent slice, shrinking as `1/B` |
+| `σ^2/B` | What the whole thing collapses to when `ρ = 0` |
+
+**Sweep B with independent trees first.** Fix `σ^2 = 1.0`, set `ρ = 0`:
+
+```
+  sigma^2 = 1.0, rho = 0  (the fantasy case: perfectly independent trees)
+
+       B      Var = rho*sigma^2 + (1-rho)*sigma^2/B
+       1        0 + 1.000/1     = 1.000000
+      10        0 + 1.000/10    = 0.100000
+     100        0 + 1.000/100   = 0.010000
+    1000        0 + 1.000/1000  = 0.001000
+
+  Variance heads to 0. If this were the real world, more trees would be a
+  free lunch with no limit, and n_estimators would only ever be a budget question.
+```
+
+**Now repeat it at a realistic correlation.** Bagged full-depth trees on the same dataset typically land around `ρ = 0.6`:
+
+```
+  sigma^2 = 1.0, rho = 0.6  (trees that largely repeat each other's mistakes)
+
+       B      rho*sigma^2  +  (1-rho)*sigma^2/B   =   Var
+       1         0.600     +     0.400/1          =  1.000000
+      10         0.600     +     0.040            =  0.640000
+     100         0.600     +     0.004            =  0.604000
+    1000         0.600     +     0.0004           =  0.600400
+
+  Delta from    10 ->  100 trees:  0.6400 - 0.6040 = 0.0360
+  Delta from   100 -> 1000 trees:  0.6040 - 0.6004 = 0.0036
+
+  10x the compute buys a 0.596% variance reduction. The curve has PLATEAUED
+  at rho*sigma^2 = 0.600 and NOTHING below that is reachable by adding trees.
+```
+
+That plateau is the entire argument for the second randomness source. `ρ*σ^2` is a hard floor set before you choose `B`, so the only way down is to attack `ρ` itself — which is exactly what per-node feature subsampling does:
+
+```
+  At a fixed B = 500 trees:
+
+    rho = 0.60  ->  Var = 0.600 + 0.400/500 = 0.600800
+    rho = 0.15  ->  Var = 0.150 + 0.850/500 = 0.151700
+
+  Cutting rho from 0.60 to 0.15 cuts variance by 74.75%.
+  Going from 100 to 1000 trees at rho = 0.60 cut it by 0.60%.
+
+  One max_features setting is worth more than 10x the hardware.
+```
+
+**Why both terms have to be there.** Drop `ρ*σ^2` and the formula predicts that a 10,000-tree forest is perfect, which no practitioner has ever observed — OOB error visibly flattens (see the diagram in Section 5). Drop the `1/B` term and the formula says adding trees never helps at all, contradicting the steep improvement everyone sees over the first ~100 trees. The two terms together are the reason the standard advice is "300-500 trees, then stop and go tune `max_features` instead."
 
 ### Depth and Tree Size
 
@@ -210,6 +353,47 @@ For each feature f:
 
 Normalise so all importances sum to 1
 ```
+
+**The idea behind it.** "Give each feature credit for every bit of mess it cleaned up, weighted by how many training samples were standing at that node when it did the cleaning."
+
+MDI is free because the forest already computed every `ΔImpurity` while deciding where to split. Nothing extra is evaluated — which is both why it costs nothing and why it is measured on training data, the root of its bias.
+
+| Symbol | What it is |
+|--------|------------|
+| `f` | The feature being scored |
+| `n` | A single node inside a single tree that split on `f` |
+| `w(n)` | Fraction of training samples that reached node `n`. Root = `1.0`; deep nodes are tiny |
+| `ΔImpurity(n)` | Impurity of the parent minus the sample-weighted impurity of its two children — how much purer the split made things |
+| `Σ over nodes and trees` | Same feature can split many times per tree and in every tree; all contributions add up |
+| Normalisation | Divide by the total across all features so the vector sums to `1.0` (this is `feature_importances_`) |
+
+**Walk two nodes for one feature.** Gini impurity, `gini = 1 - p^2 - (1-p)^2`, on a 1000-sample tree:
+
+```
+  Node A (root): 1000 samples, 500 positive -> p = 0.500, gini = 0.5000
+    split on f  ->  left  600 samples, gini 0.1800
+                    right 400 samples, gini 0.1800
+    weighted children = (600/1000)*0.18 + (400/1000)*0.18 = 0.1800
+    ImpurityDelta   = 0.5000 - 0.1800 = 0.3200
+    w(A) = 1000/1000 = 1.00
+    contribution    = 1.00 x 0.3200 = 0.3200
+
+  Node B (depth 1): 600 samples, 540 positive -> p = 0.900, gini = 0.1800
+    split on f  ->  left  400 samples, 388 pos, gini 0.0582
+                    right 200 samples, 152 pos, gini 0.3648
+    weighted children = (400/600)*0.0582 + (200/600)*0.3648 = 0.1604
+    ImpurityDelta   = 0.1800 - 0.1604 = 0.0196
+    w(B) = 600/1000 = 0.60
+    contribution    = 0.60 x 0.0196 = 0.0118
+
+  total_importance(f) = 0.3200 + 0.0118 = 0.3318
+
+  The root split carries 96.4% of it; the depth-1 split carries 3.6%.
+```
+
+**Why `w(n)` is the term that matters.** Without it, a split on 8 samples deep in a fully grown tree would count as much as the root split on all 1000. Deep trees have thousands of tiny leaves, so importance would be dominated by noise-level splits. Weighting by reach is what keeps MDI anchored to decisions that affected real volumes of data.
+
+That same weighting is also where the bias in Pitfall 2 comes from. A high-cardinality feature (product ID, 50K values) gets offered far more distinct thresholds to try, so it wins more splits and accumulates more small positive `ΔImpurity` terms — every one of them measured on the training rows it just memorised. Permutation importance dodges this by scoring the drop in a real metric on held-out data instead of summing training-time impurity gains.
 
 ### Isolation Forest — Path Length Isolates Anomalies
 

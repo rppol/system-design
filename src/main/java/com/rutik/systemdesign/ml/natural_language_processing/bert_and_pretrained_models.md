@@ -32,7 +32,70 @@ Key insight: BERT's `[CLS]` token representation (after fine-tuning) encodes a s
 
 **Masked Language Modeling (MLM):** Randomly mask 15% of input tokens and train the model to predict the masked tokens from bidirectional context. The 15% are split: 80% replaced with `[MASK]`, 10% replaced with a random token, 10% left unchanged. The 10/10 split prevents the model from learning to only handle `[MASK]` tokens — it must always maintain good representations for all tokens.
 
+**What this actually says.** "Hide one word in seven, then make the model guess it from everything around it — and hide it in three different disguises so it can never learn to only look for the blank."
+
+The 15% and the 80/10/10 are two independent knobs stacked on top of each other. The first picks *how many* positions get scored; the second picks *what the input looks like* at those positions. Confusing them is the classic interview slip.
+
+| Symbol | What it is |
+|--------|------------|
+| `15%` | Fraction of token positions selected for prediction. These are the only positions that produce loss |
+| `80%` | Of the selected positions, the share whose input token is swapped for the literal `[MASK]` symbol |
+| `10%` (random) | Selected positions whose input token is swapped for a random vocabulary token. Teaches the model to distrust every input, not just blanks |
+| `10%` (unchanged) | Selected positions left showing the true token. The model is still scored there, so it must produce a good representation for tokens that look perfectly normal |
+| the other `85%` | Pure context. Read by attention, never scored, no gradient |
+
+**Walk one example.** A 200-token WordPiece sequence, the counts pushed all the way through:
+
+```
+  sequence length                       200 WordPiece tokens
+
+  selected for prediction   0.15 x 200                     =  30 positions
+    -> shown as [MASK]      0.80 x  30                     =  24 positions
+    -> shown a random token 0.10 x  30                     =   3 positions
+    -> shown the real token 0.10 x  30                     =   3 positions
+
+  never selected            200 - 30                       = 170 positions
+                                                              (context only,
+                                                               zero gradient)
+
+  loss is averaged over all 30 selected positions -- including the 6 that
+  carry no [MASK] symbol at all. Those 6 are the entire point of the split.
+```
+
+**Why the 10/10 exists and what breaks without it.** `[MASK]` appears during pretraining and never at fine-tune or inference time — a train/test mismatch baked into the objective. If all 15% were `[MASK]`, the model could learn "only build a rich prediction at positions holding the `[MASK]` symbol" and coast everywhere else, and that shortcut collapses the moment you hand it a clean sentence. The 10% random forces it to treat *every* input token as possibly corrupted; the 10% unchanged forces it to keep predicting even when the input looks correct. The price is that only 30 of 200 positions ever produce gradient, which is exactly the sample-inefficiency ELECTRA-style RTD later attacks.
+
 **Next Sentence Prediction (NSP):** Given two sentence segments A and B, predict whether B actually follows A in the original document (50% positive, 50% random negative). Intended to teach inter-sentence coherence. RoBERTa later showed NSP hurts more than it helps — it forces shorter sequences that reduce context per training step.
+
+**Read it like this.** "Show the model two chunks of text and ask one yes/no question: did these really appear back to back? Half the time they did, half the time the second chunk was pulled from a random document."
+
+It is a binary classifier on `h_CLS` trained with binary cross-entropy, so the loss on a single example is just `-log p(correct label)`.
+
+| Symbol | What it is |
+|--------|------------|
+| segment A, segment B | The two text chunks, joined as `[CLS] A [SEP] B [SEP]` and told apart by segment embeddings |
+| `IsNext` | Positive label — B is the sentence that genuinely followed A in the source document |
+| `NotNext` | Negative label — B was sampled from a random document. This is the weakness: a random document usually has a different *topic* |
+| `50% / 50%` | Class balance. A model that guesses blindly gets 50% accuracy, so the metric is readable at face value |
+| `-log p` | Binary cross-entropy on the predicted probability of the true label |
+
+**Walk one example.** A batch of 256 sentence pairs, and what the loss looks like at three confidence levels:
+
+```
+  batch of 256 pairs   ->  128 IsNext   +   128 NotNext   (the 50/50 split)
+
+  p(correct label)      loss = -log p     reading
+  ------------------    -------------     -------------------------------
+       0.98                0.0202         confident and right -- near-zero
+       0.60                0.5108         barely above chance
+       0.50                0.6931         pure coin flip; ln 2, the ceiling
+                                          for an uninformative classifier
+       0.02                3.9120          confident and wrong -- punished hard
+
+  BERT reaches ~97-98% NSP accuracy, i.e. it sits near the 0.0202 row almost
+  always. A task you solve that easily has almost no gradient left to give.
+```
+
+That last line is the whole critique. Because negatives come from *random* documents, "are these the same topic?" answers the question nearly as well as "is this coherent?" — so NSP saturates early and stops teaching. ALBERT's SOP fixes it by making both segments come from the same document and only swapping their order, which topic overlap cannot solve.
 
 **Bidirectionality:** Unlike GPT's causal mask (triangle), BERT uses a full attention matrix — every token attends to every other token. This is why BERT cannot be used for autoregressive generation (no causal constraint), but excels at understanding.
 
@@ -54,6 +117,50 @@ Key insight: BERT's `[CLS]` token representation (after fine-tuning) encodes a s
 | BERT-base | 12 | 768 | 12 | 110M | 79.6 |
 | BERT-large | 24 | 1024 | 16 | 340M | 82.1 |
 
+**Stated plainly.** "The 110M is not a magic number — it is the embedding table plus twelve identical copies of one encoder block, and you can derive it on a whiteboard in two minutes."
+
+Interviewers ask you to reconstruct this precisely because it proves you know where a transformer's weights actually live. Two facts fall out of the arithmetic and surprise most candidates: the embedding table alone is over a fifth of BERT-base, and the feed-forward network holds twice the parameters of the attention it follows.
+
+| Symbol | What it is |
+|--------|------------|
+| `V = 30522` | WordPiece vocabulary size. Rows in the token embedding table |
+| `H = 768` | Hidden size, the width of every vector flowing through the stack (`1024` for large) |
+| `L = 12` | Number of stacked encoder layers (`24` for large) |
+| `A = 12` | Attention heads per layer (`16` for large) |
+| `I = 4H = 3072` | Intermediate (FFN) width. Always `4x` the hidden size in BERT |
+| `d_k = H / A` | Per-head dimension. `768 / 12 = 64` — and `1024 / 16 = 64` too, deliberately |
+| `H x H + H` | One linear projection: a weight matrix plus its bias vector |
+
+**Walk one example.** Rebuild BERT-base from `V=30522, H=768, L=12, I=3072`:
+
+```
+  EMBEDDINGS
+    token       30522 x 768                    = 23,440,896
+    position      512 x 768                    =     393,216
+    segment         2 x 768                    =       1,536
+    LayerNorm     2 x 768  (gain + bias)       =       1,536
+                                                 -----------
+                                                  23,837,184   (23.84M)
+
+  ONE ENCODER LAYER
+    Q,K,V,O     4 x (768x768 + 768)            =   2,362,368
+    FFN up          768x3072 + 3072            =   2,362,368
+    FFN down        3072x768 +  768            =   2,360,064
+    2 LayerNorms  4 x 768                      =       3,072
+                                                 -----------
+                                                   7,087,872   (7.09M)
+
+  STACK AND POOLER
+    12 layers   12 x 7,087,872                 =  85,054,464
+    pooler          768x768 + 768              =     590,592
+
+  TOTAL       23,837,184 + 85,054,464 + 590,592 = 109,482,240   -> "110M"
+```
+
+Same recipe with `H=1024, L=24, I=4096` gives `31.78M + 24 x 12.60M + 1.05M = 335.1M`, the figure the paper rounds to "340M". Note where the mass sits: the FFN pair is `4,722,432` of each layer's `7,087,872`, or two-thirds of every block, which is why FFN-targeted pruning and MoE routing pay off more than attention surgery.
+
+**Why `d_k = 64` in both sizes.** Multi-head attention splits `H` into `A` heads of width `H/A` and concatenates them back, so the head count never changes the parameter count — `4 x (H x H + H)` is identical whether you run 1 head or 16. Going from base to large, Devlin et al. raised `H` from 768 to 1024 *and* `A` from 12 to 16 precisely so `d_k` stays 64. That matters because attention scores are divided by `sqrt(d_k) = 8`; holding `d_k` fixed keeps the pre-softmax logit scale identical across model sizes, so the same learning rates and initialization schemes transfer without retuning.
+
 ### 4.2 BERT Variants
 
 | Model | Key Change vs BERT | When to Use |
@@ -64,6 +171,46 @@ Key insight: BERT's `[CLS]` token representation (after fine-tuning) encodes a s
 | **DeBERTa-v3** (He et al., 2021) | RTD (Replaced Token Detection, ELECTRA-style) training objective instead of MLM; parameter-efficient | Current top encoder for most NLU tasks; 86.8 GLUE with 183M params |
 | **DistilBERT** (Sanh et al., 2019) | Knowledge distillation from BERT-base to 6-layer student; 40% smaller, 60% faster, 97% of BERT performance | Production latency-constrained applications |
 | **ModernBERT** (Warner et al., 2024) | Flash Attention 2, unpadding (removes padding tokens from computation), RoPE positional encoding, alternating local/global attention, extended context (8192 tokens), trained on 2T tokens | State-of-the-art as of 2024; ~2x faster than DeBERTa-v3 on GPU, same or better quality |
+
+**Put simply.** ALBERT's `vocab_embed 128 → project to 768` says: "stop giving every one of 30,000 vocabulary rows a full 768-wide vector. Give each row a skinny 128-wide vector and let one shared matrix stretch it to 768 on the way in."
+
+The insight is that a token embedding is context-*free* — it only has to encode what a word means in isolation — while `H` is sized for the context-*dependent* work the encoder does. Tying those two dimensions together, as BERT does, is what makes the embedding table balloon.
+
+| Symbol | What it is |
+|--------|------------|
+| `V = 30000` | ALBERT vocabulary size |
+| `E = 128` | Factorized embedding dimension. The width of the context-free lookup |
+| `H` | Hidden size the encoder actually runs at (`768` base, `4096` xxlarge) |
+| `V x H` | BERT's direct table: one full-width row per vocabulary entry |
+| `V x E + E x H` | ALBERT's two-step table: skinny lookup, then one shared projection up to `H` |
+| cross-layer sharing | All `L` layers reuse one set of `W_Q, W_K, W_V` and FFN weights, so unique layer params drop from `L x 7.09M` to `1 x 7.09M` |
+
+**Walk one example.** Both ALBERT tricks, priced out against BERT-base:
+
+```
+  FACTORIZED EMBEDDING              V=30000, E=128, H=768
+    BERT direct     30000 x 768                   = 23,040,000
+    ALBERT step 1   30000 x 128                   =  3,840,000
+    ALBERT step 2      128 x 768                  =     98,304
+                                                    ----------
+                    ALBERT total                  =  3,938,304
+    saving          23,040,000 - 3,938,304        = 19,101,696   (5.85x smaller)
+
+  The gap widens with H.  At ALBERT-xxlarge's H = 4096:
+    direct          30000 x 4096                  = 122.88M
+    factorized      30000x128 + 128x4096          =   4.36M
+    saving                                        = 118.52M
+
+  CROSS-LAYER SHARING               one 7,087,872-param block, reused
+    BERT-base       12 x 7,087,872                = 85,054,464
+    ALBERT-base      1 x 7,087,872                =  7,087,872
+    saving                                        = 77,966,592
+
+  ALBERT-base total   3,938,304 + 7,087,872       = 11,026,176  -> "12M"
+  vs BERT-base                                      109,482,240 -> "110M"
+```
+
+**Why the sharing does not cost as much quality as it should.** Reusing one block across 12 layers is mathematically the same as running one layer 12 times with different inputs — a recurrent transformer. Parameter count collapses, but **compute does not**: every one of the 12 passes still runs in full, which is exactly why ALBERT-xxlarge is 3x *slower* than BERT-large despite having fewer unique weights. Read the "235M params, 91.0 GLUE" row in Section 8 with that in mind: ALBERT trades memory for nothing on the latency axis. DistilBERT makes the opposite trade — `67M / 110M = 0.609`, so 39% fewer parameters *and* 6 fewer layers to execute, which is where the real 1.6x speedup comes from.
 
 ### 4.3 Fine-Tuning Heads
 
@@ -371,6 +518,49 @@ def extract_embeddings(
     return embeddings.numpy()
 ```
 
+**In plain terms.** The two dense lines above — `(hidden_states * mask).sum(1) / mask.sum(1)` and `F.normalize(embeddings, p=2, dim=-1)` — say: "average the real tokens and ignore the padding, then shrink every vector onto the unit sphere so comparing two of them is a single dot product."
+
+Both lines are one-liners that quietly decide whether your retrieval system works. Forget the mask and padding drags every short sentence toward the same point; forget the normalize and your cosine similarity silently becomes a magnitude contest.
+
+| Symbol | What it is |
+|--------|------------|
+| `hidden_states` | `(batch, seq_len, hidden_size)` — one 768-dim vector per token position |
+| `mask` | The attention mask reshaped to `(batch, seq_len, 1)`: `1` for a real token, `0` for padding |
+| `hidden_states * mask` | Zeroes out every padding vector before it can pollute the sum |
+| `.sum(1)` | Adds across the sequence axis, collapsing `seq_len` away |
+| `mask.sum(1)` | Counts the real tokens — the correct denominator, not `seq_len` |
+| `p=2` | The L2 (Euclidean) norm: `sqrt(sum of squares)` |
+| `F.normalize(..., p=2)` | Divides each vector by its own L2 norm, making its length exactly `1.0` |
+
+**Walk one example.** A 4-position sequence in 3 dimensions, 2 real tokens and 2 padding:
+
+```
+  hidden_states          mask
+    t1  [1.0, 0.0, 1.0]    1   real
+    t2  [0.0, 2.0, 0.0]    1   real
+    t3  [3.0, 1.0, 0.0]    0   PAD  (still a nonzero vector!)
+    t4  [0.0, 0.0, 5.0]    0   PAD
+
+  MASKED MEAN (correct)
+    hidden_states * mask -> [1,0,1], [0,2,0], [0,0,0], [0,0,0]
+    .sum(1)              =  [1.0, 2.0, 1.0]
+    mask.sum(1)          =  2
+    mean                 =  [0.5, 1.0, 0.5]
+
+  L2 NORMALIZE
+    norm = sqrt(0.25 + 1.00 + 0.25) = sqrt(1.5) = 1.2247
+    unit = [0.5, 1.0, 0.5] / 1.2247 = [0.4082, 0.8165, 0.4082]
+    check: 0.4082^2 + 0.8165^2 + 0.4082^2 = 1.0
+
+  NAIVE MEAN (forgot the mask -- divides by seq_len = 4)
+    .sum(1)/4            =  [1.0, 0.75, 1.5]
+    unit                 =  [0.5121, 0.3841, 0.7682]
+
+  cosine(correct, naive) =  0.8363
+```
+
+That last number is the damage: one forgotten mask moved the sentence vector 0.16 cosine away from where it belonged, and it moved it *toward whatever garbage sat in the padding slots* — which is shared across the batch, so every short sentence drifts toward the same wrong place and they all start looking similar to each other. Once vectors are unit-length, cosine similarity and the dot product are the same operation, which is why every vector database asks for normalized input: it can then use fast inner-product search and skip the division entirely.
+
 ### Token Classification (NER)
 
 ```python
@@ -462,6 +652,53 @@ def distillation_loss(
 
     return alpha * distill_loss + (1 - alpha) * task_loss
 ```
+
+**What it means.** `alpha * distill_loss + (1 - alpha) * task_loss` says: "learn 70% from what the teacher *believed* and 30% from what the label *says*, because the teacher's uncertainty carries information a one-hot label throws away."
+
+A hard label tells the student "class 0". The teacher's softened distribution tells it "class 0, but class 1 was a close call and class 3 was never in the running" — the relative ordering of the wrong answers is free supervision, and that is the entire mechanism behind dark knowledge.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` (temperature) | Divisor applied to logits before softmax. `T = 1` is normal; `T = 4` flattens the distribution so small probabilities become visible |
+| `soft_teacher` | `softmax(teacher_logits / T)` — the teacher's belief, deliberately blurred |
+| `soft_student` | `log_softmax(student_logits / T)` — student's belief in log space, which is what `kl_div` expects as input |
+| `KL(teacher \|\| student)` | How many extra nats it costs to describe the teacher's distribution using the student's. `0` when identical |
+| `* T ** 2` | Gradient rescale. Softening by `T` shrinks gradients by roughly `1/T^2`; this multiplies the scale back |
+| `alpha = 0.7` | Weight on the soft (teacher-matching) term |
+| `1 - alpha = 0.3` | Weight on the hard-label cross-entropy. Keeps the student anchored to ground truth if the teacher is wrong |
+
+**Walk one example.** Teacher logits `[4.0, 2.0, 1.0, 0.5]`, student `[3.0, 2.5, 1.0, 0.5]`, true label `0`, `T = 4.0`, `alpha = 0.7`:
+
+```
+  STEP 1 -- what temperature does to the teacher
+    T = 1   softmax([4.0, 2.0, 1.0, 0.5]) = [0.8228, 0.1114, 0.0410, 0.0248]
+    T = 4   softmax([1.0, 0.5, 0.25, 0.125])
+                                          = [0.4007, 0.2430, 0.1893, 0.1670]
+
+    At T=1 the answer is 82% class 0 and the runners-up are nearly invisible.
+    At T=4 you can finally SEE that class 1 > class 2 > class 3. That ranking
+    is the "dark knowledge" the student is being taught.
+
+  STEP 2 -- the student, same temperature
+    T = 4   softmax([0.75, 0.625, 0.25, 0.125])
+                                          = [0.3307, 0.2918, 0.2006, 0.1770]
+
+  STEP 3 -- distillation term
+    KL(teacher || student)                = 0.011875
+    x T^2 = x 16                          = 0.1900
+
+  STEP 4 -- task term (hard label, T = 1)
+    softmax(student)                      = [0.5483, 0.3325, 0.0742, 0.0450]
+    cross_entropy, true label 0 = -ln(0.5483)
+                                          = 0.6010
+
+  STEP 5 -- combine
+    0.7 x 0.1900                          = 0.1330
+    0.3 x 0.6010                          = 0.1803
+    total loss                            = 0.3133
+```
+
+**Why the `T ** 2` is not optional.** Compare the KL at each temperature on the exact same pair of logit vectors: `0.1731` at `T = 1` versus `0.011875` at `T = 4` — softening shrank the disagreement roughly 15-fold, and with it the gradient. Multiply by `T^2 = 16` and you get `0.1900`, back in the same range as the `0.6010` task term. Skip the `* (temperature ** 2)` and the soft term becomes numerically negligible next to the hard term; `alpha = 0.7` would then be a lie, because the distillation signal you *think* you weighted at 70% contributes almost nothing and the student learns from one-hot labels alone.
 
 ---
 
@@ -576,6 +813,46 @@ tokenizer(texts, padding="longest", truncation=True, max_length=512)
 # For short-text tasks (avg 40 tokens), this cuts memory ~12x vs padding to 512
 ```
 
+**The idea behind it.** `32 * 512 * 768 * 12 layers * 4 bytes * overhead` says: "every token, at every layer, leaves a 768-number footprint behind that backprop needs later — and the word `overhead` is doing an enormous amount of work in that sentence."
+
+The literal product is only 0.6 GB. The reason the real answer is 16 GB is that the terms hidden inside "overhead" are bigger than the term written down, and one of them grows with the *square* of sequence length.
+
+| Symbol | What it is |
+|--------|------------|
+| `32` | Batch size — how many sequences are in flight together |
+| `512` | Sequence length in tokens. The term that appears squared in attention |
+| `768` | Hidden size. One activation vector per token per layer |
+| `12` | Layers. Every layer stores its own activations for the backward pass |
+| `4 bytes` | FP32. Halves to 2 with mixed precision |
+| `overhead` | The unwritten terms: the `4H`-wide FFN intermediates, the `batch x heads x 512 x 512` attention score matrices, gradients, and AdamW's two optimizer moments |
+
+**Walk one example.** Price the real terms at `batch=32, seq=512` on BERT-base:
+
+```
+  written-down term
+    hidden activations   32 x 512 x  768 x 12 x 4 bytes  =  0.60 GB
+
+  what "overhead" actually contains
+    FFN intermediates    32 x 512 x 3072 x 12 x 4 bytes  =  2.42 GB   (4x wider)
+    attention scores     32 x 12 heads x 512 x 512 x 12 x 4 bytes
+                                                         =  4.83 GB   <- largest
+                                                            ---------
+    activation subtotal                                  =  7.85 GB
+
+    AdamW state          110M params x (4+4+4+4) bytes   =  1.76 GB
+    (weights + grads + first moment + second moment)
+
+  plus fragmentation, cuDNN workspace, and the fp32 master copy -> 16GB card OOMs
+
+  DROP TO batch = 8 (the fix, with grad accumulation x4)
+    hidden               0.15 GB
+    FFN                  0.60 GB
+    attention            1.21 GB
+    activation subtotal  1.96 GB     -- 4x smaller, effective batch unchanged
+```
+
+**Why sequence length hurts four times harder than batch size.** The attention score matrix is `batch x heads x seq x seq`, so halving the batch halves it but halving the sequence *quarters* it. Going from 512 to 128 tokens shrinks that 4.83 GB term by `(512/128)^2 = 16x`, down to 0.30 GB. That quadratic is the whole reason for the second fix above: dynamic padding to the batch's longest sequence rather than a fixed 512 does not just save the linear activation terms — on a corpus averaging 40 tokens it kills the dominant quadratic term almost entirely, which is where the "~12x" figure comes from (`512 / 40 = 12.8` on the linear terms, far more on attention). It is also why ModernBERT's sliding-window local attention matters: capping the window at 128 makes the cost linear in sequence length instead of quadratic, which is what makes an 8192-token encoder affordable at all.
+
 ### Pitfall 4: Catastrophic forgetting on small datasets
 
 ```python
@@ -592,6 +869,38 @@ def get_layerwise_optimizer(model, base_lr: float = 2e-5, decay: float = 0.95):
     params.append({"params": model.classifier.parameters(), "lr": base_lr * 10})
     return AdamW(params)
 ```
+
+**What the formula is telling you.** `lr = base_lr * (decay ** (len(layers) - i))` says: "the deeper a layer sits in the stack, the less you are allowed to move it — and the brand-new classifier on top, which knows nothing, gets to move fastest of all."
+
+The premise is that BERT's layers are not interchangeable. Lower layers hold general lexical and syntactic structure learned from billions of tokens; upper layers hold the task-adjacent semantics you actually want to reshape. A single flat learning rate treats a 1,000-example dataset as sufficient evidence to rewrite both, and it is not.
+
+| Symbol | What it is |
+|--------|------------|
+| `layers` | `[embeddings] + 12 encoder layers` = 13 entries, ordered bottom to top |
+| `i` | Index into that list. `i = 0` is the embedding table, `i = 12` is the top encoder layer |
+| `len(layers) - i` | Depth from the top. `13` for the embeddings, `1` for the topmost layer |
+| `decay = 0.95` | Per-level multiplier. Each step downward shaves 5% off the learning rate |
+| `base_lr = 2e-5` | The reference rate the top of the encoder is scaled from |
+| `base_lr * 10` | The classifier head's rate. Randomly initialized, so it *should* move fast |
+
+**Walk one example.** `base_lr = 2e-5`, `decay = 0.95`, 13 layers:
+
+```
+  component              i     exponent (13 - i)     lr
+  ------------------   ----   -----------------   -----------
+  classifier head        --          --            2.0000e-04   <- 10x base
+  encoder layer 12       12           1            1.9000e-05
+  encoder layer  9        9           4            1.6290e-05
+  encoder layer  6        6           7            1.3967e-05
+  encoder layer  3        3          10            1.1975e-05
+  encoder layer  1        1          12            1.0807e-05
+  embeddings              0          13            1.0267e-05   <- slowest
+
+  spread across the encoder   1.9000e-05 / 1.0267e-05  =  1.85x
+  head vs embeddings          2.0000e-04 / 1.0267e-05  = 19.48x
+```
+
+**Why `0.95` and not something aggressive.** The encoder spread is only `1.85x` end to end — this is a gentle brake, not a freeze. That is deliberate: the layers still adapt, just at graded speed, so you keep the benefit of full fine-tuning while removing the failure mode where epoch 1 scrambles the embedding table before the head has learned anything useful. Push `decay` to `0.8` and the embeddings get `2e-5 * 0.8^13`, effectively frozen; leave it at `1.0` and you are back to the flat schedule that produced the bimodal seed distribution. The `10x` on the classifier is the other half of the trick: without it, the random head learns at the same crawl as the pretrained encoder, so the encoder spends early steps chasing gradients routed through a head that is still noise.
 
 ### Pitfall 5: Evaluating at the wrong granularity for NER
 

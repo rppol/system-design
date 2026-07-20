@@ -135,6 +135,45 @@ RESULT:
 
 The offline join must pick value=47 — the last snapshot computed strictly before the event; reading value=49 (computed after the event) leaks the future into training.
 
+**What this actually says.** "For every training row, ask what the serving system *could have known* at that instant, and use only that." The join is not a lookup by entity — it is a lookup by entity *and* by clock, and the clock condition is the whole correctness property.
+
+| Symbol | What it is |
+|--------|------------|
+| `event_time` | When the label happened. The frozen "now" for this one training row |
+| `feature_time` | When the feature value was computed and written to the offline store |
+| `feature_time < event_time` | The leakage guard. Strictly-less, never `<=`, so a same-instant recompute cannot slip in |
+| `feature_time >= event_time - max_age` | The staleness guard. Older than the window counts as missing, matching serving's TTL expiry |
+| `max(feature_time)` among survivors | The ASOF pick — the freshest value that was legitimately available |
+
+**Walk one example.** Push u1's row through both joins and price the difference:
+
+```
+  event: u1 at 2024-01-15 10:00:00, label = 1
+
+  candidate snapshots for u1        feature_time < event_time ?   kept ?
+    2024-01-14 03:00  value 45          yes (31h earlier)          yes
+    2024-01-15 03:00  value 47          yes (7h earlier)           yes  <- ASOF pick
+    2024-01-15 12:00  value 49          NO  (2h later)             no
+
+  correct  join -> 47
+  naive    join -> 49    (a plain LEFT JOIN on user_id takes the newest row)
+  inflation      -> (49 - 47) / 47 = 4.26% on this one feature
+```
+
+That 4.26% looks harmless per row, which is exactly the trap. Section 10 records the production version of it: a naive lifetime-value join scored **0.91 AUC offline and 0.67 AUC online**. Read that as headroom above a coin flip, not as a 24-point drop:
+
+```
+  offline lift over random :  0.91 - 0.50 = 0.41
+  online  lift over random :  0.67 - 0.50 = 0.17
+
+  real fraction of the lift :  0.17 / 0.41 = 41.5%
+  leaked fraction           :  100% - 41.5% = 58.5%
+```
+
+Nearly **three-fifths of the apparent skill was the future leaking backwards**. This is why point-in-time correctness is a correctness property rather than a quality tweak — a leaky join does not degrade a model gracefully, it manufactures a number that was never real.
+
+**Why the `max_age` term exists.** Without it the ASOF join happily reaches back months to find *some* value, so training sees a feature that serving would have returned as a cache miss. The window forces the offline join to go missing exactly where the online store's TTL would have gone missing, so the same default-imputation path is exercised in both places.
+
 ### Point-in-Time Join Logic (ASOF)
 
 ```mermaid
@@ -209,6 +248,58 @@ flowchart LR
 ```
 
 Materialization is the offline-to-online bridge: it reads the newest offline snapshot and writes each entity to Redis with a TTL of at least twice the schedule interval, so one delayed run does not surface as serving cache misses.
+
+### Reading the Freshness Budget
+
+The TTL rule stated above — `TTL >= 2 x update_interval` — is the one piece of feature-store arithmetic that gets set wrong most often, because it looks like a cache tuning knob and is actually a staleness contract.
+
+**Read it like this.** "A served feature is never fresher than the slowest stage that produced it, so add the stages up, then set the TTL to twice that so one missed run expires loudly instead of lying quietly."
+
+| Symbol | What it is |
+|--------|------------|
+| `update_interval` | How often the producing job runs. The floor on average staleness |
+| `stage delay` | Time added by one hop: window close, stream lag, batch cron, materialize run |
+| `worst-case age` | Sum of the stage delays — the oldest a value can be while still correct |
+| `TTL` | When Redis deletes the key. The ceiling on staleness the serving path can observe |
+| `TTL / update_interval` | The safety factor. `2` = survive one missed run; `24` = hide a full day of failure |
+
+**Walk one example.** Add the stages up for each of the three feature paths in the Section 14 fraud design, and watch the TTLs fall out of the arithmetic:
+
+```
+  path              stage delays                        worst-case age    TTL set
+  ---------------------------------------------------------------------------------
+  real-time         5-min window + 60s Flink lag        6 min             10 min
+    count_5m        + Redis read 3ms                    (360.003 s)       (1.7x)
+
+  hourly            1h cron + job runtime               ~1h+              2 h
+    spend_7d        + Redis read 3ms                                      (2x)
+
+  daily             24h cron + 1h materialize run       25 h              25 h
+    card fraud_rate + Redis read 3ms                                      (~1x)
+```
+
+The read itself is 3ms against a 25-hour budget — **the online store's latency is nowhere near the dominant staleness term**, and engineers who tune Redis to shave a millisecond while a batch job sets the age at 25 hours are optimizing the wrong stage by seven orders of magnitude.
+
+**What the safety factor buys, priced out.** Section 10's incident sets TTL at 24 hours on a feature updated hourly:
+
+```
+  safety factor = TTL / update_interval
+
+  correct  :  2 h / 1 h  =  2x   -> job fails 2 runs  -> key expires -> cache MISS -> alert
+  incident : 24 h / 1 h  = 24x   -> job fails 2 runs  -> key alive   -> stale value served
+                                    silence lasts up to 23 more hours
+```
+
+A 24x factor does not make the system more available — it converts a loud failure into a silent one. The `2x` rule is chosen so that exactly one missed run is survivable and the second one surfaces.
+
+**How the miss rate becomes an alert threshold.** The 0.1% cache-miss alarm in Section 10 sounds tiny until it is multiplied by the Section 14 traffic:
+
+```
+  5,000 transactions/sec x 0.1%  =      5 misses/sec
+                                 =  432,000 misses/day
+```
+
+432,000 daily predictions scored on default-imputed features is the actual meaning of "0.1%", which is why the threshold is set there rather than at a percent.
 
 ## 6. How It Works — Detailed Mechanics
 
@@ -523,6 +614,40 @@ def monitor_feature_drift(
     }
 ```
 
+**In plain terms.** PSI = `sum over bins of (p_curr - p_base) x log(p_curr / p_base)` says: "for every bucket of the feature's range, multiply how much the mass moved by how many times it moved, and add it all up."
+
+| Symbol | What it is |
+|--------|------------|
+| `p_base[i]` | Fraction of the training-time values that fell in bin `i` |
+| `p_curr[i]` | Fraction of today's serving values in that same bin |
+| `p_curr - p_base` | Raw mass moved. Signed, so gains and losses point opposite ways |
+| `log(p_curr / p_base)` | Relative move. `0` when unchanged, and it explodes as a bin empties out |
+| the product | Why PSI is always `>= 0`: both factors flip sign together, so every term is non-negative |
+| `epsilon = 1e-8` | Floor on an empty bin, so `log(0/p)` cannot return `-inf` and poison the sum |
+| `bins` at deciles of baseline | Equal-mass bins, so every `p_base` starts at `0.10` and no bin is born empty |
+
+**Walk one example.** Five equal-mass bins, baseline flat at `0.20`, with today's traffic sliding toward the high end:
+
+```
+  bin   p_base   p_curr    diff     log(curr/base)   term
+  ---------------------------------------------------------
+   1     0.20     0.10    -0.10        -0.6931      0.0693
+   2     0.20     0.15    -0.05        -0.2877      0.0144
+   3     0.20     0.20     0.00         0.0000      0.0000
+   4     0.20     0.25    +0.05        +0.2231      0.0112
+   5     0.20     0.30    +0.10        +0.4055      0.0405
+  ---------------------------------------------------------
+                                        PSI    =    0.1354
+
+  severity ladder:  < 0.10  ok
+                   0.1-0.2  warning   <- 0.1354 lands here
+                    > 0.20  critical, should_retrain = True
+```
+
+Note bin 3: mass unchanged, term exactly `0.0`. Bins that did not move contribute nothing, so PSI reports **only** the movement. And the two ends dominate — bin 1 alone contributes `0.0693`, over half the total, because losing half a bin's mass is a bigger relative event than gaining a quarter of one.
+
+**Why the thresholds sit at 0.1 and 0.2.** They are conventions inherited from credit scorecards, not derived quantities, and their value is that they are *stable across features*: because PSI compares each bin against its own baseline share, a 10-decile PSI of `0.2` means roughly the same amount of distributional movement whether the feature is a dollar amount or a count. That comparability is what lets one number gate retraining for every feature in the store.
+
 ---
 
 ## 7. Real-World Examples
@@ -723,6 +848,33 @@ Run a quarterly feature audit: identify features with zero models consuming them
 - Rule engine (velocity rules): 3ms
 - Network + serialization: 10ms
 - Headroom: 5ms
+
+**Stated plainly.** The budget line reads: "every stage gets a fixed allowance, the allowances must sum to less than the SLO, and whatever is left over is the only protection you have against a bad day."
+
+| Symbol | What it is |
+|--------|------------|
+| `30ms` | The P99 SLO. The number the product promised, not an average |
+| stage allowance | The slice each component may spend before it is the one breaking the SLO |
+| `headroom` | Deliberately unallocated time. Absorbs GC pauses, retries, and noisy neighbours |
+| `8 keys` in one pipeline | Redis round-trips collapsed into one, so 8 features cost one network hop |
+
+**Walk one example.** Add the allowances and see where the budget actually goes:
+
+```
+  Redis pipeline, 8 keys        4 ms    13.3%
+  LightGBM, 150 features        8 ms    26.7%
+  velocity rule engine          3 ms    10.0%
+  network + serialization      10 ms    33.3%   <- the largest single line
+  ----------------------------------------
+  allocated                    25 ms    83.3%
+  headroom                      5 ms    16.7%
+  ----------------------------------------
+  P99 SLO                      30 ms
+```
+
+The feature fetch is **13.3% of the budget** and network plus serialization is 33.3% — two and a half times larger. The instinct in an interview is to attack the feature store; the arithmetic says the transport layer is the bigger prize.
+
+**Why the 8 keys are pipelined rather than fetched in a loop.** Eight sequential Redis GETs at a 3ms P99 each would cost roughly `8 x 3 = 24ms`, pushing the allocated total to `24 + 8 + 3 + 10 = 45ms` and blowing the 30ms SLO by 15ms before any headroom is counted. Batched into one pipeline the same eight keys cost one round-trip and land at 4ms. The batching is not an optimization here, it is the difference between meeting the SLO and missing it outright.
 
 **Point-in-time correctness**: the fraud model is retrained weekly. Training data is generated using point-in-time correct joins: for each historical transaction, features are retrieved as of the transaction timestamp (not current values). This is critical — including future "count_5m" values (computed after the transaction) would show 0 for fraudulent transactions that were later blocked, leaking the label.
 

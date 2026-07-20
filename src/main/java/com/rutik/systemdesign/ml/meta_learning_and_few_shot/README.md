@@ -138,6 +138,53 @@ miniImageNet, Conv-4 backbone (Prototypical Networks):
 
 Going from 1 shot to 5 shots does not change what is being estimated — a per-class mean embedding — only how noisy the estimate is; the roughly 19-point accuracy jump above is almost entirely a variance reduction, not new information.
 
+**What this actually says.** "N-way K-shot with Q queries" is three multiplications: "an episode is `N x K` labeled images to learn from, `N x Q` different images to be graded on, and a coin-flip floor of `1/N` you must beat to have learned anything at all."
+
+Getting these three counts straight is the difference between reading a benchmark table correctly and comparing two numbers that were never comparable. `N` sets the difficulty, `K` sets the signal, `Q` sets only the measurement precision.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` (way) | Classes in this episode. Chance accuracy is exactly `1/N`, so higher N is strictly harder |
+| `K` (shot) | Labeled examples per class in the support set. What the model adapts on |
+| `Q` (query) | Held-out examples per class, from the SAME N classes. What the model is scored on |
+| support size | `N x K` — usually tiny, 5 to 25 images |
+| query size | `N x Q` — usually much larger than the support set, which surprises people |
+| episode size | `N x (K + Q)` total images touched per episode |
+| episodes | How many episodes you average over. Affects only the confidence interval, not the mean |
+
+**Walk one example.** The three settings this module reports, with `Q = 15`:
+
+```
+    setting            support = NxK    query = NxQ    episode = Nx(K+Q)    chance = 1/N
+    ---------------    -------------    -----------    -----------------    ------------
+    5-way 1-shot         5 x 1 =  5      5 x 15 = 75      5 x 16 =  80          20.0%
+    5-way 5-shot         5 x 5 = 25      5 x 15 = 75      5 x 20 = 100          20.0%
+    20-way 1-shot       20 x 1 = 20     20 x 15 = 300    20 x 16 = 320           5.0%
+
+    The query set is 15x larger than the support set at 1-shot. The model learns from
+    5 images and is graded on 75 -- that ratio is what makes a single episode's
+    accuracy readable at all.
+
+    Reported accuracy vs chance:
+      ProtoNet 5-way 1-shot  ~49%  is 2.5x its 20% chance floor
+      ProtoNet 5-way 5-shot  ~68%  is 3.4x the same 20% floor
+      A 20-way number is NOT comparable to either -- its floor is 5%, not 20%.
+```
+
+**Why the episode count is a separate knob.** `N`, `K`, and `Q` define one episode; the number of episodes you average defines how precisely you know the mean. Episode accuracies vary a lot — with a per-episode standard deviation around 18 points, the 95% confidence interval is `1.96 x 18 / sqrt(episodes)`:
+
+```
+    episodes     95% CI half-width = 1.96 x 18 / sqrt(episodes)
+    --------     -----------------------------------------------
+        100      1.96 x 18 / 10.00  = +/- 3.53 points
+        600      1.96 x 18 / 24.49  = +/- 1.44 points
+
+    Sampling 6x more episodes shrinks the interval only sqrt(6) = 2.45x -- the usual
+    square-root penalty. But it is the difference between a +/- 3.5-point interval,
+    which swallows most published improvements whole, and a +/- 1.4-point one that
+    can actually resolve them. This is why 600+ episodes is the field's convention.
+```
+
 ### Prototypical Networks classification
 
 ```mermaid
@@ -396,6 +443,67 @@ def reptile_outer_step(
     with torch.no_grad():
         for name, p in model.named_parameters():
             p.copy_(theta_0[name] + epsilon * accum[name] / len(task_batches))
+```
+
+**Read it like this.** The two loops are two update rules stacked, `theta_i' = theta - alpha * grad_theta L_i^support(theta)` inside and `theta <- theta - beta * grad_theta sum_i L_i^query(theta_i')` outside: "adapt a throwaway copy on each task's support set, see how that copy does on the task's query set, and then move the *starting point* in whatever direction would have made those adapted copies better."
+
+The outer gradient is taken with respect to `theta`, not `theta_i'` — that is the entire idea. You never keep the adapted weights; you only keep what they taught you about where to start.
+
+| Symbol | What it is |
+|--------|------------|
+| `theta` | The one shared initialization. The only thing MAML actually ships |
+| `theta_i'` | Fast weights for task `i` — a temporary copy, discarded after the outer step |
+| `alpha` | Inner learning rate, `inner_lr=0.01` above. Governs adaptation within one episode |
+| `beta` | Outer (meta) learning rate, whatever `meta_optimizer` uses. Governs learning across episodes |
+| `L_i^support` | Loss on task `i`'s support set — drives the inner loop only |
+| `L_i^query` | Loss on task `i`'s *query* set, evaluated at `theta_i'` — the only thing the outer loop sees |
+| `grad_theta` (outer) | Differentiates through the inner update, which is why a second derivative appears |
+
+**Walk one example.** A scalar toy so every number is checkable: support loss `L_s(theta) = (theta - 3)^2`, query loss `L_q(theta) = (theta - 2)^2`, `theta = 1.0`, `alpha = 0.01`, `inner_steps = 5` (the code's defaults):
+
+```
+    Inner loop -- 5 SGD steps on the SUPPORT loss, starting from theta = 1.0
+
+    step   theta       grad L_s = 2(theta-3)   theta - alpha*grad    d(theta')/d(theta)
+    ----   --------    ---------------------   ------------------    ------------------
+      1    1.000000          -4.000000              1.040000              0.980000
+      2    1.040000          -3.920000              1.079200              0.960400
+      3    1.079200          -3.841600              1.117616              0.941192
+      4    1.117616          -3.764768              1.155264              0.922368
+      5    1.155264          -3.689473              1.192158              0.903921
+
+    theta' = 1.192158                     <- fast weights, about to be thrown away
+    d(theta')/d(theta) = (1 - alpha*2)^5 = 0.98^5 = 0.903921
+
+    Outer loop -- evaluate the QUERY loss at theta', differentiate back to theta
+
+    L_q(theta') = (1.192158 - 2)^2 = 0.652608
+    dL_q/d(theta') = 2 * (1.192158 - 2) = -1.615683
+
+    full MAML  meta-grad = -1.615683 x 0.903921 = -1.460450   <- chain rule through
+                                                                 the inner steps
+    FOMAML     meta-grad = -1.615683                          <- pretends theta' is
+                                                                 independent of theta
+
+    Outer update with beta = 0.001:
+      full MAML : theta <- 1.0 - 0.001 x (-1.460450) = 1.00146045
+      FOMAML    : theta <- 1.0 - 0.001 x (-1.615683) = 1.00161568
+```
+
+Both meta-gradients point the same direction; they differ only in magnitude, here by `9.6%`. That is the whole FOMAML bet — the `0.903921` curvature factor is a modest rescaling near a reasonable solution, and dropping it removes the entire second-order graph. Notice the outer update moves `theta` by `0.00146`, about `132x` less than the `0.192` the inner loop moved `theta'`: the inner loop is supposed to move a lot and be discarded, the outer loop is supposed to move a little and persist.
+
+**Why the query set must be disjoint from the support set.** If the outer loss were measured on the same examples the inner loop just adapted on, `theta` would be rewarded for producing an initialization that *memorizes* five images in five gradient steps — which any sufficiently flexible model can do without learning anything transferable. The support/query split is what forces the outer objective to be "adapts and then generalizes" instead of "adapts and then overfits."
+
+**Where Reptile diverges.** Reptile skips the query set and the chain rule entirely: run the inner steps, then interpolate. With `inner_lr = 0.02`, `inner_steps = 10` on the same `L_s`, the toy gives `theta' = 1.670335`, so with `epsilon = 0.1`:
+
+```
+    theta <- theta + epsilon * (theta' - theta)
+           = 1.0 + 0.1 x (1.670335 - 1.0)
+           = 1.0 + 0.1 x 0.670335
+           = 1.067033
+
+    No query loss. No d(theta')/d(theta) term. No autograd beyond the 10 plain SGD
+    steps. The direction (theta' - theta) is used directly as a pseudo-gradient.
 ```
 
 **Key hyperparameters and their effects:**

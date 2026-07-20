@@ -33,6 +33,179 @@ Maximum Likelihood Estimation (MLE) answers: given a dataset, what parameters ma
 - **Law of Total Probability**: P(A) = sum_i P(A|B_i) P(B_i) for a partition {B_i}.
 - **Central Limit Theorem (CLT)**: For iid samples with mean mu and variance sigma^2, the sample mean X_bar converges to N(mu, sigma^2/n) as n -> inf. This is why Gaussian assumptions work even when individual data points are not Gaussian.
 
+### Decoding Bayes' Theorem
+
+```
+  P(A|B) = P(B|A) * P(A) / P(B)
+
+  and the Law of Total Probability supplies that denominator:
+  P(B) = P(B|A) * P(A) + P(B|not A) * P(not A)
+```
+
+**What the formula is telling you.** "Start with how common the thing is, multiply by how
+loudly the evidence shouts, then divide by how often that evidence shows up at all — from
+every source, not just the one you care about."
+
+That last clause is where almost everyone goes wrong. The denominator is a *sum over both
+branches*: true positives plus false positives. If the false-positive branch is bigger than the
+true-positive branch, a "positive" result mostly means "false alarm", no matter how accurate
+the test sounds.
+
+| Symbol | What it is |
+|--------|------------|
+| `P(A)` | The prior. How common A is before you saw any evidence — the base rate |
+| `P(B\|A)` | The likelihood. If A is true, how often does evidence B appear? |
+| `P(A\|B)` | The posterior. Your updated belief in A now that you have seen B |
+| `P(B)` | Total evidence probability. How often B appears across all ways it can happen |
+| `not A` | The complement — everything that is not A. `P(not A) = 1 - P(A)` |
+| `P(B\|not A)` | The false-alarm rate. The branch people forget to include in `P(B)` |
+
+**Walk one example.** The classic medical test, 1% prevalence, a "99% accurate" test:
+
+```
+  Disease prevalence      P(D)       = 0.01     1 person in 100
+  Sensitivity             P(+|D)     = 0.99     catches 99% of sick people
+  Specificity             P(-|not D) = 0.99     so P(+|not D) = 1 - 0.99 = 0.01
+
+  numerator      P(+|D)     * P(D)     = 0.99 * 0.01  = 0.0099   sick and positive
+  false-positive P(+|not D) * P(not D) = 0.01 * 0.99  = 0.0099   healthy and positive
+  denominator    P(+) = 0.0099 + 0.0099              = 0.0198
+
+  P(D|+) = 0.0099 / 0.0198 = 0.5000    ->  a coin flip, not 99%
+```
+
+Now shrink the prior tenfold and hold the test fixed. Nothing about the test changed:
+
+```
+  Disease prevalence      P(D)   = 0.001    1 person in 1000
+  Same test:              P(+|D) = 0.99,  P(+|not D) = 0.01
+
+  numerator      0.99 * 0.001  = 0.00099
+  false-positive 0.01 * 0.999  = 0.00999      10x bigger than the numerator
+  denominator    0.00099 + 0.00999 = 0.01098
+
+  P(D|+) = 0.00099 / 0.01098 = 0.09016  ->  about 9%
+```
+
+A positive result on a "99% accurate" test means a 9% chance of having the disease. The
+arithmetic reason is visible in the two lines: there are 999 healthy people and only 1 sick
+one, so even a 1% false-positive rate produces ~10 false alarms for every true one. This is the
+base-rate fallacy, and it is the single most-asked probability question in ML interviews.
+
+**Why the denominator exists at all.** `P(B)` is just a normalizer that forces the posterior to
+be a valid probability. Drop it and you get `0.0099` and `0.00099` — unnormalized scores that
+still rank correctly but do not sum to 1. This is exactly why Naive Bayes classifiers can skip
+the denominator entirely: you only need the argmax, and `P(B)` is the same for every class.
+
+### Decoding Expectation and Variance
+
+```
+  E[X]   = sum_x  x * P(X=x)
+  Var(X) = E[(X - E[X])^2] = E[X^2] - (E[X])^2
+```
+
+**In plain terms.** "Expectation is the long-run average you would converge to if you ran the
+experiment forever; variance is the average squared distance from that average."
+
+The squaring is not decoration. Plain distances `(x - E[X])` sum to exactly zero by
+construction, so you would learn nothing; squaring makes every deviation count positively and
+punishes far-out values harder than near ones.
+
+| Symbol | What it is |
+|--------|------------|
+| `E[X]` | The probability-weighted average outcome. Often written `mu`. Need not be attainable |
+| `P(X=x)` | How likely the value `x` is. All of these sum to 1 |
+| `X - E[X]` | The deviation. How far one outcome sits from the average |
+| `(X - E[X])^2` | Squared deviation. Removes sign and amplifies the outliers |
+| `Var(X)` | Average squared deviation. Units are the square of X's units |
+| `E[X^2]` | Average of the *squares* — not the same as the square of the average |
+| `sqrt(Var(X))` | Standard deviation, `sigma`. Back in X's original units, so readable |
+
+**Walk one example.** A four-valued discrete variable, both routes to the variance:
+
+```
+  X takes value      0      1      2      3
+  with probability  0.1    0.3    0.4    0.2      (sums to 1.0)
+
+  E[X] = 0*0.1 + 1*0.3 + 2*0.4 + 3*0.2
+       = 0.0   + 0.3   + 0.8   + 0.6    = 1.7    <- the long-run average
+
+  Definition route -- average squared distance from 1.7:
+     x   (x - 1.7)  (x - 1.7)^2  times P(x)
+     0     -1.7        2.89        0.289
+     1     -0.7        0.49        0.147
+     2     +0.3        0.09        0.036
+     3     +1.3        1.69        0.338
+                            sum  =  0.810
+
+  Shortcut route:
+     E[X^2] = 0*0.1 + 1*0.3 + 4*0.4 + 9*0.2 = 0.0 + 0.3 + 1.6 + 1.8 = 3.7
+     Var(X) = E[X^2] - (E[X])^2 = 3.7 - 1.7^2 = 3.7 - 2.89 = 0.81
+
+  Both routes give 0.81.  sigma = sqrt(0.81) = 0.9
+```
+
+Note that `E[X] = 1.7` is a value X can never actually take — expectation is a summary of the
+distribution, not a prediction of any single draw. Note also `E[X^2] = 3.7` while
+`(E[X])^2 = 2.89`; the gap between them *is* the variance. That gap is never negative, which is
+Jensen's inequality for the convex function `f(x) = x^2` (see Section 12).
+
+**Why the shortcut is the one you use in code.** The definition route needs two passes over the
+data: one to find the mean, one to accumulate squared deviations. `E[X^2] - (E[X])^2` needs a
+single pass accumulating `sum(x)` and `sum(x^2)`, which is how streaming variance and batch-norm
+running statistics are computed. The catch: with large means and small variance it subtracts two
+nearly equal large numbers and loses floating-point precision, which is why NumPy actually uses
+the two-pass form internally.
+
+### Decoding the Central Limit Theorem
+
+```
+  X_bar ~ N(mu, sigma^2 / n)   as n -> inf,  for iid X_i with mean mu, variance sigma^2
+
+  standard error:  se = sigma / sqrt(n)
+```
+
+**Put simply.** "Sample *means* go normal even when the underlying data is nowhere near normal,
+and they tighten around the truth at a rate of one over the square root of the sample size."
+
+The subject of the theorem is the mean, not the data. Individual user session durations stay
+brutally right-skewed forever; the *average* of 30 of them is close to Gaussian. Confusing these
+two is the most common CLT mistake.
+
+| Symbol | What it is |
+|--------|------------|
+| `X_i` | One raw observation. Its distribution can be any shape at all |
+| `X_bar` | The sample mean of n observations — itself a random variable |
+| `mu` | The true population mean. The sample mean is centered on it |
+| `sigma` | The population standard deviation, in the raw data's units |
+| `n` | Sample size (or batch size). The only lever you control |
+| `sigma^2 / n` | Variance of the sample mean. Shrinks linearly in n |
+| `sigma / sqrt(n)` | Standard error — the spread of `X_bar`. Shrinks only in `sqrt(n)` |
+| `iid` | Independent and identically distributed. The assumption that breaks first |
+
+**Walk one example.** Population sd `sigma = 1`, the value used in the Section 5 chart:
+
+```
+  n = 1     ->  se = 1 / sqrt(1)   = 1 / 1.000  = 1.0000
+  n = 5     ->  se = 1 / sqrt(5)   = 1 / 2.236  = 0.4472
+  n = 30    ->  se = 1 / sqrt(30)  = 1 / 5.477  = 0.1826
+  n = 256   ->  se = 1 / sqrt(256) = 1 / 16.000 = 0.0625
+
+  At n = 30 the sample mean is distributed N(mu, 0.1826^2), no matter what
+  shape the population had.
+
+  Going n = 30 -> 256 is 8.5x the data for only a 2.9x narrower spread,
+  because 8.5x under a square root is sqrt(8.53) = 2.92.
+```
+
+**Why `sqrt(n)` and not `n` is the fact that runs your budget.** Halving the error bar on any
+measured metric costs 4x the samples; a 10x tighter estimate costs 100x. That single exponent
+explains why A/B tests need tens of thousands of users per arm for a small lift, and why
+doubling batch size from 128 to 256 only cuts gradient noise by 1.41x — usually not worth the
+memory. The CLT is also the reason `iid` appears in every one of these statements: with
+correlated samples (same user, adjacent time steps) the effective n is far below the nominal n,
+so `sigma / sqrt(n)` reports an error bar narrower than reality. That is Pitfall 4 in Section 10.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -51,6 +224,56 @@ Maximum Likelihood Estimation (MLE) answers: given a dataset, what parameters ma
 | Dirichlet(alpha) | alpha (vector) | Prior for categorical distribution | alpha_i/sum | - |
 | Laplace(mu, b) | mu, b | Robust regression; L1 prior | mu | 2b^2 |
 
+**The idea behind it.** "Each row is a different answer to one question — what shape does the
+randomness in my data actually have — and picking the wrong row means your model is fitting a
+noise story that never happened."
+
+The table's Mean and Variance columns are the tell. Poisson is the only row where mean equals
+variance; Bernoulli's variance `p(1-p)` is maximal at `p = 0.5` and vanishes at the extremes;
+Gaussian lets you set both independently. Those structural facts are what decide which
+distribution can even represent your data.
+
+| Symbol | What it is |
+|--------|------------|
+| `mu`, `sigma^2` | Gaussian center and spread. Set independently — the most flexible pair |
+| `p` | Bernoulli success probability. One coin flip; variance is forced to `p(1-p)` |
+| `n, p` | Binomial: a *fixed* number of trials `n`, each succeeding with probability `p` |
+| `lambda` | A rate. Poisson: events per interval. Exponential: events per unit time |
+| `alpha, beta` | Beta shape counts. Read them as "pseudo-successes" and "pseudo-failures" |
+| `PMF` | Discrete: probability of exactly this value. Bernoulli/Binomial/Poisson |
+| `PDF` | Continuous: density, not probability. Gaussian/Exponential/Beta |
+
+**Which row to pick, in one pass.** Binary outcome, one draw -> Bernoulli. Count of successes in
+a *known, fixed* number of draws -> Binomial. Count of events in a window with no natural upper
+bound -> Poisson. A continuous symmetric measurement, or an average of anything -> Gaussian (by
+the CLT). Waiting time until the next event -> Exponential. A parameter that is itself a
+probability in `[0,1]` -> Beta.
+
+**Walk one example.** Evaluate two PMFs against their own mean and variance columns:
+
+```
+  Binomial(n=10, p=0.3) -- exactly 3 clicks out of 10 impressions shown
+    P(X=3) = C(10,3) * 0.3^3 * 0.7^7
+           = 120     * 0.027 * 0.082354
+           = 0.266828                      ->  26.7% chance of exactly 3
+    mean = n*p       = 10 * 0.3       = 3.0
+    var  = n*p*(1-p) = 10 * 0.3 * 0.7 = 2.1     var < mean
+
+  Poisson(lambda=3) -- exactly 5 errors in an hour that averages 3 errors
+    P(X=5) = e^-3 * 3^5 / 5!
+           = 0.049787 * 243 / 120
+           = 0.100819                      ->  10.1% chance of exactly 5
+    mean = lambda = 3.0
+    var  = lambda = 3.0                          var == mean, always
+```
+
+Both models have mean 3, yet they answer different questions and give different spreads. The
+Binomial is capped at 10 (you cannot get 11 clicks from 10 impressions); the Poisson has no cap,
+which is why it can be asked about 5 errors in an hour averaging 3. The `var == mean` identity
+is also a free diagnostic: measure your count data's mean and variance, and if the variance is
+much larger, the data is overdispersed and Poisson will under-report your uncertainty — switch
+to Negative Binomial, as Section 8 says.
+
 ### 4.2 Parameter Estimation Methods
 
 **MLE (Maximum Likelihood Estimation)**: Find theta that maximizes P(data | theta). For a Gaussian: mu_MLE = sample mean; sigma^2_MLE = (1/n) * sum (x_i - mu)^2 (biased). No prior knowledge incorporated.
@@ -59,6 +282,51 @@ Maximum Likelihood Estimation (MLE) answers: given a dataset, what parameters ma
 
 **Full Bayesian Inference**: Compute entire posterior P(theta | data) = P(data | theta) * P(theta) / P(data). Intractable for most models; approximate via MCMC, Variational Inference, or Laplace approximation.
 
+**Read it like this.** "All three are the same Bayes equation, and they differ only in how much
+of it you keep: MLE throws away the prior, MAP keeps the prior but reports one number, and full
+Bayes keeps the whole distribution."
+
+Seeing them as one family rather than three techniques is what makes the loss-function
+connection obvious. `MAP = MLE + log prior` is literally `loss + regularizer` — the bridge the
+Section 5 diagrams keep returning to.
+
+| Symbol | What it is |
+|--------|------------|
+| `theta` | The parameters you are estimating. Model weights, a coin's bias, a mean |
+| `P(data\|theta)` | The likelihood. "If theta were true, how probable is what I saw?" |
+| `P(theta)` | The prior. What you believed about theta before seeing any data |
+| `P(theta\|data)` | The posterior. Belief after the data — a full distribution, not a number |
+| `argmax` | "The theta that makes this biggest." Turns a distribution into one point estimate |
+| `P(data)` | Evidence. The intractable normalizer that forces MCMC or VI in full Bayes |
+| `MLE` | `argmax P(data\|theta)` — prior dropped entirely |
+| `MAP` | `argmax P(data\|theta) * P(theta)` — prior kept, but collapsed to its peak |
+
+**Walk one example.** The coin from Section 2 — 100 flips, 60 heads — with the Beta(10, 10)
+prior, through all three lenses:
+
+```
+  Data: 100 flips, 60 heads, 40 tails.    Prior: Beta(10, 10)
+
+  MLE            = 60 / 100                              = 0.6000
+  Posterior      = Beta(10 + 60, 10 + 40)  =  Beta(70, 50)
+  Posterior mean = 70 / (70 + 50)   = 70 / 120           = 0.5833
+  MAP            = (70 - 1) / (70 + 50 - 2) = 69 / 118   = 0.5847
+
+  Full Bayes keeps all of Beta(70, 50) -- so it can also report a spread,
+  which MLE's single 0.6000 cannot.
+```
+
+Read `Beta(10, 10)` as "9 pseudo-heads and 9 pseudo-tails I am pretending I already saw", so the
+prior adds 18 imaginary fair flips to the 100 real ones and drags 0.6000 down toward 0.5. That is
+regularization, arriving by a different name.
+
+**Why the prior stops mattering as data grows.** The prior contributes a fixed 18 pseudo-flips
+no matter how much data arrives, while the likelihood grows with n. Run 10,000 flips at the same
+60% rate and the posterior becomes `Beta(6010, 4010)`, whose mean is `6010 / 10020 = 0.5998` —
+back on top of the MLE. This is exactly why regularization matters most with small data and
+becomes near-irrelevant once the dataset dwarfs the parameter count, the guidance Section 9
+gives for choosing MLE over MAP.
+
 ### 4.3 Hypothesis Testing
 
 **Null hypothesis (H0)**: The default assumption (no effect, no difference).
@@ -66,6 +334,178 @@ Maximum Likelihood Estimation (MLE) answers: given a dataset, what parameters ma
 **Type I error (alpha)**: Reject H0 when it is true (false positive). Controlled by significance level alpha = 0.05.
 **Type II error (beta)**: Fail to reject H0 when it is false (false negative). Power = 1 - beta.
 **Confidence interval**: 95% CI = [x_bar - 1.96 * se, x_bar + 1.96 * se] where se = sigma / sqrt(n).
+
+#### Decoding the test statistic and the two error types
+
+```
+  t = (mean_a - mean_b) / se,   se = sqrt(var_a/n_a + var_b/n_b)
+
+  Reject H0 when |t| > critical value (1.96 for alpha = 0.05, two-tailed)
+```
+
+**Stated plainly.** "Measure the gap you observed, then divide it by how big a gap pure noise
+could plausibly have produced — if the answer is bigger than about 2, noise is a poor
+explanation."
+
+Every test statistic in statistics has this shape: signal over noise. Once you see that, the
+zoo of t-tests, z-tests, and chi-squared tests stops looking like separate formulas.
+
+| Symbol | What it is |
+|--------|------------|
+| `mean_a - mean_b` | The raw effect. What you actually observed. Has units |
+| `se` | Standard error of that difference — the noise yardstick. Same units |
+| `t` | Effect measured in units of noise. Unitless, which is why it is comparable |
+| `H0` | The boring default: no effect, no difference |
+| `alpha` | Type I error rate you agree to tolerate. Chosen *before* looking; usually 0.05 |
+| `beta` | Type II error rate. Missing a real effect |
+| `1 - beta` | Power. Probability of catching a real effect of the size you designed for |
+| `1.96` | The z where 2.5% of a standard normal sits in each tail, so 5% total |
+
+**Walk one example.** Two variants, 500 users each, using the Welch form from Section 6:
+
+```
+  Group A: n_a = 500, mean_a = 4.10, sample variance var_a = 1.00
+  Group B: n_b = 500, mean_b = 4.32, sample variance var_b = 1.20
+
+  se = sqrt(var_a/n_a + var_b/n_b)
+     = sqrt(1.00/500 + 1.20/500)
+     = sqrt(0.0020   + 0.0024)
+     = sqrt(0.0044) = 0.066332            <- the noise yardstick
+
+  observed gap = 4.32 - 4.10 = 0.22
+  t = 0.22 / 0.066332 = 3.3166            <- the gap is 3.3 noise-widths wide
+
+  alpha = 0.05 two-tailed  ->  critical value 1.96
+  |3.3166| > 1.96          ->  reject H0
+```
+
+The two error types, with the numbers this design implies:
+
+```
+                       H0 actually TRUE           H0 actually FALSE
+  Reject H0            Type I error (false +)     correct detection
+                       rate = alpha    = 0.05     rate = 1 - beta = 0.80
+  Fail to reject       correct                    Type II error (false -)
+                       rate = 1 -alpha = 0.95     rate = beta     = 0.20
+```
+
+Alpha and beta trade against each other at fixed n: demand a critical value of 2.58 instead of
+1.96 and alpha falls to 0.01, but beta rises and you start missing real wins. The only way to
+shrink both at once is to raise n — which shrinks `se` by `sqrt(n)` and stretches every t.
+
+**Why alpha must be chosen before you look.** `alpha = 0.05` is a promise about a procedure, and
+the promise only holds if the rule was fixed in advance. Run 60 true-null tests at 0.05 and you
+expect `60 * 0.05 = 3` false positives by construction — the exact problem the Section 14 case
+study fixes with Benjamini-Hochberg. Peek repeatedly at one test and you get the same leak in
+time rather than across tests, which is why that case study reaches for mSPRT.
+
+#### Decoding the p-value
+
+**What this actually says.** "If the null hypothesis were true, how often would random noise
+alone hand me a result at least this extreme?"
+
+Note the direction of the conditioning bar. The p-value is computed *assuming H0 is true* — H0
+is the given, never the thing being assigned a probability.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Tail probability of results at least as extreme as yours, given H0 |
+| `\| H0` | "Assuming H0 holds." The load-bearing part everyone drops when paraphrasing |
+| "at least as extreme" | The whole tail beyond your statistic, not just your exact value |
+| `2 *` | Two-tailed: an effect in either direction counts as surprising |
+| `Phi(z)` | Standard normal CDF — area to the left of z |
+| `p < alpha` | The decision rule. Not a measure of how big or important the effect is |
+
+**Walk one example.** Carry the `t = 3.3166` forward (n is large, so treat it as a z):
+
+```
+  p = P(|Z| >= 3.3166  |  H0 true)
+    = 2 * (1 - Phi(3.3166))
+    = 2 * 0.000456
+    = 0.000911            ->  about 9 chances in 10,000
+
+  Interpretation: if the two variants were truly identical, a gap this big
+  or bigger would turn up in roughly 1 experiment out of 1,100.
+```
+
+**What a p-value of 0.000911 is NOT.** Each of these is a distinct error, and interviewers ask
+for them by name:
+
+```
+  NOT  P(H0 is true) = 0.000911
+       -> that is a posterior and needs a prior; see Pitfall 1 in Section 10
+
+  NOT  "there is a 0.09% chance the result was due to chance"
+       -> the calculation already ASSUMED chance was the only cause
+
+  NOT  a measure of effect size
+       -> here Cohen's d is 0.21, a small effect; the tiny p comes from
+          n = 500 per group, not from the gap being large
+
+  NOT  1 - P(H1 is true) = 0.999089 confidence in the alternative
+       -> p says nothing whatsoever about H1
+
+  NOT  a claim that repeating the study gives p < 0.05 with 99.9% probability
+       -> replication probability is a different quantity entirely
+```
+
+The effect-size point is the practical one. With `n = 50,000` per arm the same test would return
+an even tinier p for a gap nobody could act on — which is why Section 13's first rule is to
+always report an effect size beside the p-value.
+
+#### Decoding the confidence interval
+
+**What it means.** "Here is a range of effect sizes the data cannot rule out — produced by a
+recipe that, run over and over on fresh samples, brackets the truth 95% of the time."
+
+The 95% is a property of the *procedure*, not of the interval sitting in front of you. Once the
+numbers are computed, the true parameter is either inside it or it is not; there is no
+probability left to talk about in the frequentist framing.
+
+| Symbol | What it is |
+|--------|------------|
+| `x_bar` | Your point estimate — the center of the interval |
+| `se` | Standard error. Sets the interval's width; shrinks as `1/sqrt(n)` |
+| `1.96` | The 95% multiplier. Use 2.58 for 99%, 1.645 for 90% |
+| `1.96 * se` | The margin of error, added and subtracted |
+| `[low, high]` | The interval. Fixed numbers once computed — not a random object |
+| "95% confidence" | A long-run coverage rate of the recipe across repeated samples |
+
+**Walk one example.** Same two variants, so the same `se = 0.066332`:
+
+```
+  point estimate (difference of means) = 0.22
+  95% CI = 0.22 -/+ 1.96 * 0.066332
+         = 0.22 -/+ 0.130
+         = [0.090, 0.350]
+
+  Zero is NOT inside [0.090, 0.350]  ->  same verdict as p = 0.000911 < 0.05
+```
+
+The interval and the p-value are two views of one calculation. A 95% CI excluding zero and a
+two-tailed p below 0.05 are mathematically the same event, which is why Section 13 asks for the
+interval: it also tells you the effect could plausibly be as small as 0.09 or as large as 0.35,
+a business-relevant range the single number `p = 0.000911` hides completely.
+
+**What the 95% claim IS and IS NOT.**
+
+```
+  IS      "If I repeated this experiment many times and built an interval
+           each time by this recipe, about 95% of those intervals would
+           contain the true difference."
+
+  IS NOT  "There is a 95% probability the true difference lies in
+           [0.090, 0.350]."
+           -> that is a Bayesian CREDIBLE interval, and it needs a prior.
+              See the confidence-vs-credible Q&A in Section 12.
+
+  IS NOT  "95% of the data lies in [0.090, 0.350]."
+           -> the interval is about the MEAN, not about individual points.
+              A prediction interval covering data is far wider.
+
+  IS NOT  "A future replication's estimate lands inside 95% of the time."
+           -> that is yet another quantity, and it is closer to 83%.
+```
 
 ---
 

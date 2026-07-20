@@ -10,6 +10,38 @@ F_M(x) = F_0(x) + Σ_{m=1}^{M} η * h_m(x)
 
 where η is the learning rate (shrinkage), h_m are weak learners, and F_0 is the initial prediction (usually the log-odds for binary classification or the mean for regression).
 
+**Read it like this.** "Start from one flat guess, then bolt on a long series of small corrections — each correction is a little tree, and each tree is shrunk before it is allowed to count."
+
+The word that carries the weight is `Σ`, not `mean`. Bagging averages independent models; boosting *sums* dependent ones. That single difference is why boosting attacks bias while bagging attacks variance.
+
+| Symbol | What it is |
+|--------|------------|
+| `F_M(x)` | The finished prediction after all `M` rounds |
+| `F_0(x)` | The starting guess made before any tree exists — mean for regression, log-odds for classification |
+| `h_m(x)` | Tree number `m`. It predicts a **correction**, never a label |
+| `η` | Shrinkage. Every tree's output is multiplied by this before it is added. Typical 0.01–0.1 |
+| `Σ_{m=1}^{M}` | Add up all `M` corrections. Summed, not averaged — this is the boosting/bagging fork |
+
+**Walk one example.** One training point whose true value is 50, with `F_0 = 30` and `η = 0.1`:
+
+```
+  round   F before   residual r = y - F   tree predicts r   F after = F + 0.1 x r
+  -----   --------   ------------------   ---------------   ---------------------
+    1       30.00           20.00               20.00                32.00
+    2       32.00           18.00               18.00                33.80
+    3       33.80           16.20               16.20                35.42
+    4       35.42           14.58               14.58                36.88
+   ...
+   10       42.25            7.75                7.75                43.03
+   20        ...             ...                 ...                 47.57
+   40        ...             ...                 ...                 49.70
+
+  Each round closes 10% of the remaining gap: residual x (1 - 0.1) = residual x 0.9.
+  Sum of the ten shrunk corrections = 13.03, and 30.00 + 13.03 = 43.03.
+```
+
+The prediction crawls, it never jumps. Averaging those ten trees would give roughly 13, not 43 — the sum is the model, and that is why "add one more tree" always means "shift the prediction a little further," never "re-vote."
+
 Unlike bagging (which reduces variance), gradient boosting primarily reduces **bias** by iteratively correcting the ensemble's mistakes. The sequential nature means each tree depends on all previous trees, creating powerful but computationally sequential training. Stochastic gradient boosting (random subsampling) adds variance reduction on top of bias reduction.
 
 ---
@@ -40,6 +72,35 @@ For m = 1, 2, ..., M:
     F_m(x) = F_{m-1}(x) + η * γ_m * h_m(x)
 ```
 
+**What this actually says.** "Ask the loss which direction would help each row, fit a tree to those directions, ask how far to step along that tree, then take a shrunken fraction of that step."
+
+It is gradient descent with a tree standing in for the gradient vector. Ordinary SGD updates *parameters*; this updates the *function itself*, one additive piece per round.
+
+| Symbol | What it is |
+|--------|------------|
+| `argmin_γ Σ_i L(y_i, γ)` | "Find the single constant that fits every row least badly." Squared error → the mean; log loss → the log-odds |
+| `r_im` | The pseudo-residual for row `i` at round `m` — the direction that would lower this row's loss |
+| `-[∂L/∂F]` | Negative gradient **with respect to the prediction**, not with respect to any weight |
+| `_{F=F_{m-1}}` | "Evaluated at the current ensemble" — the gradient is recomputed from scratch every round |
+| `h_m` | A regression tree fit to those `r_im` values. Its target column is residuals, never `y` |
+| `γ_m` (line search) | How far to step along the direction `h_m` points. Per-leaf in real implementations |
+| `η` | Shrinkage applied on top of `γ_m` — a deliberate refusal to take the full optimal step |
+
+**Walk one example.** Round 1 on the leaf holding two rows whose residuals are both `-20`, squared error loss, so the line search has a closed form `γ = Σ r·h / Σ h²`:
+
+```
+  leaf rows        r_i = -20, -20
+  tree output      h   = -20, -20     (a stump predicting the leaf's mean residual)
+
+  Sum r x h  = (-20)(-20) + (-20)(-20) =  800
+  Sum h x h  = (-20)(-20) + (-20)(-20) =  800
+  gamma      = 800 / 800 = 1.0        <- the tree already points exactly the right distance
+
+  step taken = eta x gamma x h = 0.1 x 1.0 x (-20) = -2.0 per row
+```
+
+`γ = 1.0` is not a coincidence: under squared error, fitting a tree to the residuals *is* the line search, so `γ` collapses to 1 and implementations skip it. The term earns its keep for every other loss — under MAE the tree only predicts `sign(...)`, which carries no magnitude at all, so `γ` is the only thing that decides how big the step is. Drop it there and the model steps ±1 per round regardless of whether the row was off by 0.3 or 3000.
+
 ### Why Negative Gradient, Not Raw Residuals
 
 For squared error loss L = (y - F(x))^2 / 2:
@@ -56,6 +117,46 @@ This is the residual in probability space, not raw residual. For MAE L = |y - F(
 -∂L/∂F = sign(y - F(x))   (subgradient)
 ```
 Fitting this produces a boosted quantile (median) regressor. The pseudo-residual formulation unifies all these cases.
+
+**Put simply.** "Whatever loss you chose, the thing the next tree must predict is always *how wrong you are right now* — the loss only decides what units 'wrong' is measured in."
+
+Squared error measures wrongness in raw units, log loss in probability units, MAE in direction-only units. Same machine, three different target columns.
+
+| Symbol | What it is |
+|--------|------------|
+| `F(x)` | The current ensemble's raw output — a real number, unbounded, on the score/log-odds scale |
+| `p = sigmoid(F(x))` | That raw score squashed into a probability. `F = 0` → `p = 0.5` |
+| `y - p` | The classification pseudo-residual. Positive = "we under-predicted this positive case" |
+| `sign(y - F(x))` | Direction only, always `+1` or `-1`. Distance is discarded — the outlier-proofing |
+| `delta` (Huber) | The cutoff where the loss stops squaring and starts behaving like MAE |
+| `\|y_i - F(x_i)\|` | Absolute error for row `i`; the Huber switch compares this against `delta` |
+
+**Walk one example.** Binary classification, 30% of the training rows positive, so `F_0` is the log-odds of the base rate:
+
+```
+  F_0 = log(0.30 / 0.70) = -0.847      <- the constant that argmin_gamma picks for log loss
+  p_0 = sigmoid(-0.847)  =  0.300      <- sanity check: it round-trips to the base rate
+
+  row A (y = 1):  r = y - p =  1 - 0.30 =  +0.70    strong pull upward
+  row B (y = 0):  r = y - p =  0 - 0.30 =  -0.30    gentle pull downward
+
+  Tree 1 sends row A's leaf +0.40 in log-odds space:
+      F = -0.847 + 0.400 = -0.447   ->   p = 0.390
+      new residual for row A = 1 - 0.390 = 0.610    (was 0.700)
+```
+
+Notice the residual is bounded in `[-1, 1]` no matter how confidently wrong the model is. That bound is exactly what AdaBoost's exponential loss lacks, and it is the mechanical reason gradient boosting shrugs off label noise that AdaBoost amplifies (Pitfall 5).
+
+Compare the three losses on one badly mislabelled row that is off by 100:
+
+```
+  loss            pseudo-residual the next tree must fit      practical effect
+  --------------  -----------------------------------------  ---------------------------
+  squared error   -100.00       (the full error, unbounded)   one outlier dominates
+  Huber, d = 5      -5.00       (clipped at delta)            outlier capped, still heard
+  MAE               -1.00       (sign only)                   outlier counts as one vote
+  log loss     at most 1.00     (y - p, bounded by design)    cannot blow up
+```
 
 ### Bias Reduction Mechanism
 
@@ -77,6 +178,36 @@ Large η (e.g., 0.3) + small M (e.g., 100):
 
 Rule of thumb: η=0.05 with early stopping and max M=2000 is a good default
 ```
+
+**What the formula is telling you.** Read `F_m = F_{m-1} + η · h_m` as "believe each tree only `η` as much as it asks to be believed" — the tree still points the right way, you just refuse to walk the whole distance.
+
+The consequence is arithmetic, not mystical. If a tree could close a row's gap completely, taking only `η` of it leaves `(1 - η)` of the gap behind, so the residual decays geometrically at rate `(1 - η)` per round. Trees needed therefore scales roughly as `1/η`.
+
+| Symbol | What it is |
+|--------|------------|
+| `η` (shrinkage) | Fraction of each tree's correction actually applied. `1.0` = take the whole step |
+| `M` (n_estimators) | How many corrections you are allowed to make |
+| `(1 - η)` | The residual multiplier per round — the whole tradeoff in one number |
+| `η · M` | Roughly the "total distance travelled"; keeping this constant keeps fit quality similar |
+| early stopping | Lets validation loss pick `M` for you, which is why `η` is the knob you set by hand |
+
+**Walk one example.** One row starting 20.0 away from its target, each round's tree able to fit that remaining gap exactly:
+
+```
+  remaining gap after k rounds = 20.0 x (1 - eta)^k
+
+  eta      k=0     k=1     k=2     k=3     k=4      rounds to close 90%   to close 99%
+  -----   -----   -----   -----   -----   -----     -------------------   ------------
+  1.00    20.00    0.00    0.00    0.00    0.00              1                  1
+  0.50    20.00   10.00    5.00    2.50    1.25              4                  7
+  0.10    20.00   18.00   16.20   14.58   13.12             22                 44
+  0.05    20.00   19.00   18.05   17.15   16.29             45                 90
+
+  eta 1.00 -> 0.10 is a 10x cut in step size and costs 22x the trees for the same 90%.
+  eta 0.10 -> 0.05 is a 2x cut and costs 45/22 = 2.05x the trees. Cost tracks 1/eta.
+```
+
+**Why the slow path generalizes better.** At `η = 1.0` the very first tree owns the entire correction: if that tree split on a noisy feature, the model is now committed to that mistake and every later tree spends its budget undoing it. At `η = 0.05` no single tree can move the prediction more than 5% of the way, so a bad split is one small vote among ninety and the ensemble averages the noise away while the shared signal, present in every tree, accumulates. This is the same reason the plateau appears in the `xychart` in Section 5 — past `η = 0.05` you are buying training time, not accuracy.
 
 ---
 
@@ -122,6 +253,68 @@ Rule of thumb: η=0.05 with early stopping and max M=2000 is a good default
 | Sensitivity to noise | High (outlier amplification) | Lower (with Huber loss) |
 | Relation | Special case of GBM with exponential loss | General framework |
 
+The "re-weight misclassified samples" row hides the only two formulas AdaBoost has. Each round scores its weak learner with a vote weight, then rewrites the sample weights:
+
+```
+  err_m  = sum of weights on the rows this learner got WRONG   (weights sum to 1)
+  alpha_m = 0.5 * ln((1 - err_m) / err_m)                      (this learner's vote)
+
+  w_i <- w_i * exp(+alpha_m)   if row i was misclassified
+  w_i <- w_i * exp(-alpha_m)   if row i was classified correctly
+  w_i <- w_i / Z               renormalize so the weights sum to 1 again
+```
+
+**In plain terms.** "A learner's vote is worth however far from a coin flip it is, and after it votes, every row it fluffed gets louder and every row it nailed gets quieter."
+
+`alpha` does double duty: it is both the learner's say in the final vote *and* the size of the weight shove it applies. Confident learner, big shove; useless learner, no shove.
+
+| Symbol | What it is |
+|--------|------------|
+| `w_i` | Row `i`'s weight — how much the next weak learner is penalized for getting it wrong |
+| `err_m` | Weighted error rate, not a plain count. A missed row that already has heavy weight hurts more |
+| `(1 - err) / err` | Odds of being right. `err = 0.2` → odds `4:1` |
+| `alpha_m` | Half the log-odds of being right. This learner's vote weight in the final ensemble |
+| `exp(+alpha)` | Multiplier on missed rows. Always `> 1` when the learner beats chance |
+| `exp(-alpha)` | Multiplier on correct rows. Always `< 1`, and exactly `1 / exp(+alpha)` |
+| `Z` | The sum of the raw updated weights; dividing by it restores `Σ w_i = 1` |
+
+**Walk one full round.** Five rows, equal starting weights, a stump that misses exactly one of them:
+
+```
+  start        row1   row2   row3   row4   row5     sum
+  w_i          0.200  0.200  0.200  0.200  0.200   1.000
+  outcome      WRONG  right  right  right  right
+
+  err   = 0.200                        (only row1's weight counts)
+  ratio = (1 - 0.200) / 0.200 = 4.0    (4:1 odds of being right)
+  alpha = 0.5 x ln(4.0) = 0.6931
+
+  exp(+alpha) = 2.0        exp(-alpha) = 0.5
+
+  raw w_i      0.400  0.100  0.100  0.100  0.100   0.800  = Z
+               (x2.0) (x0.5) (x0.5) (x0.5) (x0.5)
+
+  w_i / Z      0.500  0.125  0.125  0.125  0.125   1.000
+```
+
+Row 1 went `0.200 -> 0.500`; the four it got right went `0.200 -> 0.125`. The missed row now carries half the total weight all by itself — the next stump is effectively told "solve that one row or fail." That is exactly the intended focusing behaviour, and exactly the failure mode of Pitfall 5: if row 1 is mislabelled rather than hard, AdaBoost has just handed 50% of its attention to noise, and the next round will push it higher still.
+
+The `0.500` is not a fluke either. AdaBoost's weight update is constructed so that under the *new* weights, the learner that just ran scores exactly `err = 0.5` — a coin flip. It has been made worthless, which guarantees the next learner cannot simply be a copy of it.
+
+**What alpha does at the extremes:**
+
+```
+  err = 0.50   alpha = 0.5 x ln(1.0)     = 0.0000   vote worth nothing; multipliers are
+                                                    exp(0) = 1.0, so NO weight changes
+  err = 0.40   alpha = 0.5 x ln(1.5)     = 0.2027   weak vote, gentle nudge (x1.225 / x0.816)
+  err = 0.30   alpha = 0.5 x ln(2.333)   = 0.4236   moderate vote
+  err = 0.10   alpha = 0.5 x ln(9.0)     = 1.0986   strong vote (x3.0 / x0.333)
+  err = 0.01   alpha = 0.5 x ln(99.0)    = 2.2976   near-perfect learner (x9.95 / x0.101)
+  err -> 0     alpha -> +infinity                   division by zero; implementations clamp
+```
+
+A learner at `err = 0.5` is a coin flip, contributes a zero-weight vote, and leaves the weight distribution untouched — the round was a complete no-op. As `err -> 0` the alpha blows up, which is why a weak learner that perfectly separates the data must be special-cased (sklearn stops boosting). And note the formula is happy with `err > 0.5`: alpha goes negative, the learner's vote is inverted, and the weight shoves flip direction — an anti-correlated learner is still information.
+
 ### 4.7 sklearn HistGradientBoostingClassifier
 
 - Histogram-based binning (255 bins per feature) — same idea as LightGBM
@@ -163,6 +356,50 @@ flowchart TD
 
 Each tree is trained not on the labels but on the current residuals (the red nodes — the negative gradient of the loss). The ensemble adds a shrunken slice `η · Tree_m` of each correction, so the prediction crawls toward the target one small step at a time. Unlike bagging, the trees are strictly sequential: Tree 2 cannot start until F1 exists.
 
+**Stated plainly.** "Predict the average, look at what is left over, teach a tree the leftovers, add it in, and repeat on the smaller leftovers."
+
+The diagram's red nodes are the only training targets that ever exist after round 0. The label column `y` is read exactly once, to compute `F_0`; from then on the trees only ever see residuals.
+
+| Symbol | What it is |
+|--------|------------|
+| `F_0 = mean y` | Round-zero prediction: the same number for every row |
+| `r = y - F_{m-1}` | What the ensemble still owes each row. The new tree's target column |
+| `Tree_m` | Fit on `(x, r)`, so each leaf predicts the mean residual of the rows that land in it |
+| `F_m = F_{m-1} + η · Tree_m` | Bank the correction and move on |
+| SSE | `Σ (y - F)²` — the scoreboard. It must fall every round or something is wrong |
+
+**Walk two rounds.** Six rows, one feature `x`, decision stumps (depth 1), `η = 1.0` so the arithmetic stays visible:
+
+```
+  x         1      2      3      4      5      6
+  y        10     10     30     30     50     50
+
+  ROUND 0   F_0 = mean(y) = 30
+  F        30     30     30     30     30     30
+  r = y-F -20    -20      0      0    +20    +20        SSE = 1600
+
+  ROUND 1   stump searches every threshold, picks x <= 2   (SSE 400; x <= 4 ties, low wins)
+            leaf L (x <= 2): mean r = -20      leaf R (x > 2): mean r = +10
+  Tree1   -20    -20    +10    +10    +10    +10
+  F_1 = F_0 + Tree1
+  F        10     10     40     40     40     40
+  r = y-F   0      0    -10    -10    +10    +10        SSE =  400   (1600 -> 400)
+
+  ROUND 2   stump refits on the NEW residuals, picks x <= 4
+            leaf L (x <= 4): mean r = -5       leaf R (x > 4): mean r = +10
+  Tree2    -5     -5     -5     -5    +10    +10
+  F_2 = F_1 + Tree2
+  F         5      5     35     35     50     50
+  r = y-F  +5     +5     -5     -5      0      0        SSE =  100   (400 -> 100)
+
+  total squared error   1600  ->  400  ->  100     (each round quarters it)
+  worst single residual  -20  ->  -10  ->    +5
+```
+
+Two things are worth staring at. First, round 2's stump chose a *different* split (`x <= 4`, not `x <= 2`) — it is solving a different problem, because its target column changed. Second, rows 5 and 6 are exactly right after round 2 while rows 1–4 still owe ±5; the next tree will ignore the solved rows automatically, since their residuals are zero and contribute nothing to any split's score. Nobody has to tell boosting where to focus — the residual column already encodes it.
+
+With `η = 0.1` instead of `1.0`, round 1 would land at `F = [28, 28, 31, 31, 31, 31]` and the SSE would fall from 1600 to only 1372. Same split, same direction, one-tenth of the distance — and by the decay table in Section 3, about 22 rounds to close 90% of a gap that `η = 1.0` closes in one.
+
 ### Loss Functions and Their Pseudo-Residuals
 
 ```
@@ -182,6 +419,35 @@ Classification (multiclass, K classes):
 Ranking:
     LambdaMART:      r_i = Σ_j λ_{ij}   (gradient from pairwise comparison)
 ```
+
+**The idea behind it.** "This table is the whole configuration surface of gradient boosting — pick a row, and you have picked regression, classification, ranking, or robust regression. Nothing else in the algorithm changes."
+
+The multiclass row is the one with a hidden cost. `r_{ik} = 1[y_i=k] - softmax(F_k(x_i))` means one residual column *per class*, so one tree per class per round.
+
+| Symbol | What it is |
+|--------|------------|
+| `1[y_i=k]` | Indicator: `1` if row `i` really is class `k`, else `0`. The one-hot target |
+| `softmax(F_k(x_i))` | Predicted probability of class `k`, after normalizing across all `K` raw scores |
+| `λ_{ij}` | LambdaMART's pairwise gradient: how much swapping documents `i` and `j` would change NDCG |
+| `Σ_j` | Sum over every other document in the same query — the ranking signal is relative, never absolute |
+| `delta` (Huber) | The elbow between squared-error behaviour and MAE behaviour |
+
+**Walk one example.** Three classes, one row whose true class is 2, current softmax `[0.20, 0.50, 0.30]`:
+
+```
+  class k        one-hot 1[y=k]     softmax      r_ik = one-hot - softmax
+  -------        --------------     -------      -----------------------
+     1                 0             0.20               -0.20
+     2                 1             0.50               +0.50
+     3                 0             0.30               -0.30
+                                                       -------
+                              residuals sum to           0.00
+
+  Three residual columns  ->  three trees this round.
+  500 rounds x 3 classes  =  1500 trees. At K = 10 classes it is 5000 trees.
+```
+
+The residuals summing to zero is structural, not luck: softmax outputs sum to 1 and the one-hot sums to 1, so the corrections always cancel. Push probability up for the true class and it has to come out of the others. That constraint is why the `K` trees in a round cannot be trained independently of one another's scale, and why the tree count in Section 12's multiclass answer explodes the way it does.
 
 ### Stochastic Gradient Boosting with Subsampling
 
@@ -208,6 +474,32 @@ flowchart LR
 ```
 
 Each round fits its tree on a fresh random fraction (typically 0.8) of the rows drawn without replacement, then applies that tree to every row to update predictions. The per-round randomness de-correlates trees and acts as regularization — the same intuition as stochastic gradient descent injecting noise into each step.
+
+**What it means.** "Each tree is allowed to look at only part of the data when deciding where to split — but once it has decided, it corrects everybody."
+
+The asymmetry between `FIT` and `APP` in the diagram is the whole design. Fitting on a subset is what de-correlates the trees; applying to all rows is what keeps the residual bookkeeping consistent, because a row whose prediction never moved would keep handing the same residual to every future tree.
+
+| Symbol | What it is |
+|--------|------------|
+| `subsample` | Fraction of rows each tree may fit on. `0.8` typical, `1.0` = plain gradient boosting |
+| "no replacement" | Unlike bagging's bootstrap, a row appears at most once per tree |
+| `subsample · N` | Rows actually used to choose splits this round |
+| `F ← F + η · h_m` | Applied to **all** `N` rows, including the ones held out this round |
+| `colsample_bytree` | The same idea one axis over — sample features instead of rows |
+
+**Walk one example.** `N = 1000` rows, `subsample = 0.8`, 200 rounds:
+
+```
+  rows used to fit each tree   = 0.8 x 1000 = 800
+  rows held out per round      = 200        (20%, a different 200 every round)
+  rounds a given row helps fit = 0.8 x 200  = 160 of the 200 trees
+  rounds a given row is scored by but did not train = 40
+
+  Cost side:   ~20% less split-finding work per tree.
+  Benefit side: two trees now agree on far less, because they saw different 800-row views.
+```
+
+Those 40 rounds where a row is corrected by trees that never saw it are what turns subsampling into regularization rather than just a speedup — the row's residual is being reduced by structure that generalized to it, not by structure memorized from it. Set `subsample = 1.0` and that check disappears entirely: every tree is fit on, and evaluated on, the identical 1000 rows.
 
 ### Regularisation Knobs and Their Effects
 

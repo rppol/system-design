@@ -292,6 +292,75 @@ def fit_temperature(val_logits: torch.Tensor, val_labels: torch.Tensor) -> float
     return float(T.detach())
 ```
 
+### Reading the calibration score — ECE decoded
+
+Section 4.2 defines Expected Calibration Error as "bin predictions by confidence, average
+`|accuracy - confidence|` across bins." Written out, that average is weighted by how many
+predictions land in each bin:
+
+```
+ECE = sum over bins b of  (n_b / N) x | acc(b) - conf(b) |
+```
+
+**Put simply.** "In each confidence band, ask how often the model was actually right, and
+measure how far that is from what it claimed — then average those gaps, letting the busiest
+bands count most."
+
+The `n_b / N` weight is the part people forget. A model can be wildly miscalibrated in a bin
+holding 3 predictions and barely move ECE; the bins that dominate the number are the ones the
+model actually uses. Deep networks pile almost everything into the top bin, which is exactly
+why their ECE is driven by high-confidence overconfidence.
+
+| Symbol | What it is |
+|--------|------------|
+| `b` | One confidence bucket, e.g. all predictions with confidence in `[0.8, 1.0]` |
+| `n_b` | How many predictions fell in that bucket |
+| `N` | Total predictions scored |
+| `n_b / N` | The bucket's share of the traffic — its voting weight in the average |
+| `conf(b)` | What the model claimed in that bucket (mean confidence) |
+| `acc(b)` | What actually happened in that bucket (fraction correct) |
+| `\|acc - conf\|` | The honesty gap. `0` = the claim matched reality |
+
+**Walk one example.** The same two curves as the reliability diagram above, over `N = 1000`
+predictions, 5 bins. Raw network first:
+
+```
+  bin  conf   n_b    n_b/N    acc     |acc - conf|    weighted
+  1    0.1    100    0.10     0.09       0.01          0.0010
+  2    0.3     50    0.05     0.24       0.06          0.0030
+  3    0.5    100    0.10     0.40       0.10          0.0100
+  4    0.7    300    0.30     0.55       0.15          0.0450
+  5    0.9    450    0.45     0.70       0.20          0.0900
+                                                      -------
+                                              ECE  =   0.1490
+```
+
+Now the same model after temperature scaling, unchanged bin counts (T does not move any
+argmax, so no prediction switches classes -- only its confidence moves):
+
+```
+  bin  conf   n_b    n_b/N    acc     |acc - conf|    weighted
+  1    0.1    100    0.10     0.11       0.01          0.0010
+  2    0.3     50    0.05     0.31       0.01          0.0005
+  3    0.5    100    0.10     0.50       0.00          0.0000
+  4    0.7    300    0.30     0.69       0.01          0.0030
+  5    0.9    450    0.45     0.88       0.02          0.0090
+                                                      -------
+                                              ECE  =   0.0135
+```
+
+`0.149 -> 0.0135` from fitting one scalar. Note where the win came from: bins 4 and 5 alone
+contributed `0.045 + 0.090 = 0.135` of the raw `0.149`, i.e. 91% of the error lived in the
+two bins holding 75% of the predictions. Fixing the sparse low-confidence bins would have
+been almost worthless.
+
+**What ECE cannot tell you.** It is an average of absolute gaps, so a model that is
+over-confident in one bin and under-confident in another by the same amount does not cancel
+-- but a model that is 20 points wrong on 1% of traffic scores better than one that is 2
+points wrong on all of it, even though the first is dangerous. And ECE says nothing about
+coverage on any *individual* prediction. That gap is precisely what conformal prediction
+closes next.
+
 ### Split conformal — classification prediction sets
 
 ```python
@@ -329,6 +398,143 @@ if __name__ == "__main__":
     pass
 ```
 
+#### Decoding the guarantee: what `1 - alpha` actually promises
+
+The contract conformal prediction signs is one line:
+
+```
+P( y_true is in C(x_new) )  >=  1 - alpha
+```
+
+**What the formula is telling you.** "Across many new inputs, the set I hand you will contain
+the right answer at least `1 - alpha` of the time — and I will not tell you which ones."
+
+Three words in that sentence carry all the weight, and each is a standard interview trap:
+
+| Symbol | What it is |
+|--------|------------|
+| `alpha` | The miss rate you are willing to buy. `alpha = 0.1` means "wrong at most 10% of the time" |
+| `1 - alpha` | Target coverage. `0.9` = the set contains the truth 90% of the time |
+| `C(x_new)` | The prediction *set* (or interval) for a new input — not a single label |
+| `>=` | Not `=`. The guarantee is a floor; real coverage lands slightly above it |
+| `P(...)` | Probability over the *random draw of calibration set and test point together* |
+
+**Read it like this.** The probability is **marginal**, not conditional. It is averaged over
+all inputs, so "90% coverage" does not mean 90% for every subgroup. A conformal classifier can
+hit exactly 90% overall while covering the common class 97% of the time and a rare class 55%
+of the time. That is not a bug and not a failed guarantee — it is what "marginal" means, and
+it is why class-conditional (Mondrian) conformal exists in the variants table above. If a
+regulator asks "is it 90% for *this* patient population?", split conformal cannot answer yes.
+
+**Why coverage is a floor and not a target.** The `>=` comes from the finite-sample
+correction. Real coverage is bounded on both sides by `1 - alpha <= coverage < 1 - alpha +
+1/(n+1)`, so with `n = 1000` calibration points, a 90% request delivers between 90.0% and
+90.1%. Slight over-coverage is the price of the guarantee holding without any distributional
+assumption.
+
+#### Walking the quantile on a real calibration set
+
+The one learned quantity in the whole method is `q_hat`, and this is where the arithmetic is
+worth doing by hand:
+
+```
+q_hat = the ceil( (n + 1) x (1 - alpha) )-th smallest calibration score
+```
+
+**Stated plainly.** "Line up the calibration scores worst-to-best, walk up to the point where
+90% of them sit below you, and nudge one extra step for the fact that your calibration set is
+finite. That height is the bar every candidate label must clear."
+
+| Symbol | What it is |
+|--------|------------|
+| `s_i` | Nonconformity score for calibration point `i`: `1 - p(true label)`. Higher = the model was more wrong |
+| `n` | Number of calibration points |
+| `1 - alpha` | Target coverage, e.g. `0.9` |
+| `(n + 1)` | The finite-sample correction — pretend the incoming test point is already in the pile |
+| `ceil(...)` | Round the rank *up*; you cannot take the 18.9-th smallest of anything |
+| `q_hat` | The resulting score threshold. Every label scoring `<= q_hat` goes in the set |
+
+**Walk one example.** A 4-class model, `n = 20` calibration points, `alpha = 0.1`. Score each
+calibration point with `s_i = 1 - p(true label)` and sort ascending:
+
+```
+  rank :   1     2     3     4     5     6     7     8     9    10
+  s_i  : 0.02  0.03  0.05  0.06  0.08  0.10  0.11  0.13  0.15  0.18
+
+  rank :  11    12    13    14    15    16    17    18    19    20
+  s_i  : 0.21  0.25  0.29  0.34  0.40  0.47  0.55  0.66  0.78  0.94
+                                                      ^^^^
+                                                      q_hat
+```
+
+Now pick the rank:
+
+```
+  (n + 1) x (1 - alpha)  =  21 x 0.9  =  18.9
+  ceil(18.9)             =  19            <- take the 19th smallest
+  q_hat                  =  0.78
+
+  sanity check: 19 of the 20 calibration scores are <= 0.78  ->  95% of the
+  calibration set sits under the bar, comfortably above the 90% we asked for.
+```
+
+**Why `(n + 1)` and not `n` — delete it and the guarantee dies.** Run the same set without
+the correction:
+
+```
+  with    (n+1):  ceil(21 x 0.9) = 19  ->  q_hat = 0.78
+  without (n+1):  ceil(20 x 0.9) = 18  ->  q_hat = 0.66     <- lower bar
+
+  A lower bar admits fewer labels into every set -> smaller sets, but coverage
+  now falls BELOW 90%. You bought efficiency by silently breaking the contract.
+```
+
+The `+1` is the entire reason the guarantee is *finite-sample* rather than asymptotic. It
+encodes "the test point is exchangeable with these `n` points, so treat it as the `(n+1)`-th
+member of the pile." As `n` grows the correction vanishes — at `n = 1000` the rank is
+`ceil(1001 x 0.9) = 901`, essentially the plain 90th percentile — which is why it looks like
+a rounding detail until someone calibrates on 20 points.
+
+**Now push test inputs through `q_hat = 0.78`.** A label enters the set when
+`1 - p(label) <= 0.78`, i.e. when `p(label) >= 0.22`:
+
+```
+  input        p(A)  p(B)  p(C)  p(D)  | scores 1-p                | set        size
+  confident    0.93  0.04  0.02  0.01  | 0.07  0.96  0.98  0.99    | {A}          1
+  ambiguous    0.45  0.38  0.12  0.05  | 0.55  0.62  0.88  0.95    | {A, B}       2
+  diffuse      0.30  0.28  0.24  0.18  | 0.70  0.72  0.76  0.82    | {A, B, C}    3
+  OOD          0.21  0.20  0.20  0.19  | 0.79  0.80  0.80  0.81    | { }          0
+```
+
+This single table is the whole payoff. The threshold never changed — only the model's scores
+did — and set size fell out automatically as a measure of difficulty. The confident row gets a
+singleton you can auto-approve. The ambiguous row gets two labels, so route it to a human. The
+OOD row gets an **empty set**, which is not a failure but the most useful output in the table:
+"no label is plausible enough to clear the bar I calibrated." That is a machine-readable "I
+don't know", and it is the thing softmax can never produce — softmax would have reported class
+A at 21% and an argmax pipeline would have shipped it as a prediction.
+
+**Minimum calibration size.** The rank must exist, so you need
+`ceil((n + 1)(1 - alpha)) <= n`, which is roughly `n >= 1/alpha - 1`:
+
+```
+  alpha = 0.10  ->  n >= 9     (below that, q_level > 1: every set is all labels)
+  alpha = 0.05  ->  n >= 19
+  alpha = 0.01  ->  n >= 99
+```
+
+Those are hard floors for the method to be defined at all, not recommendations. In practice
+use `n >= 1000` so the coverage band `1/(n+1)` is tight and `q_hat` is not hostage to one
+unlucky calibration point — note that at `n = 20` above, `q_hat` was the 19th of 20 scores, so
+a single mislabeled calibration example would have moved the threshold directly.
+
+**One implementation note on the code above.** `np.quantile(..., method="higher")` with
+`q_level = ceil((n+1)(1-alpha))/n` lands one rank higher than the textbook
+`ceil((n+1)(1-alpha))`-th smallest — at `n = 20` it returns `0.94` (rank 20) rather than
+`0.78` (rank 19), because numpy spreads quantiles over `n - 1` intervals. It is conservative,
+so the guarantee still holds (you over-cover), and the gap is one rank out of `n` — invisible
+at `n = 1000`. Worth knowing when your hand-computed threshold disagrees with the library's.
+
 ### Conformalized quantile regression (intervals with adaptive width)
 
 ```python
@@ -350,6 +556,83 @@ def cqr_calibrate(
     return float(np.quantile(scores, min(q_level, 1.0), method="higher"))
     # final interval at test time: [lo(x) - q, hi(x) + q]
 ```
+
+The only new piece is the conformity score:
+
+```
+s_i = max( lo(x_i) - y_i ,  y_i - hi(x_i) )
+```
+
+**The idea behind it.** "Measure how badly the truth escaped the predicted interval — above or
+below, whichever side it broke out of — and if it stayed inside, record how much room was to
+spare as a negative number."
+
+That signed trick is what makes CQR work. A negative score means the interval was already
+roomy enough; a positive score means it missed by that much. Taking the `1 - alpha` quantile
+of those numbers finds the single pad `q` that would have fixed almost all of them.
+
+| Symbol | What it is |
+|--------|------------|
+| `lo(x_i)`, `hi(x_i)` | The quantile-regression model's lower and upper predictions for point `i` |
+| `y_i` | The truth that actually occurred |
+| `lo - y` | How far the truth fell *below* the interval. Positive = it undershot |
+| `y - hi` | How far the truth fell *above* the interval. Positive = it overshot |
+| `max(...)` | Only one of the two can be positive; the max picks whichever side broke |
+| negative `s_i` | The truth landed inside, with `\|s_i\|` units of slack to the nearer edge |
+| `q` | The correction added to *both* edges at test time |
+
+**Walk one example.** A delivery-ETA model, `n = 10` calibration points, `alpha = 0.1`:
+
+```
+  i   lo     hi     y      lo - y    y - hi    s_i = max     inside?
+  1   12.0   18.0   16.0    -4.0      -2.0      -2.0          yes
+  2   14.5   20.5   21.4    -6.9      +0.9      +0.9          NO  (over by 0.9)
+  3    9.0   15.0   13.5    -4.5      -1.5      -1.5          yes
+  4   20.0   26.0   24.0    -4.0      -2.0      -2.0          yes
+  5   17.5   23.5   19.0    -1.5      -4.5      -1.5          yes
+  6   11.0   17.0   17.6    -6.6      +0.6      +0.6          NO  (over by 0.6)
+  7   25.0   31.0   25.5    -0.5      -5.5      -0.5          yes
+  8   13.0   19.0   12.2    +0.8      -6.8      +0.8          NO  (under by 0.8)
+  9   16.0   22.0   20.0    -4.0      -2.0      -2.0          yes
+ 10   22.0   28.0   29.9    -7.9      +1.9      +1.9          NO  (over by 1.9)
+
+  raw coverage before correction: 6 / 10 = 60%   <- far short of the 90% asked for
+```
+
+Sort the scores and take the rank:
+
+```
+  sorted s_i : -2.0  -2.0  -2.0  -1.5  -1.5  -0.5  +0.6  +0.8  +0.9  +1.9
+  rank       :   1     2     3     4     5     6     7     8     9    10
+
+  ceil( (n+1) x (1-alpha) ) = ceil(11 x 0.9) = ceil(9.9) = 10
+  q = the 10th smallest = +1.9
+```
+
+Apply `[lo - q, hi + q]` to every interval:
+
+```
+  point 1 interval : [12.0, 18.0]  ->  [10.1, 19.9]   width 6.0 -> 9.8
+  point 10         : [22.0, 28.0]  ->  [20.1, 29.9]   y = 29.9 now just inside
+
+  coverage after correction: 10 / 10 = 100%
+```
+
+**Watch what `n = 10` did to you.** The rank came out to exactly `10`, meaning `q` is the
+single largest score in the set — the whole threshold is one calibration point, the worst
+outlier. That is why coverage overshot to 100% rather than settling near 90%, and why the
+intervals widened by 63% (6.0 to 9.8). This is the small-`n` floor from the classification
+section biting in the regression setting: `alpha = 0.1` needs `n >= 9` merely to be defined,
+and near that floor the guarantee is technically valid but wastefully conservative. At
+`n = 1000` the rank would be `901`, a genuine percentile, and `q` would reflect the bulk of
+the distribution instead of its worst member.
+
+**Why CQR beats a plain constant-width interval.** `q` is a single constant, but `lo(x)` and
+`hi(x)` are *functions of the input* — the base quantile regressor already widens where the
+data is noisy. CQR only repairs the systematic miscalibration on top of that shape, so the
+final interval stays narrow in easy regions and wide in hard ones. Conformalizing a plain
+point regressor instead gives every input the same width, which satisfies the same coverage
+guarantee while being far less useful.
 
 ---
 

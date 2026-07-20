@@ -65,11 +65,151 @@ At request time for user u:
 
 Advantage: similarities pre-computed offline; request-time lookup is O(|history| * K). Used by Amazon "Customers Also Bought."
 
+**What this actually says.** "Cosine asks whether two people rated the same things in the same *proportions*; Pearson asks whether they agreed on what was *above and below their own average*." Cosine sees magnitude, Pearson sees shape, and on the same pair they can point in opposite directions.
+
+| Symbol | What it is |
+|--------|------------|
+| `R[u]` | User u's rating row, restricted to the items both users rated |
+| `dot(a, b)` | Sum of elementwise products; large when both vectors are large together |
+| `norm(a)` | Vector length, `sqrt(sum of squares)`; divides magnitude out of the comparison |
+| `cos(a, b)` | `dot(a, b) / (norm(a) * norm(b))`. 1 = same direction, 0 = unrelated |
+| `mean(R[u])` | The user's own rating average — their "generous or stingy" baseline |
+| `Pearson(a, b)` | Cosine applied *after* subtracting each user's own mean |
+
+**Walk one example.** Two users, three co-rated items, scored both ways:
+
+```
+                     i1     i2     i3
+  Ana (A)           5.0    4.0    3.0
+  Ben (B)           3.0    4.0    5.0
+
+  COSINE (raw vectors)
+    dot(A, B) = 5*3 + 4*4 + 3*5 = 15 + 16 + 15 = 46
+    norm(A)   = sqrt(25 + 16 + 9)  = sqrt(50) = 7.0711
+    norm(B)   = sqrt(9  + 16 + 25) = sqrt(50) = 7.0711
+    cos       = 46 / (7.0711 * 7.0711) = 46 / 50 = 0.92
+                                          <- "almost identical taste"
+
+  PEARSON (mean-centred first)
+    mean(A) = 4.0   ->   A' = [ +1.0,  0.0, -1.0 ]
+    mean(B) = 4.0   ->   B' = [ -1.0,  0.0, +1.0 ]
+    dot(A', B') = (+1)(-1) + 0 + (-1)(+1) = -2
+    norm(A') = norm(B') = sqrt(2) = 1.4142
+    Pearson  = -2 / (1.4142 * 1.4142) = -2 / 2 = -1.00
+                                          <- "perfectly opposite taste"
+```
+
+Same pair, same numbers, and the two metrics disagree as violently as they possibly can: `+0.92` against `-1.00`. Cosine is dominated by the shared *level* — both users handed out ratings in the 3-to-5 band, so their raw vectors nearly line up. Pearson throws that shared level away and keeps only the deviations, where Ana ranked i1 highest and Ben ranked it lowest. When the rating scale carries a strong per-user bias (some users never give below a 4), Pearson is the honest metric; for implicit 0/1 click vectors there is no personal mean to remove and cosine is the standard choice. The identical arithmetic run on matrix *columns* instead of rows gives item-item similarity.
+
 ### 4.3 Matrix Factorization — SVD (Explicit)
 
 Minimizes: sum over observed (u, i): (R[u, i] - U[u] · V[i])^2 + lambda * (||U[u]||^2 + ||V[i]||^2)
 
 Solved via SGD or Alternating Least Squares. For explicit ratings, sklearn TruncatedSVD or Surprise SVD work well. Does not scale gracefully to implicit feedback.
+
+**Read it like this.** "Every user is a short list of taste scores, every item is a short list of trait scores, and a predicted rating is just those two lists multiplied together term by term."
+
+That one sentence is the whole of matrix factorization. `R ~ U V^T` claims the giant ratings table is not really giant — it is two skinny tables in disguise, and every missing cell falls out of a dot product you can do on paper.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | The observed ratings table, n_users by n_items, mostly blank |
+| `U` | User factor matrix, n_users by k. Row `U[u]` is user u's taste vector |
+| `V` | Item factor matrix, n_items by k. Row `V[i]` is item i's trait vector |
+| `k` | Latent dimension. 50-200 in production, 2 in the walk below |
+| `V^T` | V transposed, k by n_items, so that `U V^T` comes out shaped like `R` |
+| `U[u] . V[i]` | Dot product: multiply the two length-k vectors elementwise, then add |
+| `R_hat[u, i]` | The predicted rating — defined for every cell, including the blank ones |
+
+**Walk one example.** Three users, three films, `k = 2`. Latent factor f1 turned out to mean "sci-fi" and f2 "romance"; nobody told the model that.
+
+```
+  U (3 x 2)  users             V (3 x 2)  items
+               f1     f2                      f1     f2
+    Ana       1.0    0.2         Alien       4.0    1.0
+    Ben       0.9    0.1         BladeRun    3.8    1.2
+    Cara      0.1    1.0         NottingH    1.0    4.5
+
+  R_hat = U x V^T   (3 x 3), where every cell is one dot product
+
+               Alien   BladeRun   NottingH
+    Ana         4.20      4.04       1.90     <- this cell was blank in R
+    Ben         3.70      3.54       1.35
+    Cara        1.40      1.58       4.60
+
+  The blank cell, by hand:
+    R_hat[Ana, NottingH] = U[Ana] . V[NottingH]
+                         = (1.0 x 1.0) + (0.2 x 4.5)
+                         = 1.0 + 0.9
+                         = 1.90            <- do not recommend it
+
+  Same user, a film she loved, for contrast:
+    R_hat[Ana, Alien]    = (1.0 x 4.0) + (0.2 x 1.0)
+                         = 4.0 + 0.2
+                         = 4.20
+```
+
+Ana and Ben carry almost the same taste vector (`[1.0, 0.2]` against `[0.9, 0.1]`), so the model predicts almost the same rating for them on every film — and nobody supplied that similarity, it emerged from fitting the observed cells alone. Cara's vector points the other way and her predictions invert. Nothing in the factors is labelled "sci-fi" either; the f1 axis only earns that name because the two sci-fi films both score high on it.
+
+**The idea behind it.** "Fit the observed ratings — but among all the factorizations that fit equally well, take the one built from the smallest numbers."
+
+| Symbol | What it is |
+|--------|------------|
+| `sum over observed (u, i)` | Only cells that actually hold a rating; blanks contribute nothing |
+| `(R[u,i] - U[u] . V[i])^2` | Squared error on one observed cell — the fit term |
+| `lambda` | Penalty weight, 0.001-0.1 typical. Zero means no penalty at all |
+| `norm(U[u])^2` | Sum of squares of user u's factor values — how "big" the vector is |
+| `lambda * (...)` | Rent charged per unit of factor magnitude, paid on every update |
+
+**Walk one example.** Why the fit term alone cannot pick an answer. One observed rating, `R = 4.04`, and for clarity one factor (`k = 1`), so the model has to choose numbers `u` and `v` with `u * v = 4.04`:
+
+```
+                      u          v      u*v    fit error   u^2 + v^2   lambda-term
+  solution A       2.0100     2.0100    4.04      0.00          8.08       0.0808
+  solution B      40.4000     0.1000    4.04      0.00       1632.17      16.3217
+  solution C     404.0000     0.0100    4.04      0.00     163216.00    1632.1600
+
+  lambda = 0.01, total loss = fit error + lambda-term
+    A -> 0.0808        B -> 16.3217        C -> 1632.1600
+  (solution A is u = v = sqrt(4.04), so u^2 + v^2 = 4.04 + 4.04 = 8.08 exactly)
+```
+
+Set `lambda = 0` and all three rows have loss exactly `0.00` — the optimizer has no reason to prefer any of them and will happily drift toward C, where a single unseen item with a modest factor value produces a wild prediction. Add the penalty and A wins by four orders of magnitude over C. This is the failure mode where training loss sits near zero while held-out Recall@K stays on the floor. It bites hardest on sparse rows: with `k = 100` factors and a user who rated 3 items, the fit term pins down 3 directions and leaves 97 completely free, so `lambda` is the only thing choosing among them.
+
+**In plain terms.** Unpacking what "solved via SGD" means for the loss just above: "measure how wrong this one prediction is, then nudge the user vector toward the item vector and the item vector toward the user vector, in proportion to that error — while shrinking both a little."
+
+| Symbol | What it is |
+|--------|------------|
+| `e_ui` | Prediction error, `R[u,i] - U[u] . V[i]`. Positive means we under-predicted |
+| `eta` | Learning rate, 0.005-0.05 typical. How far to step |
+| `e_ui * V[i]` | Gradient direction: push U toward the item vector when we under-predicted |
+| `lambda * U[u]` | The regularizer's contribution — pull the vector back toward zero each step |
+| `+=` | One rating, one update. SGD touches only the two rows involved, not the matrix |
+
+**Walk one example.** One rating, mid-training, with `eta = 0.01` and `lambda = 0.01`:
+
+```
+  Ana on BladeRun, observed R = 4.04
+  Current vectors:  U[Ana] = [0.80, 0.20]      V[BladeRun] = [3.80, 1.20]
+
+  predict = 0.80*3.80 + 0.20*1.20 = 3.04 + 0.24 = 3.28
+  e_ui    = 4.04 - 3.28 = 0.76                     <- under-predicted
+
+  U update:  e*V        = [0.76*3.80, 0.76*1.20] = [2.8880, 0.9120]
+             lambda*U   = [0.0080, 0.0020]
+             difference = [2.8800, 0.9100]
+             U <- [0.80, 0.20] + 0.01*[2.8800, 0.9100] = [0.8288, 0.2091]
+
+  V update:  e*U        = [0.76*0.80, 0.76*0.20] = [0.6080, 0.1520]
+             lambda*V   = [0.0380, 0.0120]
+             difference = [0.5700, 0.1400]
+             V <- [3.80, 1.20] + 0.01*[0.5700, 0.1400] = [3.8057, 1.2014]
+
+  new predict = 0.8288*3.8057 + 0.2091*1.2014 = 3.4054
+  new error   = 4.04 - 3.4054 = 0.6346             <- 0.76 shrank in one step
+```
+
+Both updates are computed from the same pre-update vectors. Notice that U moved far more than V (`+0.0288` on the first factor against `+0.0057`): the step size is proportional to the *other* vector, and `V[BladeRun] = [3.80, 1.20]` is much longer than `U[Ana] = [0.80, 0.20]`. This is why SGD interleaves ratings one at a time and needs many epochs, where ALS below jumps straight to the exact optimum of one side per half-step.
 
 ### 4.4 Matrix Factorization — ALS (Implicit)
 
@@ -82,6 +222,68 @@ ALS alternates closed-form updates:
 - Fix U, solve for each V[i] independently (parallelizable)
 
 Convergence: ~10–20 iterations. Closed-form solution per user/item: linear system solve (k x k matrix, fast).
+
+**Stated plainly.** "A click is not a rating, it is evidence. `c_ui = 1 + alpha * r_ui` converts 'how many times you touched this' into 'how sure I am that you like it' — and never lets that certainty fall to zero."
+
+| Symbol | What it is |
+|--------|------------|
+| `r_ui` | Raw implicit count: clicks, plays, purchases. Zero if never touched |
+| `p_ui` | Binary preference, 1 if `r_ui > 0` else 0. This is what ALS actually fits |
+| `alpha` | Confidence scaling, 40 typical. What one interaction is worth |
+| `c_ui` | Weight on that cell's squared error. Never zero, so unobserved cells still count |
+| `1 +` | The floor. It is what makes unobserved items *weak negatives* rather than *missing* |
+
+**Walk one example.** With `alpha = 40`:
+
+```
+                      r_ui    p_ui    c_ui = 1 + 40*r_ui    weight vs unseen
+  never played           0       0             1                   1x
+  played once            1       1            41                  41x
+  played 5 times         5       1           201                 201x
+  played 30 times       30       1          1201                1201x
+```
+
+Two things fall out of that table. Unobserved cells carry weight `1`, not `0`, so the loss genuinely does sum over *all* cells — ALS is told "assume they do not like it, but only faintly", which is what supplies the negatives that implicit feedback never gives you. And the weighting is linear in the count, so a 30-play track pulls `1201/41 = 29.3x` harder on the factors than a single play. That linearity is the popularity-bias lever: swapping in `c_ui = 1 + alpha * log(1 + r_ui)` gives `1 + 40*log(31) = 138.4` instead of `1201`, compressing the heaviest interactions' influence by `8.7x`.
+
+**What the formula is telling you.** "Freeze every item vector, and finding the best user vector stops being learning at all — it becomes one small linear system you can solve exactly."
+
+| Symbol | What it is |
+|--------|------------|
+| `C_u` | Diagonal matrix of that user's confidences, one entry per item |
+| `V^T C_u V` | A k by k matrix: item vectors weighted by how much this user cares |
+| `lambda I` | Ridge term added to the diagonal; also what guarantees `A_u` is invertible |
+| `A_u` | `V^T C_u V + lambda I` — always k by k, whatever the catalogue size |
+| `b_u` | `V^T C_u p_u` — the right-hand side, pulled toward items the user touched |
+| `solve(A_u, b_u)` | Exact solution `U[u] = inv(A_u) b_u`. No learning rate, no epochs |
+
+**Walk one example.** Same three items and factors as Section 4.3, with `k = 2`, `alpha = 40`, `lambda = 0.01`. A brand-new user has played Alien once and nothing else:
+
+```
+  V = [[4.0, 1.0], [3.8, 1.2], [1.0, 4.5]]    c_u = [41, 1, 1]    p_u = [1, 0, 0]
+
+  V^T V           = [[31.44, 13.06],       4^2 + 3.8^2 + 1^2       = 31.44
+                     [13.06, 22.69]]       4*1 + 3.8*1.2 + 1*4.5   = 13.06
+                                           1^2 + 1.2^2 + 4.5^2     = 22.69
+
+  V^T (C_u - I) V = 40 * outer(v_Alien, v_Alien)
+                  = 40 * [[16, 4], [4, 1]]
+                  = [[640, 160], [160, 40]]     <- only the touched item contributes
+
+  A_u = V^T V + V^T (C_u - I) V + lambda*I
+      = [[671.45, 173.06],
+         [173.06,  62.70]]
+
+  b_u = V^T (c_u * p_u) = 41 * [4.0, 1.0] = [164.0, 41.0]
+
+  U[u] = solve(A_u, b_u) = [0.2623, -0.0702]
+
+  Scores that vector produces:
+    Alien     = 0.2623*4.0 + (-0.0702)*1.0 =  0.979   <- the one click, refit
+    BladeRun  = 0.2623*3.8 + (-0.0702)*1.2 =  0.913   <- never touched
+    NottingH  = 0.2623*1.0 + (-0.0702)*4.5 = -0.053   <- never touched
+```
+
+BladeRun scores `0.913` off zero interactions — that is collaborative filtering visible in a single number. Its factor vector runs nearly parallel to Alien's, so any user pulled toward Alien is dragged toward it as well, while NottingH points elsewhere and lands negative. Note the shapes too: `A_u` is 2x2 here and 100x100 in production regardless of whether the catalogue holds 6,000 items or 10 million, which is why each per-user solve is cheap and why the loop parallelizes cleanly. Pre-computing `V^T V` once per half-step is what leaves only the small `(C_u - I)` correction per user, and that correction touches solely the items the user actually interacted with.
 
 ### 4.5 BPR
 

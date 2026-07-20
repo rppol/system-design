@@ -74,10 +74,83 @@ with the naive softmax `P(w_o | w_c) = exp(u_o · v_c) / Σ_{w=1}^{V} exp(u_w ·
 center ("input") vector and `u_o` is the context ("output") vector. Each word has **two** vectors during
 training; the input vectors are usually kept as the final embeddings.
 
+**What this actually says.** "Slide a window across the corpus; at every position, nudge the center
+word's vector so it predicts each of its neighbours better than it predicts a random word."
+
+The `(1/T)` is only there so corpora of different lengths give comparable numbers. The inner sum reads
+"for every neighbour inside the window, on both sides, but never the center word itself."
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Number of tokens in the corpus; the outer sum walks every position `t` |
+| `w_t` | The center word at position `t` — the one doing the predicting |
+| `c` | Half-window size, typically 5; the window spans `w_{t-c} ... w_{t+c}` |
+| `j` | Offset inside the window; `j != 0` stops the center word predicting itself |
+| `v_c` | Input vector of the center word — the row of `W` you keep as the embedding |
+| `u_o` | Output vector of a context word — a separate matrix, discarded after training |
+| `u_o · v_c` | Dot product: how compatible this (center, context) pair is. Bigger = more likely |
+| `exp(...) / Σ exp(...)` | Softmax: turns raw dot products into probabilities that sum to 1 |
+
+**Walk one example.** Count the training pairs the objective generates from one 5-token sentence at `c = 2`:
+
+```
+  sentence: the quick brown fox jumps                   window c = 2
+
+  center      context words inside the window                    pairs
+  the         quick, brown                                         2
+  quick       the, brown, fox                                      3
+  brown       the, quick, fox, jumps                               4
+  fox         quick, brown, jumps                                  3
+  jumps       brown, fox                                           2
+                                                                 ----
+  total (center, context) pairs from 5 tokens                      14
+```
+
+Sentence edges are truncated, so the average is 2.8 pairs per token rather than the full `2c = 4`. Each of
+those 14 pairs is one gradient step — which is exactly why skip-gram squeezes more signal out of a sentence
+than CBOW's single prediction per window.
+
 **The softmax bottleneck.** The denominator sums over the entire vocabulary `V`. With `V = 1,000,000` and
 `d = 300`, every training example costs 300M multiply-adds just for the normalizer — infeasible for the
 billions of (center, context) pairs in a real corpus. word2vec is only tractable via two approximations that
 avoid the full sum: negative sampling and hierarchical softmax.
+
+**Read it like this.** "To turn one dot product into a probability you must first score every other word in
+the vocabulary, purely to know what to divide by."
+
+The numerator `exp(u_o · v_c)` is cheap — one dot product. The denominator is the entire cost, and it is the
+whole reason no practical word2vec implementation ever computes the softmax it is defined with.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Vocabulary size — 1,000,000 in the example above; the length of the denominator's sum |
+| `d` | Embedding dimension, 300; each dot product costs `d` multiply-adds |
+| `Σ_{w=1}^{V}` | "Add this up once for every word in the vocabulary" — the bottleneck itself |
+| `O(V·d)` | Full-softmax cost per example: one `d`-length dot product per vocabulary word |
+| `O(k·d)` | Negative-sampling cost: only `k+1` dot products instead of `V` |
+| `O(d·log V)` | Hierarchical-softmax cost: `log2(V)` binary decisions down a tree |
+
+**Walk one example.** First the softmax on a toy 4-word vocabulary, then the real bill at `V = 1M`:
+
+```
+  word        score u·v      exp(score)       p = exp / Z
+  brown          3.2           24.5325           0.7099
+  quick          2.1            8.1662           0.2363
+  dog            0.4            1.4918           0.0432
+  banana        -1.0            0.3679           0.0106
+                              --------          -------
+  Z = denominator              34.5584           1.0000
+
+  Now scale that denominator to a real vocabulary (V = 1,000,000, d = 300):
+    full softmax   :  V x d       = 1,000,000 x 300 = 300,000,000 mult-adds/example
+    neg. sampling  :  (k+1) x d   =        11 x 300 =       3,300 mult-adds  (k = 10)
+    hier. softmax  :  log2(V) x d =        20 x 300 =       6,000 mult-adds
+
+    negative sampling vs full softmax = 300,000,000 / 3,300 = ~90,909x cheaper
+```
+
+The toy numbers show why the sum cannot be skipped: `24.5325 / 34.5584 = 0.7099` only becomes a probability
+once every other word has been scored. Negative sampling's insight is that we never needed the probability.
 
 **Negative sampling (the loss that is actually used).** Replace the `V`-way classification with a binary
 one: is this (center, context) pair real, or was the context word drawn at random? For each true pair, draw
@@ -92,16 +165,143 @@ a random word down (toward σ=0). Cost per example is `O(k·d)`, not `O(V·d)`. 
 **unigram raised to the 3/4 power**, `P_n(w) ∝ freq(w)^{0.75}`, which flattens it so rare words are sampled
 more than pure frequency allows. Use `k = 5–20` for small datasets, `k = 2–5` for large ones.
 
+**In plain terms.** "Stop ranking a million words. Just answer one yes/no question `k+1` times: is this pair
+real, or did I make it up?"
+
+Every term is a binary log-loss. That is the whole trick — the `V`-way problem never appears.
+
+| Symbol | What it is |
+|--------|------------|
+| `u_o · v_c` | Dot product of the true (center, context) pair — the thing being pushed up |
+| `σ(x) = 1/(1+e^{-x})` | Squashes any real number into (0,1): "probability this pair is real" |
+| `log σ(u_o · v_c)` | Reward for scoring the true pair high; maximised as `σ` approaches 1 |
+| `σ(-u_{w_i} · v_c)` | Probability that negative `w_i` is fake; the minus sign flips the push downward |
+| `k` | Negatives drawn per true pair — 5–20 on small corpora, 2–5 on large ones |
+| `P_n(w)` | Noise distribution the negatives are drawn from, `freq(w)^0.75` normalised |
+| `E_{w_i ~ P_n(w)}` | "Averaged over negatives from that distribution"; in code, just sample `k` of them |
+
+**Walk one example.** One true pair plus `k = 3` negatives, scored with the binary cross-entropy form used in
+the Section 6 code:
+
+```
+  role            score u·v    sigma(score)   sigma(-score)   -log(...)   grad = pred - label
+  true pair          +2.0         0.8808            -           0.1269         -0.1192
+  negative 1         -1.5           -            0.8176         0.2014         +0.1824
+  negative 2         +0.3           -            0.4256         0.8544         +0.5744
+  negative 3         -0.8           -            0.6900         0.3711         +0.3100
+                                                               -------
+  total loss for this example                                   1.5538
+
+  Negative 2 scored +0.3 -- the model currently thinks a random word looks like a
+  real neighbour. It takes the largest gradient (+0.5744) and gets pushed away hardest.
+```
+
+Cost per example is `(k+1)·d = 4 x 300 = 1,200` mult-adds here, against `300,000,000` for the full softmax.
+Drop the negatives entirely (`k = 0`) and the objective is degenerate: nothing opposes making every dot
+product large, so all vectors collapse toward a single direction. The negatives are the only repulsive force
+in the model.
+
+**What the formula is telling you.** `P_n(w) ∝ freq(w)^{0.75}` says: "sample negatives roughly by frequency —
+but compress the gap so common words do not hog every slot and rare words still get seen."
+
+| Symbol | What it is |
+|--------|------------|
+| `freq(w)` | Raw corpus count of word `w` |
+| `^0.75` | The flattening exponent: `1.0` = pure unigram, `0.0` = uniform, `0.75` = the compromise |
+| `∝` | "Proportional to" — divide by the sum over all words to get an actual probability |
+| `P_n(w)` | Resulting probability that `w` is drawn as a negative sample |
+
+**Walk one example.** A five-word toy corpus of 1,311,100 tokens, unigram vs `freq^0.75`:
+
+```
+  word          count       unigram P(w)      P_n(w) freq^0.75       change
+  the         1,000,000        76.27%             69.27%            x 0.91
+  of            300,000        22.88%             28.08%            x 1.23
+  coffee         10,000         0.76%              2.19%            x 2.87
+  espresso        1,000         0.08%              0.39%            x 5.11
+  zeugma            100         0.01%              0.07%            x 9.08
+
+  Only the single most common word loses share; everything below it gains, and the
+  rarest gains most -- ~9x the slots raw frequency would have given it.
+```
+
+Push the exponent to `1.0` and "the" and "of" consume 99% of the negative budget, so rare words are never
+contrasted against anything and their vectors stay near their random initialization. Push it to `0.0` and
+sampling is uniform, wasting negatives on words the center word would never plausibly co-occur with anyway.
+`0.75` is the empirical middle Mikolov settled on.
+
 **Hierarchical softmax (the alternative).** Arrange the vocabulary as leaves of a binary Huffman tree.
 `P(w | v_c)` becomes a product of `log₂(V) ≈ 20` binary decisions along the root-to-leaf path, each a
 sigmoid over an inner-node vector, dropping cost from `O(V)` to `O(log V)`. Frequent words get shorter Huffman
 paths, so they are cheaper. In practice negative sampling wins on frequent words and small `k`; hierarchical
 softmax wins on rare words and very large vocabularies.
 
+**Put simply.** "Instead of asking 'which of a million words?', ask about twenty yes/no questions and follow
+the answers down to a leaf."
+
+| Symbol | What it is |
+|--------|------------|
+| `log₂(V)` | Depth of a binary tree over `V` leaves — 19.93, so ~20 decisions at `V = 1,000,000` |
+| inner-node vector | One learned vector per internal node; its sigmoid decides "go left or go right" |
+| Huffman tree | Tree built so frequent words sit nearer the root, giving them shorter, cheaper paths |
+| `P(w \| v_c)` | Product of the sigmoids along the root-to-leaf path for word `w` |
+| `O(d·log V)` | Cost: one `d`-length dot product per decision, `log₂(V)` decisions |
+
+**Walk one example.** Four of the ~20 decisions on one word's path, and the resulting cost:
+
+```
+  V = 1,000,000 words  ->  log2(V) = 19.93, so ~20 binary decisions per example
+
+  step     direction     sigmoid at that node
+   1       right                0.90
+   2       left                 0.80
+   3       right                0.95
+   4       left                 0.70
+                              ------
+  running product  0.90 x 0.80 x 0.95 x 0.70 = 0.4788
+
+  cost:  20 x 300     =       6,000 mult-adds
+  vs     1,000,000 x 300 = 300,000,000 mult-adds for the full softmax
+```
+
+Unlike negative sampling, this product is a genuine normalised probability — every path out of the root sums
+to 1 by construction, which is why hierarchical softmax is the choice when you actually need calibrated
+`P(w | context)` rather than just good vectors.
+
 **Subsampling of frequent words.** Words like "the", "a", "of" co-occur with everything and carry little
 signal. Each occurrence of word `w_i` is discarded with probability `P(discard) = 1 - sqrt(t / f(w_i))`,
 where `f(w_i)` is the word's frequency and `t ≈ 1e-5`. This removes most stopword pairs, speeds training ~2x,
 and improves rare-word vectors by widening effective windows.
+
+**Stated plainly.** "Keep each occurrence of a word with probability `sqrt(t / f)` — so anything much more
+common than one-in-100,000 mostly gets thrown away before training ever sees it."
+
+| Symbol | What it is |
+|--------|------------|
+| `f(w_i)` | Frequency of `w_i` as a fraction of all tokens, not a raw count |
+| `t` | Threshold, `1e-5`; a word appearing at exactly this rate is always kept |
+| `sqrt(t / f(w_i))` | Keep probability — equals 1 when `f = t`, shrinks as `f` grows past it |
+| `1 - sqrt(t / f(w_i))` | Discard probability, rolled independently for each occurrence |
+
+**Walk one example.** `t = 1e-5`, per-occurrence discard probability:
+
+```
+  word          frequency f      keep = sqrt(t/f)      discard
+  the             0.05                0.0141           98.59%
+  of              0.03                0.0183           98.17%
+  and             0.025               0.0200           98.00%
+  coffee          0.0001              0.3162           68.38%
+  espresso        0.00001             1.0000            0.00%
+  zeugma          0.000001            >1, clamped       0.00%
+
+  "the" survives about 1 occurrence in 71 (1 / 0.0141 = 70.7). Anything at or below
+  f = t is never dropped at all.
+```
+
+The subtle win is not the speedup — it is that deleting "the" from between two content words pulls them
+inside each other's window. A fixed `c = 5` window therefore reaches *further* in semantic terms on
+stopword-heavy text, which is why subsampling improves rare-word vectors instead of merely making training
+cheaper. Set `t` too high (say `1e-3`) and almost nothing is dropped; set it to `0` and the feature is off.
 
 **CBOW (Continuous Bag of Words).** The mirror image of skip-gram: average the context word vectors and
 predict the center word. It trains ~faster (one prediction per window vs `2c`) and is better on frequent
@@ -121,11 +321,82 @@ frequent co-occurrences and zeroes out `X_ij = 0` cells so the sum skips empties
 **ratios** of co-occurrence probabilities encode meaning — `P(ice|solid)/P(steam|solid)` is large,
 `P(ice|gas)/P(steam|gas)` is small — and log-bilinear vectors capture exactly those ratios.
 
+**The idea behind it.** "Make the dot product of two word vectors equal the log of how often they co-occur —
+and care proportionally less about getting the very common pairs exactly right."
+
+| Symbol | What it is |
+|--------|------------|
+| `X_ij` | How often word `j` appears in word `i`'s context across the whole corpus |
+| `log X_ij` | The regression target; logs because co-occurrence counts span 6+ orders of magnitude |
+| `w_i` | Vector for center word `i` — the embedding you keep |
+| `w̃_j` | Separate vector for context word `j`, playing word2vec's `u_o` role |
+| `b_i`, `b̃_j` | Per-word biases that absorb "this word is just common", freeing vectors for relation |
+| `(... - log X_ij)²` | Squared error — ordinary least squares on the log-count target |
+| `f(X_ij)` | Weight on that cell: 0 when empty, ramping up, capped at 1 once `X_ij ≥ x_max` |
+| `x_max`, `α` | Cap `100` and ramp exponent `0.75` — where the weight stops growing, and how fast |
+
+**Walk one example.** Three real cells plus an empty one, showing what the weight does to each contribution:
+
+```
+  cell             X_ij      f(X)      log X    predicted    error    error^2   f(X) x err^2
+  ice,solid          25     0.3536     3.2189      3.10     -0.1189   0.0141      0.0050
+  ice,water       1,500     1.0000     7.3132      7.10     -0.2132   0.0455      0.0455
+  ice,fashion         3     0.0721     1.0986      1.30     +0.2014   0.0406      0.0029
+  ice,zebra           0     0.0000       --          --        --       --        0.0000
+
+  Unweighted, the noisy 3-count cell (0.0406) looks nearly as important as the solid
+  1,500-count cell (0.0455). Weighted, it contributes ~16x less: 0.0455 / 0.0029 = 15.7.
+```
+
+Two things break without `f`. Drop the cap and a handful of ("the", "of")-style cells with `X_ij` in the
+millions dominate the sum, so the fit optimizes pairs that carry no meaning. Drop the `f(0) = 0` floor and
+`log X_ij` is undefined on the ~99.9% of the matrix that is empty — the zero weight is what lets the sum skip
+those cells entirely rather than needing a smoothing hack.
+
 **fastText — subword embeddings.** Represent each word as itself plus its character n-grams (typically 3–6),
 delimited by markers `<` and `>`: "where" (n=3) → `<wh, whe, her, ere, re>, <where>`. The word vector is the
 **sum** of its subword vectors. Two payoffs: (1) OOV words get a vector by summing their known n-grams (no
 `<UNK>`), and (2) morphology is shared — "running", "runner", "runs" all include the `run` root n-grams, so
 they cluster even if some are rare.
+
+**Said another way.** "A word's vector is just the pile of its character chunks added together — so a word you
+have never seen still gets a vector, as long as its chunks are familiar."
+
+| Symbol | What it is |
+|--------|------------|
+| `<`, `>` | Word-boundary markers, so the prefix `<wh` is a different vector from a mid-word `wh` |
+| `n` | n-gram length, 3 to 6 by default (`min_n` / `max_n` in gensim and fastText) |
+| subword vector | One learned vector per n-gram; the whole word also gets its own vector |
+| the sum | Word vector = plain unweighted sum of every subword vector — no averaging, no weights |
+
+**Walk one example.** "kicking" at `n = 3..6`, then the sum itself on 3-dim toy values:
+
+```
+  n=3 : <ki  kic  ick  cki  kin  ing  ng>                     7 grams
+  n=4 : 6 grams        n=5 : 5 grams        n=6 : 4 grams     15 grams
+  plus the whole-word token for "kicking"                      1
+                                                             ----
+  total subword vectors summed                                 23
+
+  summing just the seven n=3 vectors:
+    <ki    [0.10, 0.20, 0.05]
+    kic    [0.30, 0.05, 0.10]
+    ick    [0.25, 0.10, 0.05]
+    cki    [0.20, 0.05, 0.05]
+    kin    [0.05, 0.30, 0.20]
+    ing    [0.02, 0.55, 0.40]
+    ng>    [0.01, 0.40, 0.35]
+           ------------------
+    sum    [0.93, 1.65, 1.20]
+
+  "kicked" reuses <ki kic ick cki ; "singing" reuses ing ng> . The overlap in the
+  summed chunks is exactly why morphological relatives land near each other.
+```
+
+Because the sum is unweighted, longer words accumulate more terms and larger norms — another reason to
+L2-normalize before comparing (Pitfall 2). Note also that 23 vectors per word is why fastText's memory
+footprint exceeds word2vec's: the n-grams are hashed into a fixed bucket table (2M buckets by default) rather
+than stored one per distinct n-gram, which is where fastText's occasional hash collisions come from.
 
 ---
 
@@ -410,6 +681,39 @@ human_sims = [h for w1, w2, h in pairs if w1 in wv and w2 in wv]
 correlation = spearmanr(model_sims, human_sims).correlation  # ~0.65-0.75 for good vectors
 ```
 
+**How to read it.** `target = wv[b] - wv[a] + wv[c]` says: "take the step that turns 'man' into 'king', apply
+that same step starting from 'woman', and look up whichever word you land nearest."
+
+| Symbol | What it is |
+|--------|------------|
+| `wv[b] - wv[a]` | The relation vector: the offset carrying `a` to `b` (here, person -> royal) |
+| `+ wv[c]` | Start from `c` and apply that same offset |
+| `target /= norm(target)` | Normalize, so the nearest-neighbour search ranks by cosine not by length |
+| `topn + 3` | Fetch three extra hits so the three query words can be dropped — the 3COSADD rule |
+
+**Walk one example.** Three-dimensional toy vectors, `man : king :: woman : ?`
+
+```
+  man     [0.50, 0.10, 0.80]
+  king    [0.95, 0.15, 0.20]
+  woman   [0.50, 0.90, 0.75]
+
+  king - man        =  [0.45, 0.05, -0.60]      <- the "royalty" offset
+  + woman           =  [0.95, 0.95,  0.15]      <- target, norm 1.3519
+
+  cosine(target, candidate):
+    queen    [0.92, 0.93, 0.18]      0.9997     <- the answer
+    woman    [0.50, 0.90, 0.75]      0.8377     <- query word, excluded
+    king     [0.95, 0.15, 0.20]      0.8095     <- query word, excluded
+    prince   [0.88, 0.12, 0.35]      0.7768
+    man      [0.50, 0.10, 0.80]      0.5380     <- query word, excluded
+```
+
+Look at the ranking: without the 3COSADD exclusion the runner-up would be "woman" itself at `0.8377`, then
+"king" at `0.8095`. The query words sit near the target *by construction* — you built the target out of them.
+That is the entire reason the rule exists, and skipping it is the classic way to "reproduce" an analogy
+benchmark and get suspiciously bad numbers.
+
 ### Loading pretrained GloVe as a frozen torch embedding layer
 
 ```python
@@ -553,6 +857,33 @@ Averaging raw word vectors is the most common misuse. SIF weighting (down-weight
 the first principal component beats plain averaging by 10+ points on sentence-similarity benchmarks — but a
 real sentence encoder (SBERT) beats both.
 
+**What it means.** The weight `a / (a + word_freq[t])` says: "give a word a full vote if it is rare and
+informative, and almost no vote if it is 'the'."
+
+| Symbol | What it is |
+|--------|------------|
+| `a` | Smoothing constant, `1e-3`; it sets the frequency at which the weight starts collapsing |
+| `word_freq[t]` | Word `t`'s corpus frequency as a fraction of all tokens |
+| `a / (a + f)` | The SIF weight: near 1 when `f << a`, exactly 0.5 when `f = a`, near 0 when `f >> a` |
+| top principal component | The direction every sentence vector shares; subtracting it removes that common axis |
+
+**Walk one example.** `a = 1e-3`, on the fintech vocabulary from the Section 14 case study:
+
+```
+  word              freq f        weight a/(a+f)       relative to "chargeback"
+  the               0.05             0.019608                  0.02
+  of                0.03             0.032258                  0.03
+  account           0.0005           0.666667                  0.68
+  chargeback        0.00002          0.980392                  1.00
+
+  "chargeback" carries exactly 50x the weight of "the": 0.980392 / 0.019608 = 50.0.
+  A plain mean would have given the two words an identical vote.
+```
+
+The `if t in wv` guard matters just as much as the weighting: the broken version raises `KeyError` on the
+first OOV token, and the naive "fix" of substituting a zero vector is worse than skipping — a zero pulls the
+mean toward the origin, quietly shrinking every sentence containing an unknown word.
+
 ### Pitfall 2: Cosine vs dot product with unnormalized vectors
 
 ```python
@@ -567,6 +898,36 @@ sim = q @ c                              # cosine, frequency-invariant direction
 
 Word2vec vector **norms grow with word frequency**. Use cosine (normalized) for semantic similarity; raw dot
 product silently ranks common words higher.
+
+**Translated.** "Divide each vector by its own length before taking the dot product, so you compare which way
+two words point rather than how big they happen to have grown."
+
+| Symbol | What it is |
+|--------|------------|
+| `q @ c` | Raw dot product; equals `norm(q) x norm(c) x cos(theta)` — direction tangled with size |
+| `np.linalg.norm(v)` | Euclidean length of `v`, the square root of the sum of its squared components |
+| `v / np.linalg.norm(v)` | Unit vector: identical direction, length exactly 1 |
+| `cos(theta)` | The similarity you actually want: 1 aligned, 0 orthogonal, -1 opposite |
+
+**Walk one example.** Query "espresso" against one semantically right and one merely frequent candidate:
+
+```
+  vector                            norm
+  espresso   [0.60, 0.80, 0.00]    1.0000
+  coffee     [0.66, 0.72, 0.21]    0.9990
+  the        [1.20, 1.00, 3.60]    3.9243     <- frequent word, inflated norm
+
+  candidate       raw dot       cosine
+  coffee           0.9720       0.9729       <- semantically correct
+  the              1.5200       0.3873       <- wins on dot, loses badly on cosine
+
+  Ranking by dot product puts "the" above "coffee" purely because its vector is
+  ~3.9x longer. Normalizing first flips the ranking back to the right one.
+```
+
+The norms are not an accident of this toy: a frequent word appears in many more (center, context) updates, so
+its vector accumulates more gradient steps and grows longer. Raw dot product therefore encodes a frequency
+prior you almost never want in a semantic-similarity ranking.
 
 ### Pitfall 3: Training on too little data and expecting good analogies
 

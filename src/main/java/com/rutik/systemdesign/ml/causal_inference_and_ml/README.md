@@ -38,6 +38,36 @@ For binary treatment T in {0,1}:
 
 **CATE (Conditional ATE, Heterogeneous Treatment Effects):** tau(x) = E[Y(1) - Y(0) | X=x] — effect for a subpopulation characterized by covariates x. This is the target for uplift modeling.
 
+**What the formula is telling you.** "All three estimands are the same subtraction — treated outcome minus untreated outcome for the same unit — and they differ only in *whose* differences you average over." ATE averages over everyone, ATT over the people who actually got treated, CATE over the people who look like `x`.
+
+| Symbol | What it is |
+|--------|------------|
+| `Y_i(1)`, `Y_i(0)` | The two potential outcomes for unit i. Exactly one is ever observed |
+| `tau_i` | The individual effect. Never observable — this is the fundamental problem, not a data shortage |
+| `E[...]` | Average over a population. Which population is the entire distinction below |
+| `E[... \| T=1]` | Restrict the average to the treated. That conditioning bar is all that separates ATT from ATE |
+| `E[... \| X=x]` | Restrict to units with covariates `x`. Slice finely enough and you approach `tau_i` |
+
+**Walk one example.** Reusing the 1,000-patient table (sick effect −10 pp, healthy effect −5 pp), the estimand you name decides the answer you get:
+
+```
+  estimand   averaged over        weights                  value
+  --------   ------------------   ----------------------   --------
+  ATE        everyone (1000)      400/1000, 600/1000       -7.00 pp
+  ATT        the treated  (380)   320/380,   60/380        -9.21 pp
+  ATC        the untreated(620)    80/620,  540/620        -5.65 pp
+  CATE(sick)     sick only (400)  1.00                    -10.00 pp
+  CATE(healthy)  healthy   (600)  1.00                     -5.00 pp
+
+  ATE  = 0.400*(-10) + 0.600*(-5) = -4.00 - 3.00 = -7.00
+  ATT  = 0.842*(-10) + 0.158*(-5) = -8.42 - 0.79 = -9.21
+  ATC  = 0.129*(-10) + 0.871*(-5) = -1.29 - 4.35 = -5.65
+```
+
+Same patients, same treatment, five defensible answers spanning −5 to −10 pp. ATT is the largest in magnitude because the treated population is 84% sick and the sick benefit most — which is exactly the question "did admitting the people we admitted help them?" ATE answers a different and more ambitious question: "what if we admitted everyone?" — and it is 24% smaller because it extrapolates onto healthy patients who benefit less. ATC ("what if we admitted the ones we turned away?") is smaller still.
+
+**Why naming the estimand first is not pedantry.** ATE and ATT coincide only under randomization, where the treated are a random sample of everyone. In observational data they routinely differ, and quoting one while the decision requires the other is the single most common way a correct analysis produces a wrong recommendation. A rollout decision needs ATE or ATC; a retrospective "was this program worth it?" needs ATT; a targeting policy needs CATE.
+
 **Identification assumptions (required for observational causal inference):**
 1. SUTVA (Stable Unit Treatment Value Assumption): no interference between units; one version of treatment.
 2. Consistency: Y_i = Y_i(T_i) — observed outcome equals potential outcome under observed treatment.
@@ -55,6 +85,38 @@ For binary treatment T in {0,1}:
 - Matching: pair each treated unit with a control unit of similar propensity. Estimate ATT as mean difference in matched pairs.
 - IPW (Inverse Probability Weighting): weight outcomes by 1/e(x) for treated, 1/(1-e(x)) for control. Creates a pseudo-population where treatment is independent of covariates.
 - Doubly robust estimator: combines outcome model and propensity model — consistent if either is correctly specified.
+
+**In plain terms.** "Work out how likely each person was to get treated in the first place, then count the surprising ones more heavily — so the reweighted treated group and the reweighted control group look like the same population." IPW does not remove confounding by modelling the outcome; it removes it by *rebuilding the population* on both sides.
+
+| Symbol | What it is |
+|--------|------------|
+| `e(x) = P(T=1\|X=x)` | Propensity score. The chance someone with covariates `x` gets treated |
+| `1/e(x)` | Weight for a **treated** unit. Rare treatment → big weight, because that person stands in for many |
+| `1/(1−e(x))` | Weight for a **control** unit. Same logic mirrored |
+| `trim_threshold` | Drop units with `e` outside `[0.05, 0.95]`, capping any weight at 20. Enforces positivity |
+| `caliper` | Max propensity gap allowed in matching, 0.05. Wider = more matches, worse comparability |
+| Hajek normalization | Divide by the sum of weights instead of by `n` — trades a little bias for much less variance |
+
+**Walk one example.** Same 1,000 patients: sick patients have `e = 0.8`, healthy have `e = 0.1`.
+
+```
+  group              n     e      weight        n * weight    mean Y
+  ----------------   ---   ----   -----------   ----------    ------
+  treated, sick      320   0.8    1/0.8 = 1.25       400       0.30
+  treated, healthy    60   0.1    1/0.1 = 10.00      600       0.05
+  control, sick       80   0.8    1/0.2 = 5.00       400       0.40
+  control, healthy   540   0.1    1/0.9 =  1.11      600       0.10
+
+  Each arm now reconstructs the true 400-sick / 600-healthy population:
+
+  mu1 = (400*0.30 + 600*0.05) / 1000 = 150/1000 = 0.150
+  mu0 = (400*0.40 + 600*0.10) / 1000 = 220/1000 = 0.220
+  ATE_IPW = 0.150 - 0.220 = -0.070  =  -7.00 pp
+```
+
+That is the true ATE recovered exactly, from the same data whose naive comparison said **+12.18 pp**. The mechanism is visible in the `n * weight` column: 60 treated healthy patients get inflated to 600 because they are the rare ones, so the treated arm stops being 84% sick and becomes 40% sick like the population.
+
+**Why trimming exists and what breaks without it.** Weights are `1/e`, so as `e` approaches 0 or 1 they explode — a treated unit with `e = 0.01` gets weight 100 and single-handedly dominates `mu1`, making the estimate a high-variance function of one person's outcome. Worse, an `e` near 0 means that covariate profile essentially never gets treated, so there is no comparable data and the estimator is silently extrapolating. Trimming to `[0.05, 0.95]` caps weights at 20 and is really a positivity check in disguise: if trimming discards a large share of your sample, the honest conclusion is that the ATE is not identified for those units, not that you should widen the threshold.
 
 **Meta-learners (CATE estimation):**
 
@@ -79,9 +141,65 @@ The estimate theta is the ATE, debiased via the orthogonalization step.
 **Difference-in-Differences (DiD):**
 Compare pre/post change in outcomes for treated vs. control groups. Assumes parallel trends: absent treatment, treated group would have trended like control. ATE_DiD = (Y_treated_post - Y_treated_pre) - (Y_control_post - Y_control_pre).
 
+**Stated plainly.** "Subtract twice: once to cancel everything permanently different about the treated group, and once to cancel everything that happened to everybody over the same period." The first difference kills fixed group effects, the second kills the common time trend, and whatever survives both is attributed to the treatment.
+
+| Symbol | What it is |
+|--------|------------|
+| `Y_treated_post − Y_treated_pre` | The treated group's raw change. Contains treatment **and** whatever the season did |
+| `Y_control_post − Y_control_pre` | The control group's change. The estimate of "what the season did" |
+| The outer subtraction | Removes the common trend, leaving the treatment-specific increment |
+| Parallel trends | The one untestable assumption: absent treatment, both lines would have moved together |
+| Pre-period placebo | Run DiD on two *pre*-treatment periods. It must return ≈ 0 or the assumption is dead |
+
+**Walk one example.** A feature launched in one market, measured as conversion rate in percent:
+
+```
+                  pre     post    change
+  treated        42.0     51.0     +9.0
+  control        38.0     44.0     +6.0
+  ---------------------------------------
+  DiD  =  (+9.0) - (+6.0)  =  +3.0 pp
+
+  What the two naive alternatives would have told you:
+    post-only comparison   :  51.0 - 44.0  =  +7.0 pp   (off by +4.0)
+    treated pre/post only  :  51.0 - 42.0  =  +9.0 pp   (off by +6.0)
+```
+
+Both naive numbers are more than double the truth, and each is wrong for a different reason. The post-only comparison inherits the pre-existing 4.0-point gap between the markets — the treated market was simply better before anything happened. The pre/post comparison inherits the +6.0 secular trend that lifted the control market too. DiD is the cheapest way to subtract both at once, which is why it is the default when randomization is off the table.
+
+**What breaks without parallel trends.** The assumption is doing all the work, and it is untestable in the post period by construction. Suppose the treated market was already accelerating and would have gained +8.0 on its own: the true effect is +1.0, DiD still reports +3.0, and no amount of extra data corrects it. This is why the standard practice is an event-study plot of several pre-periods — if the two lines were already diverging before treatment, DiD is measuring the divergence, not the treatment.
+
 **Instrumental Variables (IV):**
 When unobserved confounders exist, use instrument Z (affects T but has no direct effect on Y).
 Two-stage least squares: (1) regress T on Z to get T_hat, (2) regress Y on T_hat. Estimates Local ATE (LATE): effect among compliers (units whose treatment changed because of Z).
+
+**Put simply.** "Find something random that nudges people into treatment but has no other route to the outcome, then scale the nudge's effect on the outcome by the nudge's effect on treatment." You give up on comparing treated to untreated entirely; you compare *nudged* to *not nudged*, which is randomized, and then divide out how much the nudge actually moved treatment.
+
+| Symbol | What it is |
+|--------|------------|
+| `Z` | The instrument. Must be as-good-as-random, must move `T`, and must reach `Y` only through `T` |
+| Stage 1 | `T` on `Z` → `T_hat`. Keeps only the part of treatment variation the instrument explains |
+| Stage 2 | `Y` on `T_hat`. Because `T_hat` is built from `Z`, the unobserved confounder cannot ride along |
+| Wald form | `LATE = (E[Y\|Z=1] − E[Y\|Z=0]) / (E[T\|Z=1] − E[T\|Z=0])` — the numerator is the nudge's outcome effect, the denominator its take-up effect |
+| Compliers | Units that took treatment *because* of `Z`. LATE is their effect, not the population's |
+| Exclusion restriction | The untestable assumption: no `Z → Y` arrow except through `T` |
+
+**Walk one example.** A randomized email encouraging enrollment in a program (`Z`), where enrollment itself (`T`) is voluntary and confounded by motivation:
+
+```
+                     E[T | Z]   E[Y | Z]
+  nudged   (Z=1)       0.60       0.34
+  control  (Z=0)       0.20       0.26
+  ---------------------------------------
+  numerator (intention-to-treat)  = 0.34 - 0.26 = 0.08
+  denominator (first stage)       = 0.60 - 0.20 = 0.40
+
+  LATE = 0.08 / 0.40 = 0.20    <- a 20-point effect among the 40% of compliers
+```
+
+The numerator on its own — 0.08 — is the intention-to-treat effect, and it is *correct* but answers a different question ("what does sending the email do?"). Dividing by 0.40 rescales it to "what does enrolling do, for the people the email actually moved."
+
+**Why a weak instrument is dangerous rather than merely imprecise.** The denominator is a divisor, so it multiplies every error in the numerator. Keep the same 0.20 effect but shrink take-up to 24% versus 20%: the denominator becomes 0.04, the numerator 0.008, and `0.008/0.04 = 0.20` still — except now sampling noise in the numerator is amplified 25× instead of 2.5×. Any residual violation of the exclusion restriction is amplified by the same factor, so a weak instrument turns a tiny bias into a large one. The conventional screen is a first-stage F-statistic above 10, and it is a floor rather than a target.
 
 ---
 
@@ -112,6 +230,30 @@ flowchart TD
 ```
 
 U opens a backdoor path T ← U → Y, so the observed P(Y|T=1) is inflated by sickness — sicker people are both admitted and more likely to die. The causal P(Y|do(T=1)) differs from P(Y|T=1) precisely because the U → T edge is unblocked.
+
+**Read it like this.** "The people who got the treatment were never comparable to the people who didn't, so the difference between their outcomes measures *who they were* plus *what the treatment did* — and you cannot tell those two apart from the numbers alone." "Correlation is not causation" sounds like a warning about weak effects; it is actually a warning about **sign flips**.
+
+**Walk one example.** 1,000 patients, sickness is the unmeasured confounder, admission is the treatment:
+
+```
+  stratum        admitted   deaths   rate     not admitted   deaths   rate
+  ------------   --------   ------   ------   ------------   ------   ------
+  sick   (400)        320       96   30.0%              80       32   40.0%
+  healthy(600)         60        3    5.0%             540       54   10.0%
+  ------------   --------   ------   ------   ------------   ------   ------
+  ALL   (1000)        380       99   26.05%            620       86   13.87%
+
+  Naive comparison:  26.05% - 13.87%  =  +12.18 pp
+  "Being admitted to hospital RAISES your chance of dying by 12 points."
+
+  But look inside each stratum -- admission LOWERS mortality in both:
+      sick:     30.0% vs 40.0%   ->  -10 pp
+      healthy:   5.0% vs 10.0%   ->   -5 pp
+```
+
+Nothing in the bottom row is a rounding artifact or a small-sample fluke: the aggregate says +12.18 pp and every subgroup says the treatment helps. The whole +12.18 comes from *composition* — 80% of sick patients get admitted versus 10% of healthy ones, so the "admitted" column is packed with people who were going to die anyway. This is Simpson's paradox, and it is the reason a model with excellent predictive AUC can still recommend exactly the wrong policy: prediction only needs the correlation to hold, while a decision needs the arrow to point the right way.
+
+**Why the arrow into T is the whole problem.** If admission had been assigned by coin flip, sick and healthy patients would be split evenly across both columns and the naive difference would land on the truth. Confounding is not a property of the outcome — it is the `U → T` edge. Delete it (randomize) or block it (condition on U) and the naive estimate becomes valid; leave it and no amount of data fixes anything, because more patients just estimates the wrong quantity more precisely.
 
 ### Backdoor Adjustment
 

@@ -37,17 +37,202 @@ Key insight: Dense retrieval does not outperform BM25 on all queries. For querie
 
 **TF-IDF (foundational):** Term Frequency × Inverse Document Frequency weights terms by how discriminative they are. A term appearing frequently in a document and rarely in the corpus has high TF-IDF — a signal it characterizes this document. TF-IDF is the foundation that BM25 improves upon.
 
+**The idea behind it.** "Score a term high in one document when it appears a lot *here* and almost nowhere *else* in the corpus." TF measures local prominence, IDF measures global rarity, and the product keeps only terms that are both. Either half alone is worthless: TF alone ranks every document by how often it says "the"; IDF alone ignores the document being scored entirely.
+
+The two halves are separate calculations, so decode them separately.
+
+`TF(t, d)` — term frequency, a *within-document* quantity:
+
+| Symbol | What it is |
+|--------|------------|
+| `count(t, d)` | How many times term `t` literally occurs in document `d` |
+| `\|d\|` | Length of document `d` in tokens |
+| `TF = count(t, d) / \|d\|` | Share of this document made up of term `t`. A rate, not a raw count, so a 4000-word page does not beat a 40-word page just by being longer |
+
+`IDF(t)` — inverse document frequency, a *corpus-wide* quantity that never looks at the document being scored:
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total number of documents in the corpus |
+| `df(t)` | Document frequency: how many of those `N` documents contain `t` at least once. Note: presence only, count ignored |
+| `N / df(t)` | "One in how many documents has this word." `df` small → big number → rare, discriminative term |
+| `log(...)` | Compresses that ratio so a single ultra-rare term cannot swamp everything else |
+| `IDF = log(N / df(t))` | The rarity weight. A term in every document gets `log(1) = 0` and contributes nothing |
+
+**Walk one example.** A five-document corpus pushed all the way through:
+
+```
+  corpus, N = 5 documents
+    d1  "python tutorial for beginners"     len 4
+    d2  "python data science"               len 3
+    d3  "java tutorial"                     len 2
+    d4  "learn python programming"          len 3
+    d5  "cooking recipes"                   len 2
+
+  IDF = ln(N / df)          (corpus-wide, computed once at index time)
+    term        df    N/df     IDF
+    python       3    1.67    0.5108    <- in most docs: weak signal
+    tutorial     2    2.50    0.9163
+    java         1    5.00    1.6094    <- rare: strong signal
+    cooking      1    5.00    1.6094
+
+  TF-IDF for d1 "python tutorial for beginners", |d| = 4
+    python      TF = 1/4 = 0.2500   x 0.5108  =  0.1277
+    tutorial    TF = 1/4 = 0.2500   x 0.9163  =  0.2291   <- same count, higher score
+                                                             purely because it is rarer
+
+  TF-IDF for d2 "python data science", |d| = 3
+    python      TF = 1/3 = 0.3333   x 0.5108  =  0.1703
+    tutorial    TF = 0/3 = 0.0000   x 0.9163  =  0.0000   <- absent, contributes nothing
+
+  Both documents contain "python" exactly once, yet d2 scores higher
+  (0.1703 vs 0.1277) because d2 is shorter -- the same word is a bigger
+  share of what d2 is about.
+```
+
+**Why the log is there, and what breaks without it.** In a 10,000-document corpus, `df = 1` gives `N/df = 10000` while `df = 5000` gives `N/df = 2` — a raw ratio of `5000x`. Taking logs turns that into `9.2103` vs `0.6931`, a ratio of `13.29x`. Without the log, one freak term appearing in a single document would dominate the sum for every query it touches, and a document matching that one term would outrank a document matching all the others. The log converts "how many times rarer" into "how many orders of magnitude rarer," which is the scale at which term rarity is actually informative.
+
+**Why the smoothing `+1` is there.** A query term that appears in *zero* corpus documents has `df(t) = 0`, and `N / 0` is a division by zero that crashes the scorer at query time — not index time, so it is easy to miss in testing. Writing `IDF = log(N / (1 + df))` keeps the value finite (`ln(10000/1) = 9.2103` for the unseen term) and the ranking well-defined. BM25 uses a different smoothing constant for the same reason; that variant is decoded in Section 6.
+
 **BM25 (Best Match 25):** Adds two critical improvements over TF-IDF:
 1. **TF saturation:** Raw TF over-values repeated terms. "Python" appearing 50 times should not be 50x more evidence than appearing once. BM25 saturates TF: `TF_sat = TF × (k1 + 1) / (TF + k1)`. As TF→∞, TF_sat→(k1+1). With k1=1.2, TF_sat plateaus at 2.2.
 2. **Length normalization:** Long documents naturally contain more term occurrences. BM25 normalizes for document length: shorter documents get a boost, longer get a penalty. `L_norm = 1 - b + b × (|d| / avgdl)` where b=0.75.
+
+**Read it like this.** Saturation says "the tenth mention of a word tells you almost nothing the third one did not"; length normalization says "the tenth mention is less impressive in a 5,000-word document than in a 200-word one." Both exist because raw TF-IDF believes a word repeated 50 times is 50 times the evidence, and that belief is what keyword-stuffed pages exploit.
+
+| Symbol | What it is |
+|--------|------------|
+| `TF` | Raw count of the term in this document — unbounded, `0` to whatever |
+| `k1` | Saturation dial, default `1.2`. Bigger `k1` means repeated mentions keep earning credit for longer |
+| `k1 + 1` | The ceiling the saturated value approaches. At `k1 = 1.2` that ceiling is `2.2` |
+| `TF / (TF + k1)` | The saturating core: `0` at `TF = 0`, climbing toward `1` and never reaching it |
+| `avgdl` | Mean document length across the whole corpus, in tokens |
+| `\|d\| / avgdl` | How bloated this document is. `1.0` = exactly average, `4.0` = four times average |
+| `b` | Normalization strength, default `0.75`. `b = 0` disables length correction, `b = 1` applies it fully |
+| `L_norm` | The length penalty that gets multiplied into `k1` in the denominator. `> 1` penalizes, `< 1` rewards |
+
+**Walk one example.** First saturation alone, holding length at exactly average so `L_norm = 1`:
+
+```
+  TF_sat = TF x (k1 + 1) / (TF + k1),   k1 = 1.2,  ceiling k1 + 1 = 2.2
+
+    raw TF          1        2        3        5       10       50     1000
+    TF_sat     1.0000   1.3750   1.5714   1.7742   1.9643   2.1484   2.1974
+    value of
+    each extra
+    mention in
+    this step      --  0.37500  0.19643  0.10138  0.03802  0.00460  0.00005
+
+  The 2nd mention is worth 0.375. Each mention between 50 and 1000 is worth
+  0.00005 -- about 7,500 times less. Stuffing a term 1000 times buys less
+  than one honest second mention did.
+```
+
+Then length normalization alone, on a corpus whose average document is 200 tokens:
+
+```
+  L_norm = 1 - b + b x (|d| / avgdl),   b = 0.75,  avgdl = 200
+
+    |d|          50      100     200     400     800
+    |d|/avgdl   0.25     0.50    1.00    2.00    4.00
+    L_norm     0.4375   0.6250  1.0000  1.7500  3.2500
+                 ^                ^                ^
+              boosted          neutral          penalized
+```
+
+`L_norm` sits in the denominator multiplied by `k1`, so a bigger `L_norm` shrinks the score. Set `b = 0` and every row above collapses to `1.0000` — long documents then win simply by containing more words, which is exactly the failure BM25 was written to fix. Set `b = 1` and the correction is total, which over-punishes genuinely comprehensive long documents; `0.75` is the empirical compromise.
 
 **Inverted index:** The core data structure for sparse retrieval. For each term in the vocabulary, store a posting list: sorted list of (document_id, term_frequency) pairs. To retrieve documents containing "python programming": look up both posting lists, merge (AND/OR logic), rank by BM25 score. With skip pointers, merging posting lists of length n is O(n), not O(n²).
 
 **Sentence embeddings:** Map a sentence to a single dense vector in a semantic space where similar sentences are nearby. `sim(sentence_a, sentence_b) = cosine(embed(a), embed(b))`. Training requires sentence pairs with similarity labels (NLI, STS benchmarks, or self-supervised methods).
 
+**Put simply.** "Ignore how long the two arrows are; ask only whether they point the same way." Cosine is the angle between two embedding vectors, rescaled to `1` for identical direction, `0` for perpendicular, `-1` for opposite. Length is discarded on purpose, because vector length in embedding space tracks things like text length and token count — not meaning.
+
+| Symbol | What it is |
+|--------|------------|
+| `embed(a)` | The encoder's output vector for sentence `a` — 384 or 768 numbers |
+| `a · b` | Dot product: multiply the two vectors element-by-element and add up. Big when they agree coordinate-by-coordinate |
+| `\|\|a\|\|` | L2 norm, the vector's length: `sqrt(a·a)` |
+| `cos(a,b) = (a·b) / (\|\|a\|\| \|\|b\|\|)` | Dot product with both lengths divided out — pure direction, bounded to `[-1, 1]` |
+| L2 normalization | Replacing `a` with `a / \|\|a\|\|` so its length becomes exactly `1` |
+
+**Walk one example.** Three-dimensional toy vectors, where the axes are the counts of "cheap", "car", and "bicycle". The query is `q = [1, 1, 0]` ("cheap car"):
+
+```
+  doc A = [5, 5, 0]   same content as the query, said five times over (a long page)
+  doc B = [0, 1, 1]   "car bicycle"  -- genuinely a different topic
+
+                       ||v||     q.v     cosine(q,v)    euclidean(q,v)
+    doc A            7.0711      10        1.0000          5.6569
+    doc B            1.4142       1        0.5000          1.4142
+
+  Euclidean distance ranks B (1.4142) as CLOSER than A (5.6569) -- exactly
+  backwards. A is the query repeated; B is a different topic. Cosine gets
+  it right: A = 1.0000 (identical direction), B = 0.5000.
+```
+
+That is the whole answer to "why cosine, not Euclidean": Euclidean distance punishes a document for being long, because a longer document produces a longer vector, and the raw gap between two vector tips grows with their length regardless of topic.
+
+**What L2 normalization buys you.** Once every vector has length `1`, the denominator of the cosine formula is `1 × 1 = 1`, so the division disappears and **the dot product simply *is* the cosine**:
+
+```
+  q_unit = [0.7071, 0.7071, 0.0000]     (q divided by ||q|| = 1.4142)
+  A_unit = [0.7071, 0.7071, 0.0000]     (A divided by ||A|| = 7.0711)
+  B_unit = [0.0000, 0.7071, 0.7071]
+
+    dot(q_unit, A_unit) = 1.0000   == cosine(q, A)
+    dot(q_unit, B_unit) = 0.5000   == cosine(q, B)
+
+  And on unit vectors, euclidean distance becomes a restatement of cosine:
+    d(q_unit, B_unit)^2 = 1.0000     2 - 2 x cosine = 2 - 2(0.5) = 1.0000
+```
+
+This identity is why the FAISS code below builds an `IndexFlatIP` (inner product) index rather than an L2 index and why `encode()` ends in `F.normalize(..., p=2)`. Inner-product search is cheaper than cosine search — no per-comparison division, no square roots — and on normalized vectors it returns identical rankings. Skip the normalize step and `IndexFlatIP` silently starts ranking by *magnitude*, so the longest documents float to the top of every query. The last line above shows the other consequence: once vectors are normalized, sorting by cosine descending and sorting by Euclidean distance ascending produce the same order, so an HNSW or IVF index built on either metric is valid.
+
 **Siamese architecture (Sentence-BERT):** Two BERT encoders with shared weights. Input: (sentence_a, sentence_b). Each sentence encoded independently to mean-pooled representation. Trained with cosine embedding loss on NLI data (entailment→similar, contradiction→dissimilar). At inference, pre-compute and store all document embeddings; query is encoded on-the-fly; nearest neighbor search finds top-K.
 
 **Reciprocal Rank Fusion (RRF):** Given two ranked lists (e.g., BM25 rank and dense rank), fuse them without knowing individual scores. Score for document d = Σ_{system} 1/(k + rank(d, system)) where k=60 is a constant preventing top-ranked documents from dominating too strongly. Simple, calibration-free, often outperforms score-based fusion when score scales differ between systems.
+
+**Stated plainly.** "Throw away both systems' scores, keep only their rank orders, and reward the document that several systems agreed was near the top." The formula never compares a BM25 number to a cosine number, which is the entire point — those two scales are not commensurable.
+
+| Symbol | What it is |
+|--------|------------|
+| `rank(d, system)` | The 1-based position document `d` got in that system's list. Rank 1 is best |
+| `k` | Damping constant, `60` by convention. It is added to every rank before inverting |
+| `1 / (k + rank)` | One system's vote for `d`. Always positive, always shrinking as rank worsens |
+| `Σ_system` | Sum the votes across systems. A document missing from a list simply contributes `0` |
+| `score(d)` | The fused score, used only for sorting — its absolute value means nothing |
+
+**Walk one example.** Four documents, ranked by BM25 and by a dense retriever, `k = 60`:
+
+```
+  doc     bm25 rank   dense rank    1/(60+r_bm25)  +  1/(60+r_dense)  =  fused
+  ----------------------------------------------------------------------------
+  docB         3           2          0.015873         0.016129        0.032002
+  docD         2           8          0.016129         0.014706        0.030835
+  docA         1          50          0.016393         0.009091        0.025484
+  docC        --           1          0.000000         0.016393        0.016393
+
+  docA is BM25's outright #1 and still finishes THIRD, because the dense
+  retriever buried it at rank 50. docB, which neither system ranked first
+  but both ranked near the top, wins. RRF rewards agreement over any single
+  system's conviction.
+```
+
+**Why `k` is 60 and not 0.** The constant flattens the curve near the top of the list so rank 1 does not steamroll rank 2:
+
+```
+    k       score(rank 1)   score(rank 2)   how much better rank 1 is
+    0          1.0000          0.5000            2.00x   (100% better)
+    1          0.5000          0.3333            1.50x
+   10          0.0909          0.0833            1.09x
+   60          0.0164          0.0161            1.02x   (1.6% better)
+
+  With k = 60, rank 1 is only 1.15x rank 10 -- but still 17.4x rank 1000,
+  so the ordering signal survives while the top-of-list tyranny does not.
+```
+
+With `k = 0` a document that either system ranked first would nearly always win the fusion, which reduces the hybrid to "whichever retriever was more confident," discarding the second opinion you paid for. Cormack et al. (2009) found `60` worked well across diverse IR collections; it is not derived from theory, and it is worth re-tuning when one retriever is known to be much stronger than the other.
 
 ---
 
@@ -74,6 +259,63 @@ Key insight: Dense retrieval does not outperform BM25 on all queries. For querie
 | E5-large | 24L | 1024 | Weakly supervised | 40.6 |
 | BGE-large | 24L | 1024 | Contrastive + hard negatives | 41.9 |
 | ColBERT-v2 | 12L | 128/token | Late interaction + distillation | 39.7 |
+
+### 4.2.1 Reading the Retrieval Metrics
+
+The two tables above are scored in `NDCG@10` and `MRR@10`, and Section 12 adds `Recall@K`. All three answer different questions, and all three are quoted constantly in interviews without being defined.
+
+**What this actually says.** "MRR asks how fast you found *the* answer, NDCG asks how well you ordered *all* the good answers, and Recall@K asks whether the good answers made it into the bucket at all." Pick MRR when one correct result ends the task, NDCG when the user scans a whole page, Recall@K when a reranker downstream will do the ordering for you.
+
+| Symbol | What it is |
+|--------|------------|
+| `rel_i` | Graded relevance of the document at position `i` — typically `0` irrelevant, `1` partial, `2` relevant, `3` perfect |
+| `2^rel_i - 1` | The gain. Exponential, so one perfect hit (`7`) outweighs three partial hits (`1` each) |
+| `log2(i + 1)` | The positional discount. Deeper positions divide the gain by more |
+| `DCG@K` | Sum of discounted gains over the top `K` — raw, not comparable across queries |
+| `IDCG@K` | The same sum computed on the *perfect* ordering of the same documents |
+| `NDCG@K = DCG / IDCG` | Bounded `[0, 1]`. `1.0` means your ranking is already optimal |
+| `rank_q(first_relevant)` | The position of the first relevant result for query `q`; `0` credit if there is none in the top `K` |
+| `MRR@K` | Mean of `1 / rank_q` over all queries. `1.0` = every query's answer was at position 1 |
+| `Recall@K` | (relevant documents appearing in the top `K`) / (all relevant documents that exist) |
+
+**Walk one example.** NDCG@5 on a single query whose top five results grade out as `[3, 0, 2, 0, 1]`:
+
+```
+  your ranking            ideal ranking (same docs, best order)
+  pos rel gain disc  contrib      pos rel gain disc  contrib
+   1   3    7  1.0000  7.0000      1   3    7  1.0000  7.0000
+   2   0    0  1.5850  0.0000      2   2    3  1.5850  1.8928
+   3   2    3  2.0000  1.5000      3   1    1  2.0000  0.5000
+   4   0    0  2.3219  0.0000      4   0    0  2.3219  0.0000
+   5   1    1  2.5850  0.3869      5   0    0  2.5850  0.0000
+                     --------                        --------
+              DCG@5 = 8.8869                IDCG@5 = 9.3928
+
+  NDCG@5 = 8.8869 / 9.3928 = 0.9461
+
+  Almost all of the score comes from position 1 (7.0000 of 8.8869 = 79%).
+  That is the exponential gain at work: a perfect result at the top is
+  worth more than everything below it combined.
+```
+
+MRR and Recall on the same kind of data:
+
+```
+  MRR@10 over four queries, by position of the FIRST relevant result
+    query     first relevant at     reciprocal rank
+    q1              1                    1.0000
+    q2              3                    0.3333
+    q3         none in top 10            0.0000
+    q4              2                    0.5000
+                                       --------
+                          MRR@10 = 1.8333 / 4 = 0.4583
+
+  Recall@100 for one query with 8 known relevant documents,
+  6 of which appear in the retriever's top 100:
+    Recall@100 = 6 / 8 = 0.7500
+```
+
+Two reading notes for the tables above. First, the `MS MARCO MRR@10` column is reported on a 0-100 scale, so `33.4` means `MRR@10 = 0.334` — roughly "the first relevant passage sits around position 3 on average." Second, `Recall@K` is the metric with a hard downstream consequence: the `0.7500` above means a cross-encoder reranking those 100 candidates can never see the 2 missing documents, so `0.7500` is a ceiling on every metric computed after it, no matter how good the reranker is.
 
 ### 4.3 Hybrid Retrieval Strategies
 
@@ -324,6 +566,59 @@ class BM25:
         return scored[:top_k]
 ```
 
+**What the formula is telling you.** `score(Q,D) = Σ_t IDF(t) × TF(t,D)×(k1+1) / (TF(t,D) + k1×(1-b+b×|D|/avgdl))` says: "for every query term, multiply how rare the term is by how convincingly this document uses it — where 'convincingly' saturates with repetition and is discounted for document bloat — then add those up." Everything TF-IDF did is still in there; BM25 only replaces the raw `TF` factor with a bounded, length-aware version.
+
+| Symbol | What it is |
+|--------|------------|
+| `Σ_{t ∈ Q}` | Loop over the query's terms and add. Terms not in the corpus are skipped entirely (see the `continue` in `_score_doc`) |
+| `IDF(t)` | Rarity weight, precomputed once per term at index time — never depends on the document being scored |
+| `N - df(t) + 0.5` | Documents *without* the term, plus smoothing. Numerator of the odds ratio |
+| `df(t) + 0.5` | Documents *with* the term, plus smoothing. Denominator |
+| `+ 1` inside the log | Floor that keeps IDF at or above `0` even when every document has the term |
+| `TF(t,D) × (k1+1)` | Numerator of the saturating TF term; `k1+1 = 2.2` is the ceiling it approaches |
+| `k1 × (1 - b + b×\|D\|/avgdl)` | Denominator's length-scaled saturation constant. Long documents inflate this and shrink the score |
+| `avgdl` | Corpus mean document length, computed in `__init__` as `sum(len(doc)) / N` |
+
+**Walk one example.** A 10,000-document corpus, `avgdl = 200`, one query term with `df = 500`, `k1 = 1.2`, `b = 0.75`:
+
+```
+  IDF = ln((10000 - 500 + 0.5) / (500 + 0.5) + 1)
+      = ln(9500.5 / 500.5 + 1) = ln(18.9820 + 1) = ln(19.9820) = 2.9948
+
+  score = IDF x TF x (k1+1) / (TF + k1 x L),  L = 1 - b + b x (|D|/avgdl)
+
+   TF   |D|      L        saturated TF        score
+    1   200   1.0000        1.0000           2.9948   <- baseline: one mention,
+                                                          average-length doc
+    3   100   0.6250        1.7600           5.2709   <- 3 mentions in a SHORT doc
+    3   200   1.0000        1.5714           4.7062   <- same 3 mentions, avg length
+    3   800   3.2500        0.9565           2.8646   <- same 3 mentions, bloated doc:
+                                                          scores BELOW the 1-mention doc
+
+  Compare what plain TF-IDF (unbounded raw TF x IDF) would have given:
+    TF =  1  ->  1 x 2.9948 =   2.9948
+    TF =  3  ->  3 x 2.9948 =   8.9845
+    TF = 30  -> 30 x 2.9948 =  89.8450   <- 30x the single-mention score
+
+  BM25 for that same TF = 30 in an 800-token document is 5.8306 -- under 2x
+  the baseline, not 30x. That gap between 89.8450 and 5.8306 is the whole
+  reason BM25 replaced TF-IDF for ranking.
+```
+
+The third row is the one worth remembering: three mentions inside a bloated document score `2.8646`, *below* a single mention in an average-length document (`2.9948`). Raw TF-IDF can never produce that ordering, because raw TF only goes up.
+
+**Why the `0.5` and the `+ 1` in the IDF are both load-bearing.** They guard two different failure modes at the extreme `df(t) = N`, a term present in every document:
+
+```
+  N = 10000
+
+  no smoothing at all      : ln((N - N) / N)              = ln(0)      = -infinity
+  with 0.5, without the +1 : ln((10000-10000+0.5)/10000.5) = ln(0.00005) = -9.9035
+  with both (as written)   : ln(0.00005 + 1)                            =  0.00005
+```
+
+Without the `0.5`, the log of zero blows up the entire score to `-inf` — one ubiquitous term in the query destroys the ranking. With the `0.5` but without the `+ 1`, the IDF is a large *negative* number, so BM25 actively penalizes a document for containing "the" more often, which is nonsense. The `+ 1` floors it at essentially zero (`0.00005`): ubiquitous terms contribute nothing rather than doing harm. Compare a rare term in the same corpus — `df = 1` gives `IDF = 8.8050` — so the full dynamic range runs from `0.00005` up to `8.8050`, always non-negative.
+
 ### Sentence-BERT Training (Siamese Network)
 
 ```python
@@ -428,6 +723,39 @@ def build_faiss_index(
     index.add(embeddings.astype(np.float32))
     return index
 ```
+
+**In plain terms.** `nlist = sqrt(N)` with `nprobe` clusters searched says: "chop the corpus into `sqrt(N)` buckets so each bucket holds about `sqrt(N)` vectors, then at query time open only `nprobe` of them." The recall-versus-latency dial is entirely `nprobe`, and the arithmetic behind it is one line: you compare against `nprobe × (N / nlist)` vectors instead of all `N`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of vectors in the index |
+| `nlist` | How many k-means clusters `train()` carves the space into. `sqrt(N)` balances cluster count against cluster size |
+| `N / nlist` | Average vectors per cluster. At `nlist = sqrt(N)` this is also `sqrt(N)` |
+| `nprobe` | How many nearest clusters to actually scan at query time. The only knob you change after training |
+| `nprobe × N / nlist` | Vectors compared per query — the real cost driver |
+| `nlist / nprobe` | Speedup over exhaustive `IndexFlatIP` search |
+| Recall@10 | Fraction of the true top-10 the approximate search actually returned. Missing them is the price of not scanning everything |
+
+**Walk one example.** A 1M-vector index, `nlist = sqrt(1,000,000) = 1000`, so roughly 1,000 vectors per cluster:
+
+```
+  N = 1,000,000    nlist = 1000    1,000 vectors per cluster
+
+   nprobe   vectors scanned   share of corpus   speedup vs flat
+      1           1,000            0.100%          1000.0x
+     10          10,000            1.000%           100.0x
+     50          50,000            5.000%            20.0x
+    100         100,000           10.000%            10.0x
+
+  Scale to the 50M-product case study in Section 14 (nlist = 7071):
+   nprobe   vectors scanned   share of corpus   speedup vs flat
+     10          70,711            0.141%           707.1x
+     50         353,557            0.707%           141.4x
+```
+
+The curve is the point: going from `nprobe = 1` to `nprobe = 10` costs 10x the work but buys most of the missing recall, because the true nearest neighbor is very often in one of the ten nearest clusters. Going from `50` to `100` doubles the work again for a much smaller recall gain. That is why Section 12's guidance is `nprobe = 10-50` for `recall@10 ~95%`, and why the 50M-product design in Section 14 sits at `nprobe = 50` — a 141x speedup while still touching only 0.707% of the corpus.
+
+**Why recall is lost at all.** IVF assigns each vector to exactly one cluster at `add()` time. A query vector sitting near a cluster boundary has genuine neighbors on the far side of that boundary, and if the neighboring cluster is not among the `nprobe` opened, those documents are unreachable — no amount of rescoring recovers them. Raising `nprobe` opens more boundary clusters, which is precisely why recall climbs with it. This is also the mechanism behind Pitfall 4: `train()` fixes the boundaries, so 100K documents appended afterwards land in clusters drawn for a corpus that no longer exists, and queries aimed at the new material probe the wrong buckets.
 
 ### Reciprocal Rank Fusion
 
@@ -564,6 +892,50 @@ class ColBERT(torch.nn.Module):
         # Sum over query dimension: scalar
         return max_sims.sum().item()
 ```
+
+**What it means.** `score(Q,D) = Σ_i max_j cos(q_i, d_j)` says: "for every word in the query, find the single word in the document that best answers it, then add up how good those best answers were." Nothing in the formula requires those answers to come from the same part of the document, which is exactly what lets one query match a document that covers its parts in scattered places.
+
+| Symbol | What it is |
+|--------|------------|
+| `Q` | Query token matrix, shape `(q_len, 128)` — one L2-normalized vector per query token, not one per query |
+| `D` | Document token matrix, shape `(d_len, 128)` |
+| `Q @ D.T` | The full `(q_len, d_len)` grid of pairwise cosine similarities. Normalized inputs make matmul = cosine |
+| `max_j` | Row-wise maximum: each query token's best match anywhere in the document |
+| `Σ_i` | Sum those row maxima. More query tokens satisfied = higher score |
+| "late" interaction | Q and D are encoded independently (so D is precomputable), and only the cheap similarity grid is computed at query time |
+
+**Walk one example.** Query tokens `[capital, france, attractions]` against document tokens `[Paris, is, the, Eiffel]`:
+
+```
+  cosine grid (Q @ D.T), rows = query tokens, cols = document tokens
+
+                Paris     is     the   Eiffel      row max
+  capital        0.82    0.05   0.03    0.21         0.82   <- matched "Paris"
+  france         0.74    0.02   0.01    0.35         0.74   <- matched "Paris" too
+  attractions    0.30    0.04   0.02    0.68         0.68   <- matched "Eiffel"
+                                                    ------
+                                  score(Q, D)  =     2.24
+
+  Note "Paris" is the best match for TWO query tokens -- MaxSim allows reuse.
+  And "attractions" scored off a completely different token. A single pooled
+  768d vector has to encode both of those relationships at once; the grid
+  just represents them separately.
+```
+
+Compare that `2.24` against the average of all 12 cells, `0.2725`: most of the grid is noise (the `is`/`the` columns), and taking the row max is what discards it. Sum instead of average across rows means longer queries produce larger scores, so ColBERT scores are comparable *between documents for one query*, never across queries.
+
+**What the extra expressiveness costs.** Storing per-token vectors instead of one pooled vector:
+
+```
+  bi-encoder :  768 dims x 4 bytes                =   3,072 bytes/doc
+  ColBERT    :  32 tokens x 128 dims x 4 bytes    =  16,384 bytes/doc
+
+  ratio = 16,384 / 3,072 = 5.33x
+
+  at 1M documents :  3.07 GB  ->  16.38 GB
+```
+
+The dimension drop from 768 to 128 (the `self.linear` projection) is what keeps that ratio at `5.33x` instead of `32x` — without it, 32 full-width token vectors would be 32 times a pooled vector. This is also why Best Practice 9 recommends INT8 compression of the document token embeddings: it takes the 4 bytes per dimension down to 1, restoring the storage bill to roughly bi-encoder levels for under 0.5 MRR@10 of quality.
 
 ---
 

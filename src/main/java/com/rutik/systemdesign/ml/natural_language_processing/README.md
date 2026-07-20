@@ -82,6 +82,35 @@ See [text_representation_and_retrieval.md](text_representation_and_retrieval.md)
 | BiLSTM + Attention | O(n*h) | Longer sequences, sentiment |
 | BERT fine-tuned | O(n²*L) | >10K labeled examples, highest accuracy |
 
+**Read it like this.** "The first three models cost you one pass over the text; BERT costs you a pass over every pair of tokens, once per layer."
+
+That single difference — linear in `n` versus quadratic in `n` — is the whole latency story in this table, and it is why the cheap models never disappeared.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Sequence length in tokens (or number of documents, for the training-cost reading) |
+| `d` | Feature dimension — vocabulary size for TF-IDF, embedding width for neural models |
+| `k` | Convolution filter width in TextCNN (2, 3, 4 in §6) |
+| `h` | LSTM hidden size |
+| `L` | Number of transformer layers stacked (12 for bert-base) |
+| `n²` | Every token attends to every other token — the pairwise term |
+
+**Walk one example.** The same 512-token input pushed through each cost model:
+
+```
+                        cost expression    n=512, d=300, k=3, h=256, L=12
+  LR + TF-IDF           O(n*d)              512 x 300              =     153,600
+  TextCNN               O(n*k*d)            512 x 3 x 300          =     460,800
+  BiLSTM                O(n*h)              512 x 256              =     131,072
+  BERT (attention)      O(n^2*L)            512 x 512 x 12         =   3,145,728
+
+  Now double the input to 1024 tokens:
+  LR + TF-IDF           2x the work          (linear)
+  BERT (attention)      4x the work          (quadratic -- 12.6M pairwise scores)
+```
+
+Doubling the input doubles the cost of every classical model and quadruples BERT's. This is the arithmetic behind the 512-token limit that Section 14 has to work around with a sliding window.
+
 See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for BERT/RoBERTa/DeBERTa fine-tuning, variants, and production guidance.
 
 ### 4.4 Sequence Labeling (NER)
@@ -91,6 +120,32 @@ BIO tagging: B-entity (Beginning), I-entity (Inside), O (Outside). For "New York
 ### 4.5 Topic Modeling
 
 LDA (Latent Dirichlet Allocation): each document is a mixture of topics; each topic is a distribution over words. Hyperparameters: alpha (document-topic sparsity, typically 1/K), beta (topic-word sparsity, typically 0.01).
+
+**The idea behind it.** "alpha and beta are prior guesses about how *spread out* the mixtures should be — small values say 'a document is about one or two things, and a topic uses a handful of words'."
+
+Both are Dirichlet concentration parameters, and the only thing worth remembering is the direction: below 1.0 pushes probability mass onto a few entries; above 1.0 smears it evenly across all of them. Getting the direction backwards is the single most common LDA misconfiguration.
+
+| Symbol | What it is |
+|--------|------------|
+| `K` | Number of topics you asked for (20 in the code below, 150 for the NY Times example in §7) |
+| `alpha` | Document-topic prior. Low = each document commits to few topics |
+| `beta` (`eta` in gensim) | Topic-word prior. Low = each topic commits to few words |
+| `1/K` | The usual alpha default — shrinks automatically as you add topics |
+| `0.01` | The usual beta default — deliberately far below 1.0, so topics stay word-sparse |
+
+**Walk one example.** What `alpha = 1/K` actually buys you as `K` grows:
+
+```
+  K = 10   ->  alpha = 1/10  = 0.1000    each doc leans on ~1-3 of 10 topics
+  K = 20   ->  alpha = 1/20  = 0.0500    each doc leans on ~1-3 of 20 topics
+  K = 150  ->  alpha = 1/150 = 0.0067    each doc still leans on ~1-3 topics
+
+  Contrast with a fixed alpha = 1.0 at K = 150:
+    every document gets a little of all 150 topics -> topic mixtures become
+    near-uniform mush, and coherence (C_v) collapses.
+```
+
+The `1/K` rule keeps documents equally decisive no matter how many topics you sweep, which is exactly what makes the "sweep K from 10 to 100 and pick the elbow" procedure in §13 a fair comparison. Note that the code below passes `alpha="auto"` and `eta="auto"`, which lets gensim learn these from data instead — worth doing once the corpus is larger than a few thousand documents.
 
 ---
 
@@ -212,6 +267,33 @@ flowchart LR
 ```
 
 Skip-gram predicts context from a center word; the learned embedding matrix W is the actual product — the softmax head is discarded after training. This is why the distributional hypothesis (§3) yields geometry where similar-context words sit close.
+
+**What the formula is telling you.** "Multiplying a one-hot vector by W is not multiplication at all — it is a table lookup, and W is the table you are actually training."
+
+Reading `one-hot × W` as a real matrix product is the classic misreading. All but one entry of the input vector is zero, so `V × 300` multiply-adds collapse into copying row `i` of `W`. The softmax head on the other side is the expensive part, and it is thrown away.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Vocabulary size — 500K words in the Pitfall 5 example |
+| `W` (`V × 300`) | Input embedding matrix. Row `i` *is* the vector for word `i`. The keeper |
+| `W'` (`300 × V`) | Output matrix, one column per possible context word. Discarded after training |
+| one-hot input | A `V`-long vector, single `1` at the center word's index |
+| softmax over `V` | Turns `V` raw scores into probabilities that sum to `1.0` |
+
+**Walk one example.** Where the compute actually goes for a single (center, context) pair:
+
+```
+  V = 500,000 vocabulary,  embedding width d = 300
+
+  input side   one-hot x W    -> row lookup                 ~0 multiply-adds
+  output side  vec x W'       -> 300 x 500,000          = 150,000,000 mult-adds
+  softmax      exp + normalize over 500,000 scores      =     500,000 exp calls
+
+  Total per training pair:  ~150M operations to update ONE word's vector.
+  A 1B-token corpus with window=5 produces billions of such pairs.
+```
+
+The output side costs 150 million operations to learn one 300-number vector — that is the bottleneck skip-gram implementations exist to avoid. Production trainers (including the gensim call in §6) never evaluate the full softmax; they score the true context word against a small handful of randomly drawn "negative" words instead, turning the `V`-way normalization into a few binary decisions. Without that substitution, the `min_count=5` and `window=5` settings below would be academic — the model would never finish training.
 
 ### BiLSTM + CRF for NER
 
@@ -345,6 +427,75 @@ def build_tfidf_classifier(
     return pipeline
 ```
 
+**In plain terms.** "Count how much this document talks about a word, then divide out how much *everybody* talks about it."
+
+TF-IDF is two independent ideas multiplied together, and they are worth decoding separately because they fail separately. TF is a within-document statistic computed at transform time; IDF is a corpus-wide statistic frozen at `fit` time — which is precisely why fitting on the full dataset leaks test data (Pitfall 1).
+
+**The TF half.** Term frequency is just "how many times does term `t` appear in document `d`". Raw counts are the default; `sublinear_tf=True` in the code above replaces the count with `1 + log(tf)`.
+
+| Symbol | What it is |
+|--------|------------|
+| `tf(t, d)` | Raw occurrences of term `t` in document `d` |
+| `1 + log(tf)` | The `sublinear_tf=True` form. Third mention of a word counts far less than the first |
+
+**The IDF half.** Inverse document frequency is "how rare is this term across the whole corpus". Sklearn uses the smoothed form `idf(t) = ln((1 + N) / (1 + df(t))) + 1`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total documents in the fitted corpus |
+| `df(t)` | Document frequency — how many documents contain `t` at least once |
+| `(1 + N)/(1 + df)` | The `+1`s are smoothing, so a term in every document never divides by zero |
+| `ln(...)` | Compresses the range. Without it a term in 1 of 1M docs would outweigh everything |
+| `+ 1` (trailing) | Floor, so a term appearing in every document gets weight `1.0`, not `0` |
+| `min_df=2` | Drop terms seen in fewer than 2 documents — typos and one-off tokens |
+
+**Walk one example.** A three-document corpus, computed end to end:
+
+```
+  Corpus (N = 3 documents)
+    d1: the cat sat on the mat
+    d2: the dog sat on the log
+    d3: the cat chased the dog
+
+  Step 1 -- df(t): how many of the 3 documents contain t
+    the    df=3      cat  df=2      sat df=2      on     df=2
+    dog    df=2      mat  df=1      log df=1      chased df=1
+
+  Step 2 -- idf(t) = ln((1+3)/(1+df)) + 1
+    the    ln(4/4) + 1 = 1.0000     <- in every document, no discriminating power
+    cat    ln(4/3) + 1 = 1.2877
+    mat    ln(4/2) + 1 = 1.6931     <- unique to d1, weighted highest
+
+  Step 3 -- tf(t, d1): raw counts inside d1
+    the 2     cat 1     sat 1     on 1     mat 1
+
+  Step 4 -- tf x idf for d1
+    the   2 x 1.0000 = 2.0000      <- STILL the largest number. Not fixed yet.
+    mat   1 x 1.6931 = 1.6931
+    cat   1 x 1.2877 = 1.2877
+    sat   1 x 1.2877 = 1.2877
+    on    1 x 1.2877 = 1.2877
+
+  Step 5 -- L2 normalize by the vector length 3.4411
+    the 0.5812    mat 0.4920    cat 0.3742    sat 0.3742    on 0.3742
+```
+
+Step 4 is the punchline most explanations skip: IDF alone does **not** demote "the" below the content words here, because "the" occurs twice. Raw TF is still winning. That is what `sublinear_tf=True` is for:
+
+```
+  sublinear_tf=True replaces tf with 1 + log(tf)
+    tf = 1  ->  1 + log(1) = 1.0000     (unchanged)
+    tf = 2  ->  1 + log(2) = 1.6931     (not 2.0 -- saying it twice is not 2x)
+
+  d1 recomputed and L2-normalized:
+    the 0.5174    mat 0.5174    cat 0.3935    sat 0.3935    on 0.3935
+
+  "the" falls 0.5812 -> 0.5174 and "mat" rises 0.4920 -> 0.5174. The stop word
+  and the unique content word now weigh the same, on a 3-document toy corpus.
+```
+
+Scale `N` from 3 to a realistic 50,000 documents and the gap widens dramatically: `idf("the")` stays pinned at `1.0` while a term in 5 documents earns `ln(50001/6) + 1 = 10.03`. **Why L2 normalization exists:** without Step 5, a 2,000-word document would have roughly ten times the vector magnitude of a 200-word one, and logistic regression would learn "long document" as a feature. Normalizing to unit length makes every document a direction rather than a magnitude — which is also what makes cosine similarity meaningful, since for unit vectors the dot product *is* the cosine.
+
 ### Word2Vec with Gensim
 
 ```python
@@ -395,6 +546,35 @@ def demo_embeddings(model: Word2Vec) -> None:
     sim = model.wv.similarity("car", "automobile")
     print(f"car <-> automobile similarity: {sim:.3f}")  # ~0.85 on large corpus
 ```
+
+**What this actually says.** "Ignore how long the two vectors are; tell me only whether they point the same way."
+
+`model.wv.similarity` returns cosine similarity, `cos(a, b) = (a · b) / (|a| |b|)`. The division by both lengths is the entire point — it strips magnitude out, leaving pure direction. Word2Vec vector lengths correlate with word frequency, so a raw dot product would rank common words as similar to everything.
+
+| Symbol | What it is |
+|--------|------------|
+| `a · b` | Dot product — multiply matching dimensions, add them all up |
+| `\|a\|` | Length (L2 norm) of vector `a`: square each entry, sum, take the square root |
+| `cos(a, b)` | Result in `[-1, 1]`. `1` = identical direction, `0` = unrelated, `-1` = opposite |
+| `0.85` | The value in the code comment — "car" and "automobile" nearly, not exactly, aligned |
+
+**Walk one example.** Three-dimensional stand-ins, to show magnitude genuinely cancels:
+
+```
+  a = [0.8, 0.6, 0.0]        b = [0.4, 0.9, 0.2]
+
+  dot   a . b = 0.8x0.4 + 0.6x0.9 + 0.0x0.2 = 0.32 + 0.54 + 0.00 = 0.8600
+  |a|   sqrt(0.64 + 0.36 + 0.00)                                  = 1.0000
+  |b|   sqrt(0.16 + 0.81 + 0.04)                                  = 1.0050
+  cos   0.8600 / (1.0000 x 1.0050)                                = 0.8557
+
+  Now scale a by 10x -- same direction, ten times longer:
+  c = [8.0, 6.0, 0.0]
+  dot   c . b = 8.6000        |c| = 10.0000
+  cos   8.6000 / (10.0000 x 1.0050)                               = 0.8557   identical
+```
+
+The 10x rescale changed the dot product from `0.86` to `8.60` and left the cosine untouched at `0.8557`. In practice, note that cosine similarity is symmetric and unbounded by frequency but says nothing about polysemy — "bank" has exactly one vector, so its cosine to "river" and to "loan" are both computed against a blurred average of both senses. That limitation is what sentence embeddings and contextual models exist to fix.
 
 ### spaCy NER Example
 
@@ -480,6 +660,39 @@ class TextCNN(nn.Module):
         cat = torch.cat(pooled, dim=1)             # (batch, len(filter_sizes)*num_filters)
         return self.fc(self.dropout(cat))          # (batch, num_classes)
 ```
+
+**Put simply.** "Slide 300 little n-gram detectors across the sentence, keep only each detector's loudest reading, and classify from those 300 numbers."
+
+The shape comments carry two calculations that are easy to gloss over: `seq_len - fs + 1` (how many positions a filter of width `fs` fits into) and `len(filter_sizes) * num_filters` (why the classifier head is always the same width regardless of sentence length).
+
+| Symbol | What it is |
+|--------|------------|
+| `seq_len` | Tokens in the padded sentence |
+| `fs` | Filter width — 2, 3, or 4 tokens. A learnable bigram/trigram/4-gram detector |
+| `num_filters` | 100 independent detectors *per* width, each learning a different phrase pattern |
+| `seq_len - fs + 1` | Valid convolution positions — a width-4 filter cannot start in the last 3 slots |
+| `max_pool1d(out, out.size(2))` | Max over *all* positions, collapsing each filter to one scalar |
+| `len(filter_sizes) * num_filters` | `3 x 100 = 300` — the fixed-width feature vector fed to the classifier |
+
+**Walk one example.** A 20-token sentence, `embed_dim=300`, `num_filters=100`:
+
+```
+  after embedding + permute            (batch, 300, 20)
+
+  conv width 2  -> positions 20 - 2 + 1 = 19    (batch, 100, 19)
+  conv width 3  -> positions 20 - 3 + 1 = 18    (batch, 100, 18)
+  conv width 4  -> positions 20 - 4 + 1 = 17    (batch, 100, 17)
+
+  max-pool over time collapses the last axis entirely:
+    19 -> 1,  18 -> 1,  17 -> 1                 (batch, 100) each
+  concatenate                            100 + 100 + 100 = (batch, 300)
+  dropout(0.5) -> Linear(300, 2)                (batch, 2)
+
+  Same sentence padded to 200 tokens instead of 20:
+    positions become 199 / 198 / 197, and the concat is STILL (batch, 300).
+```
+
+Max-pool-over-time is what makes the head width independent of `seq_len` — the model accepts any sentence length and always hands the classifier exactly 300 numbers. **What breaks without the pool:** you would have to flatten `100 x 19` per filter size, the `Linear` layer would be tied to one exact sentence length, and the phrase "highly recommend" would produce a different feature depending on whether it landed at position 3 or position 15. The pool is what buys position invariance, at the cost of discarding *how many times* and *where* a phrase fired.
 
 ### LDA Topic Modeling
 
@@ -624,6 +837,36 @@ Without a CRF layer, a neural model can predict I-LOC following B-PER — a stru
 
 A gensim Word2Vec model trained on 1B tokens with 300d vectors and vocabulary 500K words requires ~600MB RAM. In a microservice handling 1K RPS, loading this model per request is fatal. Fix: load once at startup, share across threads with read-only access; or use a quantized 100d model that fits in 200MB with minimal quality loss.
 
+**Stated plainly.** "An embedding table's size is one multiplication: vocabulary times dimensions times bytes per number. Nothing else in the model matters."
+
+Embedding memory is `V × d × bytes`. Everything about deploying word vectors — whether the model fits in a container, whether you can afford 300d, whether quantization is worth it — falls out of those three numbers, and none of them depend on how much text you trained on.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Vocabulary size after `min_count` filtering — 500,000 here |
+| `d` | Vector width — 300 (default) or 100 (the quantized alternative) |
+| bytes/number | `4` for float32, the numpy default gensim stores |
+| 1B tokens | Training corpus size. Sets *quality*, contributes **zero** bytes at serve time |
+
+**Walk one example.** Where the 600MB and 200MB in the paragraph above come from:
+
+```
+  300d model     500,000 x 300 x 4 bytes  = 600,000,000 bytes = 600 MB
+  100d model     500,000 x 100 x 4 bytes  = 200,000,000 bytes = 200 MB
+
+  Per-request loading at 1,000 RPS:
+    1,000 x 600 MB = 600 GB/s of allocation      -- fatal, as stated above
+  Load-once at startup:
+    600 MB resident, shared read-only by every thread. Constant.
+
+  What the corpus size does NOT do:
+    trained on 100M tokens -> still 600 MB     (same V, same d)
+    trained on   1B tokens -> still 600 MB
+    trained on  10B tokens -> still 600 MB
+```
+
+Dropping 300d to 100d is a straight 3x memory cut because the relationship is linear in `d`. Note that this counts only the final `wv` vectors — during *training* gensim also holds the output matrix `W'` from §5 at the same `V × d` size, which is why training peaks near double the serving footprint and why the trained artifact shrinks when you save it.
+
 ---
 
 ## 11. Technologies & Tools
@@ -741,6 +984,72 @@ ticket text
 
 Macro-F1 0.89 across 47 classes, p99 latency 45ms under load, throughput 800 tickets/sec. Dynamic batching trades up to 10ms of queueing for far higher GPU utilization, the key lever that turns single-digit to 800 req/s.
 
+**Decoded in one line.** "Throughput is batches per second times batch size — so the way to go faster is not a faster GPU, it is a fuller batch."
+
+The three serving numbers above are not independent; they are one budget seen from three angles. Being able to derive any of them from the other two is what capacity planning in an interview looks like.
+
+| Symbol | What it is |
+|--------|------------|
+| `max_batch = 32` | Ceiling on tickets fused into one GPU forward pass |
+| `max_wait = 10ms` | How long the batcher will hold the first arrival waiting for company |
+| 2x A10G | GPU count — batches per second is split across them |
+| p99 45ms | 99th-percentile end-to-end latency: queue wait + GPU time + overhead |
+| 800/sec | Sustained throughput, the product of batch size and batch rate |
+
+**Walk one example.** Deriving the per-batch GPU budget from the published numbers:
+
+```
+  800 tickets/sec  /  32 per batch          =  25.0 batches/sec  (cluster-wide)
+  25.0 batches/sec /  2 GPUs                =  12.5 batches/sec  (per GPU)
+  1000 ms          /  12.5 batches/sec      =  80.0 ms per batch (per GPU)
+
+  Amortized GPU cost per ticket:
+    80.0 ms / 32 tickets                    =   2.5 ms per ticket
+
+  Latency budget check against p99 = 45ms:
+    up to 10 ms queueing + ~80 ms of batch compute overlapped across 2 GPUs
+    -> the 45 ms p99 only holds because batches pipeline; a single ticket
+       arriving into an idle server is served in well under 10 ms.
+```
+
+The striking number is `2.5ms` of GPU time per ticket versus roughly `80ms` for the batch that contains it. That ratio is the whole argument for dynamic batching: one ticket alone would also cost most of that 80ms, because the GPU is throughput-bound, not latency-bound. **What breaks without the batcher:** run batch size 1 and you serve roughly 12.5 tickets/sec per GPU instead of 400 — a 32x throughput collapse for a latency gain of at most 10ms.
+
+**Said without the jargon.** "Macro-F1 is the average of the per-class F1 scores with every class counted once — so one tiny class you fail on drags the headline down as hard as a huge class you ace."
+
+Macro versus micro is the single most consequential choice in an imbalanced classifier's scorecard, and the two can differ by 15 points on the same predictions. Best Practice 9 above warns about exactly this gap.
+
+| Symbol | What it is |
+|--------|------------|
+| TP | True positives — predicted this class, and it was this class |
+| FP | False positives — predicted this class, it was something else |
+| FN | False negatives — was this class, you predicted something else |
+| precision `P` | `TP / (TP + FP)`. Of what you flagged, how much was right |
+| recall `R` | `TP / (TP + FN)`. Of what existed, how much you found |
+| F1 | `2PR / (P + R)`. Harmonic mean — punishes a lopsided P/R pair |
+| macro-F1 | Mean of per-class F1. Every class counted once, regardless of size |
+| micro-F1 | F1 computed on pooled TP/FP/FN. Every *sample* counted once |
+
+**Walk one example.** A three-entity NER run, matching the "88% overall, 40% on MONEY" warning in §13:
+
+```
+  entity   support     TP    FP    FN        P        R       F1
+  PER          950    900    70    50   0.9278   0.9474   0.9375
+  ORG          760    650    90   110   0.8784   0.8553   0.8667
+  MONEY         75     30    45    45   0.4000   0.4000   0.4000
+
+  MONEY worked out longhand:
+    P  = 30 / (30 + 45) = 30 / 75 = 0.4000
+    R  = 30 / (30 + 45) = 30 / 75 = 0.4000
+    F1 = 2 x 0.4 x 0.4 / (0.4 + 0.4) = 0.32 / 0.8 = 0.4000
+
+  micro: pool everything     TP=1580  FP=205  FN=205
+    P = 1580/1785 = 0.8852   R = 1580/1785 = 0.8852   micro-F1 = 0.8852
+  macro: average the three F1s
+    (0.9375 + 0.8667 + 0.4000) / 3                    macro-F1 = 0.7347
+```
+
+The same model reports **88.5% micro-F1 and 73.5% macro-F1**. The 15-point spread is entirely the MONEY row: only 75 of 1,785 entities, so micro-F1 barely notices it while macro-F1 gives it a full one-third vote. **Why the harmonic mean, not the average:** a model that tags everything MONEY would score `R = 1.00` with near-zero precision; the plain average would reward it with ~0.50 while F1 correctly collapses toward zero. And **why MONEY matters most** is a business fact, not a statistical one — as §13 notes, 40% F1 on monetary amounts is catastrophic in a financial pipeline no matter how good the headline looks, which is precisely why the case study below reports macro-F1 rather than accuracy.
+
 **Sliding-window tokenization for long tickets:**
 
 ```python
@@ -758,6 +1067,38 @@ def encode_long(text: str, max_len: int = 512, stride: int = 128) -> dict:
     )
 ```
 
+**What it means.** "Cut the ticket into 512-token windows that overlap by 128 tokens, so no sentence gets sliced in half at a window boundary."
+
+The counterintuitive part of the HuggingFace API is that `stride` is the *overlap*, not the step. The step is `max_len - stride`, and mixing those two up silently changes how many windows you generate and how much you pay per ticket.
+
+| Symbol | What it is |
+|--------|------------|
+| `max_len = 512` | Window size — BERT's hard positional-embedding limit |
+| `stride = 128` | Tokens each window re-reads from the previous one (the overlap) |
+| `max_len - stride` | The actual advance per window: `512 - 128 = 384` |
+| `return_overflowing_tokens=True` | Emit every window instead of dropping the tail. The whole point |
+| `padding="max_length"` | Pad the final short window to 512 so the batch tensor is rectangular |
+
+**Walk one example.** A 1,200-token ticket, the kind where the real problem is described last:
+
+```
+  step = max_len - stride = 512 - 128 = 384
+
+  window 1   tokens    0 -  511
+  window 2   tokens  384 -  895      (re-reads 384-511 from window 1)
+  window 3   tokens  768 - 1199      (re-reads 768-895 from window 2)
+
+  ceil((1200 - 512) / 384) + 1 = ceil(1.79) + 1 = 3 windows
+
+  Default right-truncation instead:
+    tokens 0 - 511 kept, tokens 512 - 1199 DISCARDED  -- 57% of the ticket gone,
+    including the part after the log dump where the customer states the problem.
+
+  Cost: 3 forward passes instead of 1, then mean-pool the 3 logit vectors.
+```
+
+Three windows for one ticket is a 3x compute bill, which is why the pooling in `TicketClassifier.predict` runs `probs.mean(dim=0)` — it collapses the per-window predictions back into one answer. **Why the overlap exists at all:** with `stride = 0` the windows would butt up against each other, and any sentence straddling token 512 would be split with neither half seeing the whole phrase. The 128-token overlap guarantees every span shorter than 128 tokens appears intact in at least one window.
+
 **Class-weighted training for imbalanced queues:**
 
 ```python
@@ -774,6 +1115,37 @@ model = AutoModelForSequenceClassification.from_pretrained(
     "bert-base-uncased", num_labels=47
 )
 ```
+
+**Reading the weight formula.** `weights = label_counts.sum() / (len(label_counts) * label_counts)` says: "give every queue the same total say in the loss, no matter how many tickets it has."
+
+It is the inverse-frequency rule normalized so the average weight is `1.0` — which matters, because it means switching the loss on does not also change your effective learning rate. This is the same formula sklearn uses for `class_weight="balanced"`.
+
+| Symbol | What it is |
+|--------|------------|
+| `label_counts` | Per-class training-example counts, one entry per queue |
+| `label_counts.sum()` | Total training examples, `N` |
+| `len(label_counts)` | Number of classes, `K` (47 in this system) |
+| `N / (K * count_c)` | Class `c`'s weight. Rare class -> big number, common class -> small |
+| `nn.CrossEntropyLoss(weight=...)` | Multiplies each example's loss by its class weight |
+
+**Walk one example.** Four queues with a 80:1 imbalance, `N = 10,000`, `K = 4`:
+
+```
+  queue                 count      weight = 10000 / (4 x count)
+  general inquiry        8000      10000 / 32000  =   0.3125
+  billing                1500      10000 /  6000  =   1.6667
+  auth failure            400      10000 /  1600  =   6.2500
+  data-loss escalation    100      10000 /   400  =  25.0000
+
+  Total loss contribution per queue = count x weight:
+    8000 x 0.3125  = 2500        400 x  6.2500 = 2500
+    1500 x 1.6667  = 2500        100 x 25.0000 = 2500
+
+  Every queue now contributes exactly 2500 = N/K to the loss. Equal votes.
+  Weight ratio rarest:commonest = 25.0 / 0.3125 = 80.0x, exactly the count ratio.
+```
+
+The final column is the check that tells you the formula is right: every class contributes `N/K = 2500`, so the loss no longer knows which classes were rare. **What breaks without it:** with plain `CrossEntropyLoss` the model can reach 80% accuracy by always predicting "general inquiry", and the 100-example escalation queue — the one where being wrong is most expensive — gets 1.25% of the gradient signal and is never learned. **What breaks with too much of it:** at 47 classes with a genuine 1000x spread, weights near 1000 make a handful of noisy rare examples dominate every update, so precision on the rare queues craters even as recall rises. Capping weights (or square-rooting them) is the usual middle ground.
 
 **FastAPI serving with dynamic batching and window pooling:**
 

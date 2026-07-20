@@ -29,11 +29,104 @@ Optimal solution (closed form): w* = (X^T X)^{-1} X^T y
 ```
 Existence of closed form requires X^T X to be invertible (no perfect multicollinearity and n >= d).
 
+**What this actually says.** "Draw a straight line, measure how far off each point is, square those misses so big ones hurt disproportionately, and average — then solve for the line that makes that average as small as possible, in one shot."
+
+The squaring is the whole personality of OLS. It is why one outlier can drag the entire line, and it is also why a closed form exists at all: squares make the loss a parabola in w, and a parabola has exactly one bottom you can solve for algebraically.
+
+| Symbol | What it is |
+|--------|------------|
+| `y_i` | The true target for training row `i` — the number you wish you had predicted |
+| `w^T x_i` | The prediction: each feature multiplied by its weight, summed. A dot product |
+| `(y_i - w^T x_i)` | The residual — signed miss. Positive means you under-predicted |
+| `(...)^2` | Squares the miss. Kills the sign, and punishes a miss of 4 sixteen times more than a miss of 1 |
+| `(1/n) * sum_i` | Average over all n rows, so the loss does not grow just because you added data |
+| `X` | The full data matrix, n rows by d columns (one row per example) |
+| `X^T X` | A d x d "how do features co-vary" matrix. Singular when two features duplicate each other |
+| `X^T y` | A d-length "how does each feature co-vary with the target" vector |
+| `(X^T X)^{-1}` | The undo step — divides out feature overlap so each weight gets credit only for what it uniquely explains |
+
+**Walk one example.** Three points, one feature plus a bias column, solved end to end:
+
+```
+  data:  x = 1, 2, 3          y = 2, 4, 7
+
+  X (bias column first)      X^T X            X^T y
+    [1  1]                   [ 3   6]         [13]
+    [1  2]                   [ 6  14]         [31]
+    [1  3]
+
+  (X^T X)^{-1} = [ 2.3333  -1.0000 ]     (det = 3*14 - 6*6 = 6)
+                 [-1.0000   0.5000 ]
+
+  w = (X^T X)^{-1} X^T y
+    bias = 2.3333*13 + (-1.0000)*31 = 30.3333 - 31.0000 = -0.6667
+    slope = -1.0000*13 +   0.5000*31 = -13.0000 + 15.5000 = +2.5000
+
+  best line:  y_hat = -0.6667 + 2.5*x
+
+  x     y     y_hat    residual   residual^2
+  1     2     1.8333   -0.1667      0.0278
+  2     4     4.3333   +0.3333      0.1111
+  3     7     6.8333   -0.1667      0.0278
+
+  MSE = (0.0278 + 0.1111 + 0.0278) / 3 = 0.0556
+```
+
+No iteration, no learning rate, no convergence check — one matrix inverse and the optimum is exact. The catch is the `d^3` cost of that inverse, which is why the table in Section 4.1 caps the Normal Equation at roughly `d < 10,000`.
+
+**What breaks without the inverse.** If two features are perfect duplicates, `X^T X` has a zero eigenvalue, `det = 0`, and `(X^T X)^{-1}` does not exist. Infinitely many weight vectors then fit the data equally well — which is exactly the +50,000 / -50,000 coefficient pair in Pitfall 5.
+
 **Cross-Entropy Loss (Logistic Regression)**:
 ```
 Loss = -(1/n) * sum_i [y_i * log(p_i) + (1-y_i) * log(1-p_i)]
 ```
 where p_i = sigma(w^T x_i). This is the negative log-likelihood of a Bernoulli model. No closed-form solution — requires iterative optimization.
+
+**Read it like this.** "Look up the probability the model assigned to the answer that actually happened, and charge it `-log` of that number — free if it said 1.0, infinite if it said 0.0."
+
+The `y_i` and `(1-y_i)` factors are not math, they are an if-statement written in algebra. When `y = 1` the second term is multiplied by zero and vanishes; when `y = 0` the first term vanishes. Only one half of that expression is ever alive for a given row.
+
+| Symbol | What it is |
+|--------|------------|
+| `z = w^T x + b` | The logit — the raw linear score, any real number from -inf to +inf |
+| `sigma(z) = 1/(1+exp(-z))` | The squasher. Turns any logit into a probability strictly between 0 and 1 |
+| `p_i` | The model's predicted P(y=1) for row `i` |
+| `y_i` | The truth, exactly 0 or 1. Acts as a switch selecting which log term survives |
+| `log(p_i)` | Negative for any p < 1, approaching -inf as p approaches 0 |
+| `-(...)` | Flips the sign so the quantity is a cost to minimize, not a likelihood to maximize |
+| `(1/n) * sum_i` | Average across the batch |
+
+**Walk one example.** A single prediction pushed all the way from raw features to loss and gradient. Two standardized features, `w = [1.5, -0.8]`, `b = -0.4`, `x = [2.0, 1.0]`:
+
+```
+  step 1 -- the logit
+    z = 1.5*2.0 + (-0.8)*1.0 + (-0.4)
+      = 3.0 - 0.8 - 0.4
+      = 1.8
+
+  step 2 -- the sigmoid
+    exp(-1.8) = 0.16530
+    p = 1 / (1 + 0.16530) = 1 / 1.16530 = 0.85815
+    so the model says: 85.8% chance this is class 1
+
+  step 3 -- the loss, and it depends entirely on the truth
+    if y = 1 :  loss = -log(0.85815)  = 0.15298    cheap, it was confident and right
+    if y = 0 :  loss = -log(1-0.85815)
+                     = -log(0.14185)  = 1.95298    12.8x worse, confident and wrong
+
+  step 4 -- the gradient (y = 1 case)
+    dL/dz = p - y = 0.85815 - 1 = -0.14185
+    dL/dw = (p - y) * x = -0.14185 * [2.0, 1.0] = [-0.28370, -0.14185]
+    w <- w - lr * dL/dw    (a small nudge UP, since the gradient is negative)
+
+  sanity check on the odds reading
+    odds = p/(1-p) = 0.85815/0.14185 = 6.0496
+    exp(z)         = exp(1.8)        = 6.0496     <- identical, by construction
+```
+
+That last line is the whole reason logistic regression is called a *log-odds* model: `z` is not a probability, it literally *is* the log of the odds. Exponentiate a coefficient and you get an odds multiplier, which is what Section 6.4 and Pitfall 3 are both about.
+
+**Why `-log` and not squared error on p.** Squared error on a probability gives a tiny gradient when the model is confidently wrong (the sigmoid is flat out in the tails, so the error signal gets multiplied by a near-zero slope and learning stalls). Cross-entropy's `-log` blows up exactly where squared error goes quiet, and the sigmoid derivative cancels against it to leave the clean `(p - y) * x` above. That cancellation is the single most-asked derivation in this topic.
 
 **Maximum Likelihood Estimation**: both OLS (under Gaussian noise) and logistic regression (under Bernoulli likelihood) are instances of MLE. The squared error loss IS the negative log-likelihood under Gaussian noise.
 
@@ -64,6 +157,51 @@ The d^3 term in the Normal Equation comes from inverting the d x d matrix X^T X.
 
 **C parameter in sklearn LogisticRegression**: C = 1 / lambda. Smaller C = stronger regularization. Default C=1.0.
 
+**The idea behind it.** "Add a fee for having large weights. L2 charges a fee proportional to the weight squared, so the fee shrinks as the weight shrinks; L1 charges a flat fee per unit of weight, so the pressure to shrink never lets up — even at 0.0001."
+
+That one difference — does the penalty's *slope* fade near zero or stay constant — is the entire explanation for sparsity, and it is more convincing than the usual diamond-versus-circle picture.
+
+| Symbol | What it is |
+|--------|------------|
+| `lambda` | Penalty strength. Zero = plain OLS; large = weights crushed toward the origin |
+| `\|\|w\|\|^2` | Sum of squared weights (L2 penalty). Its derivative is `2*lambda*w` — shrinks with w |
+| `\|\|w\|\|_1` | Sum of absolute weights (L1 penalty). Its derivative is `lambda*sign(w)` — constant, whatever w is |
+| `sign(w)` | +1 if w is positive, -1 if negative, undefined at 0 (any value in [-1, 1] is a valid subgradient) |
+| `l1_ratio` | ElasticNet's mixing dial. 0 = pure Ridge, 1 = pure Lasso, 0.5 = half and half |
+| `alpha` (sklearn) | The library's name for lambda in Ridge/Lasso/ElasticNet |
+| `C` (LogisticRegression) | The *inverse*, `C = 1/lambda`. Small C means strong penalty — the direction that trips people up |
+
+**Walk one example.** The same useless noise feature, the same starting weight `w = 0.5`, the same `lr = 0.1` and `lambda = 1.5`, run through both penalties. Assume the data-fit gradient is negligible for this feature — it explains nothing, so only the penalty moves it:
+
+```
+  L1 -- step size is lr*lambda*sign(w) = 0.1*1.5*1 = 0.15, CONSTANT
+    step 1   0.500000  ->  0.350000
+    step 2   0.350000  ->  0.200000
+    step 3   0.200000  ->  0.050000
+    step 4   0.050000  ->  0.000000   <- 0.05 - 0.15 = -0.10 would OVERSHOOT past
+                                         zero, so it is clamped exactly to 0
+    step 5   0.000000  ->  0.000000   <- sign(0) can be 0; the penalty no longer
+    step 6   0.000000  ->  0.000000      pushes, and the weight STICKS at zero
+
+  L2 -- step is lr*2*lambda*w = 0.3*w, so each step just multiplies by 0.7
+    step 1   0.500000  ->  0.350000   <- identical to L1 so far
+    step 2   0.350000  ->  0.245000   <- and here they part ways
+    step 3   0.245000  ->  0.171500
+    step 4   0.171500  ->  0.120050
+    step 5   0.120050  ->  0.084035
+    step 6   0.084035  ->  0.058824
+
+  keep going with L2:
+    after 20 steps   0.5 * 0.7^20 = 0.00039896
+    after 50 steps   0.5 * 0.7^50 = 0.0000000090
+
+  never exactly zero -- 0.7 times something positive is always positive
+```
+
+Both start at 0.5 and both land on 0.350000 after one step, which is what makes the contrast so sharp: the mechanism, not the magnitude, is what differs. L1 subtracts a fixed 0.15 every time, so it *arrives* at zero in four steps and the vanishing subgradient holds it there. L2 multiplies by 0.7 every time, an infinite sequence that approaches zero asymptotically and reaches it never. Ask sklearn to count `np.abs(coef_) < 1e-6` (as `compare_regularization` does in Section 6.1) and Lasso reports real zeros while Ridge reports none.
+
+**Why the clamp matters.** A naive L1 subgradient step from `0.05` would land on `-0.10` and then bounce back to `+0.05` forever, oscillating around zero instead of settling. Real solvers apply the proximal / soft-thresholding operator shown above — "if the step would cross zero, stop at zero" — which is why coordinate descent, not plain gradient descent, is the standard Lasso solver and why sklearn's `Lasso` needs `max_iter=5000` on hard problems.
+
 ### 4.3 Logistic Regression Variants
 
 **Binary logistic regression**: sigmoid output, binary cross-entropy loss.
@@ -72,6 +210,34 @@ The d^3 term in the Normal Equation comes from inverting the d x d matrix X^T X.
 ```
 P(y=k | x) = exp(w_k^T x) / sum_j exp(w_j^T x)
 ```
+
+**Put simply.** "Give every class its own score, make all the scores positive by exponentiating them, then divide by the total so they read as shares of a pie."
+
+Exponentiating before normalizing is what makes softmax *soft*: it preserves the ordering of the logits but exaggerates the gaps, so a small lead in logit space becomes a decisive lead in probability space.
+
+| Symbol | What it is |
+|--------|------------|
+| `w_k` | The weight vector belonging to class `k` — K of them, one per class |
+| `w_k^T x` | Class `k`'s raw score (logit) for this input. Can be negative |
+| `exp(...)` | Forces every score positive and stretches the gaps between them |
+| `sum_j exp(w_j^T x)` | The normalizer — total across all K classes. Guarantees the outputs sum to 1 |
+| `P(y=k \| x)` | Class `k`'s share of that total |
+
+**Walk one example.** Three classes, logits already computed:
+
+```
+  class    logit z     exp(z)      exp(z) / 11.2125      probability
+    1        2.0       7.38906          0.65900             65.9%
+    2        1.0       2.71828          0.24243             24.2%
+    3        0.1       1.10517          0.09857              9.9%
+                      --------                             -------
+              sum =   11.21251                              100.0%
+
+  the logit gap 2.0 - 1.0 = 1.0 became a probability ratio of
+    0.65900 / 0.24243 = 2.718 = exp(1.0)
+```
+
+That final line is the invariant worth memorizing: the *ratio* of any two softmax probabilities is `exp` of their logit difference, and nothing else in the vector affects it. It also shows why adding a constant to every logit changes nothing — the constant factors out of numerator and denominator, which is exactly the trick numerically-stable implementations use (subtract the max logit before exponentiating, so `exp` never overflows).
 
 **One-vs-Rest (OvR)**: train K binary classifiers, predict class with highest probability. Default for most sklearn solvers.
 
@@ -353,6 +519,69 @@ def compare_regularization(
         print(f"{name:12s}  RMSE={rmse:7.2f}  zero_coefs={n_zero}/{n_features}")
 ```
 
+**Stated plainly.** The two lines `w -= lr * grad_w` and `b -= lr * grad_b` say: "the gradient points uphill toward more loss, so take a step in the opposite direction, and take a step whose size is `lr` times how steep it is here."
+
+Both halves matter. The *direction* comes from the minus sign; the *distance* comes from `lr` multiplied by the slope — which means steps shrink automatically as you approach the bottom, because the slope flattens there. That self-braking is why a fixed learning rate can converge at all.
+
+| Symbol | What it is |
+|--------|------------|
+| `w` | The current weight vector — where you are standing on the loss surface |
+| `grad_w` | Slope of the loss at that point. Points in the direction of steepest *increase* |
+| `-` (the minus) | Turns "steepest uphill" into "steepest downhill". Without it you maximize the loss |
+| `lr` | Learning rate — how much of the gradient you actually apply. Typically 0.001 to 0.1 |
+| `:=` / `-=` | Assignment, not equality. This is a repeated overwrite, not an equation to solve |
+| `(2/n) * X.T @ residuals` | The MSE gradient. The `2` comes from differentiating the square; the `1/n` keeps it batch-size independent |
+
+**Walk one example.** Strip away the data and use the simplest possible loss with the same shape as MSE: `f(w) = w^2`, whose gradient is `2w`, with the minimum obviously at `w = 0`. Start at `w = 4`, learning rate `0.1`:
+
+```
+  RUN A -- lr = 0.1  (well chosen)
+
+  step   w before    f(w)      gradient 2w    w - 0.1*grad     w after
+    1     4.0000    16.0000       8.0000      4.0 - 0.8         3.2000
+    2     3.2000    10.2400       6.4000      3.2 - 0.64        2.5600
+    3     2.5600     6.5536       5.1200      2.56 - 0.512      2.0480
+
+  after 3 steps: w went 4.0000 -> 2.0480, loss 16.0000 -> 4.1943
+  each step multiplies w by (1 - 0.1*2) = 0.8, so w shrinks 20% per step
+  and the steps themselves shrink too: 0.80, 0.64, 0.512 -- self-braking
+  step 4 continues the trend: 2.0480 -> 1.6384, loss 2.6844
+```
+
+Now the same function, the same start, one knob changed:
+
+```
+  RUN B -- lr = 1.1  (too large)
+
+  step   w before    f(w)      gradient 2w    w - 1.1*grad     w after
+    1     4.0000    16.0000       8.0000      4.0 - 8.8        -4.8000
+    2    -4.8000    23.0400      -9.6000     -4.8 + 10.56       5.7600
+    3     5.7600    33.1776      11.5200      5.76 - 12.672    -6.9120
+    4    -6.9120    47.7757     -13.8240     -6.912 + 15.2064   8.2944
+
+  after 4 steps: w went 4.0000 -> 8.2944, loss 16.0000 -> 68.7971
+```
+
+Put the two runs side by side and the contrast is not subtle:
+
+```
+  step      lr = 0.1                      lr = 1.1
+            w          loss               w           loss
+    0     4.0000     16.0000            4.0000      16.0000
+    1     3.2000     10.2400           -4.8000      23.0400
+    2     2.5600      6.5536            5.7600      33.1776
+    3     2.0480      4.1943           -6.9120      47.7757
+    4     1.6384      2.6844            8.2944      68.7971
+
+          loss falls monotonically       loss RISES every step, and the
+          toward 0 -- CONVERGENCE        sign of w flips each time as it
+                                         overshoots the minimum -- DIVERGENCE
+```
+
+The alternating sign in Run B is the fingerprint of a too-large learning rate: the step from `w = 4` is so long it lands past zero at `-4.8`, *further* from the minimum than it started, and the next gradient is bigger, so the next overshoot is bigger. The threshold for `f(w) = w^2` is exact — the per-step multiplier is `(1 - 2*lr)`, so `lr < 1.0` converges, `lr = 1.0` oscillates forever between `+4` and `-4`, and `lr > 1.0` diverges. In production you see this as a loss curve that goes to `NaN` within a few dozen batches, and the first thing to try is always dividing the learning rate by 10.
+
+**Why this connects back to Pitfall 2.** With unscaled features, one feature's gradient is thousands of times larger than another's, and a single scalar `lr` must serve both. Pick an `lr` small enough to keep the large-scale feature in Run A territory and the small-scale feature barely moves; pick one big enough to train the small feature and the large one goes full Run B. `StandardScaler` exists to put every feature on a scale where one learning rate works for all of them.
+
 ### 6.2 Logistic Regression — sklearn with Correct Settings
 
 ```python
@@ -460,6 +689,36 @@ def compute_vif(X_df: pd.DataFrame) -> pd.DataFrame:
     return vif_data.sort_values("VIF", ascending=False)
 
 
+```
+
+**What it means.** `VIF_j = 1 / (1 - R^2_j)` says: "regress feature j on all the other features; whatever fraction of it they can already reproduce is `R^2_j`, and this formula turns that fraction into a blow-up factor for feature j's coefficient variance."
+
+Reading it as a blow-up factor is what makes the thresholds intuitive rather than arbitrary. VIF is not a correlation — it is "how many times wider this coefficient's confidence interval got because the feature is redundant."
+
+| Symbol | What it is |
+|--------|------------|
+| `R^2_j` | Fraction of feature j explained by the *other* features. 0 = unique, 1 = perfectly redundant |
+| `1 - R^2_j` | The unique part of feature j — the only signal OLS can use to pin its coefficient down |
+| `1 / (1 - R^2_j)` | One over that unique part. Small denominator means an explosive result |
+| `sqrt(VIF)` | The multiplier on the coefficient's *standard error* (VIF is on the variance scale) |
+
+**Walk one example.** The thresholds in the docstring, derived rather than memorized:
+
+```
+  R^2_j      1 - R^2_j      VIF = 1/(1-R^2)     sqrt(VIF)     verdict
+   0.00        1.0000              1.00           1.00        fully unique
+   0.50        0.5000              2.00           1.41        moderate, fine
+   0.80        0.2000              5.00           2.24        soft warning line
+   0.90        0.1000             10.00           3.16        severe -- act
+   0.99        0.0100            100.00          10.00        near-duplicate
+   0.9999      0.0001          10000.00         100.00        Pitfall 5 territory
+```
+
+So "VIF > 10" is not a magic number — it is the point where 90% of a feature is already reproducible from its neighbours, leaving only 10% unique signal, and the coefficient's standard error is 3.16x what it would be with independent features. Pitfall 5's reported VIF of 8,500 corresponds to `R^2_j = 0.99988`: the feature was an exact product of two others, so essentially none of it was unique, and the +50,000 / -50,000 coefficient pair was OLS dividing by something indistinguishable from zero.
+
+**Why Ridge fixes it.** Ridge replaces `(X^T X)^{-1}` with `(X^T X + alpha*I)^{-1}`, and adding `alpha` to the diagonal lifts every eigenvalue by `alpha`. Concretely, for a near-collinear `X^T X = [[2, 2], [2, 2.0001]]` the eigenvalues are `0.00005` and `4.00005`, the determinant is `0.0002`, and entries of the inverse reach `10,000.5` — coefficients explode. Add `alpha = 1.0` and the eigenvalues become `1.00005` and `5.00005`, the determinant becomes `5.0003`, and the largest inverse entry drops to `0.60` — a 16,700x reduction in the amplification. The matrix is now strictly positive definite, so it is always invertible no matter how redundant the features are.
+
+```python
 def handle_multicollinearity_demo() -> None:
     """
     Demonstrates that Ridge is robust to multicollinearity while OLS is not.
@@ -511,6 +770,34 @@ def interpret_logistic_coefficients(
 
     return df
 ```
+
+**What the formula is telling you.** `odds_ratio = exp(coef)` says: "this coefficient is not an amount to add to the probability — it is a number to *multiply the odds* by, once per unit of the feature."
+
+Additive in log-odds, multiplicative in odds, and neither in probability. Getting that chain right is the difference between a defensible statement to a regulator and the mistake Pitfall 3 warns about.
+
+| Symbol | What it is |
+|--------|------------|
+| `coef` (`w_j`) | Change in **log-odds** per one-unit increase in feature j, all else held fixed |
+| `odds` | `p / (1 - p)` — "how many times more likely than not". Ranges 0 to infinity |
+| `exp(coef)` | The **odds ratio**. Multiply the odds by this for each unit of the feature |
+| `exp(coef) > 1` | Feature raises risk. `= 1` means no effect. `< 1` means it lowers risk |
+| `p = odds / (1 + odds)` | The way back from odds to a probability |
+
+**Walk one example.** One coefficient, `coef = 0.3`, so `exp(0.3) = 1.3499` — the odds always get multiplied by the same 1.3499. Watch what that does to the *probability* at three different baselines:
+
+```
+  baseline p    odds = p/(1-p)    new odds = odds*1.3499    new p      change in p
+     0.10           0.1111               0.1500            0.1304       +0.0304
+     0.50           1.0000               1.3499            0.5744       +0.0744
+     0.90           9.0000              12.1487            0.9239       +0.0239
+
+  identical coefficient, identical odds multiplier -- but the probability
+  moved +7.4 points in the middle and only +2.4 points near the top
+```
+
+The odds ratio is constant down that middle column; the probability change is not. This is the numeric version of the S-curve in Section 5.5 — the sigmoid is steepest at `p = 0.5` and flattens in both tails, so the same coefficient buys the most probability where the model is most uncertain. It is precisely why "a one-unit increase in X raises churn probability by 0.3" is never a valid sentence, while "it multiplies the odds of churn by 1.35" is true at every baseline.
+
+**Where this shows up in the case study.** Section 14 reports the top-3 features by absolute coefficient magnitude, and that ranking is only meaningful because `StandardScaler` put every feature on the same scale first. Compare raw, unscaled coefficients and you are comparing "per dollar" against "per year" — a large coefficient may just mean the feature has small units.
 
 ---
 

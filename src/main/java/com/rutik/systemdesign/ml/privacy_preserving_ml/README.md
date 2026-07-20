@@ -88,12 +88,89 @@ Pr[M(D) ∈ S]  ≤  e^ε · Pr[M(D') ∈ S]  +  δ
 - **δ (delta)** — the probability the ε bound fails. Set δ ≪ 1/N (e.g. 1e-5 for N = 100k records) so a "catastrophic leak of one record" is astronomically unlikely.
 - **Pure DP** (δ = 0) uses the Laplace mechanism; **approximate DP** (δ > 0) uses the Gaussian mechanism and is what DP-SGD relies on.
 
+**What this actually says.** "Whatever answer comes out, it was at most `e^ε` times more likely to have come from the world where your record is in the data than from the world where it isn't — and even that bound can fail, but only with probability δ."
+
+Note what is *not* being hidden. DP does not hide the answer; it hides *which of two neighboring datasets produced it*. An adversary who already knows every other record and is only trying to decide "was Alice in there?" cannot multiply their confidence by more than `e^ε`. That is the entire promise, and it is why ε is comparable across mechanisms, datasets, and companies.
+
+| Symbol | What it is |
+|--------|------------|
+| `M(D)` | The randomized mechanism's output on dataset `D` — a noisy count, a released model, anything |
+| `D` vs `D'` | Two datasets identical except one record (yours) is present in one and absent in the other |
+| `S` | Any set of outcomes the adversary might care about, e.g. "the noisy count came out above 9,998" |
+| `Pr[M(D) ∈ S]` | How likely that outcome is in the world where you are in the data |
+| `e^ε` | The **multiplicative** ceiling on how far apart those two likelihoods can be |
+| `δ` | Escape hatch: the probability the `e^ε` bound simply does not hold. Keep it ≪ 1/N |
+
+**Walk one example.** The single most misread thing about ε is that it lives in an exponent:
+
+```
+  epsilon    e^epsilon    the adversary's likelihood-ratio ceiling
+  -------    ---------    -----------------------------------------------
+    0.5         1.65      evidence barely moves; near-total deniability
+    1           2.72      at most 2.7x more confident you were in the data
+    3          20.09      at most 20x
+    8        2980.96      at most 2981x
+
+  Going from epsilon = 3 to epsilon = 8 is NOT "8/3 = 2.7x weaker":
+      e^8 / e^3  =  e^5  =  148.41x weaker
+
+  And epsilon = 10 is e^10 = 22026 -- 1096x weaker than epsilon = 3.
+```
+
+**The idea behind it.** "Turn the ratio into an odds update and you can read ε as *how much an attacker's belief is allowed to move*." Starting from a 50/50 guess, the posterior after seeing the output is capped at `e^ε / (e^ε + 1)`:
+
+```
+  Adversary's prior: 50% chance you are in the dataset  (odds 1 : 1)
+
+  epsilon = 1  ->  odds at most  2.72 : 1   ->  posterior <= 73.11%
+  epsilon = 3  ->  odds at most 20.09 : 1   ->  posterior <= 95.26%
+  epsilon = 8  ->  odds at most  2981 : 1   ->  posterior <= 99.97%
+
+  Rare-membership case -- prior 1% (you are 1 of 100 candidate patients):
+  epsilon = 1  ->  posterior <=  2.67%   still basically ignorance
+  epsilon = 3  ->  posterior <= 16.87%   a real, actionable lead
+  epsilon = 8  ->  posterior <= 96.79%   effectively a confirmation
+```
+
+That last column is why "ε = 8, which is only a bit more than ε = 3" is wrong in a way that matters legally: at ε = 3 an attacker starting from 1% suspicion ends at 17%, at ε = 8 they end at 97%. These are worst-case bounds — a real attack usually does far worse than the ceiling — but the ceiling is the only thing you can put in an audit report.
+
+**Why δ exists and what breaks without it.** With δ = 0 (pure DP) the `e^ε` bound must hold for *every* outcome, including absurdly unlikely tails, which forces heavy-tailed Laplace noise. Allowing a tiny δ lets you use Gaussian noise, which has thinner tails and composes far more tightly — the entire practicality of DP-SGD rests on that trade. But δ must stay ≪ 1/N: a mechanism that publishes one random record verbatim satisfies (0, 1/N)-DP on paper, so a δ near 1/N buys a "guarantee" that permits catastrophe.
+
 **Sensitivity** Δf is the maximum change in a function's output when one record changes: `Δf = max_{D,D'} ||f(D) − f(D')||`. For a count query, Δf = 1 (one person changes the count by at most 1). Sensitivity determines how much noise you must add.
 
 | Mechanism | Noise distribution | Scale | Gives |
 |-----------|-------------------|-------|-------|
 | **Laplace** | Laplace(0, Δf/ε) | b = Δf/ε | (ε, 0)-DP — pure |
 | **Gaussian** | N(0, σ²) | σ = Δf·√(2 ln(1.25/δ))/ε | (ε, δ)-DP — approximate |
+
+**Read it like this.** "Noise must be big enough to swamp the largest difference one person can make, and you need proportionally more of it the smaller your ε is." Sensitivity is the numerator because it *is* the signal you are hiding; ε is the denominator because it is your tolerance for that signal showing through.
+
+| Symbol | What it is |
+|--------|------------|
+| `Δf` | Worst-case change in the answer from adding or removing one record. Count query → 1 |
+| `b = Δf/ε` | Laplace scale. The noise's average magnitude, in the same units as the answer |
+| `σ` | Gaussian standard deviation. Same role as `b`, different distribution shape |
+| `√(2 ln(1.25/δ))` | The tail-safety factor. Only depends on δ — at δ = 1e-5 it is the constant 4.84 |
+| `N(0, σ²)` | Zero-mean noise: unbiased, so averaging many noisy answers converges to the truth |
+
+**Walk one example.** A COUNT query over 10,000 users, sensitivity Δf = 1, δ = 1e-5:
+
+```
+  epsilon   Laplace b = 1/eps   Laplace std dev   Gaussian sigma = 4.84/eps
+  -------   -----------------   ---------------   -------------------------
+    0.1           10.0               14.14                  48.45
+    0.5            2.0                2.83                   9.69
+    1              1.0                1.41                   4.84
+    3              0.333              0.47                   1.61
+    8              0.125              0.18                   0.61
+
+  At epsilon = 1 the published count of 10,000 typically lands within +/- 1.4.
+  The +/- 1 that one person's presence causes is buried inside that noise.
+  At epsilon = 0.1 the noise is +/- 14 -- the one-person signal is 10x smaller
+  than the jitter, and the count is still perfectly usable at this scale.
+```
+
+Notice Gaussian noise is *larger* than Laplace at the same single-query ε (4.84 vs 1.41 std dev). Gaussian still wins in practice, because that penalty is paid once while the composition savings are paid thousands of times — which is the next table.
 
 ### 4.4 Composition — how the budget drains
 
@@ -104,6 +181,37 @@ Pr[M(D) ∈ S]  ≤  e^ε · Pr[M(D') ∈ S]  +  δ
 | **RDP (Rényi DP)** | Track Rényi divergence at multiple orders α, convert to (ε, δ) once at the end | DP-SGD; the tightest practical accountant |
 
 DP-SGD runs thousands of noisy gradient steps; basic composition would blow the budget instantly. **Rényi DP / the moments accountant** (Abadi et al. 2016) tracks the loss in a form that composes tightly, then converts to a final (ε, δ) — often 10× smaller ε than advanced composition for the same noise.
+
+**In plain terms.** "Every time you touch the data you spend privacy, and the accountant's only job is to argue that the spending adds up more slowly than it looks." Basic composition adds ε linearly; advanced composition notices the per-step losses partly cancel like a random walk, so they grow like `√k` instead of `k`.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Number of mechanisms you run against the same data — for DP-SGD, the number of gradient steps |
+| `ε` | Per-step privacy loss. Tiny individually; the danger is the total |
+| `k·ε` | Basic composition: assume every step's leak stacks in the same direction. Worst case, always valid |
+| `√(2k ln(1/δ′))·ε` | Advanced composition's main term. The `√k` is the random-walk cancellation |
+| `k·ε(e^ε−1)` | A second-order correction, negligible when per-step ε is small |
+| `δ′` | Extra failure probability you *pay* to get the tighter `√k` bound — nothing is free |
+
+**Walk one example.** 10,000 DP-SGD steps, each step (ε = 0.001, δ = 0), reported at δ′ = 1e-5:
+
+```
+  basic:     total eps = k * eps
+                       = 10000 * 0.001
+                       = 10.0            <- a "weak DP" number; nearly meaningless
+
+  advanced:  main  = sqrt(2 * 10000 * ln(1/1e-5)) * 0.001
+                   = sqrt(230258.5) * 0.001
+                   = 479.85 * 0.001  = 0.4799
+             corr  = 10000 * 0.001 * (e^0.001 - 1)
+                   = 10 * 0.0010005   = 0.0100
+             total = 0.4799 + 0.0100   = 0.4899
+
+  same noise, same 10,000 steps:  10.0  ->  0.49    (20.4x tighter)
+  RDP / moments accountant tightens it roughly 10x again, to ~0.05.
+```
+
+Nothing about the training run changed between those two lines — only the *proof*. That is the point worth internalizing: a better accountant buys you accuracy for free, because for a fixed target ε you can now run with less noise. This is why "which accountant did you use?" is a fair first question about any published ε.
 
 ### 4.5 Federated learning strategies
 
@@ -162,6 +270,26 @@ xychart-beta
 ```
 
 Utility rises as ε grows because larger ε means less noise. The curve is steep at small ε and flattens past ε ≈ 4–8, which is why practitioners rarely pay for ε < 1 unless a regulator demands it — the marginal privacy gain costs disproportionate accuracy. Exact numbers depend on task and model; these are representative of a mid-size image or text classifier under DP-SGD.
+
+**Stated plainly.** "Each step up the ε ladder buys you a roughly constant slice of the remaining error, while costing you an exponentially larger privacy ceiling." The accuracy axis is linear; the privacy axis is not — that mismatch is the entire tradeoff.
+
+**Walk one example.** Reading the same six bars as accuracy gained versus privacy surrendered:
+
+```
+  epsilon   accuracy   error   accuracy gained   e^epsilon   privacy ceiling paid
+  -------   --------   -----   ---------------   ---------   --------------------
+    0.5        79%      21%          --             1.65            baseline
+    1          85%      15%        +6 pts           2.72             1.6x
+    2          89%      11%        +4 pts           7.39             4.5x
+    4          92%       8%        +3 pts          54.60            33.1x
+    8          94%       6%        +2 pts        2980.96          1808.4x
+   no DP       96%       4%        +2 pts        infinite          unbounded
+
+  0.5 -> 8 costs 1808x more privacy ceiling and buys 15 accuracy points.
+  0.5 -> 2 costs    4.5x more and already buys 10 of those 15 points.
+```
+
+That is the practical read: the first doublings of ε are cheap and productive, and the last ones are neither. Most production deployments settle at ε between 1 and 4 for exactly this reason — and the residual 4% error at "no DP" is the reminder that even an infinite budget does not get you to zero.
 
 ### 5.3 Federated averaging (FedAvg) — one round
 
@@ -380,7 +508,57 @@ strategy = fl.server.strategy.FedAvg(
 # fl.server.start_server(config=fl.server.ServerConfig(num_rounds=1_000), strategy=strategy)
 ```
 
+**What the formula is telling you.** The aggregation the server runs is `w_global = Σ_k (n_k / N) · w_k`, and it says: "average the clients' models, but let each client speak in proportion to how much data it trained on." Returning `n` alongside the weights is not bookkeeping — it *is* the aggregation rule, and it is what makes FedAvg approximate the centralized gradient it can never compute.
+
+| Symbol | What it is |
+|--------|------------|
+| `w_k` | Client k's weights after E local epochs, starting from the global model |
+| `n_k` | How many examples client k trained on this round |
+| `N = Σ n_k` | Total examples across the participating clients (not the whole fleet — only this round's sample) |
+| `n_k / N` | Client k's vote share. Sums to 1 across clients, so the result stays on the same scale |
+| `E` | Local epochs before reporting. Larger E = fewer rounds = less bandwidth, but more client drift |
+| `fraction_fit` | Share of the fleet sampled per round — 0.01 of a million devices = 10,000 clients |
+
+**Walk one example.** Three clients report one scalar weight after a round:
+
+```
+                n_k     w_k      n_k / N      contribution
+  client 1      500     0.80      0.50          0.400
+  client 2      100     0.20      0.10          0.020
+  client 3      400     0.60      0.40          0.240
+  --------------------------------------------------------
+  N = 1000                                w_global = 0.660
+
+  Unweighted mean instead:  (0.80 + 0.20 + 0.60) / 3  =  0.533
+```
+
+The gap between `0.660` and `0.533` is client 2 — 100 examples — being handed the same authority as client 1's 500. On a phone fleet where per-device sample counts differ by orders of magnitude, dropping the `n_k` weighting lets the quietest devices dominate the model, and the usual symptom is a global model that mysteriously degrades as you add clients.
+
 **FedProx** for non-IID data adds one term to the client's local loss: `loss += (mu / 2) * ||w - w_global||^2`, with μ typically 0.001–1.0. When each client's data is skewed (one user types mostly in Spanish, another in code), unconstrained local training drifts far from the global model and averaging diverges; the proximal term tethers each client to w_global, trading a little local fit for stable global convergence.
+
+**Put simply.** "Fit your own data, but pay a fine that grows with the square of how far you wandered from the model everyone agreed on." Squaring is what makes it a tether rather than a wall: small drifts are nearly free, large drifts get expensive fast.
+
+| Symbol | What it is |
+|--------|------------|
+| `w` | The client's weights as local training moves them |
+| `w_global` | This round's starting point, shared by every client. The anchor |
+| `‖w − w_global‖²` | Squared distance drifted. Zero at the start of the round, grows as you train |
+| `μ` | Leash stiffness. μ = 0 recovers plain FedAvg; large μ freezes local learning entirely |
+| `μ/2` | The `/2` cancels the 2 from differentiating the square, so the gradient is just `μ(w − w_global)` |
+
+**Walk one example.** The same drift, priced under three settings of μ:
+
+```
+  drift ||w - w_global||     mu = 0.001     mu = 0.1      mu = 1.0
+  ----------------------     ----------     --------      --------
+          0.5                  0.0001        0.0125         0.125
+          2.0                  0.0020        0.2000         2.000
+          5.0                  0.0125        1.2500        12.500
+
+  Quadrupling the drift (0.5 -> 2.0) multiplies the penalty by 16, not 4.
+```
+
+Read the μ = 0.001 column and you have effectively plain FedAvg — a straggler that drifts to 5.0 pays 0.0125, which no reasonable local loss will notice. Read the μ = 1.0 column and a drift of 5.0 costs 12.5, which dwarfs most classification losses and pins the client to the anchor. The middle column is where FedProx actually lives: enough to keep a Spanish-only or code-only client from running away, not enough to stop it learning anything local.
 
 ### 6.5 Secure aggregation — why the server must not see one update
 

@@ -252,6 +252,69 @@ print(f"LightGBM CV AUC: {scores.mean():.3f} ± {scores.std():.3f}")
 # result: ~0.84 AUC CV — 12pp gain with lower complexity and 50x faster training
 ```
 
+**What the formula is telling you.** "Count the weights, count the rows, and if the weights badly outnumber the rows the model has enough freedom to memorize the training set instead of learning from it."
+
+The parameter-to-sample ratio is the crudest possible capacity check, and that is its virtue: you can run it in your head before writing any training code, and it eliminates whole algorithm classes in one line.
+
+| Symbol | What it is |
+|--------|------------|
+| `nn.Linear(i, o)` | A dense layer holding `i × o` weights plus `o` biases |
+| `i × o + o` | That layer's exact parameter count. The `+ o` is the bias vector |
+| Total parameters | Sum across layers — the model's raw capacity |
+| `n_samples` | Training rows available. Here `5,000` |
+| params : samples | The ratio. Above roughly `1:1` you are relying entirely on regularization |
+| `num_leaves = 31` | LightGBM's capacity knob, per tree — a far smaller and structurally constrained budget |
+
+**Walk one example.** The exact parameter count of the `DeepNet` above, layer by layer:
+
+```
+   layer                        weights        bias     parameters
+   Linear(30,  256)     30 x 256 =  7,680  +    256  =      7,936
+   Linear(256, 128)    256 x 128 = 32,768  +    128  =     32,896
+   Linear(128,  64)    128 x  64 =  8,192  +     64  =      8,256
+   Linear(64,    1)     64 x   1 =     64  +      1  =         65
+   -----------------------------------------------------------------
+   total                                                   49,153
+
+   training rows                                             5,000
+   parameters per row              49,153 / 5,000  =          9.8
+```
+
+Just under **ten free parameters for every single training row**. Dropout at `0.3` and early stopping are being asked to hold that back on their own, and they cannot — hence the `~0.72` CV AUC. (The exact figure is `49,153`; the prose above rounds it up. Either way the conclusion is unchanged: the capacity is an order of magnitude past what 5,000 rows can constrain.)
+
+Now read the correction in the same terms. LightGBM's `num_leaves = 31` over `300` trees is a comparable raw count, but the capacity is *shaped*: each tree is a piecewise-constant partition, `min_child_samples = 20` forbids any leaf from fitting fewer than 20 rows, and `subsample`/`colsample` at `0.8` decorrelate the trees. The result is `~0.84` AUC — a 12-point gain that is really a 43% cut in the remaining error (`0.12 / 0.28`), achieved by choosing a better inductive bias rather than by collecting more data.
+
+**Read it like this.** "Split the data into `k` blocks, train `k` times leaving a different block out each time, and report the spread as well as the mean — because on data this small the spread is the number that tells you whether the comparison is real."
+
+`cross_val_score` returns an array, not a scalar, and printing `± scores.std()` is not decoration. It is the only thing standing between you and declaring a winner on noise.
+
+| Symbol | What it is |
+|--------|------------|
+| `cv=5` | Number of folds. The data is cut into 5 blocks of equal size |
+| Training rows per fit | `(k-1)/k` of the data — `80%` at `k = 5` |
+| Validation rows per fit | `1/k` of the data — `20%`, and each row is validated exactly once overall |
+| Number of fits | `k`. Five models are trained, then discarded; the score is what you keep |
+| `scores.mean()` | The generalization estimate |
+| `scores.std()` | Spread across folds. Compare it against the gap you are claiming |
+
+**Walk one example.** The 5-fold split over these 5,000 rows:
+
+```
+   folds k = 5,  n = 5,000 rows
+      rows per fold          5,000 / 5           = 1,000
+      train rows per fit     5,000 - 1,000       = 4,000   (80%)
+      validate rows per fit                        1,000   (20%)
+      models trained                                   5
+      times each row is validated                      1
+      times each row is trained on                     4
+```
+
+Now the decision rule. The reported gap is `0.84 - 0.72 = 0.12` AUC. If `scores.std()` came back around `0.01`, that gap is roughly twelve standard deviations and the conclusion is safe. If it came back around `0.05` — entirely plausible when each fold validates on only 1,000 rows — the gap is barely two, and "LightGBM beats the DNN" is a much weaker claim than the point estimate suggests. This is why the print statement carries `± scores.std()` and why a candidate quoting a bare CV mean invites the follow-up question.
+
+**Why `k = 5` rather than 10 or leave-one-out.** Raising `k` trains on more data per fit (`90%` at `k = 10`), lowering bias, but the folds overlap more so their scores become correlated and the variance estimate degrades — while the cost rises linearly, `k` full fits. At the extreme, leave-one-out means 5,000 fits for a variance estimate that is famously unreliable. `k = 5` and `k = 10` are the standard compromise; go to `k = 10` when data is scarce enough that losing `20%` per fit hurts, and stay at `5` when fits are expensive.
+
+**The fold-splitting trap this code does not guard against.** Plain `cv=5` uses random splits. That is correct here because `make_classification` produces i.i.d. rows, but on real data it is the single most common way to manufacture a fake result: random folds on time-series data let the model see the future, and random folds on grouped data (multiple rows per user) leak the same user across train and validation. Reach for `TimeSeriesSplit` or `GroupKFold` the moment either structure is present, and remember that any preprocessing — scaling, target encoding, imputation — must be fitted *inside* the fold, not before the split.
+
 The DNN has ~100k parameters on 5k samples — a parameter-to-sample ratio of 20:1. Generalization theory (VC dimension, PAC learning bounds) predicts high variance. The GBDT has a regularized tree structure that is essentially a piecewise-constant function fitter, which matches how most tabular data is generated (rule-based business logic + noise).
 
 ### 6.2 Constraint-Driven Selection — Credit Risk (Regulated)
@@ -297,6 +360,38 @@ lr = LogisticRegression(C=0.1, solver="lbfgs", max_iter=1000)
 # Train on WOE-encoded features → each coefficient is the contribution of that bin
 ```
 
+**In plain terms.** "For each bin, ask how over-represented defaulters are compared with non-defaulters. Take the log of that ratio and you have a number you can add straight onto a log-odds score — which is exactly the currency logistic regression works in."
+
+That last clause is why WOE exists at all. It is not a generic encoding; it is engineered so a non-linear feature enters a *linear* model without losing either the non-linearity or the auditability the regulator wants.
+
+| Symbol | What it is |
+|--------|------------|
+| `events` | Defaults in this bin (the target = 1 class) |
+| `non_events` | Non-defaults in this bin |
+| `dist_events` | This bin's share of *all* defaults. The column sums to `1.0` |
+| `dist_non_events` | This bin's share of all non-defaults. Also sums to `1.0` |
+| `WOE = ln(dE / dN)` | Positive = riskier than average; `0` = exactly average; negative = safer |
+| `IV term = (dE - dN) × WOE` | Always non-negative — the difference and the log always share a sign |
+| `IV` | Sum of the terms. One number for "how much does this whole feature predict?" |
+| `1e-9` | Guard so an empty bin does not produce `ln(0)` |
+
+**Walk one example.** An age feature over 1,000 defaults and 10,000 non-defaults, quantile-binned into three:
+
+```
+   bin      defaults   non-defaults    dE       dN      WOE = ln(dE/dN)   IV term
+   18-24        400        1,600     0.4000   0.1600       +0.9163        0.2199
+   25-35        250        1,650     0.2500   0.1650       +0.4155        0.0353
+   36+          350        6,750     0.3500   0.6750       -0.6568        0.2135
+   -------------------------------------------------------------------------------
+   totals     1,000       10,000     1.0000   1.0000            IV    =   0.4687
+```
+
+The `25-35` bin lands at `WOE = +0.4155`, which rounds to the `0.42` quoted in the comment above — and now that number is readable rather than asserted. It means applicants aged 25-35 make up `25%` of defaults but only `16.5%` of non-defaults, a `1.52x` over-representation. Exponentiate and `e^0.4155 = 1.515`: falling in this bin multiplies the odds of default by roughly `1.5x` against the population baseline of `1,000 / 10,000 = 0.1`.
+
+**Why this is the shape regulators accept.** The scorecard reduces to "base score, plus one WOE-derived addend per feature bin, run through a logistic." An adverse-action notice can therefore name the exact bins that pushed an applicant over the line, with a number attached to each. A GBDT cannot produce that: every leaf path is a unique conjunction of conditions, and the paths are not stable across retrains, so the same applicant can be declined for structurally different stated reasons two months apart.
+
+**What IV is actually for.** IV compresses the whole feature into one screening number, and the industry bands are worth memorizing: below `0.02` the feature is useless; `0.02-0.1` weak; `0.1-0.3` medium; `0.3-0.5` strong; **above `0.5` treat it as suspicious rather than excellent** — that usually means leakage or a proxy for the target itself. This age feature at `0.4687` sits at the top of "strong" and is close enough to the line to be worth a leakage check before it ships. Note also that the `18-24` and `36+` bins carry almost all the IV (`0.2199` and `0.2135`) while `25-35` contributes `0.0353`; the middle bin is near the population average and is essentially just a reference level.
+
 ### 6.3 Latency-Constrained Serving — Pre-computing vs Online Inference
 
 ```python
@@ -332,6 +427,35 @@ def latency_budget_check(
 # 3-layer MLP (PyTorch CPU): p50=4ms, p99=18ms -> FAILS <10ms SLO
 # ResNet-50 (PyTorch CPU):   p50=90ms, p99=200ms -> Needs GPU or quantization
 ```
+
+**Put simply.** "Measure the tail, not the average — because the SLO is a promise about your worst requests, and the gap between typical and worst is where models get disqualified."
+
+The reason `within_budget` compares `p99` and not `p50` is the entire lesson. A model that looks twice as fast on average can still be the one that misses the SLO, because tail behaviour is a different property from mean behaviour.
+
+| Symbol | What it is |
+|--------|------------|
+| `p50_ms` | Median latency. Half of requests are faster than this. The number people quote |
+| `p99_ms` | 99th percentile. Only 1 request in 100 is slower. The number the SLO is written against |
+| `p99_budget_ms` | The SLO. `10ms` here |
+| `p99 / p50` | Tail ratio. How much worse the bad requests are than the typical ones |
+| `within_budget` | The verdict — computed on `p99`, never on `p50` |
+| `n_trials = 1000` | Enough samples that `p99` is estimated from ~10 observations, the bare minimum |
+
+**Walk one example.** The four measured models against the `10ms` p99 SLO:
+
+```
+   model                    p50      p99    tail ratio   % of budget    verdict
+   LightGBM (300 trees)    0.4ms    1.2ms     3.0x          12%          PASS
+   XGBoost  (300 trees)    0.6ms    2.1ms     3.5x          21%          PASS
+   3-layer MLP (CPU)       4.0ms   18.0ms     4.5x         180%          FAIL
+   ResNet-50 (CPU)        90.0ms  200.0ms     2.2x       2,000%          FAIL
+```
+
+The MLP is the instructive row. Its `p50` of `4ms` sits comfortably inside a `10ms` budget — a team benchmarking on averages would ship it. Its `p99` of `18ms` is `80%` over the SLO, so it fails one request in a hundred, and at any real traffic volume that is a continuous stream of violations. The tail ratio explains why: `4.5x` against LightGBM's `3.0x`, because a Python-level forward pass is exposed to GC pauses and allocator jitter that a compiled tree traversal simply is not.
+
+Meanwhile LightGBM uses `12%` of budget at p99, leaving `8.8ms` for feature retrieval, network hops, and next year's extra features. ResNet-50 at `20x` the SLO is not a tuning problem — no amount of quantization closes a 20x gap on CPU, which is the constraint that forces the GPU decision rather than merely suggesting it.
+
+**Why this belongs before the accuracy comparison.** This is §3's "constraints drive algorithm class before accuracy drives it" made concrete. If the SLO is a hard `10ms` p99, the MLP and ResNet are out of the shortlist *before anyone measures their AUC* — and measuring it first only creates the temptation to negotiate the SLO afterward. Run the latency check on an untrained model of the right shape during the design phase; it costs minutes and it prunes the search.
 
 ---
 
