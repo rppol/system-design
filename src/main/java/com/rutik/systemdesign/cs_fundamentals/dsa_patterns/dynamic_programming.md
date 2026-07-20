@@ -251,6 +251,137 @@ Final: dp[11] = 3
 | LCS / Edit Distance (2D DP) | O(m * n) | O(m * n), or O(min(m,n)) with rolling rows | Each cell depends only on the row above and current row |
 | LIS (O(n log n)) | O(n log n) | O(n) | `tails` array + binary search; see §11 for why it works |
 
+### Decoding the complexity formula
+
+**Stated plainly.** "The running time is *how many distinct
+subproblems exist* multiplied by *how much work each one costs to fill in*."
+
+That framing matters because it makes DP complexity something you can read
+straight off your own state definition, before writing a line of code. If
+`dp` is a 2D table of `m x n` cells and each cell does one `max` of two
+neighbours, you already know it is `O(m * n)` time. If each cell instead
+loops over every coin, you multiply by that loop.
+
+| Symbol | What it is |
+|---|---|
+| `O(n)` | Work grows in step with the input size. Double `n`, double the time |
+| `O(2^n)` | Work *doubles* every time `n` grows by one. Unusable past ~40 |
+| `O(m * n)` | One unit of work per cell of an `m`-by-`n` table |
+| `dp[i]` | The stored answer to the subproblem labelled `i` |
+| `dp[i][j]` | The stored answer to the subproblem labelled by the pair `(i, j)` |
+| `n` | Input size — array length, string length, or target amount |
+| `m` | The second dimension — length of the *other* string or array |
+
+### What memoization actually buys you
+
+**What the formula is telling you.** "Without a cache, the recursion re-derives
+the same answer from scratch every time it needs it; with a cache, each
+distinct answer is derived once and then read."
+
+Naive recursive Fibonacci is the cleanest demonstration, because the number of
+calls it makes is exactly `2 * fib(n+1) - 1`:
+
+| n | Naive calls (`O(2^n)`) | Memoized states (`O(n)`) | Speedup |
+|---|---|---|---|
+| 20 | 21,891 | 21 | ~1,000x |
+| 30 | 2,692,537 | 31 | ~87,000x |
+| 40 | 331,160,281 | 41 | ~8,000,000x |
+| 100 | 1,146,295,688,027,634,168,201 (~1.15e21) | 101 | ~1.1e19 x |
+
+At `n = 100` the naive version makes about 1.15 *sextillion* calls. At one
+billion calls per second that is roughly 36,000 years. The memoized version
+fills 101 array slots. The loose `2^n` bound quoted for the naive version is
+`2^100 ~= 1.27e30`; the exact call count `1.15e21` is smaller because the
+recursion tree is lopsided, but both land in "never finishes" territory.
+
+**Why this complexity, and what breaks without the cache.** The naive tree has
+`O(2^n)` *nodes* but only `n + 1` *distinct values* among them. Everything
+above `n + 1` is recomputation. The cache does not make any single subproblem
+faster — it removes the duplicates, collapsing an exponential tree into a
+linear chain. That is the entire idea of dynamic programming, and every other
+DP recurrence in this file is the same trick wearing a different state.
+
+### Decoding the state / transition / base-case triple
+
+**What this actually says.** "Say what a table cell means, say how to fill
+it from cells you already filled, and say which cells you get for free."
+
+Every DP in this file is these three answers and nothing more. If you can
+state all three out loud, the code writes itself; if you cannot, no amount of
+coding will rescue you.
+
+| Piece | The question it answers | Coin Change example | LCS example |
+|---|---|---|---|
+| **State** | What does one cell *mean*? | `dp[i]` = fewest coins summing to `i` | `dp[i][j]` = LCS length of first `i` and first `j` chars |
+| **Transition** | How do I fill it from smaller cells? | `dp[i] = min(dp[i - c] + 1)` over coins `c` | match: `dp[i-1][j-1] + 1`; else `max(dp[i-1][j], dp[i][j-1])` |
+| **Base case** | Which cells are known outright? | `dp[0] = 0` (no coins make 0) | row 0 and column 0 are all `0` (empty string) |
+| **Order** | In what sequence is it safe to fill? | `i` ascending — `i - c < i` is already done | row by row, left to right |
+
+**Walk one example.** LCS of `text1 = "ace"` and `text2 = "abcde"`, filling the
+`4 x 6` table. Row 0 and column 0 are the base cases (empty string, LCS 0):
+
+```
+         j=0    j=1    j=2    j=3    j=4    j=5
+         ""     a      b      c      d      e
+  i=0 "" [ 0 ]  0      0      0      0      0      <- base case row
+  i=1 a    0  [ 1 ]  [ 1 ]  [ 1 ]    1      1
+  i=2 c    0    1      1    [ 2 ]    2      2
+  i=3 e    0    1      1      2      2    [ 3 ]    <- answer
+
+  Cell (1,1): text1[0]='a' vs text2[0]='a'  -> MATCH
+              dp[1][1] = dp[0][0] + 1 = 0 + 1 = 1
+              "extend the best answer for the two shorter prefixes"
+
+  Cell (1,2): text1[0]='a' vs text2[1]='b'  -> no match
+              dp[1][2] = max(dp[0][2], dp[1][1]) = max(0, 1) = 1
+              "drop a char from one side or the other; keep the better"
+
+  Cell (1,3): 'a' vs 'c' -> no match
+              dp[1][3] = max(dp[0][3], dp[1][2]) = max(0, 1) = 1
+
+  Cell (2,3): text1[1]='c' vs text2[2]='c'  -> MATCH
+              dp[2][3] = dp[1][2] + 1 = 1 + 1 = 2
+              the diagonal neighbour, not the max -- a match always
+              reaches back to the strictly smaller prefix pair
+
+  Cell (3,5): text1[2]='e' vs text2[4]='e'  -> MATCH
+              dp[3][5] = dp[2][4] + 1 = 2 + 1 = 3
+```
+
+Answer `dp[3][5] = 3`, which is the subsequence `"ace"` itself. Notice that a
+match reads the **diagonal** cell and a mismatch reads the **left and above**
+cells — that dependency shape is what forces the row-by-row, left-to-right
+fill order, and it is also what makes the next optimization legal.
+
+### Decoding the space optimization
+
+**In plain terms.** "Cell `(i, j)` only ever looks at the row
+above it and the cell to its left, so once you have finished a row you can
+throw it away — keep two rows, not `m` of them."
+
+| Symbol | What it is |
+|---|---|
+| `O(n * m)` | Store the whole table: one slot per cell |
+| `O(m)` | Store one row (or two) and reuse the buffer |
+
+**Walk one example.** LCS on two 1000-character strings:
+
+```
+  full table  : (1000 + 1) x (1000 + 1) = 1,002,001 cells
+  rolling rows: 2 x (1000 + 1)          =     2,002 cells
+
+  reduction   : 1,002,001 / 2,002 = 500x fewer cells held at once
+```
+
+**Why this works, and what it costs.** The transition never reaches further
+back than one row, so rows `0..i-2` are dead weight the moment row `i` starts.
+Dropping them is free in time — the same number of cells are still computed,
+just into a recycled buffer — but it costs you the ability to **reconstruct**
+the actual subsequence afterward, since backtracking a path through the table
+requires the whole table to still exist. Use the rolling array when the
+question asks for the *length*; keep the full table when it asks for the
+*sequence itself*. That is the entire tradeoff.
+
 ---
 
 ## 6. Variations & Sub-patterns

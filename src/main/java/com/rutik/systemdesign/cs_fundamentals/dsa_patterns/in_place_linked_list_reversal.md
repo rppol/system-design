@@ -90,6 +90,54 @@ return prev  (= 3, the new head)
 
 The invariant maintained at every step: **everything from `prev` backward is fully reversed and correctly linked; `curr` is the next node to process; `next_temp` preserves the link to the rest of the still-forward-pointing list before we overwrite `curr.next`.** Without saving `next_temp` *before* reassigning `curr.next`, you'd lose the reference to the rest of the list — this is the single most common bug in this pattern.
 
+**Stated plainly.** "`prev` is the finished pile, `curr` is the
+node in your hand, and `next_temp` is your grip on the rest of the list — you
+must grab the rest before you let go of it, or it floats away."
+
+That framing matters because it turns four lines that look interchangeable
+into a strict order with a physical reason: you cannot let go of `curr.next`
+until `next_temp` is holding it, and you cannot advance `prev` until `curr`
+has already been re-pointed at the old `prev`.
+
+| Symbol | What it is |
+|--------|------------|
+| `prev` | Head of the already-reversed portion. Starts at `None` because the original head must end up pointing at nothing |
+| `curr` | The one node being rewired this iteration. The loop ends when it walks off the end (`None`) |
+| `next_temp` | A one-line-lifetime backup of `curr.next`, taken before the overwrite destroys it |
+| `curr.next = prev` | The actual reversal. Every other line is bookkeeping around this one |
+| `->` | A `.next` reference |
+| `None` | The end-of-list terminator, and the correct starting value for `prev` |
+
+**Walk one example.** Reversing `1 -> 2 -> 3 -> None`. Each row shows all three
+pointers *after* that iteration's four statements have run:
+
+```
+  iter   next_temp   curr.next set to   prev   curr   list state so far
+  ----   ---------   ----------------   ----   ----   ----------------------------
+  init   ---         ---                None   1      None ; 1 -> 2 -> 3 -> None
+  1      2           None               1      2      None <- 1 ; 2 -> 3 -> None
+  2      3           1                  2      3      None <- 1 <- 2 ; 3 -> None
+  3      None        2                  3      None   None <- 1 <- 2 <- 3
+  ----   ---------   ----------------   ----   ----   ----------------------------
+  loop ends (curr is None); return prev = node 3, the new head
+```
+
+Read the `prev` column top to bottom and it walks 1, 2, 3 — it is always one
+node behind `curr`, one step late by exactly one iteration. Read the `curr`
+column and it walks the original list in original order, unaffected by the
+rewiring, precisely because `next_temp` captured each link before it was
+overwritten.
+
+**Why this works.** The loop never needs to see more than two adjacent nodes at
+once. Reversing a list is nothing more than reversing every individual link,
+and a single link only involves a node and its predecessor — which is exactly
+what `curr` and `prev` are. There is no need to know the list's length, to
+reach the end first, or to hold any node other than these three, which is what
+makes the whole thing O(1) space. The `next_temp` variable exists solely
+because `curr.next` is simultaneously "the link I am about to destroy" and
+"the only route to the remaining nodes"; one temporary variable separates
+those two roles, and that separation is the entire pattern.
+
 ```
 Reversing a SUB-RANGE [left, right] (e.g., reverse positions 2-4 of a 5-node list)
 

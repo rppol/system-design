@@ -47,6 +47,55 @@ xychart-beta
 
 *The middle line is f(n) = n² + n; the bottom line is the lower bound 0.5·n² and the top line is the upper bound 2·n². f(n) stays sandwiched between them for every n ≥ 1 — exactly what `f(n) = Θ(n²)` requires, and why "drop the lower-order term" (above) is safe.*
 
+### Decoding the Bound Notation
+
+**The idea behind it.** `f(n) = O(g(n))` reads as *"once the input is big enough, f never costs more than some fixed multiple of g."* The two escape hatches — "big enough" (`n ≥ n₀`) and "some fixed multiple" (`c`) — are what let you throw away constants and small-n weirdness and still make a true, provable statement.
+
+| Symbol | What it is |
+|--------|------------|
+| `f(n)` | The real operation count of your algorithm, exactly, with every constant |
+| `g(n)` | The clean shape you are comparing it to — `n`, `n log n`, `n²` |
+| `O(g(n))` | Ceiling. f grows *no faster than* g. A true but possibly loose claim |
+| `Ω(g(n))` | Floor. f grows *at least as fast as* g. Used to prove nothing can do better |
+| `Θ(g(n))` | Ceiling and floor at once. f grows *exactly like* g |
+| `o(g(n))` | Strictly slower than g — the ratio `f/g` goes to 0. `n = o(n²)`, but `n ≠ o(n)` |
+| `c`, `c₁`, `c₂` | The fixed multiplier(s). Any positive constant you like — you just have to name one |
+| `n₀` | The threshold. Below it the claim need not hold; the promise is only about large n |
+| `T(n)` | Conventional name for "the running time on input of size n" |
+| `n^(log_b a)` | The recursion-tree's leaf count expressed as a power of n (see §4.3) |
+
+**Walk one example.** Take `f(n) = 3n² + 100n + 500` from §2 and prove it is `Θ(n²)` — meaning you must produce an actual `c₁`, `c₂`, and `n₀`:
+
+```
+  claim: 3n^2  <=  3n^2 + 100n + 500  <=  4n^2      for all n >= 105
+         ^^^^^                            ^^^^^
+         c1 = 3                           c2 = 4
+
+  lower side is free: 100n + 500 is positive, so f(n) >= 3n^2 for every n >= 1.
+
+  upper side needs the threshold. 3n^2 + 100n + 500 <= 4n^2
+    <=>  100n + 500 <= n^2
+    <=>  n^2 - 100n - 500 >= 0
+    <=>  n >= (100 + sqrt(10000 + 2000)) / 2  =  104.77   ->  n0 = 105
+
+  check the boundary:
+    n = 104:  f = 43,348   4n^2 = 43,264    43,348 > 43,264   fails
+    n = 105:  f = 44,075   4n^2 = 44,100    44,075 < 44,100   holds
+    n = 1000: f = 3,100,500  4n^2 = 4,000,000                 holds, with room
+
+  so c1 = 3, c2 = 4, n0 = 105  ->  f(n) = Theta(n^2), and therefore also O(n^2).
+```
+
+**Why anyone bothers with Θ.** Big-O alone is a *ceiling*, and a ceiling can be absurdly high and still be true: binary search is `O(n)`, `O(n²)`, and `O(2^n)` — all correct, all useless. Nothing in the definition of O forbids over-claiming. Θ is the statement that removes the wiggle room: it says you found the ceiling *and* the floor and they are the same shape, so the answer cannot be sharpened. That is why best practice #5 tells you to give the tightest Θ you can prove.
+
+**Why Ω exists as a separate thing.** O describes an *algorithm*; Ω usually describes a *problem*. "Any comparison sort is Ω(n log n)" is a claim about every algorithm that could ever be written, not about one implementation — it is what tells you to stop looking for a comparison-based O(n) sort and go find a non-comparison trick instead (counting sort, radix sort).
+
+```
+  a claim about an algorithm you wrote   ->  O   ("mine costs at most this")
+  a claim about the problem itself       ->  Omega ("nobody can do better than this")
+  both, and they meet                    ->  Theta ("this algorithm is optimal")
+```
+
 ---
 
 ## 4. Types / Complexity Classes
@@ -64,6 +113,72 @@ xychart-beta
 | O(2^n) | Exponential | 2ⁿ | Recursive Fibonacci (naive), power set enumeration |
 | O(n!) | Factorial | n·(n-1)! | Brute-force TSP, permutation generation |
 
+**Stated plainly.** *"The class name is not a speed — it is a rule for what happens to your cost when the input doubles."* That is the only column that carries engineering information. `O(n²)` does not mean "slow"; it means "every time your data doubles, your bill goes up 4×", which is what turns a fine prototype into a 3 a.m. incident when the customer grows.
+
+**Say the classes out loud** — you cannot rehearse an answer you cannot verbalize:
+
+| Written | The rule it encodes |
+|---------|---------------------|
+| `O(1)` | Cost is flat. Doubling n changes nothing |
+| `O(log n)` | Doubling n adds *one* step |
+| `O(n)` | Doubling n doubles the cost |
+| `O(n log n)` | Doubling n slightly more than doubles it (~2.1×) |
+| `O(n²)` | Doubling n quadruples the cost |
+| `O(n³)` | Doubling n multiplies the cost by 8 |
+| `O(2^n)` | Adding *one element* doubles the cost |
+| `O(n!)` | Adding one element multiplies the cost by n |
+
+**Walk one example — feel the growth, do not read the name.** Operation counts at three input sizes (`log` is base 2 throughout):
+
+```
+  n              O(log n)      O(n)        O(n log n)          O(n^2)         O(2^n)
+  ------------------------------------------------------------------------------------
+  10                3.3          10                33             100          1,024
+  1,000            10.0       1,000            9,966       1,000,000       1.1 e301
+  1,000,000        19.9   1,000,000       19,931,569       1.0 e12         overflow
+
+  same numbers as wall-clock time, at a generous 1 billion operations/second:
+
+  n              O(log n)      O(n)        O(n log n)          O(n^2)         O(2^n)
+  ------------------------------------------------------------------------------------
+  10                3 ns       10 ns             33 ns          100 ns         1.0 us
+  1,000            10 ns      1.0 us           10.0 us          1.0 ms       4 e13 yr
+  1,000,000        20 ns      1.0 ms           19.9 ms        1,000   s       heat death
+```
+
+Read across the bottom row. Between `O(n log n)` and `O(n²)` at one million items the gap is 19.9 milliseconds versus 16.7 minutes — same machine, same data, same problem. That single row is the entire argument for caring about complexity, and it is the number to quote when someone says "just buy a faster server."
+
+**Why the exponential column ends in a joke.** `2^1000` is not a big number, it is a number with 302 digits — more than the ~10^80 atoms in the observable universe. There is no hardware answer to an exponential algorithm. When your analysis lands on `O(2^n)` the only move is to change the algorithm (memoize it, prune it, approximate it), which is exactly the fix listed for naive Fibonacci in Q17.
+
+### Logarithm Intuition: What log₂(n) Actually Counts
+
+**What the formula is telling you.** *"log₂(n) is the number of times you can cut n in half before you get down to 1."* It is not an abstract inverse-exponent — it is literally a step count, which is why every algorithm that throws away half the remaining work on each step costs `O(log n)`.
+
+**Walk one example.** Binary search on n = 1,000 sorted records:
+
+```
+  step:      0     1     2     3     4     5     6     7     8     9
+  remaining: 1000  500   250   125    62    31    15     7     3     1
+                 \____ halve ____/  ... nine halvings to reach 1
+
+  count of halvings = 9        log2(1000) = 9.97      (rounds to 10)
+```
+
+Now the payoff — grow the input a thousandfold and count again:
+
+```
+  n              halvings to reach 1     log2(n)
+  --------------------------------------------------
+  8                      3                 3.0
+  16                     4                 4.0
+  1,024                 10                10.0
+  1,000,000             19                19.9
+
+  n went up 1,000,000x       ->  the work went up from 3 steps to 20.
+```
+
+That is why §7's claim about Redis holds: a leaderboard of 10 million users costs ~23 skip-list steps, and a leaderboard of 20 million costs ~24. **Doubling the data adds one step.** Also note the base almost never matters — `log₂ n` and `log₁₀ n` differ by the constant factor `log₂ 10 ≈ 3.32`, and constants are dropped, which is why nobody writes the base inside a Big-O.
+
 ### 4.2 Amortized Analysis Methods
 
 **Aggregate method**: compute total cost of n operations, divide by n. Example: dynamic array doubling — total copies over n appends = n + n/2 + n/4 + ... = 2n, so amortized O(1) per append.
@@ -72,9 +187,131 @@ xychart-beta
 
 **Potential method**: define a potential function Φ that measures "stored energy" in the data structure. Amortized cost = actual cost + ΔΦ. Dynamic array: Φ = 2 × (elements since last resize). Push amortized = 1 + 2 = 3 = O(1).
 
+**Reading amortized analysis in plain English.** *"A few operations are genuinely expensive, but they are rare enough that if you bill the whole sequence and divide, every operation was cheap on average — and this is a proven ceiling, not a hopeful average."* The word doing the work is **sequence**: amortized is a claim about n operations together, never about any single one.
+
+| Symbol | What it is |
+|--------|------------|
+| `Φ` | Potential — prepaid credit banked in the structure, waiting to fund the next resize |
+| `ΔΦ` | How much the potential changed during this one operation (`Φ_after - Φ_before`) |
+| amortized cost | `actual cost + ΔΦ`. What you *charge*, not what you *spend* |
+| `n + n/2 + n/4 + ...` | A sum that converges to `2n` no matter how large n gets. The whole proof |
+
+**Walk one example.** Sixteen appends into an array that starts at capacity 1 and doubles when full. `write` is the 1 unit to store the new element; `copy` is the resize cost:
+
+```
+  append #   capacity before   resize?   copies   write   cost   running total
+  ---------------------------------------------------------------------------
+      1             1            no          0       1       1          1
+      2             1           YES          1       1       2          3
+      3             2           YES          2       1       3          6
+      4             4            no          0       1       1          7
+      5             4           YES          4       1       5         12
+      6             8            no          0       1       1         13
+      7             8            no          0       1       1         14
+      8             8            no          0       1       1         15
+      9             8           YES          8       1       9         24
+     10-16         16            no          0       1       1     25..31
+  ---------------------------------------------------------------------------
+  copies total = 1 + 2 + 4 + 8 = 15   (= n - 1, and always < n)
+  writes total = 16                   (= n, one per append)
+  TOTAL        = 31                   (< 2n = 32)
+
+  amortized cost per append = 31 / 16 = 1.94  ->  a constant  ->  O(1) amortized
+```
+
+Every row costs 1 except four spikes, and the spikes get rarer at exactly the rate they get more expensive. That is the whole argument.
+
+**Why the doubling is load-bearing.** The proof depends on capacity *multiplying*, not incrementing. Compare growth strategies over the same 16 appends:
+
+```
+  strategy              resizes    total copies         amortized per append
+  ---------------------------------------------------------------------------
+  double  (1,2,4,8,16)      4      1+2+4+8 = 15         ~1        -> O(1)
+  grow by 1 each time      15      1+2+...+15 = 120     120/16=7.5 -> O(n)
+```
+
+Grow-by-one gives `n(n-1)/2` copies — for n = 1,000 that is 499,500 copies instead of 999. This is not a theoretical distinction: it is why every real dynamic array (Python `list`, Java `ArrayList`, C++ `vector`, Go slices) multiplies its capacity by a factor rather than adding a fixed amount.
+
+**Why "amortized" is not "average".** Average-case is a statement about *input distribution* — it can be defeated by an unlucky or adversarial input. Amortized is a statement about *the sequence of operations* and holds for every possible input, adversarial included: no attacker can make n appends cost more than 2n, because the resize schedule is determined by the structure, not the data. What amortized still does **not** promise is any single operation's latency — the append that triggers a copy of a 1-million-element array really does take O(n), which is the tail-latency trap in Pitfall 1 and Q2.
+
 ### 4.3 Recurrence Relations and Master Theorem
 
 For divide-and-conquer recurrences of the form `T(n) = aT(n/b) + f(n)`:
+
+**What this actually says.** *"To solve a problem of size n, I break it into `a` pieces, each `b` times smaller, and then pay `f(n)` to split them up and stitch the answers back together."* Every divide-and-conquer algorithm you will ever analyse is described by those three numbers — the entire skill is reading them off your code.
+
+| Symbol | What it is — the question it answers |
+|--------|--------------------------------------|
+| `T(n)` | Total cost to solve size n. The unknown you are solving for |
+| `a` | **How many subproblems** do I recurse into? Count the recursive calls |
+| `b` | **How much smaller** is each one? `n/b` — for halving, `b = 2` |
+| `f(n)` | **How much non-recursive work** per call — the split plus the combine |
+| `n^(log_b a)` | Total work at the leaves. How many base cases the recursion bottoms out in |
+| `ε` | Any tiny positive number. Its job is to mean "strictly, by a polynomial margin" |
+| `log_b a` | The exponent that turns the leaf count into a power of n |
+
+**Where `n^(log_b a)` comes from.** The recursion tree has depth `log_b n` (you divide by `b` until you hit 1) and each level multiplies the node count by `a`, so the bottom level holds `a^(log_b n)` leaves — and that quantity is algebraically identical to `n^(log_b a)`. So the master theorem is one comparison: **is the leaf work or the combine work bigger?**
+
+```
+  leaves win     ->  Case 1  ->  T(n) = Theta(n^(log_b a))          all cost at the bottom
+  it's a tie     ->  Case 2  ->  T(n) = Theta(n^(log_b a) * log n)  every level costs the same
+  combine wins   ->  Case 3  ->  T(n) = Theta(f(n))                 all cost at the top
+```
+
+**Walk merge sort (a = 2, b = 2, f(n) = n).** Read it off the code in §6.2: two recursive calls (`a = 2`), each on half the array (`b = 2`), plus a linear merge (`f(n) = n`).
+
+```
+  log_b a = log_2 2 = 1        ->  leaf work = n^1 = n
+  f(n) = n = Theta(n^1)        ->  TIE  ->  Case 2  ->  T(n) = Theta(n log n)
+
+  the tree at n = 8, showing why every level costs the same:
+
+  level 0:  [ 8 ]                                  1 node  x 8 work  =  8
+  level 1:  [ 4 ][ 4 ]                             2 nodes x 4 work  =  8
+  level 2:  [2][2][2][2]                           4 nodes x 2 work  =  8
+  level 3:  [1][1][1][1][1][1][1][1]               8 nodes x 1 work  =  8   <- leaves
+                                                   ------------------------
+  merge work happens at levels 0..2  =  3 levels x 8  =  24  =  n * log2(n)
+```
+
+Node count doubles per level while per-node work halves — they cancel exactly, so cost is `n` at every level and there are `log₂ n` levels. That product *is* `n log n`.
+
+**Walk binary search (a = 1, b = 2, f(n) = 1).** One recursive call (`a = 1`), on half the range (`b = 2`), with only a comparison to combine (`f(n) = 1`).
+
+```
+  log_b a = log_2 1 = 0        ->  leaf work = n^0 = 1
+  f(n) = 1 = Theta(n^0)        ->  TIE  ->  Case 2  ->  T(n) = Theta(n^0 * log n) = Theta(log n)
+
+  the tree is a stick, not a tree -- a = 1 means no branching:
+
+  level 0:  [ n ]        1 comparison
+  level 1:  [n/2]        1 comparison
+  level 2:  [n/4]        1 comparison
+     ...
+  level k:  [ 1 ]        1 comparison        k = log2(n) levels, 1 unit each
+                                             ------------------------------
+                                             total = log2(n)
+```
+
+**Walk naive matrix multiply (a = 8, b = 2, f(n) = n²).** Eight recursive multiplications of half-size blocks, plus quadratic additions to combine.
+
+```
+  log_b a = log_2 8 = 3        ->  leaf work = n^3
+  f(n) = n^2, and n^2 = O(n^(3 - 1)) with epsilon = 1
+                               ->  LEAVES WIN  ->  Case 1  ->  T(n) = Theta(n^3)
+
+  level 0:  1 node    x  n^2       work                      = n^2
+  level 1:  8 nodes   x (n/2)^2    = 8 * n^2/4               = 2 n^2
+  level 2:  64 nodes  x (n/4)^2    = 64 * n^2/16             = 4 n^2
+     ...                                              each level DOUBLES
+  leaves:   8^(log2 n) = n^3 nodes x O(1)                    = n^3   <- dominates
+```
+
+Here the levels do *not* balance — each one costs twice the last, so the bottom level swamps everything above it and the total is just the leaf count. That is the signature of Case 1: **cost concentrated at the leaves.** This is also exactly what Strassen attacks in Q18 — dropping `a` from 8 to 7 changes `log₂ a` from 3 to 2.807, and since `a` sits in the *exponent*, removing one of eight multiplications is worth more than any constant-factor tuning ever could be.
+
+**Case 3, for contrast.** `T(n) = 2T(n/2) + n²`: `log₂ 2 = 1`, and `n² = Ω(n^(1+ε))` with `ε = 1`, so the combine step dominates and `T(n) = Θ(n²)`. The recursion is irrelevant — the top-level call alone already does all the work the algorithm will ever do.
+
+**Why this exists.** Without the master theorem you would expand the recurrence by hand every time, which is slow and error-prone under interview pressure. With it, analysing merge sort is: count the calls (2), read the shrink factor (2), read the combine cost (n), compare `n` to `n^1`, answer `Θ(n log n)` — about ten seconds. Note the limits: it only applies when subproblems are *equal-sized*, so `T(n) = T(n-1) + O(1)` (linear recursion, → O(n)) and `T(n) = 2T(n-1) + O(1)` (Q17, → O(2^n)) are outside its scope and must be expanded directly. Quicksort's worst case, `T(n) = T(n-1) + O(n)`, is the same story — unequal splits — and that is precisely why it degrades to O(n²).
 
 ```mermaid
 flowchart TD
@@ -106,6 +343,39 @@ Examples:
 - Merge sort: `T(n) = 2T(n/2) + O(n)`. `a=2, b=2, log_b a = 1`. `f(n) = n = Θ(n^1)` → Case 2 → `T(n) = Θ(n log n)`.
 - Binary search: `T(n) = T(n/2) + O(1)`. `a=1, b=2, log_b a = 0`. `f(n) = 1 = Θ(n^0)` → Case 2 → `T(n) = Θ(log n)`.
 - Naive matrix multiply: `T(n) = 8T(n/2) + O(n²)`. `a=8, b=2, log_b a = 3`. `f(n) = n² = O(n^(3-1))` → Case 1 → `T(n) = Θ(n³)`.
+
+### 4.4 Best / Average / Worst Case, Decoded
+
+**In plain terms.** *"Big-O measures growth; best/average/worst chooses **which input** you are measuring the growth of. They are independent axes, and naming a class without naming the case is only half an answer."* This is the single most common way a correct-sounding interview answer gets marked down.
+
+| Term | What input it means | Who cares |
+|------|---------------------|-----------|
+| Best case | The luckiest input of size n | Almost nobody — it is rarely actionable |
+| Average case | Expected cost over the input distribution | Throughput planning, batch jobs |
+| Worst case | The most hostile input of size n | SLAs, real-time deadlines, anything adversarial |
+| Amortized | Worst case, but per-operation across a sequence | Data-structure APIs (`append`, `insert`) |
+
+**Walk one example.** Quicksort on n = 1,000, contrasting a balanced split with the degenerate split from Q4:
+
+```
+  BEST / AVERAGE -- pivot lands near the middle, recursion depth ~ log2(1000) = 10
+    level 0:      1 partition  over 1000 elements  = 1,000 comparisons
+    level 1:      2 partitions over  500 each      = 1,000
+    ...
+    10 levels x 1,000                              ~ 10,000 comparisons   -> O(n log n)
+
+  WORST -- pivot is always the minimum (already-sorted input, "pick first" pivot)
+    partition 1:  999 comparisons
+    partition 2:  998
+    ...
+    sum = n(n-1)/2 = 1000 x 999 / 2                = 499,500 comparisons  -> O(n^2)
+
+  same code, same n, same machine:  10,000  vs  499,500     -> a 50x gap
+```
+
+Nothing about the *algorithm* changed between those two runs — only the input did. That is what the case axis is measuring, and why "quicksort is O(n log n)" is an incomplete sentence.
+
+**Why the distinction is not academic.** Sorted input is not an exotic adversarial construction — it is the single most likely shape of real production data (records that came out of a database with an ORDER BY, timestamps, already-deduplicated IDs). The naive-pivot worst case triggers on exactly the input you are most likely to receive, which is why the fixes in Q4 (randomized pivot, median-of-three, introsort) exist at all. State the case, every time.
 
 ---
 
@@ -256,6 +526,43 @@ def factorial_iter(n: int) -> int:
         result *= i
     return result
 ```
+
+**Reading space complexity in plain English.** *"How much extra memory is alive at the single worst moment of the run — not how much you allocated in total."* The two words that trip people up are **extra** (the input array itself is usually not counted) and **at once** (memory you allocate and free before the peak never shows up in the answer).
+
+| Term | What it is |
+|------|------------|
+| Auxiliary space | Extra memory *you* allocate — the answer people actually want |
+| Input space | The `n` elements handed to you. Excluded by convention unless stated |
+| Call-stack space | One frame per live recursive call. Invisible in the code, real in the RAM |
+| `O(h)` | Stack cost of a recursion `h` frames deep — `h`, not the node count `n` |
+
+**Walk one example — the invisible memory.** `factorial(5)` above allocates nothing, yet peaks at 5 live stack frames:
+
+```
+  call                     frames live      note
+  ------------------------------------------------------------
+  factorial(5)                  1
+    factorial(4)                2
+      factorial(3)              3
+        factorial(2)            4
+          factorial(1)          5           <- PEAK, all frames still open
+            factorial(0)        6  -> returns 1, and the stack unwinds
+  ------------------------------------------------------------
+  peak frames = n + 1  ->  O(n) space, despite zero explicit allocation
+
+  factorial_iter(5): one `result` variable, reused  ->  O(1) space
+```
+
+Both functions are `O(n)` time. They differ by a factor of n in space, and the difference is entirely in machinery the source code never mentions. This is the trap in Pitfall 3 and Q7 — a recursive DFS claiming "O(1) space" is wrong twice over: `O(n)` for the visited set plus `O(h)` for the stack.
+
+**Why `h` and not `n` for trees.** Stack depth is the *longest root-to-leaf path*, not the node count, so the same traversal on the same number of nodes costs wildly different memory depending on shape:
+
+```
+  10^6 nodes, balanced binary tree   ->  h = log2(10^6) = 20 frames      trivial
+  10^6 nodes, degenerate (a chain)   ->  h = 10^6       frames           StackOverflow
+```
+
+**Why this exists — what breaks without it.** Space is the constraint that fails *loudly*: an algorithm that is 10× too slow returns a late answer, but one that is 10× over the memory budget crashes with a `StackOverflowError` or gets OOM-killed. CPython's default recursion limit is 1,000 frames, so the degenerate case above dies long before it is slow. Best practice #2 exists for this reason — quote space alongside time or the analysis is incomplete.
 
 ---
 

@@ -218,6 +218,83 @@ flowchart TD
 
 The whole reason this is a distinct pattern is the **space** column: the naive version of nearly every problem here allocates a second matrix or a visited grid, and the interview follow-up is always "now do it in O(1) extra space," which forces the coordinate-arithmetic insight.
 
+### Decoding `O(rows × cols)`
+
+**What the formula is telling you.** "There are `rows × cols` cells and you touch
+each a fixed number of times, so the work is just the number of cells. This one
+*is* a product — unlike `O(V + E)` on a graph — because the input itself is
+two-dimensional."
+
+Worth saying explicitly, because `O(m·n)` reads like a nested-loop penalty and
+it is not one. It is linear in the input size; the input just happens to be
+described by two numbers. A grid of `m × n` cells has `m · n` items the same way
+a list of `k` items has `k`.
+
+| Symbol | What it is |
+|---|---|
+| `m`, `rows` | Number of rows |
+| `n`, `cols` | Number of columns |
+| `O(m·n)` | One constant-cost visit per cell — linear in the cell count |
+| `O(1)` extra | Auxiliary space beyond the input grid and the required output |
+| `4^L` | Backtracking blowup: 4 directions branched `L` deep, only in DFS-with-undo problems |
+
+**Why a grid is secretly a graph.** Every grid problem is a graph problem where
+the graph is implicit: `V = m · n` cells, and each cell has up to 4 edges, so
+`E <= 4mn / 2 = 2mn`. Substituting into the traversal bound:
+
+```
+  O(V + E)  =  O(mn + 2mn)  =  O(3mn)  =  O(mn)
+
+  the graph bound collapses into the grid bound -- same algorithm,
+  the adjacency list is just replaced by arithmetic on (r, c)
+```
+
+That is the direction-vector idiom's entire justification: you never build an
+adjacency list because you can *compute* the neighbors, which is why grid BFS
+uses `O(1)` structural memory where a general graph needs `O(V + E)`.
+
+**Walk one example.** BFS from `S` at `(0,0)` to `T` at `(2,3)`, with
+`dirs = [(-1,0), (1,0), (0,-1), (0,1)]` meaning up, down, left, right. `#` is a
+wall.
+
+```
+         c=0  c=1  c=2  c=3
+  r=0     S    .    .    .
+  r=1     #    #    .    .
+  r=2     .    .    .    T
+
+  step  popped   dist  the 4 direction probes                enqueued   queue after
+  ----  -------  ----  ------------------------------------  ---------  --------------
+   0    --        --   (seed)                                 (0,0)     [(0,0)]
+   1    (0,0)      0   up:OOB  down:(1,0)=#  left:OOB          (0,1)     [(0,1)]
+                       right:(0,1) OK
+   2    (0,1)      1   up:OOB  down:(1,1)=#  left:seen         (0,2)     [(0,2)]
+                       right:(0,2) OK
+   3    (0,2)      2   up:OOB  down:(1,2) OK  left:seen        (1,2)     [(1,2),(0,3)]
+                       right:(0,3) OK                          (0,3)
+   4    (1,2)      3   up:seen  down:(2,2) OK  left:(1,1)=#    (2,2)     [(0,3),(2,2),
+                       right:(1,3) OK                          (1,3)      (1,3)]
+   5    (0,3)      3   up:OOB  down:seen  left:seen            --        [(2,2),(1,3)]
+                       right:OOB
+   6    (2,2)      4   up:seen  down:OOB  left:(2,1) OK        (2,1)     [(1,3),(2,1),
+                       right:(2,3) = T, OK                     (2,3)      (2,3)]
+   7    (1,3)      4   all four seen / OOB                     --        [(2,1),(2,3)]
+   8    (2,1)      5   left:(2,0) OK, rest seen / OOB          (2,0)     [(2,3),(2,0)]
+   9    (2,3)      5   TARGET REACHED -> return 5              --        --
+
+  shortest path: (0,0) -> (0,1) -> (0,2) -> (1,2) -> (2,2) -> (2,3) = 5 moves
+```
+
+**Why this complexity.** The `visited` guard admits each cell to the queue at
+most once, so there are at most `m · n = 3 × 4 = 12` dequeues. Each dequeue runs
+the direction loop exactly 4 times, so at most `4 × 12 = 48` probes. Total work
+is bounded by `4mn`, and dropping the constant gives `O(m·n)`. Scale it up: a
+`1,000 × 1,000` grid means `1,000,000` cells and at most `4,000,000` neighbor
+probes — still linear, still trivially fast. The bound only leaves linear
+territory when the problem removes the `visited` guard to allow revisiting on
+different paths (Word Search, path-counting), and then the `4^L` backtracking
+term takes over.
+
 ---
 
 ## 6. Variations & Sub-patterns

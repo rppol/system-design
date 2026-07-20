@@ -264,6 +264,115 @@ the `feasible` check, not the search itself — when optimizing, look there
 first (e.g., can `feasible` be made O(log n) with a prefix-sum + binary search
 instead of O(n)?).
 
+### Decoding the O(log n) claim
+
+**In plain terms.** "Every step throws away half of what is left,
+so the question is not 'how many elements are there' but 'how many times can I
+halve that number before only one remains' — and that count is the logarithm."
+
+That reframing is why binary search feels almost free at scale. Going from a
+thousand elements to a billion — a *million-fold* increase in data — adds only
+ten more steps, because each step's power is multiplicative, not additive.
+
+| Symbol | What it is |
+|---|---|
+| `O(log n)` | Number of halvings needed to reduce `n` to 1. Base 2 unless stated |
+| `log2(n)` | Literally: "2 raised to what power gives `n`?" |
+| `lo`, `hi` | The inclusive bounds of the range still under consideration |
+| `mid` | The index being tested this step, halfway between `lo` and `hi` |
+| `n` | Size of the search space (array length, or the range of the answer) |
+| `O(1)` | Constant space — three integer variables, regardless of `n` |
+
+**Walk one example.** Searching a sorted array of `n = 1,000,000` elements.
+Each step halves the surviving range:
+
+```
+  step 0 (start)   1,000,000 candidates remain
+  step 1             500,000
+  step 2             250,000
+  step 3             125,000
+  step 4              62,500
+  step 5              31,250
+  step 6              15,625
+  step 7               7,813
+  step 8               3,907
+  step 9               1,954
+  step 10                977
+  step 11                489
+  step 12                245
+  step 13                123
+  step 14                 62
+  step 15                 31
+  step 16                 16
+  step 17                  8
+  step 18                  4
+  step 19                  2
+  step 20                  1   <- found
+
+  log2(1,000,000) = 19.93  ->  20 steps, ceiling of the logarithm
+```
+
+Twenty comparisons against a million-element linear scan's 1,000,000 — a
+50,000x reduction. Push to a billion elements and it is only 30 steps
+(`log2(1e9) = 29.9`): ten more steps for a thousand times the data.
+
+**Why this complexity, and what breaks with a linear scan.** The halving is
+only legal because the array is *sorted* — one comparison at `mid` tells you
+which half cannot possibly contain the target, letting you discard it
+untested. An unsorted array gives that comparison no such power: knowing
+`arr[mid] > target` says nothing about the other elements, so you are back to
+checking all `n`. Sortedness is what converts one comparison into a decision
+about half the data.
+
+### Decoding the overflow-safe midpoint
+
+**Read it like this.** "`(lo + hi) / 2` computes a number that may
+not fit in the machine's integer before dividing it back down to a number that
+would have; `lo + (hi - lo) / 2` never builds the oversized number in the first
+place."
+
+The two expressions are mathematically identical — the difference is entirely
+about the intermediate value. In Python this is only a style habit (integers
+are arbitrary-precision), but in Java, C, C++, and Go it is a real bug that
+survived in the JDK's own `Arrays.binarySearch` for nine years.
+
+| Symbol | What it is |
+|---|---|
+| `(lo + hi) / 2` | The naive midpoint. Builds a sum that can exceed the type |
+| `lo + (hi - lo) / 2` | The safe midpoint. Builds only a *difference*, which always fits |
+| `2^31 - 1` | 2,147,483,647 — the largest value a signed 32-bit `int` holds |
+
+**Walk one example.** A 32-bit signed `int` search where `lo = 2,000,000,000`
+and `hi = 2,100,000,000`. The true midpoint is `2,050,000,000`, comfortably
+inside the type's range:
+
+```
+  int limit           =  2,147,483,647   (2^31 - 1)
+  lo                  =  2,000,000,000   fits
+  hi                  =  2,100,000,000   fits
+  true midpoint       =  2,050,000,000   fits
+
+  NAIVE: (lo + hi) / 2
+      lo + hi         =  4,100,000,000   EXCEEDS the limit by 1,952,516,353
+      wraps around to = -194,967,296     (negative!)
+      / 2             =   -97,483,648
+      -> arr[-97483648] : negative index, crash or silent garbage
+
+  SAFE: lo + (hi - lo) / 2
+      hi - lo         =    100,000,000   small, always fits
+      / 2             =     50,000,000
+      lo + that       =  2,050,000,000   correct, and never overflowed
+```
+
+**Why the safe form cannot overflow.** Because `lo <= hi` throughout the
+search, `hi - lo` is non-negative and no larger than `hi` itself — so the
+subtraction always fits in whatever type already holds `hi`. Halving it makes
+it smaller still, and adding it back to `lo` produces a value between `lo` and
+`hi`, which by definition fits. The naive form's failure needs no unusual
+input: any two indices whose *sum* exceeds the type triggers it, even though
+both indices and their midpoint are perfectly ordinary. This is why the safe
+form is worth writing reflexively even in Python, where it costs nothing.
+
 ---
 
 ## 6. Variations & Sub-patterns

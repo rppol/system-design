@@ -53,6 +53,56 @@ The data structure foundations (adjacency list/matrix, Trie, Union-Find, segment
 | Floyd-Warshall | Any (no neg cycles) | O(V³) | O(V²) | All-pairs shortest path, transitive closure |
 | A* | Non-negative + heuristic | O(E log V) | O(V) | Grid pathfinding (with admissible heuristic) |
 
+#### Decoding `O(V + E)` — a sum, never a product
+
+**The idea behind it.** "Traversal touches every vertex once and walks down every edge once, and
+those are two separate piles of work that get *added together* — not one pile multiplied by the other."
+
+The plus sign is the entire content of the notation and the single most misread character in graph
+complexity. `O(V + E)` does not mean "roughly `V` times `E`"; it means the algorithm's cost is the *size
+of the input itself*, because an adjacency list literally consists of `V` buckets holding `E` entries.
+Reading it as a sum immediately tells you the algorithm is optimal — you cannot beat "look at the input
+once."
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | How many nodes. Also written `\|V\|`. Each is dequeued exactly once |
+| `E` | How many connections. Each is examined exactly once (twice if undirected) |
+| `O(V + E)` | Two separate costs, summed. Linear in the *total size* of the graph |
+| `O(V x E)` | A genuinely different, much worse class — this is Bellman-Ford's `O(VE)` |
+| `O(V^2)` | The adjacency-*matrix* cost: scanning `V` neighbour slots for each of `V` vertices |
+| `E = O(V)` | A **sparse** graph. Most real ones: road networks, social graphs |
+| `E = O(V^2)` | A **dense** graph. Every vertex connected to nearly every other |
+
+**Walk one example.** A social graph with 1,000,000 users averaging 100 friends each, so `V = 10^6` and
+`E = 5 x 10^7` (50 million undirected edges, each stored twice in the adjacency list):
+
+```
+  reading it as a SUM (correct)
+      V  + 2E  =  1,000,000 + 100,000,000  =  1.01 x 10^8 operations
+      at 1e8 ops/sec:  about 1 second
+
+  reading it as a PRODUCT (the misread)
+      V  x  E  =  1,000,000 x 50,000,000   =  5 x 10^13 operations
+      at 1e8 ops/sec:  about 5.8 DAYS
+
+  the same graph on an adjacency MATRIX, O(V^2)
+      V^2      =  10^12 operations, and 10^12 bits = 125 GB just to store it
+      at 1e8 ops/sec:  about 2.8 hours -- and it will not fit in RAM
+
+  which term dominates depends on density:
+      sparse (E ~ V)     ->  V + E ~ 2V     the vertices matter
+      dense  (E ~ V^2)   ->  V + E ~ V^2    the edges dominate completely
+```
+
+**Why the representation decides the complexity, and what breaks with the wrong one.** BFS is `O(V + E)`
+on an adjacency list and `O(V^2)` on an adjacency matrix — the *algorithm* is identical; only the cost of
+asking "who are v's neighbours?" changed, from `O(degree(v))` to `O(V)`. For the social graph above that
+is the difference between 1 second and not fitting in memory. The rule of thumb: adjacency list for
+sparse graphs (nearly all real ones), adjacency matrix only when the graph is dense or you need `O(1)`
+"is there an edge u-v?" lookups. And note that Dijkstra's `O((V + E) log V)` is the same sum with a
+per-operation heap factor bolted on — still fundamentally linear-ish, still nothing like `O(VE)`.
+
 ### MST Algorithm Selection
 
 | Algorithm | Time | Best for | Notes |
@@ -72,6 +122,58 @@ The data structure foundations (adjacency list/matrix, Trie, Union-Find, segment
 | Aho-Corasick | O(M) (sum of patterns) | O(n + M + k) | O(M) | Multiple pattern simultaneous search |
 | Boyer-Moore | O(m + σ) | O(n/m) best | O(m + σ) | Large alphabets; best practical average |
 | Suffix Array | O(n log n) | O(m log n) | O(n) | Multiple searches over same text |
+
+#### Decoding naive search's `O(n x m)` — this one really is a product
+
+**Stated plainly.** "Try the pattern at every one of the `n` starting positions in the text,
+and at each position compare up to `m` characters before giving up — so the two counts *multiply*."
+
+Contrast this with `O(V + E)` directly above: there the two quantities were independent piles of work
+added together; here the inner loop runs once per iteration of the outer loop, which is what a product
+means. The pathology is that on a mismatch the naive algorithm throws away everything it just learned and
+restarts the pattern from character 0, one position to the right.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Text length. The number of candidate starting positions is `n - m + 1` |
+| `m` | Pattern length. The maximum comparisons spent at any one starting position |
+| `O(n x m)` | Nested loops: outer over positions, inner over pattern characters |
+| `O(n + m)` | KMP. Preprocess the pattern once (`m`), then one pass over the text (`n`) |
+| worst case | Every start matches almost all of the pattern, then fails on the last character |
+
+**Walk one example.** The adversarial input is a text of all `a`s and a pattern of `a`s ending in `b`:
+
+```
+  text    = "aaaaaaaaaaaaaaaa"    n = 16
+  pattern = "aaab"                m = 4
+
+  start 0:  a a a a       vs  a a a b     3 matches then FAIL on the 4th
+  start 1:  a a a a       vs  a a a b     3 matches then FAIL
+  start 2:  a a a a       vs  a a a b     3 matches then FAIL
+  ...       every single start does the same 4 comparisons and learns nothing
+  start 12: a a a a       vs  a a a b     3 matches then FAIL
+
+  comparisons = (n - m + 1) x m = 13 x 4 = 52 comparisons to find NOTHING
+  KMP on the same input                  = 16 + 4 = 20 steps
+
+  now scale it to a realistic log-scan: n = 1,000,000 and m = 1,000
+
+    naive worst case  (n - m + 1) x m = 999,001,000  ~  1 BILLION comparisons
+                                                        about 10 seconds
+    KMP               n + m           =   1,001,000  ~  1 million steps
+                                                        about 1 millisecond
+
+    a 1000x gap, and the ratio is exactly m -- the pattern length.
+```
+
+**Why the wasted work is avoidable, and what KMP actually saves.** At `start 0` the naive scan proved that
+`text[0..2] == "aaa"`. That fact is still true at `start 1`, but naive throws it away and re-derives it.
+KMP's failure function is precisely a record of "given what I already matched, how far can I safely slide
+without re-reading the text?" — which is why its text pointer never moves backward and the total is a
+*sum* rather than a product. The catch is that the pathological case requires a self-similar pattern; on
+random English text, naive substring search almost always fails on the first or second character and runs
+in roughly `O(n)`, which is exactly why `str.find` in most standard libraries is a tuned naive/Boyer-Moore
+hybrid rather than KMP. Choose KMP when you need the worst-case *guarantee*, not the average case.
 
 ---
 
@@ -173,6 +275,72 @@ Search "ABCABCABCABD" for pattern:
 ```
 
 The fail[] value at each index is the length of the longest prefix-that-is-also-a-suffix seen so far — kept as a column-aligned value table on purpose, since character alignment is the information Mermaid cannot draw. The search trace beneath it shows the payoff: on the mismatch at position 8 the pointer jumps straight to fail[7]=5 instead of restarting at 0, skipping 5 redundant comparisons.
+
+**What the formula is telling you.** "`fail[i]` answers one question: *if I have matched the pattern up to
+position `i` and the next character disappoints me, how much of what I matched is still usable?* The
+answer is the length of the longest chunk at the end of `pattern[0..i]` that is identical to a chunk at
+the beginning of the pattern — because that chunk is already lined up for a fresh attempt."
+
+This is the part everyone finds opaque, and the reason is almost always that "longest proper prefix which
+is also a suffix" is read as a piece of trivia about strings rather than as a *shift instruction*. It is a
+shift instruction. `fail[7] = 5` is the pattern saying: "if you fail me at index 8, do not go back to 0 —
+you are already 5 characters into a fresh match, for free."
+
+| Symbol | What it is |
+|--------|------------|
+| `fail[i]` | Length of the longest proper prefix of `pattern[0..i]` that is also its suffix |
+| "proper" | Strictly shorter than the string itself. Without this, `fail[i] = i+1` always, and nothing shifts |
+| `j` | The build pointer. Also *the current fail value* — the two are the same number |
+| `i` | The scan pointer, moving left to right over the pattern. Never moves backward |
+| `j = fail[j-1]` | The **fallback**. Try the next-shorter candidate border |
+| border | The prefix-equals-suffix chunk itself. `fail[i]` is its length |
+
+**Walk one example.** Building `fail[]` for `ABCABCABD` one character at a time. `i` scans forward; `j`
+tracks how long the current border is. The rule is only two lines: *if `p[i] == p[j]`, the border grows by
+one; otherwise fall back to `fail[j-1]` and try again.*
+
+```
+  pattern:  A  B  C  A  B  C  A  B  D
+  index:    0  1  2  3  4  5  6  7  8
+
+   i   p[i]   j before   compare            outcome                      fail[i]
+  ---  ----   --------   ----------------   --------------------------   -------
+   0    A        -        (base case)        a 1-char string has no
+                                             proper prefix                  0
+   1    B        0        p[1]=B vs p[0]=A   mismatch, j already 0          0
+   2    C        0        p[2]=C vs p[0]=A   mismatch, j already 0          0
+   3    A        0        p[3]=A vs p[0]=A   MATCH -> j = 1                 1
+   4    B        1        p[4]=B vs p[1]=B   MATCH -> j = 2                 2
+   5    C        2        p[5]=C vs p[2]=C   MATCH -> j = 3                 3
+   6    A        3        p[6]=A vs p[3]=A   MATCH -> j = 4                 4
+   7    B        4        p[7]=B vs p[4]=B   MATCH -> j = 5                 5
+   8    D        5        p[8]=D vs p[5]=C   mismatch -> fall back:
+                                               j = fail[4] = 2
+                                             p[8]=D vs p[2]=C  mismatch
+                                               j = fail[1] = 0
+                                             p[8]=D vs p[0]=A  mismatch
+                                             j stays 0                      0
+
+  fail = [0, 0, 0, 1, 2, 3, 4, 5, 0]
+
+  reading a single row as English:
+    fail[7] = 5  ->  "ABCABCAB" ends with "ABCAB", and it also STARTS with
+                     "ABCAB", so 5 characters are reusable on failure"
+
+              A B C A B C A B
+              ^^^^^^^                prefix  "ABCAB"
+                    ^^^^^^^          suffix  "ABCAB"   <- same 5 chars, overlapping
+```
+
+**Why the text pointer never moves backward, and what breaks without the fallback chain.** Row 8 is the
+one that carries the algorithm. When `D` failed against `C`, the code did not restart at 0 — it walked
+`5 -> 2 -> 0`, testing each successively shorter border. Each fallback step *strictly decreases* `j`, and
+`j` only ever increases one step at a time, so across the whole build `j` rises at most `m` times and
+therefore falls at most `m` times: the double loop is `O(m)` total, not `O(m^2)`. The identical accounting
+in the search loop gives `O(n)`, because the text index `i` never decrements. Break the chain — fall back
+to `0` instead of `fail[j-1]` — and you silently miss overlapping occurrences (searching `AAAA` for `AA`
+would report 2 matches instead of 3); use `fail[j]` instead of `fail[j-1]` and you get the classic
+off-by-one that loops forever, which is Pitfall 4.
 
 ### Bellman-Ford — Negative Cycle Detection
 
@@ -556,6 +724,64 @@ def rabin_karp_search(text: str, pattern: str, base: int = 31, mod: int = 10**9 
 
     return matches
 ```
+
+**What this actually says.** "Treat each window of the text as a number written in base 31, then
+slide the window by doing arithmetic instead of re-reading characters: subtract the digit that left,
+shift everything up one place, add the digit that arrived. Constant work per position, no matter how long
+the pattern is."
+
+The framing that unlocks it is *place value*. `"abc"` is not a string here, it is the number
+`1x31^2 + 2x31 + 3`, exactly the way `345` is `3x10^2 + 4x10 + 5`. Once the window is a number, sliding it
+is the same three-step edit you would do on a decimal odometer.
+
+| Symbol | What it is |
+|--------|------------|
+| `base` | The place-value radix. Must exceed the alphabet size; 31 and 131 are common |
+| `mod` | Keeps the hash inside a machine word. A large prime, to spread collisions |
+| `h = base^(m-1)` | The weight of the **leading** character — the digit about to leave |
+| `t_hash` | Hash of the current text window |
+| `- cv(out) * h` | Remove the leading character's contribution |
+| `base * (...)` | Shift every remaining digit up one place |
+| `+ cv(in)` | Append the new trailing character at weight 1 |
+| `% mod` | Wrap. In Python the result can go negative after the subtraction — add `mod` back |
+
+**Walk one example.** `text = "abcab"`, `m = 3`, `base = 31`, with `a=1, b=2, c=3`. Weight of the leading
+character is `h = 31^(3-1) = 961`:
+
+```
+  window 0  "abc"   =  1 x 961  +  2 x 31  +  3 x 1
+                    =    961    +    62    +    3     =  1026
+
+  roll to window 1: 'a' leaves the front, 'a' arrives at the back -> "bca"
+
+     step 1  drop the outgoing 'a'    1026 - cv(a) x h  = 1026 - 1 x 961 =   65
+     step 2  shift up one place         65 x 31                          = 2015
+     step 3  add the incoming 'a'     2015 + cv(a)      = 2015 + 1       = 2016
+
+     check directly:  "bca" = 2 x 961 + 3 x 31 + 1 = 1922 + 93 + 1 = 2016   agrees
+
+  roll to window 2: 'b' leaves, 'b' arrives -> "cab"
+
+     step 1  2016 - cv(b) x 961 = 2016 - 1922 =   94
+     step 2    94 x 31                        = 2914
+     step 3  2914 + cv(b)                     = 2916
+
+     check directly:  "cab" = 3 x 961 + 1 x 31 + 2 = 2883 + 31 + 2 = 2916   agrees
+
+  cost per slide: one multiply, one subtract, one add, one mod = O(1),
+  versus O(m) to rehash the window from scratch.
+```
+
+**Why the `mod` is both necessary and the source of the worst case.** Without it, a 1,000-character window
+would need a 5,000-bit integer and every arithmetic step would become slow; with it, the hash is a
+collision-prone fingerprint rather than an identity. Two different windows can share a hash, which is why
+line `if text[i:i+m] == pattern` re-verifies on every hit — and why the worst case is `O(nm)`: an
+adversary who knows your `base` and `mod` can craft a text where every position collides and every
+position pays a full `O(m)` verification. The defences are a large prime modulus (with `mod = 10^9+7` the
+expected false positives over a 1M-character text are `10^6 / 10^9 = 0.001`, effectively none), a randomly
+chosen base per run to defeat adversarial inputs, or double hashing with two independent moduli. What you
+must never do is drop the verification and trust the hash — that is Pitfall 5, and it produces wrong
+answers rather than slow ones.
 
 ### Z-Algorithm
 

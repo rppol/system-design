@@ -38,6 +38,56 @@ This module covers the two structural properties that enable DP, the two impleme
 
 **Base cases**: The values of dp for trivially small inputs. Missing or incorrect base cases are the most common source of DP bugs.
 
+### Decoding the state / transition / base-case triple
+
+**The idea behind it.** "Every DP problem is three sentences: *what does one table cell mean*
+(state), *how do I compute a cell from cells I already have* (transition), and *which cells do I know
+without computing anything* (base cases). Write those three sentences and the code writes itself."
+
+That framing matters because it is also the debugging order. A DP that produces wrong answers is almost
+never a loop bug — it is one of the three sentences being false. And the three are checked in order: an
+ambiguous state definition makes the transition unwritable, and a correct transition on a missing base
+case silently reads a zero.
+
+| Symbol | What it is |
+|--------|------------|
+| `dp[i]` | One cell. Its **meaning** is the state definition, stated in English |
+| `dp[i][j]` | A 2D state: two independent things vary. Table size is the product |
+| `dp[i] = f(dp[i-1], ...)` | The transition. Arrows always point *backwards* to smaller states |
+| `dp[0]` | A base case. Known outright, never computed by the transition |
+| "first i items" | The near-universal state phrasing for sequence DP. Note **i items**, not **index i** |
+| `O(states) x O(transition)` | The runtime. `n x m` cells, `O(1)` work each → `O(nm)` |
+
+**Walk one example.** The three sentences for 0/1 knapsack, written out before any code exists:
+
+```
+  state       dp[i][w] = the best value obtainable using only the FIRST i items,
+                         with a knapsack capacity of exactly w.
+                         table size = (n+1) x (W+1) cells
+
+  transition  for each cell, item i is either left behind or taken:
+
+                skip it   ->  dp[i-1][w]                     same capacity, one fewer item
+                take it   ->  dp[i-1][w - weight[i]] + value[i]
+                              ^^^^^^^^^^^^^^^^^^^^^  capacity is reduced FIRST,
+                                                     then the value is added
+
+                dp[i][w] = max(skip, take)      and "take" is only legal if w >= weight[i]
+
+  base case   dp[0][w] = 0 for every w      no items available -> no value
+                         (the row of zeros at the top of the table in Section 5)
+
+  runtime     (n+1)(W+1) cells x O(1) work per cell  =  O(nW)
+```
+
+**Why the state must be a complete description, and what breaks if it is not.** The transition is only
+allowed to read other cells — so every fact that influences the answer must be encoded in the *indices*.
+If the answer for "first i items, capacity w" also depended on which specific items you took earlier, the
+cell would not be a single number and the table would be a lie. This is exactly why the longest *simple*
+path has no DP: the answer for "best path to node v" depends on which vertices are already used, and that
+history does not fit in an index. Add it as an index (a visited bitmask) and DP returns — at
+`O(2^V × V)` states, which is the Held-Karp travelling-salesman algorithm.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -101,6 +151,47 @@ Advantages: no recursion overhead or stack overflow risk; amenable to space opti
 ### Space Optimisation (Rolling Array)
 
 When dp[i] only depends on dp[i-1] (or dp[i][j] only on dp[i-1][...]), you only need to keep the previous row. Reduces O(n²) space to O(n) in many 2D DP problems (knapsack, LCS, edit distance).
+
+**Stated plainly.** "If a cell only ever looks one row back, then every row older than that
+is dead weight — keep one row instead of `n`, and the memory bill drops from `O(n x m)` to `O(m)` while
+the running time does not change at all."
+
+The insight is about the *dependency depth*, not the algorithm. Look at which rows the transition reads;
+whatever it never reads can be thrown away the instant it is written.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(n x m)` | Full table: `n` rows of `m` cells. The naive allocation |
+| `O(m)` | One row. What you actually need when the lookback is a single row |
+| `O(1)` | A fixed number of scalars. Fibonacci's two-variable version |
+| lookback depth | How many rows back the transition reaches. Keep exactly that many, plus the current one |
+| in-place, reversed | Overwriting one array in decreasing index order, so a cell reads the OLD value |
+
+**Walk one example.** 0/1 knapsack with `n = 1000` items and capacity `W = 100,000`, 4-byte ints:
+
+```
+  full 2D table    (n+1) x (W+1)  =  1001 x 100001 cells
+                   x 4 bytes      =  400,404,004 bytes  =  382 MB    <- OOM territory
+
+  one row only     (W+1) cells    =  100001 cells
+                   x 4 bytes      =  400,004 bytes      =  0.38 MB   <- a 1000x cut
+
+  time is IDENTICAL in both: 1001 x 100001 = 100.1 million cell evaluations.
+  you dropped the storage, not the work.
+
+  the same reduction on Fibonacci goes one step further, to O(1):
+       dp = [0, 1, 1, 2, 3, 5, ...]        n+1 ints
+       prev, curr = 0, 1                   2 ints, forever
+```
+
+**What breaks: you lose the reconstruction.** The table is not only the answer, it is the *evidence*. The
+backtrace in Section 5 ("compare `dp[i][w]` vs `dp[i-1][w]`; if equal, item i was not taken") needs every
+row to still exist. Collapse to one row and you can report the optimal *value* 7 but not the optimal
+*items* {1, 2} — this is Pitfall 5. The standard escapes are to keep the full table when you need the
+answer itself, store a parallel bitmask of decisions, or use Hirschberg's divide-and-conquer trick to
+recover the path in `O(m)` space at 2x the time. Also note the ordering hazard: because the single row
+mixes old and new values, 0/1 knapsack must sweep capacity *downward* and unbounded knapsack *upward* —
+the direction is now load-bearing in a way it never was with two separate rows.
 
 ### DP on Intervals
 
@@ -180,6 +271,51 @@ Tabulated (bottom-up, left to right):
   Space-optimised: only keep prev two values -> O(1) space.
 ```
 
+#### Decoding the memoisation payoff — what `O(2^n)` to `O(n)` actually buys
+
+**What the formula is telling you.** "Naive Fibonacci re-derives the same handful of answers an astronomical
+number of times; memoisation says *write each answer down the first time*, which collapses the cost from
+'how many paths are there through the recursion tree' to 'how many distinct questions are there'."
+
+The reframing is the whole of dynamic programming. Exponential complexity here is not caused by hard work
+— it is caused by *repeated* work. There are only 101 distinct questions in `fib(100)`, and the naive
+version asks them 10^21 times.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(2^n)` | Cost grows by a **factor** of 2 per unit of n. Adding 1 to n doubles the runtime |
+| `O(n)` | Cost grows by a **constant amount** per unit of n. Adding 1 to n adds one step |
+| `2^n` vs `n` | Not "faster"; a different *kind* of growth. No hardware closes an exponential gap |
+| `phi^n` | The true naive fib growth, `phi = 1.618`. Bounded above by `2^n`, still exponential |
+| number of states | The memoised cost. For fib, one state per value of n: exactly `n+1` of them |
+
+**Walk one example.** Call counts for naive versus memoised Fibonacci, with n climbing:
+
+```
+     n     naive calls (= 2*F(n+1) - 1)     memoised calls     ratio
+    ---    ----------------------------     --------------     -----
+      5              15                            6            2.5x
+     10             177                           11             16x
+     20          21,891                           21          1,042x
+     50   40,730,022,147                          51          8.0e8
+    100    1.15e21                               101          1.1e19
+
+  the loose textbook bound is 2^100 = 1.27e30; the exact count is 1.15e21
+  because the tree branches at phi = 1.618, not 2. Both are catastrophic.
+
+  wall clock at an optimistic 1 billion calls/second:
+      naive  fib(100) : 1.15e21 / 1e9 = 1.15e12 seconds = ~36,000 YEARS
+      memoised fib(100):    101 calls = under a microsecond
+```
+
+**Why the collapse is so total, and what breaks without overlapping sub-problems.** The naive tree has
+`~phi^n` *nodes* but only `n+1` *distinct labels*, so the ratio of wasted-to-useful work is itself
+exponential — memoisation deletes all of it for `O(n)` extra memory. This is the single best
+time-for-space trade in the algorithms canon. It works only because the sub-problems *overlap*: merge
+sort's recursion tree also has exponentially many nodes, but every node is a distinct slice of the array,
+so a memo table would score a 0% hit rate and buy nothing but overhead. Overlap is the precondition; the
+optimal-substructure property from Section 3 is what makes the cached answers reusable in the first place.
+
 ### 0/1 Knapsack — Table Fill Pattern
 
 ```
@@ -196,6 +332,70 @@ dp[i][w] = max value using first i items with capacity w
   Answer: dp[3][5] = 7
   Reconstruction: compare dp[i][w] vs dp[i-1][w]; if equal, item i not taken.
 ```
+
+#### Decoding the table — five cells, walked one at a time
+
+**What this actually says.** "Each cell asks one small question — *best value from the first i items
+with capacity w* — and answers it by peeking at exactly two cells in the row above: the one directly
+overhead (skip this item) and the one up-and-to-the-left by `weight[i]` columns (take it)."
+
+Reading the table as *two arrows per cell* is what makes DP concrete. The row above is always already
+finished, so nothing is ever computed out of order, and every cell costs O(1) regardless of how large the
+table gets.
+
+| Symbol | What it is |
+|--------|------------|
+| `dp[i][w]` | Best value using the first `i` items at capacity `w` |
+| `dp[i-1][w]` | The **skip** branch. Same capacity, this item refused |
+| `dp[i-1][w - w_i]` | The **take** branch. The room left after this item goes in |
+| `+ v_i` | The value gained by taking item `i` |
+| `max(skip, take)` | The choice. Ties mean either decision is optimal |
+| `w < w_i` | Item does not fit; the take branch is illegal and the cell just copies down |
+
+**Walk one example.** Five cells from the table above, with `items = [(w=2,v=3), (w=3,v=4), (w=4,v=5)]`:
+
+```
+       w:   0    1    2    3    4    5
+  i=0:      0    0    0    0    0    0
+  i=1:      0    0    3    3    3    3
+  i=2:      0    0    3    4    4    7
+  i=3:      0    0    3    4    5    7
+
+  cell 1   dp[1][2]   item 1 is (w=2, v=3), capacity 2
+           skip = dp[0][2] = 0
+           take = dp[0][2-2] + 3 = dp[0][0] + 3 = 0 + 3 = 3     <- fits exactly
+           max(0, 3) = 3
+
+  cell 2   dp[2][3]   item 2 is (w=3, v=4), capacity 3
+           skip = dp[1][3] = 3                                  (keep item 1 only)
+           take = dp[1][3-3] + 4 = dp[1][0] + 4 = 0 + 4 = 4
+           max(3, 4) = 4        <- one heavier item beats one lighter item here
+
+  cell 3   dp[2][5]   item 2 is (w=3, v=4), capacity 5
+           skip = dp[1][5] = 3
+           take = dp[1][5-3] + 4 = dp[1][2] + 4 = 3 + 4 = 7     <- BOTH items fit
+           max(3, 7) = 7        the 3 in dp[1][2] IS item 1, already packed
+
+  cell 4   dp[3][4]   item 3 is (w=4, v=5), capacity 4
+           skip = dp[2][4] = 4
+           take = dp[2][4-4] + 5 = dp[2][0] + 5 = 0 + 5 = 5
+           max(4, 5) = 5        <- item 3 alone beats item 2 alone
+
+  cell 5   dp[3][5]   item 3 is (w=4, v=5), capacity 5
+           skip = dp[2][5] = 7                                  (items 1 + 2)
+           take = dp[2][5-4] + 5 = dp[2][1] + 5 = 0 + 5 = 5
+           max(7, 5) = 7        <- the pair wins; item 3 is left behind
+
+  answer   dp[3][5] = 7, achieved by items 1 and 2 (weight 2+3 = 5, value 3+4 = 7)
+```
+
+**Why every cell is O(1) and what breaks without the "row above" discipline.** Cell 3 is the one worth
+staring at: `dp[1][2] = 3` already encodes "item 1 is in the bag." The transition never re-examines
+earlier items, never re-adds a weight, and never loops — it trusts one number. That trust is only valid
+because both cells it reads come from row `i-1`, the row for a *strictly smaller* item set. Read from row
+`i` instead and item `i` can be taken twice, which silently converts 0/1 knapsack into unbounded knapsack
+— the exact bug in Pitfall 2, and the reason the space-optimised 1D version must iterate capacity
+*downward*.
 
 ### LCS — Diagonal Propagation
 

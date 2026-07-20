@@ -287,6 +287,136 @@ same "process in non-decreasing distance order" invariant as a heap — but
 insertion/removal from a deque is O(1) vs. O(log V) for a heap, and there's
 no `log V` factor at all.
 
+### Decoding Dijkstra's `O((V + E) log V)`
+
+**What the formula is telling you.** "Do the same linear amount of work as a plain
+BFS — visit every vertex, look down every edge — but pay a `log V` surcharge
+on each of those operations, because a heap has to keep the frontier sorted."
+
+The `(V + E)` half is exactly the graph-traversal bound. The `log V` is rent
+paid to the priority queue. Separating the two makes it obvious why swapping
+the data structure changes the bound: with an array instead of a heap you pay
+`O(V)` per extraction and get `O(V^2)`; with a Fibonacci heap the decrease-key
+drops to `O(1)` amortized and you get `O(E + V log V)`.
+
+| Symbol | What it is |
+|---|---|
+| `V` | Vertex count |
+| `E` | Edge count |
+| `log V` | Height of a binary heap holding up to `V` items — the cost of one push or pop |
+| `O((V+E) log V)` | `V` pops plus up to `E` pushes, each costing `log V` |
+| relax | Test `dist[u] + w(u,v) < dist[v]` and lower `dist[v]` if so |
+
+**Walk one example.** Directed weighted graph, source `A`:
+`A->B(4)  A->C(1)  C->B(2)  C->D(5)  B->D(1)  D->E(3)`. Distances start at
+infinity (`inf`) except `dist[A] = 0`.
+
+```
+  step  popped   relaxations performed        A   B    C    D    E    heap after
+  ----  -------  -------------------------  ---  ---  ---  ---  ---  ---------------
+   0    --       (init)                       0  inf  inf  inf  inf  [(0,A)]
+   1    (0,A)    A->B = 0+4 = 4  accept       0    4    1  inf  inf  [(1,C),(4,B)]
+                 A->C = 0+1 = 1  accept
+   2    (1,C)    C->B = 1+2 = 3 < 4 accept    0    3    1    6  inf  [(3,B),(4,B*),
+                 C->D = 1+5 = 6  accept                             (6,D)]
+   3    (3,B)    B->D = 3+1 = 4 < 6 accept    0    3    1    4  inf  [(4,B*),(4,D),
+                                                                     (6,D*)]
+   4    (4,B*)   stale: 4 > dist[B]=3, skip   0    3    1    4  inf  [(4,D),(6,D*)]
+   5    (4,D)    D->E = 4+3 = 7  accept       0    3    1    4    7  [(6,D*),(7,E)]
+   6    (6,D*)   stale: 6 > dist[D]=4, skip   0    3    1    4    7  [(7,E)]
+   7    (7,E)    no outgoing edges            0    3    1    4    7  []
+
+  * = stale entry, left behind by a lazy-deletion heap
+```
+
+Final distances from `A`: `B=3`, `C=1`, `D=4`, `E=7`. Note step 2: `B` was
+already at 4 but the route through `C` costs 3, so the entry is *lowered* and
+re-pushed rather than edited in place — that lazy-deletion trick is why the
+heap can hold more than `V` entries and why steps 4 and 6 exist.
+
+**Why this complexity.** Each vertex is finalized (popped and processed) once,
+giving `V` pops at `log V` each. Each edge can trigger at most one successful
+relaxation and therefore at most one push, giving `E` pushes at `log V` each.
+Add them: `V log V + E log V = (V + E) log V`. The stale entries do not change
+the bound — there are at most `E` of them, and each costs one `O(log V)` pop
+plus an `O(1)` comparison to discard.
+
+### Decoding why Dijkstra breaks on negative edges
+
+**What this actually says.** "Dijkstra's one assumption is that a path can
+only get *worse* as you extend it. The moment an edge can subtract, popping the
+cheapest frontier node stops being proof that you have found its final answer."
+
+Dijkstra marks a vertex done the instant it is popped and never reconsiders it.
+That commitment is only safe if every remaining path to that vertex is at least
+as long as the one just found — which requires all weights to be `>= 0`.
+
+**Walk one example.** Three nodes, source `A`: `A->B(1)`, `A->C(2)`,
+`C->B(-2)`. The true shortest path to `B` is `A -> C -> B` costing
+`2 + (-2) = 0`. Dijkstra reports `1`.
+
+```
+  step  popped   action                            dist[A]  dist[B]  dist[C]  done set
+  ----  -------  --------------------------------  -------  -------  -------  --------
+   0    --       init                                  0      inf      inf     {}
+   1    (0,A)    relax A->B = 1, A->C = 2              0        1        2     {A}
+   2    (1,B)    B is cheapest -> FINALIZED at 1       0        1        2     {A,B}
+   3    (2,C)    relax C->B = 2 + (-2) = 0             0        1        2     {A,B,C}
+                 0 < 1, but B already finalized
+                 -> improvement DISCARDED
+
+  reported dist[B] = 1        actual shortest = 0        error = 1
+```
+
+Step 2 is the bug. `B` looked cheapest at cost 1, which is true *of the
+frontier*, but a later, more expensive vertex held a negative edge that undercut
+it. With non-negative weights that is impossible: anything reached after `C` at
+cost 2 must cost at least 2.
+
+### Decoding Bellman-Ford's `O(V × E)` and the `V - 1`
+
+**In plain terms.** "Stop trying to be clever about the order.
+Just relax every single edge, over and over, `V - 1` times — enough passes that
+any shortest path, however long, has time to fully form."
+
+Bellman-Ford buys correctness under negative weights by giving up the greedy
+finalization. Nothing is ever marked done, so nothing can be wrongly committed.
+
+| Symbol | What it is |
+|---|---|
+| `O(V * E)` | `V - 1` passes, each relaxing all `E` edges |
+| `V - 1` | Maximum edge count of a shortest (simple) path |
+| simple path | A path that repeats no vertex |
+| negative cycle | A loop whose weights sum below zero — makes "shortest" undefined |
+
+**Why `V - 1` and not `V`.** A shortest path never revisits a vertex (revisiting
+means it contained a cycle, and with no negative cycle that cycle only added
+weight, so removing it gives a shorter path). A simple path over `V` vertices
+therefore touches at most `V` vertices and so has at most `V - 1` edges. Pass
+`k` of the algorithm is guaranteed to have found every shortest path using at
+most `k` edges, so after `V - 1` passes every shortest path is settled.
+
+```
+  V = 5 vertices  ->  longest possible simple path:
+
+     A --- B --- C --- D --- E        5 vertices, 4 edges = V - 1
+
+  pass 1 settles all 1-edge shortest paths   (dist to B)
+  pass 2 settles all 2-edge shortest paths   (dist to C)
+  pass 3 settles all 3-edge shortest paths   (dist to D)
+  pass 4 settles all 4-edge shortest paths   (dist to E)   <- V - 1 = 4, done
+
+  a 5th pass that still lowers a distance  =>  a negative cycle exists
+```
+
+**Why this complexity.** `V - 1` passes multiplied by `E` relaxations per pass
+gives `(V - 1) × E`, which is `O(V × E)`. Compare against Dijkstra on the same
+graph at `V = 1,000`, `E = 5,000`: Dijkstra costs roughly
+`(1,000 + 5,000) × log2(1,000) ≈ 6,000 × 10 = 60,000` operations, while
+Bellman-Ford costs `999 × 5,000 = 4,995,000` — about 83x more work. That is the
+price of tolerating negative edges, and it is also why the optional
+"no relaxation happened this pass, break early" check is worth adding.
+
 ---
 
 ## 6. Variations & Sub-patterns

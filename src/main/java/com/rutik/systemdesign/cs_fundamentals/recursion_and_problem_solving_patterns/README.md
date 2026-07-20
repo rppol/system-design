@@ -47,6 +47,110 @@ This module teaches how recursion works (call stack, base case, recurrence), the
 | Mutual recursion | f → g → f | Even/odd check via mutual calls |
 | Tail recursion | f(n, acc) → f(n-1, acc') | Factorial with accumulator |
 
+#### Decoding the shape of a recursion tree — branching factor vs depth
+
+**The idea behind it.** "A recursion's cost has exactly two dials: *how many calls does each call
+make* (the branching factor `b`) and *how many times can you shrink before hitting the base case* (the
+depth `d`). Time is governed by `b^d` — the node count. Space is governed by `d` alone — only one
+root-to-leaf path is alive at a time."
+
+Separating those two dials is the whole point. Every row of the table above is a `(b, d)` pair in
+disguise, and the two dials answer two completely different questions: `b^d` tells you whether the
+algorithm finishes this century, `d` tells you whether it blows the stack.
+
+| Symbol | What it is |
+|--------|------------|
+| `b` | Recursive calls made *per* invocation. Linear 1, binary 2, permutations up to n |
+| `d` | Longest chain of calls before a base case. Subtract-1 recursion → `d = n`; halving → `d = log n` |
+| `b^i` | Nodes on level `i`. The tree widens by a factor of `b` per level |
+| `O(b^d)` | Total node count = total time. The number that explodes |
+| `O(d)` | Stack space. Frames alive at once, never the whole tree |
+| `f(n) -> f(n-1)` | `b = 1`, `d = n`: no explosion, but `O(n)` stack |
+| `f(n) -> 2 f(n/2)` | `b = 2`, `d = log n`: `2^log n = n` nodes. Safe |
+| `f(n) -> 2 f(n-1)` | `b = 2`, `d = n`: `2^n` nodes. The killer |
+
+**Walk one example.** Level-by-level node counts for the three shapes, and where the wall is:
+
+```
+  shape                b   d        nodes on level i        total nodes
+  ------------------   -  ------    -----------------       -----------
+  f(n) -> f(n-1)       1   n        1  1  1  1  ...  1       n         linear
+  f(n) -> 2 f(n/2)     2   log n    1  2  4  8  ...  n       2n - 1    linear-ish
+  f(n) -> 2 f(n-1)     2   n        1  2  4  8  ...  2^n     2^(n+1)-1 EXPLOSION
+
+  the binary-splitting tree and the binary-subtracting tree BOTH double per
+  level. The only difference is how many levels there are -- and that is
+  everything:
+
+     n      levels    total nodes 2^(n+1)-1     time at 1e9 nodes/sec
+    ---     ------    ----------------------    ---------------------
+     10       10             2,047                 2 microseconds
+     20       20         2,097,151                 2 milliseconds
+     30       30     2,147,483,647                 2 seconds
+     40       40 2,199,023,255,551                 37 minutes
+     50       50     2.25e15                       26 days
+
+  each +1 on n DOUBLES the runtime. Buying a 1000x faster machine buys you
+  ten more values of n -- and then you are stuck again.
+```
+
+**Why the space cost is only `O(d)` and what breaks when `d` gets large.** At any instant the machine is
+executing exactly one leaf, so only the frames on that single root-to-leaf path exist; siblings were
+already popped or have not been pushed. That is why the `2^n` Fibonacci tree still fits comfortably in
+memory even though it takes forever — it is `O(n)` stack, `O(2^n)` time. The failure mode is the mirror
+image: a `b = 1` linear recursion over a 100,000-element linked list has trivial time but `d = 100,000`,
+which overruns CPython's default limit of 1,000 frames and blows a Java thread's 512 KB–1 MB stack. The
+two fixes are unrelated because the two dials are unrelated: memoisation attacks `b^d` (see Pitfall 2),
+while converting to iteration or an explicit stack attacks `d`.
+
+#### Decoding tail recursion
+
+**Stated plainly.** "If the recursive call is the *very last* thing a function does, the
+caller has nothing left to come back for — so its stack frame is dead weight and can be reused rather than
+stacked, turning `O(n)` stack into `O(1)`."
+
+The test is mechanical and stricter than it sounds: after the recursive call returns, is there *any*
+pending arithmetic, any wrapping expression, any `finally` block? If yes, it is not tail recursion.
+
+| Symbol | What it is |
+|--------|------------|
+| `return f(n-1)` | Tail position. Nothing pending; the frame can be discarded |
+| `return n * f(n-1)` | **Not** tail position. The `n *` must wait for the return value |
+| `acc` | The running result threaded *down* as a parameter instead of computed on the way up |
+| TCO | The compiler rewriting the call into a jump. Scheme, Scala `@tailrec`, most C compilers at `-O2` |
+
+**Walk one example.** The same factorial written both ways, with the stack shown at its deepest:
+
+```
+  NOT tail recursive                       tail recursive
+  def fact(n):                             def fact(n, acc=1):
+      if n == 0: return 1                      if n == 0: return acc
+      return n * fact(n - 1)                   return fact(n - 1, n * acc)
+              ^ work pending after return               ^ nothing pending
+
+  stack at the deepest point, n = 4:
+
+    frame  pending expression      frame  parameters carried down
+    -----  ------------------      -----  -----------------------
+    fact(4)  4 * ___               fact(4, acc=1)
+    fact(3)  3 * ___               fact(3, acc=4)      <- 4*1 already done
+    fact(2)  2 * ___               fact(2, acc=12)     <- 3*4 already done
+    fact(1)  1 * ___               fact(1, acc=24)     <- 2*12 already done
+    fact(0)  returns 1             fact(0, acc=24)     <- returns 24 directly
+
+    5 frames must ALL stay alive   with TCO: 1 frame, reused 5 times
+    to finish the multiplications  without TCO: still 5 frames
+```
+
+**Why CPython refuses to do this, and what to do instead.** Guido van Rossum has rejected TCO in CPython
+deliberately: eliminating frames destroys the traceback, and a readable stack trace was judged more
+valuable than the optimisation. Java's HotSpot does not perform it either (it would break the
+`StackWalker` and security-manager stack inspection). So in both languages the accumulator rewrite buys
+you *nothing* on its own — `fact(10000, 1)` still raises `RecursionError`. The rewrite is still worth
+knowing, because a tail-recursive function converts to a `while` loop mechanically: the accumulator
+becomes a local variable and the recursive call becomes a reassignment of the parameters. That loop is
+what you actually ship.
+
 ### 4.2 Problem-Solving Pattern Library
 
 **Two-pointer**: two indices starting at different positions (usually both ends or both at start) that move toward each other or in the same direction based on a condition. O(n) time, O(1) space. Use when the array is sorted, or when you can exploit the ordering to shrink the search space.
@@ -91,6 +195,56 @@ flowchart LR
 ```
 
 Stack depth at the deepest point is 5 frames (`factorial(4)` down to the `factorial(0)` base case). Each solid arrow pushes a new frame on the way down; each dotted arrow pops one on the way back up, carrying the accumulated product — total space is O(n).
+
+**What the formula is telling you.** "The call stack is a stack of half-finished sentences. Each frame is a
+paused function holding its own local variables and a bookmark saying *where to resume once the answer
+comes back*; recursion just means the paused function is waiting on a copy of itself."
+
+That framing kills the two persistent confusions at once — how the same variable `n` can hold five
+different values simultaneously (five frames, five private copies), and where the multiplication actually
+happens (on the way *up*, after each return, never on the way down).
+
+| Symbol | What it is |
+|--------|------------|
+| frame | One paused call: its parameters, its locals, and its return address |
+| push | Making a call. The stack pointer moves; the caller freezes mid-expression |
+| pop | Returning. The frame's memory is reclaimed instantly, no GC involved |
+| depth | Frames alive right now. The peak of this is your space cost |
+| `O(n)` space | `n` frames alive at the deepest point of a linear recursion |
+| `RecursionError` | CPython's guard, tripping at 1,000 frames by default (`sys.setrecursionlimit`) |
+| `StackOverflowError` | The JVM's version, at 512 KB–1 MB of stack, roughly 5,000–20,000 frames |
+
+**Walk one example.** `factorial(4)` traced frame by frame, downward then upward:
+
+```
+  time ->
+  step  action                     stack (top frame on the right)          depth
+  ----  ------------------------   -------------------------------------   -----
+   1    call factorial(4)          [f(4) n=4, wants 4*__ ]                    1
+   2    call factorial(3)          [f(4) f(3) n=3, wants 3*__ ]               2
+   3    call factorial(2)          [f(4) f(3) f(2) n=2, wants 2*__ ]          3
+   4    call factorial(1)          [f(4) f(3) f(2) f(1) n=1, wants 1*__ ]     4
+   5    call factorial(0)          [f(4) f(3) f(2) f(1) f(0) BASE CASE ]      5  <- peak
+   6    f(0) returns 1             [f(4) f(3) f(2) f(1) ] got 1               4
+   7    f(1) computes 1 * 1  = 1   [f(4) f(3) f(2) ]     got 1                3
+   8    f(2) computes 2 * 1  = 2   [f(4) f(3) ]          got 2                2
+   9    f(3) computes 3 * 2  = 6   [f(4) ]               got 6                1
+  10    f(4) computes 4 * 6  = 24  [ ]                   returns 24           0
+
+  five distinct copies of the variable n coexist at step 5: 4, 3, 2, 1, 0.
+  no multiplication has happened yet at step 5 -- all five are pending.
+```
+
+**Why the peak depth is the number that matters, and what breaks when it grows.** Steps 1–5 cost memory
+that is not released until steps 6–10 unwind, so the peak — not the total call count — sets the space
+bill. Push the same shape to `factorial(2000)` and you have 2,000 pending multiplications and 2,000 live
+frames: CPython raises `RecursionError` at 1,000, and raising the limit with
+`sys.setrecursionlimit(100000)` does not help, because the *C* stack underneath is a fixed OS allocation
+and will segfault instead. The real fixes are structural: convert to a loop (factorial is a one-line
+`for`), use an explicit heap-allocated stack for tree and graph traversals, or run the recursion on a
+`threading.Thread` created with a larger `threading.stack_size()`. This is also the difference between a
+recursion depth of `n` and `log n` — an unbalanced BST degenerates to `d = n` and overflows, while a
+balanced one stays at `d = log n = 20` for a million nodes and never comes close.
 
 ### Two-Pointer on Sorted Array (Target Sum)
 

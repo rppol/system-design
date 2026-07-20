@@ -144,6 +144,38 @@ stateDiagram-v2
 
 Three states are necessary and sufficient — one per residue class mod 3. This is the same trick behind streaming checksum and CRC computation: a DFA can do bounded modular arithmetic on an input of unbounded length using *constant* memory, because the only fact that matters about the past is the current remainder.
 
+#### Decoding `(2r + b) mod 3`
+
+**The idea behind it.** "Appending one bit to a binary number doubles it and then adds the bit — so if you only ever need the remainder, you only ever need to keep the remainder, and the whole unbounded number can be thrown away as you read it."
+
+That last clause is the entire reason a *finite* machine can process an *infinite* set of inputs. The state is not a compressed copy of the number; it is the only fact about the number that the question depends on.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `r` | The DFA's state. One of exactly three values: 0, 1, 2 |
+| `b` | The next input symbol, read as the integer 0 or 1 |
+| `2r` | Appending a bit shifts the number left one place, i.e. multiplies by 2 |
+| `+ b` | The new low bit lands in the ones place |
+| `mod 3` | Wrap back into `{0, 1, 2}` so the state set stays finite |
+| accepting state | Remainder 0 means "divisible by 3, accept if the input ends here" |
+
+**Walk one example with real numbers.** Feed `101101` (decimal 45, and 45 = 3 × 15) through the rule one bit at a time:
+
+```
+  bit read   arithmetic                new r   value so far   check
+  --------   -----------------------   -----   ------------   -----------------
+     1       (2*0 + 1) mod 3 = 1         1            1        1  mod 3 = 1  ok
+     0       (2*1 + 0) mod 3 = 2         2           10 = 2    2  mod 3 = 2  ok
+     1       (2*2 + 1) mod 3 = 2         2          101 = 5    5  mod 3 = 2  ok
+     1       (2*2 + 1) mod 3 = 2         2         1011 = 11  11  mod 3 = 2  ok
+     0       (2*2 + 0) mod 3 = 1         1        10110 = 22  22  mod 3 = 1  ok
+     1       (2*1 + 1) mod 3 = 0         0       101101 = 45  45  mod 3 = 0  ok
+
+  ends in r0 -> ACCEPT.  The machine never stored 45, only the running remainder.
+```
+
+**Why the memory stays constant no matter how long the input gets.** A 10-bit input and a 10-million-bit input both run in the same three states, using the same two integers of storage. The machine has no counter that can overflow because it has no counter at all — every fact about the prefix collapses into one of three buckets. That is precisely the boundary that §6.4 formalizes: a language is regular exactly when "everything the past matters for" fits in a *fixed* number of buckets, and `{aⁿbⁿ}` fails because tracking n needs an unbounded number of them.
+
 **Example B — strings ending in "01".** Track only "what would let me accept if the string ended right now": no useful progress (`q0`), just saw a 0 (`q1`), or just saw 0-then-1 (`q2`, accepting).
 
 ```mermaid
@@ -259,6 +291,39 @@ len(accepting)   # 4   -- half the subsets contain q3
 
 A 4-state NFA became an **8 = 2³**-state DFA. In general, the "nth-from-last symbol is 1" language needs an (n+1)-state NFA but a minimal 2ⁿ-state DFA — this exact family is the standard proof that subset construction's exponential worst case is tight, not just a loose upper bound.
 
+#### Decoding the 2ⁿ Blowup
+
+**Stated plainly.** "A DFA state has to record *which* NFA states you might currently be sitting in — and the number of possible answers to 'which subset of n things' is 2ⁿ, so the state count is a power set, not a multiple."
+
+The exponent is not pessimism about the algorithm. It is a direct count of the subsets, and the "nth-from-last symbol" family actually reaches it, so no cleverer conversion can avoid it in general.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `n` | How many states the nondeterministic machine has |
+| subset `S` | Everywhere the NFA could simultaneously be after reading the input so far |
+| `2ⁿ` | The size of the power set — each NFA state is independently in S or not |
+| `frozenset` (in the code) | The immutable subset used as a dictionary key. One key = one DFA state |
+| reachable subsets | Usually far fewer than 2ⁿ; the worst case is when all of them occur |
+| accepting DFA state | `current & accept` is non-empty — the NFA *could* be accepting right now |
+
+**Walk one example with real numbers.** The "nth-from-last symbol is 1" family, which hits the bound exactly:
+
+```
+  n      NFA states (n+1)      DFA states (2^n)      blowup factor
+  ----   ------------------    ------------------    -------------------
+   3            4                        8              2.0x
+   4            5                       16              3.2x
+  10           11                    1,024             93x
+  20           21                1,048,576             49,932x
+  30           31            1,073,741,824             34,636,833x
+
+  n = 30: an NFA you could draw on one page becomes a DFA with 1.07 BILLION
+  states. At a conservative 16 bytes per state that is ~17 GB of transition
+  table -- the machine does not fit in memory, though the NFA fits in a tweet.
+```
+
+**Why this is the whole regex-engine tradeoff, not a footnote.** Building the DFA up front buys guaranteed linear-time matching — one table lookup per input character, no backtracking possible — but only if the table can be built at all, and the row above shows patterns where it cannot. The two production answers are exactly the two branches of this table: simulate the NFA directly and accept possibly-exponential *time* (backtracking engines like PCRE and `java.util.regex`, hence the ReDoS incident in §10, Pitfall 3), or build DFA states **lazily and cached** as input demands them, which is what RE2 does — you pay only for subsets actually reached, keeping the common case linear while never materializing the full 2ⁿ table.
+
 ### 6.3 Regex, NFA, and DFA Are Exactly Equivalent — Kleene's Theorem
 
 Kleene's theorem says regular expressions, NFAs, and DFAs all describe precisely the same class of languages, and each direction is a constructive algorithm, not just an existence proof:
@@ -280,6 +345,62 @@ This equivalence is *why* two regex engines can implement the same pattern langu
 **The adversary game**: to prove L is *not* regular, assume it is, let p be the (unknown) pumping length, and pick one string in L of length ≥ p that you control. The lemma guarantees *some* split works if L is regular — your job is to show that **every possible split** xyz (there are only a bounded number, since |xy| ≤ p) fails to keep xyⁱz in L for some i. That contradiction proves L is not regular.
 
 **Worked proof — `{aⁿbⁿ : n ≥ 0}` is not regular**: pick `w = aᵖbᵖ` (length 2p ≥ p, and it's in the language). Since |xy| ≤ p, xy sits entirely within the leading block of a's, so y = `a^k` for some k ≥ 1. Pumping down to i = 0 gives `a^(p-k) bᵖ`, which has fewer a's than b's — not in the language. Contradiction, so `{aⁿbⁿ}` is not regular.
+
+#### Decoding the Pumping Lemma, Quantifier by Quantifier
+
+**What the formula is telling you.** "If a language is regular, then every long enough string in it contains a chunk near the front that you can repeat any number of times — or delete entirely — and always land back inside the language. So if you can exhibit one long string where *no* chunk survives that treatment, the language was never regular."
+
+The statement reads as quantifier soup because four quantifiers alternate: *there exists* p, *for all* long w, *there exists* a split, *for all* i. Who gets to choose what — and in what order — is the entire skill.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `L` | The set of strings you are testing. Here, all `a`s followed by equally many `b`s |
+| `p` | Secretly the DFA's state count. **The adversary picks it, and you never learn its value** |
+| `w` | A string in L with `\|w\| ≥ p`. **You** pick it — this is your one lever, so pick well |
+| `w = xyz` | The adversary picks the split. You must beat *every* legal one |
+| `\|xy\| ≤ p` | The constraint that pins `y` inside your string's opening block |
+| `\|y\| ≥ 1` | Rules out the cheat of pumping nothing |
+| `xyⁱz` | The pumped string. `i = 0` deletes y; `i = 2` doubles it |
+| "for every i ≥ 0" | You only need **one** value of i to fail. `i = 0` is almost always easiest |
+| `∈ L` | Passes the membership rule. Your goal is to show the pumped string does not |
+
+**Who chooses what, in order.** The alternation is a two-player game, and the moves strictly alternate:
+
+```
+  move 1  ADVERSARY   picks p, and does not tell you the value
+  move 2  YOU         pick w in L with |w| >= p          <- your only real decision
+  move 3  ADVERSARY   picks any split xyz obeying |xy| <= p and |y| >= 1
+  move 4  YOU         pick any i >= 0 and show x y^i z is NOT in L
+
+  you win  =  you have an answer for EVERY move-3 split
+  the point of a good move 2 is to leave the adversary no good splits at all
+```
+
+**Walk one example with real numbers.** `L = {aⁿbⁿ}`. Suppose the adversary's hidden p happens to be 4 — the argument must not depend on that, but fixing it makes every split enumerable. You pick `w = a⁴b⁴ = "aaaabbbb"`, length 8 ≥ 4, and in L. Because `|xy| ≤ 4`, the split cannot reach past the fourth character, so `y` is pure `a`s. There are exactly 10 legal splits, and `i = 0` kills all 10:
+
+```
+  w = a a a a b b b b        p = 4, so x and y live entirely inside the first 4 chars
+
+    x        y        x y^0 z (delete y)   a's   b's   in L?
+  -------  -------   ------------------   ----  ----  ------
+  ""       "a"       aaabbbb                3     4    no
+  ""       "aa"      aabbbb                 2     4    no
+  ""       "aaa"     abbbb                  1     4    no
+  ""       "aaaa"    bbbb                   0     4    no
+  "a"      "a"       aaabbbb                3     4    no
+  "a"      "aa"      aabbbb                 2     4    no
+  "a"      "aaa"     abbbb                  1     4    no
+  "aa"     "a"       aaabbbb                3     4    no
+  "aa"     "aa"      aabbbb                 2     4    no
+  "aaa"    "a"       aaabbbb                3     4    no
+
+  10 of 10 splits fail.  Every deletion removes only a's, so a's drop to 4-k
+  while b's stay pinned at 4 -- and 4-k can never equal 4 because k >= 1.
+```
+
+The argument never used `p = 4` except to make the list finite. For any p, `y = a^k` with `k ≥ 1`, deleting it yields `a^(p−k) b^p` with strictly fewer a's than b's. The lemma promised *some* split would survive if L were regular; none does; therefore L is not regular.
+
+**Why `|xy| ≤ p` is the clause that does all the work, and `i = 0` the move that ends it.** Without `|xy| ≤ p`, the adversary could set `y = "ab"` straddling the boundary — pumping that preserves the count balance, and the proof collapses. The clause forces `y` into the opening block, which is exactly why you choose a `w` whose first p characters are all one symbol: it strips the adversary of every interesting split before the game starts. Choose `w = (ab)^p` instead and you hand back the straddling split and lose. Then `i = 0` finishes it, because deletion changes the counts in one direction only, needing no case analysis about whether repeating could somehow re-balance. A "proof" that tests a single convenient split rather than all of them proves nothing — that omission, not the algebra, is where these arguments actually fail.
 
 **Corollary — balanced parentheses are not regular either**: the identical argument applies to `w = "("^p ")"^p`. Any split's `y` is pure `"("`, so pumping down strictly reduces the open-paren count while leaving the close-paren count fixed — the pumped string is unbalanced. **No regular expression can match arbitrarily nested balanced parentheses**, because doing so requires counting unbounded depth, and the pumping lemma proves regular languages cannot count past a fixed bound. See §10 Pitfall 1 for the broken-regex / working-parser code that follows directly from this proof.
 
@@ -367,6 +488,42 @@ Now ask whether `D(D)` halts. If `H(D, D)` says "yes, halts", then `D` runs `loo
 
 This is the same self-reference trick Cantor used to prove the reals are uncountable. Note the asymmetry: the halting problem is **Turing-recognizable** (a simulator that runs P on x and says "halts" the moment it observes a halt is a valid semi-decider — it just never says "no"), but not decidable, because there is no way to distinguish "still running" from "will run forever" without an oracle.
 
+#### Decoding Decidability — Stated Without a Single Symbol
+
+**What this actually says.** "Decidable means a program exists that always finishes and always gives the right yes-or-no answer. Recognizable means a program exists that says yes correctly when the answer is yes, but is allowed to run forever instead of saying no. Undecidable means no program of the first kind can exist — ever, on any hardware, with any budget."
+
+The three words are routinely used as synonyms in engineering conversation and they are not. Almost every confusion about the halting problem comes from collapsing "recognizable" into "decidable."
+
+| Term | The behavior that defines it |
+|------|------------------------------|
+| Decidable | Runs on any input, always stops, answer always correct |
+| Recognizable (semi-decidable) | On a yes-instance it stops and says yes. On a no-instance it may run forever |
+| Not even recognizable | No program confirms yes-instances in finite time |
+| Undecidable | Not a gap in current knowledge. Proven impossible, permanently |
+| The halting question | Recognizable, but undecidable |
+| The complement | Not even recognizable — you can never observe "it never stopped" |
+
+**Walk one example with real numbers — where "recognizable" runs out.** Suppose you build the obvious checker: simulate the program and report the moment it stops.
+
+```
+  simulate P on x, reporting after a budget of steps
+
+  P stops after         50 steps    -> simulator says "HALTS" at step 50        correct
+  P stops after  1,000,000 steps    -> simulator says "HALTS" at step 1,000,000 correct
+  P never stops                     -> simulator is still running at step
+                                       1,000,000 ... 10^12 ... 10^100 ...
+                                       and has learned NOTHING new at any point
+
+  the simulator at step 10^100 cannot tell these two cases apart:
+      (a) P halts at step 10^100 + 1     -> answer should be YES
+      (b) P never halts                  -> answer should be NO
+  no amount of extra waiting separates them, so the simulator can never say "NO"
+```
+
+Adding a timeout does not fix this — it changes the question. "Does P halt within 10 million steps?" is perfectly decidable (run it 10 million steps and look), but it is a *different* question from "does P halt", and a program that answers the first while claiming to answer the second is simply wrong on every input that needed 10 million and one steps.
+
+**Why this lands on real tools rather than staying in the textbook.** Any request of the form "flag every program in this repo that has an infinite loop", "prove this build script always terminates", or "detect all malware by deciding whether it ever executes the payload" is the halting problem in a costume, and the correct engineering response is not a better algorithm — it is to change the question. The three standard changes are: bound it (model checkers explore up to N steps — see TLA+ in §11), accept one-sided error (static analyzers report *possible* infinite loops and tolerate false positives), or restrict the language until termination becomes provable (total-functional languages, Rust's borrow checker on a restricted grammar, SQL without recursive CTEs). Rice's theorem sharpens the warning: **every** non-trivial semantic property of a program's behavior — not just halting — is undecidable, so "does this code ever leak a secret" is in the same boat as "does this code ever stop."
+
 ### 6.8 Reductions — and Which Direction They Go
 
 A **reduction** A ≤p B means: given a polynomial-time algorithm for B, you can build a polynomial-time algorithm for A by transforming any A-instance into a B-instance, solving it with B's algorithm, and translating the answer back. The single most common student error is running this backwards.
@@ -412,6 +569,47 @@ flowchart LR
 
 **3-SAT → Vertex Cover, concretely**: given a 3-SAT formula with n variables and m clauses, build a graph with (a) one edge per variable connecting a `xᵢ` vertex to a `¬xᵢ` vertex (covering that edge forces the cover to include at least one of the two — the "choose true or false" gadget), and (b) one triangle per clause (any vertex cover of a triangle needs at least 2 of its 3 vertices), with cross-edges wiring each triangle vertex to the matching literal vertex in its variable gadget. The formula is satisfiable **iff** this graph has a vertex cover of size exactly `n + 2m`.
 
+#### Decoding the Vertex Cover Budget `n + 2m`
+
+**The idea behind it.** "The cover size is not a magic constant — it is the exact minimum forced by the gadgets: one vertex per variable because each variable edge needs one end, plus two per clause because every triangle needs two of its three corners. Hit that budget exactly and there is no slack left to cheat with."
+
+The whole reduction hinges on that lack of slack. If the budget were even one larger, a cover could exist without corresponding to a satisfying assignment, and the "iff" would break.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `n` | How many `xᵢ` the formula has. One two-vertex gadget each |
+| `m` | How many 3-literal clauses. One triangle each |
+| variable gadget | Covering it forces choosing exactly one — that choice **is** the truth assignment |
+| clause triangle | Any cover needs 2 of 3; the one left out must be covered from elsewhere |
+| cross-edge | Forces the uncovered corner's literal to be the one you set true |
+| `n + 2m` | The budget: 1 per variable edge + 2 per triangle. Exactly the forced minimum |
+| "iff" | Both directions proven — satisfiable → cover exists, and cover exists → satisfiable |
+
+**Walk one example with real numbers.** Take `(x1 ∨ ¬x2 ∨ x3) ∧ (¬x1 ∨ x2 ∨ x3)`, so `n = 3`, `m = 2`:
+
+```
+  graph size
+    variable vertices  = 2n      = 2 * 3 = 6      (x1, ~x1, x2, ~x2, x3, ~x3)
+    clause vertices    = 3m      = 3 * 2 = 6      (three corners per triangle)
+    total vertices               = 12
+    edges = n (variable) + 3m (triangle sides) + 3m (cross) = 3 + 6 + 6 = 15
+
+  budget
+    k = n + 2m = 3 + (2 * 2) = 7
+
+  a satisfying assignment: x1 = T, x2 = T, x3 = T
+    from each variable gadget, take the TRUE literal vertex   -> x1, x2, x3    = 3
+    clause 1 (x1, ~x2, x3): x1 is true, so LEAVE OUT the x1 corner, take 2     = 2
+    clause 2 (~x1, x2, x3): x2 is true, so LEAVE OUT the x2 corner, take 2     = 2
+                                                                        total = 7  ok
+
+  the left-out corners are safe: the x1 corner's cross-edge runs to vertex x1,
+  which is already in the cover -- and it is in the cover precisely BECAUSE
+  x1 was assigned true.  That is the link the whole reduction is built on.
+```
+
+**Why an exact budget rather than an upper bound.** Ask for a cover of size at most 8 and the correspondence dies: a cover could take both ends of a variable edge — meaning "x1 is true AND false" — and still fit. The budget of exactly `n + 2m` leaves zero spare vertices, so every legal cover is forced to spend one per variable edge and two per triangle, which is exactly the structure of a truth assignment satisfying every clause. The same tightness argument reappears one paragraph down in the TSP reduction: weight-1 edges for real edges and weight-2 otherwise, with a threshold of exactly `|V|` — any tour touching even one weight-2 edge costs at least `|V| + 1`, so fitting the budget forces the tour to be Hamiltonian in the original graph.
+
 **Hamiltonian Path/Cycle and TSP-decision**: 3-SAT also reduces to Hamiltonian path via a separate gadget chain (per-variable "diamond" widgets traversable in two directions, wired through per-clause junctions — see Sipser's *Introduction to the Theory of Computation* for the full construction). Hamiltonian Cycle reduces cleanly to **TSP-decision**: given graph G, build a complete graph with edge weight 1 for original edges and 2 otherwise, and ask "is there a tour of total weight ≤ |V|?" Any tour using even one weight-2 edge costs at least |V|+1, so a tour of weight ≤ |V| must use only original edges — i.e. it is exactly a Hamiltonian cycle in G.
 
 **Decision vs optimization**: TSP-decision ("is there a tour ≤ B?") is in NP because a proposed tour's length is checkable in polynomial time; the *optimization* version ("find the shortest tour") has no such bounded certificate to check against and is NP-hard without being classified inside NP in the same way — a subtlety worth stating explicitly in interviews.
@@ -446,6 +644,44 @@ flowchart LR
 | PDA | 1 stack, nondeterministic | O(n³) typical (CYK-style) | **No** (undecidable) | Yes |
 | LBA (context-sensitive) | tape bounded by input | PSPACE | **No** (undecidable) | **No** (undecidable) |
 | Turing machine | unbounded tape | Undecidable in general | **No** (Rice's theorem) | **No** (undecidable) |
+
+#### Decoding the Membership-Test Column: O vs. Θ vs. Ω
+
+**Stated plainly.** "Big-O is a ceiling — the cost is *at most* this. Omega is a floor — *at least* this. Theta is both at once, which is the only one of the three that actually pins down how fast something is."
+
+The table above uses `O` throughout, and that is a deliberate, weaker claim than most readers hear. `O(n³)` for PDA membership means the CYK algorithm never exceeds cubic; it does not claim cubic is required, and it does not forbid a faster algorithm on structured inputs.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `O(f)` | Upper bound. `f` is a ceiling the cost stays under, beyond some input size |
+| `Ω(f)` | Lower bound. The cost never drops below `f`. Used for impossibility claims |
+| `Θ(f)` | Both bounds at once: `O(f)` and `Ω(f)` together. The tight answer |
+| `n` in this table | The string being tested for membership — not the machine's size |
+| `states` in `O(n × states)` | A second, independent input. Fixed per machine, so often treated as a constant |
+| "beyond some input size" | All three ignore constants and small n. `O(n)` may lose to `O(n²)` on n = 10 |
+
+**Walk one example with real numbers.** The same claim stated three ways, on DFA membership testing a 1,000,000-character input:
+
+```
+  DFA membership: one table lookup per input character, always exactly n lookups
+
+    O(n)      "at most linear"        TRUE   -- and also technically true: O(n^2), O(2^n)
+    Omega(n)  "at least linear"       TRUE   -- you must read every character to decide
+    Theta(n)  "exactly linear"        TRUE   -- both bounds meet; THIS is the real claim
+
+  why the loose ones are still "true" statements
+    n = 1,000,000    actual work    1,000,000 lookups
+                     O(n) ceiling   1,000,000        tight
+                     O(n^2) ceiling 1,000,000,000,000  true, and useless -- a million-fold
+                                                       overstatement that no one can act on
+
+  NFA membership, O(n * states), for a 20-state NFA
+    n * states = 1,000,000 * 20 = 20,000,000 steps   -- linear in n, 20x the DFA constant
+    the alternative (convert first) costs up to 2^20 = 1,048,576 DFA states to build,
+    then 1,000,000 lookups: worth it only if the machine is reused across many inputs
+```
+
+**Why an interview answer of "O" where "Θ" was meant is a real error.** Saying "comparison sorting is `O(n log n)`" is a true but weak statement; the meaningful claim is that comparison sorting is `Ω(n log n)` — no algorithm can beat it — which is what makes the bound interesting, and it is proven by a decision-tree counting argument, not by inspecting any particular algorithm. The pattern generalizes across this whole module: `O` describes an algorithm you have, `Ω` describes a limit no algorithm can cross, and `Θ` claims you have found an algorithm that meets the limit. That is also why "undecidable" is categorically different from every row above — it is not a large `Ω`, it is the absence of any `O` at all.
 
 ### The P / NP Landscape
 

@@ -200,6 +200,43 @@ Key properties:
 - **Range scan**: walk the leaf linked list; sequential I/O, fast on both SSD and HDD.
 - **Insert/Delete**: O(log n) with possible node splits or merges.
 
+**The idea behind it.** "Fanout is not a tuning knob — it is just how many routing entries physically fit in one disk page, so it falls straight out of dividing page size by entry size."
+
+That framing matters because fanout is the base of the logarithm that sets tree height, and height is the number of disk reads per lookup. A schema decision that widens the key silently shrinks the fanout, which can add a whole level to every index in the table.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| page | The unit the storage engine reads. PostgreSQL 8 KB, InnoDB 16 KB. One page = one I/O |
+| usable | Page size minus header and per-page bookkeeping. ~8,150 B of an 8 KB page |
+| entry | One key + one child pointer + per-item overhead, in an internal node |
+| fanout | `usable / entry`. Children per internal node — the log base |
+| `N` | Rows in the table |
+| height | Levels root to leaf. `ceil(log_fanout(N))` |
+
+**Walk one example with real numbers.** A PostgreSQL 8 KB page, varying only the key width:
+
+```
+  usable bytes in one 8 KB page
+    8192 - 24 (page header) - ~16 (special/line-pointer overhead) = ~8,150 B
+
+  fanout = usable / entry size
+
+    key type                    entry size    fanout = 8150 / entry
+    ------------------------------------------------------------------
+    BIGINT id  (8 B) + ptr       ~16 B        509
+    INT + small pointer          ~20 B        407
+    composite (int, timestamp)   ~40 B        203
+    wide text / composite key    ~80 B        101      <- the "~100" quoted above
+
+  Same arithmetic on an InnoDB 16 KB page:
+    (16384 - ~128) / 40 B = 406               <- the "~200" range widens with bigger pages
+
+  So "fanout 100-200" is not a constant of nature.
+  It is (page size) / (your key width), and YOU control the divisor.
+```
+
+**Why a wide key is a hidden extra disk read.** Doubling the key width halves the fanout, and halving the fanout is a change of logarithm base — with fanout 500 a 4-level tree addresses 62.5 billion rows, while at fanout 100 the same 4 levels reach only 100 million. Index a `UUID` (16 B) or a `VARCHAR(64)` where a `BIGINT` would do, and you have not merely used more disk: you have reduced how many rows each level of the tree can cover, potentially adding a level and therefore an I/O to every single lookup, on a hot path executed millions of times a day. This is the concrete mechanism behind the usual advice to keep primary keys narrow.
+
 For page layout, clustered vs. secondary indexes, and InnoDB specifics, see
 [../../database/indexing_deep_dive](../../database/indexing_deep_dive/).
 
@@ -621,6 +658,43 @@ Expected output:
   1,000,000,000      100        5          5
 ```
 
+**The idea behind it.** "Each level multiplies your reach by the fanout, so capacity grows as `fanout^height` — which is why adding one level does not add a few rows, it adds a factor of a hundred."
+
+The table above reports the inverse (`height = ceil(log_fanout(N))`), but the forward direction is what makes the result feel inevitable rather than surprising. Read it as "how many rows can `h` levels cover" and the famous "3-4 levels for billions" claim stops being a slogan.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `fanout^height` | Leaf slots the tree can address — its capacity |
+| `log_fanout(N)` | The inverse: levels needed for `N` rows |
+| `ceil(...)` | Round up. You cannot build 4.5 levels; a partial level is a whole level |
+| height = I/Os | One page read per level, worst case, cold cache |
+
+**Walk one example with real numbers.** Multiply out the forward direction, one level at a time:
+
+```
+  fanout 100                       fanout 200                  fanout 500
+  ------------------------------------------------------------------------------
+  h=1  100^1 =         100         200^1 =         200         500^1 =         500
+  h=2  100^2 =      10,000         200^2 =      40,000         500^2 =     250,000
+  h=3  100^3 =   1,000,000         200^3 =   8,000,000         500^3 = 125,000,000
+  h=4  100^4 = 100,000,000         200^4 = 1,600,000,000       500^4 = 62,500,000,000
+  h=5  100^5 = 10,000,000,000
+
+  Read the h=4 row across:  100 M  ->  1.6 B  ->  62.5 B rows
+  Nothing changed but the key width. Height stayed at 4.
+
+  Checking the 1-billion-row case against the table above:
+    log_100(1e9) = 4.50   -> ceil -> 5 levels   (matches the printed output)
+    log_200(1e9) = 3.91   -> ceil -> 4 levels
+    log_500(1e9) = 3.33   -> ceil -> 4 levels
+
+  Why the height barely moves: to force a 5th level at fanout 200 you must
+  exceed 200^4 = 1.6 billion rows. To force a 6th you need 200^5 = 320 billion.
+  Each extra I/O buys 200x more table.
+```
+
+**Why 3-4 levels is the answer for almost every real table.** Exponential capacity meets logarithmic cost: the tree's reach explodes while the read count creeps. Practically it is even better than the table suggests, because the root and the level below it are a handful of pages that live permanently in the buffer pool — so a "4 I/O" lookup on a warm index is usually 1 physical read at the leaf, with the upper levels served from memory. That is the real reason a primary-key lookup on a billion-row table costs about the same as on a thousand-row table, and why the honest answer to "will this query scale" is almost never about the index height and almost always about how many rows the query *matches*.
+
 ### 6.4 WAL write cost model
 
 ```python
@@ -828,6 +902,46 @@ No isolation level sits in the high-safety-and-high-throughput quadrant — the 
 - Approximate nearest-neighbour (vector search): use HNSW or IVF indexes, not B+Tree.
 - Write-heavy columns updated on every row: each write must update the index; high fanout B+Trees
   have relatively low write amplification, but a heavily updated column still adds overhead.
+
+**Stated plainly.** "Selectivity is the fraction of the table a predicate keeps, and an index only pays off while that fraction stays small — past a few percent, jumping around the heap costs more than reading the whole thing straight through."
+
+This is why "the index exists but the planner ignores it" is usually correct behaviour rather than a bug. The planner is not comparing index vs. no-index; it is comparing *random* page fetches against *sequential* ones.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| selectivity | `matching_rows / total_rows`. Lower = more selective = better for an index |
+| cardinality | Distinct values in the column. `is_active` has 2; `email` has N |
+| `1 / cardinality` | Selectivity of an equality predicate, assuming even distribution |
+| seq_page_cost | PostgreSQL default 1.0. Cost of reading the next page in order |
+| random_page_cost | Default 4.0 (HDD-era). Lower to ~1.1 on SSD |
+
+**Walk one example with real numbers.** 10 M-row table, 100 rows per 8 KB page = 100,000 heap pages:
+
+```
+  SEQ SCAN cost (read everything, in order)
+    100,000 pages x 1.0 (seq_page_cost)     = 100,000
+     10,000,000 rows x 0.01 (cpu_tuple_cost) = 100,000
+                                     total  = 200,000
+
+  INDEX SCAN cost ~ matching_rows x (random_page_cost + cpu_tuple_cost)
+    (worst case: every matching row is on a different page)
+
+    predicate               sel      rows       index cost      planner picks
+    ----------------------------------------------------------------------------
+    email = '..'            1e-7            1          ~4        index   (trivial)
+    customer_id = 42        0.001      10,000      40,100        index   (5x cheaper)
+    status = 'shipped'      0.050     500,000   2,005,000        SEQ SCAN (10x worse)
+    is_active = true        0.500   5,000,000  20,050,000        SEQ SCAN (100x worse)
+
+  Break-even, solving 200,000 = N x sel x (random_page_cost + 0.01):
+    random_page_cost 4.0 (HDD)  -> sel = 0.50%   (~49,900 rows)
+    random_page_cost 1.1 (SSD)  -> sel = 1.80%   (~180,200 rows)
+
+  Note what moved the threshold: not the index, the STORAGE.
+  On SSD, random reads got cheap, so indexes stay useful ~3.6x further out.
+```
+
+**Why low-cardinality columns are the classic wasted index.** A boolean column has cardinality 2, so an equality predicate on it has selectivity ~0.5 by construction — five million random heap fetches where a sequential scan reads 100,000 pages in order. The index will never be chosen, yet it still costs a write on every INSERT and UPDATE. The exceptions all work by *restoring* selectivity: a partial index (`WHERE is_active = false` when only 0.1% of rows are inactive) indexes just the rare side; a composite index puts the low-cardinality column after a selective one; a covering index removes the heap fetch entirely so `random_page_cost` stops applying. This also explains Pitfall 4 below — stale statistics mean the planner's `sel` estimate is wrong, and every number in the table above is computed from that estimate, so one bad guess flips the whole decision.
 
 ### When to denormalise
 

@@ -206,6 +206,102 @@ Compare to the naive approach — keep a sorted list and binary-insert each new
 element: insertion is `O(n)` (shifting elements) even though finding the
 insertion point is `O(log n)`. Two heaps avoids the O(n) shift entirely.
 
+### Decoding the median-maintenance invariant
+
+**In plain terms.** "Cut the data in half and keep each half in a
+heap that points its cheapest end at the cut — then the median is always
+sitting at the top of one or both heaps, and reading it costs nothing."
+
+That framing explains the whole design. You are not searching for the median;
+you are maintaining a structure in which the median has nowhere to hide. The
+two heaps face each other across the cut like two funnels mouth-to-mouth.
+
+| Symbol | What it is |
+|---|---|
+| `left` | Max-heap of the smaller half. Its root is the *largest* small value |
+| `right` | Min-heap of the larger half. Its root is the *smallest* large value |
+| `-left[0]` | The true max of `left`. Python has no max-heap, so values are stored negated |
+| `right[0]` | The min of `right`, stored as-is |
+| `O(log n)` | One push or pop — the height of a heap holding `n` items |
+| `O(1)` | Reading a heap root. No traversal, it is array slot 0 |
+| `n` | Elements seen so far across both heaps |
+
+The invariant has two clauses, and both are load-bearing:
+
+| Clause | What it says | What breaks without it |
+|---|---|---|
+| **Ordering** | every value in `left` <= every value in `right` | the roots are no longer the middle values; median is wrong |
+| **Balance** | `len(left) == len(right)` or `len(left) == len(right) + 1` | the cut drifts off-centre; roots are middle-*ish*, not the median |
+
+**Why balance is enough to pin the median.** With `2m` elements split `m`/`m`,
+the median is the average of positions `m` and `m+1` — which are exactly the
+two roots. With `2m + 1` elements split `m+1`/`m`, the median is position
+`m+1`, which is exactly `left`'s root. The sizes being equal-or-one-apart is
+precisely the condition that makes those statements true, which is why
+`add_num` restores it after every single insertion rather than lazily.
+
+**Walk one example.** Stream `5, 15, 1, 3, 8, 7, 9`. `left` shown
+largest-first, `right` smallest-first, so the two roots are the innermost
+values on each side of the `|` cut:
+
+```
+  insert   left (max-heap)      |  right (min-heap)   sizes  median  sorted so far
+  ------   -----------------    |  ----------------   -----  ------  ----------------------
+     5     5                    |                      1,0    5.0    [5]
+    15     5                    |  15                  1,1   10.0    [5,15]
+     1     5  1                 |  15                  2,1    5.0    [1,5,15]
+     3     3  1                 |  5  15               2,2    4.0    [1,3,5,15]
+     8     5  3  1              |  8  15               3,2    5.0    [1,3,5,8,15]
+     7     5  3  1              |  7  8  15            3,3    6.0    [1,3,5,7,8,15]
+     9     7  5  3  1           |  8  9  15            4,3    7.0    [1,3,5,7,8,9,15]
+                       ^        |  ^
+                       roots ---+--- median reads from here, always O(1)
+```
+
+Two of those steps needed a rebalance, and they show both directions:
+
+```
+  INSERT 3: 3 <= 5, so it goes LEFT     -> left = {5,3,1}  right = {15}
+            sizes 3,1 -> 3 > 1 + 1, too heavy on the left
+            REBALANCE: pop left's root (5), push it to right
+            -> left = {3,1}  right = {5,15}   sizes 2,2   balanced
+
+  INSERT 8: 8 > 5, so it goes RIGHT     -> left = {3,1}  right = {5,8,15}
+            sizes 2,3 -> right is bigger than left, not allowed
+            REBALANCE: pop right's root (5), push it to left
+            -> left = {5,3,1}  right = {8,15}  sizes 3,2  balanced
+```
+
+**Why both heaps stay balanced.** Each insertion adds exactly one element, so
+the size difference can only ever change by one — meaning the invariant can
+only ever be violated by one. A single pop-and-push therefore always restores
+it; you never need a loop, and never more than one transfer. The element moved
+is always a *root*, which is exactly the boundary value: moving `left`'s
+maximum rightward, or `right`'s minimum leftward, keeps the ordering clause
+intact for free, because the moved element was already adjacent to the cut.
+
+**Why this complexity, and what breaks with a sorted list.** Both structures
+find the median instantly once the data is arranged. The difference is the cost
+of *maintaining* the arrangement under insertion:
+
+```
+  sorted list, n = 1,000,000, inserting one element:
+      find position   binary search   log2(1e6) = 20 steps      cheap
+      make room       shift elements  up to 500,000 moves       expensive
+      -> O(n) per insertion
+
+  two heaps, same insertion:
+      push            sift up         log2(1e6) = 20 steps      cheap
+      rebalance       one pop + push  20 + 20 steps             cheap
+      -> O(log n) per insertion, ~60 steps total
+```
+
+A sorted array knows where the new element belongs in 20 steps, then spends up
+to half a million memory moves physically making room for it. The heaps never
+need a total order — only enough structure to keep the two boundary values on
+top — so nothing shifts. Across a million insertions that is roughly 60 million
+operations instead of 500 billion.
+
 ---
 
 ## 6. Variations & Sub-patterns

@@ -73,6 +73,39 @@ U+0800   - U+FFFF        3    1110xxxx   10xxxxxx   10xxxxxx      -
 U+10000  - U+10FFFF      4    11110xxx   10xxxxxx   10xxxxxx   10xxxxxx
 ```
 
+**The idea behind it.** "Spend the fewest bytes that can hold the code point's bits: the lead byte announces the total length in unary, and every byte after it wears a `10` badge saying 'I am a continuation, not a start.'"
+
+The `x` slots are the only bits that carry the code point; the prefix bits are pure bookkeeping. That is why the table's real content is a *budget* — how many payload bits each row can hold — and picking a row is just "does the number fit."
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `x` | One payload bit — an actual bit of the code point's binary value |
+| `0xxxxxxx` | 1-byte lead. Leading `0` means "plain ASCII, done" — 7 payload bits |
+| `110xxxxx` | 2-byte lead. Two leading 1s = "two bytes total" — 5 payload bits |
+| `1110xxxx` | 3-byte lead. Three 1s = "three bytes total" — 4 payload bits |
+| `11110xxx` | 4-byte lead. Four 1s = "four bytes total" — 3 payload bits |
+| `10xxxxxx` | Continuation byte. Never a lead byte — 6 payload bits each |
+
+**Walk one example with real numbers.** Encoding `U+4E2D` (the CJK character for "middle"):
+
+```
+  payload budget per row:  1 byte = 7      2 bytes = 5 + 6      = 11
+                           3 bytes = 4 + 6 + 6 = 16   4 bytes = 3 + 6 + 6 + 6 = 21
+
+  U+4E2D = 20013 decimal = 100 111000 101101 binary  (15 significant bits)
+  15 > 7, 15 > 11, 15 <= 16  ->  the 3-byte row is the smallest that fits
+
+  zero-pad 15 bits to 16, then slice 4 + 6 + 6 from the most significant end:
+
+                     byte 1     byte 2     byte 3
+    payload bits     0100       111000     101101
+    prefix           1110       10         10
+    full byte        11100100   10111000   10101101
+    hex              0xE4       0xB8       0xAD      <- matches Section 6.1
+```
+
+**Why the prefixes buy self-synchronization.** Because a continuation byte always starts `10` and no lead byte ever does, any byte in a UTF-8 stream self-identifies as "start" or "middle" with zero context. Drop a reader at a random offset and it walks backward at most 3 bytes to find the lead byte — the property Shift-JIS lacks, where the same byte value can be a first half or a second half depending on how many characters preceded it.
+
 Three properties explain why UTF-8 has become the dominant encoding (W3Techs surveys have shown it used by roughly 98% of all web pages for years):
 
 1. **ASCII-superset.** Every ASCII byte (0x00–0x7F) is *already* valid UTF-8 for the identical character — a pure-ASCII file is byte-for-byte identical whether you call it ASCII or UTF-8. Decades of C string handling (NUL-terminated, byte-oriented) keep working unmodified.
@@ -190,6 +223,35 @@ halves, add 0x10000 back) is exactly how a correct UTF-16 decoder recovers the
 original 21-bit code point from a surrogate pair — and exactly the arithmetic a
 buggy decoder skips when it treats each surrogate half as an independent character.
 
+**Stated plainly.** "Everything above U+FFFF is exactly 20 bits once you subtract the BMP away, and 20 bits is precisely two 10-bit halves — so park one half in each of two reserved 1,024-slot ranges."
+
+The whole design is reverse-engineered from a coincidence of sizes. Unicode stops at `U+10FFFF` *because* that is the largest value this two-half trick can address, not the other way round.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `0x10000` | The first astral code point. Subtracting it removes the BMP, leaving a 20-bit offset |
+| `>> 10` | Keep the top 10 bits, discard the bottom 10. Integer divide by 1,024 |
+| `& 0x3FF` | Keep only the bottom 10 bits. Remainder after dividing by 1,024 |
+| `0xD800` | High-surrogate base. The block `D800`-`DBFF` — exactly 1,024 slots |
+| `0xDC00` | Low-surrogate base. The block `DC00`-`DFFF` — another 1,024 slots |
+
+**Walk one example with real numbers.** Encoding `U+1F600` (GRINNING FACE):
+
+```
+  offset  = 0x1F600 - 0x10000 = 0x0F600 = 62976    <- fits in 20 bits, always
+  high 10 = 62976 >> 10       = 61      = 0x03D
+  low 10  = 62976 & 0x3FF     = 512     = 0x200
+
+  high surrogate = 0xD800 + 0x03D = 0xD83D
+  low  surrogate = 0xDC00 + 0x200 = 0xDE00      -> UTF-16 pair D83D DE00, 4 bytes
+
+  decoding back:  0x10000 + ((0xD83D - 0xD800) << 10) + (0xDE00 - 0xDC00)
+               =  0x10000 + (61 << 10) + 512
+               =  0x10000 + 62464 + 512 = 0x1F600            <- round-trips exactly
+```
+
+**Why the code space stops at U+10FFFF.** Two 10-bit halves address `1024 x 1024 = 1,048,576` astral code points; add the 65,536 BMP slots and the total is `1,114,112` — the exact size of Unicode's code space, `U+0000` through `U+10FFFF`. The 2,048 surrogate slots are permanently burned out of the BMP to make this work, which is why they can never be assigned characters and why a lone unpaired surrogate is not valid text in any encoding.
+
 ### Four Ways to Measure the Length of One Emoji Sequence
 
 One visible glyph, four different correct "lengths," for the family emoji sequence `MAN + ZWJ + WOMAN + ZWJ + GIRL + ZWJ + BOY` — which renders as ONE glyph in ZWJ-aware fonts:
@@ -208,6 +270,31 @@ xychart-beta
 - **UTF-8 bytes — 25**: each person is 4 bytes (4 x 4 = 16), plus 3 ZWJ x 3 bytes each (9) = 25.
 
 "How long is this string?" has four different correct answers depending on which unit is being counted — `str.length` in most languages is a code-unit or code-point count, and was NEVER a promise about visible-character count.
+
+**What the formula is telling you.** "Count the pieces, then count the pieces' pieces: 7 code points become 11 UTF-16 units and 25 UTF-8 bytes because each *individual* code point expands by a different, encoding-specific factor."
+
+The four numbers are not four measurements of one thing — they are four different multiplications applied to the same 7-item list, and the multiplier depends on whether each item is astral or BMP.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| ZWJ | `U+200D` — an invisible BMP code point that glues neighbours into one glyph |
+| person emoji | Astral code points (`U+1F466`-`U+1F469`), all above `U+FFFF` |
+| grapheme cluster | The UAX #29 segmentation unit — what a cursor moves over |
+
+**Walk one example with real numbers.** The 7-code-point family sequence `MAN ZWJ WOMAN ZWJ GIRL ZWJ BOY`:
+
+```
+                       count   UTF-16 units each   UTF-8 bytes each
+  people (astral)        4            2                  4
+  ZWJ     (BMP)          3            1                  3
+
+  code points  = 4 + 3                     =  7
+  UTF-16 units = 4 x 2  +  3 x 1  = 8 + 3  = 11
+  UTF-8 bytes  = 4 x 4  +  3 x 3  = 16 + 9 = 25
+  graphemes    = 1                         =  1   <- the ZWJs collapse all 7 into one
+```
+
+**Why the ZWJ is the one that flips the ratio.** A ZWJ is 1 UTF-16 unit but 3 UTF-8 bytes, while a person emoji is 2 UTF-16 units but 4 UTF-8 bytes — so UTF-8 is *worse* than UTF-16 here (25 bytes vs 22), the reverse of the ASCII case where UTF-8 wins 1 byte to 2. Emoji-heavy text is the one workload where UTF-8's compactness argument inverts. It is also why a DB column sized in "characters" and a wire budget sized in bytes disagree by a factor of 25 on a single visible glyph.
 
 ---
 
@@ -397,6 +484,33 @@ entire message switches to UCS-2 (2 bytes/char), dropping the limit to 70 charac
 per segment (67 for a multi-part concatenated message, since 6 bytes are reserved per
 segment for the concatenation header). One emoji can more than double the number of
 billed segments for an otherwise-plain-English text message.
+
+**What this actually says.** "The segment is 140 *bytes*, never 160 characters — 160 is just what 140 bytes works out to when each character costs 7 bits instead of 8."
+
+The famous "160-character SMS limit" is a derived number, not a defined one. Change the bits-per-character and the limit changes with it, which is exactly what one emoji does.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| 140 bytes | The real, fixed payload size of one SMS segment |
+| GSM-7 | 7-bit alphabet, packed — 8 characters squeeze into 7 bytes |
+| UCS-2 | Fixed 2 bytes per character. The fallback the instant one character is outside GSM-7 |
+| UDH | 6 bytes stolen from the payload to number the parts of a multi-part message |
+
+**Walk one example with real numbers.** A 150-character plain-English message, then the same message with one emoji appended:
+
+```
+  segment capacity, GSM-7:  140 bytes x 8 bits = 1120 bits;  1120 / 7 = 160 chars
+  segment capacity, UCS-2:  140 bytes / 2 bytes per char     =          70 chars
+
+  concatenated (6-byte UDH steals payload):
+    GSM-7:  (140 - 6) x 8 / 7 = 153 chars      UCS-2:  (140 - 6) / 2 = 67 chars
+
+  150-char message, plain ASCII    ->  fits in 1 segment (150 <= 160)   = 1 billed
+  150 chars + one emoji            ->  UCS-2, 67 chars per part
+                                       ceil(151 / 67) = 3 parts         = 3 billed
+```
+
+**Why one character can triple the bill.** The alphabet switch is all-or-nothing across the *entire* message — there is no "mostly GSM-7 with one wide character." A single curly apostrophe pasted from a word processor (`U+2019`, not in GSM-7) does the same damage as an emoji: capacity drops from 160 to 70 (a factor of `160 / 70 = 2.29`), and at that point a message that was one segment becomes three. Sanitizing smart quotes back to ASCII before sending is the cheapest cost optimization in bulk SMS.
 
 **MySQL `utf8` vs `utf8mb4`** — MySQL's charset historically named `utf8` (now
 `utf8mb3`, deprecated since 8.0.28) stores at most 3 bytes per character, covering

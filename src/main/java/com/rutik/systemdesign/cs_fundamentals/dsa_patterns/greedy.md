@@ -304,6 +304,112 @@ costs of the DP/backtracking alternatives that greedy displaces — which is
 exactly why proving greedy correctness (or refuting it quickly) is so
 valuable in an interview.
 
+### Decoding the complexity claim
+
+**What the formula is telling you.** "The scan is free; you are paying for the
+sort. Greedy costs `O(n log n)` because sorting costs `O(n log n)`, and the
+actual decision-making is a single `O(n)` pass on top of it."
+
+That framing matters because it tells you where the only available speedup
+lives. If the input arrives already sorted — or if the order genuinely does not
+matter, as in `can_jump` — greedy drops to a clean `O(n)` and there is nothing
+left to optimize.
+
+| Symbol | What it is |
+|---|---|
+| `O(n)` | One pass over the input. The greedy scan itself |
+| `O(n log n)` | The sort. Dominates the total whenever sorting is required |
+| `O(1)` | Constant extra space — a couple of running variables, no table |
+| `O(n^2)` | What the DP alternative typically costs when greedy is not legal |
+| `n` | Number of items, intervals, or jumps |
+
+### Decoding the exchange argument
+
+**What this actually says.** "Take somebody's perfect answer, swap its
+first pick for my greedy pick, and show the answer is still just as good —
+if that swap never hurts, my greedy pick was safe to make all along."
+
+That is the whole proof technique. It matters because greedy's entire risk is
+committing early with no way back; the exchange argument is how you discharge
+that risk *before* writing code rather than discovering a counterexample in the
+last five minutes of an interview.
+
+The proof runs in three moves:
+
+| Move | What you claim | Interval-scheduling instance |
+|---|---|---|
+| 1. Assume | Some optimal solution `OPT` exists, and it differs from greedy | `OPT` picks some interval `X` first |
+| 2. Exchange | Replace `OPT`'s first pick with greedy's pick `G` | Swap `X` for the earliest-ending interval `G` |
+| 3. Show no loss | The swapped solution is still valid and no smaller | `G` ends no later than `X`, so everything `OPT` picked after `X` still fits |
+
+Step 3 is the load-bearing one, and for interval scheduling it holds for a
+concrete reason: greedy picked the interval with the **earliest end time**, so
+`end(G) <= end(X)`. Any interval that did not conflict with `X` cannot conflict
+with `G` either, because `G` frees the timeline at least as early. Repeat the
+exchange for the second pick, the third, and so on, and `OPT` is transformed
+into greedy's answer one swap at a time without ever losing an interval.
+Therefore greedy is optimal.
+
+**Walk one example.** Four intervals, greedy sorted by end time:
+
+```
+  intervals: [1,2]  [2,3]  [4,5]  [1,100]
+
+  OPT starts with [1,100]  ->  nothing else fits (it spans everything)
+                               OPT so far = 1 interval
+
+  EXCHANGE [1,100] for greedy's [1,2]:
+      end([1,2]) = 2  <=  end([1,100]) = 100
+      the timeline is free from t=2 instead of t=100
+      [2,3] now fits.  [4,5] now fits.
+                               after swap = 3 intervals
+
+  the swap did not lose anything -- it strictly gained
+```
+
+### When greedy is NOT legal
+
+**In plain terms.** "If no exchange argument holds, the locally
+best move can lock you out of the globally best answer — and greedy will
+confidently return a wrong number rather than fail loudly."
+
+Coin change is the canonical trap. Greedy ("always take the largest coin that
+fits") is optimal for US denominations `{1, 5, 10, 25}`, which is exactly why
+it feels safe. Change the denomination set and it breaks:
+
+| Coins | Amount | Greedy result | Optimal (DP) | Greedy wrong by |
+|---|---|---|---|---|
+| `{1, 5, 10, 25}` | 30 | `25 + 5` = 2 coins | 2 coins | correct |
+| `{1, 7, 10}` | 14 | `10 + 1 + 1 + 1 + 1` = 5 coins | `7 + 7` = 2 coins | 2.5x too many |
+| `{1, 3, 4}` | 6 | `4 + 1 + 1` = 3 coins | `3 + 3` = 2 coins | 1 extra coin |
+| `{1, 15, 25}` | 30 | `25 + 1x5` = 6 coins | `15 + 15` = 2 coins | 3x too many |
+
+**Walk one example.** Coins `{1, 7, 10}`, amount `14`:
+
+```
+  GREEDY                              OPTIMAL
+  take 10  -> remaining 4             take 7  -> remaining 7
+  10 too big, 7 too big -> take 1     take 7  -> remaining 0
+  remaining 3 -> take 1
+  remaining 2 -> take 1               total: 2 coins
+  remaining 1 -> take 1
+
+  total: 5 coins                      greedy is 150% worse
+```
+
+Taking the `10` felt locally optimal — it is the biggest legal step and it
+removes the most value in one move. But it strands the remainder at `4`, a
+value reachable only by four `1`s, while passing over `7` twice would have
+landed exactly. No exchange argument exists here: swapping the optimal
+solution's first `7` for greedy's `10` makes the answer strictly worse, which
+is precisely the step-3 failure to watch for.
+
+**Why this matters more than the complexity.** Greedy's `O(n log n)` is a real
+win over DP's `O(n * amount)` — but only when greedy is *correct*. An
+`O(n log n)` wrong answer is worth nothing. Run the exchange argument first;
+if step 3 fails, or if you can build a counterexample like the one above in
+under a minute, switch to DP and pay the extra cost knowingly.
+
 ---
 
 ## 6. Variations & Sub-patterns

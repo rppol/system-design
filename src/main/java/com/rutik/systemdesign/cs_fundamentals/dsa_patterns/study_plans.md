@@ -133,6 +133,47 @@ Programming is NeetCode 150's largest single category (23 problems across
 1-D and 2-D), and Phase 7 is a low-interdependency wrap-up before final mock
 interviews.*
 
+**The idea behind it.** "The seven phase durations sum to roughly 8.5
+weeks, which is why §1 says NeetCode 150 needs 8-12 weeks and Blind 75 needs
+3-4 — the same seven phases, walked at two different densities."
+
+That framing matters because it makes the two recommendations one decision
+rather than two. You are not choosing between two study plans; you are choosing
+how many rows per phase you drill, and the phase order never changes.
+
+| Symbol | What it is |
+|---|---|
+| `~1 week` | A phase estimate at NC150 density — all rows, B75 and NC150 |
+| `~1.5 weeks` | The phases carrying 5-6 pattern files instead of 2-3 |
+| B75 | The 75-problem subset. Roughly half the rows, so roughly half the calendar |
+| NC150 | The full ~150-problem superset. The 8-12 week track |
+
+**Walk one example.** Add the phase estimates:
+
+```
+  phase   duration      patterns covered
+  -----   -----------   ----------------
+  P1      1.0 week      3   (hashing, two pointers, prefix sum)
+  P2      1.0 week      2   (sliding window, monotonic stack)
+  P3      1.0 week      4   (binary search, fast/slow, reversal, cyclic sort)
+  P4      1.5 weeks     6   (trees, heaps, k-way merge, tries)
+  P5      1.5 weeks     5   (backtracking, graphs, topo sort, union-find, paths)
+  P6      2.0 weeks     3   (DP, greedy, intervals)
+  P7      0.5 week      1   (bit manipulation + math/simulation appendix)
+  -----   -----------   ----------------
+  total   8.5 weeks     24 pattern files + appendix
+```
+
+**Why weeks do not track pattern count.** Phase 3 covers four patterns in one
+week; Phase 6 covers three in two. The duration tracks *problem difficulty and
+variation count*, not how many files there are — DP alone is NC150's largest
+category at 23 problems, and each one is a fresh recurrence rather than a
+re-application of the same template. Phases 1-3, by contrast, are template-heavy:
+once the two-pointer template is in your hands, most of its rows are the same
+motion with a different predicate. Budget by how much *novelty* a phase
+contains, and the 8.5-week total lands inside the stated 8-12 week window with
+room for the mock interviews the plan assumes you will run at the end.
+
 ---
 
 ## 4. Pattern-Mapped Problem Tables

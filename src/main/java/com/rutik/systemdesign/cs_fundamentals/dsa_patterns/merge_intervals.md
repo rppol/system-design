@@ -278,6 +278,38 @@ Expected output for `intervals = [[1,3],[6,9]]`, `new_interval = [2,5]` is `[[1,
 
 The "Insert Interval" O(n) result (no sort needed, since input is pre-sorted) is a common interview "gotcha" — candidates who don't notice the pre-sorted constraint often default to the O(n log n) "append + re-sort + merge" brute force, missing the cleaner linear solution.
 
+### Decoding the complexity claim
+
+**Stated plainly.** "Oh of n log n means: the sort *is* the algorithm's cost, and the merge pass that follows it is free by comparison — so the only optimization worth arguing about is whether you can skip the sort."
+
+That framing matters because it tells you exactly where to push. Shaving constants off the merge scan buys nothing; noticing the input was already sorted removes the dominant term entirely.
+
+| Symbol | What it is |
+|---|---|
+| `O(...)` | An upper bound on how fast the work grows as the input grows |
+| `n` | The input size — how many intervals there are |
+| `log n` | Roughly how many times you can halve `n` before reaching 1. For `n = 10,000` it is about 13 |
+| `O(n log n)` | The sort: `n` items each participating in about `log n` levels of comparison |
+| `O(n)` | The merge scan alone — one look at each interval |
+| `O(n^2)` | Comparing every interval against every other, the brute force this replaces |
+
+**Walk one example.** `[[1,3], [2,6], [8,10], [15,18]]`, already sorted by start. The scan keeps only the last merged interval in hand and never looks backward:
+
+```
+  input, sorted by start:  [1,3]   [2,6]   [8,10]   [15,18]
+
+  step  interval  last out  test: start <= last_end   action           output so far
+  ----  --------  --------  -----------------------   --------------   ---------------------
+    1    [1,3]      --      seed the first one        emit [1,3]       [1,3]
+    2    [2,6]     [1,3]     2 <= 3   overlap         end = max(3,6)   [1,6]
+    3    [8,10]    [1,6]     8 <= 6   no overlap      append           [1,6] [8,10]
+    4    [15,18]   [8,10]   15 <= 10  no overlap      append           [1,6] [8,10] [15,18]
+
+  4 intervals in, 4 comparisons, 3 out -- one pass, zero backtracking
+```
+
+**Why the sort dominates, quantified.** At LC 56's limit of `n = 10,000`: the sort costs about `n * log2(n) = 10,000 * 13.29 = 132,877` operations, while the merge scan costs `10,000`. The sort is roughly **13 times** the scan, so total work is about `142,877` and is ~93% sort. Against the brute-force "compare every pair" approach at `n^2 / 2 = 50,000,000`, the sort-then-scan approach is about **350 times cheaper**. And for Insert Interval, where the input arrives pre-sorted and the sort disappears, the cost drops from `142,877` to `10,000` — about **14 times faster** for free, purely from reading the constraints.
+
 ---
 
 ## 6. Variations & Sub-patterns

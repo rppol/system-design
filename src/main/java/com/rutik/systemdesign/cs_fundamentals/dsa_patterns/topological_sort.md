@@ -284,6 +284,92 @@ Both are linear in graph size — the choice between them is usually about
 which cycle-detection style is more natural for the problem, or whether the
 problem already gives you a recursive DFS structure to extend.
 
+### Decoding Kahn's `O(V + E)`
+
+**What it means.** "Count how many prerequisites each task has,
+repeatedly take any task whose count has hit zero, and tick down the counters
+of everything it unblocks. Each task is taken once and each dependency is
+ticked down once — two separate piles of work, added."
+
+The `V` and the `E` come from two structurally different loops, which is why
+they add rather than multiply. Building the in-degree array is one pass over
+the edges; the main loop dequeues each vertex once and, for that vertex, walks
+only its own outgoing edges.
+
+| Symbol | What it is |
+|---|---|
+| `V` | Number of nodes (tasks, courses, files) |
+| `E` | Number of directed edges (prerequisite relations) |
+| `O(V + E)` | One dequeue per node plus one decrement per edge |
+| in-degree | How many edges point *at* a node — how many prerequisites remain |
+| `len(order) != V` | The cycle test: fewer nodes emitted than exist |
+
+**Walk one example.** Six tasks `A..F` with edges
+`A->C  B->C  B->D  C->E  D->E  E->F`. Initial in-degrees are computed by
+scanning all 6 edges once.
+
+```
+  step  dequeued  edges relaxed         in-degree after     queue      output
+                                        A  B  C  D  E  F
+  ----  --------  --------------------  ------------------  ---------  ---------------
+   0    --        (init scan of 6       0  0  2  1  2  1    [A, B]     []
+                   edges)
+   1    A         A->C: C 2 -> 1        0  0  1  1  2  1    [B]        [A]
+   2    B         B->C: C 1 -> 0  ENQ   0  0  0  0  2  1    [C, D]     [A, B]
+                  B->D: D 1 -> 0  ENQ
+   3    C         C->E: E 2 -> 1        0  0  0  0  1  1    [D]        [A, B, C]
+   4    D         D->E: E 1 -> 0  ENQ   0  0  0  0  0  1    [E]        [A, B, C, D]
+   5    E         E->F: F 1 -> 0  ENQ   0  0  0  0  0  0    [F]        [A,B,C,D,E]
+   6    F         (no outgoing edges)   0  0  0  0  0  0    []         [A,B,C,D,E,F]
+
+  len(output) = 6 = V   ->  valid topological order, no cycle
+```
+
+Six dequeues (one per vertex) and six decrements (one per edge): `V + E =
+6 + 6 = 12` units of work, plus the initial `E = 6` scan to build the
+in-degree array. Linear in the input size.
+
+**Walk the cycle case.** Same graph plus one extra edge `F->C`, which closes
+the loop `C -> E -> F -> C`. Only the in-degree of `C` changes, from 2 to 3.
+
+```
+  step  dequeued  edges relaxed         in-degree after     queue      output
+                                        A  B  C  D  E  F
+  ----  --------  --------------------  ------------------  ---------  -----------
+   0    --        (init, 7 edges)       0  0  3  1  2  1    [A, B]     []
+   1    A         A->C: C 3 -> 2        0  0  2  1  2  1    [B]        [A]
+   2    B         B->C: C 2 -> 1        0  0  1  0  2  1    [D]        [A, B]
+                  B->D: D 1 -> 0  ENQ
+   3    D         D->E: E 2 -> 1        0  0  1  0  1  1    []         [A, B, D]
+   4    --        QUEUE IS EMPTY, but C, E, F are still unemitted
+
+  len(output) = 3  !=  V = 6   ->  CYCLE DETECTED
+
+  the stuck nodes, each waiting on the next:
+
+      C --> E --> F
+      ^                 |
+      +-----------------+
+
+  every one of C, E, F has in-degree 1, and the only edge that could
+  zero it comes from another member of the same cycle -- so none of
+  them ever reaches zero
+```
+
+That is the whole cycle-detection mechanism: a cycle is a set of nodes whose
+in-degrees can only be lowered by each other, so no member ever hits zero, the
+queue starves, and the loop exits early. You do not need a separate check — the
+length comparison `len(order) != num_nodes` *is* the check, and it costs `O(1)`.
+
+**Why this complexity.** Three passes, all linear, none nested inside another:
+building the adjacency list and in-degree array touches each edge once (`O(E)`),
+seeding the queue scans each in-degree once (`O(V)`), and the main loop dequeues
+each vertex exactly once — the `visited`-equivalent guarantee here is that a
+node is enqueued only at the instant its in-degree reaches zero, which happens
+at most once — and for each dequeued vertex walks only its own out-edges. Those
+out-edge walks sum to `E` across the entire run, not `E` per vertex. Total:
+`O(V + E)`.
+
 ---
 
 ## 6. Variations & Sub-patterns

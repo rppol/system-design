@@ -331,6 +331,82 @@ The `path[:]` (or `list(path)`) copy when recording a result is **essential**
 mutating `path` list, and by the time backtracking finishes, all entries
 would show the final (empty) state. This is a milder cousin of the §8 bug.
 
+### Decoding the branching-factor formula
+
+**What it means.** "Count how many choices you face at each step
+(`b`), count how many steps deep you go (`d`), and the search tree has about
+`b^d` nodes — every extra level of depth multiplies the whole cost by `b`."
+
+That framing matters because it tells you which knob to turn. Shaving the
+*depth* by one divides the work by `b`; shaving the *branching factor* by one
+changes the base of the exponent, which is far more powerful still. Pruning
+attacks `b`, which is why it wins so decisively.
+
+| Symbol | What it is |
+|---|---|
+| `b` | Branching factor — choices available at one node |
+| `d` | Depth — how many decisions deep the recursion goes |
+| `O(b^d)` | Nodes in the search tree; the cost of exploring everything |
+| `O(2^n)` | The subsets case: `b = 2` (take or skip) at each of `n` items |
+| `O(n!)` | The permutations case: `b` shrinks `n, n-1, n-2, ...` as items are used |
+| `n` | Input size — items to choose from, or board width |
+
+**Walk one example.** Subsets of `[1, 2, 3]`. At every level the choice is
+binary — include this element or skip it — so `b = 2` and `d = n = 3`:
+
+```
+  depth 0                     [ ]                       1 node   = 2^0
+                          /         \
+  depth 1            [1]             [ ]                2 nodes  = 2^1
+                    /    \          /    \
+  depth 2      [1,2]     [1]     [2]      [ ]           4 nodes  = 2^2
+               /   \     /  \    /   \    /   \
+  depth 3  [1,2,3][1,2][1,3][1][2,3][2][3]  [ ]         8 nodes  = 2^3
+
+  leaves at depth n = 2^3 = 8 subsets, which is the answer set
+  total nodes = 1 + 2 + 4 + 8 = 15 = 2^(n+1) - 1
+```
+
+The leaf count `2^n` is not an inefficiency — it is the size of the *output*.
+No algorithm can enumerate 8 subsets in fewer than 8 steps. The `* n` in the
+`O(2^n * n)` row above is the cost of copying each subset out.
+
+### What pruning actually buys you
+
+**Put simply.** "A pruned branch is not one node skipped — it
+is that node *and its entire subtree beneath it*, so cutting near the root
+deletes exponentially more work than cutting near the leaves."
+
+N-Queens on an 8x8 board is the sharpest demonstration. Without constraint
+checks, you would place a queen in any of 8 columns on each of 8 rows; with the
+column and diagonal sets from Template 4, most placements are rejected the
+moment they are attempted:
+
+| Approach | Nodes explored (n = 8) | Notes |
+|---|---|---|
+| No pruning (`b = 8`, `d = 8`) | 19,173,960 | Full 8-ary tree: `8^1 + 8^2 + ... + 8^8` |
+| Column constraint only (`n!`) | 40,320 leaves | Each column used once — permutations of 8 |
+| Column + both diagonals (pruned) | 2,056 | What Template 4 actually visits |
+
+```
+  full tree      19,173,960 nodes  ############################## (100%)
+  pruned search       2,056 nodes  |                             (0.0107%)
+
+  reduction: 19,173,960 / 2,056 = 9,326x less work
+  both find the same 92 solutions
+```
+
+**Why this complexity, and what breaks without pruning.** The `O(n!)` figure in
+the table above is a worst-case *bound*, not a prediction — it assumes you
+discover a conflict only after placing all `n` queens. Checking `cols`,
+`diag1`, and `diag2` before recursing moves that discovery to the earliest
+possible row, and every row you catch it earlier removes a subtree of size
+`b^(remaining depth)`. Rejecting one bad placement at row 2 deletes roughly
+`8^6 = 262,144` nodes that would otherwise have been generated and thrown
+away. This is why N-Queens runs instantly at `n = 8` despite an `O(n!)` label:
+the label describes the tree you *could* walk, and pruning is what stops you
+from walking it.
+
 ---
 
 ## 6. Variations & Sub-patterns

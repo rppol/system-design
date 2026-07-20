@@ -303,6 +303,57 @@ The beauty of this algorithm: it never needs to know `C` or `k` explicitly — t
 
 Compare to the hash-set approach: same O(n) time, but **O(n) space**. The fast/slow pattern's entire value proposition is trading a (small) increase in code subtlety for O(1) space — this is exactly the kind of tradeoff an L5 interviewer wants to hear you articulate explicitly.
 
+### Decoding Floyd's algorithm — why the two pointers must meet
+
+**Stated plainly.** "Once both pointers are inside the loop, the fast one gains exactly one step on the slow one every tick — so the gap between them shrinks by one per tick and must hit zero, the same way a runner lapping a track at one extra step per stride is guaranteed to catch you."
+
+That framing matters because "fast might jump over slow" is the objection everyone raises, and it is answered by the gap being an integer that decreases by exactly 1. It can never skip from 2 to 0 without passing through 1.
+
+| Symbol | What it is |
+|---|---|
+| `mu` | Tail length — how many nodes sit before the cycle starts |
+| `lambda` | Cycle length — how many nodes are in the loop |
+| `t` | Step count. After `t` ticks, slow has moved `t` and fast has moved `2t` |
+| `k` | Some whole number of laps. The lap count fast has gained on slow |
+| `mod` | Remainder after dividing. `6 mod 4 = 2` — what is left after 1 full lap |
+| `O(1)` | Constant memory: two pointers, no matter how long the list is |
+
+**Walk one example.** A 6-node list with `mu = 2` and `lambda = 4` — node 5 points back to node 2:
+
+```
+  0 -> 1 -> 2 -> 3 -> 4 -> 5
+            ^              |
+            +--------------+       mu = 2 (tail), lambda = 4 (cycle)
+
+  Phase 1: slow moves +1, fast moves +2 each tick.
+  "gap" = how many steps fast still needs to gain to land on slow,
+  measured forward around the cycle -- only defined once both are inside it.
+
+  tick   slow node   fast node   gap
+  ----   ---------   ---------   ---------------------------
+    0        0           0       -- fast has not entered yet
+    1        1           2       -- slow has not entered yet
+    2        2           4       2
+    3        3           2       1
+    4        4           4       0   <- they meet, at node 4
+```
+
+The gap goes `2 -> 1 -> 0`. It cannot do anything else: fast advances 2 and slow advances 1, so their separation changes by exactly `-1` per tick. An integer counting down by one always reaches zero, and it does so within `lambda` ticks of both pointers being inside the cycle. That is the entire meeting proof — no case analysis needed.
+
+**Why phase 2 lands on the cycle start.** At the meeting, slow has walked `t = 4` and fast has walked `2t = 8`. Fast's extra distance is `8 - 4 = 4`, which is exactly `lambda = 4` — one full lap, `k = 1`. Generally `t = k * lambda`. Now measure from the meeting point: slow entered the cycle at tick `mu` and has been circling for `t - mu = 4 - 2 = 2` steps, so the remaining distance forward around the cycle back to the start is `lambda - 2 = 2` — which equals `mu`. Both distances are `2`, so a pointer restarted at the head and a pointer left at the meeting node, moving at the same speed, arrive together:
+
+```
+  Phase 2: reset p1 to head, leave p2 at the meeting node, move both +1.
+
+  tick   p1 node   p2 node
+  ----   -------   -------
+    0        0         4
+    1        1         5
+    2        2         2      <- both land on node 2 = the cycle start, after mu = 2 steps
+```
+
+**Why this is O(n) and not O(n^2).** Phase 1 runs at most `mu + lambda` ticks — slow needs `mu` to reach the cycle and at most `lambda` more to be caught — and `mu + lambda <= n`. So slow makes at most `n` moves, fast at most `2n`. Phase 2 adds `mu <= n` moves for each of the two pointers. Total is bounded by roughly `4n` pointer moves, all in constant memory. The hash-set alternative does the same `n` traversal but stores up to `n` node references; for a 10^5-node list that is 200,000 pointer moves either way, but 100,000 stored references versus **two**.
+
 ---
 
 ## 6. Variations & Sub-patterns

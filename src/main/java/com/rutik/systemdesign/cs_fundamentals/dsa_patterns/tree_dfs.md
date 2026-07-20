@@ -267,6 +267,99 @@ traversal.
 `RecursionError` (default recursion limit ~1000); converting to an iterative
 DFS with an explicit stack avoids this.
 
+### Decoding `O(n)` time and `O(h)` space
+
+**What it means.** "Time is `O(n)` because every node is visited
+once. Space is `O(h)` because at any instant the call stack holds exactly one
+root-to-current-node path — not the whole tree, just the path down to where you
+currently are."
+
+The `O(h)` is the number interviewers actually push on, because `h` is not a
+fixed function of `n`. It is `log n` for a balanced tree and `n` for a skewed
+one, and the gap between those two is where recursion crashes live. Saying
+"`O(h)` space" and stopping is an incomplete answer; the complete one names both
+ends of the range.
+
+| Symbol | What it is |
+|---|---|
+| `n` | Total node count |
+| `h` | Tree height — the longest root-to-leaf path |
+| `O(h)` | Recursion-stack depth; one frame per node on the current path |
+| `O(log n)` | `h` when the tree is balanced |
+| `O(n)` | `h` when the tree is degenerate (every node has one child) |
+
+**Walk one example.** `max_depth` on a 6-node tree. Each row shows the live
+call stack — that stack *is* the space cost.
+
+```
+        1
+      /   \
+     2     3
+    / \     \
+   4   5     6
+
+  step  action              call stack (root -> current)   depth  returns
+  ----  ------------------  -----------------------------  -----  -------
+   1    enter 1             [1]                              1
+   2    enter 2 (left)      [1, 2]                           2
+   3    enter 4 (left)      [1, 2, 4]                        3
+   4    4 is a leaf         [1, 2, 4]                        3      1
+   5    pop 4, enter 5      [1, 2, 5]                        3
+   6    5 is a leaf         [1, 2, 5]                        3      1
+   7    pop 5, finish 2     [1, 2]                           2      2
+   8    pop 2, enter 3      [1, 3]                           2
+   9    enter 6 (right)     [1, 3, 6]                        3
+  10    6 is a leaf         [1, 3, 6]                        3      1
+  11    pop 6, finish 3     [1, 3]                           2      2
+  12    pop 3, finish 1     [1]                              1      3
+
+  6 node visits = n              peak stack depth = 3 = h + 1
+```
+
+Every node was entered exactly once (`O(n)` time), but the stack never held
+more than 3 frames even though the tree has 6 nodes. Compare against the BFS
+of this same tree in [`tree_bfs.md`](tree_bfs.md) §5, where the queue peaked at
+3 as well — at `n = 6` the two are indistinguishable, which is exactly why the
+distinction has to be argued at scale rather than demonstrated on a toy.
+
+**Why `h` swings so violently.** The two extreme shapes at `n = 1,000,000`:
+
+```
+  shape        picture (schematic)      h                       peak frames
+  -----------  ----------------------   ---------------------   -----------
+  balanced           o                  floor(log2(10^6)) = 19          20
+                   /   \
+                  o     o
+                 / \   / \
+                o   o o   o
+
+  degenerate         o                  n - 1 = 999,999            1,000,000
+                      \
+                       o
+                        \
+                         o
+                          \
+                           o
+
+  ratio = 1,000,000 / 20 = 50,000x more stack in the degenerate case
+```
+
+**Why this complexity, and why it crashes.** Time is `O(n)` regardless of shape
+— visiting is visiting, and the shape only changes the order. Space follows the
+path length because a frame is pushed on descent and popped on return, so only
+the ancestors of the current node are live. The failure mode is concrete:
+CPython's default recursion limit is **1,000** frames, so a degenerate
+1,000,000-node tree raises `RecursionError` at depth 1,000 — after covering
+`1,000 / 1,000,000 = 0.1%` of the tree. The balanced case needs 20 frames, 2% of
+the limit, and is never at risk.
+
+The fix is not a bigger limit (`sys.setrecursionlimit` trades a clean
+`RecursionError` for a hard interpreter segfault when the C stack runs out). The
+fix is the iterative DFS with an explicit `list` as the stack: same `O(n)` time,
+same `O(h)` asymptotic space, but the stack now lives on the heap where a
+million entries is roughly 8 MB of pointers rather than a million interpreter
+frames.
+
 ---
 
 ## 6. Variations & Sub-patterns

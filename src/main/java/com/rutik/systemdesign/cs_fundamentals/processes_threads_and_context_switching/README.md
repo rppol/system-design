@@ -171,6 +171,34 @@ sequenceDiagram
 
 Steps 1–5 run entirely in the kernel and are identical whether A and B are threads in the same process or different processes; step 6 — the CR3 page-table switch — only fires between different processes, which is exactly why a same-process thread switch is roughly 5x cheaper (no TLB flush).
 
+**The idea behind it.** "Saving and restoring registers is the cheap, fixed part; the expensive part is the caches and TLB you *invalidated*, and you only pay that when the two tasks live in different address spaces."
+
+The register save/restore is a few dozen memory writes — nanoseconds. Almost the entire microsecond-scale cost is the indirect penalty that shows up *after* the switch, in the newly-cold caches of the task you switched to.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| TCB | Task Control Block — the kernel struct where a task's registers are parked |
+| CR3 | The x86 register holding the page-table base. Writing it *is* the address-space switch |
+| TLB | Translation Lookaside Buffer — the cache of virtual-to-physical page mappings |
+| TLB miss | A lookup the TLB could not answer, forcing a page-table walk: ~200-300 ns each |
+
+**Walk one example with real numbers.** Comparing the two switch flavours from the diagram:
+
+```
+  same-process thread switch (steps 1-5 only, no step 6):
+    trap + save + schedule + restore  ~= 0.5 - 2 us    <- CR3 untouched, TLB survives
+
+  cross-process switch (steps 1-6):
+    the same 0.5 - 2 us of steps 1-5
+    + CR3 write flushes the TLB -> the next task re-walks page tables
+    total                             ~= 2 - 10 us
+
+  ratio at the top of each band:  10 us / 2 us = 5x more expensive
+  in TLB misses, that 8 us gap is roughly  8000 ns / 250 ns  = ~32 extra walks
+```
+
+**Why this is the entire argument for threads over processes.** Nothing in steps 1-5 cares whether A and B share an address space — only step 6 does. So a runtime that multiplexes work onto *one* process (threads, goroutines, virtual threads) never pays step 6 at all, and a runtime that multiplexes across processes pays it on every single switch. That single CR3 write is why Chrome's per-tab isolation costs real CPU, and why an M:N scheduler that parks a task in user space (~0.1 us, Section 8) beats even the same-process kernel switch by another order of magnitude.
+
 ### Thread States
 
 ```mermaid
@@ -387,6 +415,34 @@ def pipe_example() -> str:
 **Use threads for I/O-bound work in most languages**: Threads block on I/O while other threads run. In Java and Go, threads/goroutines for I/O concurrency are idiomatic. In Python, use `asyncio` or `threading` for I/O-bound work (GIL releases on I/O).
 
 **Avoid creating thousands of OS threads**: Each OS thread has an 8 MB default stack reservation. 10,000 threads = 80 GB virtual address space reservation. Even with lazy physical allocation, the context-switch overhead (~1–10 µs × 10,000 threads = 10–100 ms just for scheduling overhead per second) dominates CPU time.
+
+**Stated plainly.** "Two independent budgets run out at once — address space, which is reserved per thread whether you touch it or not, and CPU time, which the scheduler burns just moving between threads before any of them does work."
+
+The address-space number scares people first, but it is the *soft* limit (Linux only commits pages you actually touch). The scheduling number is the hard one: it is real CPU, spent every second, on nothing.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| 8 MB | Linux's default per-thread stack *reservation* (`ulimit -s`), not its resident size |
+| virtual vs resident | Reserved address range vs pages actually backed by physical RAM |
+| ~1-10 µs | Cost of one kernel context switch, from the Section 4 table |
+| switches/sec | How often the scheduler rotates — one per thread per second is the *floor*, not the norm |
+
+**Walk one example with real numbers.** 10,000 OS threads on one machine:
+
+```
+  address space:  10,000 x 8 MB = 80,000 MB = 78 GB reserved
+                  resident RAM is far lower -- typically ~100 KB touched per thread
+                  10,000 x 100 KB = ~1 GB actually resident
+
+  scheduling cost, at just ONE switch per thread per second:
+    10,000 x  1 us =  10,000 us =  10 ms/s  =  1% of one core
+    10,000 x 10 us = 100,000 us = 100 ms/s  = 10% of one core
+
+  at a more realistic 10 switches per thread per second, x10 again:
+    10,000 x 10 x 5 us = 500,000 us = 500 ms/s = 50% of one core burned on switching
+```
+
+**Why the second budget is the one that kills you.** 78 GB of *reservation* is harmless on x86-64, where user space spans 128 TiB — the kernel never allocates a page you do not touch. But the scheduling cost is charged in real CPU cycles every second, it grows linearly with thread count, and it is spent entirely on overhead. This is the exact quantity M:N runtimes eliminate: a goroutine or virtual thread switch is a user-space stack swap at ~0.1 µs, so the same 10,000 tasks cost `10,000 x 10 x 0.1 us = 10 ms/s` — 50x less, from the same table's numbers.
 
 ---
 
@@ -659,6 +715,35 @@ def fixed_server() -> None:
 | Context switches / sec | ~50,000 | <100 |
 | Max concurrency (8 GB RAM) | ~8,000 requests | ~500,000 requests |
 | CPU utilisation (I/O bound) | 10–30% wasted on context switching | <1% overhead |
+
+**What the formula is telling you.** "5,000 threads that spend all their time asleep still cost full price — 40 GB of reserved stacks and a quarter of a core spent switching between threads that are, by construction, doing nothing."
+
+Every number in the BROKEN column is driven by *concurrency* (5,000 in-flight requests), not by *work* (each request is a 5-second sleep). That mismatch is the whole case study: the threading model bills you for waiting.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| 5,000 concurrent | Requests in flight at once, each parked for ~5 s in a long poll |
+| ~5 µs | One kernel context switch — midpoint of the 1-10 µs band |
+| 50,000 switches/s | The table's observed rate: ~10 switches per thread per second |
+| epoll | The kernel readiness interface letting ONE thread wait on 5,000 sockets |
+
+**Walk one example with real numbers.** Reconciling the two figures the BROKEN block and the table give:
+
+```
+  address space:  5,000 x 8 MB   = 40,000 MB = 39 GB reserved
+  resident RAM:   5,000 x ~100 KB = ~500 MB          <- the table's "~500 MB"
+
+  scheduling cost, code-comment floor (1 switch per thread per second):
+    5,000 x 5 us  =  25,000 us =  25 ms/s  = 2.5% of one core
+
+  scheduling cost, the table's observed 50,000 switches/s:
+    50,000 x 5 us = 250,000 us = 250 ms/s  =  25% of one core   <- inside "10-30%"
+
+  useful throughput either way:  5,000 requests / 5 s block = 1,000 responses/s
+  async path: 1 thread, 1 epoll_wait, <100 switches/s -> ~0.05% of one core
+```
+
+**Why the two overhead numbers are both right.** `25 ms/s` is the floor — what you pay if every thread is switched exactly once per second. `250 ms/s` is what actually happens, because a thread is switched every time its timer expires, its socket becomes readable, or the scheduler preempts it — roughly 10 times per second here. The async path does not reduce that cost, it *deletes the entity being switched*: 5,000 suspended coroutines are 5,000 heap objects on one thread's stack, and the kernel only ever schedules that one thread. Same 1,000 responses/s, ~500x less scheduling overhead.
 
 **Java virtual threads (alternative FIX)**:
 

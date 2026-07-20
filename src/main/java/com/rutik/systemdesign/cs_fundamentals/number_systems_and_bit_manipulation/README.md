@@ -57,6 +57,49 @@ Binary → Hex: group bits in fours from the right.
   10110111 = 1011 0111 = B7 = 0xB7 = 183
 ```
 
+**The idea behind it.** "A number is a bag of coins whose denominations are powers of the base;
+converting means asking, largest coin first, how many of each you need — or equivalently, peeling off one
+digit at a time from the bottom by dividing."
+
+The two directions are the same fact read from opposite ends. Division-with-remainder peels the *lowest*
+digit first (which is why you read the remainders bottom-up); place-value expansion builds from the
+*highest* digit down. Once you see that, hex is not a third system — it is binary with the digits stapled
+into groups of four.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | How many distinct digits the system has. Binary 2, octal 8, decimal 10, hex 16 |
+| `2^k` | The weight of column `k`, counting from 0 at the right |
+| `N ÷ 2 = q r d` | `d` is the next binary digit; `q` is what is left to convert |
+| `0b`, `0o`, `0x` | Literal prefixes for binary, octal, hex |
+| `0xB7` | Two hex digits = exactly 8 bits = one byte |
+
+**Walk one example.** Convert 45 both directions, and confirm the two agree:
+
+```
+  peel from the bottom (divide by 2)      build from the top (place value)
+  ---------------------------------      -------------------------------
+  45 / 2 = 22  r 1   <- bit 0             bit 5 : 32  x 1 = 32
+  22 / 2 = 11  r 0   <- bit 1             bit 4 : 16  x 0 =  0
+  11 / 2 =  5  r 1   <- bit 2             bit 3 :  8  x 1 =  8
+   5 / 2 =  2  r 1   <- bit 3             bit 2 :  4  x 1 =  4
+   2 / 2 =  1  r 0   <- bit 4             bit 1 :  2  x 0 =  0
+   1 / 2 =  0  r 1   <- bit 5             bit 0 :  1  x 1 =  1
+                                                        ----
+  read up: 1 0 1 1 0 1 = 0b101101                        45   <- agrees
+
+  regroup into fours for hex:  0010 1101  =  2    D  =  0x2D
+                               ^^^^ ^^^^     |    |
+                               2    13       2    13
+```
+
+**Why the grouping trick works and what breaks without it.** 16 is exactly `2^4`, so four binary columns
+carry precisely the information of one hex column and never interact across the boundary. That is why
+`0b10110111` splits cleanly into `B7` with no arithmetic. It fails the moment the bases are not powers of
+each other: decimal is not a power of 2, so there is no group-the-digits shortcut from binary to decimal —
+you are stuck doing the real division. This is the entire reason engineers write memory dumps in hex
+rather than decimal.
+
 ### 4.2 Two's Complement Mechanics
 
 ```
@@ -94,6 +137,50 @@ flowchart LR
 
 Two transform steps, zero new hardware: this is why a CPU needs no separate subtract circuit — negate via this pipeline, then reuse the existing unsigned adder.
 
+**Stated plainly.** "Negative numbers are not a separate species — `-k` is just whichever
+bit pattern you have to *add* to `k` to make the counter roll over to zero. Flip-and-add-one is the recipe
+that finds that pattern."
+
+This is the part readers never picture, because the usual phrasing ("flip the bits, add one") is a
+procedure with no meaning attached. The meaning is odometer arithmetic: an 8-bit register counts
+`0..255` and then wraps back to `0`. So `-5` is defined to be `256 - 5 = 251`, because `5 + 251 = 256`,
+and 256 does not fit in 8 bits — it falls off the top and leaves `0`.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | The register width in bits. 8 for a byte, 32 for a Java `int` |
+| `2^n` | The odometer's wrap point. 8-bit: 256. This value is never storable |
+| `-k = 2^n - k` | The definition. Everything else is a shortcut to compute it |
+| `~x` | Flip every bit. Note `~x == -x - 1`, one short of the negation |
+| `~x + 1` | The flip-and-add-one recipe. Identical to `2^n - x` |
+| `1 0000 0000` | The 9th bit of an 8-bit add. Hardware simply drops it |
+
+**Walk one example.** Negate 12 in an 8-bit register, then check the sum returns to zero:
+
+```
+   12         =  0000 1100
+   flip (~12) =  1111 0011     = 243 unsigned   <- one short of the answer
+   + 1        =  1111 0100     = 244 unsigned   <- this is -12
+
+   cross-check by the definition:  256 - 12 = 244   <- same pattern, agrees
+
+   now add 12 and -12 with the plain unsigned adder:
+
+        0000 1100     (  12 )
+      + 1111 0100     ( -12 )
+      -----------
+      1 0000 0000     carry out of bit 7 is DISCARDED
+        0000 0000     = 0                            <- correct
+```
+
+**Why this works and what breaks without it.** The top bit doubles as a sign flag *for free*: any pattern
+`1xxx xxxx` is negative because `2^n - k` for `k <= 127` always lands above the halfway mark. So there is
+one adder, one comparator for zero, and no branch on sign anywhere in the datapath. The costs of the
+scheme show up at the edges: the range is lopsided (`-128 .. +127`, because `0` occupies a slot on the
+positive side), so `-(-128)` overflows back to `-128`, and `abs(Integer.MIN_VALUE)` is negative in Java.
+The older sign-magnitude and one's-complement schemes avoid the lopsidedness but pay for it with two
+distinct zeros (`+0` and `-0`) and a second adder path — which is exactly why no modern CPU uses them.
+
 ### 4.3 Bitwise Operation Truth Table
 
 ```
@@ -122,6 +209,140 @@ a | b | a AND b | a OR b | a XOR b | NOT a
 | Multiply by 2^k | `n << k` | Left shift |
 | Integer divide by 2^k | `n >> k` | Arithmetic right shift (signed) |
 
+Each row of that table is a one-liner with a mechanism hiding behind it. The four that carry the most
+interview weight are decoded below, every one of them walked in actual binary.
+
+#### Decoding `n & (n - 1)` — "clear the lowest set bit"
+
+**What the formula is telling you.** "Subtracting 1 destroys exactly one region of the number — the lowest
+1 and everything below it — so ANDing with the original keeps only the part that survived untouched."
+
+| Symbol | What it is |
+|--------|------------|
+| `&` | Bit survives only if it is 1 in *both* operands |
+| `n - 1` | Borrow propagation: lowest 1 becomes 0, all zeros below it become 1 |
+| `n & (n-1)` | n with its rightmost 1 turned off |
+| `== 0` | Nothing left after removing one bit, so there was only ever one bit |
+
+**Walk one example.** Take `n = 12`, then `n = 40`:
+
+```
+  n      = 12   ->  0000 1100
+  n - 1  = 11   ->  0000 1011      the lowest 1 (bit 2) went to 0, bits below flipped to 1
+  n & (n-1)     ->  0000 1000  = 8       <- clears the lowest set bit
+
+  n      = 40   ->  0010 1000
+  n - 1  = 39   ->  0010 0111
+  n & (n-1)     ->  0010 0000  = 32      <- again, exactly one bit removed
+
+  power-of-two test, n = 8:
+  n      =  8   ->  0000 1000
+  n - 1  =  7   ->  0000 0111      no bits in common at all
+  n & (n-1)     ->  0000 0000  = 0       <- so 8 has exactly one set bit
+```
+
+**Why this works and what breaks without it.** Borrowing is local: the subtraction cannot reach past the
+lowest 1, so every bit *above* it is byte-for-byte identical in `n` and `n-1` and survives the AND
+unchanged. That locality is what makes Kernighan's loop run in `k` iterations for `k` set bits rather
+than the full 32. What breaks without the `n > 0` guard on the power-of-two test: `n = 0` gives
+`0 & -1 = 0`, a false positive, and any negative `n` in Python's arbitrary-precision model has infinitely
+many leading 1s, so the test is meaningless there too.
+
+#### Decoding `n & (-n)` — "isolate the lowest set bit"
+
+**What this actually says.** "Negation flips everything *above* the lowest 1 and leaves the lowest 1
+itself standing, so the only column where `n` and `-n` still agree is that single bit."
+
+| Symbol | What it is |
+|--------|------------|
+| `-n` | `~n + 1` — the two's complement from §4.2 |
+| `n & (-n)` | The *value* of the rightmost set bit (4, 8, 16 …), not its index |
+| `i += i & (-i)` | The Fenwick-tree step to the next responsible node |
+
+**Walk one example.** `n = 40`, isolating its lowest set bit:
+
+```
+  n      = 40   ->  0010 1000
+  ~n           ->  1101 0111
+  ~n + 1 = -n  ->  1101 1000  = 216 unsigned, -40 signed
+
+  align them:      0010 1000   ( n )
+                   1101 1000   (-n )
+                   ---------
+        n & -n  =  0000 1000  = 8    <- the lowest set bit, as a value
+```
+
+Note the columns: everything to the *left* of bit 3 is inverted between the two rows (so the AND kills
+it), everything to the *right* is zero in both, and bit 3 alone is 1 in both. That is the whole proof, and
+it is why the answer is `8` rather than `3` — the trick returns the bit's weight, not its position. If you
+need the index, take `(n & -n).bit_length() - 1`.
+
+#### Decoding XOR self-cancellation — `a ^ a = 0`, `a ^ 0 = a`
+
+**In plain terms.** "XOR is a light switch: applying the same value twice returns you exactly
+where you started, so anything that appears an even number of times vanishes from the running total."
+
+| Symbol | What it is |
+|--------|------------|
+| `^` | Bit is 1 when the two inputs *differ*. Also "addition mod 2, no carry" |
+| `a ^ a = 0` | Self-inverse. Every column differs from itself in zero places |
+| `a ^ 0 = a` | Identity element. XORing with nothing changes nothing |
+| commutative | `a ^ b == b ^ a`, so you may reorder the stream freely |
+| associative | `(a^b)^c == a^(b^c)`, so you may pair up duplicates at will |
+
+**Walk one example.** The single-number problem on `[4, 1, 2, 1, 2]`, accumulating left to right:
+
+```
+  step   input            running result (binary)      value
+  ----   -----            -----------------------      -----
+  init                    0000 0000                      0
+  ^ 4    0000 0100        0000 0100                      4
+  ^ 1    0000 0001        0000 0101                      5
+  ^ 2    0000 0010        0000 0111                      7
+  ^ 1    0000 0001        0000 0110                      6     <- the earlier 1 is undone
+  ^ 2    0000 0010        0000 0100                      4     <- the earlier 2 is undone
+
+  because the operation is commutative and associative, this is the same as:
+      4 ^ (1 ^ 1) ^ (2 ^ 2)  =  4 ^ 0 ^ 0  =  4
+```
+
+**Why this works and what breaks without it.** Commutativity plus associativity is what lets you rewrite
+the arrival order into convenient pairs *after the fact* — the algorithm never needs to see the duplicates
+adjacent, which is why it works on an unsorted stream in one pass with a single accumulator. It breaks the
+moment an element appears three times (odd counts do not cancel) or two distinct elements are unpaired
+(you get their XOR, an ambiguous blend — see Q14 for the split-by-a-set-bit fix).
+
+#### Decoding shifts as multiply and divide
+
+**Read it like this.** "Shifting left by `k` slides every digit into a column worth `2^k` more,
+which is multiplication by `2^k` — the same reason writing a `0` after a decimal number multiplies it
+by 10."
+
+| Symbol | What it is |
+|--------|------------|
+| `n << k` | `n * 2^k`. Bits shifted off the top are lost (silent overflow) |
+| `n >> k` | Floor division by `2^k`. Bits shifted off the bottom are lost |
+| `>>` (arithmetic) | Refills from the left with the *sign bit*, preserving sign |
+| `>>>` (logical) | Java/JS only. Refills with `0`, so negatives become huge positives |
+
+**Walk one example.** `13 << 3`, then a negative right shift where the fill rule shows its teeth:
+
+```
+  n        = 13   ->  0000 1101
+  n << 3          ->  0110 1000  = 104        and 13 x 2^3 = 13 x 8 = 104   <- agrees
+
+  n        = -7   ->  1111 1001                (two's complement, 8-bit)
+  n >> 1  arithmetic -> 1111 1100  = -4        refilled with the sign bit 1
+  n >>> 1 logical    -> 0111 1100  = 124       refilled with 0 -- sign destroyed
+```
+
+**Why this works and what breaks without it.** Shifting is one wire-level operation, no adder involved,
+which is why compilers rewrite `x * 8` as `x << 3` automatically. Two traps: right shift is *floor*
+division, not truncation, so `-7 >> 1 == -4` while `-7 // 2` in C truncates toward zero to `-3`; and the
+shift amount is taken modulo the register width in Java and C, so `1 << 32` on a 32-bit `int` yields `1`,
+not `0` (see Pitfall 2). Never hand-write shift-for-divide in production code — the compiler already did
+it, and you have only removed the reader's ability to see the intent.
+
 ### 4.5 IEEE-754 Float Representation
 
 ```
@@ -139,6 +360,68 @@ a | b | a AND b | a OR b | a XOR b | NOT a
   0.1 in binary = 0.0001100110011... (repeating) — requires infinite bits.
   Stored as rounded approximation. 0.1 + 0.2 = 0.30000000000000004 in float64.
 ```
+
+**What it means.** "A float is scientific notation in binary: a sign, an exponent that says
+where to put the binary point, and a mantissa that holds the significant digits — so precision is measured
+in *significant bits*, never in decimal places."
+
+That framing explains the whole reputation of floats. A `float32` has 24 significant bits (23 stored plus
+one free), which is roughly 7 decimal digits, and it has that same relative precision whether the number is
+`0.001` or `10^30`. What it does *not* have is any notion of decimal exactness, because a base-2 mantissa
+can only express fractions whose denominator is a power of 2.
+
+| Symbol | What it is |
+|--------|------------|
+| `(-1)^s` | Sign switch. `s = 0` gives `+1`, `s = 1` gives `-1` |
+| `e` | 8 raw bits, `0..255`, stored *biased* so no separate sign bit is needed |
+| `e - 127` | The real exponent. Bias 127 for float32, 1023 for float64 |
+| `1.m` | The implicit leading 1 — never stored, since normalized values always start with 1 |
+| `2^(e-127)` | Where the binary point lands |
+| `e = 0` / `e = 255` | Reserved: subnormals and zero, versus Inf and NaN |
+
+**Walk one example.** Encode `-6.25` as a 32-bit float, field by field:
+
+```
+  step 1  write the magnitude in binary   6.25  = 110.01
+  step 2  normalize to 1.xxx form         110.01 = 1.1001 x 2^2
+  step 3  read off the three fields
+
+     sign      s = 1                  because the value is negative
+     exponent  e = 2 + 127 = 129   -> 1000 0001
+     mantissa  the bits after "1." -> 1001 000 0000 0000 0000 0000   (23 bits)
+
+  assembled:
+
+     s  exponent    mantissa
+     1  1000 0001   1001 0000 0000 0000 0000 000
+     -  ---------   -----------------------------
+     1     8 bits            23 bits              = 32 bits total
+
+  decode it back:  (-1)^1  x  1.1001b  x  2^(129-127)
+                =  -1      x  1.5625   x  4
+                =  -6.25                          <- round-trips exactly
+```
+
+It round-trips exactly because `6.25 = 110.01b` terminates in binary — its fractional part is `1/4`, a
+power of two. Now try `0.1`, whose fraction is `1/10`:
+
+```
+  0.1 in binary = 0.0001100110011001100110011001100...   (0011 repeats forever)
+
+  float64 keeps 53 significant bits, then rounds. What is actually stored is:
+      0.1000000000000000055511151231257827021181583404541015625
+
+  0.1 + 0.2  ->  0.30000000000000004   because two rounded inputs produce a
+                                       sum that misses the nearest float to 0.3
+```
+
+**Why the bias and the implicit 1 exist, and what breaks without them.** The implicit leading 1 buys a
+free bit of precision — every normalized mantissa starts with 1, so storing it would waste 1 of 24 bits.
+The bias lets you compare two positive floats by comparing their raw bit patterns as if they were
+integers, because a larger exponent is a larger unsigned field; a two's-complement exponent would have
+broken that ordering. The price is the reserved encodings at both ends (`e = 0` for zero and subnormals,
+`e = 255` for `Inf` and `NaN`) and the hard rule that follows from all of it: never compare computed
+floats with `==`, and never store money in one — use integer cents or `Decimal`.
 
 ---
 

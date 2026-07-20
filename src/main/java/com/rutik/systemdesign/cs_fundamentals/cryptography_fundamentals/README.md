@@ -77,6 +77,35 @@ General-purpose hash functions (SHA-256) execute in microseconds, allowing billi
 
 SHA-256 properties: deterministic, one-way, 2^128 resistance to birthday attacks (birthday bound), 256-bit output = 32 bytes = 64 hex characters.
 
+**The idea behind it.** "A hash with `n` output bits does not survive `2^n` guesses before a collision shows up — it survives only about `sqrt(2^n)` = `2^(n/2)`, because a collision only needs *any two* of your hashes to match, not a match against one specific target."
+
+That square root is why the table's "output size" column is really a "half this number" column. Preimage resistance (find an input hashing to *this* value) is the full `2^n`; collision resistance (find *any* two inputs that agree) is `2^(n/2)`, and collision resistance is what signatures and certificates depend on.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `n` | Hash output size in bits. 128 for MD5, 160 for SHA-1, 256 for SHA-256 |
+| `2^n` | Size of the output space — how many distinct digests exist |
+| `sqrt(2^n)` | The birthday bound. Equals `2^(n/2)` exactly, since `sqrt(2^n) = 2^(n/2)` |
+| "birthday" | Named for the party paradox: 23 people give a shared-birthday coin flip, not 183 |
+
+**Walk one example with real numbers.** Attacker hashes at 10^12 (one trillion) candidates per second:
+
+```
+  algorithm    n     2^n (preimage)   2^(n/2) (collision)   time at 1e12 hashes/sec
+  ---------------------------------------------------------------------------------
+  MD5         128    3.4e38           2^64  = 1.8e19        213 days
+  SHA-1       160    1.5e48           2^80  = 1.2e24        38,309 years
+  SHA-256     256    1.2e77           2^128 = 3.4e38        1.08e19 years
+
+  Why MD5 and SHA-1 are marked BROKEN above is worse than this table:
+    cryptanalysis beat the birthday bound outright.
+    SHAttered (2017) forged a SHA-1 collision in ~2^63.1 work, not 2^80
+      -> 2^63.1 / 1e12 = 114 days of brute force equivalent
+      -> a 2^80 -> 2^63.1 shortcut = 122,000x cheaper than the bound predicts
+```
+
+**Why the halving is the whole story.** SHA-256's 256-bit output does not buy 256 bits of collision safety — it buys 128, which is exactly why 128 is the industry's security floor and why nobody ships a 128-bit-output hash. Run the same arithmetic on MD5 and its 128-bit output collapses to a 64-bit collision bound: 213 days of commodity brute force even before any cryptanalytic shortcut. The lesson generalizes — whenever a scheme's security rests on "no two values collide," halve the bit count before judging it.
+
 ### 4.2 Symmetric Encryption
 
 **AES (Advanced Encryption Standard):**
@@ -84,6 +113,41 @@ SHA-256 properties: deterministic, one-way, 2^128 resistance to birthday attacks
 - Key sizes: 128-bit (16 bytes), 192-bit (24 bytes), 256-bit (32 bytes)
 - AES-256 = 14 rounds of substitution-permutation operations
 - Requires a mode of operation for data longer than one block
+
+**Stated plainly.** "A key of `n` bits has `2^n` possible values, and every extra bit *doubles* the search — so 'twice as long' is not twice as hard, it is astronomically harder."
+
+Key length is the one place in engineering where a small linear change buys an exponential result, and it is why the jump from DES's 56 bits to AES's 128 ended the brute-force conversation permanently rather than merely postponing it.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `n` | Key length in bits. DES 56, AES-128 is 128, AES-256 is 256 |
+| `2^n` | Key space — the number of keys an exhaustive search must try |
+| `2^n / 2` | Expected work: on average you find the key halfway through |
+| `R` | Keys tested per second by the attacker's hardware |
+| `2^n / (2R)` | Expected seconds to crack |
+
+**Walk one example with real numbers.** Attacker rate `R` = 10^12 keys/sec (a large GPU farm):
+
+```
+  DES, n = 56
+    key space   2^56  = 72,057,594,037,927,936        (7.2e16)
+    full sweep  7.2e16 / 1e12 = 72,058 sec            = 20.0 hours
+    expected    half that                             = 10.0 hours
+
+  AES, n = 128
+    key space   2^128 = 3.4e38
+    full sweep  3.4e38 / 1e12 = 3.4e26 sec            = 1.08e19 years
+    expected    half that                             = 5.39e18 years
+
+  Compare the two sweeps:
+    20 hours              vs    10,800,000,000,000,000,000 years
+    same machine, same rate, 72 more bits
+
+  Sanity anchor: the universe is ~1.38e10 years old.
+    1.08e19 / 1.38e10 = 781,000,000 universe lifetimes for ONE AES-128 key.
+```
+
+**Why 56 bits was doomed and 128 is not "just bigger."** DES's 56-bit key was already marginal when it shipped and fell to purpose-built hardware in 1998; at today's rates it is a coffee break. But no rate improvement rescues an attacker at 128 bits — buying a million times more hardware turns 1.08e19 years into 1.08e13 years, still ~780 times the age of the universe. This is why real attacks on AES never target the key space: they target nonce reuse, key reuse, side channels, or the human who typed the passphrase. When you see AES-256 recommended over AES-128, the motive is post-quantum margin (Grover's algorithm square-roots the search to `2^(n/2)`, turning 128 into 64), not any classical weakness.
 
 **Modes of Operation:**
 
@@ -106,6 +170,47 @@ SHA-256 properties: deterministic, one-way, 2^128 resistance to birthday attacks
 - RSA-2048 key = 2048 bits; RSA-4096 for long-term security
 - Slow: RSA-2048 decryption ~10 ms; used to encrypt small payloads (symmetric keys)
 - Hybrid encryption: use RSA to exchange an AES key, then AES for bulk data
+
+**What the formula is telling you.** "Raise the message to a public power and wrap it around a modulus; raise the result to the matching private power and it wraps all the way back to the original — because the two exponents were built to cancel each other modulo `phi(n)`."
+
+The `mod n` is what makes it one-way. Ordinary exponentiation is easy to invert by taking a root, but wrapping around a modulus scrambles the ordering, so recovering `m` from `m^e mod n` requires knowing `d`, and finding `d` requires factoring `n` back into `p` and `q`.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `p`, `q` | Two secret large primes. Real RSA-2048: ~1024 bits each |
+| `n` | `p*q`. Public. The wrap-around point for every operation |
+| `phi(n)` | `(p-1)*(q-1)`. Count of numbers below `n` sharing no factor with it. Secret |
+| `e` | Public exponent. Almost always 65537 — small, odd, fast to exponentiate |
+| `d` | Private exponent. The number with `e*d mod phi(n) = 1`. Secret |
+| `m^e mod n` | Encryption. Also signature *verification* |
+| `c^d mod n` | Decryption. Also signature *creation* |
+
+**Walk one example with real numbers.** Toy primes so every step fits on a line — message `m` = 65:
+
+```
+  KEYGEN
+    p = 61, q = 53
+    n    = 61 * 53         = 3233        <- public modulus
+    phi  = 60 * 52         = 3120        <- secret
+    e    = 17                            <- public, coprime to 3120
+    d    = 17^-1 mod 3120  = 2753        <- secret
+    check: 17 * 2753 = 46801 = 15 * 3120 + 1  -> 46801 mod 3120 = 1  OK
+
+  ENCRYPT   c = m^e mod n = 65^17 mod 3233
+    65^17 has 31 digits, so nobody computes it directly.
+    Square-and-multiply, reducing mod 3233 at every step:
+        65^1  =                        65
+        65^2  = 65*65     = 4225   ->  992
+        65^4  = 992*992             -> 1232
+        65^8  = 1232*1232           -> 1547
+        65^16 = 1547*1547           ->  789
+      17 = 16 + 1, so 65^17 = 65^16 * 65^1
+        789 * 65 = 51285 = 15*3233 + 2790   ->  c = 2790
+
+  DECRYPT   m = c^d mod n = 2790^2753 mod 3233 = 65        <- back to the start
+```
+
+**Why the modulus is the entire security argument.** Notice the encrypt step never got large: five squarings handled an exponent of 17, and the same trick handles 65537 in 16 squarings plus one multiply. Modular exponentiation is cheap in both directions — *if you know the exponent*. An attacker holds `n` = 3233, `e` = 17 and `c` = 2790, and to get `d` must recover `phi` = 3120, which requires splitting 3233 into 61 x 53. At this size that is trivial. At RSA-2048, `n` is a 617-digit number and no published algorithm factors it, which is also why RSA-1024 was retired: factoring records crept up on it. This is the same reason ECC wins on size — the elliptic-curve discrete log has no comparably good sub-exponential attack, so a 256-bit ECC key matches a 3072-bit RSA key.
 
 **Elliptic Curve Cryptography (ECC):**
 - Security based on elliptic curve discrete logarithm problem

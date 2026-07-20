@@ -83,6 +83,49 @@ Virtual address (48 bits used):
   [29:21] PMD index (9 bits) | [20:12] PTE index (9 bits) | [11:0] offset (12 bits)
 ```
 
+**The idea behind it.** "A virtual address is not one number — it is five numbers glued together: four table indices that say which shelf to look on at each of four levels, and one offset that says how far into the final 4 KB page to land."
+
+Every one of those bit-widths is forced by a physical constraint, not chosen for tidiness. Working out *why* each number is what it is makes the whole x86-64 paging design fall out in about six lines of arithmetic.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `[47:39]` | A 9-bit slice of the address. Inclusive on both ends, so `47 - 39 + 1 = 9` bits |
+| offset | Byte position inside the final page. Never goes through a table — it is copied straight through |
+| PGD/PUD/PMD/PTE | The four table levels, outermost to innermost |
+| `2^n` | How many distinct values `n` bits can name. 9 bits name 512 things |
+| PTE | One 8-byte row: a physical frame number plus flag bits (present, RW, NX, dirty, accessed) |
+
+**Walk one example with real numbers.** Derive the whole split from two given facts — 4 KB pages, 8-byte entries:
+
+```
+  Fact 1: page size = 4 KB = 4,096 B
+    offset must address every byte in a page
+    offset bits = log2(4,096)                     = 12 bits
+    Bits [11:0] are now spent. 48 - 12            = 36 bits left to index tables.
+
+  Fact 2: an entry is 8 B, and a table should be exactly one page
+    entries per table = 4,096 B / 8 B             = 512 entries
+    index bits per table = log2(512)              = 9 bits
+    levels needed = 36 bits / 9 bits per level    = 4 levels   <- hence "4-level"
+
+  Check: 9 + 9 + 9 + 9 + 12 = 48 bits.  Exactly the address width.
+
+  What each level spans (multiply by 512 going outward):
+    one PTE   covers                 4,096 B  = 4 KB
+    one PMD   covers    512 x 4 KB =     2 MB          <- also the huge-page size
+    one PUD   covers    512 x 2 MB =     1 GB          <- also the giant-page size
+    one PGD   covers    512 x 1 GB =   512 GB
+    full PGD  covers   512 x 512 GB =  256 TiB = 2^48  <- 128 TiB user + 128 TiB kernel
+
+  Why not one flat table?
+    entries = 2^36                 = 68,719,476,736
+    size    = 68,719,476,736 x 8 B = 549,755,813,888 B = 512 GiB   PER PROCESS
+    A 4-level tree instead allocates only the branches actually used:
+    a process touching one page needs 4 tables x 4 KB = 16 KB total.
+```
+
+**Why 2 MB and 1 GB are the huge-page sizes.** They are not arbitrary marketing numbers — they are precisely the spans of one PMD and one PUD entry. A huge page is nothing more than stopping the walk one level early and treating that entry's whole span as a single page, which is why only those two sizes exist and why no one offers a 512 KB page. The same identity explains the "512" in "one 2 MB TLB entry replaces 512 4 KB entries" later in Section 7: `2 MB / 4 KB = 512`, the branching factor of the tree.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -107,6 +150,38 @@ flowchart LR
     class cr3,pgd,pud,pmd,pte base
 ```
 *The MMU checks the TLB first (~1 cycle, under 1 ns on a hit); a miss walks all four page-table levels — CR3 -> PGD -> PUD -> PMD -> PTE — costing about 400 ns for the four DRAM reads before the physical address (frame x 4096 + offset) is known.*
+
+**Stated plainly.** "Translating an address is itself four memory reads, so the CPU caches translations; the TLB hit rate decides whether your program does one memory access per load or five."
+
+The critical framing is that the walk cost is *not* the data access — it is pure overhead paid before the real read even begins. That is why a modest-sounding TLB hit rate is so expensive: the penalty is 400 ns bolted onto a 100 ns operation.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| TLB | Translation Lookaside Buffer. A tiny cache of virtual-page -> physical-frame answers |
+| `h` | TLB hit rate. Fraction of translations already cached |
+| `1 - h` | Miss rate. The fraction that must pay for a full page-table walk |
+| EAT | Effective access time. What one memory reference costs on average, translation included |
+| walk cost | ~400 ns = 4 levels x ~100 ns, one DRAM read per level |
+
+**Walk one example with real numbers.** TLB lookup 1 ns, actual data read 100 ns, walk penalty 400 ns on a miss:
+
+```
+  EAT = TLB_lookup + data_access + (1 - h) x walk_cost
+      = 1 ns       + 100 ns      + (1 - h) x 400 ns
+
+  h        (1-h)    walk term          EAT        vs perfect TLB (101 ns)
+  -------  -------  ----------------   ---------  ----------------------
+  1.00     0.00     0.00 x 400 =   0    101.0 ns   1.000x   (the floor)
+  0.99     0.01     0.01 x 400 =   4    105.0 ns   1.040x
+  0.95     0.05     0.05 x 400 =  20    121.0 ns   1.198x
+  0.90     0.10     0.10 x 400 =  40    141.0 ns   1.396x
+  0.70     0.30     0.30 x 400 = 120    221.0 ns   2.188x   <- TLB thrashing
+
+  Read the last row carefully: losing 30 points of hit rate did not cost
+  30% — it MORE THAN DOUBLED every memory access in the program.
+```
+
+**Why huge pages are the standard fix, in one line of arithmetic.** The TLB has a fixed *entry count*, so its coverage — its "reach" — is entries x page size. A 64-entry L1 dTLB reaches `64 x 4 KB = 256 KB`; the same 64 entries with 2 MB pages reach `64 x 2 MB = 128 MB`, a 512x increase for zero extra hardware. A database whose working set is 6 GiB will thrash a 4 KB TLB no matter how the code is written, because the whole TLB cannot describe even a thousandth of what the process is touching. Switching to 2 MB pages moves `h` back toward 0.99 and, per the table above, pulls EAT from the 221 ns row toward the 105 ns row. This is the mechanism behind the huge-page entry in Section 7 and the "TLB coverage" column in the page-size tradeoff table in Section 8.
 
 ### Page Fault Handling
 
@@ -397,6 +472,42 @@ quadrantChart
 | 4 KB | 4 KB per entry | Low | Low per fault | Default everywhere |
 | 2 MB | 2 MB per entry | High (last 2MB partially used) | Higher per fault | Databases, JVM heap |
 | 1 GB | 1 GB per entry | Very high | Very high per fault | Large in-memory databases |
+
+### Decoding "Internal Fragmentation" — Putting a Percentage on It
+
+**What the formula is telling you.** "Memory is handed out in whole pages only, so every allocation rounds up — and the wasted tail averages half a page, whatever that page happens to be."
+
+The "Low / High / Very high" column above is doing a lot of unquantified work. Turning it into bytes shows the cost is not proportional to your allocation at all; it is proportional to the page size and to how *many* separate mappings you have.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| internal fragmentation | Bytes inside an allocated page that nobody uses. Paid for, unreachable |
+| external fragmentation | Free bytes *between* allocations, too scattered to use. Paging has none |
+| `ceil(a / p)` | Pages needed for `a` bytes at page size `p`. Round up, never down |
+| waste | `ceil(a/p) x p - a`. The unused tail of the final page |
+| `p / 2` | Expected waste per mapping, if allocation sizes land uniformly within the last page |
+
+**Walk one example with real numbers.** One 10,000-byte allocation, at each page size:
+
+```
+  4 KB pages
+    pages  = ceil(10,000 / 4,096)          = 3 pages
+    used   = 3 x 4,096                     = 12,288 B
+    waste  = 12,288 - 10,000               =  2,288 B
+    ratio  = 2,288 / 12,288                =  18.62% of the memory charged to you
+
+  2 MB pages
+    pages  = ceil(10,000 / 2,097,152)      = 1 page
+    used   = 1 x 2,097,152                 = 2,097,152 B
+    waste  = 2,097,152 - 10,000            = 2,087,152 B
+    ratio  = 2,087,152 / 2,097,152         =  99.52%   <- 200x the payload
+
+  Now scale it: 1,000 separate small mappings, expected waste p/2 each
+    4 KB:  1,000 x 2,048 B      =     2,048,000 B =  1.95 MiB   (ignorable)
+    2 MB:  1,000 x 1,048,576 B  = 1,048,576,000 B =  0.98 GiB   (a whole GB, gone)
+```
+
+**Why this does not veto huge pages.** The waste scales with the *number of mappings*, not with total memory, so the decision hinges entirely on allocation shape. A PostgreSQL shared-buffer pool or a JVM heap is a handful of enormous contiguous mappings — one 8 GiB region wastes at most 2 MiB of tail, a rounding error, while collecting the 512x TLB-reach win from the previous section. A process with thousands of small `mmap`s inverts that arithmetic completely and pays about a gigabyte for nothing. That split is exactly why Linux enables Transparent Huge Pages for large anonymous regions but never promotes small ones, and why the "Used in" column above lists databases and JVM heaps rather than "everything".
 
 ---
 

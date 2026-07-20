@@ -640,6 +640,35 @@ long elapsed = System.nanoTime() - start;
 // heap size, and machine load.
 ```
 
+**The idea behind it.** "A method's speed is a step function of a counter, not a property of the code — the same `compute(i)` runs at three different speeds depending only on how many times it has already been called."
+
+The thresholds are the whole mechanism. Nothing about the method changes; a counter crosses a line and the runtime swaps in faster machine code underneath a running program.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| Tier 0 | The interpreter. Walks bytecode one op at a time, counting as it goes |
+| C1 | Fast compiler, weak optimization. Classic default threshold: 1,500 invocations |
+| C2 | Slow compiler, aggressive speculation. Classic default threshold: 10,000 invocations |
+| back-edge counter | Counts loop iterations, not calls — the input OSR uses to promote a hot loop mid-method |
+| OSR | On-stack replacement: swap an executing interpreted frame for a compiled one |
+
+**Walk one example with real numbers.** The 1,000,000-iteration loop above, against the classic thresholds:
+
+```
+  iterations 1        - 1,500       interpreted (Tier 0)       = 0.15% of the run
+  iterations 1,501    - 10,000      C1-compiled                = 0.85% of the run
+  iterations 10,001   - 1,000,000   C2-compiled                = 99.0% of the run
+
+  the timer spans all three, so `elapsed` measures a weighted blend:
+    99% of iterations at C2 speed, but the slow 1% sits at the FRONT
+
+  the FIX's split:  200,000 warmup iterations (discarded)
+                    1,000,000 measured iterations, all C2 by then
+                    warmup is 200,000 / 1,200,000 = 17% of total work, timed at zero
+```
+
+**Why the blend is worse than it looks.** With 1% of iterations interpreted the error seems negligible — but interpreted execution is commonly 10-100x slower than C2 output, so that 1% of *iterations* can be a double-digit percentage of *elapsed time*, and the exact fraction moves with JVM version, heap size, and machine load. That is the real defect: the benchmark is not merely biased, it is **unstable** — rerun it on a different JVM and the number moves for reasons that have nothing to do with the code. Warming up first does not make the measurement faster, it makes it *reproducible*.
+
 The full fix, and the reason JMH exists at all, is in section 10's pitfalls below.
 
 GraalVM Native Image takes the opposite bet entirely: instead of a runtime JIT, a build-time **points-to analysis** starting from the program's declared entry points (`main`, or a framework's registered handlers) computes the entire reachable call graph under a **closed-world assumption**, and compiles everything it can prove is reachable straight to native code, packaged with a minimal embedded runtime (historically called SubstrateVM) that ships its own simple garbage collector but no JIT at all. The payoff is a cold start commonly in the 10-50 ms range, against a typical JVM cold-start-to-first-response commonly reported in the hundreds of milliseconds to low seconds for a framework-heavy app, depending on classpath size — at the cost of a multi-minute native-image build and a closed-world assumption that anything the static analysis cannot see (reflection, dynamic proxies, classes loaded by name from a config file) must be explicitly declared, or it silently is not there at run time.
@@ -1040,6 +1069,33 @@ CMD ["./app-native"]
 | JVM + CDS + TieredStopAtLevel=1 | ~400 ms | small — generate one CDS archive | Lower than full C2, still strong |
 | GraalVM Native Image | ~75 ms | ~5-10 min native-image build, reflection config required | Good, below a fully warmed C2 |
 | Go rewrite | ~58 ms | full rewrite — the largest cost by far | Good, simple GC |
+
+**Stated plainly.** "Subtract the ~50 ms of actual request handling from every row and what is left is pure translation cost — that remainder is the only thing the four strategies disagree about."
+
+Every row does the same ~50 ms of payments validation. Reading the raw latencies as "the JVM is 16x slower than Go" is the mistake; reading the *remainders* shows the JVM is paying a one-time startup tax that Go never charges.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| P99 | The 99th-percentile latency — 1 request in 100 is slower than this |
+| scale-to-zero | The platform kills idle containers, so the next request pays full startup |
+| CDS | Class Data Sharing — a pre-parsed, pre-verified class archive reused across starts |
+| TieredStopAtLevel=1 | Cap the JIT at C1: never queue C2 work this process will not live to use |
+
+**Walk one example with real numbers.** Splitting each row into handling vs startup, against the 300 ms budget:
+
+```
+                            total     handling    startup    vs 300 ms budget
+  JVM default              950 ms      50 ms      900 ms     over by 650 ms
+  JVM + CDS + C1-only      400 ms      50 ms      350 ms     over by 100 ms
+  GraalVM Native Image      75 ms      50 ms       25 ms     under by 225 ms
+  Go rewrite                58 ms      50 ms        8 ms     under by 242 ms
+
+  startup reduction, JVM default -> tuned:      900 -> 350   = 61% removed
+  startup reduction, JVM default -> native:     900 ->  25   = 97% removed
+  end-to-end speedup:  950 / 75 = 12.7x, but the handling floor caps it at 950/50 = 19x
+```
+
+**Why the 50 ms floor is the number that ends the argument.** No execution strategy can go below it — it is the actual work. So the *most* any rewrite could ever buy is `950 - 50 = 900 ms`, and GraalVM already captures `875` of those `900` without touching the source. That is what makes FIX option B beat the Go rewrite on cost-effectiveness: the Go rewrite spends a full reimplementation to claw back the last `75 - 58 = 17 ms`, roughly 2% of the original latency, on a budget that was already met with 225 ms to spare.
 
 **Discussion questions:**
 

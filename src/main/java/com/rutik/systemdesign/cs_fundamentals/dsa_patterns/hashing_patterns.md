@@ -206,6 +206,84 @@ result = [["eat","tea","ate"], ["tan","nat"], ["bat"]]
 
 All variants trade O(n) (or O(n*k)) space for collapsing an O(n^2) (or worse) brute force into linear time — the canonical space-time tradeoff.
 
+**In plain terms.** "O(1) average" means "you compute one hash,
+jump straight to one bucket, and find roughly one item waiting there — and
+that stays true whether the table holds a thousand keys or a billion."
+
+That framing matters because the honest version of the claim has an escape
+hatch in it: *roughly one item waiting there*. Everything about hash-table
+performance — resizing, load factors, treeification, hash-flooding attacks —
+is about defending that word "roughly."
+
+| Symbol | What it is |
+|--------|------------|
+| `m` | Number of buckets (slots) in the table. Java calls this the capacity |
+| `n` | Number of keys currently stored |
+| `α = n / m` | How full the table is. `0.75` means 3 keys for every 4 buckets |
+| `hash(key)` | Scrambles the key into a wide integer. Cost depends on the KEY's size, not the table's |
+| `hash & (m - 1)` | Folds that integer down to a bucket index. One arithmetic op, for any `m` |
+| O(1) *amortized* | Individual inserts are O(1) except the rare resize, which is O(n); spread out, still O(1) each |
+
+**Walk one example.** Same load factor, two wildly different table sizes:
+
+```
+  table          buckets m    keys n      alpha = n/m   avg items per bucket
+  ------------   ----------   ---------   -----------   --------------------
+  small          1,024            750         0.73              0.73
+  large          1,048,576    768,000         0.73              0.73
+
+  lookup cost, both tables:
+    1. hash(key)          -> one pass over the KEY (a 10-char string: 10 steps)
+    2. & (m - 1)          -> ONE machine instruction, identical for both tables
+    3. read bucket        -> ONE memory access
+    4. compare candidates -> ~0.73 comparisons on average
+                             ------------------------------
+                             same total work, 1000x more data
+```
+
+**Why size does not matter.** Nothing in that four-step list mentions `m`
+except step 2, and step 2 is a single AND instruction whose cost does not grow
+with the operand's value. Contrast a sorted array's binary search: it must
+*halve* `m` repeatedly, so 1,024 slots costs 10 probes and 1,048,576 costs 20.
+The hash table never searches for the bucket — it computes the bucket. That
+computation is what buys constant time, and it is why growing the table costs
+memory but not lookup steps.
+
+**Walk what a collision actually costs.** Insert two keys that hash to bucket
+7. With chaining, bucket 7 stops being a single value and becomes a list:
+
+```
+  no collision       bucket[7] -> ("cat", 1)
+                     lookup "cat": 1 comparison
+
+  one collision      bucket[7] -> ("cat", 1) -> ("dog", 2)
+                     lookup "dog": 2 comparisons (miss "cat" first)
+
+  degenerate case    bucket[7] -> k1 -> k2 -> k3 -> ... -> k750
+                     lookup k750: 750 comparisons     <- this is the O(n)
+```
+
+**Quantifying the degeneration.** If an adversary (or a badly written
+`hashCode`) forces all `n` keys into one bucket, the table has silently become
+an unsorted linked list, and every lookup is O(n):
+
+```
+  n keys    healthy (alpha 0.73)   all-collide, chained   all-collide, treeified
+  -------   --------------------   --------------------   ----------------------
+  750       ~1 comparison          750 comparisons        ~10  (log2 750 = 9.55)
+  768,000   ~1 comparison          768,000 comparisons    ~20  (log2 768000 = 19.55)
+```
+
+That third column is the real-world defense: Java 8+ converts a bucket to a
+red-black tree once it holds 8 or more entries, capping the worst case at
+O(log n) instead of O(n). The other defense is the resize itself — Java grows
+the table (doubling `m`, rehashing everything) the moment `α` crosses 0.75,
+i.e. at 12 entries in the default 16-bucket table. Python's `dict` uses open
+addressing and resizes around `α = 0.66`. Both are the same bargain: spend
+occasional O(n) rehashing work to keep the average bucket occupancy near 1,
+because that occupancy is the only thing standing between "O(1) average" and
+"O(n) worst case."
+
 ---
 
 ## 6. Variations & Sub-patterns

@@ -213,6 +213,44 @@ Each "swap" places at least one element into its correct home position permanent
 
 Cyclic sort is the *only* O(n) time **and** O(1) space approach for this family of problems (other than the fast/slow-pointer trick for the single-duplicate case, which trades mutation-avoidance for being limited to "exactly one duplicate, no missing").
 
+### Decoding the complexity claim
+
+**The idea behind it.** "Oh of n means: even though a `while` loop sits inside the `for` loop, the algorithm can only ever perform about `n` swaps in total — every swap drops one value into its permanent home, and there are only `n` homes to fill."
+
+That framing matters because the swap budget is a property of the *array*, not of the loop structure. The inner `while` is not "up to `n` iterations per outer step"; it is drawing from one shared pool of at most `n` placements that the whole run must share.
+
+| Symbol | What it is |
+|---|---|
+| `O(...)` | An upper bound on how fast the work grows as the input grows |
+| `n` | The input size — the number of elements, and also the size of the value range |
+| `O(n)` | Work proportional to `n` — what the nested loops actually cost |
+| `O(n^2)` | What the nesting *looks* like it costs, and does not |
+| `O(1)` | Constant extra memory — the swaps happen in the input array itself |
+| `home` | Where a value belongs. For values `1..n` that is `nums[v] -> index v-1` |
+
+**Walk one example.** `nums = [3, 1, 5, 4, 2]`, a permutation of `1..5`, so `n = 5`. All the swapping happens at `i = 0`, and then the rest of the array is already correct:
+
+```
+  nums = [3, 1, 5, 4, 2]        n = 5, values are a permutation of 1..5
+
+  i   nums before      nums[i]  home  occupant  action           nums after
+  --  ---------------  -------  ----  --------  ---------------  ---------------
+  0   [3, 1, 5, 4, 2]     3       2       5     swap  (#1)       [5, 1, 3, 4, 2]
+  0   [5, 1, 3, 4, 2]     5       4       2     swap  (#2)       [2, 1, 3, 4, 5]
+  0   [2, 1, 3, 4, 5]     2       1       1     swap  (#3)       [1, 2, 3, 4, 5]
+  0   [1, 2, 3, 4, 5]     1       0       1     in place, i++    [1, 2, 3, 4, 5]
+  1   [1, 2, 3, 4, 5]     2       1       2     in place, i++    unchanged
+  2   [1, 2, 3, 4, 5]     3       2       3     in place, i++    unchanged
+  3   [1, 2, 3, 4, 5]     4       3       4     in place, i++    unchanged
+  4   [1, 2, 3, 4, 5]     5       4       5     in place, i++    unchanged
+
+  swaps: 3    outer steps: 5    total home-checks: 8    ceiling 2n - 1 = 9
+```
+
+Follow swap #1: the `3` it moved to index 2 is now home, and no later step ever touches index 2 again. Same for the `5` after swap #2 and the `2` after swap #3. Three swaps, three permanent placements.
+
+**Why this is O(n) and not O(n^2).** Each swap places at least one value at its final index, and a value at its final index is never moved again — so the run can perform at most `n - 1` swaps *in total*, across all outer iterations combined. The inner `while` executes once per swap, plus exactly one final failing check per outer index, giving at most `(n - 1) + n = 2n - 1` units of work. The trace above spent 8, under its ceiling of 9. At `n = 100,000` that is fewer than 200,000 operations, against `10^10` for a genuinely quadratic scan — **50,000 times** the difference. The tell that an interviewer is listening for is the phrase "each swap is permanent," not the loop shape.
+
 ---
 
 ## 6. Variations & Sub-patterns

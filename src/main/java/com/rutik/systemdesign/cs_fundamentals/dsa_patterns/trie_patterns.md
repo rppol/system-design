@@ -328,6 +328,132 @@ With a shared trie, **one** DFS pass per starting cell explores all words
 simultaneously, and a dead end in the trie (no matching child) prunes that
 branch for *every* word sharing that prefix at once.
 
+### Decoding `O(L)` — lookup independent of dictionary size
+
+**What it means.** "Looking a word up costs one step per
+*letter in the word you are looking up*. It does not matter whether the trie
+holds ten words or ten million — the cost is the length of your query and
+nothing else."
+
+That independence is the headline. Every other container's lookup cost mentions
+the collection size somewhere: a sorted array is `O(log N)` comparisons, a
+balanced BST the same, a linked scan `O(N)`. A trie's is `O(L)` with no `N`
+anywhere in it, because the query string itself dictates the path taken.
+
+| Symbol | What it is |
+|---|---|
+| `L` | Length of the word or prefix being looked up |
+| `N` | Number of words stored in the trie |
+| `O(L)` | Trie search or insert cost — one child-map hop per character |
+| `O(1)` auxiliary | Search allocates nothing; it just walks existing pointers |
+| `26^d` | Wildcard branching factor: `d` dots, each trying up to 26 children |
+
+**Walk one example.** Insert `cat`, `car`, `card`, `dog`, then search. `*`
+marks a node where `is_end` is true.
+
+```
+  insert order   nodes created            running node count (excluding root)
+  ------------   ----------------------   -----------------------------------
+  "cat"          c, ca, cat*                              3
+  "car"          car*        (c, ca reused)               4
+  "card"         card*       (c, ca, car reused)          5
+  "dog"          d, do, dog*                              8
+
+  resulting trie:
+
+                    (root)
+                   /      \
+                  c        d
+                  |        |
+                  a        o
+                 / \       |
+                t*  r*     g*
+                    |
+                    d*
+
+  4 words, 13 total characters, but only 8 nodes -- prefix sharing
+  saved 13 - 8 = 5 nodes (38 percent)
+
+  search("card"):  root -> c -> a -> r -> d, then check is_end   = 4 hops, TRUE
+  search("ca"):    root -> c -> a,           then check is_end   = 2 hops, FALSE
+  starts_with("ca"): same 2 hops, no is_end check                = 2 hops, TRUE
+  search("cab"):   root -> c -> a, no child 'b'  -> fail at hop 3
+```
+
+`search("card")` cost 4 hops. Add a million more words to this trie and
+`search("card")` still costs 4 hops — it walks the same four pointers. That is
+`O(L)` with no `N` in it.
+
+**Why this complexity.** Each character consumes exactly one dictionary lookup
+in the current node's `children` map (`O(1)` average) and one pointer follow.
+There are `L` characters, so `L` constant-cost steps. Insert is the same walk
+with node creation on misses, so also `O(L)`, allocating at most `L` new nodes.
+The wildcard variant is the exception that proves the rule: a `.` cannot pick a
+single child, so it must try all of them, and `d` dots multiply into `26^d`
+paths — the only time dictionary breadth re-enters the bound.
+
+### Decoding trie vs. hash set — what you pay and what you buy
+
+**Put simply.** "A hash set matches a trie on exact lookup and
+beats it badly on memory. You pay that memory premium for exactly one thing:
+prefix queries, which a hash set fundamentally cannot answer without scanning
+every key it holds."
+
+Note that a hash set's `O(1)` lookup is not actually free of `L` either —
+hashing the string must read all `L` of its characters. So on exact-match
+lookup the two are the same order of work. Memory and prefix capability are the
+real axes.
+
+**Walk one example.** A realistic English vocabulary: `N = 100,000` words,
+average length 8 characters (`800,000` characters total).
+
+```
+  structure   sizing arithmetic                                  memory
+  ---------   ----------------------------------------------     ---------
+  hash set    strings: 100,000 x (49 B overhead + 8 chars)
+                      = 100,000 x 57 B          = 5,700,000 B
+              table:  needs > 100,000 / 0.6 = 166,667 slots,
+                      rounds to 262,144 slots x 8 B
+                                                = 2,097,152 B
+              total                             = 7,797,152 B     ~7.8 MB
+
+  trie        upper bound on nodes: 800,000 (zero prefix sharing)
+              real English sharing lands near   ~250,000 nodes
+              per node: 26 child pointers x 8 B = 208 B
+              total: 250,000 x 208 B            = 52,000,000 B    ~52 MB
+
+  ratio = 52,000,000 / 7,797,152 = 6.67   ->  the trie costs about 6.7x more
+```
+
+(A dict-based node instead of a fixed 26-slot array shrinks the trie
+considerably when most nodes have one or two children, at the cost of a slower
+constant factor per hop. That is the usual production tradeoff.)
+
+**What the 6.7x buys.** The prefix query, which the hash set cannot do at all:
+
+```
+  query: "every word starting with 'pre'"   (suppose 500 such words)
+
+  hash set   no key ordering, no shared structure -> must test all keys
+             100,000 string prefix comparisons             = 100,000 ops
+
+  trie       walk r -> p -> r -> e                         =       3 ops
+             then collect the subtree, which contains
+             exactly the 500 matches and nothing else      =     500 ops
+             total                                         =     503 ops
+
+  ratio = 100,000 / 503 = 198.8   ->  about 199x fewer operations
+```
+
+**Why the gap is structural, not tunable.** Hashing deliberately destroys
+locality — that is what makes it uniform. `"pre"`, `"prefix"`, and `"prevent"`
+land in unrelated buckets by design, so there is no bucket, no range, no pointer
+to follow that groups them. A trie instead makes the prefix *be* the path, so
+every word sharing a prefix necessarily sits in one subtree. If a problem
+mentions prefixes, autocomplete, or wildcards, that structural property is the
+reason to reach for a trie; if it only asks "is this word present", use the hash
+set and keep the 44 MB.
+
 ---
 
 ## 6. Variations & Sub-patterns

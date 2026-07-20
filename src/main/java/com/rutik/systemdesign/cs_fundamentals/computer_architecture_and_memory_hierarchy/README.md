@@ -158,6 +158,40 @@ flowchart TD
 
 Each hop down trades latency for capacity: registers answer in under a cycle, but a full miss cascading to DRAM costs ~300 cycles on a 3 GHz core, and a miss all the way to disk is roughly five orders of magnitude slower than an L1 hit.
 
+**The idea behind it.** "Every step down the ladder is not a little slower — it is a different unit of time entirely, and your intuition for 'a bit slower' is wrong by a factor of ten million."
+
+Nanoseconds are unimaginable, so nobody reasons about them correctly. The fix is to rescale the whole ladder by one constant factor until the fastest rung lands on a duration a human actually feels, then read off the rest.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `ns` | 10^-9 s. One clock tick on a 1 GHz core; a 3 GHz core ticks 3x per ns |
+| `µs` | 10^-6 s = 1,000 ns |
+| `ms` | 10^-3 s = 1,000,000 ns |
+| scale factor | The one number you multiply every rung by. Chosen so 1 ns becomes 1 second |
+| "human-scale wait" | The rescaled duration, expressed in units a person has felt |
+
+**Walk one example with real numbers.** Multiply every real latency by 1e9 — i.e. read every nanosecond as one second — and nothing else changes:
+
+```
+  Rung          Real latency      x 1e9  ->  seconds       Human-scale wait
+  ------------  ---------------   ------------------       -------------------------
+  register            0.3 ns          0.3 s                a blink, half-finished
+  L1 cache            1   ns          1 s                  one heartbeat
+  L2 cache           10   ns         10 s                  count to ten
+  L3 cache           40   ns         40 s                  walk to the coffee machine
+  DRAM              100   ns        100 s                  1 min 40 s
+  NVMe SSD          100   us    100,000 s                  1.16 days
+  HDD / network      10   ms  10,000,000 s                 115.7 days
+
+  The two conversions that do the work:
+    100 us  = 100 x 1,000 ns     =    100,000 ns  ->    100,000 s
+              100,000 s / 86,400 s per day        =      1.157 days
+     10 ms  = 10 x 1,000,000 ns  = 10,000,000 ns  -> 10,000,000 s
+           10,000,000 s / 86,400 s per day        =    115.741 days
+```
+
+**Why the rescale changes decisions, not just feelings.** At human scale the question "should I add a cache in front of this disk read?" answers itself: you are choosing between a heartbeat and four months. It also explains why the *middle* of the ladder is where engineering effort pays off — L1 to DRAM is 1 second to 100 seconds, a 100x gap that data layout can actually move, whereas the DRAM-to-disk gap is so large that no amount of cache-line tuning matters once you have touched the disk at all. This is the same reasoning behind the "I/O-bound code" bullet in Section 9: shaving 10-100 ns off code that already waits 10 ms is shaving a heartbeat off four months.
+
 ### CPU Pipeline (4-stage simplified)
 
 ```
@@ -301,6 +335,44 @@ if __name__ == "__main__":
 ```
 
 Row-major access: each successive read hits a value in the same 64-byte cache line — 8 consecutive `int64` values fit in one cache line, so every 8th access is a cache miss. Column-major: each successive read jumps 4096 columns × 8 bytes = 32 KB forward in memory, almost certainly a cache miss each time. On a modern laptop with a 4 MB L3 cache and a 4096×4096 int64 matrix (128 MB), column-major is typically 5–10× slower.
+
+**Stated plainly.** "You never pay for one byte — you pay for 64. Spatial locality is just the question of how many of those 64 bytes you actually use before the line is thrown away."
+
+The two traversals execute the *identical* 16.7 million reads, in the identical arithmetic order, over the identical bytes. The only thing that differs is the address stride, and the stride alone decides whether each fetched line serves 8 reads or 1.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| cache line | The 64-byte block the hardware always moves. The atom of memory traffic |
+| stride | Address distance between consecutive accesses, in bytes |
+| `line / element_size` | How many values ride along free on one fetch. Here `64 / 8 = 8` |
+| miss rate | Fraction of accesses that must go fetch a line. Sequential floor is `1 / elements_per_line` |
+| `int64` | 8-byte integer. Element size, and the only reason the number 8 appears |
+
+**Walk one example with real numbers.** The same 4096x4096 `int64` matrix, both traversals, DRAM miss penalty 100 ns and L1 hit 1 ns:
+
+```
+  Matrix: 4096 x 4096 int64
+    elements    = 4096 x 4096          = 16,777,216
+    bytes       = 16,777,216 x 8       = 134,217,728 B = 128 MiB   (>> 4 MB L3)
+    per line    = 64 B / 8 B           = 8 elements ride along free
+
+  ROW-MAJOR   stride = 8 B  (next element is the next address)
+    one fetched line serves 8 reads, so 1 read in 8 misses
+    misses   = 16,777,216 / 8          =  2,097,152
+    miss rate                          =  0.125
+    AMAT     = 1 + 0.125 x 100         =  13.5 ns per access
+
+  COL-MAJOR   stride = 4096 x 8 B      =  32,768 B = 32 KB
+    32 KB overshoots the 64 B line, so every read fetches a fresh line
+    the other 7 elements of each line are evicted long before reuse
+    misses   = 16,777,216              = 16,777,216      (8x more)
+    miss rate                          =  1.0
+    AMAT     = 1 + 1.0 x 100           = 101.0 ns per access
+
+  Modelled slowdown = 101.0 / 13.5     =  7.5x   <- matches the 5-10x measured
+```
+
+**Why 8, and why it is the ceiling.** The `1/8` sequential miss rate is not tunable — it falls straight out of `64 / 8`. Switch to `int32` and 16 elements ride per line, dropping the floor to a 0.0625 miss rate; switch to a 64-byte struct and you are back to one element per line, which is column-major performance with row-major code. That is the whole argument for struct-of-arrays over array-of-structs in Section 9: SoA shrinks the effective element size so more useful values fit in the line you are already paying for. The prefetcher then compounds the win, because a constant small stride is a pattern it can predict and a 32 KB jump is not.
 
 ### Simulating Branch Prediction Impact
 
@@ -635,6 +707,59 @@ Modern CPUs include a **hardware prefetcher** that monitors access patterns and 
 | Strided (stride = cache line) | ~99% | ~1,000 | ~10 GB/s effective |
 | Strided (stride = page = 4 KB) | ~60% | ~400,000 | ~500 MB/s effective |
 | Random (linked list traversal) | ~5% | ~950,000 | ~100–200 MB/s effective |
+
+### Decoding the Hit Rates — Average Memory Access Time (AMAT)
+
+The hit rates above only become actionable once they are turned into a time. The standard formula does that:
+
+```
+AMAT = hit_time + miss_rate x miss_penalty
+```
+
+**What the formula is telling you.** "Every access pays the fast-path cost no matter what; on top of that you pay the slow-path cost, but only on the fraction of accesses that actually miss."
+
+The shape matters more than the numbers: it is a fixed toll plus a probabilistic surcharge. That is why a hit rate dropping from 99% to 95% — which sounds like a rounding error — is not a 4% regression but a 5x one.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `AMAT` | Average memory access time. What one memory read costs, averaged over hits and misses |
+| `hit_time` | Cost of the fast path, paid on every access. L1 is ~1 ns |
+| `miss_rate` | `1 - hit_rate`. The probability you pay the surcharge |
+| `miss_penalty` | *Extra* time when the fast path fails — the next level's cost, not the total |
+| `x` | Ordinary multiplication. It is an expected value: probability times cost |
+
+**Walk one example with real numbers.** L1 hit time 1 ns, miss penalty 100 ns (straight to DRAM), using the exact hit rates from the table above:
+
+```
+  Access pattern         hit    miss   AMAT = 1 + miss x 100        cycles @ 3 GHz
+  ---------------------  -----  -----  ---------------------------  --------------
+  sequential             0.99   0.01   1 + 0.01 x 100 =   2.00 ns          6
+  strided, 4 KB page     0.60   0.40   1 + 0.40 x 100 =  41.00 ns        123
+  random (linked list)   0.05   0.95   1 + 0.95 x 100 =  96.00 ns        288
+
+  random / sequential = 96.00 / 2.00 = 48x
+
+  Same code. Same instruction count. Same number of reads.
+  48x apart because of where the bytes sit.
+```
+
+Real hardware has three cache levels, and the formula simply nests — each level's "miss penalty" is the next level's whole AMAT:
+
+```
+  Given: L1 1 ns  (misses 5% of accesses)
+         L2 10 ns (misses 40% of the accesses that reach it)
+         L3 40 ns (misses 25% of the accesses that reach it)
+         DRAM 100 ns
+
+  innermost:  40  + 0.25 x 100  = 65.0 ns   <- cost of reaching L3
+  then:       10  + 0.40 x 65.0 = 36.0 ns   <- cost of reaching L2
+  finally:     1  + 0.05 x 36.0 =  2.8 ns   <- AMAT the core actually sees
+
+  Note the local miss rates: 40% of L2 accesses miss, but that is 0.05 x 0.40
+  = 2% of ALL accesses. Local vs global miss rate is the classic exam trap.
+```
+
+**Why the miss penalty dominates.** Because `miss_penalty` is roughly 100x `hit_time`, the surcharge term outruns the toll as soon as the miss rate clears about 1%. Chasing hit time is therefore almost never the lever — hardware already picked it — while miss rate is entirely under your control through data layout. Concretely: at a 0.99 hit rate the miss term contributes 1.00 of the 2.00 ns, already half the total; at 0.95 it contributes 5.00 of 6.00 ns, five-sixths. This is also why the two "~99%" rows in the table above have identical throughput despite very different-looking access patterns — once you are hitting, the pattern stops mattering.
 
 ---
 

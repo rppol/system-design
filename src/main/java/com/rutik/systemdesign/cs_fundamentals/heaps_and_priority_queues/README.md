@@ -119,6 +119,46 @@ left(1)=2, right(1)=3
 left(2)=4, right(2)=5
 ```
 
+**The idea behind it.** "The tree is a lie — there is no tree, only an array, and arithmetic on the index tells you where a node's family lives."
+
+That framing matters because it is *why* heaps are fast in a way balanced BSTs are not. A BST node must store two pointers (16 bytes on 64-bit) and its children sit wherever the allocator dropped them. A heap stores nothing but the payload, and a parent and its children are a few array slots apart — so they tend to land in the same 64-byte cache line.
+
+| Symbol | What it is |
+|--------|------------|
+| `i` | The array index of the node you are standing on |
+| `(i-1)//2` | The parent's index. `//` = integer division, throws away the remainder |
+| `2i+1` | The left child's index |
+| `2i+2` | The right child's index |
+| `n//2` | Index of the first leaf. Everything at or past it has no children |
+| `h` | Levels below a node. A leaf has `h = 0`; the root has `h = floor(log2 n)` |
+
+**Walk one example.** The same 7 elements, 0-indexed (this is the layout the code in Section 5 uses):
+
+```
+  array:   [ 1,  3,  2,  7,  5,  9,  4 ]
+  index:     0   1   2   3   4   5   6
+
+                     1  (i=0)
+                   /      \
+              (i=1) 3        2  (i=2)
+              /   \        /   \
+        (i=3) 7    5      9      4
+                 (i=4) (i=5)  (i=6)
+
+  i   val   (i-1)//2   parent   2i+1   2i+2   is leaf?
+  0    1       -         -        1      2     no
+  1    3       0         1        3      4     no
+  2    2       0         1        5      6     no
+  3    7       1         3        7      8     yes  (7,8 past end)
+  4    5       1         3        -      -     yes
+  5    9       2         2        -      -     yes
+  6    4       2         2        -      -     yes
+```
+
+Read the `parent` column against the picture: indices 3 and 4 both report parent 1, and index 1 holds `3` — exactly the node drawn above them. Indices 5 and 6 both report parent 2, holding `2`. The arithmetic reproduces every edge in the drawing without a single pointer being stored. `n//2 = 3` marks the first leaf, which is why `build` in Section 5 starts its loop at `n//2 - 1`.
+
+**Why this addressing scheme, and what breaks without it.** The arithmetic only works if the tree is *complete* — every level full except the last, which fills left to right. Break that invariant (delete from the middle and leave a hole) and index `2i+1` no longer points at a child; it points at garbage, and every subsequent sift silently corrupts the heap rather than raising. That is the failure mode: a heap with a hole does not crash, it just starts returning the wrong minimum. This is exactly why the `pop` in Section 5 moves the *last* element to the root instead of shifting elements down — shifting would be O(n) and holes are not allowed.
+
 ### Sift-Down after removing root (replace with last leaf):
 
 ```
@@ -141,6 +181,45 @@ Step 1: swap 4 with min(3,2)=2 → swap with right child
 Step 2: children of 4 are 9 (index 6). 4 < 9, heap restored.
 Result: [_, 2, 3, 4, 7, 5, 9]
 ```
+
+**Stated plainly.** "A sift can only ever walk straight up or straight down one branch, so it stops after as many steps as the tree has levels — and doubling the data adds exactly one level."
+
+The second half is the part worth internalizing. `O(log n)` is not a vague promise of speed; it is the concrete statement that going from a thousand items to a million — a thousandfold more data — costs you ten extra swaps, not a thousand times more work.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(log n)` | Cost grows by one step each time `n` doubles |
+| `log2 n` | How many times you can halve `n` before reaching 1 |
+| `floor(log2 n)` | The heap's exact height — the hard ceiling on swaps per sift |
+| `O(1)` | Constant. `peek()` is one array read regardless of `n` |
+| `O(n)` | One pass touching every element |
+
+**Walk one example.** Push `0` onto the 8-slot heap from above and count the swaps:
+
+```
+  start:  [1, 3, 2, 7, 5, 9, 4]        append 0 at index 7
+
+  step   i    parent=(i-1)//2   compare        action        array after
+  ----   --   ---------------   ------------   -----------   ------------------------
+   1      7          3          0 < 7          swap          [1,3,2,0,5,9,4,7]
+   2      3          1          0 < 3          swap          [1,0,2,3,5,9,4,7]
+   3      1          0          0 < 1          swap          [0,1,2,3,5,9,4,7]
+   4      0          -          at root        stop          [0,1,2,3,5,9,4,7]
+
+  3 swaps for n = 8.  floor(log2 8) = 3.  The bound is exactly tight here.
+```
+
+The index sequence `7 -> 3 -> 1 -> 0` is the whole argument: each step at least halves the index, and an integer can only be halved `log2 n` times before it hits 0. Sift-down is the mirror image — `0 -> 1 -> 3 -> 7`, each step at least doubling — so it obeys the same ceiling.
+
+**What that costs at real scale.** `floor(log2 n)` is the exact worst-case swap count; the `log2 n` column rounded up is the round number quoted in complexity tables:
+
+```
+  n            log2 n     height = floor(log2 n)     worst-case swaps per push/pop
+  1,000          9.97               9                             9   (~10)
+  1,000,000     19.93              19                            19   (~20)
+```
+
+**Why this complexity, and the failure mode when you get it wrong.** The tempting alternative to a heap is a sorted list: `peek` becomes O(1) and free, which looks like a win. But insertion becomes O(n) because every later element shifts. At n = 1,000,000 that is 1,000,000 moves per insert instead of 19 swaps — and the operation-count table shows where that lands you: `O(n log n)` total work (20,000,000) becomes `O(n^2)` (10^12). In production this is the classic priority-queue-backed scheduler or rate limiter that tests fine at a thousand queued jobs and falls over at a million: the queue stops draining, latency goes vertical, and the CPU profile shows all time inside `memmove`. Nothing errors — the system just stops keeping up.
 
 ### Two-Heap Median Pattern:
 
@@ -171,6 +250,67 @@ Heapify index 1 (9): 9 > children(7,4)? yes → swap 9 with 4 → recurse → sw
 
 Final: [_, 2, 3, 4, 9, 7, 5, 8]
 ```
+
+**What the formula is telling you.** "Half the nodes are leaves and cost nothing at all; the nodes that can fall a long way are so rare that the whole thing adds up to `n`, not `n log n`."
+
+This is the single most-asked follow-up on this topic, and the reason it trips people is that the obvious bound is right but loose: there are `n` nodes and each sift-down is `O(log n)`, so `O(n log n)` is a true upper bound — it is just not tight. The tight answer comes from noticing that `log n` is the cost for the *root only*, and almost no node is the root.
+
+| Symbol | What it is |
+|--------|------------|
+| `h` | Levels *below* a node. Leaves are `h = 0`; the root is `h = floor(log2 n)` |
+| `n/2^(h+1)` | How many nodes sit at height `h`. Doubles the height, halves the count |
+| `<= h` work | A node at height `h` can fall at most `h` levels — that is all the room there is |
+| `sum(h/2^(h+1))` | The per-level total. Converges to `1` as `h` grows |
+| `O(n)` | The result: work proportional to the element count, not to `n log n` |
+
+**Walk one example.** The n = 15 heap, level by level:
+
+```
+  height   nodes at that height   max fall each   work at this level
+  ------   --------------------   -------------   ------------------
+    0             8  (leaves)           0                  0     <- half the tree, FREE
+    1             4                     1                  4
+    2             2                     2                  4
+    3             1  (root)             3                  3
+                 --                                       --
+                 15                                       11
+
+  total work <= 11 swaps.   Naive bound n*log2(n) = 15 * 3.91 = 58.6
+```
+
+The pattern is the whole insight: as you climb, the per-node cost goes up by 1 but the node count is cut in half. Halving beats incrementing, so the column shrinks instead of growing. Now the same table at production scale:
+
+```
+  height   nodes at that height   work at this level
+  ------   --------------------   ------------------
+     0            500,000                    0      <- 50.0% of all nodes, zero work
+     1            250,000              250,000
+     2            125,000              250,000
+     3             62,500              187,500
+     ...              ...                  ...
+    18                  2                   36
+    19                  1  (root)           19
+                 ----------           ----------
+                  1,000,000              999,987
+
+  total work <= 999,987 swaps  ~=  n
+  n * log2(n)  =  19,931,569          <- 19.9x more than reality
+```
+
+Nine hundred ninety-nine thousand nine hundred eighty-seven, against a million elements. The sum really does collapse to `n * 1`. The reason is that `sum over h of h/2^(h+1)` converges to `1` — the tail contributes almost nothing because the deep-falling nodes are exponentially rare.
+
+**Why the contrast with `n` successive pushes is the real point.** Building by pushing one element at a time is genuinely `O(n log n)`, and not for a subtle reason: `push` sifts *up* from a leaf, and leaves are where all the nodes are, so the expensive case is the common case. `build` sifts *down* from internal nodes, and internal nodes are rare. Same data, same heap, opposite distribution of work:
+
+```
+  n = 1,000,000
+
+  build-heap (sift DOWN from n//2-1)   ~=      1,000,000 operations
+  n successive push() (sift UP)        ~=     20,000,000 operations
+                                              ----------
+                                              20x difference
+```
+
+**The failure mode.** This never announces itself as a bug — both versions are correct and both return a valid heap. It shows up as a startup or batch-load phase that is 20x slower than it needs to be: the service that takes 40 seconds to warm its priority queue instead of 2, blows its readiness-probe deadline, gets killed by the orchestrator, and restarts into the same 40-second load. The `O(n log n)` build is also the reason heapsort's build phase is often mistakenly analyzed as the bottleneck — it is not; the `n` extractions afterward are, and those really are `O(n log n)`.
 
 ---
 
@@ -440,6 +580,34 @@ def build_fixed(arr):
 ```
 
 The difference is measurable: for n=10^7 elements, heapify runs ~3x faster than n pushes.
+
+**What this actually says.** "You already have all the data, so stop pretending it is arriving one item at a time — heapify the whole array at once and pay `O(n)` instead of `O(n log n)`."
+
+The decision rule is simply whether the data is already in hand. Streaming arrivals must use `push`; there is no choice. A list you already hold should always be `heapify`d.
+
+| Symbol | What it is |
+|--------|------------|
+| `heapq.heapify(h)` | In-place bulk build. Sifts down from `n//2 - 1`. `O(n)` |
+| `heapq.heappush(h, x)` | Add one item, sift up. `O(log n)` worst case |
+| `O(n)` vs `O(n log n)` | One pass vs one pass with a `log n` factor on each item |
+| `arr[:]` | Full copy — `heapify` mutates in place, so copy first if the caller still needs the original |
+
+**Why the measured gap is 3x and not 20x.** The operation counts predict a 20x difference at n = 10^6, but the wall-clock benchmark shows about 3x. Both are correct, and reconciling them is the genuinely instructive part — `O(log n)` for `push` is a *worst case*, not the typical case on random input:
+
+```
+  n = 1,000,000 pushes, counting actual swaps
+
+  input order        total swaps     avg swaps per push
+  ----------------   -----------     ------------------
+  random              1,279,567             1.28    <- nearly free; most items stop at depth 1
+  descending         17,951,445            17.95    <- the O(n log n) bound, fully realized
+
+  build-heap (any order)  ~1,000,000        1.00    <- always
+```
+
+On random input a pushed element is usually already larger than its parent, so it stops after one comparison — the average is 1.28 swaps, not 20. That is why the benchmark only shows 3x: you are comparing 1.28M swaps against 1M, plus per-call overhead. **But the worst case is not hypothetical.** Feed the same code a descending sequence — an already-sorted-desc export, a reverse-chronological backlog, timestamps replayed newest-first — and the swap count jumps 14x to 17.95M, landing exactly on the `O(n log n)` bound.
+
+**The failure mode.** This is a latent, data-dependent cliff, which is the worst kind. The build passes load-testing on synthetic random data at 3x, ships, and then one day ingests a sorted file and runs 14x slower than it ever did in staging. Nothing throws; the batch job just misses its window. Using `heapify` removes the variance entirely — its `~n` cost is independent of input order, which is the real reason to prefer it, over and above the average-case speedup.
 
 ### Pitfall 2: Max-heap in Python (forgetting to negate)
 

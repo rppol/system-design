@@ -37,6 +37,40 @@ All four must hold simultaneously:
 3. **No preemption**: Resources cannot be forcibly taken from a thread; they are released only voluntarily.
 4. **Circular wait**: A set of threads T₁, T₂, ..., Tₙ exists such that T₁ waits for a resource held by T₂, T₂ waits for a resource held by T₃, ..., Tₙ waits for a resource held by T₁.
 
+**The idea behind it.** "Deadlock is an AND, not an OR — all four conditions must be true at the same instant, so falsifying any single one of them makes deadlock structurally impossible, forever."
+
+This is why the list has exactly four entries and why the prevention table below has exactly four rows. The four conditions are not four warning signs to watch for; they are four independent switches, and deadlock needs every one of them flipped on.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `ME` | At least one resource cannot be shared. True by definition for any real mutex |
+| `HW` | A thread keeps what it holds while blocking for more |
+| `NP` | Nobody can take a resource away; only the owner releases it |
+| `CW` | The wait-for edges close a loop: T1 -> T2 -> ... -> Tn -> T1 |
+| `AND` | Conjunction. One false input makes the whole expression false |
+
+**Walk one example with real numbers.** Enumerating the switch settings:
+
+```
+  deadlock possible  <=>  ME AND HW AND NP AND CW
+
+  4 independent booleans -> 2^4 = 16 possible states of the system
+  exactly  1  of those 16 permits deadlock  (all four true)  = 6.25%
+  the other 15 are deadlock-free by construction
+
+  falsify ONE condition -> 8 of the 16 rows vanish, and the deadlock row is
+  always among them, no matter WHICH one you pick:
+
+    ME  HW  NP  CW   deadlock?
+     T   T   T   T      YES     <- the only dangerous row
+     T   T   T   F      no      <- lock ordering killed CW
+     T   T   F   T      no      <- DB rollback killed NP
+     T   F   T   T      no      <- acquire-all-at-once killed HW
+     F   T   T   T      no      <- lock-free CAS killed ME
+```
+
+**Why practitioners always attack circular wait.** All four columns are equally valid targets in theory, but three of them are expensive in practice: killing `ME` needs lock-free algorithms (hard, and impossible for genuinely exclusive resources), killing `HW` means grabbing every lock up front (destroys concurrency), and killing `NP` means being able to roll work back (which is why databases *can* do it and application code usually cannot). Killing `CW` costs one convention — always take locks in a fixed global order — which is why "sort the locks" is the fix in Pitfall 1 and in the distributed case study in Section 14.
+
 ### Synchronization Primitives
 
 **Mutex (binary semaphore with ownership)**: Only the thread that locked the mutex can unlock it. Provides mutual exclusion for critical sections. Recursive mutexes allow the same thread to acquire multiple times (with a counter). Non-recursive mutex re-acquisition by the same thread → immediate deadlock.
@@ -141,6 +175,46 @@ Safety check (find safe sequence):
   P0 need 7,4,3 <= 10,4,7 -> run P0
 Safe sequence: <P1, P3, P4, P2, P0>
 ```
+
+**The idea behind it.** "A state is safe if you can name an order in which every process finishes — pay one process its full remaining need, collect back everything it held, and use that bigger pot to fund the next one."
+
+The banker metaphor is exact: the bank never lends so much that no customer can be paid out in full. It does not matter that no single process can be funded from the initial pot alone — what matters is that *some* process can, because finishing it refills the pot.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `Allocation[i]` | What process i is holding right now |
+| `Max[i]` | The most process i will ever ask for, declared up front |
+| `Need[i]` | `Max[i] - Allocation[i]` — the worst case still outstanding |
+| `Available` | Total instances minus everything currently allocated |
+| `<=` (vectors) | Compares element-wise. ALL three resource types must fit, not just one |
+
+**Walk one example with real numbers.** The state above, with totals A=10, B=5, C=7:
+
+```
+  Available check:  total (10,5,7) - sum of Allocation (7,2,5) = (3,3,2)   <- matches
+
+  Need = Max - Allocation:
+    P0: (7,5,3)-(0,1,0) = (7,4,3)      P3: (2,2,2)-(2,1,1) = (0,1,1)
+    P1: (3,2,2)-(2,0,0) = (1,2,2)      P4: (4,3,3)-(0,0,2) = (4,3,1)
+    P2: (9,0,2)-(3,0,2) = (6,0,0)
+
+  who can run first from Available = (3,3,2)?
+    P0 need (7,4,3): 7 > 3  NO      P2 need (6,0,0): 6 > 3  NO
+    P1 need (1,2,2): fits   YES     P3 need (0,1,1): fits   YES
+    P4 need (4,3,1): 4 > 3  NO
+
+  fund P1, then collect its Allocation back:
+    step   run   need       avail before   + its allocation   avail after
+     1     P1    (1,2,2)     (3,3,2)          (2,0,0)          (5,3,2)
+     2     P3    (0,1,1)     (5,3,2)          (2,1,1)          (7,4,3)
+     3     P4    (4,3,1)     (7,4,3)          (0,0,2)          (7,4,5)
+     4     P2    (6,0,0)     (7,4,5)          (3,0,2)         (10,4,7)
+     5     P0    (7,4,3)    (10,4,7)          (0,1,0)         (10,5,7)
+
+  final Available = (10,5,7) = the totals -> everything returned, state is SAFE
+```
+
+**Why "safe" is not the same as "no deadlock right now."** Nothing in this state is deadlocked — no process is even blocked. Safety is a claim about the *future*: it says that even if every process immediately demanded its entire declared `Need`, an order exists that satisfies them all. An unsafe state is not a deadlocked one either; it is one from which deadlock has become *reachable*, and the algorithm refuses to enter it. That conservatism is exactly why Banker's is rare in production: it requires every process to declare its maximum need up front, which almost no real workload can do, so real systems use detection-plus-rollback (databases) or plain lock ordering instead.
 
 ### Banker's Algorithm — Request Decision Flow
 

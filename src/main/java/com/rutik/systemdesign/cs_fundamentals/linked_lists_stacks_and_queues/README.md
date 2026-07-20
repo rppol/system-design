@@ -162,6 +162,37 @@ flowchart LR
 
 Every element makes exactly three trips — pushed onto stack1, moved to stack2, popped from stack2 — so the amortized cost is O(1) per operation, even though the single dequeue that triggers a transfer costs O(n).
 
+**The idea behind it.** "No single element can be touched more than four times in its whole life, so `n` elements cost at most `4n` work total — the expensive dequeue is not extra work, it is the work the cheap dequeues already paid for."
+
+That framing matters because "amortized O(1)" is not a probabilistic claim or an average over lucky inputs. It is a hard ceiling on the total, and it holds for the worst input an adversary can pick.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(1)` | Cost does not grow with `n`. A fixed number of steps, whatever the size |
+| `O(n)` | Cost grows in step with `n`. Double the data, double the work |
+| amortized | Averaged over a long run of operations. Total work / number of operations |
+| worst case | The most expensive *single* operation. Here O(n) — the transfer |
+| `4n` | The total work bound. 4 touches per element, `n` elements |
+
+**Walk one example.** Six operations on an empty queue, counting every push and pop:
+
+```
+  op            in stack      out stack     pushes/pops   running total
+  enqueue 1     [1]           []                  1              1
+  enqueue 2     [1,2]         []                  1              2
+  enqueue 3     [1,2,3]       []                  1              3
+  dequeue       []            [2,1]               7             10
+                              ^ 3 pops from in, 3 pushes to out, 1 pop from out
+  dequeue       []            [1]                 1             11
+  dequeue       []            []                  1             12
+
+  3 elements enqueued and dequeued -> 12 operations -> exactly 4 per element
+```
+
+The fourth row looks like a disaster: one dequeue cost 7 operations. But the two dequeues that follow cost 1 each, because the transfer already staged them. Charge each element its own 4 touches up front and the expensive dequeue is fully prepaid — no element is ever transferred twice, because once it is in `out` it never goes back.
+
+**Why the amortized bound and not the worst case is what matters.** Sum the costs and `n` dequeues total at most `4n`, so at n = 1,000,000 the whole run is bounded by 4,000,000 operations — linear, not quadratic. The failure mode of getting this wrong is choosing the naive alternative: rebuilding FIFO order on *every* dequeue instead of only when `out` is empty. That turns each dequeue into its own O(n) transfer, and `n` dequeues become `n(n-1)/2` moves. At n = 100,000 that is 4,999,950,000 element moves rather than 400,000 — a queue that stalls a request thread for minutes instead of microseconds. The single guard `if not out: transfer()` is the entire difference.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -336,6 +367,38 @@ def is_valid(s: str) -> bool:
 | Cache performance | Poor (pointer chasing) | Poor | Excellent | Array usually faster in practice |
 | Extra memory | 1 pointer/node | 2 pointers/node | 0 | LL has 50–100% overhead |
 
+**Stated plainly.** "Both traversals are O(n), and the array still wins by more than 10x — because Big-O counts elements visited, and the hardware charges you for memory *fetches*, which is a completely different number."
+
+That framing matters because the "Cache performance" row above is the only row in the table Big-O cannot express. Two data structures with identical complexity can differ by an order of magnitude in wall-clock, and the reason is never in the complexity analysis.
+
+| Symbol | What it is |
+|--------|------------|
+| cache line | The smallest unit RAM hands the CPU. 64 bytes on x86-64 and ARM64 |
+| L1 hit | Data already in the fastest cache. ~1 ns |
+| cache miss | Data must come from RAM. ~100 ns — about 100x slower |
+| locality | Whether the next thing you need sits beside the last thing you fetched |
+| pointer chase | Reading an address, then going there to read the next address |
+
+**Walk one example.** Traverse 1,000,000 four-byte ints, summing them:
+
+```
+  ARRAY (contiguous)
+    64-byte cache line / 4-byte int      = 16 ints per fetch
+    1,000,000 ints / 16 ints per fetch   = 62,500 memory fetches
+    62,500 fetches x 100 ns              = 6,250,000 ns  = 6.25 ms
+    the other 937,500 reads are L1 hits at ~1 ns, essentially free
+
+  LINKED LIST (nodes scattered by the allocator)
+    each node is a separate address       = 1,000,000 fetches
+    1,000,000 fetches x 100 ns            = 100,000,000 ns = 100.0 ms
+
+  ratio = 100.0 ms / 6.25 ms = 16x slower, at identical O(n)
+```
+
+The 16x is not a coincidence — it is exactly the 16 ints a single cache line carries. The array amortizes one fetch across 16 elements; the linked list amortizes it across one. And the array's fetches are *sequential*, so the hardware prefetcher predicts them and issues them early, while a pointer chase cannot be prefetched at all: the CPU does not know the next address until the current fetch returns, so the misses serialize.
+
+**Why this complexity claim misleads in production.** The failure mode is picking a linked list off the O(1)-insert row and shipping a hot loop that only ever *iterates*. The complexity table promised parity on traversal, so the regression never shows up in review — it shows up as a p99 latency cliff once the collection outgrows L2, and profilers blame the loop body rather than the memory layout. The practical rule: linked lists earn their place when you hold a reference and splice in the middle, or when stable node addresses matter. If the dominant access pattern is a scan, use the array even where Big-O says it makes no difference.
+
 ### Stack vs Queue
 
 | Stack (LIFO) | Queue (FIFO) |
@@ -431,6 +494,37 @@ while queue:
     node = queue.popleft()  # O(1) ✓
 ```
 
+**What the formula is telling you.** "Removing the front of a Python list is not free — every remaining element physically slides one slot left, so a loop that drains the list does quadratic work while looking perfectly linear on the page."
+
+That framing matters because nothing in the source code signals the cost. `pop(0)` and `popleft()` are the same length and read the same way; the difference lives entirely in the memory layout underneath.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(n^2)` | Work grows with the square of `n`. 10x the data, 100x the work |
+| `n(n-1)/2` | Sum of 1 through n-1. What draining the list actually costs |
+| shift | Sliding every later element down one index to close the gap |
+| `deque` | Double-ended queue. A block-linked ring, so both ends are O(1) |
+
+**Walk one example.** Draining a list of 5 by `pop(0)`, counting elements moved:
+
+```
+  list state        pop(0) removes   elements shifted left   running moves
+  [a,b,c,d,e]             a                   4                    4
+  [b,c,d,e]               b                   3                    7
+  [c,d,e]                 c                   2                    9
+  [d,e]                   d                   1                   10
+  [e]                     e                   0                   10
+
+  total = 4+3+2+1+0 = 10 = n(n-1)/2 for n=5
+
+  n = 1,000     ->   499,500 element moves      (deque:     1,000 ops)
+  n = 100,000   ->   4,999,950,000 element moves (deque:   100,000 ops)
+```
+
+At n = 100,000 the shift work is roughly 50,000x the deque's — five billion moves against one hundred thousand. The growth is the point: going from n = 1,000 to n = 100,000 is 100x the data but about 10,000x the work.
+
+**Why this is the classic BFS killer.** The failure mode is a graph traversal that passes every test on a 50-node fixture and then wedges a worker on real input. BFS pushes the whole frontier into the queue, so on a wide graph the list is long precisely when you are popping from it hardest — the quadratic term compounds exactly where you cannot afford it. `collections.deque` stores elements in a linked chain of fixed-size blocks, so `popleft` just advances a pointer inside the head block and never touches the other elements. Same one-line call site, same readability, no shift.
+
 ### Pitfall 4: Forgetting the Tail Pointer for O(1) Enqueue
 
 ```python
@@ -458,6 +552,37 @@ class QueueFast:
             self.head = node
         self.tail = node    # O(1) ✓
 ```
+
+**What this actually says.** "One extra pointer converts every enqueue from a full walk of the list into a single assignment — you pay 8 bytes once to stop re-deriving something you already knew."
+
+That framing matters because the tail pointer is not an optimization bolted on afterward. It is the difference between a queue that is a queue and a queue that is quietly a quadratic loop.
+
+| Symbol | What it is |
+|--------|------------|
+| tail pointer | A stored reference to the last node. 8 bytes, one field |
+| `O(1)` enqueue | Append without touching any other node |
+| `O(n)` walk | Follow `.next` from the head until it runs out |
+| invariant | A fact you keep true on every mutation so you never recompute it |
+
+**Walk one example.** Enqueue 5 elements into a list that has no tail pointer:
+
+```
+  enqueue   list length before   nodes walked to reach the end   running total
+  a                 0                        0                         0
+  b                 1                        1                         1
+  c                 2                        2                         3
+  d                 3                        3                         6
+  e                 4                        4                        10
+
+  total = 0+1+2+3+4 = 10 = n(n-1)/2 for n=5
+
+  n = 1,000     ->     499,500 pointer hops   (tail pointer:     1,000)
+  n = 100,000   -> 4,999,950,000 pointer hops (tail pointer:   100,000)
+```
+
+Identical arithmetic to the `pop(0)` trap, arriving from the opposite end of the structure — and worse in wall-clock, because each hop in that walk is a pointer chase to a scattered address (~100 ns miss) rather than a contiguous shift the prefetcher can hide.
+
+**Why the invariant is the real lesson.** The failure mode is subtle: the code is correct, the tests pass, and the queue simply gets slower as it fills, so the symptom looks like load rather than a bug. Every enqueue re-walks the list to rediscover a node the previous enqueue was already holding. Maintaining `self.tail` on every mutation — including the empty-to-one-element transition and the delete-the-last-node case, which are exactly where tail pointers go stale — keeps the answer cached instead of recomputed. That is the general shape of the fix: when a loop is re-deriving a fact an earlier step already knew, store the fact.
 
 ---
 

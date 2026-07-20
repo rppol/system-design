@@ -115,6 +115,47 @@ The two 1's (001 ^ 001 = 000) and two 2's (010 ^ 010 = 000)
 cancel completely, regardless of where they appear in the array.
 ```
 
+**Stated plainly.** "XOR everything together; any value that
+showed up an even number of times erases itself, so whatever survives is the
+odd one out."
+
+That framing matters because it says nothing about *position*. Shuffle the
+array however you like and the answer does not move — which is exactly why a
+single accumulator variable suffices and no hash set is needed.
+
+| Symbol | What it is |
+|--------|------------|
+| `^` | Bit-by-bit "do these differ?" — 1 when the two bits disagree, 0 when they agree |
+| `&` | Bit-by-bit "are both 1?" — 1 only when both bits are 1 |
+| `\|` | Bit-by-bit "is either 1?" — 1 when at least one bit is 1 |
+| `~` | Flip every bit: every 0 becomes 1, every 1 becomes 0 |
+| `<<` | Slide the bits toward the high end, zero-filling — one step doubles the value |
+| `>>` | Slide the bits toward the low end — one step halves the value (floor) |
+| `a ^= b` | Shorthand for `a = a ^ b` — fold `b` into the running accumulator |
+
+**Walk one example.** The same five values, shown as 4-bit columns, folded in
+left to right:
+
+```
+  step    value       running total    as decimal
+  -----   ---------   -------------    ----------
+  start   ----        0000                  0
+  ^ 4     0100        0100                  4
+  ^ 1     0001        0101                  5
+  ^ 2     0010        0111                  7
+  ^ 1     0001        0110                  6
+  ^ 2     0010        0100                  4     <- the single number
+```
+
+**Why this works.** XOR treats each bit column completely independently, and
+within a column it is just "count the 1s, keep the parity." Column 2 (value 4)
+holds a single 1 across the whole input — odd count, so it survives as 1.
+Columns 0 and 1 each hold exactly two 1s — even count, so both settle to 0.
+Every duplicate pair contributes an even count to every column it touches, so
+duplicates cannot influence any column's parity. That is the entire proof, and
+it is why the trick generalizes to "appears an odd number of times" but breaks
+for "appears three times" (see Section 8).
+
 ### `n & (n-1)` clears the lowest set bit
 
 Subtracting 1 from `n` flips the lowest set bit to 0 and flips every bit
@@ -134,6 +175,48 @@ n & (n-1):
 Repeating "n = n & (n-1)" until n == 0 counts the set bits
 (Brian Kernighan's algorithm) -- one iteration per SET bit, not per total bit.
 ```
+
+**What the formula is telling you.** "Subtracting one borrows from the lowest 1
+bit, so AND-ing the before-picture with the after-picture keeps only the bits
+that had nothing to do with that borrow — the lowest 1, and every 0 beneath
+it, vanish."
+
+That framing is what makes the power-of-two test obvious rather than magic: if
+`n` had exactly one 1 bit, removing it leaves nothing, so `n & (n-1) == 0`.
+
+| Symbol | What it is |
+|--------|------------|
+| `n - 1` | Ordinary subtraction — but in binary it flips the lowest 1 to 0 and turns every 0 below it into 1 |
+| `&` | Keeps a bit only where BOTH operands have a 1 |
+| `n & (n-1)` | `n` with its lowest set bit removed |
+| `n & (n-1) == 0` | True (for `n > 0`) only when `n` had exactly one set bit — a power of two |
+| popcount | How many 1 bits a number has. `popcount(44) = 3` |
+
+**Walk one example.** Start with `n = 12`:
+
+```
+  n     = 12   ->  0000 1100
+  n - 1 = 11   ->  0000 1011      <- bit 2 flipped off, bits 1-0 flipped on
+  n & (n-1)    ->  0000 1000  = 8    <- clears the lowest set bit
+```
+
+**Walk the counting loop.** Brian Kernighan's popcount on `n = 44`
+(`44 = 32 + 8 + 4`, so three set bits — bits 5, 3, and 2):
+
+```
+  iteration   n before      n after       count   bit cleared
+  ---------   -----------   -----------   -----   -----------
+  1           0010 1100     0010 1000       1     bit 2  (value 4)
+  2           0010 1000     0010 0000       2     bit 3  (value 8)
+  3           0010 0000     0000 0000       3     bit 5  (value 32)
+  loop ends: n == 0, popcount(44) = 3
+```
+
+**Why this works.** Every iteration destroys exactly one 1 bit and never
+creates one, so the loop count equals the number of 1 bits and nothing else.
+A naive "test all 32 positions" loop pays 32 iterations regardless of the
+value; this pays 3 for `n = 44`. On sparse numbers the difference is large —
+`n = 2^31` costs 32 iterations naively and exactly 1 here.
 
 ---
 
@@ -258,6 +341,39 @@ width once you fix it at 32 or 64 bits — but it's worth stating the constant
 explicitly (32 iterations) since interviewers sometimes ask "is this really
 O(n)?"
 
+**What this actually says.** "The bit width is a constant the machine
+chose, not something the input grows — so a loop over 32 bit positions is a
+fixed tax per element, and Big-O is allowed to forget it."
+
+That framing matters because it tells you where the constant *does* bite:
+Big-O says `single_number` and `single_number_ii` are both O(n), but one of
+them touches each element once and the other touches it 32 times.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(popcount(n))` | Iterations equal the number of 1 bits in `n` — between 0 and the bit width |
+| `O(32 * n)` | 32 bit positions, each scanning all `n` values |
+| `O(n * 2^n)` | `2^n` subsets, `n` work to write each one out |
+| `1 << n` | `2^n`. The mask count in bitmask enumeration |
+
+**Walk one example.** What the constants actually cost on `n = 1,000,000`
+elements:
+
+```
+  template            formula          element visits    vs single_number
+  -----------------   --------------   --------------    ----------------
+  single_number       n                     1,000,000            1x
+  single_number_ii    32 * n               32,000,000           32x
+  hamming_weight      popcount(value)   (per value: 0-32, avg 16)
+```
+
+**Why this works out to O(n) anyway.** The `32` never changes when the input
+grows — feed in a billion elements and it is still 32. A term that stays fixed
+while `n` climbs is a constant factor, and constant factors drop out of Big-O
+by definition. The honest interview sentence is "O(n), with a 32x constant
+from the bit-position loop" — claiming plain O(n) without naming the constant
+is what invites the follow-up question.
+
 ---
 
 ## 6. Variations & Sub-patterns
@@ -314,6 +430,52 @@ isn't enough (every-other-value appears `k > 2` times):
   step (see [`database_and_storage_fundamentals/`](../database_and_storage_fundamentals/README.md) for index structures that use this)
 - [Power of Two (LC 231)](https://leetcode.com/problems/power-of-two/), Power of Four (LC 342)
 
+**In plain terms.** "Negating a number in two's complement leaves
+the lowest 1 bit exactly where it was and flips everything above it — so
+AND-ing `n` with `-n` keeps that one bit and kills the rest."
+
+That framing matters because `-n` is the piece nobody pictures. Negative
+numbers are not stored with a minus sign; `-n` is literally "flip every bit,
+then add one," and the *add one* is what re-restores the lowest set bit that
+the flip had just destroyed.
+
+| Symbol | What it is |
+|--------|------------|
+| `~n` | Flip every bit of `n` (also called the one's complement) |
+| `-n` | Two's complement: `~n + 1`. This is how hardware actually stores a negative |
+| `n & -n` | Isolates the lowest set bit — returns a value with only that bit on |
+| `n & (n-1)` | Clears the lowest set bit — the complement operation |
+| `n \| -n` | Everything from the lowest set bit upward, all set |
+
+**Walk one example.** `n = 12`, eight-bit columns:
+
+```
+  n            =  12   ->  0000 1100
+  ~n           = -13   ->  1111 0011      <- every bit flipped
+  ~n + 1 = -n  = -12   ->  1111 0100      <- the +1 ripples through the low 0s
+                                             and stops at the first 0 it finds
+  n & -n               ->  0000 0100  = 4    <- isolates the lowest set bit
+```
+
+Contrast the two tricks side by side on the same value:
+
+```
+  operation      result        meaning
+  ------------   -----------   -------------------------------
+  n & (n-1)      0000 1000     n WITHOUT its lowest set bit  (8)
+  n & (-n)       0000 0100     ONLY n's lowest set bit       (4)
+  sum of the two 0000 1100     back to n itself             (12)
+```
+
+**Why this works.** Write `n` as `<high bits> 1 <k zeros>`. Flipping gives
+`<flipped high> 0 <k ones>`; adding 1 carries all the way up through those `k`
+ones, turning them back to zeros, and lands on the 0 that used to be the
+lowest 1 — turning it back to 1 and stopping. So `-n` is
+`<flipped high> 1 <k zeros>`: identical to `n` from the lowest set bit
+downward, and bitwise-opposite above it. AND that with `n` and only the shared
+region — that single bit — survives. This is exactly the step a Fenwick tree
+uses to walk from an index to its parent range.
+
 **4. Bitmask enumeration family** — when `n <= ~20`, an integer `0..2^n-1`
 represents a subset:
 - [Subsets (LC 78)](https://leetcode.com/problems/subsets/) bitmask variant
@@ -346,6 +508,58 @@ def reverse_bits(n: int) -> int:
         n >>= 1
     return result
 ```
+
+**Read it like this.** "A shift is just multiplying or dividing by a
+power of two, and `1 << i` is a one-bit spotlight you point at position `i` —
+every set/clear/toggle/test above is that spotlight combined with the operator
+that does what you want."
+
+That framing collapses four separate incantations into one idea. You are never
+memorizing four tricks; you are building one mask and choosing an operator.
+
+| Symbol | What it is |
+|--------|------------|
+| `1 << i` | A mask with a single 1 at position `i`, everything else 0. Equals `2^i` |
+| `~(1 << i)` | The inverse mask: all 1s EXCEPT position `i` |
+| `(1 << k) - 1` | A run of `k` ones at the bottom — the standard "keep the low k bits" mask |
+| `n \|= mask` | Force the mask's bits ON, leave everything else alone |
+| `n &= ~mask` | Force the mask's bits OFF, leave everything else alone |
+| `n ^= mask` | Flip the mask's bits, leave everything else alone |
+| `(n >> i) & 1` | Slide bit `i` into the last position, then keep only that position |
+
+**Walk one example.** Shifting is arithmetic in disguise:
+
+```
+  13 << 3   ->  0000 1101  becomes  0110 1000  = 104   (13 * 2^3 = 13 * 8)
+  200 >> 3  ->  1100 1000  becomes  0001 1001  =  25   (200 // 8, floor)
+```
+
+Note `>>` *floors* rather than truncating toward zero: `-9 >> 1` is `-5`, not
+`-4`. Bits fall off the right edge and are gone, so shifting is only a clean
+division when the discarded bits were zeros.
+
+**Walk mask construction.** Building the two masks, then applying all four
+utility ops to `n = 1011 0101`:
+
+```
+  1 << 3            ->  0000 1000     spotlight on bit 3
+  ~(1 << 3)         ->  1111 0111     everything EXCEPT bit 3
+  (1 << 5) - 1      ->  0001 1111     the low five bits, all on
+
+  n                 =   1011 0101
+  get   bit 5:  (n >> 5) & 1      ->  1                  (bit 5 is on)
+  set   bit 1:  n |   (1 << 1)    ->  1011 0111          (bit 1 turned on)
+  clear bit 4:  n &  ~(1 << 4)    ->  1010 0101          (bit 4 turned off)
+  toggle bit 7: n ^  (1 << 7)     ->  0011 0101          (bit 7 was on, now off)
+```
+
+**Why this works.** Each operator has an identity element that makes it a
+no-op: OR-ing with 0 changes nothing, AND-ing with 1 changes nothing, XOR-ing
+with 0 changes nothing. So a mask that is 0 everywhere except position `i`
+(for OR and XOR), or 1 everywhere except position `i` (for AND), guarantees
+that only position `i` can possibly change and the other 31 bits are carried
+through untouched. That is the whole reason bit surgery is safe: the mask
+picks the target, and the operator's identity protects the bystanders.
 
 **6. Maximum XOR pair** — [Maximum XOR of Two Numbers in an Array (LC 421)](https://leetcode.com/problems/maximum-xor-of-two-numbers-in-an-array/):
 build a binary trie of each number's bits (most-significant-bit first), then

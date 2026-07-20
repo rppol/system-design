@@ -249,6 +249,91 @@ case where the heap approach collapses to the same cost as sorting everything,
 which is exactly why keeping `k` small relative to `N` is what makes k-way
 merge worth it.
 
+### Decoding O(N log k)
+
+**In plain terms.** "You will handle all `N` elements one at a
+time — that is the `N`. But each one only has to be compared against the `k`
+front-runners, one per list — that is the `log k`."
+
+The two letters answer two different questions, and keeping them straight is
+the whole point: `N` is *how many times* you do the work, `k` is *how big the
+thing you work on is*. They are independent, which is why merging a hundred
+million elements from 3 lists is barely more expensive per element than
+merging eight.
+
+| Symbol | What it is |
+|---|---|
+| `N` | **Total** elements across every list combined |
+| `k` | Number of **lists** (sources), not elements |
+| `O(N log k)` | `N` pop/push pairs, each costing `log k` |
+| `O(N log N)` | Concatenate everything and sort — ignores the existing order |
+| `log k` | Height of a heap holding `k` items — the sift distance per operation |
+| `O(k)` | Space: the heap holds one candidate per list, never more |
+
+### Why the heap holds k, not N
+
+**Read it like this.** "Only the *head* of each sorted list can
+possibly be the next smallest element — everything behind a head is already
+known to be larger than it, so there is no reason to load it yet."
+
+That is the invariant the whole pattern rests on. Each list is already sorted,
+so list `i`'s second element cannot beat its own first element. The global
+minimum must therefore be the minimum of just `k` candidates — one per list —
+no matter how long the lists are.
+
+**Walk one example.** Merging `k = 3` lists, `N = 8` elements total:
+`[1,4,5]`, `[1,3,4]`, `[2,6]`. Watch the heap size, not the output:
+
+```
+  seed: one head per list                    heap = [1, 1, 2]     size 3
+                                                     ^  ^  ^
+                                             from list 0, 1, 2
+
+  step  pop  from list  push replacement  heap contents   size  output so far
+  ----  ---  ---------  ----------------  -------------   ----  ----------------
+    1    1     list 0      4 (next in 0)  [1, 2, 4]        3    1
+    2    1     list 1      3 (next in 1)  [2, 3, 4]        3    1 1
+    3    2     list 2      6 (next in 2)  [3, 4, 6]        3    1 1 2
+    4    3     list 1      4 (next in 1)  [4, 4, 6]        3    1 1 2 3
+    5    4     list 0      5 (next in 0)  [4, 5, 6]        3    1 1 2 3 4
+    6    4     list 1      (list 1 empty) [5, 6]           2    1 1 2 3 4 4
+    7    5     list 0      (list 0 empty) [6]              1    1 1 2 3 4 4 5
+    8    6     list 2      (list 2 empty) []               0    1 1 2 3 4 4 5 6
+
+  heap size never exceeded 3 = k, though N = 8 elements passed through it
+```
+
+Eight elements flowed through a container that never held more than three.
+Each pop is immediately followed by one push from the *same* list, which is
+what pins the size at `k` — the heap is a window over the `k` list heads, not
+a buffer of the data.
+
+**Why this complexity, and what breaks with concatenate-then-sort.** The
+alternative dumps all `N` elements into one array and sorts, costing
+`O(N log N)` time and `O(N)` space. It works, and it throws away the single
+most valuable fact about the input: **each list is already sorted**. Sorting
+re-establishes an ordering that was 90% present already.
+
+Quantified at `N = 1,000,000`:
+
+```
+                          per element        x N          total comparisons
+  concat + sort (O(N log N))  log2(1e6)=19.93  x 1e6  = 19,931,569
+  heap merge, k=3             log2(3)  = 1.58  x 1e6  =  1,584,963   12.6x fewer
+  heap merge, k=10            log2(10) = 3.32  x 1e6  =  3,321,928    6.0x fewer
+  heap merge, k=100           log2(100)= 6.64  x 1e6  =  6,643,856    3.0x fewer
+
+  space held:   sort = 1,000,000 elements
+                heap =         3 to 100 elements
+```
+
+The space column is the more important one. Because the heap only ever holds
+`k` elements, the lists never have to fit in memory at all — they can be
+files, network cursors, or infinite streams read lazily. This is exactly how
+external merge sort finishes its merge phase on datasets far larger than RAM,
+and why `O(N log k)` is the streaming answer where `O(N log N)` requires the
+whole dataset resident at once.
+
 ---
 
 ## 6. Variations & Sub-patterns

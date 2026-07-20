@@ -122,6 +122,55 @@ The single highest-leverage habit: **look at the input size constraint before th
 | n ≤ 10^8 | O(n) or O(log n) | math / formula, binary search on answer |
 | n > 10^9 | O(log n) or O(1) | binary search on answer, modular arithmetic, matrix exponentiation |
 
+**The idea behind it.** "A judge machine does very roughly 10^8 simple
+operations per second, so pick any complexity whose operation count lands under
+that — the table is just that one division, precomputed for every `n`."
+
+That framing matters because it turns the table from something to memorize into
+something to *derive*. Forget a row and you can rebuild it at the whiteboard:
+take `n`, try each complexity class, keep the cheapest one that stays under
+~10^8.
+
+| Symbol | What it is |
+|---|---|
+| `n` | The input-size bound printed in the problem's Constraints section |
+| `10^8` | The rough operations-per-second budget for a 1-second limit. Order of magnitude, not a precise figure |
+| `O(n log n)` | Sorting-shaped. `log` here is base 2, and `log2(10^5)` is about 17 |
+| `O(2^n)` | Doubles with every added element. `2^20` is about a million |
+| `O(n!)` | Every ordering of the input. Grows faster than anything else on the table |
+| `O(2^(n/2))` | Meet-in-the-middle: split into halves, so the exponent halves |
+
+**Walk one example.** Multiply each row out and compare against the ~10^8
+budget:
+
+```
+  n            complexity     operations     verdict
+  ----------   ------------   -----------    -----------------------------
+  10           O(n!)             3.6 * 10^6  comfortable
+  12           O(n!)             4.8 * 10^8  at the ceiling -- 12 is the wall
+  20           O(2^n)            1.0 * 10^6  comfortable
+  25           O(2^(n/2))        4.1 * 10^3  trivial (vs 2^25 = 3.4 * 10^7)
+  500          O(n^3)            1.3 * 10^8  at the ceiling
+  5,000        O(n^2)            2.5 * 10^7  comfortable
+  10^4         O(n^2)            1.0 * 10^8  exactly at the ceiling
+  10^5         O(n log n)        1.7 * 10^6  comfortable (log2 10^5 = 16.6)
+  5 * 10^5     O(n log n)        9.5 * 10^6  comfortable, constants start to matter
+  10^6         O(n)              1.0 * 10^6  comfortable
+  10^8         O(n)              1.0 * 10^8  at the ceiling, tight constants only
+  10^9         O(log n)                  30  trivial
+```
+
+**Why the table reads as a staircase.** Notice how the borderline rows cluster
+at 10^8: `n = 12` with `O(n!)`, `n = 500` with `O(n^3)`, `n = 10^4` with
+`O(n^2)`, `n = 10^8` with `O(n)`. Those are the same constraint expressed four
+different ways — each row is the largest `n` at which that complexity class
+still fits the budget. The rows below the ceiling (`n = 20` at 10^6,
+`n = 10^5` at 1.7 * 10^6) exist because problem-setters leave headroom for
+constant factors, and because the next class down would be a much harder
+algorithm for no benefit. This is why the practical rule is "read `n`, find its
+row, then only consider patterns in that row" — the search space for the
+*algorithm* collapses the moment you fix the *budget*.
+
 **Reading a grid (m × n):** treat the total cells m*n as your effective n. A 1000×1000 grid has n=10^6; O(m*n) is fine, O(m*n * log(mn)) may be tight.
 
 **Reading k (number of results / window size):** constraints on k (e.g., k ≤ 10^4 separately from n ≤ 10^5) can open O(n*k) windows. Read both.

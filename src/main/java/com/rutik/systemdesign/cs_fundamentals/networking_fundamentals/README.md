@@ -116,6 +116,44 @@ The initiator enters TIME_WAIT for 2×MSL (Maximum Segment Lifetime, typically 6
 
 **Flow control**: Receiver advertises a receive window (rwnd) in every ACK. Sender cannot have more than rwnd unacknowledged bytes in flight. Default: 65535 bytes (64 KB), extendable to 1 GB with window scaling option.
 
+**The idea behind it.** "Bandwidth is how wide the pipe is, latency is how long the pipe is, and throughput is what you actually get — which is neither, it is your window size divided by the round-trip time."
+
+Engineers conflate all three constantly, and the conflation is expensive: it produces bug reports like "we bought a 1 Gbps link and single transfers still crawl at 5 Mbps." Nothing is broken in that scenario. The window is.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| bandwidth | Pipe *width*. The link's capacity ceiling. Never a promise about one flow |
+| latency (RTT) | Pipe *length* in time. Bounded below by the speed of light in fiber |
+| throughput | What you measure. Always `<=` bandwidth |
+| rwnd | Unacked bytes the sender may have outstanding. Default 65535 B |
+| `rwnd / RTT` | The throughput ceiling of a single TCP flow |
+| BDP | `bandwidth x RTT`. Bytes needed in flight to *fill* the pipe |
+
+**Walk one example with real numbers.** A 1 Gbps link, 100 ms RTT (US coast to Europe), default 64 KB window:
+
+```
+  BDP = bandwidth x RTT
+      = 1,000,000,000 bits/sec x 0.100 sec
+      = 100,000,000 bits  /8  =  12,500,000 bytes  =  11.9 MB in flight
+                                                      to keep the pipe full
+
+  Actual single-flow throughput = rwnd / RTT
+      = 65,535 bytes / 0.100 sec
+      = 655,350 bytes/sec  x8  =  5,242,800 bits/sec  =  5.24 Mbps
+
+  You paid for 1000 Mbps.  You got 5.24 Mbps.  That is 0.5% of the link.
+
+  Same 64 KB window, shrinking the RTT instead:
+      RTT 100 ms  ->  5.24 Mbps
+      RTT  10 ms  ->  52.4 Mbps        <- 10x closer, 10x faster
+      RTT   1 ms  ->  524 Mbps         <- LAN; window finally stops mattering
+
+  Window needed to actually fill 1 Gbps at 100 ms:
+      12,500,000 / 65,535 = 191x the default  ->  window scaling, not optional
+```
+
+**Why bandwidth alone never predicts throughput.** The sender transmits one window, then *stops* and waits a full RTT for the ACK before it may send more. Bandwidth sets how fast that window drains onto the wire; RTT sets how long the sender idles afterwards. On a short link the wait is negligible and throughput approaches bandwidth; on a long link the wait dominates and throughput is pinned to `rwnd / RTT` no matter how wide the pipe is. This is the "long fat network" problem, and it is why RFC 1323 window scaling exists, why bulk transfers use many parallel streams, and why moving the data closer (CDN, regional replica) beats buying more bandwidth almost every time. Note the asymmetry in the numbers above: doubling bandwidth changed nothing, while cutting RTT by 10x gave a clean 10x.
+
 **Congestion control**:
 - Slow start: begin with cwnd=1 MSS (max segment size, typically 1460 B), double per RTT
 - Congestion avoidance (AIMD): once cwnd exceeds ssthresh, increase by 1 MSS per RTT; halve on packet loss
@@ -338,6 +376,61 @@ Binary:  11000000.10101000.00000001.xxxxxxxx
 
 Total usable: 254 addresses
 ```
+
+**Stated plainly.** "The prefix number is just a count of leading 1-bits in a 32-bit mask; AND the address against that mask and whatever survives is the network, whatever the mask zeroed out is the host part."
+
+Subnetting looks like decimal arithmetic and is not — `255.255.255.192` is meaningless as a number and obvious as a bit pattern. Every subnetting question becomes mechanical once you write the octets in binary.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `/24` | Prefix length. The mask's first 24 bits are 1, the rest are 0 |
+| mask | The same thing in dotted-decimal. `/24` = `255.255.255.0` |
+| `AND` | `1 AND 1 = 1`, everything else 0. Keeps prefix bits, zeroes host bits |
+| `32 - prefix` | How many bits are left to number hosts with |
+| `2^(32-prefix)` | Total addresses in the subnet |
+| `- 2` | Drop the all-zeros (network ID) and all-ones (broadcast) addresses |
+
+**Walk one example with real numbers.** Take `192.168.1.100` and mask it two different ways:
+
+```
+  CASE A -- 192.168.1.100 /24        mask 255.255.255.0
+
+    address  192      .168      .1        .100
+             11000000 . 10101000 . 00000001 . 01100100
+    mask     11111111 . 11111111 . 11111111 . 00000000
+    AND      -------------------------------------------
+    network  11000000 . 10101000 . 00000001 . 00000000   = 192.168.1.0
+                                              ^^^^^^^^
+                                              8 host bits, all zeroed
+
+    host bits = 32 - 24 = 8
+    total     = 2^8      = 256          (.0 through .255)
+    usable    = 256 - 2  = 254          (.0 network, .255 broadcast removed)
+    of those 254, .1 is conventionally the gateway, leaving 253 for hosts
+
+  CASE B -- 192.168.1.100 /26        mask 255.255.255.192
+
+    address  11000000 . 10101000 . 00000001 . 01100100
+    mask     11111111 . 11111111 . 11111111 . 11000000
+    AND      -------------------------------------------
+    network  11000000 . 10101000 . 00000001 . 01000000   = 192.168.1.64
+                                                ^^^^^^
+                                                6 host bits
+
+    the last octet alone:  100 AND 192 = 64
+      100 = 01100100
+      192 = 11000000
+      AND = 01000000 = 64                <- .100 lives in the .64 subnet
+
+    host bits = 32 - 26 = 6
+    total     = 2^6      = 64            (.64 through .127)
+    usable    = 64 - 2   = 62            (.64 network, .127 broadcast)
+
+  Two more bits of prefix cost 3/4 of the addresses:
+    /24 -> 254 usable     /26 -> 62 usable     /20 -> 4094     /16 -> 65534
+```
+
+**Why the "minus 2" is not a rounding convention.** The all-zeros host pattern names the subnet itself and the all-ones pattern is the broadcast address, so neither can be assigned to an interface — which is why a `/30` point-to-point link yields exactly 2 usable addresses out of 4, and why a `/31` is a special-cased RFC 3021 exception rather than a subnet with 0 hosts. The same arithmetic explains the private-range table in Section 4.2: `10.0.0.0/8` leaves 24 host bits, and `2^24 - 2` is the ~16.7 M figure listed there. It also explains the most common cloud-VPC mistake — carving a `/24` per subnet, then discovering that a managed service reserves several addresses on top of the 2, so a "256-address" subnet can hand out well under 250.
 
 ---
 

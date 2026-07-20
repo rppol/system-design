@@ -279,6 +279,98 @@ with a path longer than ~1000 cells (e.g., a 32x32 fully-connected grid is
 1024 cells). For large grids, prefer the **iterative DFS with an explicit
 stack** or BFS with a deque — same complexity, no recursion-depth risk.
 
+### Decoding `O(V + E)`
+
+**Put simply.** "Touch every vertex once, and look down every
+edge once. Add the two piles of work together — you never multiply them."
+
+That word *add* is the entire claim. The reflex when you see nested loops
+(`for each vertex: for each neighbor:`) is to write `O(V × E)`, and that
+reflex is wrong here. The inner loop does not run `E` times per vertex; it
+runs `degree(v)` times, and the degrees of all vertices sum to exactly `2E`
+in an undirected graph. Summed work, not multiplied work.
+
+| Symbol | What it is |
+|---|---|
+| `V` | Number of vertices (nodes) in the graph |
+| `E` | Number of edges (connections) in the graph |
+| `O(V + E)` | Work grows with the *total size of the input* — the node list plus the edge list |
+| `deg(v)` | How many edges touch vertex `v` |
+| `Σ deg(v) = 2E` | Handshake lemma: every edge is counted once from each of its two endpoints |
+
+**Walk one example.** A 5-vertex, 6-edge undirected graph. BFS from `A`. The
+adjacency list is `A:[B,C]  B:[A,D]  C:[A,D,E]  D:[B,C,E]  E:[C,D]`. Note
+`deg` sums to `2+2+3+3+2 = 12 = 2E`, and `E = 6`.
+
+```
+  step  dequeued  neighbors scanned  edges looked at  queue after   visited
+  ----  --------  -----------------  ---------------  -----------   ----------------
+   0    --        --                       0          [A]           {A}
+   1    A         B, C                     2          [B, C]        {A,B,C}
+   2    B         A(seen), D               2          [C, D]        {A,B,C,D}
+   3    C         A(seen), D(seen), E      3          [D, E]        {A,B,C,D,E}
+   4    D         B(seen), C(seen),        3          [E]           {A,B,C,D,E}
+                  E(seen)
+   5    E         C(seen), D(seen)         2          []            {A,B,C,D,E}
+  ----  --------  -----------------  ---------------
+  totals: 5 dequeues (= V)              12 (= 2E)
+```
+
+Five dequeues because the `visited` set admits each vertex exactly once. Twelve
+edge inspections because each of the 6 edges was examined from both endpoints.
+Total operations `5 + 12 = 17`, which is `V + 2E` — and constant factors drop,
+so `O(V + E)`. Had it been `O(V × E)` the bound would be `5 × 6 = 30` and
+would grow quadratically; it does not.
+
+**Why the sum and not the product.** The `visited` check is what converts a
+potentially exponential walk into a linear one. Without it a vertex could be
+enqueued once per incoming edge and the traversal would revisit subtrees
+forever on a cyclic graph. With it, the loop body for vertex `v` runs exactly
+once, and that body costs `deg(v)`. Summing the body cost over all vertices
+gives `Σ deg(v) = 2E`, and summing the loop overhead gives `V`. Two
+independent piles, added.
+
+### Decoding adjacency list vs. adjacency matrix
+
+**The idea behind it.** "An adjacency list asks 'who are my
+neighbors?' and gets a short answer. An adjacency matrix asks 'is every other
+vertex in the graph my neighbor?' and gets `V` answers, almost all of them
+no."
+
+The distinction only matters when the graph is *sparse* — which real graphs
+(road networks, social follow graphs, dependency graphs) almost always are.
+
+| Symbol | What it is |
+|---|---|
+| `O(V + E)` | Adjacency-list traversal cost |
+| `O(V^2)` | Adjacency-matrix traversal cost — one full row scan per vertex |
+| sparse | `E` is close to `V` (each node has a handful of neighbors) |
+| dense | `E` is close to `V^2` (nearly every pair is connected) |
+
+**Walk one example.** A sparse social graph: `V = 10,000` users, `E = 50,000`
+follow edges (average degree 10).
+
+```
+  representation     neighbor lookup      full traversal cost
+  ----------------   ------------------   ---------------------------------
+  adjacency list     read deg(v) items    V + E   = 10,000 + 50,000 = 60,000
+  adjacency matrix   scan V matrix cells  V x V   = 10,000 x 10,000
+                                                  = 100,000,000
+
+  ratio = 100,000,000 / 60,000 = 1,666.67   ->  about 1,600x more work
+```
+
+The same 1,600x gap shows up in memory: the matrix needs `10,000 × 10,000 =
+100,000,000` cells whether or not an edge is there, while the list stores
+`2E = 100,000` entries — a factor of 1,000 saved.
+
+**Why the crossover exists.** The matrix wins only when `E` approaches
+`V^2`, because then `V + E ≈ V^2` anyway and the matrix buys you `O(1)`
+edge-existence queries that the list answers in `O(deg(v))`. At average
+degree 10, `E/V^2 = 50,000 / 100,000,000 = 0.0005` — the matrix is 99.95%
+zeros, and every one of those zeros gets scanned. Default to the adjacency
+list unless the problem states the graph is dense or hands you a matrix.
+
 ---
 
 ## 6. Variations & Sub-patterns

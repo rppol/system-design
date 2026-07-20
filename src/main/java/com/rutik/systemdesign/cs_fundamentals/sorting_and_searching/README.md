@@ -145,6 +145,44 @@ flowchart TD
 
 *Each level performs O(n) merge work across log n levels, giving O(n log n) total — divide (orange) recursively halves the array down to single-element base cases (gold), then merge (green) recombines them in sorted order back up to the final output (blue).*
 
+**The idea behind it.** The recurrence `T(n) = 2T(n/2) + n` says: "sorting `n` things costs two half-sized sorts, plus one full sweep to zip the two halves back together."
+
+That framing matters because it separates the two costs that people conflate. The *halving* decides how many rounds you do; the *sweep* decides what each round costs. Neither alone gives you `n log n` — the product does.
+
+| Symbol | What it is |
+|--------|------------|
+| `T(n)` | Time to sort an input of size `n`. The thing you are solving for |
+| `2T(n/2)` | The two recursive sorts of each half. This is where the *halving* comes from |
+| `+ n` | The merge sweep. Every one of the `n` elements is copied exactly once |
+| `log n` | How many times you can halve `n` before hitting 1. The number of merge rounds |
+| `O(n log n)` | Rounds (`log n`) times work per round (`n`) |
+
+**Walk one example.** Merge sort on `n = 16`, counted round by round:
+
+```
+  n = 16                          merges at    each merge     elements touched
+  merge round                     this round   covers         this round
+  ---------------------------------------------------------------------------
+  round 1: singles  -> runs of 2       8            2                16
+  round 2: runs of 2 -> runs of 4      4            4                16
+  round 3: runs of 4 -> runs of 8      2            8                16
+  round 4: runs of 8 -> runs of 16     1           16                16
+  ---------------------------------------------------------------------------
+  rounds = log2(16) = 4                total = 4 rounds x 16 = 64 element moves
+```
+
+The merges get fewer and fatter as you go up, but the two effects cancel exactly: `8 x 2 = 4 x 4 = 2 x 8 = 1 x 16 = 16`. Every level costs `n`, and there are `log2(n)` levels, so the total is `n log n`. That is the whole proof, made countable.
+
+Here is what those growth rates mean at real input sizes:
+
+```
+  n            O(log n)     O(n)       O(n log n)         O(n^2)
+  1,000              10      1,000         10,000        1,000,000
+  1,000,000          20  1,000,000     20,000,000    1,000,000,000,000
+```
+
+**Why this complexity matters in production.** The gap between `O(n log n)` and `O(n^2)` at a million records is 20 million operations versus a trillion — roughly 50,000x. A request that returns in 40 ms under merge sort takes over half an hour under a quadratic sort. The failure mode is not "slower"; it is a request timeout, a thread pinned for minutes, and a connection pool drained by the queued callers behind it.
+
 ### Quicksort — Partition Around Pivot
 
 ```
@@ -165,6 +203,42 @@ Worst case: sorted input, always pick last as pivot
   -> pivot lands at index 0 or n-1 every time
   -> n recursive calls each doing O(n) work = O(n^2)
 ```
+
+**Stated plainly.** "Quicksort is fast only when the pivot lands near the middle; if it lands at an end every time, you peel off one element per pass instead of halving, and the algorithm degenerates into a very expensive bubble sort."
+
+That framing matters because quicksort's `O(n log n)` is an *average*, not a guarantee. Merge sort's bound holds for every input. Quicksort's holds only for inputs whose pivots happen to split well — and the input that breaks it is the most common input in production: already-sorted data.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(n log n)` | The average case. Pivot splits roughly in half, so depth is `log n` |
+| `O(n^2)` | The worst case. Pivot splits off one element, so depth is `n` |
+| `n(n-1)/2` | Sum of `n-1 + n-2 + ... + 1`. The degenerate comparison count |
+| `Theta(log n)` stack | Healthy recursion depth. Degenerates to `Theta(n)` frames on sorted input |
+
+**Walk one example.** Sorted input `[1,2,3,4,5,6,7,8]`, always taking the last element as pivot:
+
+```
+  call   subarray being partitioned   size   comparisons   pivot ends up
+  ------------------------------------------------------------------------
+    1    1 2 3 4 5 6 7 8                8         7        far right (8)
+    2    1 2 3 4 5 6 7                  7         6        far right (7)
+    3    1 2 3 4 5 6                    6         5        far right (6)
+    4    1 2 3 4 5                      5         4        far right (5)
+    5    1 2 3 4                        4         3        far right (4)
+    6    1 2 3                          3         2        far right (3)
+    7    1 2                            2         1        far right (2)
+  ------------------------------------------------------------------------
+  total = 7+6+5+4+3+2+1 = 28 = n(n-1)/2       recursion depth = 7 = n-1
+```
+
+Nothing is ever halved. Each partition removes exactly one element, so you get `n` levels of `O(n)` work instead of `log n` levels of `O(n)`. At `n = 1,000,000` that is the difference between:
+
+```
+  well-chosen pivot   n log2 n     =        20,000,000 comparisons
+  degenerate pivot    n(n-1)/2     =   499,999,500,000 comparisons   (~25,000x)
+```
+
+**Why this complexity matters in production.** Two things break, and the second is worse. First, the timeout: 500 billion comparisons will not finish inside any request budget. Second, the stack — `n-1 = 999,999` recursion frames overflows the call stack and crashes the process outright, so you get a hard fault rather than a slow response. Because sorted input is the trigger, an attacker who can control the order of submitted data can force this deliberately; that is the classic quicksort denial-of-service. Randomising the pivot (or median-of-three, or Introsort's heapsort fallback at depth `2 log n`) removes the attacker's ability to pick a bad input, which is exactly what `_partition` buys below.
 
 ### Counting Sort
 
@@ -198,6 +272,40 @@ lo=0, hi=1
   mid=0, arr[0]=1 < target: lo=1
 lo=1, hi=1 -> return 1  (first index of 2)
 ```
+
+**What the formula is telling you.** `O(log n)` says: "every probe throws away half of what is left, so the question is not how big the array is — it is how many times you can halve it before nothing remains."
+
+That framing matters because `log n` grows absurdly slowly, and people underestimate this. Going from a thousand elements to a million elements does not multiply the work by a thousand. It adds ten probes.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(log n)` | Cost grows by 1 step each time `n` *doubles* — not each time `n` grows by 1 |
+| `log2(n)` | How many halvings take `n` down to 1. `log2(1,048,576) = 20` |
+| `mid` | The probe point. Splits the live range into two halves |
+| `lo`, `hi` | The live range. Everything outside it has been eliminated for good |
+
+**Walk one example.** Search a sorted array of 1,000,000 elements. Count the surviving candidates after each probe:
+
+```
+  probe   candidates still in play      probe   candidates still in play
+  ---------------------------------------------------------------------
+    1              1,000,000             11                     488
+    2                500,000             12                     244
+    3                250,000             13                     122
+    4                125,000             14                      61
+    5                 62,500             15                      30
+    6                 31,250             16                      15
+    7                 15,625             17                       7
+    8                  7,812             18                       3
+    9                  3,906             19                       1
+   10                  1,953             20                       0  <- done
+  ---------------------------------------------------------------------
+  20 probes total. Linear scan of the same array: up to 1,000,000 probes.
+```
+
+Twenty comparisons to find one row among a million. Double the array to two million and it becomes twenty-one. This is why every index in every database is a logarithmic structure: a B+Tree lookup is this same table with a higher branching factor.
+
+**Why this complexity matters in production.** The failure mode is the one that hides. An `O(n)` scan where an `O(log n)` probe belonged looks perfectly healthy in development against 500 rows — 500 versus 9 operations is invisible. It only breaks after the table grows, and it breaks nonlinearly: the scan degrades in direct proportion to data growth while the probe barely moves. This is the archetypal "it was fine last quarter" latency regression, and the cause is almost always a missing index turning a logarithmic lookup back into a linear one.
 
 ---
 
@@ -360,6 +468,34 @@ def _counting_sort_by_digit(arr: List[int], exp: int) -> List[int]:
     return output
 ```
 
+**What this actually says.** `O(n + k)` says: "walk the input once, walk the key range once — and never compare two elements to each other at all."
+
+That framing matters because it explains how these sorts *escape* the `n log n` floor rather than beating it. The lower bound applies to algorithms that learn about the order only by asking "is a before b?" Counting sort never asks. It uses the key itself as an array index, so the value tells it the position directly. A rule about comparison-based algorithms simply does not bind an algorithm that makes no comparisons.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of elements to sort |
+| `k` | Size of the key *range* — how many distinct buckets, not how many items |
+| `O(n + k)` | One pass over the items, one pass over the buckets. Counting sort |
+| `d` | Number of digit positions (passes). For 32-bit ints base 256, `d = 4` |
+| `O(d(n + k))` | Radix sort: one stable counting sort per digit |
+
+**Walk one example.** The same `n = 1,000,000` under three regimes:
+
+```
+  scenario                         n           k          ops        verdict
+  ---------------------------------------------------------------------------
+  ages 0..99                1,000,000         100    1,000,100    beats n log n
+  32-bit ids, radix d=4     1,000,000         256   ~4,001,024    beats n log n
+  full int32 range          1,000,000   4.29e9      ~4.3e9        far worse
+  ---------------------------------------------------------------------------
+  comparison sort baseline: n log2 n = 20,000,000 operations
+```
+
+The first two win decisively. The third loses by 200x — and that is the whole story of `k`. Radix sort's `d` passes exist precisely to keep `k` small: instead of one pass with `k = 4.29e9`, it does 4 passes with `k = 256`.
+
+**Why this complexity matters in production.** The failure mode is memory, not time. `k` is an allocation — counting sort builds an array of `k` counters *before* it looks at how many elements you actually have. Sorting a hundred user records keyed by a 64-bit ID does not run slowly; it attempts to allocate an array of billions of entries and dies with an `OutOfMemoryError` or drives the box into swap. This is why any counting-sort call path needs the `k` versus `n` gate shown in Pitfall 3 — the check is not an optimisation, it is the guard that keeps a small input from taking down the process.
+
 ### Binary Search — All Variants
 
 ```python
@@ -472,6 +608,35 @@ def min_eating_speed(piles: List[int], h: int) -> int:
 | Space | O(1) – O(n) depending on algorithm | O(n + k) |
 | Stability | Depends on algorithm | Counting and LSD radix are stable |
 | Practical limit | Suitable for all general use | Efficient only when k ≪ n (k = key range) |
+
+**In plain terms.** The `Ω(n log n)` lower bound says: "there are `n!` possible orderings the input might be in, each comparison answers one yes/no question, and you cannot narrow `n!` possibilities down to one with fewer than `log2(n!)` yes/no answers."
+
+That framing matters because it is not a statement about any particular algorithm being poorly written. It is an information budget. No cleverness, no constant-factor tuning, and no future algorithm can beat it — as long as the only thing you are allowed to do is compare pairs.
+
+| Symbol | What it is |
+|--------|------------|
+| `n!` | Number of possible orderings of `n` distinct items. `20! ≈ 2.43e18` |
+| `log2(n!)` | Minimum yes/no answers needed to pin down which ordering it is |
+| `Ω(n log n)` | A *lower* bound — "no faster than". `O` is a ceiling, `Ω` is a floor |
+| 1 comparison | Exactly 1 bit of information: the answer is yes or no, nothing more |
+| Stirling | The approximation `log2(n!) ≈ n log2(n) - 1.4427n` |
+
+**Walk one example.** Sorting 20 elements. Count the information required:
+
+```
+  possible orderings of 20 items      20! = 2,432,902,008,176,640,000
+  bits needed to identify one         log2(20!) = 61.08 bits
+  bits one comparison provides        1
+  ---------------------------------------------------------------------
+  minimum comparisons                 ceil(61.08) = 62
+
+  No comparison sort in existence, or that will ever exist, can sort
+  20 elements in 61 comparisons or fewer. The information is not there.
+```
+
+The same arithmetic at `n = 1,000,000` gives `log2(n!) = 18,488,885` comparisons as the floor, against merge sort's `n log2 n = 20,000,000`. Merge sort is within 8 percent of the theoretical optimum — which is why nobody is still hunting for a faster comparison sort.
+
+**Why this matters in production.** The practical consequence is knowing when to stop optimising and when to change representation. If your sort is comparison-based and already `n log n`, the remaining wins are constant factors — cache behaviour, fewer branches, TimSort exploiting existing runs — typically 2–3x, never an order of magnitude. The only way to get an order of magnitude is to leave the comparison model entirely: map your keys to bounded integers and use counting or radix sort, which index rather than compare and so are not bound by `log2(n!)` at all. Teams burn weeks micro-tuning a comparator when the real answer was that the sort key was an integer all along.
 
 ---
 
@@ -598,6 +763,27 @@ def fixed_quicksort(arr, lo, hi):
     fixed_quicksort(arr, p + 1, hi)
 ```
 
+**Read it like this.** "The random swap does not make the algorithm faster on average — it makes the bad case unreachable by anyone choosing the input."
+
+That distinction is the point. Average-case cost is identical before and after. What changes is *who decides* whether you hit the worst case: without randomisation, the caller does; with it, the RNG does.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(n log n)` avg | What you get when pivots split near the middle |
+| `O(n^2)` worst | What sorted input triggers under a fixed last-element pivot |
+| `n(n-1)/2` | Exact comparison count in the degenerate case |
+
+**Walk one example.** Sorted input at `n = 1,000,000`:
+
+```
+  broken_quicksort   n(n-1)/2 = 499,999,500,000 comparisons, depth 999,999
+  fixed_quicksort    ~n log2 n =    20,000,000 comparisons, depth ~40
+  ---------------------------------------------------------------------
+  ratio: ~25,000x more work, ~25,000x deeper recursion
+```
+
+**Why this matters in production.** Sorted input is not an exotic edge case — it is what you get from a database `ORDER BY`, an append-only log, or a paginated API. The observable failure is a `RecursionError`/`StackOverflowError` from 999,999 frames, which kills the worker before the timeout ever fires. Because the trigger is attacker-controllable ordering, an endpoint that sorts user-supplied data with a fixed pivot is a denial-of-service primitive: one crafted payload, one dead process. Randomising the pivot, or using median-of-three plus Introsort's heapsort fallback at depth `2 log n`, closes it.
+
 ### Pitfall 3 — Applying counting sort when key range >> n
 
 ```python
@@ -618,6 +804,27 @@ def smart_sort(arr):
         return counting_sort_shifted(arr)
     return sorted(arr)              # Python's TimSort; O(n log n)
 ```
+
+**What it means.** "Counting sort's cost is `O(n + k)`, and the `k` half has nothing to do with how much data you have — it is set entirely by how far apart your largest and smallest keys are."
+
+That is what makes this pitfall so easy to hit: the input that kills you can be tiny. Ten elements with one outlier key of `10^9` allocates the same billion-slot array as ten million elements would.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Key range, `max - min + 1`. An *allocation size*, not an item count |
+| `O(n + k)` | Wins only while `k` stays comparable to `n` |
+| `k <= 10n` | The gate in `smart_sort`. Above it, fall back to `O(n log n)` |
+
+**Walk one example.** Where the crossover actually sits, at `n = 1,000,000` (baseline `n log2 n = 20,000,000`):
+
+```
+  k = 100            n + k =     1,000,100    counting sort wins  (20x)
+  k = 10,000,000     n + k =    11,000,000    counting sort wins  (1.8x)
+  k = 100,000,000    n + k =   101,000,000    comparison sort wins (5x)
+  k = 4,294,967,296  n + k = 4,295,967,296    17 GB at 4 B/counter; process dies
+```
+
+**Why this matters in production.** The failure is an allocation, and it happens before a single element is sorted. `[0, 10**9]` — two elements — asks CPython for a billion-entry list, roughly 8 GB of pointers, and you get a `MemoryError` or an OOM kill. There is no graceful degradation and no partial result, and load testing with well-clustered keys will never surface it; it takes one production record with an unexpected key to bring the box down. Gate on `k` versus `n` at the call site, always.
 
 ### Pitfall 4 — Merge sort on large linked list without tail recursion (stack overflow)
 

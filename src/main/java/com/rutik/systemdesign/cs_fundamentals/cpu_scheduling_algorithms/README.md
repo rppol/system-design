@@ -86,6 +86,92 @@ Waiting times: P1=3, P2=1, P3=0
 Average: (3+1+0)/3 = 1.33 -> much better
 ```
 
+### Decoding the Averages — FCFS vs SJF vs Round-Robin on One Process Set
+
+This is the calculation every OS course and half of all systems interviews ask you to perform. It is worth doing slowly and completely, once, on the process set already above.
+
+**The idea behind it.** "The scheduler cannot change how much work there is — total CPU time is fixed at 13 ms no matter what. All it can change is *who waits while someone else runs*, and the average waiting time is the single number that scores that choice."
+
+Every algorithm below finishes the same three jobs using the same 13 ms of CPU. The averages differ by more than 5x purely from ordering. That is the entire lesson of scheduling theory.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| arrival | When the process becomes runnable. All three arrive at t=0 here |
+| burst | CPU time the process needs. P1=10, P2=2, P3=1 |
+| completion | Clock reading when the process finishes for good |
+| turnaround | `completion - arrival`. Total wall-clock time the process existed |
+| waiting | `turnaround - burst`. Time sat in the ready queue doing nothing |
+| response | `first_run - arrival`. Time until *first* CPU, not until finish |
+| quantum | RR's time slice. 3 ms here |
+
+The one identity that prevents most arithmetic errors:
+
+```
+  waiting = turnaround - burst
+          = (completion - arrival) - burst
+
+  Compute completion times off the Gantt chart, then everything else
+  is subtraction. Never try to accumulate waiting time directly.
+```
+
+**Walk one example with real numbers.** Process set P1(burst 10), P2(burst 2), P3(burst 1), all arriving at t=0, queue order P1 then P2 then P3, RR quantum 3:
+
+```
+  ===== FCFS ===== run in arrival order: P1, P2, P3
+  |------------P1(10)------------|--P2(2)--|-P3(1)-|
+  0                             10        12      13
+
+        completion    turnaround = comp - 0    waiting = ta - burst
+  P1        10             10                    10 - 10 =  0
+  P2        12             12                    12 -  2 = 10
+  P3        13             13                    13 -  1 = 12
+                     sum = 35                    sum     = 22
+       avg turnaround = 35 / 3 = 11.67    avg waiting = 22 / 3 = 7.33
+
+  ===== SJF ===== non-preemptive, shortest burst first: P3, P2, P1
+  |P3(1)|--P2(2)--|------------P1(10)------------|
+  0     1         3                             13
+
+        completion    turnaround               waiting
+  P3         1              1                    1 -  1 =  0
+  P2         3              3                    3 -  2 =  1
+  P1        13             13                   13 - 10 =  3
+                     sum = 17                    sum     =  4
+       avg turnaround = 17 / 3 =  5.67    avg waiting =  4 / 3 = 1.33
+
+  ===== ROUND-ROBIN, quantum = 3 =====
+  slice-by-slice trace (queue shown after each slice):
+
+    t= 0- 3  P1 runs 3, remaining 7   queue: P2, P3, P1
+    t= 3- 5  P2 runs 2, DONE at 5     queue: P3, P1        (needed < quantum)
+    t= 5- 6  P3 runs 1, DONE at 6     queue: P1
+    t= 6- 9  P1 runs 3, remaining 4   queue: P1
+    t= 9-12  P1 runs 3, remaining 1   queue: P1
+    t=12-13  P1 runs 1, DONE at 13    queue: empty
+
+  |--P1--|-P2-|P3|--P1--|--P1--|P1|
+  0      3    5  6      9     12  13
+
+        completion    turnaround               waiting
+  P1        13             13                   13 - 10 =  3
+  P2         5              5                    5 -  2 =  3
+  P3         6              6                    6 -  1 =  5
+                     sum = 24                    sum     = 11
+       avg turnaround = 24 / 3 =  8.00    avg waiting = 11 / 3 = 3.67
+
+  ===== SCOREBOARD =====
+  Algorithm  avg waiting   avg turnaround   P3 waits   dispatches
+  ---------  -----------   --------------   --------   ----------
+  FCFS          7.33           11.67          12          3
+  SJF           1.33            5.67           0          3
+  RR (q=3)      3.67            8.00           5          6
+
+  Same 13 ms of work in every row. FCFS makes the 1 ms job wait 12 ms
+  behind the 10 ms job -- the convoy effect, costing it 12x its own runtime.
+```
+
+**Why SJF wins the average and still loses in practice.** SJF is provably optimal for average waiting time, and the reason is visible in the arithmetic: putting a job of burst `b` first adds `b` to the wait of *every* job behind it, so the total waiting time is minimised by front-loading the smallest bursts. Running P1 first charges its 10 ms to two other processes (20 ms of induced waiting); running it last charges nobody. Yet SJF is unusable as a general-purpose scheduler for two reasons the table cannot show — it requires knowing burst times in advance, which no OS does, and a steady arrival of short jobs starves P1 forever. Round-Robin's 3.67 is the deliberate compromise: it gives up 2.34 ms of average waiting against SJF and pays 6 dispatches instead of 3, and buys back a bounded response time (no process waits more than one full queue cycle for *first* CPU) plus immunity to starvation. MLFQ, further down, is the attempt to get SJF's numbers without SJF's oracle — it *infers* short bursts by watching which processes yield before their quantum expires.
+
 ### Round-Robin (Quantum = 3)
 
 ```mermaid
@@ -152,6 +238,46 @@ sequenceDiagram
 ```
 
 CFS always dispatches the runnable thread with the smallest vruntime (kept in a red-black tree), so three equal-weight (nice 0) threads converge on exactly 33% of CPU each. A thread at nice=-5 has 3x the weight of nice=0, so its vruntime advances only 1/3 as fast and it earns 3x more CPU time.
+
+**Stated plainly.** "Charge every thread a bill for the CPU time it uses, but let high-priority threads pay a discounted rate — then always run whoever owes the least."
+
+Priority in CFS is not a queue position and not a bigger time slice. It is a *billing rate*. That single reframing is what makes nice values predictable instead of folklore: a nice value maps to a weight, and CPU share is just that weight over the sum of all weights.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| vruntime | Accumulated *billed* CPU time in nanoseconds. The red-black tree's sort key |
+| weight | The thread's priority as a number. nice 0 = 1024, by definition |
+| `1024 / weight` | Multiplier applied to real runtime before adding it to vruntime |
+| nice | The user-facing knob, -20 to +19. *Higher* nice = nicer to others = less CPU |
+| `w_i / sum(w)` | The steady-state fraction of CPU this thread receives |
+
+**Walk one example with real numbers.** Three runnable threads, each given a 4 ms slice; A and B at nice 0, C at nice -5 (Linux weight table value 3121):
+
+```
+  weight comes from nice via a fixed table, ~25% per step: 1024 x 1.25^(-nice)
+    nice  0 -> 1024                          (the definition)
+    nice -5 -> 1024 x 1.25^5 = 3125 approx   (real kernel table says 3121)
+    ratio 3121 / 1024 = 3.05  -> "nice -5 is about 3x the weight"
+
+  vruntime charged for 4 ms of REAL CPU:
+    A (w=1024):  4 ms x 1024/1024 = 4.00 ms billed   <- pays full price
+    B (w=1024):  4 ms x 1024/1024 = 4.00 ms billed
+    C (w=3121):  4 ms x 1024/3121 = 1.31 ms billed   <- pays 1/3 price
+
+  Because the scheduler always picks the SMALLEST vruntime, C's slow-growing
+  bill means C is picked back up roughly 3x as often:
+
+    total weight = 1024 + 1024 + 3121 = 5169
+    A share = 1024 / 5169 = 19.8%
+    B share = 1024 / 5169 = 19.8%
+    C share = 3121 / 5169 = 60.4%
+              (19.8 + 19.8 + 60.4 = 100%)
+
+  Sanity check with three equal nice-0 threads:
+    1024 / (1024 x 3) = 33.3% each, exactly as the trace above shows.
+```
+
+**Why this beats fixed priorities and fixed quanta.** A strict priority scheduler answers "who runs next" and nothing else, which is why it starves low-priority threads — there is no accounting that ever lets them catch up. CFS's bill always grows for whoever is running, so *every* runnable thread eventually holds the minimum vruntime and gets the CPU; nice -5 makes C's turn come around three times as often, but it never stops A's turn from arriving. The knob is also composable: this is exactly the mechanism behind `cpu.shares` in cgroups, where a container's share is its weight over the sum of sibling weights, computed with the identical `w_i / sum(w)` arithmetic one level up the hierarchy.
 
 ---
 
@@ -371,6 +497,38 @@ The UI thread's priority is a two-state lifecycle keyed on touch activity: boost
 | Very long (infinite) | Poor (= FCFS) | Good | Minimal |
 
 **Rule of thumb**: Quantum should be much larger than context-switch cost (~1 µs) but small enough to provide good response time. Linux's CFS min granularity is 4 ms.
+
+**What the formula is telling you.** "Every time slice ends you burn a fixed setup cost, so the fraction of the CPU you lose to overhead is just that cost divided by the slice length — shrink the slice and the tax rate climbs."
+
+The table's "Poor (overhead)" verdict on a 1 ms quantum only makes sense once you separate the two costs a switch carries: the *direct* register-save-and-restore, and the *indirect* cache and TLB refill that follows.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| quantum `q` | Length of one time slice before preemption |
+| `c` | Direct context-switch time — save/restore registers, swap page tables. ~1 µs |
+| `c / (q + c)` | Share of wall-clock time spent switching rather than computing |
+| indirect cost | Cold L1/L2/TLB after the switch. Not in `c`, often several times larger |
+
+**Walk one example with real numbers.** Direct switch cost 1 µs = 0.001 ms, across the quanta in the table above:
+
+```
+  overhead = c / (q + c)
+
+  quantum q      c / (q + c)              overhead     table verdict
+  -------------  -----------------------  -----------  ----------------------
+  0.1 ms         0.001 / 0.101            0.9901%      (below the table)
+  1   ms         0.001 / 1.001            0.0999%      "Poor (overhead)"
+  4   ms         0.001 / 4.001            0.0250%      Linux CFS min granularity
+  10  ms         0.001 / 10.001           0.0100%      "Good"
+  100 ms         0.001 / 100.001          0.0010%      "Moderate response time"
+
+  Direct cost alone does NOT justify calling 1 ms "poor" -- 0.1% is nothing.
+  The real bill is indirect: after each switch the new thread runs with a cold
+  L1 and a flushed TLB, and refilling those costs several microseconds of
+  degraded execution that never appears in the 1 us figure.
+```
+
+**Why the quantum is chosen from the response-time side instead.** Since direct overhead is negligible above ~1 ms, the binding constraint is the other end: with `n` runnable threads, the worst-case wait for first CPU is `(n - 1) x q`. At `q = 100 ms` and 10 runnable threads that is 900 ms — visibly unresponsive — while at `q = 4 ms` it is 36 ms, under a typical interaction budget. This is why CFS sets a *target latency* (`sched_latency_ns`, 8-24 ms) and divides it among runnable threads rather than fixing a quantum, and why it clamps the result at `sched_min_granularity_ns` (4 ms): the clamp exists precisely to stop a large `n` from driving slices down into the region where cache-refill overhead starts to dominate.
 
 ---
 

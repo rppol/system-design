@@ -214,6 +214,139 @@ achieves the (better) inverse-Ackermann bound.
 **With neither**: O(n) worst case — a pathological sequence of unions can
 produce a degenerate linked-list-shaped tree.
 
+### Decoding `α(n)` — the inverse Ackermann function
+
+**What this actually says.** "`α(n)` is a function that grows so
+absurdly slowly that for any `n` you could ever store — indeed for any `n`
+the physical universe could represent — its value is at most 4. Read
+`O(α(n))` as 'constant time, and I am being pedantic about it.'"
+
+Almost every other complexity symbol describes growth you can feel. `α(n)`
+describes growth you cannot: it is the inverse of the Ackermann function,
+which explodes faster than any exponential tower. Inverting something that
+violent produces something that crawls. Nobody optimizes against `α(n)`;
+you recognize it and move on.
+
+| Symbol | What it is |
+|---|---|
+| `α(n)` | The number of times you must apply a tower-of-powers shrink to get `n` down to 1. Bounded by 4 in practice |
+| `A(m, n)` | The fastest-growing classic computable function; `α` is its inverse |
+| `O(α(n))` | Amortized cost of `find` with union-by-rank plus path compression |
+| amortized | Averaged over a whole sequence of operations, not guaranteed per single call |
+| `O(n · α(n)) ≈ O(n)` | `n` operations cost effectively linear total time |
+
+**How small is 4, really.** The bound is `α(n) <= 4` for every `n` below
+`2^65536`. To see how far outside reality that is:
+
+```
+  quantity                                 size          roughly, in powers of 2
+  ---------------------------------------  ------------  -----------------------
+  atoms in the observable universe          ~10^80        2^266
+  bits if every atom stored one bit         ~10^80        2^266
+  the union-find bound's threshold            --          2^65536
+
+  2^65536 dwarfs 2^266 by 65,270 doublings.
+  So for any n you can physically instantiate:   alpha(n) <= 4.
+```
+
+A `find` that is "at most 4 pointer hops on average" is, for engineering
+purposes, `O(1)`. That is why the section table writes
+`O(n · α(n)) ≈ O(n)` — the `α` factor is a theoretician's asterisk.
+
+**Walk one example.** Seven elements `0..6`. Union by rank, plus path
+compression on every `find`. The `parent` array is shown after each step;
+`^` marks self-parented roots.
+
+```
+  step  operation     what happens                     parent array (index 0..6)
+  ----  ------------  -------------------------------  -------------------------
+   0    (init)        every node its own root          [0, 1, 2, 3, 4, 5, 6]
+                                                        ^  ^  ^  ^  ^  ^  ^
+   1    union(0, 1)   ranks tie (0,0): 1 -> 0,         [0, 0, 2, 3, 4, 5, 6]
+                      rank[0] becomes 1                 ^        ^  ^  ^  ^
+   2    union(2, 3)   ranks tie (0,0): 3 -> 2,         [0, 0, 2, 2, 4, 5, 6]
+                      rank[2] becomes 1                 ^        ^  ^  ^  ^
+   3    union(0, 2)   ranks tie (1,1): 2 -> 0,         [0, 0, 0, 2, 4, 5, 6]
+                      rank[0] becomes 2                 ^              ^  ^
+   4    union(4, 5)   ranks tie (0,0): 5 -> 4,         [0, 0, 0, 2, 4, 4, 6]
+                      rank[4] becomes 1                 ^              ^     ^
+   5    union(3, 5)   find(3): 3 -> 2 -> 0, COMPRESS   [0, 0, 0, 0, 0, 4, 6]
+                      parent[3] = 0 directly            ^                    ^
+                      find(5) = 4; rank[0]=2 >
+                      rank[4]=1, so 4 -> 0
+   6    find(6)       6 is already its own root,       [0, 0, 0, 0, 0, 4, 6]
+                      0 hops                            ^                    ^
+   7    union(6, 5)   find(5): 5 -> 4 -> 0, COMPRESS   [0, 0, 0, 0, 0, 0, 0]
+                      parent[5] = 0 directly            ^
+                      rank[0]=2 > rank[6]=0: 6 -> 0
+
+  final forest -- every node points straight at the root:
+
+                          0
+        +-------+-------+-------+-------+-------+
+        1       2       3       4       5       6
+
+        every find() is now exactly 1 hop
+```
+
+Watch step 5 and step 7: each `find` that walked a 2-hop path *rewired* the
+nodes it passed to point directly at the root. The structure paid for its own
+flattening while answering a query it had to answer anyway. That is the whole
+mechanism — path compression is free work done in passing.
+
+### Decoding the naive chain vs. the compressed forest
+
+**In plain terms.** "Without the two optimizations, union-find
+degenerates into a linked list and `find` becomes a linear scan. With them,
+the same structure collapses into a two-level star and `find` becomes a
+pointer dereference."
+
+| Symbol | What it is |
+|---|---|
+| `O(n)` | Naive: worst-case chain, `find` walks every node |
+| `O(log n)` | Either optimization alone: tree height stays logarithmic |
+| `O(α(n))` | Both together: effectively constant |
+
+**Walk one example.** Same 7 elements, but naive `union` always points the
+first root at the second and never compresses. Apply
+`union(0,1), union(1,2), union(2,3), union(3,4), union(4,5), union(5,6)`:
+
+```
+  naive (no rank, no compression)      with rank + compression
+  -------------------------------      -------------------------------
+        0                                          6
+        |                                +---+---+---+---+---+
+        1                                0   1   2   3   4   5
+        |
+        2                              find(0) = 1 hop
+        |
+        3                              find(any) = 1 hop
+        |
+        4
+        |
+        5
+        |
+        6
+
+  find(0) walks 0->1->2->3->4->5->6 = 6 hops
+  find(0) on n nodes = n - 1 hops
+```
+
+**Why this complexity.** In the naive chain, `find` cost is the node's depth,
+and a hostile union order makes depth `n - 1`, so `m` operations cost
+`O(m · n)`. Union by rank forbids that shape: attaching the shorter tree under
+the taller one means a tree of height `h` requires at least `2^h` nodes, so
+`h <= log2(n)` — the chain is structurally impossible. Path compression then
+attacks the remaining `log n`: every traversal permanently shortens the paths
+it touched, so repeated queries amortize away. Tarjan proved the two together
+land at `O(α(n))` amortized, and no better bound is possible for this problem.
+
+Concretely at `n = 1,000,000`: a naive worst-case `find` costs up to `999,999`
+pointer hops; union by rank alone caps it at `log2(1,000,000) ≈ 20` hops; both
+optimizations bring it to at most 4 amortized. That is a `999,999 / 4 ≈
+250,000x` improvement over naive, and a `20 / 4 = 5x` improvement over
+rank-only.
+
 ---
 
 ## 6. Variations & Sub-patterns

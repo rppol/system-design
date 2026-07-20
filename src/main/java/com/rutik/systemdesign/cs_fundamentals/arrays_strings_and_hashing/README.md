@@ -182,6 +182,50 @@ class DynArray:
 
 Amortised proof: each element is copied at most once per doubling step. Total copies for n appends = n/2 + n/4 + ... ≤ n. Total work = n appends + n copies = 2n = O(n). Amortised per-append: O(1).
 
+**The idea behind it.** "Appending is *usually* free; occasionally it is expensive; and the expensive ones are rare enough — and spread far enough apart — that the average stays constant."
+
+Amortized is not the same as average-case. Average-case is a statement about random inputs; amortized is a worst-case guarantee about a *sequence*. No adversary can pick inputs that make appends slow, because the expensive resize pays for itself out of the cheap appends that preceded it.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(1)` | Constant. Cost does not grow with how much is already stored |
+| `O(n)` | Linear. One unit of work per element currently held |
+| "amortized O(1)" | Total cost of n operations is O(n), so each one *averages* O(1) |
+| `cap` | Slots allocated. Always ≥ `size` |
+| `size` | Slots actually used. What `len()` reports |
+| growth factor 2 | New capacity = 2 × old capacity on overflow |
+
+**Walk one example.** Append 1024 elements into the `DynArray` above and count every element copy:
+
+```
+  append #     size before   cap before   resize?   elements copied   running total
+        1            0            1         no             0                  0
+        2            1            1        yes             1                  1
+        3            2            2        yes             2                  3
+        5            4            4        yes             4                  7
+        9            8            8        yes             8                 15
+       17           16           16        yes            16                 31
+       33           32           32        yes            32                 63
+       65           64           64        yes            64                127
+      129          128          128        yes           128                255
+      257          256          256        yes           256                511
+      513          512          512        yes           512               1023
+  (all other 1014 appends: no resize, 0 copies each)
+
+  total copies = 1 + 2 + 4 + 8 + ... + 512 = 1023
+  bound        = 2n = 2048          ->  1023 < 2048  ✓
+  per append   = 1023 / 1024 = 0.999 copies on average  ->  O(1) amortized
+```
+
+Only 10 of the 1024 appends resize at all. The doubling sequence is a geometric series, and a geometric series summing to just under its own last term is exactly why the total stays linear: `1+2+...+512 = 1023`, which is one less than `1024`. Halve the growth factor to 1.1 and the resizes get *far* more frequent; drop to a fixed `+1` growth and the total becomes `1+2+...+n = n(n+1)/2`, which is O(n^2).
+
+| n | O(log n) | O(n) | O(n log n) | O(n^2) |
+|---|---------|------|-----------|--------|
+| 1,000 | 10 | 1,000 | 10,000 | 1,000,000 |
+| 1,000,000 | 20 | 1,000,000 | 20,000,000 | 1,000,000,000,000 |
+
+**Why this complexity matters — the failure mode.** Get the growth factor wrong (grow by a constant instead of a multiple) and appends fall off the O(n^2) column above: building a 1,000,000-element list stops being a million operations and becomes a trillion — a request that used to finish in milliseconds now never returns, and the pathology only shows up at production volume because at n = 1,000 the difference is 1,000 vs 1,000,000, still sub-second. The second failure mode is memory: doubling means a resize momentarily holds *both* the old and new backing arrays, so peak RSS is ~3× the steady-state array size at the instant of growth. A service sized to its average list footprint will OOM during the resize spike, not during normal operation.
+
 ### 6.2 Hash Table Implementation
 
 ```python
@@ -237,6 +281,46 @@ class HashMap:
                 self.put(k, v)
 ```
 
+**Stated plainly.** "A hash table is O(1) only as long as the buckets stay mostly empty — the `0.75` in `put()` is not a magic constant, it is the price you pay to keep lookups from turning into a linear scan."
+
+The whole O(1) claim rests on one assumption: that the hash function scatters keys evenly. Nothing in the data structure enforces that. When the assumption breaks — by accident or on purpose — the same code silently becomes O(n) per lookup with no error, no exception, and no log line.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of entries currently stored |
+| `m` | Number of buckets / slots (`self._cap` in the code above) |
+| `α = n/m` | How full the table is. `0.75` is the resize trigger in `put()` |
+| `O(1)` avg | Expected probes is a small constant *given a good hash* |
+| `O(n)` worst | Every key landed in one bucket; lookup degenerates to a scan |
+| "probe" | One slot inspected during `_probe()`'s walk |
+
+**Walk one example.** Linear probing, `m = 16` slots, filling the table one key at a time. Expected probes come from Knuth's linear-probing formulas — successful `0.5 × (1 + 1/(1-α))`, unsuccessful `0.5 × (1 + 1/(1-α)^2)`:
+
+```
+   n     m     alpha = n/m    probes (hit)   probes (miss)   state
+   4    16        0.25            1.17            1.39       roomy
+   8    16        0.50            1.50            2.50       comfortable
+  12    16        0.75            2.50            8.50       <- resize fires here
+  14    16        0.875           4.50           32.50       (only if resize disabled)
+  15    16        0.9375          8.50          128.50       clustering runaway
+```
+
+Read the miss column, not the hit column — that is the one that explodes. Between α = 0.5 and α = 0.75 a failed lookup goes from 2.5 probes to 8.5; push to α = 0.9375 and it is 128.5. This is why `put()` resizes at `>= 0.75` rather than waiting until the table is actually full: the cost curve is a `1/(1-α)^2` wall, and the last few percent of capacity cost more than all the preceding capacity combined.
+
+Now the worst case. Suppose every key hashes to the same bucket:
+
+```
+  good hash, n = 1,000, m = 1,024      ->  ~1-2 probes per lookup   (O(1))
+  all keys collide, n = 1,000          ->  up to 1,000 probes       (O(n))
+
+  1,000 lookups x 1,000 probes = 1,000,000 slot inspections
+  vs the healthy 1,000 x 2     =     2,000 slot inspections
+                                     ------------------------
+                                     500x more work, same code
+```
+
+**Why this complexity matters — the failure mode.** The named production incident here is **hash-flooding denial of service**. An attacker who knows (or can guess) your hash function crafts thousands of distinct keys that all hash to the same bucket, then submits them as HTTP form fields, JSON keys, or query parameters. Your framework dutifully inserts them into a map, every insert scans the whole chain, and a single request that looks like ordinary input burns CPU quadratically — `n` inserts each costing O(n) is O(n^2) work, so 100,000 colliding keys is 10,000,000,000 comparisons off one request. This landed as a real cross-language vulnerability in 2011/2012 (PHP, Java, Python, Ruby, and others all shipped fixes). The mitigations are the ones you see in modern runtimes: **randomized hash seeds per process** (Python's `PYTHONHASHSEED`, on by default since 3.3) so the attacker cannot precompute collisions, and **treeified buckets** (Java 8's HashMap converting a chain to a red-black tree at ≥ 8 entries, noted in §4.1) so even a fully-collided bucket degrades to O(log n) rather than O(n). The second, quieter failure mode is a **bad `__hash__`/`hashCode` on your own key class** — returning a constant, or hashing only one field of a composite key — which produces the same O(n) collapse with no attacker at all, and shows up as a service that is fast in staging and mysteriously CPU-bound in production where the key cardinality is higher.
+
 ### 6.3 String Building — Common O(n²) Trap
 
 ```python
@@ -255,6 +339,47 @@ def build_string(chars: list[str]) -> str:
         parts.append(c)   # O(1) amortized append to list
     return ''.join(parts)  # single O(n) scan
 ```
+
+**What the formula is telling you.** "Strings are immutable, so `s += x` never appends — it allocates a brand-new string and copies everything you already had, which means the loop re-copies the whole prefix on every single iteration."
+
+The trap is that the broken version *looks* like an O(1) append. Nothing in `result += c` hints that a full copy is happening; the cost is hidden inside the language's string semantics. That is exactly why this is the single most common accidental-O(n^2) in interview code and in production log-formatting loops.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of pieces being concatenated |
+| `O(n^2)` | Work grows with the *square* of the input. Double n, quadruple the time |
+| `n(n+1)/2` | Sum `1+2+...+n`. The exact character-copy count of the broken loop |
+| immutable | The object cannot be changed in place; every "edit" is a new allocation |
+| `''.join(parts)` | Measures the total length once, allocates once, copies each piece once |
+
+**Walk one example.** Build a 5-character string one character at a time with `result += c`:
+
+```
+  iteration   result before   chars copied into the new string   running total
+      1           ""                        0                          0
+      2           "a"                       1                          1
+      3           "ab"                      2                          3
+      4           "abc"                     3                          6
+      5           "abcd"                    4                         10
+
+  total = 0+1+2+3+4 = 10 characters copied to produce a 5-character string
+
+  ''.join(parts): measure total length (5), allocate once, copy 5 chars = 5
+```
+
+Five characters copied versus ten is not alarming. The gap is a *ratio*, and the ratio is `n/2`, so it widens with every element:
+
+```
+   n           broken  s += x        builder / join        ratio
+                n(n+1)/2 copies      n copies
+
+   1,000              500,500              1,000            500x
+   100,000      5,000,050,000            100,000         50,000x
+```
+
+At n = 1,000 the broken loop copies 500,500 characters — half a millisecond, invisible. At n = 100,000 it copies 5,000,050,000 characters to produce a 100,000-character string: five billion character copies where 100,000 would do, a 50,000× overshoot.
+
+**Why this complexity matters — the failure mode.** This is the classic "it worked fine in dev, it hangs in prod" bug, and it hangs *silently* — no exception, no error, just a request that stops returning. The shape is always the same: a loop that accumulates a report, a CSV export, a log line, or a JSON blob with `+=`, tested against 50 rows and deployed against 100,000. Because the cost is quadratic, the symptom does not scale gently — a 10× increase in data is a 100× increase in time, so the endpoint goes from 200 ms to 20 seconds and trips the gateway timeout. It also generates n intermediate string objects that immediately become garbage, so the secondary symptom is a GC storm: allocation pressure and pause times spike alongside the CPU, and the thread holding the loop pins a worker for the duration. The fix is unconditional and costs nothing — accumulate into a list and `''.join()` at the end (Python), or use `StringBuilder` (Java). Never `+=` a string inside a loop whose bound you do not control.
 
 ### 6.4 Anagram Grouping — Canonical Key Pattern
 

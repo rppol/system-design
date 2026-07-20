@@ -242,6 +242,47 @@ The `width` formula `i - stack[-1] - 1` captures "everything strictly between th
 
 The O(n) bound (despite the `while` loop nested in the `for` loop) follows the same amortized argument as cyclic sort and sliding window: **each element is pushed exactly once and popped at most once**, so total push+pop operations are bounded by `2n`.
 
+### Decoding the complexity claim
+
+**Read it like this.** "Oh of n means: every bar gets pushed onto the stack exactly once and popped off at most once, so the total stack traffic is capped at `2n` no matter how the heights are arranged — there is no input that makes it quadratic."
+
+That framing matters because the inner `while` really can pop many items in a single outer iteration, which looks alarming. But those items are gone permanently; a long burst of pops is *borrowing* from a budget that was already paid for at push time, so it cannot recur.
+
+| Symbol | What it is |
+|---|---|
+| `O(...)` | An upper bound on how fast the work grows as the input grows |
+| `n` | The input size — how many bars or elements there are |
+| `k` | The window width, in the sliding-window-maximum variant |
+| `O(n)` | Work proportional to `n` — the `2n` push/pop budget, constants dropped |
+| `O(n^2)` | Expanding left and right from every bar, the brute force this replaces |
+| `2n` | The exact operation ceiling: `n` pushes plus at most `n` pops |
+
+**Walk one example.** `heights = [2, 1, 5, 6, 2, 3]` with a sentinel `0` appended at index 6 to force the final flush. The stack holds indices, kept increasing by height:
+
+```
+  heights = [2, 1, 5, 6, 2, 3] + sentinel 0 at index 6
+
+  i  h  stack before  pops: idx / height / width / area   stack after  best
+  -  -  ------------  --------------------------------   -----------  ----
+  0  2  []            none                               [0]             0
+  1  1  [0]           0 / h=2 / w=1 / area=2             [1]             2
+  2  5  [1]           none                               [1,2]           2
+  3  6  [1,2]         none                               [1,2,3]         2
+  4  2  [1,2,3]       3 / h=6 / w=1 / area=6             [1,4]          10
+  .  .  .             2 / h=5 / w=2 / area=10            .               .
+  5  3  [1,4]         none                               [1,4,5]        10
+  6  0  [1,4,5]       5 / h=3 / w=1 / area=3             [6]            10
+  .  .  .             4 / h=2 / w=4 / area=8             .               .
+  .  .  .             1 / h=1 / w=6 / area=6             .               .
+
+  answer = 10 (bars 5 and 6, height 5, width 2)
+  pushes: 7    pops: 6    total stack ops: 13    ceiling 2n = 14
+```
+
+Index `6` triggers three pops in one outer iteration — the scary-looking case. But indices 5, 4 and 1 were each pushed exactly once, long before, and can never be popped again. The burst is bounded by how much was pushed, not by `n` per outer step.
+
+**Why this is O(n) and not O(n^2).** Count operations, not loop nesting. The outer `for` runs `n` times and pushes once per iteration: `n` pushes, full stop. Every pop removes an item that some push put there, so pops are bounded by pushes: at most `n` pops. Total `2n` — the trace above spent 13 against a ceiling of 14. At LC 84's limit of `n = 100,000` that is 200,000 stack operations, versus `100,000^2 = 10^10` for the expand-from-every-bar brute force — **50,000 times more work** avoided. This is the identical argument to sliding window's `left` pointer and cyclic sort's swap budget; three patterns, one proof shape.
+
 ---
 
 ## 6. Variations & Sub-patterns

@@ -123,6 +123,62 @@ flowchart TD
 
 Prefix `"car"` traversal: root → c → a → r. `search("car")` returns True because the `r` node has `is_end = True`; `starts_with("ca")` returns True simply because the `a` node exists. Green nodes mark completed words (`is_end = True`); orange nodes are prefix-only branch points.
 
+**The idea behind it.** "A trie lookup costs one pointer hop per character of the *query* — and
+nothing else. It does not care whether the dictionary holds 5 words or 5 million, because you only ever
+walk the path your own query spells out."
+
+That independence from `n` is the property worth internalising, and it is genuinely unusual: almost every
+other structure's cost is written in terms of how much data it holds. A trie's is written entirely in
+terms of how much you *asked*.
+
+| Symbol | What it is |
+|--------|------------|
+| `m` (or `L`) | Number of characters in the **query**, not in the dictionary |
+| `O(m)` | One node hop per character. `"car"` = 3 hops, always |
+| `n` | Number of words stored. Notice it appears **nowhere** in the lookup cost |
+| `k` | Number of results a prefix query returns |
+| `O(m + k)` | Autocomplete: walk to the prefix node, then enumerate its subtree |
+| `sigma` | Children per node. 26 for lowercase English, 256 for bytes |
+
+**Walk one example.** The five-word trie above, counted honestly, then scaled to a real dictionary:
+
+```
+  words: cat, car, card, care, dog
+
+  flat storage (a hash set)          trie storage
+      c a t                            root
+      c a r                             |-- c - a -+- t (END cat)
+      c a r d                           |          +- r (END car) -+- d (END card)
+      c a r e                           |                          +- e (END care)
+      d o g                             +-- d - o - g (END dog)
+      ----------------------           ---------------------------------------
+      17 characters stored              9 nodes -- "car" is stored ONCE and
+                                        shared by car, card, and care
+
+  lookup cost for "care" (m = 4):
+      trie      : 4 pointer hops                       independent of n
+      hash set  : hash all 4 chars, then compare 4     also O(m) -- a TIE
+
+  prefix query "car*" over a 1,000,000-word dictionary (m = 3, k = 3 results):
+      trie      : 3 hops to reach the 'r' node, then walk its subtree
+                  = 3 + 3 = 6 operations
+      hash set  : no prefix structure exists, so scan every key
+                  = 1,000,000 x 3 char comparisons = 3,000,000 operations
+
+      ratio: ~500,000x. THIS is why tries exist -- not exact match, prefixes.
+```
+
+**What it costs, and when the hash set wins.** Exact-match lookup is a tie, so a trie is only worth its
+price when you need prefixes, sorted iteration, or heavy prefix sharing. The price is real: an
+array-of-children node holds `sigma` pointers whether it uses them or not — 26 pointers x 8 bytes = 208
+bytes per node for lowercase English, and a million-word dictionary needs roughly 2 million nodes, so
+about 400 MB versus roughly 80 MB for a plain hash set of the same words. That is a 5x memory penalty
+bought to make one query shape fast. The escapes are a dict/hash-map per node (pay only for children that
+exist, at the cost of an indirection per hop), or a compressed radix tree that collapses each non-
+branching chain into a single edge — the "card"/"care" tail above becomes one node instead of two. Skip
+all of it when the keys are long and share no prefixes: that is Pitfall 2, where the trie degenerates to
+one node per character and buys nothing.
+
 ### Union-Find Path Compression
 
 ```mermaid
@@ -158,6 +214,55 @@ flowchart LR
 
 Path compression rewrites every node touched by `find(6)` to point directly at the root — the next `find(6)` call is O(1) instead of walking the O(n) chain.
 
+**Stated plainly.** "`O(alpha(n))` means: the cost per operation grows so absurdly slowly
+that for every input any computer will ever process, it is at most 4. Treat it as a constant — not
+because we are being sloppy, but because the function provably never exceeds 4 below `n = 10^80`."
+
+The honest statement is that `alpha(n)` is not `O(1)` in theory; it just is in practice, by a margin no
+other complexity class comes close to. Knowing *why* is what makes the claim usable instead of magical.
+
+| Symbol | What it is |
+|--------|------------|
+| `alpha(n)` | The **inverse Ackermann** function. The slowest-growing function in common use |
+| Ackermann | A function that grows so violently that `A(4,4)` exceeds the atom count of the universe |
+| inverse | `alpha(n)` asks: how big must the Ackermann argument be to reach `n`? Answer: tiny |
+| amortised | Averaged over a sequence of operations. One `find` may be slow; `m` of them are not |
+| path compression | On every `find`, re-point each node on the path straight at the root |
+| union by rank | Attach the shorter tree under the taller one, so depth never grows needlessly |
+
+**Walk one example.** How `alpha(n)` behaves as `n` covers everything that exists:
+
+```
+                    n                          alpha(n)
+  --------------------------------------       --------
+                    5                              2
+                2,048                              3
+        1,000,000  (a city of users)                4
+   10,000,000,000  (every device on Earth)          4
+            10^80  (atoms in the universe)          4
+        10^(10^6)  (a number you cannot write)      5
+
+  compare the growth of the alternatives, at n = 1,000,000:
+
+      O(n)        1,000,000        naive chain walk, no optimisations
+      O(log n)           20        union by rank only
+      O(alpha(n))         4        rank + path compression
+      O(1)                1        the theoretical floor
+
+  4 versus 1. That gap is why "effectively constant" is not hand-waving.
+```
+
+**Why the two optimisations are both required, and what breaks with only one.** Union by rank alone bounds
+tree height at `log n` — 20 hops per `find` on a million nodes. Path compression alone gives
+`O(log n)` amortised. It is only their *combination* that reaches `alpha(n)`, and the argument is that
+compression flattens exactly the paths that repeated queries actually touch, so the work each `find` does
+is charged to future finds that will now be `O(1)`. Drop union by rank and an adversarial union order
+builds a 1,000,000-node chain: the first `find` walks all million pointers, which is Pitfall 1 and turns
+Kruskal's MST from seconds into hours. Also note "amortised" is doing real work in the claim — a single
+`find` immediately after a bad union can still cost `O(log n)`; the guarantee is over the sequence, which
+is fine for batch algorithms like Kruskal and connected components but is *not* a per-call latency bound
+for a real-time system.
+
 ### Segment Tree for array [2, 3, 1, 5, 4]
 
 ```mermaid
@@ -185,6 +290,55 @@ flowchart TD
 
 Range-sum query `[1,3]` descends from the root and sums the three highlighted leaves — 3 + 1 + 5 = 9 — visiting O(log n) nodes instead of scanning all 5 array elements.
 
+**What the formula is telling you.** "Store the tree in a flat array and skip the pointers entirely: node `i`'s
+children are always at `2i` and `2i+1`, and its parent is always at `i // 2`. Navigation becomes
+arithmetic, so there is no allocation, no pointer chasing, and the whole structure is one contiguous
+cache-friendly block."
+
+The index formulas are not a convention someone picked — they are what you get when you number a complete
+binary tree level by level, left to right. Once numbered that way, moving down a level is exactly
+"multiply by 2, plus a bit for which child."
+
+| Symbol | What it is |
+|--------|------------|
+| `tree[i]` | The aggregate (sum/min/max) over node `i`'s range. Root at index 1 |
+| `2*i` | Left child. Same as shifting `i` left by one bit |
+| `2*i + 1` | Right child. The `+1` is the bit that says "right" |
+| `i // 2` | Parent. Shifting right by one bit; used when updating upward |
+| `4*n` | The safe array allocation. Not `2n` — see below |
+| `O(log n)` | Query and update cost: the tree height, one level per step |
+
+**Walk one example.** Index arithmetic on the array `[2, 3, 1, 5, 4]`, rooted at index 1:
+
+```
+  index   node range   value   left child (2i)   right child (2i+1)
+  -----   ----------   -----   ---------------   ------------------
+    1       [0,4]        15      2 -> [0,2]         3 -> [3,4]
+    2       [0,2]         6      4 -> [0,1]         5 -> [2,2]
+    3       [3,4]         9      6 -> [3,3]         7 -> [4,4]
+    4       [0,1]         5      8 -> [0,0]         9 -> [1,1]
+    5       [2,2]         1      leaf               leaf
+
+  point update: set a[1] = 10 (was 3). Walk UP by halving:
+
+      leaf a[1] lives at index 9        tree[9]  = 10
+      parent 9 // 2 = 4                 tree[4]  = 2 + 10 = 12
+      parent 4 // 2 = 2                 tree[2]  = 12 + 1 = 13
+      parent 2 // 2 = 1                 tree[1]  = 13 + 9 = 22
+      parent 1 // 2 = 0                 stop -- above the root
+
+      4 writes for a 5-element array. For a 1,000,000-element array it is
+      20 writes, versus 1 write plus a 1,000,000-element rescan on every query.
+```
+
+**Why the allocation is `4n` and what breaks at `2n`.** A complete binary tree over `n` leaves has `2n-1`
+nodes, which is where the tempting `2n` comes from — but the flat numbering leaves *gaps* whenever `n` is
+not a power of two, because the recursion still descends to the next power of two. For `n = 5` the
+deepest index reached is beyond `2 x 5 = 10`, so `2n` indexes out of bounds; `4n = 20` is always safe
+(the bound is `2 x 2^ceil(log2 n) <= 4n`). This is Pitfall 3, and it fails as an `IndexError` on
+non-power-of-two inputs only — which is why it survives testing on `n = 8` and dies in production on
+`n = 5`.
+
 ### Fenwick Tree (BIT) — responsible ranges
 
 ```
@@ -199,6 +353,70 @@ i & (-i):
 prefix_sum(6) = BIT[6] + BIT[4] = 9 + 11 = 20
                                     (updates: 6 -= 2 → 4, 4 -= 4 → 0)
 ```
+
+**What this actually says.** "Each slot `i` owns a block of exactly `i & (-i)` elements ending at `i` —
+its lowest set bit tells you how wide it is. A prefix sum is then just 'strip off one set bit at a time
+and add up the blocks you land on', which is why the cost is the number of 1-bits, at most `log n`."
+
+Everything about a Fenwick tree is the binary expansion of the index. There is no tree in memory, no
+pointers, no children — only one array and the observation that `i & (-i)` isolates the lowest set bit
+(the `n & -n` trick from the bit-manipulation module).
+
+| Symbol | What it is |
+|--------|------------|
+| `i & (-i)` | The lowest set bit as a **value**. Also the width of `i`'s block |
+| `BIT[i]` | Sum of the `i & (-i)` elements ending at position `i` |
+| `i -= i & (-i)` | **Query** step. Strip the lowest 1-bit, jump to the previous block |
+| `i += i & (-i)` | **Update** step. Move to the next slot whose block covers `i` |
+| 1-indexed | Mandatory. `0 & -0 = 0`, so index 0 makes both loops spin forever |
+| `O(log n)` | At most one step per bit of `i` — 20 steps for a million elements |
+
+**Walk one example.** The array above, with each index shown in binary so the block widths are visible:
+
+```
+  index    binary    i & (-i)    block it owns      BIT[i]
+  -----    ------    --------    --------------     ------
+    1       0001         1          [1,1]              2
+    2       0010         2          [1,2]              5
+    3       0011         1          [3,3]              1
+    4       0100         4          [1,4]             11
+    5       0101         1          [5,5]              4
+    6       0110         2          [5,6]              9
+    7       0111         1          [7,7]              3
+    8       1000         8          [1,8]             23
+
+  QUERY prefix_sum(6):  strip the lowest set bit each step
+
+      i = 6 = 0110      add BIT[6] = 9     covers [5,6]
+                        6 - (6 & -6) = 6 - 2 = 4
+      i = 4 = 0100      add BIT[4] = 11    covers [1,4]
+                        4 - (4 & -4) = 4 - 4 = 0
+      i = 0             stop
+
+      total = 9 + 11 = 20, and the blocks [5,6] + [1,4] tile [1,6] EXACTLY,
+      with no gap and no overlap. 6 has two 1-bits -> two additions.
+
+  UPDATE add to a[5]:   add the lowest set bit each step
+
+      i = 5 = 0101      BIT[5]  covers [5,5]   -> touch it
+                        5 + (5 & -5) = 5 + 1 = 6
+      i = 6 = 0110      BIT[6]  covers [5,6]   -> contains index 5, touch it
+                        6 + (6 & -6) = 6 + 2 = 8
+      i = 8 = 1000      BIT[8]  covers [1,8]   -> contains index 5, touch it
+                        8 + (8 & -8) = 8 + 8 = 16 > n = 8, stop
+
+      3 writes. Exactly the slots whose blocks contain index 5, no others.
+```
+
+**Why the two directions are opposites, and what breaks with 0-indexing.** Query walks *backwards* through
+the blocks that tile `[1, i]`, so it removes bits; update walks *forwards* through the blocks that
+*contain* `i`, so it adds bits. Both terminate in at most one step per bit position, giving `O(log n)` —
+20 steps at `n = 10^6`, versus `O(n)` for a naive prefix scan or `O(n)` per update for a precomputed
+prefix-sum array. The structure is fragile in exactly one way: at index 0, `0 & -0 = 0`, so `i -= 0` and
+`i += 0` never move and both loops hang forever. That is why every Fenwick implementation is 1-indexed and
+why callers must add 1 when mapping from a 0-indexed array — Pitfall 5. It is also fundamentally limited to
+*invertible* aggregates: prefix sums work because subtraction recovers a range, `range(l, r) =
+prefix(r) - prefix(l-1)`; minimum has no inverse, which is why range-min needs a segment tree instead.
 
 ---
 

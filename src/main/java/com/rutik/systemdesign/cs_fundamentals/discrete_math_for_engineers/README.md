@@ -36,6 +36,62 @@ None of this is academic decoration. An off-by-one error in an inductive proof i
 - **Partial orders**: relax symmetry to antisymmetry (a R b ∧ b R a ⟹ a = b) while keeping reflexivity and transitivity. "Must run before" and "is a prerequisite of" are partial orders — topological sort only works because a DAG's edges encode a partial order with no cycles.
 - **Functions — injective, surjective, bijective**: a function is injective (one-to-one) if distinct inputs always give distinct outputs, surjective (onto) if every possible output is reachable, and bijective if both hold simultaneously (the function is invertible). A hash function mapping a larger key space into a smaller bucket space can *never* be injective — the Pigeonhole Principle (Section 6.4) makes this mathematically certain, not just likely — so the real engineering goal is a function that spreads the unavoidable collisions evenly rather than clustering them.
 
+### Decoding the Notation Above
+
+**The idea behind it.** "Every symbol in this section is shorthand for one English sentence — the logic symbols say *what is claimed*, the set symbols say *what is inside what*, and the quantifiers say *how many things the claim covers*."
+
+Almost none of it is arithmetic. Reading a discrete-math statement aloud, symbol by symbol, converts it back into the sentence it was compressed from — and the compression is the only thing that makes these statements look harder than the code they describe.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `¬p` | Flip the truth value. Code: `!p` |
+| `p ∧ q` | True only when both are true. Code: `p && q` |
+| `p ∨ q` | True when at least one is true (inclusive). Code: `p \|\| q` |
+| `p → q` | A promise. False *only* in the one case p true, q false. Code: `!p \|\| q` |
+| `p ↔ q` | Both directions hold. The two have identical truth values |
+| `≡` | Same truth table on every row. Not "equals a number" |
+| `∀x P(x)` | The claim holds for *every* element of the domain. A loop that must never break |
+| `∃x P(x)` | At least one element works. A search that must find a hit |
+| `x ∈ A` | Membership. Code: `x in A` |
+| `A ⊆ B` | Every element of A is also in B. Code: `A.issubset(B)` |
+| `A ∪ B` | Everything in either set. Code: `A \| B` |
+| `A ∩ B` | Only what is in both. Code: `A & B` |
+| `A − B` | In A but not in B. Code: `A - B` |
+| `A × B` | All ordered pairs `(a, b)`. The nested loop |
+| `\|A\|` | How many elements. Code: `len(A)` |
+| `⟹` | Same arrow as `→`, used between proof steps rather than inside a formula |
+
+**Walk one example with real numbers.** Two small sets, every set operation evaluated:
+
+```
+  A = {1, 2, 3, 4}                B = {3, 4, 5}
+
+  A union B       A u B  = {1, 2, 3, 4, 5}        size 5
+  A intersect B   A n B  = {3, 4}                 size 2
+  A minus B       A - B  = {1, 2}                 size 2
+  is A a subset of B?  no -- 1 is in A but not in B
+
+  inclusion-exclusion check:  |A| + |B| - |A n B|
+                            =  4  +  3  -   2      = 5   = |A u B|   ok
+
+  power set of A:   2^|A| = 2^4  = 16 subsets   (each of 4 elements: in or out)
+  A x B  (pairs):   |A| * |B| = 4 * 3 = 12 ordered pairs
+```
+
+The two bottom lines are why "enumerate all subsets" costs 2^n and "compare every pair across two lists" costs the product of their sizes. The counting rule and the complexity class are the same fact stated twice.
+
+**Why quantifier order is not a detail.** Read the two orderings aloud over the domain "integers", with `P(x, y)` meaning "y is greater than x":
+
+```
+  for all x, there exists y with y > x       TRUE   -- pick y = x + 1, a NEW y per x
+  there exists y, for all x, with y > x      FALSE  -- needs ONE y beating every integer
+
+  x = 5   -> y = 6    ok        <- the first form is allowed to choose y after seeing x
+  x = 99  -> y = 100  ok        <- a different y again; that freedom is the whole gap
+```
+
+Same four symbols, same predicate, opposite truth values. In a spec this is the difference between "every request gets *a* worker" (a pool) and "there is *one* worker that serves every request" (a bottleneck) — swapping the order silently rewrites the requirement, which is why `∀∃` versus `∃∀` is the highest-frequency quantifier trap in both proofs and design documents.
+
 ---
 
 ## 4. Types / Proof Techniques
@@ -57,6 +113,45 @@ Assume the claim is false, derive a logical contradiction from that assumption a
 ### 4.4 Proof by Induction
 
 State P(n) as the claim indexed by a natural number n. Prove a **base case** — P holds at the smallest n the claim applies to — then prove the **inductive step**: assuming P(k) (the inductive hypothesis) for an arbitrary k, show P(k+1) follows. The well-ordering principle (every non-empty set of natural numbers has a smallest element) is *why* this works: if P failed somewhere, there would be a smallest failing n > base, and the inductive step (P(n−1) ⟹ P(n)) would contradict n being the smallest failure. Induction is the workhorse for proving recursive and iterative code correct (Section 6.1) and for closed-form counting formulas (Section 6.3).
+
+#### Decoding the Induction Schema
+
+**Stated plainly.** "Show the claim is true at the starting number, then show that truth at any one number forcibly drags truth to the next number — and the claim topples over every number like dominoes, forever, from one finite argument."
+
+The move that feels illegal is *assuming* P(k) in the middle of proving it. It is not circular: you never assume the thing you are proving (P for all n); you assume one arbitrary rung and prove the rung above it. The base case is what tips the first domino, and without it the whole chain proves nothing.
+
+| Piece | What it actually is |
+|-------|---------------------|
+| `P(n)` | The claim, written as a function of n. Must be a statement, not a number |
+| base case | Verify P at the floor by direct arithmetic. The tipped first domino |
+| `P(k)` | "Suppose the claim already holds at some arbitrary rung k" |
+| `P(k) ⟹ P(k+1)` | The domino spacing: truth at k mechanically forces truth at k+1 |
+| "arbitrary k" | You may use nothing about k except that P(k) holds — that is what makes it general |
+| conclusion | Base + step together give every n at once |
+
+**Walk one example with real numbers.** Claim: `P(n)` is "1 + 2 + ... + n = n(n+1)/2".
+
+```
+  BASE CASE  n = 1
+    left side  = 1
+    right side = 1 * (1 + 1) / 2 = 2 / 2 = 1          match -> P(1) holds
+
+  INDUCTIVE STEP   assume P(k):  1 + ... + k = k(k+1)/2
+    want:  1 + ... + k + (k+1) = (k+1)(k+2)/2
+
+    1 + ... + k + (k+1)
+       = k(k+1)/2 + (k+1)             <- substitute the hypothesis, the ONLY step using it
+       = (k+1) * (k/2 + 1)            <- factor out (k+1)
+       = (k+1)(k+2)/2                 <- exactly the target       P(k+1) holds
+
+  SPOT CHECK the two sides at several n
+    n =   1 ->  sum      1     formula      1
+    n =   4 ->  sum     10     formula     10
+    n =  10 ->  sum     55     formula     55
+    n = 100 ->  sum  5,050     formula  5,050
+```
+
+**Why the base case carries the whole argument.** The inductive step alone proves only "*if* it ever holds, it keeps holding" — a chain of dominoes nobody pushed. Prove the step for the false claim "1 + ... + n = n(n+1)/2 + 7" and it still goes through (add 7 to both sides), yet the claim is wrong at every n, because no base case survives: at n = 1 it demands 1 = 8. A misaligned or skipped base case is exactly the off-by-one that lets a "verified" loop be wrong at its first or last iteration — Section 10, Pitfall 1 is that bug in code form.
 
 ### 4.5 Strong Induction
 
@@ -308,6 +403,45 @@ div3, div5, div15 = 100 // 3, 100 // 5, 100 // 15
 assert div3 + div5 - div15 == 47
 ```
 
+#### Decoding the Counting Formulas
+
+**What the formula is telling you.** "A permutation counts *arrangements* — the same people in a different order is a different answer. A combination counts *selections* — the same people in a different order is the same answer, so you divide the arrangement count by the number of orderings you refused to distinguish."
+
+That single division, `r!`, is the entire difference between the two formulas. Everything else — both numerators are the identical `n! / (n − r)!` — is shared.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `n!` | `n × (n−1) × ... × 1`. The number of ways to order n distinct things |
+| `n! / (n − r)!` | Cancels away the ordering of the `n − r` things you did *not* pick |
+| `P(n, r)` | Ways to pick r of n **and put them in order**. Python: `math.perm` |
+| `C(n, r)`, `nCr`, `(n choose r)` | Ways to pick r of n **ignoring order**. Python: `math.comb` |
+| `r!` (the extra divisor) | How many orderings of one chosen group you are collapsing into a single count |
+| `\|A ∪ B\|` | Total distinct items across both, each counted once |
+| `− \|A ∩ B\|` | The correction: items in both got counted twice, so subtract one copy |
+
+**Walk one example with real numbers.** Ten racers; award the top 3 places, then instead pick a 3-person committee:
+
+```
+  n = 10 racers, r = 3 slots
+
+  10! = 3,628,800          <- every ordering of all ten
+   7! = 5,040              <- orderings of the 7 who did NOT place, which we do not care about
+
+  PERMUTATIONS  P(10,3) = 10! / 7! = 3,628,800 / 5,040 = 720
+    same thing counted directly:  10 * 9 * 8 = 720
+    "gold has 10 candidates, then silver 9 left, then bronze 8 left"
+
+  COMBINATIONS  C(10,3) = P(10,3) / 3! = 720 / 6 = 120
+    3! = 6   <- the 6 orderings of ONE committee {Ann, Bob, Cy}:
+               ABC  ACB  BAC  BCA  CAB  CBA   all one committee, not six
+
+  so 720 podiums collapse into 120 committees, exactly 6 podiums per committee
+```
+
+The same division scales: a 5-card poker hand is `C(52,5) = 2,598,960`, not the `P(52,5) = 311,875,200` you get if you (wrongly) treat the order the cards were dealt as meaningful — a factor of `5! = 120` too large.
+
+**Why "does order matter?" is the only question you have to answer.** Nearly every miscount in a counting interview is choosing the wrong one of these two formulas, not arithmetic. Ask whether swapping two chosen items produces a genuinely different outcome: different podium, yes → permutation; same committee, no → combination. And when you count with `|A| + |B|` and the two groups can overlap, inclusion-exclusion is the same instinct — subtract the double-counted overlap once, which is why `33 + 20 − 6 = 47` above and not `33 + 20 = 53`.
+
 The product rule is also why brute force costs what it costs: generating every subset of an n-element set is 2ⁿ (each element independently in-or-out), and generating every ordering is n! (Section 3's power-set and Cartesian-product principles, applied directly) — see [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/README.md) for how these translate into the exponential and factorial complexity classes.
 
 ### 6.4 The Pigeonhole Principle, From Guarantee to Hash-Table Capacity Planning
@@ -332,6 +466,45 @@ assert force_collision_demo(16) == (16, 0)
 
 Pigeonhole gives a **guarantee**, not a probability — it says nothing about *how soon* a collision becomes likely, only that one must eventually exist. That is a different question, answered by the **birthday paradox**: for a hash with N possible outputs, the count of keys needed for a 50% chance of *some* collision is approximately 1.1774 × √N, not N. A 32-bit hash has N = 2³² ≈ 4.3 billion possible outputs, so pigeonhole alone would need 2³² + 1 keys to *force* a collision — but the birthday approximation puts a coin-flip-odds collision at only **≈ 77,000 keys** (1.1774 × √(2³²) ≈ 77,162), five orders of magnitude sooner. This is precisely why 32-bit hashes are considered weak for content-addressed storage at scale, and why systems moved to 64-bit and 128-bit+ digests.
 
+#### Decoding Pigeonhole vs. the Birthday Bound
+
+**What this actually says.** "Pigeonhole answers *when is a collision unavoidable* and the birthday bound answers *when does one become likely* — and the second number is the square root of the first, which is why real systems break vastly earlier than the guarantee suggests."
+
+These two get conflated constantly, and the conflation is expensive: sizing a hash by the pigeonhole number is off by a factor of tens of thousands.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `n` items, `k` containers | Keys being hashed, and the buckets or digest values they land in |
+| `n > k ⟹ collision` | The guarantee. Certainty, with zero probability involved |
+| `⌈n / k⌉` | Generalized form: some container is *at least* this full. Round the division UP |
+| `N` | The number of distinct hash outputs. For a b-bit hash, `N = 2^b` |
+| `√N` | Half the bits. A 32-bit hash's square root is a 16-bit-sized number |
+| `1.1774 × √N` | Keys needed for a 50% chance of *some* collision. The birthday bound |
+
+**Walk one example with real numbers.** The same 32-bit hash, measured both ways:
+
+```
+  32-bit hash:  N = 2^32 = 4,294,967,296 possible outputs
+
+  PIGEONHOLE (certainty)
+    keys needed to FORCE a collision = N + 1 = 4,294,967,297
+
+  BIRTHDAY (coin-flip odds)
+    sqrt(N)              = 65,536
+    1.1774 * 65,536      = 77,162 keys        <- 50% chance SOME pair collides
+
+  ratio  4,294,967,297 / 77,162  =  ~55,662x sooner than the guarantee
+
+  scaling by hash width:
+    16-bit   N = 65,536                    50% at ~301 keys
+    32-bit   N = 4,294,967,296             50% at ~77,162 keys
+    64-bit   N = 18,446,744,073,709,551,616  50% at ~5.06 billion keys
+```
+
+Adding 32 bits multiplied the safe key count by roughly 65,536 — not by 2, and not by 4 billion. Halving the exponent is what the square root does, so **every extra bit of digest buys only half a bit of collision resistance.**
+
+**Why the guarantee is the useless number in production.** Pigeonhole tells you a 32-bit hash *must* collide past 4.3 billion keys, which sounds like acres of headroom for a 100-million-row table. The birthday bound says a coin-flip collision arrives at 77,162 keys — you cross it before the table fills a single page of a dashboard. Any argument of the form "we will never store 2^32 items so collisions are impossible" is using the wrong bound, and it is the reasoning error behind the SHA-1 deprecation story in Section 7: SHAttered needed roughly 2^63.1 evaluations against a *160-bit* digest, because the birthday bound, not the digest width, sets the real attack cost.
+
 ### 6.5 Solving Recurrences Beyond the Master Theorem: Characteristic Equations
 
 [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/README.md#43-recurrence-relations-and-master-theorem) covers the Master Theorem for **divide-and-conquer** recurrences of the form T(n) = a·T(n/b) + f(n). The Master Theorem does not apply to **linear recurrences with constant coefficients** — recurrences like T(n) = T(n−1) + T(n−2) + O(1), where the subproblem sizes shrink by subtraction rather than division. Those are solved with the **characteristic equation** method.
@@ -341,6 +514,42 @@ For the Fibonacci recurrence F(n) = F(n−1) + F(n−2), the characteristic equa
 This sharpens a claim often left loose: naive recursive Fibonacci is commonly bounded as O(2ⁿ) using the simpler model T(n) ≤ 2·T(n−1) + O(1) (a valid but loose upper bound — see [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/README.md) Q17). Solving the *actual* recurrence T(n) = T(n−1) + T(n−2) + O(1) via the characteristic equation gives the **tight** bound Θ(φⁿ) ≈ Θ(1.618ⁿ) — asymptotically far smaller than 2ⁿ: at n = 100, φ¹⁰⁰ ≈ 7.92 × 10²⁰ versus 2¹⁰⁰ ≈ 1.27 × 10³⁰, roughly a billion-fold, or nine orders of magnitude, apart.
 
 Linear recurrences also solve counting problems directly: the number of length-n binary strings containing no two consecutive 1s is F(n + 2) (verified for n = 1..5: 2, 3, 5, 8, 13 — exactly F(3) through F(7)). Recognizing "this count satisfies the same recurrence as Fibonacci" turns a combinatorics problem into an already-solved recurrence.
+
+#### Decoding the Characteristic Equation
+
+**In plain terms.** "Guess that the answer grows like some number raised to the n-th power, plug that guess into the recurrence, and the recurrence collapses into an ordinary quadratic whose roots *are* the growth rates."
+
+That is the whole method. A recurrence is a rule with no closed form; the characteristic equation is the trick that turns "each term is built from earlier terms" into "each term is `x^n` for a specific x you can solve for algebraically."
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `F(n) = F(n−1) + F(n−2)` | The rule. Tells you how to *compute* term n, not how big it is |
+| `x² = x + 1` | The recurrence after substituting `F(n) = xⁿ` and dividing by `x^(n−2)` |
+| `φ` | The larger root, `(1 + √5)/2 ≈ 1.618`. The golden ratio, and the growth rate |
+| `ψ` | The smaller root, `(1 − √5)/2 ≈ −0.618`. Magnitude below 1, so it vanishes as n grows |
+| `(φⁿ − ψⁿ)/√5` | The closed form. Exact for every n, despite being built from irrationals |
+| `Θ(φⁿ)` | A *tight* bound — the true growth rate, not merely a ceiling above it |
+| `O(2ⁿ)` | An upper bound only. True, but loose — the real growth is much slower |
+
+**Walk one example with real numbers.** Substituting the guess into the recurrence, then measuring how loose `2ⁿ` is:
+
+```
+  guess  F(n) = x^n     and substitute into  F(n) = F(n-1) + F(n-2)
+
+     x^n = x^(n-1) + x^(n-2)
+     x^2 = x + 1              <- divide every term by x^(n-2). The recurrence is now a quadratic
+     x^2 - x - 1 = 0
+     x = (1 +/- sqrt(5)) / 2  ->  phi = 1.6180...   psi = -0.6180...
+
+  psi^n dies out:  |psi| < 1, so psi^10 = 0.0081, psi^50 = 3.6e-11 -> phi^n dominates
+
+  HOW LOOSE IS 2^n?     at n = 100
+     phi^100 = 7.92e20
+     2^100   = 1.27e30
+     ratio   = 1.6e9        <- the loose bound overstates the work ~1.6 BILLION-fold
+```
+
+**Why the tight bound is worth the algebra.** `O(2ⁿ)` and `Θ(φⁿ)` both say "exponential, do not run this on large n", so for a triage decision they are interchangeable. They stop being interchangeable the moment you estimate an actual runtime: at n = 100 they disagree by nine orders of magnitude, which is the difference between "finishes over a weekend" and "outlives the machine." Big-O is a promise about a ceiling; `Θ` is a claim about the real rate, and only the characteristic equation gets you the second one for a subtract-style recurrence — the Master Theorem cannot, because it only handles subproblems that shrink by *division*.
 
 ### 6.6 Modular Arithmetic: Fast Exponentiation, Fermat's Little Theorem, and Hash Bucketing
 
@@ -374,6 +583,48 @@ inverse = pow(a, p - 2, p)             # Fermat-derived modular inverse
 assert (a * inverse) % p == 1          # 5 * 8 mod 13 == 1
 ```
 
+#### Decoding Modular Notation, Square-and-Multiply, and the Inverse
+
+**Read it like this.** "Modular arithmetic is clock arithmetic — only the remainder survives, so you may reduce at every step instead of at the end. Square-and-multiply exploits that by doubling the exponent each round instead of adding one, and Fermat's theorem hands you division for free when the modulus is prime."
+
+The reduce-as-you-go property is not a convenience — it is what keeps intermediate values small enough to compute at all. `7^128` has 109 digits; `7^128 mod 1,000,000,007` never exceeds 10 digits at any point.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `a mod m` | The remainder after dividing a by m. Always in `0 .. m−1` for positive m |
+| `a ≡ b (mod m)` | a and b leave the *same* remainder. Not "a equals b" — it is an equivalence relation |
+| `(a + b) mod m` distributes | `((a mod m) + (b mod m)) mod m`. Same for `×`. **Not** for `÷` |
+| `aᵇ mod m` | Modular exponentiation. Python: `pow(a, b, m)` — the 3-argument form |
+| `exp & 1` | Reads the current low bit of the exponent. The "multiply" half of the algorithm |
+| `exp >>= 1` | Shift right one bit. Turns O(b) work into O(log b) |
+| `aᵖ⁻¹ ≡ 1 (mod p)` | For prime p and a not divisible by p. The reason the next row works |
+| `a^(p−2) mod p` | The value that multiplies a back to 1. Modular "division by a" |
+
+**Walk one example with real numbers.** Square-and-multiply on a small case you can check by hand, `5^11 mod 13`:
+
+```
+  exp = 11 = binary 1011      -> 4 rounds, not 11 multiplications
+
+  round  exp  bit  result (only when bit=1)          base (squared every round)
+  -----  ---  ---  ------------------------------    -----------------------------
+    1     11   1   1 * 5   = 5                       5*5   = 25 mod 13 = 12
+    2      5   1   5 * 12  = 60 mod 13 = 8           12*12 = 144 mod 13 = 1
+    3      2   0   (skip, bit is 0)          8       1*1   = 1
+    4      1   1   8 * 1   = 8                       done
+
+  answer 8      check: 5^11 = 48,828,125 and 48,828,125 mod 13 = 8   ok
+
+  cost: exponent 128 = 2^7 needs 8 rounds, not 128 multiplications
+        a 2048-bit RSA exponent needs ~2,048 rounds, not 2^2048 -- the gap
+        between "instant" and "will never finish"
+
+  FERMAT INVERSE, p = 13, a = 5
+    inverse = a^(p-2) mod p = 5^11 mod 13 = 8       <- the same number just computed
+    check:    5 * 8 = 40,  40 mod 13 = 1            <- 8 IS "one thirteenth-style divide by 5"
+```
+
+**Why division needs an inverse at all.** Addition and multiplication survive the mod because remainders add and multiply consistently; division does not, since `6/2 mod 13` and `6/2` on the reduced representatives can disagree once a numerator wraps. So modular arithmetic replaces "divide by a" with "multiply by the number that undoes a", and Fermat's theorem produces that number in one `pow` call whenever the modulus is prime. This is also the practical argument for prime moduli in hashing and in competitive-programming arithmetic (`1_000_000_007` is prime precisely so inverses always exist), and it is the same exponentiation primitive RSA runs on — see [cryptography_fundamentals](../cryptography_fundamentals/README.md).
+
 **Why hash table sizes matter here**: if the table size m is a power of two, `key mod m` depends only on the low bits of `key` — if keys share structure in those bits (all even, all multiples of 4, aligned pointer addresses), severe clustering results (Section 14 makes this concrete). A **prime** table size makes `key mod m` depend on all of the key's bits, breaking that specific failure mode. Real-world hash tables solve the same problem two different ways: classic implementations choose a prime size; Java's `HashMap` instead keeps power-of-two sizes (for the speed of `hash & (n - 1)` over `hash % n`) and applies a **spreading** step first — `h ^ (h >>> 16)` since Java 8 — that mixes high bits into low bits before the mask is applied. See [arrays_strings_and_hashing](../arrays_strings_and_hashing/README.md) for the full hash-table treatment, and [cryptography_fundamentals](../cryptography_fundamentals/README.md) for where modular exponentiation and Fermat's theorem reappear inside RSA.
 
 ### 6.7 Probability and Linearity of Expectation: Randomized Quicksort
@@ -387,6 +638,49 @@ E[total comparisons] = sum over all pairs i<j of  2 / (j - i + 1)
                       = 2(n+1)H_n - 4n                     (H_n = 1 + 1/2 + ... + 1/n)
                       = Theta(n log n)
 ```
+
+#### Decoding Expectation, Indicators, and That Sum
+
+**What it means.** "Instead of reasoning about the whole messy random run at once, ask a yes/no question about each individual pair, note that the average of a yes/no question is just its probability, and add those probabilities up — legally, even though the pairs are wildly dependent on each other."
+
+The permission to add dependent things is the entire trick. It is what turns an intractable analysis of recursion-tree shapes into a sum over `n(n−1)/2` independent-looking little questions.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `E[X]` | The long-run average of the random quantity X. Not a most-likely value |
+| `Σ x · P(X = x)` | The definition: weight each outcome by how often it happens |
+| `E[X + Y] = E[X] + E[Y]` | Averages always add. **True even when X and Y are dependent** |
+| `X_ij` | A variable that is 1 if ranks i and j are ever compared, else 0 |
+| `E[indicator] = P(event)` | The bridge: counting becomes probability |
+| `2 / (j − i + 1)` | Chance that i or j is picked as pivot before anything between them |
+| `H_n` | `1 + 1/2 + 1/3 + ... + 1/n`. Grows like `ln n` — the source of the log |
+| `Θ(n log n)` | Tight bound: the exact growth rate, not just an upper limit |
+
+**Walk one example with real numbers.** Why the `2 / (d + 1)` probability is what it is, then the full sum at n = 1000:
+
+```
+  WHY 2/(d+1):  take ranks i and j with d = j - i, so d+1 elements sit in [i..j]
+    the FIRST of those d+1 elements chosen as a pivot decides everything:
+      it is i or j        -> they get compared          (2 of the d+1 outcomes)
+      it is anything between -> they are split apart, never compared
+
+    adjacent ranks   d = 1  -> P = 2/2   = 1.00   always compared
+    d = 4                   -> P = 2/5   = 0.40
+    d = 9                   -> P = 2/10  = 0.20
+    far apart  d = 99       -> P = 2/100 = 0.02   almost never compared
+
+  SUM IT UP, n = 1000
+    H_1000 = 1 + 1/2 + ... + 1/1000 = 7.4855
+    E[comparisons] = 2(n+1)H_n - 4n
+                   = 2 * 1001 * 7.4855 - 4000
+                   = 14,985.9 - 4,000
+                   = 10,985.9
+
+    for scale:  n log2(n) = 1000 * 9.966 = 9,965.8    same order, ~1.10x apart
+    simulation (2,000 trials) averaged 10,955.9       within 0.3% of the formula
+```
+
+**Why linearity is the load-bearing assumption.** Whether ranks 5 and 6 get compared is heavily entangled with whether 5 and 7 do — they share pivots and share recursion branches. Any tool requiring independence (multiplying probabilities, variance of a sum) would be illegal here, and the analysis would stall. Linearity of expectation asks for nothing: `E[X + Y] = E[X] + E[Y]` holds unconditionally, so you may sum `n(n−1)/2` mutually dependent indicators and still get the exact answer. Note the one thing it does **not** license — `E[X · Y] = E[X] · E[Y]` needs independence and is false in general, which is Section 10, Pitfall 4.
 
 ```python
 import random
@@ -426,6 +720,44 @@ This is why randomized quicksort has no adversarial worst-case input, unlike a f
 **Trees**: a connected, acyclic graph on n vertices has exactly n − 1 edges — any additional edge creates a cycle, and any fewer edges disconnects it. This is the invariant Union-Find uses to detect cycles while building a minimum spanning tree: an edge that would connect two vertices already in the same equivalence class (Section 3) would violate "n − 1 edges, no cycle."
 
 **Bipartite graphs**: a graph is bipartite if and only if it can be 2-colored so that no edge connects two same-colored vertices, which is equivalent to having no odd-length cycle.
+
+#### Decoding the Graph Counting Facts
+
+**Put simply.** "Every edge has exactly two ends, so counting ends is the same as counting edges twice — and a tree is the sparsest graph that is still connected, so it has one edge fewer than it has vertices, with no slack anywhere."
+
+Both facts are one-line sanity checks you can run against any graph-algorithm bug report, and both are counting arguments, not graph algorithms.
+
+| Symbol | What it actually is |
+|--------|---------------------|
+| `V`, `\|V\|` | The nodes. Often called `n` |
+| `E`, `\|E\|` | The connections. Often called `m` |
+| `deg(v)` | How many edge-ends touch v. A self-loop counts 2 |
+| `Σ deg(v) = 2\|E\|` | Sum every vertex's degree and you have counted every edge exactly twice |
+| `\|E\| = \|V\| − 1` | Connected and acyclic forces exactly this. One more edge → a cycle; one fewer → disconnected |
+| bipartite | Vertices split into two sides with no edge inside a side |
+| odd cycle | The one obstruction to 2-coloring. Alternating colors around it always clashes |
+
+**Walk one example with real numbers.** A 4-vertex complete graph, then a 7-vertex tree:
+
+```
+  K4 -- every pair of 4 vertices joined
+
+    each vertex touches the other 3   ->  deg(v) = 3 for all four
+    sum of degrees = 4 * 3 = 12
+    edges = 12 / 2 = 6                    check: C(4,2) = 6   ok
+
+    odd-degree vertices: all 4 have degree 3 -> count is 4, which is EVEN, as the
+    corollary demands (an odd count of odd-degree vertices is impossible, always)
+
+  a 7-vertex tree
+    edges = |V| - 1 = 6
+    sum of degrees = 2 * 6 = 12 spread over 7 vertices -> average degree 12/7 = 1.71
+
+    add ANY 7th edge  -> 7 edges on 7 vertices -> a cycle must exist
+    drop ANY edge     -> 5 edges on 7 vertices -> the graph splits in two
+```
+
+**Why these are the fastest bug detectors you have.** An adjacency-list builder that forgets to add the reverse edge in an undirected graph produces a degree sum that is *odd* or that is not `2|E|` — catchable in one pass, before any traversal runs. Likewise, a "minimum spanning tree" that comes back with anything other than `|V| − 1` edges is wrong by definition, whatever the algorithm claims, which is exactly the invariant Kruskal's Union-Find check is enforcing edge by edge: reject an edge whose two endpoints already share a root, because accepting it would push the count past `|V| − 1` and close a cycle.
 
 ```python
 from collections import deque

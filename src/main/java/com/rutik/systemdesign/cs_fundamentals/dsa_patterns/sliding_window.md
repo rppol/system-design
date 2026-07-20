@@ -216,6 +216,43 @@ Wait — the trace above shows `best=6` after the first valid window, but the *c
 
 The amortized argument is the crux: even though there's a `for` loop with a nested `while` loop, **`left` is monotonically non-decreasing across the entire algorithm** — it never resets to 0. So the total iterations of the `while` loop, summed across all `for` iterations, is at most `n`. Total work = O(n) for the outer loop + O(n) for all inner-loop iterations combined = O(n).
 
+### Decoding the complexity claim
+
+**What this actually says.** "Oh of n plus m means: walk across `s` once with each of two pointers, and read `t` once — the work grows in a straight line with the input, never as a square of it."
+
+That framing matters because the code *looks* quadratic. The quantity that decides the complexity is not "how many loops are nested" but **how many pointer moves happen in total**, and here that total is capped before the outer loop even starts.
+
+| Symbol | What it is |
+|---|---|
+| `O(...)` | An upper bound on how fast the work grows as the input grows |
+| `n` | The input size — here `len(s)`, the string being scanned |
+| `m` | `len(t)`, the pattern whose characters the window must cover |
+| `O(n + m)` | Work proportional to `n` plus `m` — two independent linear passes, added |
+| `O(n^2)` | Work proportional to `n` times `n` — what a restarting inner loop would cost |
+| `\|Σ\|` | How many distinct characters the alphabet has (52, or 256 for ASCII) |
+
+**Walk one example.** `s = "AABC"`, `t = "AC"`, so `n = 4`. Watch `left` and `right` — neither ever moves backward:
+
+```
+  s   =  A  A  B  C            t = "AC"        n = 4
+  idx    0  1  2  3
+
+  step  right  char  missing  window  left  action
+  ----  -----  ----  -------  ------  ----  --------------------------------
+    1     0     A       1     [0,0]     0   expand: A found
+    2     1     A       1     [0,1]     0   expand: surplus A, still missing C
+    3     2     B       1     [0,2]     0   expand: B is not needed
+    4     3     C       0     [0,3]     0   window valid -> try to shrink
+    5     3     -       0     [1,3]     1   drop the surplus A, still valid
+    6     3     -       1     [1,3]     1   dropping A at idx 1 breaks it -> stop
+
+  answer = s[1..3] = "ABC"
+  right advanced 4 times ; left advanced 1 time ; 5 pointer moves in total
+  the ceiling is 2n = 8, and 5 <= 8
+```
+
+**Why this is O(n) and not O(n^2).** A nested loop is only quadratic if the inner loop *restarts* for every outer step. It does not here: `left` is declared once, outside the `for`, and only ever increments. So the inner `while`'s iterations are not "up to `n` per outer step" but "`n` across the whole run, shared between all outer steps." Said as a budget: every element enters the window exactly once and leaves at most once, so **at most 2n pointer moves total**. At LC 76's limit of `n = 100,000` that is 200,000 moves; a genuinely quadratic scan would be `100,000^2 = 10^10` — 50,000 times more work.
+
 ---
 
 ## 6. Variations & Sub-patterns

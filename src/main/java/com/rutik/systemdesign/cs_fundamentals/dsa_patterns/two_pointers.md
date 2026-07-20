@@ -225,6 +225,41 @@ xychart-beta
 
 **Growth at a glance:** fixing one more element before the two-pointer scan multiplies the work by another factor of n — the O(n), O(n^2), O(n^3) figures from the table above and the kSum question in Section 11, plotted here at a fixed n=10 so the curve is visible at a glance.
 
+### Decoding the complexity claim
+
+**Put simply.** "Oh of n squared means: for each of the `n` ways to pick a first element, one single sweep across the rest of the array — `n` sweeps, not `n` nested searches through every remaining pair."
+
+That framing matters because it locates the cost precisely. The `n^2` comes entirely from the *outer* `for` loop multiplied by *one* linear scan; it does not come from the two pointers, which are themselves linear. Drop the outer loop (plain pair sum) and you drop straight to O(n).
+
+| Symbol | What it is |
+|---|---|
+| `O(...)` | An upper bound on how fast the work grows as the input grows |
+| `n` | The input size — the number of elements in `nums` |
+| `O(n)` | One pass. The inner two-pointer scan, on its own |
+| `O(n log n)` | The sort. `log n` is roughly "how many times you can halve `n`" |
+| `O(n^2)` | Outer loop times inner scan — the 3Sum total |
+| `O(n^3)` | Three nested loops — the brute force the pattern replaces |
+| `O(1)` | Constant extra memory: a fixed handful of variables, whatever `n` is |
+
+**Walk one example.** Sorted `nums = [-4, -1, -1, 0, 1, 2]`. The outer loop fixes `i = 1` (value `-1`), so the inner scan hunts for a pair summing to `+1`:
+
+```
+  sorted nums = [ -4,  -1,  -1,   0,   1,   2 ]      i = 1 fixes -1, target = +1
+  index            0    1    2    3    4    5
+
+  step  left  right  nums[left]  nums[right]  sum  vs target  action
+  ----  ----  -----  ----------  -----------  ---  ---------  ------------------
+    1     2      5       -1           2        1     equal    record (-1, -1, 2)
+    2     3      4        0           1        1     equal    record (-1,  0, 1)
+    3     4      3        -            -        -    crossed  pointers met, stop
+
+  left advanced 2 ; right retreated 2 ; the gap 5 - 2 = 3 closed in 2 steps
+```
+
+The two pointers start `3` apart and every step closes that gap by at least `1`, so the scan cannot run longer than the span it started with. That is the whole proof of the inner O(n).
+
+**Why the inner scan is O(n) and not O(n^2).** `left` only increases and `right` only decreases — neither can revisit an index, so between them they make at most `n` moves per scan, not `n` moves each per position. Summing one scan over every outer `i` gives `(n-1) + (n-2) + ... + 1 = n(n-1)/2`, i.e. about `n^2/2`. At LC 15's limit of `n = 3000`: the two-pointer version does about `3000^2 / 2 = 4,500,000` operations, while the O(n^3) brute force does `3000^3 = 2.7 * 10^10` — **6,000 times more work.**
+
 ---
 
 ## 6. Variations & Sub-patterns

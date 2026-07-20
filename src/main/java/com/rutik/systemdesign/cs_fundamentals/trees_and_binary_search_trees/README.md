@@ -58,6 +58,36 @@ Without balancing, a BST degenerates to a linked list on sorted input (O(n) oper
 | B+tree | O(log_t n) | O(log n) | All data in leaves; linked leaves for range scan |
 | Skip list | O(log n) expected | O(log n) | Redis sorted sets; easier than BST to implement |
 
+**The idea behind it.** "Every row in this table is really one row — the cost of a BST operation is the height of the tree, and each family is just a different scheme for keeping that height near log n instead of letting it grow to n."
+
+That reframing matters because it collapses six structures into one question. You never tune "search speed" directly; you only ever tune height. The `O(n) worst` in row one is not a different algorithm — it is the same algorithm on a tree that was allowed to grow tall.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of keys stored in the tree |
+| `h` | Height — the number of edges on the longest root-to-leaf path |
+| `O(log n)` | Cost grows by one step every time `n` doubles |
+| `O(n)` | Cost grows in lockstep with the data. Doubling `n` doubles the work |
+| `log n` | "How many times can I halve `n` before I reach 1" |
+| `log_t n` | Same halving question, but each step divides by `t`, not 2 |
+| `1.44 log n` | AVL's proven height ceiling — at most 44% taller than perfect |
+| `2 log n` | Red-black's ceiling — at most twice as tall as perfect |
+
+**Walk one example.** The same 1,000,000 keys, stored three ways:
+
+```
+  structure                    height h      lookup cost      vs. perfect
+  ------------------------------------------------------------------------
+  perfectly balanced BST             19       20 nodes            1x
+  AVL tree (1.44 log n)              28       29 nodes           1.4x
+  red-black tree (2 log n)           39       40 nodes           2.0x
+  unbalanced BST, sorted input  999,999    1,000,000 nodes   50,000x
+```
+
+**What degeneration actually costs.** Insert already-sorted keys into a plain BST and every new key is larger than everything before it, so it hangs off the right spine forever. You have not built a tree — you have built a singly linked list with a wasted `left` pointer per node. At 1,000,000 sorted inserts a lookup walks 1,000,000 nodes instead of 20: **50,000x slower**, verified as `1,000,000 / 20`.
+
+**The failure mode has a name.** This is the auto-increment-ID trap. A service keys an in-memory index by database primary key, backfills it by replaying rows in `ORDER BY id`, and every insert lands on the right spine. It passes every test — a unit test with 20 shuffled keys builds a fine tree. It passes staging. Then production backfills 1M ordered rows and the p99 latency goes off a cliff while p50 barely moves, because p50 queries hit recently-inserted keys near the bottom of the spine and p99 queries hit old keys at the top. The fix is not a bigger box; it is a self-balancing family from rows 2-6 of the table above, or shuffling the insert order.
+
 ### 4.3 AVL Rotation (Conceptual)
 
 **Left-Left case (single right rotation at z):**
@@ -147,6 +177,59 @@ flowchart LR
 
 Red marks the unbalanced node that triggers the rotation, orange is the pivot doing the work, purple subtrees are re-parented but never modified, and green is the new balanced root after the fix.
 
+**Stated plainly.** "A rotation grabs the child, makes it the new parent, and hands the orphaned middle subtree back to the old parent — which shortens the tall side by one level without ever reordering the keys."
+
+That last clause is the whole reason rotations are legal. A rotation is not a re-sort; it is a re-hang. The in-order sequence is an invariant the operation is engineered never to touch, which is why you can apply it purely for height and never re-validate the BST property.
+
+| Symbol | What it is |
+|--------|------------|
+| `z` | The unbalanced node — the lowest node whose balance factor went out of range |
+| `y` | The pivot. `z`'s taller child, which becomes the new subtree root |
+| `x` | `y`'s taller child. Names the case (left-left vs left-right) but is not moved |
+| `T1..T4` | The four subtrees hanging off `x`, `y`, `z`. Re-parented, never rewritten |
+| `BF(node)` | `height(left) - height(right)`. Legal AVL range is `-1, 0, +1` |
+| `BF = +2` | Left side is two levels taller. Triggers a right rotation |
+| `BF = -2` | Right side is two levels taller. Triggers a left rotation |
+
+**Walk one example.** Right-rotate at `z = 30`. Heights count edges, so a leaf has height 0:
+
+```
+  BEFORE  (BF(30) = h(left) - h(right) = 2 - 0 = +2, illegal)
+
+              30   h=3  <- z, unbalanced
+             /  \
+          20      40    h(20)=2, h(40)=0
+         /  \
+      10      25        h(10)=1, h(25)=0     <- 25 is T3, the middle subtree
+     /  \
+    5     15            h=0, h=0
+
+  THREE POINTER REASSIGNMENTS
+    1.  y      = z.left        ->  y = 20            (grab the pivot)
+    2.  z.left = y.right       ->  30.left = 25      (hand T3 back to z)
+    3.  y.right = z            ->  20.right = 30     (z becomes y's right child)
+        parent-of-z now points at y  (return y)
+
+  AFTER  (BF(20) = 1 - 1 = 0, legal)
+
+              20   h=2  <- new subtree root
+             /  \
+          10      30    h(10)=1, h(30)=1
+         /  \    /  \
+        5   15  25    40
+
+  IN-ORDER CHECK
+    before:  5, 10, 15, 20, 25, 30, 40
+    after:   5, 10, 15, 20, 25, 30, 40    <- identical, as required
+
+  HEIGHT
+    before: 3      after: 2      delta: -1
+```
+
+Step 2 is the step people forget, and it is the only one that can go wrong. `T3` (the node `25`) sits *between* `y` and `z` in sorted order — greater than 20, less than 30 — so it is the one subtree that must change parents. Drop it and you leak the subtree; attach it to the wrong side and you corrupt the ordering. Every other pointer move is bookkeeping.
+
+**Why the height must drop by exactly 1.** The rotation is triggered at `BF = +2`, meaning the left side is two levels taller. Making `y` the root lifts the tall left side up one level and pushes `z` and its short right side down one, splitting the difference. That is why a single rotation fixes a left-left case but not a left-right case: in left-right the tall path bends, so lifting `y` moves the wrong subtree up and the height does not drop — hence the double rotation in the second diagram. Fail to detect the bent case and you rotate forever without converging, which shows up in production as an insert that never returns.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -184,6 +267,60 @@ flowchart TD
 ```
 
 Red traces the decision path; green marks the target found. Search for 11 follows 8 -> right -> 12 -> left -> 10 -> right -> 11: 4 comparisons, matching log2(15) ≈ 4.
+
+**What the formula is telling you.** "Each level of a balanced tree holds twice as many nodes as the level above it, so the levels needed to hold `n` keys is the number of doublings that reach `n` — and that number is `log2(n)`."
+
+The reason this is worth slowing down on: `log2(n)` is not an approximation or a convention, it is the direct arithmetic consequence of every node having two children. Branching factor 2 in, log base 2 out. Change the branching factor to 100 (a B+Tree page) and the same argument gives you `log100(n)` for free.
+
+| Symbol | What it is |
+|--------|------------|
+| `log2(n)` | How many doublings it takes to reach `n`. Also: how many halvings reach 1 |
+| `2^k` | Node capacity of level `k` on its own |
+| `2^(h+1) - 1` | Total capacity of a tree of height `h` |
+| `h` | Edges on the longest root-to-leaf path. A single node has `h = 0` |
+| `h + 1` | Number of *levels*. Off-by-one trap: levels and height differ by 1 |
+| `O(log n)` | One extra comparison every time the dataset doubles |
+
+**Walk one example.** Level capacity in a perfectly balanced binary tree, up to n = 1,000,000:
+
+```
+  level k     capacity 2^k     running total 2^(k+1)-1     covers n up to
+  ---------------------------------------------------------------------
+     0                  1                          1                  1
+     1                  2                          3                  3
+     2                  4                          7                  7
+     3                  8                         15                 15
+     4                 16                         31                 31
+    ...                ...                        ...                ...
+    10              1,024                      2,047              2,047
+    ...                ...                        ...                ...
+    18            262,144                    524,287            524,287
+    19            524,288                  1,048,575          1,048,575  <- n = 1e6 fits
+
+  n = 1,000,000  ->  levels 0..19  ->  20 levels, height h = 19
+  check: log2(1,000,000) = 19.93, rounded up = 20 comparisons
+```
+
+Twenty levels hold 1,048,575 keys; nineteen levels hold only 524,287, which is short of a million. So 1,000,000 keys need exactly 20 levels, and a search touches one node per level: **20 comparisons to find any key among a million.**
+
+**It is the same halving as binary search.** Every comparison discards an entire subtree, and in a balanced tree that subtree is half of what remained:
+
+```
+  comparison:      0        1        2        3        4   ...   19       20
+  candidates:  1,000,000  500,000  250,000  125,000  62,500 ...   3        1
+```
+
+Twenty halvings take a million down to one. That is the identical sequence a binary search over a sorted array walks — a balanced BST is just binary search with the midpoints pre-materialised as nodes, which is why it earns the same `O(log n)` and why the search-path diagram above is a decision tree rather than a data layout.
+
+**Why this complexity is the one to protect.** `O(log n)` is nearly flat: going from 1,000 keys to 1,000,000 keys — a 1,000x growth in data — takes the lookup from 10 comparisons to 20. That is a 2x cost increase for 1,000x the data, which is why tree-backed indexes hold their latency as a table grows.
+
+```
+  n            O(log n)     O(n)       O(n log n)         O(n^2)
+  1,000              10      1,000         10,000        1,000,000
+  1,000,000          20  1,000,000     20,000,000    1,000,000,000,000
+```
+
+Read the `O(log n)` column against the `O(n)` column: 20 versus 1,000,000. The failure mode when you lose the balance guarantee is that you slide from the first column to the second silently — nothing errors, nothing logs, the tree still returns correct answers. You only find out from the latency graph, and by then the tree is already a million-node list that cannot be rebalanced without a full rebuild.
 
 ### B+Tree Leaf Linked List (Database Index)
 
@@ -290,6 +427,37 @@ def inorder(root: Optional[TreeNode]) -> list[int]:
     _walk(root)
     return result
 ```
+
+**What this actually says.** "Search, insert, and delete all cost `O(h)` — they do a fixed amount of work at each level and then descend, so the only thing that varies is how many levels there are."
+
+Notice what the docstring on `search` is really saying: it does *not* claim `O(log n)`. It claims `O(h)`, and then tells you what `h` happens to be under two different assumptions. That distinction is the entire subject. `O(log n)` is a conclusion about a balanced tree; `O(h)` is the truth about all trees.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(h)` | Cost is proportional to height. The honest complexity of every BST operation |
+| `h` | The only variable. Everything else in the loop is `O(1)` |
+| `O(1)` | Constant — one comparison and one pointer follow, regardless of `n` |
+| `O(log n)` | What `O(h)` becomes *when* balance is guaranteed |
+| `O(n)` | What `O(h)` becomes when it is not |
+
+**Walk one example.** Trace `search(root, 11)` on the 15-node tree from §5 and count the work per level:
+
+```
+  level   node   comparison        pointer follow        work this level
+  ------------------------------------------------------------------------
+    0      8     11 > 8            root = root.right          O(1)
+    1     12     11 < 12           root = root.left           O(1)
+    2     10     11 > 10           root = root.right          O(1)
+    3     11     11 == 11          return root                O(1)
+
+  levels visited: 4        work per level: O(1)        total: O(4) = O(h)
+```
+
+Every row of that trace is identical in cost. There is no loop inside the loop, no scan of siblings, no allocation — one integer compare and one pointer dereference. Multiply constant work by the number of levels and the complexity is just the level count wearing a different name.
+
+**Insert and delete are the same walk plus a fixed tail.** `insert` descends exactly like `search` (the recursion in the code above follows one branch per call), then does `O(1)` work at the bottom: allocate a node and assign one pointer. `delete` descends the same way, then does `O(1)` pointer surgery for the zero-child and one-child cases; the two-child case finds the in-order successor, which is another descent and so still bounded by `h`. Three operations, one cost model.
+
+**Why `h` is the only variable that matters.** Because everything else is already `O(1)`, no amount of optimising the per-node work can save you — halving the comparison cost buys 2x, while letting `h` slip from 20 to 1,000,000 costs 50,000x. This is the practical reason a code review of a BST should barely glance at the loop body and go straight to the question "what guarantees the height?" A tree with a beautifully tuned comparator and no balancing is a linked list with good taste.
 
 ### 6.2 Level-Order Traversal (BFS)
 
@@ -447,6 +615,34 @@ def is_valid_bst(root: Optional[TreeNode]) -> bool:
 | Sorted iteration | BST | O(n) in-order traversal |
 | Disk I/O minimised | B+Tree | High branching factor = few page reads |
 
+**In plain terms.** "A hash table wins on raw point-lookup speed and loses everything else; a BST pays about 20 comparisons for a lookup and gets ordering thrown in for free."
+
+The table is easy to misread as "hash table is faster." It is faster at exactly one operation. The row that decides most real designs is the range-query row, because that is where the two structures are not 20x apart but 50,000x apart.
+
+| Symbol | What it is |
+|--------|------------|
+| `O(1)` | Constant time. Cost does not grow with `n` at all |
+| `O(log n)` | ~20 steps at a million keys. One more step per doubling |
+| `O(n)` | Touch everything. A full scan |
+| `[lo, hi]` | A range query — every key between two bounds |
+| floor/ceiling | Largest key `<=` x, smallest key `>=` x. Needs order; a hash has none |
+
+**Walk one example.** One million keys. Find every key in `[400000, 400100]` — 101 results:
+
+```
+  structure       find the start        collect 101        total node touches
+  ---------------------------------------------------------------------------
+  balanced BST    O(log n) =  20        O(101) = 101              121
+  hash table      no ordering        O(n) full scan          1,000,000
+  sorted array    O(log n) =  20        O(101) = 101              121
+
+  BST vs hash table on this query:  1,000,000 / 121  =  ~8,264x fewer touches
+```
+
+The hash table has no choice but to scan: its keys are scattered by the hash function, so "the next key after 400000" is not a question it can answer without inspecting all of them. The BST answers it by walking to the start in 20 steps and then following in-order successors.
+
+**Why the ordered structure earns its extra ~20 comparisons.** Point lookups are the operation people benchmark and range scans are the operation that shows up in production — pagination, time-window queries, leaderboards, "everything since this cursor." Pick the hash table because a microbenchmark said `O(1)` beats `O(log n)`, and the failure mode is that you win 20x on the operation you measured and lose four orders of magnitude on the one you did not. This is why database indexes are B+Trees rather than hash indexes despite hashing being faster per key.
+
 ### AVL vs Red-Black Tree
 
 | Dimension | AVL | Red-Black |
@@ -456,6 +652,40 @@ def is_valid_bst(root: Optional[TreeNode]) -> bool:
 | Insert/delete | More rotations (slower) | Fewer rotations (faster) |
 | Memory | 1 height/balance field | 1 color bit |
 | Used in | Databases, lookup-heavy | OS schedulers, Java TreeMap |
+
+**Read it like this.** "Self-balancing is a trade you make on every write: you pay a small, bounded rebalancing cost per insert so that every read is guaranteed `O(log n)` instead of merely hoping for it."
+
+The word doing the work is *guaranteed*. A plain BST on random input is already about `log n` tall on average. Balancing does not buy you the average case — you had that already. It buys you the worst case, which is the only case that shows up in a p99 chart.
+
+| Symbol | What it is |
+|--------|------------|
+| balance factor | `height(left) - height(right)`. AVL keeps it in `-1, 0, +1` |
+| rotation | The `O(1)` pointer re-hang from §4.3. Fixes one level of imbalance |
+| `O(log n)` rotations | Worst-case rebalance work: one check per level back up to the root |
+| amortised `O(1)` | Red-black's actual average rotations per insert — a small constant |
+| `1.44 log n` | AVL height ceiling. Shorter tree, more rotations to maintain |
+| `2 log n` | Red-black height ceiling. Taller tree, cheaper to maintain |
+
+**Walk one example.** One insert into a 1,000,000-key tree, and what each family charges:
+
+```
+                            AVL                 red-black           plain BST
+  -----------------------------------------------------------------------------
+  descend to insert          29 steps            40 steps            varies
+  rebalance walk up          29 checks           40 checks           0
+  rotations performed        <= 2                <= 3                0
+  ---------------------------------------------------------------------------
+  guaranteed read cost       29 nodes            40 nodes         1 .. 1,000,000
+
+  the trade: ~30-40 extra O(1) checks per WRITE
+             buys a hard ceiling of 29-40 nodes per READ
+```
+
+Both balanced families cap rotations per insert at a small constant — the rebalance *walk* is `O(log n)`, but the actual pointer surgery is 2-3 rotations at most, each `O(1)`. So the real per-write premium is a few dozen integer comparisons on the way back up.
+
+**Why AVL and red-black split the difference differently.** AVL enforces the tighter `1.44 log n` ceiling, so it rebalances more eagerly and rotates more often — a good trade when reads vastly outnumber writes, which is the database-index profile. Red-black tolerates up to `2 log n`, so it rotates less and inserts faster, at the price of a tree that can be 40 levels instead of 29 — a good trade for write-heavy structures like an OS scheduler's runqueue or Java's `TreeMap`. Neither is "better"; they are the same mechanism with the tolerance dial set for a different read/write mix.
+
+**The failure mode of skipping the trade.** Choosing a plain BST is choosing the last column: you save 30-40 checks per write and accept a read cost with no upper bound. That bet pays off right up until the input arrives sorted — a backfill, a replayed changelog, a monotonic timestamp key — and then the tree that was 20 nodes deep in testing is 1,000,000 deep in production. The rebalancing cost is insurance, and the premium is roughly a rounding error against the claim it covers.
 
 ---
 
@@ -470,6 +700,35 @@ def is_valid_bst(root: Optional[TreeNode]) -> bool:
 - You only need point lookups — use a hash table (O(1) vs O(log n)).
 - Data is accessed in random (non-sequential) order on disk — use a B+Tree with large pages.
 - You need a simple priority queue — use a heap (simpler, same O(log n) insert/extract-min).
+
+**What it means.** "Do not use an unbalanced BST when you cannot promise the insertion order is unsorted — because sorted input turns the structure into a linked list and the `O(log n)` you designed around silently becomes `O(n)`."
+
+This is worth stating as its own rule because it is a constraint on your *data*, not on your code. The implementation is correct in both cases. The only thing that changed is the order keys arrived in.
+
+| Symbol | What it is |
+|--------|------------|
+| degenerate tree | A BST where every node has one child. Height `n - 1` |
+| `h = n - 1` | The worst case. 1,000,000 keys become 999,999 edges deep |
+| p50 / p99 | Median and 99th-percentile latency. Degeneration moves them apart |
+| 50,000x | `1,000,000 / 20` — degenerate lookup vs balanced lookup |
+
+**Walk one example.** Insert `1, 2, 3, ..., 1000000` in order into a plain BST:
+
+```
+  insert 1  ->  1
+  insert 2  ->  1 -> 2            (2 > 1, goes right)
+  insert 3  ->  1 -> 2 -> 3       (3 > 1 right, > 2 right)
+  insert 4  ->  1 -> 2 -> 3 -> 4
+  ...
+  insert 1,000,000  ->  a right spine 1,000,000 nodes long
+
+  every node:  left = None,  right = next key      <- a linked list
+
+  lookup(1,000,000)   balanced: 20 nodes    degenerate: 1,000,000 nodes
+  slowdown            1,000,000 / 20  =  50,000x
+```
+
+**Why this specific failure is so hard to catch.** It has no error path. The tree returns correct answers at every size, so correctness tests pass; a unit test seeds 20 shuffled keys and builds a perfectly reasonable tree. It only manifests at production scale *and* production insert order — and even then it hits p99 long before p50, because recently-inserted keys sit at the shallow end of the spine while the oldest keys sit `n` hops away. You see a latency graph where the median is fine and the tail has fallen off a cliff, which reads like a GC pause or a noisy neighbour, not a data structure choice. Auto-increment IDs, monotonic timestamps, and `ORDER BY` backfills are the three usual sources.
 
 **Putting it together:**
 

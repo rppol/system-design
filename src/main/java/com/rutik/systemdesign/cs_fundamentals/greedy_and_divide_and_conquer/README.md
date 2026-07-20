@@ -61,6 +61,95 @@ The Master theorem determines the total complexity from (a, b, d).
 | Optimal encoding | Minimum frequency | Huffman coding |
 | Fractional knapsack | Max value/weight ratio | Load optimisation with divisible items |
 
+#### Decoding the exchange argument
+
+**The idea behind it.** "Hand me *any* optimal solution. I will show that I can swap my greedy
+pick into it without making it worse — so there is always an optimal solution that agrees with me, and by
+repeating the swap, one that agrees with me everywhere."
+
+The framing matters because it inverts what beginners try to prove. You are not proving "greedy finds the
+optimum" directly; you are proving "no optimum is *harmed* by adopting the greedy choice." That is a much
+weaker, much more provable claim, and it happens to be equivalent.
+
+| Symbol | What it is |
+|--------|------------|
+| `OPT` | Some optimal solution. You assume it exists; you never construct it |
+| `g` | The greedy choice — the first item greedy takes |
+| `o` | The item `OPT` takes instead, in the same slot |
+| `OPT'` | `OPT` with `o` swapped out for `g`. The thing you must show is still valid and still optimal |
+| `\|OPT'\| >= \|OPT\|` | "No worse." This is the whole burden of proof |
+| induction | Repeat the swap on the sub-problem left after removing `g` |
+
+**Walk one example.** Activity selection on A [1,3], B [2,4], C [3,5], D [4,6], E [5,7]. Greedy picks by
+earliest finish, so `g = A`. Suppose an adversary hands you an optimal schedule starting with B instead:
+
+```
+  timeline    1    2    3    4    5    6    7
+  greedy g =  A[1,3]                                finish 3
+  their  o =       B[2,4]                           finish 4
+
+  OPT  = { B[2,4], D[4,6] }              2 activities
+  swap B -> A:
+  OPT' = { A[1,3], D[4,6] }              2 activities   <- still valid, still 2
+
+  is OPT' valid?  A finishes at 3; D starts at 4; 3 <= 4, no overlap.   yes
+  why is it ALWAYS valid?  finish(A) = 3 <= finish(B) = 4, so anything that
+  fit after B fits after A too. Swapping in the earlier finisher can only
+  free up time, never consume more.
+
+  induct: remove A, re-run greedy on what starts at or after 3
+       -> picks C[3,5], then E[5,7]   ->  { A, C, E } = 3 activities
+```
+
+**Why the "no worse" direction is enough.** If swapping could ever *improve* `OPT`, then `OPT` was not
+optimal — contradiction. So the swap is exactly neutral, which means an optimal solution containing the
+greedy choice exists. Apply the same argument to the remaining sub-problem, and by induction greedy's
+entire sequence sits inside some optimal solution. The single load-bearing fact in the example above is
+`finish(g) <= finish(o)`, which is true *by construction* because greedy sorted by finish time. Change the
+sort key and that inequality evaporates — which is precisely Pitfall 2.
+
+#### When greedy fails — with real numbers
+
+Greedy's failure mode is not subtle once you have numbers in front of you. Coin change with the
+denominations `{1, 3, 4}` and a target of 6:
+
+```
+  greedy: take the largest coin that fits, repeat
+       6 - 4 = 2      coins used: [4]
+       2 - 1 = 1      coins used: [4, 1]
+       1 - 1 = 0      coins used: [4, 1, 1]        ->  3 coins
+
+  optimal (found only by DP over all combinations)
+       3 + 3 = 6      coins used: [3, 3]           ->  2 coins
+
+  greedy is 50% worse, on an input with three denominations and a target of six.
+```
+
+The greedy choice of `4` is *locally* the biggest step toward the goal, and it is exactly what dooms the
+solution: it leaves a remainder of 2, which the denomination set cannot pay efficiently. The exchange
+argument fails at the first step — swapping `4` into the optimal `{3, 3}` does not leave a valid, equally
+good remainder. There is no repair; the fix is a different algorithm (DP).
+
+The same failure with 0/1 knapsack, capacity 10:
+
+```
+  item   weight   value   value/weight
+   A        6       30        5.00        <- greedy takes this first
+   B        5       20        4.00
+   C        5       20        4.00
+
+  greedy by ratio:  take A (weight 6, value 30). Remaining capacity 4.
+                    B needs 5, C needs 5. Neither fits.
+                    total value = 30
+
+  optimal:          take B + C (weight 10, value 40).
+                    total value = 40         <- greedy loses 25%
+
+  note: make the items DIVISIBLE and greedy becomes optimal again --
+  it would take all of A plus 4/5 of B for 30 + 16 = 46. The 0/1
+  constraint is what breaks the matroid structure, not the ratio rule.
+```
+
 ### Divide and Conquer Patterns
 
 | Pattern | Recurrence | Result | Example |
@@ -95,6 +184,79 @@ flowchart LR
 ```
 
 Intuition: compare the "work at each level" (n^d grows as levels widen) with the "number of leaves" (a^(log_b n) = n^(log_b a)). The larger one wins.
+
+**Stated plainly.** "`T(n) = aT(n/b) + f(n)` says: to solve a problem of size n, I make **a**
+recursive calls, each on a problem **b times smaller**, and I pay **f(n)** on top to split the input and
+glue the answers back together."
+
+That is the entire content of the notation — three questions, one per letter. *How many subproblems do I
+spawn? How much smaller is each one? How much non-recursive work do I do at this node?* Every recurrence
+in the table above is just those three answers written down. The Master theorem then does one job: it
+decides whether the recursion's cost piles up at the **top** of the tree (the splitting work), spreads
+**evenly** across all levels, or piles up at the **bottom** (the sheer number of leaves).
+
+| Symbol | What it is |
+|--------|------------|
+| `T(n)` | Total cost of solving a problem of size n. The thing you are solving for |
+| `a` | **How many subproblems** each call spawns. Merge sort 2, Strassen 7, binary search 1 |
+| `b` | **How much smaller** each subproblem is. `n/b`. Halving means `b = 2` |
+| `n/b` | The size handed to each recursive call |
+| `f(n)` | **Work to split and combine** at this node, excluding the recursion. Often written `O(n^d)` |
+| `d` | The exponent in `f(n) = O(n^d)`. Linear merge → `d = 1`; quadratic add → `d = 2` |
+| `log_b(a)` | The exponent that counts the **leaves**: the tree has `n^log_b(a)` of them |
+| `a / b^d` | The per-level growth ratio. Below 1, at 1, above 1 → Case 1, 2, 3 |
+
+**Walk one example.** The cleanest way to see the three cases is to tabulate the work *per level* of the
+recursion tree for `n = 8`. Level i has `a^i` nodes, each of size `n/b^i`, each costing `(n/b^i)^d`:
+
+```
+  merge sort   a=2  b=2  d=1     log_2(2) = 1 = d     ratio a/b^d = 2/2 = 1.0
+  level   nodes   size   work/node   level total
+    0        1      8         8           8
+    1        2      4         4           8       <- identical
+    2        4      2         2           8       <- identical
+    3        8      1         1           8       <- identical
+                                      -------
+                          total = 8 x 4 levels = 32 = n log n     CASE 2
+
+  Strassen     a=7  b=2  d=2     log_2(7) = 2.807 > d = 2   ratio = 7/4 = 1.75
+  level   nodes   size   work/node   level total
+    0        1      8        64          64
+    1        7      4        16         112      <- growing
+    2       49      2         4         196      <- growing
+    3      343      1         1         343      <- the leaves dominate
+                                      -------
+                                total = 715, and 7^3 = 343 = n^log_2(7)   CASE 3
+
+  quickselect  a=1  b=2  d=1     log_2(1) = 0 < d = 1       ratio = 1/2 = 0.5
+  level   nodes   size   work/node   level total
+    0        1      8         8           8      <- the root dominates
+    1        1      4         4           4
+    2        1      2         2           2
+    3        1      1         1           1
+                                      -------
+                       total = 15 < 2n, a geometric series -> O(n)        CASE 1
+
+  binary search a=1 b=2  d=0     log_2(1) = 0 = d          ratio = 1/1 = 1.0
+  every level costs exactly 1 comparison, and there are log_2(8) + 1 = 4 levels
+                       total = 4 = O(log n)                               CASE 2
+```
+
+**Why the ratio `a / b^d` is the whole theorem.** Each level's total work is `n^d × (a/b^d)^i` — a
+geometric series in the level index `i`. Geometric series have exactly three behaviours, and they are the
+three cases. Ratio below 1: the series shrinks, so the first term (the root, `n^d`) dominates and
+`T(n) = O(n^d)`. Ratio exactly 1: every level costs the same, so multiply one level by the `log_b(n)`
+levels and get `O(n^d log n)`. Ratio above 1: the series grows, so the last term (the leaves,
+`n^log_b(a)`) dominates and `T(n) = O(n^log_b(a))`.
+
+**What this buys you as an algorithm designer.** It tells you exactly which knob to turn. Strassen is
+famous *only* because it drops `a` from 8 to 7 — same `b`, same `d`, and the exponent falls from
+`log_2(8) = 3` to `log_2(7) = 2.807`. Karatsuba does the identical trick on integer multiplication, 4
+subproblems down to 3, `log_2(3) = 1.585`. In a Case-3 algorithm, shaving the combine step is wasted
+effort; only killing a recursive call moves the exponent. In a Case-1 algorithm the reverse holds. And
+the theorem simply does not apply when `f(n)` is not polynomial — `T(n) = 2T(n/2) + O(n log n)` (closest
+pair) falls in the gap between Cases 2 and 3 and needs the recursion tree drawn by hand, which is
+Pitfall 5.
 
 ---
 

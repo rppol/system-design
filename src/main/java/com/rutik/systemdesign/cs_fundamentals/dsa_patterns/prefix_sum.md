@@ -219,6 +219,43 @@ This walkthrough illustrates the most important practical lesson: **trust the pr
 
 The hashmap variant trades O(n) space for collapsing O(n^2) brute force into O(n) — one of the most favorable tradeoffs in the entire pattern catalog, which is why "subarray sum" problems are interview staples.
 
+### Decoding the identity and the tradeoff
+
+**In plain terms.** "`sum(i..j) = P[j+1] - P[i]` means: the sum of a middle slice is the total up to the end of the slice, minus the total up to just before it starts — take the whole rope and cut off the part you did not ask for."
+
+That framing matters because it turns *every* range question into one subtraction. Once the running totals exist, the length of the range you ask about no longer affects how long the answer takes.
+
+| Symbol | What it is |
+|---|---|
+| `O(...)` | An upper bound on how fast the work grows as the input grows |
+| `n` | The input size — how many elements are in `nums` |
+| `Q` | How many range queries you will be asked |
+| `P[k]` | The total of the first `k` elements. `P[0] = 0` by definition, so `P` has `n+1` slots |
+| `sum(i..j)` | The total of `nums[i]` through `nums[j]`, both ends included |
+| `O(1)` | Constant time — one subtraction, regardless of how wide the range is |
+| `O(n^2)` | Re-adding the range on every query, for every query |
+
+**Walk one example.** Using the same array as the chart above, `nums = [3, 4, -7, 1, 3, 3, 1, -4]`. Build `P` by carrying a running total, then check the identity against direct addition:
+
+```
+  nums  =  [   3,   4,  -7,   1,   3,   3,   1,  -4 ]
+  index        0    1    2    3    4    5    6    7
+
+  P     =  [0,   3,   7,   0,   1,   4,   7,   8,   4 ]
+  index     0    1    2    3    4    5    6    7    8
+            ^ P[0] = 0 is the empty prefix -- this is the off-by-one guard
+
+  query        formula        arithmetic       direct addition       agree?
+  -----------  -------------  ---------------  --------------------  ------
+  sum(0..3)    P[4] - P[0]    1 - 0 =  1       3 + 4 - 7 + 1  =  1   yes
+  sum(2..5)    P[6] - P[2]    7 - 7 =  0      -7 + 1 + 3 + 3  =  0   yes
+  sum(4..6)    P[7] - P[4]    8 - 1 =  7       3 + 3 + 1      =  7   yes
+```
+
+Note that `sum(2..5)` uses `P[6]`, not `P[5]`. The `+1` on the right index is what the leading `P[0] = 0` buys you: without it you would need a special case for ranges that start at index 0.
+
+**Why the O(n) precompute pays for itself, quantified.** Answering `Q` queries by re-adding costs `Q * n`; the prefix array costs `n` once plus `1` per query, so `n + Q`. On the 8-element array above, one query is `8` operations brute force versus `8 + 1 = 9` with prefix — brute force wins. At two queries it is `16` versus `10`, and prefix has already won and never loses again. At LC-scale `n = 100,000` and `Q = 100,000`: brute force is `10^10` operations, prefix is `200,000` — **50,000 times cheaper.** The break-even is essentially two queries, which is why you build the array without hesitating.
+
 ---
 
 ## 6. Variations & Sub-patterns

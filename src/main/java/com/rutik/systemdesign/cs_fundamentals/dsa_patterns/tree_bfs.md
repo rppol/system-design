@@ -287,6 +287,94 @@ result = [[3], [9, 20], [15, 7]]
 For a **complete binary tree**, the last level holds about `n/2` nodes, so
 `O(w) = O(n)` in the worst case — the queue can briefly hold half the tree.
 
+### Decoding `O(n)` time and `O(w)` space
+
+**In plain terms.** "Time is `O(n)` because every node enters and
+leaves the queue exactly once. Space is *not* `O(n)` — it is the size of the
+single widest level, because that is the most the queue ever holds at one
+instant."
+
+The time bound is the easy half and interviewers rarely probe it. The space
+bound is where the follow-up lives: "what is the peak memory of your BFS?" The
+answer is not "the tree" — it is "one level of the tree", and for a balanced
+tree that widest level is the bottom one, holding about `n/2` nodes.
+
+| Symbol | What it is |
+|---|---|
+| `n` | Total node count in the tree |
+| `w` | Width of the widest level — the peak queue size |
+| `h` | Height of the tree (number of levels minus one) |
+| `O(w)` | BFS auxiliary space |
+| `O(n)` | BFS time; also BFS space in the balanced worst case, since `w ≈ n/2` |
+
+**Walk one example.** A 6-node tree. The `for _ in range(len(queue))` snapshot
+is what fences one level off from the next.
+
+```
+        1
+      /   \
+     2     3
+    / \     \
+   4   5     6
+
+  step  level size  dequeued  children pushed  queue after    peak so far  output
+  ----  ----------  --------  ---------------  ------------   -----------  -----------
+   0    --          --        --               [1]                 1       []
+   1    1           1         2, 3             [2, 3]              2       [[1]]
+   2    2           2         4, 5             [3, 4, 5]           3       [[1]]
+                    3         6                [4, 5, 6]           3       [[1],[2,3]]
+   3    3           4         --               [5, 6]              3       [[1],[2,3]]
+                    5         --               [6]                 3
+                    6         --               []                  3       [[1],[2,3],
+                                                                             [4,5,6]]
+
+  6 dequeues total = n        peak queue = 3 = w (the widest level, the bottom)
+```
+
+Six dequeues for six nodes — that is the `O(n)` time. The queue never exceeded
+3 even though the tree has 6 nodes — that is the `O(w)` space, and here
+`w = 3 = n/2`.
+
+**Why `w ≈ n/2` for a balanced tree.** A complete binary tree doubles at every
+level, so the bottom level alone holds as many nodes as every level above it
+combined, plus one. At `n = 1,000,000`:
+
+```
+  level    nodes at that level    cumulative
+  -----    -------------------    ----------
+    0                1                    1
+    1                2                    3
+    2                4                    7
+   ...              ...                  ...
+   18          262,144              524,287
+   19          475,713            1,000,000   <- remainder, the widest level
+
+  levels 0..18 combined  =   524,287 nodes
+  level 19 alone         =   475,713 nodes   ->  w = 475,713, about n/2
+```
+
+**Why this matters against DFS.** The same tree traversed depth-first holds
+only one root-to-leaf path on the stack:
+
+```
+  n = 1,000,000, balanced
+
+  BFS peak queue  =  w  =  475,713 node references
+                       at 8 bytes per reference  ~=  3.8 MB
+
+  DFS peak stack  =  h  =  floor(log2(1,000,000))  =  19,  so 20 frames
+                       at ~100 bytes per Python frame  ~=  2 KB
+
+  ratio  =  475,713 / 20  =  23,785x more live state in BFS
+```
+
+That is the tradeoff to state out loud: BFS is the only way to get level-by-level
+answers and shortest-path-by-edge-count, and it costs you roughly `n/2` live
+references to get them. If the problem does not actually need level structure,
+DFS is the cheaper traversal. The exception is `min_depth`, where BFS wins on
+*time* — it returns at the first leaf dequeued, so a tree with one shallow leaf
+terminates in a few levels while DFS would explore the whole deep subtree first.
+
 ---
 
 ## 6. Variations & Sub-patterns

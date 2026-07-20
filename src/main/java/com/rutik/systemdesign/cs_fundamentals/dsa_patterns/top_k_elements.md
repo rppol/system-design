@@ -236,6 +236,66 @@ member of the "top-2 so far" once the heap exceeded size `k = 2`.
 For `k = n`, the heap approach degenerates to O(n log n) — the same as
 sorting, so prefer sorting directly when `k` is large.
 
+### Decoding O(n log k) vs O(n log n)
+
+**What this actually says.** "You still touch all `n` elements either way —
+the difference is how expensive each touch is. Sorting compares against a
+structure holding all `n` items; the heap compares against a structure holding
+only `k`, and `k` is tiny."
+
+That is the whole insight: `n` sets how *many* operations you do, and the thing
+inside the logarithm sets how *much each one costs*. Shrinking the container
+from `n` to `k` shrinks the per-element price without changing the count.
+
+| Symbol | What it is |
+|---|---|
+| `O(n log k)` | `n` insertions, each costing `log k` to sift through a `k`-sized heap |
+| `O(n log n)` | Full sort — `n` elements each costing `log n` |
+| `k` | How many top elements you actually need. Usually a small constant |
+| `n` | Total elements in the stream or array |
+| `O(k)` | Space held: only the `k` best-so-far, never the whole input |
+| `log k` | Height of a heap holding `k` items — the sift-up/sift-down distance |
+
+**Walk one example.** `n = 1,000,000` elements, `k = 10` (the classic "top 10
+trending" shape). Comparison counts, not wall-clock:
+
+```
+                        per element      x n            total comparisons
+  full sort             log2(1e6)=19.93  x 1,000,000  = 19,931,569
+  heap of size k=10     log2(10) = 3.32  x 1,000,000  =  3,321,928
+
+  reduction: 19,931,569 / 3,321,928 = 6.0x fewer comparisons
+
+  memory held at once:
+    full sort   1,000,000 elements
+    heap             10 elements
+  reduction: 100,000x less memory
+```
+
+The 6x on comparisons is nice. The **100,000x on memory** is the reason this
+pattern exists.
+
+**Why this complexity, and what breaks with the sort.** Sorting answers a
+question you did not ask: it establishes the full ordering of all million
+elements when you only ever needed the boundary between the top 10 and
+everything else. The heap answers exactly the question asked — it holds the
+current 10 best, and each new element is one comparison against the heap's
+root to decide "does this beat my current 10th place?" If not, discard it in
+`O(1)` and never think about it again.
+
+The sort also has a failure mode the heap does not: it requires the entire
+input in memory at once. On a stream of a billion events, or a 40 GB log file
+on a machine with 8 GB of RAM, sorting is not merely slower — it is
+impossible, while the `O(k)` heap never grows past 10 elements regardless of
+how much data flows through it. That is why `O(n log k)` is the streaming
+answer and `O(n log n)` is the batch answer.
+
+**Where the tradeoff flips.** As `k` approaches `n`, `log k` approaches
+`log n` and the advantage evaporates — plus the heap's constant factors are
+worse than a well-tuned sort's. At `k = n` the heap is doing the same work as
+sorting while being harder to read. The rule of thumb: heap when `k` is a small
+fraction of `n`, sort when `k` is a meaningful fraction of it.
+
 ---
 
 ## 6. Variations & Sub-patterns

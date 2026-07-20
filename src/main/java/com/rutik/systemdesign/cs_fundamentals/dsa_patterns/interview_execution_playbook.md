@@ -634,6 +634,46 @@ If Implement runs long (common), it eats into Review/Evaluate first — never
 skip Understand or Match, since a wrong pattern wastes the ENTIRE remaining
 budget.
 
+**What the formula is telling you.** "The six phase ranges do not add up to 45
+minutes — the lower bounds total 28 and the upper bounds total 41, and that
+gap IS the plan, not sloppy arithmetic."
+
+That framing matters because it tells you what to do when a phase runs over.
+You are not stealing from a fixed allocation; you are spending slack that was
+budgeted for exactly this. Panic only starts once the slack is gone.
+
+| Symbol | What it is |
+|---|---|
+| `3-5 min` | A range, not a target. The low end is the healthy case, the high end is the ceiling |
+| lower-bound sum | 28 min. What the loop costs when every phase goes well |
+| upper-bound sum | 41 min. What the loop costs when every phase runs long |
+| slack | 45 minus whatever you actually spend — the interviewer's follow-up time |
+
+**Walk one example.** Add both columns of the six phases:
+
+```
+  phase        lower   upper
+  ----------   -----   -----
+  Understand       3       5
+  Match            2       3
+  Plan             3       5
+  Implement       15      20
+  Review           3       5
+  Evaluate         2       3
+  ----------   -----   -----
+  total           28      41
+  of 45 min       17      4     <- minutes of slack remaining
+```
+
+**Why the fast path is worth the discipline.** Finish at the lower bound and
+you keep 17 minutes for follow-ups, optimizations, and questions — the part of
+the loop where above-bar signal actually gets generated. Finish at the upper
+bound and you have 4 minutes, enough to say goodbye. Note also that Implement's
+range (15-20) is 5 minutes wide, the same absolute width as Understand's (3-5)
+but a far smaller *fraction* — which is why Implement overruns are usually
+caused by a bad Match, not by slow typing. Fixing a 2-minute phase is what buys
+back the 20-minute one.
+
 ### 60-Minute Loop (Medium + follow-up, or Medium + Easy)
 
 ```mermaid
