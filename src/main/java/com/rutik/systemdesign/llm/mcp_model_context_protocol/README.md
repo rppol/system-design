@@ -195,18 +195,18 @@ JSON-RPC Response (error):
 }
 ```
 
-**Reading it in plain English.** "Every MCP message is a small JSON envelope wrapped around an even smaller payload — cheap in bulk, but the wrapper is nearly half the bytes, which is exactly why the protocol feels heavy on a single hot-path call."
+**The idea behind it.** "Every MCP message is a small JSON envelope wrapped around an even smaller payload — cheap in bulk, but the wrapper is nearly half the bytes, which is exactly why the protocol feels heavy on a single hot-path call."
 
 The envelope is fixed cost per message, not per byte of useful work. That ratio is harmless across a long session and terrible for one-shot use.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `jsonrpc` | "jason are pee see" | Protocol version marker, always `"2.0"`. Pure overhead, required on every message |
-| `id` | "eye dee" | Correlation number. The response must echo it back so the client can match them |
-| `method` | "method" | Which operation: `tools/call`, `resources/read`, `initialize` |
-| `params` / `result` | "params" / "result" | The actual payload. Everything else on the message is envelope |
-| round trip | "round trip" | One request plus one response. Two messages per tool call |
-| base64 | "base sixty-four" | Binary-to-text encoding for blobs. Costs 4 bytes for every 3 bytes of input |
+| Symbol | What it is |
+|--------|------------|
+| `jsonrpc` | Protocol version marker, always `"2.0"`. Pure overhead, required on every message |
+| `id` | Correlation number. The response must echo it back so the client can match them |
+| `method` | Which operation: `tools/call`, `resources/read`, `initialize` |
+| `params` / `result` | The actual payload. Everything else on the message is envelope |
+| round trip | One request plus one response. Two messages per tool call |
+| base64 | Binary-to-text encoding for blobs. Costs 4 bytes for every 3 bytes of input |
 
 **Walk one example.** The `tools/call` request above, minified the way it actually goes on the wire:
 
@@ -306,18 +306,18 @@ sequenceDiagram
 9. Model generates next response using tool result
 ```
 
-**Reading it in plain English.** "Step 2 is the expensive one: every tool a server registers becomes context the model must be shown on every single request of the session — which is what actually limits how many MCP servers you can connect at once."
+**Stated plainly.** "Step 2 is the expensive one: every tool a server registers becomes context the model must be shown on every single request of the session — which is what actually limits how many MCP servers you can connect at once."
 
 `tools/list` runs once, so it looks free. It is not. The model is stateless per request, so the client re-injects the entire manifest into every prompt. The protocol cost is trivial; the context cost is the real constraint.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `t_schema` | "tee schema" | Tokens for one ToolDefinition: name, description, and full inputSchema |
-| `N` | "en" | Total tools registered across all connected servers, not per server |
-| `N x t_schema` | "en times tee schema" | Manifest size. Prepended to every request for the whole session |
-| `W` | "double-u" | Model context window. 200K for Claude, 128K for many others |
-| schema share | "schema share" | `N x t_schema / W`. The fraction of the window gone before the task starts |
-| `R` | "are" | Requests in the session. The manifest is paid `R` times, not once |
+| Symbol | What it is |
+|--------|------------|
+| `t_schema` | Tokens for one ToolDefinition: name, description, and full inputSchema |
+| `N` | Total tools registered across all connected servers, not per server |
+| `N x t_schema` | Manifest size. Prepended to every request for the whole session |
+| `W` | Model context window. 200K for Claude, 128K for many others |
+| schema share | `N x t_schema / W`. The fraction of the window gone before the task starts |
+| `R` | Requests in the session. The manifest is paid `R` times, not once |
 
 **Walk one example.** The `search_documents` definition above is ~120 tokens; richly documented tools with 4-6 parameters and negative guidance run 250-300. Start with the environment from the Section 14 case study:
 
@@ -483,17 +483,17 @@ Multiple internal LLM applications (a support bot, a contract reviewer, an onboa
 | Proxy-friendly | N/A | Yes (with keep-alive tuning) | Yes |
 | Connection overhead | Process spawn (~50–200ms) | HTTP handshake | Single HTTP connection |
 
-**Reading it in plain English.** "Transport cost is a one-time setup charge plus a small per-call charge — so the right transport depends entirely on how many calls you spread the setup across."
+**What the formula is telling you.** "Transport cost is a one-time setup charge plus a small per-call charge — so the right transport depends entirely on how many calls you spread the setup across."
 
 The comparison table ranks stdio as "lowest latency," and that is true per call and false per session if you only make one call. Setup amortization is the whole decision.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| setup | "setup" | Paid once per session: process spawn for stdio, TCP + TLS + `initialize` for SSE |
-| RTT | "are tee tee" | Round-trip time. One network hop out and back |
-| per-call | "per call" | Marginal cost of one more `tools/call`. IPC for stdio, one RTT for SSE |
-| `C` | "see" | Calls made in the session. The number setup gets divided by |
-| setup/`C` | "setup over see" | Amortized setup per call. The number that actually matters |
+| Symbol | What it is |
+|--------|------------|
+| setup | Paid once per session: process spawn for stdio, TCP + TLS + `initialize` for SSE |
+| RTT | Round-trip time. One network hop out and back |
+| per-call | Marginal cost of one more `tools/call`. IPC for stdio, one RTT for SSE |
+| `C` | Calls made in the session. The number setup gets divided by |
+| setup/`C` | Amortized setup per call. The number that actually matters |
 
 **Walk one example.** A 20-call session, taking the ~50-200ms spawn from the table above and typical network RTTs:
 

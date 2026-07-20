@@ -49,19 +49,19 @@ Targets:        "The" "quick" "brown" "fox"
 Loss = -1/T × Σ log P(token_t | token_1, ..., token_{t-1})
 ```
 
-**Reading it in plain English.** "For every position in the text, ask the model how much probability it gave to the token that actually came next, and average how surprised it was. Low loss = the real text was unsurprising."
+**The idea behind it.** "For every position in the text, ask the model how much probability it gave to the token that actually came next, and average how surprised it was. Low loss = the real text was unsurprising."
 
 That is the entire training signal for a trillion-dollar industry. There is no human label anywhere — the "answer key" is just the next token that the corpus already contains, so any text at all is training data.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `Σ` | "sum over" | Add up the term once for every token position `t` in the sequence |
-| `T` | "capital T" | Sequence length — how many token positions contributed |
-| `1/T × Σ` | "average over tokens" | Mean per-token loss, so long and short batches are comparable |
-| `P(token_t \| ...)` | "probability of token t given everything before it" | The softmax probability the model assigned to the *correct* next token |
-| `log P` | "log prob" | Turns probability into a score. `P = 1` -> `0`; `P = 0.1` -> `-2.30`; `P -> 0` -> `-infinity` |
-| `-` (leading minus) | "negative" | Flips it so loss is positive and *smaller is better* |
-| `L` | "loss" | The single number gradient descent pushes down |
+| Symbol | What it is |
+|--------|------------|
+| `Σ` | Add up the term once for every token position `t` in the sequence |
+| `T` | Sequence length — how many token positions contributed |
+| `1/T × Σ` | Mean per-token loss, so long and short batches are comparable |
+| `P(token_t \| ...)` | The softmax probability the model assigned to the *correct* next token |
+| `log P` | Turns probability into a score. `P = 1` -> `0`; `P = 0.1` -> `-2.30`; `P -> 0` -> `-infinity` |
+| `-` (leading minus) | Flips it so loss is positive and *smaller is better* |
+| `L` | The single number gradient descent pushes down |
 
 **Walk one example.** Three predictions on `"The quick brown fox"`, showing what probability the
 model gave the token that actually came next:
@@ -92,15 +92,15 @@ averaging is what makes the number comparable across batches, across runs, and a
   ppl = exp(L)          and equivalently          L = ln(ppl)
 ```
 
-**Reading it in plain English.** "Perplexity is the effective number of tokens the model is choosing
+**Stated plainly.** "Perplexity is the effective number of tokens the model is choosing
 between at each step — as if it narrowed a 32,000-token vocabulary down to a shortlist of that size
 and then guessed uniformly from the shortlist."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `exp(x)` | "e to the x" | The inverse of `ln`. Undoes the log that turned probabilities into scores |
-| `ppl` | "perplexity" | Effective branching factor — the size of the model's shortlist |
-| `L` | "loss" | Mean per-token cross-entropy, in nats (natural log units) |
+| Symbol | What it is |
+|--------|------------|
+| `exp(x)` | The inverse of `ln`. Undoes the log that turned probabilities into scores |
+| `ppl` | Effective branching factor — the size of the model's shortlist |
+| `L` | Mean per-token cross-entropy, in nats (natural log units) |
 
 **Walk one example.** Reuse the loss values this module already quotes:
 
@@ -189,16 +189,16 @@ Architecture:
 Loss = Σ_{k=1}^{N} L_k (cross-entropy for each head)
 ```
 
-**Reading it in plain English.** "Run the same next-token loss once per head — head 1 graded on the token one step ahead, head 2 on two steps ahead, and so on — then add the grades together."
+**What the formula is telling you.** "Run the same next-token loss once per head — head 1 graded on the token one step ahead, head 2 on two steps ahead, and so on — then add the grades together."
 
 Each `L_k` is exactly the cross-entropy from §4.1; the only change is which target it is compared against. Nothing new is being optimized, the same trunk is just being asked a harder question N ways at once.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `Σ_{k=1}^{N}` | "sum over k from one to N" | Loop the head index `k` from 1 to N and add every term |
-| `k` | "kay" | Which head — equivalently, how many positions into the future it predicts |
-| `N` | "capital N" | Number of heads, typically 4 |
-| `L_k` | "loss sub k" | Head `k`'s own cross-entropy against the token at position `+k` |
+| Symbol | What it is |
+|--------|------------|
+| `Σ_{k=1}^{N}` | Loop the head index `k` from 1 to N and add every term |
+| `k` | Which head — equivalently, how many positions into the future it predicts |
+| `N` | Number of heads, typically 4 |
+| `L_k` | Head `k`'s own cross-entropy against the token at position `+k` |
 
 **Walk one example.** N = 4 on `"The quick brown fox"`, per-head cross-entropy:
 
@@ -285,18 +285,18 @@ The curve above is two formulas glued at the warmup boundary (this is exactly wh
       lr       = min_lr + cosine x (peak_lr - min_lr)         <- decay down
 ```
 
-**Reading it in plain English.** "Ramp the step size up from zero over the first couple of percent of training, then ride it back down along the first half of a cosine wave — fast in the middle, gentle at both ends — until it lands on a small floor instead of zero."
+**What this actually says.** "Ramp the step size up from zero over the first couple of percent of training, then ride it back down along the first half of a cosine wave — fast in the middle, gentle at both ends — until it lands on a small floor instead of zero."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `lr` | "learning rate" | How big a step the optimizer takes along the gradient |
-| `peak_lr` | "peak L R" | The maximum, reached at the end of warmup. 1e-4 to 3e-4 here |
-| `min_lr` | "min L R" | The floor, `min_lr_ratio x peak_lr` = 10% of peak in the §14 config |
-| `warmup` | "warmup steps" | Length of the linear ramp. 2,000 steps in both case studies |
-| `progress` | "progress" | Fraction of post-warmup training done, 0 at the start, 1 at the end |
-| `pi x progress` | "pi times progress" | Maps that fraction onto 0 .. pi radians — the first half of a cosine |
-| `cos` | "cosine" | Wave that runs `+1 -> 0 -> -1` over 0 .. pi |
-| `0.5 x (1 + cos(...))` | "half of one plus cosine" | Rescales that `+1 .. -1` swing onto a clean `1.0 .. 0.0` multiplier |
+| Symbol | What it is |
+|--------|------------|
+| `lr` | How big a step the optimizer takes along the gradient |
+| `peak_lr` | The maximum, reached at the end of warmup. 1e-4 to 3e-4 here |
+| `min_lr` | The floor, `min_lr_ratio x peak_lr` = 10% of peak in the §14 config |
+| `warmup` | Length of the linear ramp. 2,000 steps in both case studies |
+| `progress` | Fraction of post-warmup training done, 0 at the start, 1 at the end |
+| `pi x progress` | Maps that fraction onto 0 .. pi radians — the first half of a cosine |
+| `cos` | Wave that runs `+1 -> 0 -> -1` over 0 .. pi |
+| `0.5 x (1 + cos(...))` | Rescales that `+1 .. -1` swing onto a clean `1.0 .. 0.0` multiplier |
 
 **Walk one example.** Case study 1's schedule: peak 1e-5, min_lr_ratio 0.1 (so min 1e-6),
 warmup 2,000, total 250,000 steps:
@@ -395,15 +395,15 @@ The Pile (EleutherAI):
   effective_tokens    = tokens_per_gpu_step x num_gpus x grad_accum_steps
 ```
 
-**Reading it in plain English.** "Each GPU chews a small slice it can actually fit, you do that several times in a row without stepping the optimizer, and the gradients pile up until together they represent the huge batch you actually wanted."
+**In plain terms.** "Each GPU chews a small slice it can actually fit, you do that several times in a row without stepping the optimizer, and the gradients pile up until together they represent the huge batch you actually wanted."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `micro_batch_sequences` | "micro batch" | Sequences one GPU processes in one forward/backward. Limited by VRAM |
-| `sequence_length` | "sequence length" | Tokens per sequence — 4,096 in case study 1, 8,192 in case study 2 |
-| `num_gpus` | "number of GPUs" | Data-parallel replicas, each on a different slice |
-| `grad_accum_steps` | "grad accum steps" | Backward passes accumulated before one `optimizer.step()` |
-| `effective_tokens` | "effective batch" | The batch size that actually matters for the LR — the *only* one to quote |
+| Symbol | What it is |
+|--------|------------|
+| `micro_batch_sequences` | Sequences one GPU processes in one forward/backward. Limited by VRAM |
+| `sequence_length` | Tokens per sequence — 4,096 in case study 1, 8,192 in case study 2 |
+| `num_gpus` | Data-parallel replicas, each on a different slice |
+| `grad_accum_steps` | Backward passes accumulated before one `optimizer.step()` |
+| `effective_tokens` | The batch size that actually matters for the LR — the *only* one to quote |
 
 **Walk one example.** Case study 1's config, straight from `ContinuedPretrainingConfig`:
 
@@ -441,19 +441,19 @@ and is now training at double the effective LR.
   w_t = w_{t-1} - lr x [ m_hat / (sqrt(v_hat) + eps) + weight_decay x w_{t-1} ]
 ```
 
-**Reading it in plain English.** "Step in the direction gradients have been pointing lately, but scale that step down for any weight whose gradient has been noisy or large — and separately shrink every weight a little each step regardless."
+**Read it like this.** "Step in the direction gradients have been pointing lately, but scale that step down for any weight whose gradient has been noisy or large — and separately shrink every weight a little each step regardless."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `g_t` | "g sub t" | This step's gradient for one weight |
-| `m_t` | "m sub t" | Running mean of gradients. The momentum term — smooths out batch noise |
-| `v_t` | "v sub t" | Running mean of *squared* gradients. A per-weight noise/magnitude meter |
-| `beta1` | "beta one" | Momentum decay, 0.9. Memory of roughly the last 10 steps |
-| `beta2` | "beta two" | Variance decay, 0.95 here (0.999 in generic Adam). Memory of ~20 steps |
-| `m_hat`, `v_hat` | "m hat", "v hat" | Bias-corrected versions — `m_0` starts at zero, so early estimates read too small |
-| `eps` | "epsilon" | Tiny floor, 1e-8. Stops division by zero when a weight's gradient is dead |
-| `sqrt(v_hat)` | "root v hat" | Typical gradient magnitude for this weight — the per-weight step normalizer |
-| `weight_decay` | "weight decay" | 0.1 here. Pulls weights toward zero; the "W" in AdamW keeps it out of `m`/`v` |
+| Symbol | What it is |
+|--------|------------|
+| `g_t` | This step's gradient for one weight |
+| `m_t` | Running mean of gradients. The momentum term — smooths out batch noise |
+| `v_t` | Running mean of *squared* gradients. A per-weight noise/magnitude meter |
+| `beta1` | Momentum decay, 0.9. Memory of roughly the last 10 steps |
+| `beta2` | Variance decay, 0.95 here (0.999 in generic Adam). Memory of ~20 steps |
+| `m_hat`, `v_hat` | Bias-corrected versions — `m_0` starts at zero, so early estimates read too small |
+| `eps` | Tiny floor, 1e-8. Stops division by zero when a weight's gradient is dead |
+| `sqrt(v_hat)` | Typical gradient magnitude for this weight — the per-weight step normalizer |
+| `weight_decay` | 0.1 here. Pulls weights toward zero; the "W" in AdamW keeps it out of `m`/`v` |
 
 **Walk one example.** One weight over three steps, `beta1 = 0.9`, `beta2 = 0.95`, `lr = 1e-5`:
 
@@ -502,7 +502,7 @@ Monitoring the loss curve and related signals is critical for catching problems 
 
 **Healthy loss curve**: Smooth exponential decay with small noise. The curve follows a power law: L(t) ~ t^(-alpha), where alpha depends on model size and data quality. Noise amplitude should be consistent — increasing noise suggests data pipeline issues.
 
-**Reading the power law in plain English.** "Every time you multiply the training tokens (or parameters, or compute) by some fixed factor, the loss shrinks by a fixed factor — never by a fixed amount. Progress is bought in multiples, not in increments."
+**What it means.** "Every time you multiply the training tokens (or parameters, or compute) by some fixed factor, the loss shrinks by a fixed factor — never by a fixed amount. Progress is bought in multiples, not in increments."
 
 The same shape appears in all three scaling-law forms, which is why the Chinchilla work could fit them jointly:
 
@@ -512,14 +512,14 @@ The same shape appears in all three scaling-law forms, which is why the Chinchil
   L(D) = (D_c / D)^alpha_D   loss vs dataset size         (D_c = a fitted constant)
 ```
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `L(N)` | "loss as a function of N" | The loss you would reach with `N` parameters, trained properly |
-| `N` | "capital N" | Model parameters. `D` = training tokens, `t` = steps, `C` = compute FLOPs |
-| `N_c`, `D_c` | "N critical", "D critical" | Fitted constants that set the scale — where the curve crosses `L = 1` |
-| `alpha` | "alpha" | The exponent. How steeply loss falls; measured near 0.05-0.10 for LLMs |
-| `x^(-alpha)` | "x to the minus alpha" | The power law itself. Negative exponent = grows -> loss falls |
-| `~` | "scales as" | Proportional to, ignoring the constant out front |
+| Symbol | What it is |
+|--------|------------|
+| `L(N)` | The loss you would reach with `N` parameters, trained properly |
+| `N` | Model parameters. `D` = training tokens, `t` = steps, `C` = compute FLOPs |
+| `N_c`, `D_c` | Fitted constants that set the scale — where the curve crosses `L = 1` |
+| `alpha` | The exponent. How steeply loss falls; measured near 0.05-0.10 for LLMs |
+| `x^(-alpha)` | The power law itself. Negative exponent = grows -> loss falls |
+| `~` | Proportional to, ignoring the constant out front |
 
 **Walk one example.** Take `alpha = 0.076` (roughly the Kaplan/Chinchilla parameter exponent) and
 ask what each 10x in model size buys:
@@ -575,15 +575,15 @@ Where:
   N       = number of prediction heads (typically 4)
 ```
 
-**Reading it in plain English.** "Train normally on the next token, then average the extra heads' losses together and add a small fraction of that as a nudge — the future-planning signal helps, but it must never outvote the objective you actually care about."
+**Put simply.** "Train normally on the next token, then average the extra heads' losses together and add a small fraction of that as a nudge — the future-planning signal helps, but it must never outvote the objective you actually care about."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `L_total` | "total loss" | What gradient descent actually minimizes |
-| `L_CLM` | "C L M loss" | The §4.1 next-token loss. The real objective, weight fixed at 1 |
-| `lambda` | "lambda" | Auxiliary weight, 0.1-0.3. How loud the side objective is allowed to be |
-| `(1/N) x Σ` | "average over the heads" | Mean, not sum, so changing `N` does not change the auxiliary's loudness |
-| `Σ_{k=2}^{N}` | "sum over k from two to N" | Starts at **2** — head 1 is already counted as `L_CLM` |
+| Symbol | What it is |
+|--------|------------|
+| `L_total` | What gradient descent actually minimizes |
+| `L_CLM` | The §4.1 next-token loss. The real objective, weight fixed at 1 |
+| `lambda` | Auxiliary weight, 0.1-0.3. How loud the side objective is allowed to be |
+| `(1/N) x Σ` | Mean, not sum, so changing `N` does not change the auxiliary's loudness |
+| `Σ_{k=2}^{N}` | Starts at **2** — head 1 is already counted as `L_CLM` |
 
 **Walk one example.** `lambda = 0.2`, `N = 4`, using the per-head numbers from §4.4:
 
@@ -631,15 +631,15 @@ Everything above rests on one budget identity that every pre-training interview 
   C ~= 6 x N x D
 ```
 
-**Reading it in plain English.** "The total cost of a training run is just: how big the model is, times how much text it reads, times six. Nothing about architecture, optimizer, or cluster enters — only params and tokens."
+**The idea behind it.** "The total cost of a training run is just: how big the model is, times how much text it reads, times six. Nothing about architecture, optimizer, or cluster enters — only params and tokens."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `C` | "capital C" | Total training compute, in FLOPs (floating-point operations) |
-| `N` | "capital N" | Model parameters — 7e9 for a 7B model |
-| `D` | "capital D" | Training tokens seen — counted with repeats, not unique tokens |
-| `6` | "six" | FLOPs spent per parameter per token. Derived below |
-| `~=` | "approximately equals" | Ignores attention's quadratic term, negligible until context >> hidden dim |
+| Symbol | What it is |
+|--------|------------|
+| `C` | Total training compute, in FLOPs (floating-point operations) |
+| `N` | Model parameters — 7e9 for a 7B model |
+| `D` | Training tokens seen — counted with repeats, not unique tokens |
+| `6` | FLOPs spent per parameter per token. Derived below |
+| `~=` | Ignores attention's quadratic term, negligible until context >> hidden dim |
 
 **Where the 6 comes from.** Each weight participates in one multiply and one add — 2 FLOPs — every
 time a token passes through it. That happens three times per training token:

@@ -71,17 +71,17 @@ Key insights:
 - Include edge cases and ambiguous examples
 - Balance examples across classes
 
-**Reading it in plain English.** "Every example you paste into the prompt is a fixed tax you pay on *every single request*, forever — so the question is never 'do more examples help?' but 'do they help more than they cost?'"
+**The idea behind it.** "Every example you paste into the prompt is a fixed tax you pay on *every single request*, forever — so the question is never 'do more examples help?' but 'do they help more than they cost?'"
 
 That framing matters because the cost is recurring and traffic-scaled while the accuracy gain is one-time and bounded. Few-shot tokens are the one part of the bill that never amortizes.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `k` | "kay" | Number of demonstrations in the prompt. The 3-8 range above |
-| `t_ex` | "tee sub ex" | Tokens per example, counting the input text, separator, and label |
-| `k x t_ex` | "kay times tee sub ex" | Total few-shot budget added to every request, before the query |
-| `R` | "are" | Requests per day. The multiplier that turns a small prompt into a large bill |
-| `$/1M` | "dollars per million" | Provider input-token price. ~$3.00/1M for a mid-tier model |
+| Symbol | What it is |
+|--------|------------|
+| `k` | Number of demonstrations in the prompt. The 3-8 range above |
+| `t_ex` | Tokens per example, counting the input text, separator, and label |
+| `k x t_ex` | Total few-shot budget added to every request, before the query |
+| `R` | Requests per day. The multiplier that turns a small prompt into a large bill |
+| `$/1M` | Provider input-token price. ~$3.00/1M for a mid-tier model |
 
 **Walk one example.** Sentiment demonstrations like the three above run ~125 tokens each once the review text, arrow, and label are counted:
 
@@ -170,18 +170,18 @@ Improves accuracy by 5-15% on math/reasoning tasks
 Cost: N× tokens (use for high-stakes decisions)
 ```
 
-**Reading it in plain English.** "Ask the same question ten times and trust the answer that shows up most often — because a model's mistakes scatter but its correct reasoning converges."
+**Stated plainly.** "Ask the same question ten times and trust the answer that shows up most often — because a model's mistakes scatter but its correct reasoning converges."
 
 The asymmetry is the whole mechanism. There is exactly one right answer for the correct chains to agree on, and many wrong answers for the incorrect ones to split across. Voting exploits that imbalance.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `N` | "en" | Number of independent reasoning chains sampled. 10 in the block above |
-| `p` | "pee" | Probability any single chain reaches the correct answer on its own |
-| `C(N,k)` | "en choose kay" | How many ways exactly `k` of the `N` chains can be the correct ones |
-| `p^k` | "pee to the kay" | Probability those `k` specific chains all got it right |
-| `(1-p)^(N-k)` | "one minus pee to the en minus kay" | Probability the other chains all got it wrong |
-| majority | "majority" | More than half agree: `k > N/2`, so `k >= 6` when `N = 10` |
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of independent reasoning chains sampled. 10 in the block above |
+| `p` | Probability any single chain reaches the correct answer on its own |
+| `C(N,k)` | How many ways exactly `k` of the `N` chains can be the correct ones |
+| `p^k` | Probability those `k` specific chains all got it right |
+| `(1-p)^(N-k)` | Probability the other chains all got it wrong |
+| majority | More than half agree: `k > N/2`, so `k >= 6` when `N = 10` |
 
 **Walk one example.** Ten chains, each correct 60% of the time on its own:
 
@@ -341,18 +341,18 @@ top_p (nucleus sampling): Only sample from top tokens whose
 top_k: Only consider top-k tokens at each step
 ```
 
-**Reading it in plain English.** "Temperature stretches or squashes the *gaps* between token scores before they become probabilities; top-p then throws away the tail entirely."
+**What the formula is telling you.** "Temperature stretches or squashes the *gaps* between token scores before they become probabilities; top-p then throws away the tail entirely."
 
 They are not two dials doing the same job. Temperature reshapes the whole distribution and leaves every token with some chance, however small. Top-p makes a hard cut — the tokens below the line get probability exactly zero. You need both because reshaping alone never removes the garbage.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `logit_i` | "logit eye" | The model's raw pre-softmax score for token `i`. Unbounded, can be negative |
-| `τ` | "tau" | Temperature. Divides every logit before softmax. Small τ = bigger gaps = more decisive |
-| `softmax` | "soft max" | Exponentiate every score, divide each by the total. Turns any scores into probabilities summing to 1 |
-| `p` (top_p) | "top pee" | Cumulative-probability cutoff. Keep tokens until their running sum reaches `p`, drop the rest |
-| `top_k` | "top kay" | Fixed-count cutoff. Keep exactly `k` tokens regardless of how the probability mass sits |
-| nucleus | "nucleus" | The surviving set after the top-p cut. Its size changes token by token |
+| Symbol | What it is |
+|--------|------------|
+| `logit_i` | The model's raw pre-softmax score for token `i`. Unbounded, can be negative |
+| `τ` | Temperature. Divides every logit before softmax. Small τ = bigger gaps = more decisive |
+| `softmax` | Exponentiate every score, divide each by the total. Turns any scores into probabilities summing to 1 |
+| `p` (top_p) | Cumulative-probability cutoff. Keep tokens until their running sum reaches `p`, drop the rest |
+| `top_k` | Fixed-count cutoff. Keep exactly `k` tokens regardless of how the probability mass sits |
+| nucleus | The surviving set after the top-p cut. Its size changes token by token |
 
 **Walk one example.** Four candidate next tokens after "The product quality is":
 
@@ -412,16 +412,16 @@ Tip: Count tokens BEFORE sending to API
 Use tiktoken for OpenAI models
 ```
 
-**Reading it in plain English.** "The context window is one shared bucket, and the answer the model has not written yet is already taking up space in it."
+**What this actually says.** "The context window is one shared bucket, and the answer the model has not written yet is already taking up space in it."
 
 That is the part teams get wrong. Input and output are not two separate budgets — a request that fits perfectly on the way in fails halfway through the response, because `max_tokens` was never subtracted up front.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| context window | "context window" | Hard ceiling on input + output combined. 128K here, 200K for Claude |
-| input subtotal | "input subtotal" | System prompt + few-shot + retrieved docs + query. Everything you send |
-| response reserve | "response reserve" | `max_tokens` you allow the model to generate. Spend it before the call, not after |
-| headroom | "headroom" | Window minus everything committed. Your margin for a longer query or one more doc |
+| Symbol | What it is |
+|--------|------------|
+| context window | Hard ceiling on input + output combined. 128K here, 200K for Claude |
+| input subtotal | System prompt + few-shot + retrieved docs + query. Everything you send |
+| response reserve | `max_tokens` you allow the model to generate. Spend it before the call, not after |
+| headroom | Window minus everything committed. Your margin for a longer query or one more doc |
 
 **Walk one example.** The 128K budget from the block above, made explicit:
 

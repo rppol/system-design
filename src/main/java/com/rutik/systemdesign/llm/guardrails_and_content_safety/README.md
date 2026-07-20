@@ -109,22 +109,22 @@ def check_toxicity(response: str) -> dict:
     }
 ```
 
-**Reading it in plain English.** "The classifier only ever hands you a number between 0 and 1. The `> 0.7` is the actual safety policy — the model ranks, the threshold decides."
+**The idea behind it.** "The classifier only ever hands you a number between 0 and 1. The `> 0.7` is the actual safety policy — the model ranks, the threshold decides."
 
 That split matters because the two are tuned by different people for different reasons. Swapping in a better classifier moves the ranking quality; moving `0.7` to `0.5` moves how much harm you let through and how many innocent users you block, with the same model. Almost every guardrail incident post-mortem is a threshold argument, not a model argument.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `p` | "p" | The classifier's toxicity score for this text, 0.0 to 1.0. Not a probability you can trust literally — a rank |
-| `tau` (`τ`) | "tau" | The block threshold. Here `0.7`. The only knob that turns a score into a decision |
-| `TP` | "true positive" | Genuinely toxic, and you blocked it. The win |
-| `FN` | "false negative" | Genuinely toxic, and you let it through. Harm reaches the user |
-| `FP` | "false positive" | Perfectly fine, and you blocked it. A real user hits a wall |
-| `TN` | "true negative" | Fine, and you allowed it. The overwhelming majority |
-| `P` | "precision" | `TP / (TP + FP)` — of everything you blocked, what fraction deserved it |
-| `R` | "recall" | `TP / (TP + FN)` — of all the harm out there, what fraction you caught |
-| `F1` | "F one" | `2PR / (P + R)` — the harmonic mean. One number that punishes lopsidedness |
-| `FPR` | "F P R" / "false positive rate" | `FP / (FP + TN)` — fraction of *innocent* traffic you blocked |
+| Symbol | What it is |
+|--------|------------|
+| `p` | The classifier's toxicity score for this text, 0.0 to 1.0. Not a probability you can trust literally — a rank |
+| `tau` (`τ`) | The block threshold. Here `0.7`. The only knob that turns a score into a decision |
+| `TP` | Genuinely toxic, and you blocked it. The win |
+| `FN` | Genuinely toxic, and you let it through. Harm reaches the user |
+| `FP` | Perfectly fine, and you blocked it. A real user hits a wall |
+| `TN` | Fine, and you allowed it. The overwhelming majority |
+| `P` | `TP / (TP + FP)` — of everything you blocked, what fraction deserved it |
+| `R` | `TP / (TP + FN)` — of all the harm out there, what fraction you caught |
+| `F1` | `2PR / (P + R)` — the harmonic mean. One number that punishes lopsidedness |
+| `FPR` | `FP / (FP + TN)` — fraction of *innocent* traffic you blocked |
 
 **Walk one example.** One day of traffic through the toxicity filter, at two thresholds:
 
@@ -359,15 +359,15 @@ flowchart TD
 
 Total latency = max(LLM, classifier) — no added latency when classifiers finish before LLM.
 
-**Reading it in plain English.** "Because the checks run beside the model instead of in front of it, you pay for the slowest one, not for all of them added up — and the LLM is almost always the slowest one, so the checks are free."
+**Stated plainly.** "Because the checks run beside the model instead of in front of it, you pay for the slowest one, not for all of them added up — and the LLM is almost always the slowest one, so the checks are free."
 
 That `max` is the entire argument for the parallel layout. The serial version costs a sum, and sums grow every time someone adds a guardrail; the max stops growing the moment every classifier is faster than inference.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `max(a, b)` | "max of a and b" | Whichever finishes last. The wall-clock cost of work done side by side |
-| `a + b` | "a plus b" | The serial cost. What you pay when each check gates the next |
-| headroom | "headroom" | `LLM time - slowest classifier`. How much slower a new guardrail can get before users feel it |
+| Symbol | What it is |
+|--------|------------|
+| `max(a, b)` | Whichever finishes last. The wall-clock cost of work done side by side |
+| `a + b` | The serial cost. What you pay when each check gates the next |
+| headroom | `LLM time - slowest classifier`. How much slower a new guardrail can get before users feel it |
 
 **Walk one example.** The numbers already in the diagram above — LLM 1–3 s, each classifier 50–200 ms:
 
@@ -436,19 +436,19 @@ Monitoring:
   Target: <0.1% of legitimate requests blocked
 ```
 
-**Reading it in plain English.** "Sweep the threshold across every value it could take, plot what you catch against what you break, and pick the point where the damage you cause is smaller than the damage you prevent."
+**What the formula is telling you.** "Sweep the threshold across every value it could take, plot what you catch against what you break, and pick the point where the damage you cause is smaller than the damage you prevent."
 
 The ROC curve is not a model quality report — it is the menu of policies a single fixed classifier can implement. Every point on it is the same weights with a different number in the `>` comparison.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| ROC | "rock" / "R O C" | Receiver Operating Characteristic. The curve of TPR against FPR as `tau` sweeps 1.0 down to 0.0 |
-| `TPR` | "T P R" | True positive rate. Same number as recall — fraction of genuinely toxic messages caught |
-| `FPR` | "F P R" | False positive rate. Fraction of benign messages wrongly blocked. The x-axis |
-| AUC | "A U C" | Area under the ROC curve, 0.5 to 1.0. Probability a random toxic message scores above a random benign one |
-| AUC = 0.5 | "point five" | Coin flip. The classifier carries no signal and no threshold can save it |
-| AUC = 1.0 | "one" | Perfect separation. Some threshold gives 100% recall at 0% FPR |
-| operating point | "operating point" | The one `tau` you actually ship. A business decision, not a metric |
+| Symbol | What it is |
+|--------|------------|
+| ROC | Receiver Operating Characteristic. The curve of TPR against FPR as `tau` sweeps 1.0 down to 0.0 |
+| `TPR` | True positive rate. Same number as recall — fraction of genuinely toxic messages caught |
+| `FPR` | False positive rate. Fraction of benign messages wrongly blocked. The x-axis |
+| AUC | Area under the ROC curve, 0.5 to 1.0. Probability a random toxic message scores above a random benign one |
+| AUC = 0.5 | Coin flip. The classifier carries no signal and no threshold can save it |
+| AUC = 1.0 | Perfect separation. Some threshold gives 100% recall at 0% FPR |
+| operating point | The one `tau` you actually ship. A business decision, not a metric |
 
 **Walk one example.** The same 10,000-message day from Section 4.2 — 200 toxic, 9,800 benign — swept across thresholds:
 

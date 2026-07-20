@@ -220,7 +220,7 @@ Spearman rho (ordinal: did the judge RANK them the same way?)
                  n(n^2 - 1)
 ```
 
-**Reading it in plain English.** "Kappa asks 'how much of the agreement that was actually up for
+**The idea behind it.** "Kappa asks 'how much of the agreement that was actually up for
 grabs did the judge earn?' Spearman asks 'when the judge says one answer is better than another,
 is it right about the ordering?'"
 
@@ -230,16 +230,16 @@ If it scores everything one point lower than humans do, kappa collapses but Spea
 what you actually need. That is why this module's rule is a Spearman threshold of 0.7, not an
 accuracy threshold.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `kappa` | "kappa" | Chance-corrected agreement. 1 perfect, 0 no better than guessing, negative = anti-correlated |
-| `p_o` | "p observed" | Raw agreement rate — the inflated number teams quote |
-| `p_e` | "p expected" | Agreement two independent guessers would hit given their own base rates |
-| `1 - p_e` | "the headroom" | How much agreement was available to earn above chance |
-| `rho` | "rho" (rhymes with "row") | Spearman rank correlation, from -1 to +1 |
-| `d_i` | "d sub i" | Rank gap on item i: judge's rank minus human's rank |
-| `sum d_i^2` | "sum of squared rank gaps" | Squaring makes big disagreements dominate small ones |
-| `n(n^2 - 1)` | "n times n squared minus one" | Normalizer — the worst possible total, so rho lands in [-1, 1] |
+| Symbol | What it is |
+|--------|------------|
+| `kappa` | Chance-corrected agreement. 1 perfect, 0 no better than guessing, negative = anti-correlated |
+| `p_o` | Raw agreement rate — the inflated number teams quote |
+| `p_e` | Agreement two independent guessers would hit given their own base rates |
+| `1 - p_e` | How much agreement was available to earn above chance |
+| `rho` | Spearman rank correlation, from -1 to +1 |
+| `d_i` | Rank gap on item i: judge's rank minus human's rank |
+| `sum d_i^2` | Squaring makes big disagreements dominate small ones |
+| `n(n^2 - 1)` | Normalizer — the worst possible total, so rho lands in [-1, 1] |
 
 **Walk one example.** The 50-example calibration set this module recommends, judged pass/fail. The
 judge and the human agreed on 41 of 50. The judge said "pass" 76% of the time, the human 80%:
@@ -370,7 +370,7 @@ Two pieces of arithmetic in that file are doing more work than they look like th
   gate:  primary_score - baseline  >=  -REGRESSION_THRESHOLD    (-0.05)
 ```
 
-**Reading it in plain English.** "Add up the rubric dimensions you actually care about, divide by
+**Stated plainly.** "Add up the rubric dimensions you actually care about, divide by
 the best score they could possibly have summed to, and you get one number on a 0-1 scale that is
 comparable across releases."
 
@@ -379,14 +379,14 @@ dimensions to four and the divisor must become 20, or every historical baseline 
 incomparable. This is the single most common way an eval suite starts lying: someone adds a
 dimension, forgets the divisor, and every score drops by a quarter overnight.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `relevance` etc. | "the dimension scores" | Judge output, integers 0-5, one per rubric dimension |
-| `15` | "fifteen" | 3 dimensions x 5 points. The theoretical maximum, used to normalize to 0-1 |
-| `primary_score` | "primary score" | The normalized 0-1 quality number for one example |
-| `baseline` | "baseline" | The same example's score on the last known-good commit |
-| `delta` | "delta" | `primary_score - baseline`. Negative means worse than before |
-| `-0.05` | "minus five points" | The regression threshold — 5 percentage points on the 0-1 scale |
+| Symbol | What it is |
+|--------|------------|
+| `relevance` etc. | Judge output, integers 0-5, one per rubric dimension |
+| `15` | 3 dimensions x 5 points. The theoretical maximum, used to normalize to 0-1 |
+| `primary_score` | The normalized 0-1 quality number for one example |
+| `baseline` | The same example's score on the last known-good commit |
+| `delta` | `primary_score - baseline`. Negative means worse than before |
+| `-0.05` | The regression threshold — 5 percentage points on the 0-1 scale |
 
 **Walk two examples.** Same rubric, same threshold, opposite verdicts:
 
@@ -478,7 +478,7 @@ async def run_flakiness_suite(chain, dataset: list, n_runs: int = 5) -> list:
     target < 0.05
 ```
 
-**Reading it in plain English.** "Run the same input five times. If the scores fan out more than
+**What the formula is telling you.** "Run the same input five times. If the scores fan out more than
 0.15, the prompt is not producing one behaviour with noise on top — it is producing two different
 behaviours, and which one a user gets is a coin flip."
 
@@ -487,15 +487,15 @@ variance by 25%, which is deliberate: you estimated the mean from the same five 
 spread around it is systematically too small, and dividing by 4 corrects for that. Use `N` and you
 will under-report flakiness on exactly the small-N runs you can afford to do.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `s_i` | "s sub i" | The judge score from run number i of the same unchanged input |
-| `s_bar` | "s bar" | The mean of those runs. The bar means "average of" |
-| `sum (s_i - s_bar)^2` | "sum of squared deviations" | Total spread. Squaring means one outlier dominates |
-| `N - 1` | "N minus one" | Bessel correction — degrees of freedom left after estimating the mean |
-| `sigma` | "sigma" | Standard deviation, in the same 0-1 units as the score itself |
-| `0.15` | "the flakiness threshold" | Empirical line: above it, the variance swamps a 5% regression signal |
-| `flakiness_rate` | "flakiness rate" | Fraction of the suite that cannot even agree with itself |
+| Symbol | What it is |
+|--------|------------|
+| `s_i` | The judge score from run number i of the same unchanged input |
+| `s_bar` | The mean of those runs. The bar means "average of" |
+| `sum (s_i - s_bar)^2` | Total spread. Squaring means one outlier dominates |
+| `N - 1` | Bessel correction — degrees of freedom left after estimating the mean |
+| `sigma` | Standard deviation, in the same 0-1 units as the score itself |
+| `0.15` | Empirical line: above it, the variance swamps a 5% regression signal |
+| `flakiness_rate` | Fraction of the suite that cannot even agree with itself |
 
 **Walk one example.** One golden example, five runs at production temperature:
 
@@ -601,7 +601,7 @@ module's robust/fragile bands are actually stated in:
   fragile   : sensitivity > 0.15     (minor mutations move the score > 15%)
 ```
 
-**Reading it in plain English.** "Change something about the prompt that should not matter. If the
+**What this actually says.** "Change something about the prompt that should not matter. If the
 score moves anyway, the prompt was not working for the reason you thought it was."
 
 Note the absolute value: a mutation that *improves* the score is just as damning as one that hurts
@@ -609,13 +609,13 @@ it. If deleting your last sentence raises quality, that sentence was actively ha
 found out by accident. Fragility is about the magnitude of the model's reaction to irrelevant
 edits, not its direction.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `delta_m` | "delta sub m" | Signed score change caused by mutation m. Sign tells you which way, not how bad |
-| `\|delta_m\|` | "absolute value of delta" | Magnitude only. Improvements count as fragility too |
-| `sensitivity_m` | "sensitivity" | Delta as a fraction of the original score, so prompts at different score levels compare |
-| `score(...)` | "score of" | Full golden-dataset evaluation, so each mutation costs a whole eval run |
-| `0.05 / 0.15` | "five and fifteen percent" | The robust and fragile bands. Between them is "watch it" |
+| Symbol | What it is |
+|--------|------------|
+| `delta_m` | Signed score change caused by mutation m. Sign tells you which way, not how bad |
+| `\|delta_m\|` | Magnitude only. Improvements count as fragility too |
+| `sensitivity_m` | Delta as a fraction of the original score, so prompts at different score levels compare |
+| `score(...)` | Full golden-dataset evaluation, so each mutation costs a whole eval run |
+| `0.05 / 0.15` | The robust and fragile bands. Between them is "watch it" |
 
 **Walk one example.** Original prompt scores 0.84 on the golden set. Four mutations:
 

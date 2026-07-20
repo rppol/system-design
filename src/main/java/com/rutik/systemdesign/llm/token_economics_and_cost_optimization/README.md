@@ -28,7 +28,7 @@ reduction without meaningful quality loss.
 The gap between expensive frontier models and cheap small models, combined with caching and routing
 strategies, is where most cost optimization opportunity lives.
 
-**Reading it in plain English.** "A price quoted as `$2.50 / 1M tokens` means every single token costs
+**The idea behind it.** "A price quoted as `$2.50 / 1M tokens` means every single token costs
 one 2.5-millionth of a dollar; a request's bill is just tokens-in at the input rate plus tokens-out
 at the output rate, and nothing else."
 
@@ -36,14 +36,14 @@ That framing matters because the table above is not a menu of model prices — i
 prices per model, and the expensive one is attached to the quantity you control least. Every cost
 decision in this module is a manipulation of one of those two multiplications.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `$2.50 / 1M` | "two dollars fifty per million tokens" | The unit price. Divide by 1,000,000 to get the price of one token: `$0.0000025` |
-| input tokens | "input tokens" / "prompt tokens" | Everything you send: system prompt, few-shot examples, retrieved context, conversation history, user query |
-| output tokens | "output tokens" / "completion tokens" | Everything the model generates, including hidden reasoning tokens on reasoning models |
-| `tokens / 1_000_000 x rate` | "tokens over a million, times the rate" | The only cost formula there is. Applied twice — once per side |
-| blended rate | "blended rate" | One number standing in for both sides, weighted by your actual input/output split |
-| cache hit rate | "cache hit rate" | Fraction of input tokens billed at the discounted cached-read price instead of full price |
+| Symbol | What it is |
+|--------|------------|
+| `$2.50 / 1M` | The unit price. Divide by 1,000,000 to get the price of one token: `$0.0000025` |
+| input tokens | Everything you send: system prompt, few-shot examples, retrieved context, conversation history, user query |
+| output tokens | Everything the model generates, including hidden reasoning tokens on reasoning models |
+| `tokens / 1_000_000 x rate` | The only cost formula there is. Applied twice — once per side |
+| blended rate | One number standing in for both sides, weighted by your actual input/output split |
+| cache hit rate | Fraction of input tokens billed at the discounted cached-read price instead of full price |
 
 **Walk one example.** One GPT-4o request with a 1,200-token prompt and a 400-token answer:
 
@@ -267,7 +267,7 @@ The break-even point for a 70B model on 4x A100 (reserved) at $28,700/month TCO 
 commercial API at $7.80/1M blended token cost falls at approximately 120M tokens/day. Below this,
 the API is cheaper when all costs are honestly included.
 
-**Reading it in plain English.** "A self-hosted GPU bills you for wall-clock time, not for work done
+**Stated plainly.** "A self-hosted GPU bills you for wall-clock time, not for work done
 — so your real cost per token is the fixed monthly bill divided by however many tokens you actually
 pushed through the box, and idle hours land in that denominator as pure loss."
 
@@ -276,13 +276,13 @@ full price for the hours you did not use it. Self-hosting therefore has no cheap
 utilization threshold, and below it the fixed cost is amortized over so few tokens that the
 effective per-token price exceeds any API rate.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `TCO_month` | "monthly T-C-O" | Total cost of ownership per month: GPU lease + overhead + personnel + tooling. `$28,700` here |
-| `T_capacity` | "T capacity" | Tokens the node could serve per month running flat out. The denominator's ceiling |
-| `U` | "utilization" | Fraction of capacity you actually use. `T_served = U x T_capacity` |
-| `C_self` | "C self" | Effective self-hosted cost per 1M tokens: `TCO_month / (T_served in millions)` |
-| `C_api` | "C A-P-I" | The API's blended rate per 1M tokens — the line you must get under |
+| Symbol | What it is |
+|--------|------------|
+| `TCO_month` | Total cost of ownership per month: GPU lease + overhead + personnel + tooling. `$28,700` here |
+| `T_capacity` | Tokens the node could serve per month running flat out. The denominator's ceiling |
+| `U` | Fraction of capacity you actually use. `T_served = U x T_capacity` |
+| `C_self` | Effective self-hosted cost per 1M tokens: `TCO_month / (T_served in millions)` |
+| `C_api` | The API's blended rate per 1M tokens — the line you must get under |
 
 **Walk one example.** Fixed TCO of `$28,700/month` on a node whose flat-out ceiling is 200M
 tokens/day (= 6.0B tokens/month), measured against the `$7.80/1M` Sonnet blended rate:
@@ -398,7 +398,7 @@ Assume 60/40 input/output split, avg 1,500 tokens total per request.
     Self-hosted:      $28,700/month   <-- self-hosting wins
 ```
 
-**Reading it in plain English.** "Break-even is the one token volume where a flat monthly GPU bill
+**What the formula is telling you.** "Break-even is the one token volume where a flat monthly GPU bill
 and a per-token API bill come out equal; below it every token you serve yourself costs more than
 simply buying it, and above it the fixed bill stops growing while the API bill does not."
 
@@ -407,14 +407,14 @@ architectural argument into a single number you can check against your own traff
 answer is almost never "self-host" or "use the API" — it is "you are at 40M tokens/day and the line
 is at 123M, so revisit in two quarters."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `TCO_month` | "monthly T-C-O" | The flat monthly self-hosting bill. Does not move with volume. `$28,700` |
-| `r_in`, `r_out` | "input rate", "output rate" | The two API prices per 1M tokens. `$3.00` and `$15.00` for Sonnet |
-| `s_in`, `s_out` | "input share", "output share" | Fraction of your tokens that are input vs output. `0.60` and `0.40` here |
-| `C_blend` | "blended rate" | `s_in x r_in + s_out x r_out` — one API price per 1M tokens for your traffic mix |
-| `B` | "break-even volume" | `TCO_month / C_blend` — tokens per month at which the two bills are equal |
-| `x1M` | "per million" | Every rate is quoted per 1M tokens, so volumes must be expressed in millions before dividing |
+| Symbol | What it is |
+|--------|------------|
+| `TCO_month` | The flat monthly self-hosting bill. Does not move with volume. `$28,700` |
+| `r_in`, `r_out` | The two API prices per 1M tokens. `$3.00` and `$15.00` for Sonnet |
+| `s_in`, `s_out` | Fraction of your tokens that are input vs output. `0.60` and `0.40` here |
+| `C_blend` | `s_in x r_in + s_out x r_out` — one API price per 1M tokens for your traffic mix |
+| `B` | `TCO_month / C_blend` — tokens per month at which the two bills are equal |
+| `x1M` | Every rate is quoted per 1M tokens, so volumes must be expressed in millions before dividing |
 
 **Walk one example.** The 4x A100 node above, against Claude 3.5 Sonnet:
 
@@ -541,7 +541,7 @@ With caching (1 write + 9,999 reads):
   Total: ~$6.01/day   (90% reduction)
 ```
 
-**Reading it in plain English.** "Pay a one-time 25% surcharge to park the prefix in the provider's
+**What this actually says.** "Pay a one-time 25% surcharge to park the prefix in the provider's
 KV cache, then buy it back at a tenth of the price on every request that follows — the surcharge is
 repaid before the second request finishes."
 
@@ -549,14 +549,14 @@ The framing that matters is *per-prefix, not per-request*. Caching does not make
 it makes one specific span of tokens cheaper, and only for as long as that span stays byte-identical
 and inside the TTL window.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `$3.00 / 1M` | "three dollars per million" | Standard Anthropic input rate — what an uncached prefix costs every single time |
-| `$3.75 / 1M` | "three seventy-five per million" | Cache-write rate. `1.25 x` standard — the surcharge for storing the prefix |
-| `$0.30 / 1M` | "thirty cents per million" | Cache-read rate. `0.10 x` standard — the 90% discount |
-| prefix | "prefix" | The leading span of tokens that is byte-identical across requests. Must exceed 1,024 tokens to cache at all |
-| TTL | "T-T-L", "time to live" | 5 minutes, refreshed on each hit. A gap longer than this forces a re-write |
-| hit rate | "hit rate" | Fraction of requests that find the prefix still cached. `9,999 / 10,000` in the example above |
+| Symbol | What it is |
+|--------|------------|
+| `$3.00 / 1M` | Standard Anthropic input rate — what an uncached prefix costs every single time |
+| `$3.75 / 1M` | Cache-write rate. `1.25 x` standard — the surcharge for storing the prefix |
+| `$0.30 / 1M` | Cache-read rate. `0.10 x` standard — the 90% discount |
+| prefix | The leading span of tokens that is byte-identical across requests. Must exceed 1,024 tokens to cache at all |
+| TTL | 5 minutes, refreshed on each hit. A gap longer than this forces a re-write |
+| hit rate | Fraction of requests that find the prefix still cached. `9,999 / 10,000` in the example above |
 
 **Walk one example.** The 2,000-token prefix, priced three ways:
 
@@ -645,7 +645,7 @@ print(f"Batch created: {batch.id}")
 # Poll batch.status until "completed", then retrieve results
 ```
 
-**Reading it in plain English.** "Batch is a flat 0.5 multiplier applied to both rates at once — you
+**In plain terms.** "Batch is a flat 0.5 multiplier applied to both rates at once — you
 are not restructuring anything, you are agreeing to wait up to 24 hours and halving the bill in
 exchange."
 
@@ -653,12 +653,12 @@ Unlike caching or routing, there is no arithmetic subtlety here and no quality t
 That is precisely why it should be a policy rather than an optimization: the only variable is
 whether the workload can tolerate the SLA, and that is a product question answered once per feature.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `x 0.50` | "times zero point five" | The batch multiplier. Applies to input and output rates identically, unlike caching |
-| 24h SLA | "twenty-four-hour S-L-A" | The completion window you commit to. Jobs usually finish sooner; you cannot rely on it |
-| batch-eligible | "batch eligible" | Any call whose response the user does not see inside the same HTTP request |
-| `completion_window` | "completion window" | The API field that selects batch pricing. The whole discount is one string |
+| Symbol | What it is |
+|--------|------------|
+| `x 0.50` | The batch multiplier. Applies to input and output rates identically, unlike caching |
+| 24h SLA | The completion window you commit to. Jobs usually finish sooner; you cannot rely on it |
+| batch-eligible | Any call whose response the user does not see inside the same HTTP request |
+| `completion_window` | The API field that selects batch pricing. The whole discount is one string |
 
 **Walk one example.** The nightly SEC-filing job from Section 7, on GPT-4o:
 
@@ -1184,7 +1184,7 @@ Target State:
   Total target: ~$19,000/month
 ```
 
-**Reading it in plain English.** "The blended bill is not an average of the levers you applied — it
+**Read it like this.** "The blended bill is not an average of the levers you applied — it
 is each lever's multiplier applied to the slice of spend it actually touches, then summed. A 50%
 saving on 8% of the bill is a 4% saving."
 
@@ -1192,14 +1192,14 @@ This is why Step 1 is instrumentation and not optimization. Without the per-feat
 weight anything, so you end up applying your best lever to whichever feature you happened to look at
 first. The weights are the whole plan.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `w_f` | "w sub f", "weight of feature f" | Feature f's share of baseline spend. Sums to 1.0 across features |
-| `B` | "baseline" | Total spend before any change. `$50,000/month` here |
-| `m_f` | "m sub f", "multiplier for f" | What f's spend becomes as a fraction of what it was. Batch alone is `0.50` |
-| `w_f x B` | "w times B" | Feature f's dollars before optimization — the slice a lever gets to act on |
-| blended total | "blended total" | `sum over f of (w_f x B x m_f)`. The number the CFO sees |
-| reduction | "reduction" | `1 - (blended total / B)`. The number the CTO asked for |
+| Symbol | What it is |
+|--------|------------|
+| `w_f` | Feature f's share of baseline spend. Sums to 1.0 across features |
+| `B` | Total spend before any change. `$50,000/month` here |
+| `m_f` | What f's spend becomes as a fraction of what it was. Batch alone is `0.50` |
+| `w_f x B` | Feature f's dollars before optimization — the slice a lever gets to act on |
+| blended total | `sum over f of (w_f x B x m_f)`. The number the CFO sees |
+| reduction | `1 - (blended total / B)`. The number the CTO asked for |
 
 **Walk one example.** The four features, weights from the Week-1 baseline:
 

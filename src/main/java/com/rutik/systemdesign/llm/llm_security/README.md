@@ -322,19 +322,19 @@ Encodes "Ignore all previous instructions" in base64. Bypasses string-matching i
 - Classifier-based: Train a separate classifier on known injection patterns. Models like Rebuff and Lakera Guard achieve 92-97% detection rates on known patterns, but 60-75% on novel attacks.
 - Dual-LLM: Use a second LLM to analyze the input for adversarial intent before passing it to the main model. Adds 100-200ms latency and $0.001-0.003 per request in API costs.
 
-**Reading the perplexity threshold in plain English.** "Perplexity is how surprised a language model was by the text — roughly, how many words it felt were plausible at each position. A crafted attack string is *less* surprising than real human typing, so unusually low surprise is the tell."
+**The idea behind it.** "Perplexity is how surprised a language model was by the text — roughly, how many words it felt were plausible at each position. A crafted attack string is *less* surprising than real human typing, so unusually low surprise is the tell."
 
 That inversion trips people up. Intuition says an attack should look weird and therefore score high. It scores low because gradient-optimized suffixes and copy-pasted jailbreak templates are exactly the token sequences a language model finds most predictable — while a genuine user question is full of typos, proper nouns, and abrupt topic shifts that a model did not see coming.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `PPL` | "perplexity" | The score. Exponentiated average negative log-probability of the text |
-| `N` | "N" | Number of tokens in the input |
-| `p(t_i)` | "p of t sub i" | The model's probability for token `i` given everything before it |
-| `log p` | "log p" | Always negative (probabilities are below 1). More negative = more surprising |
-| `(1/N) sum` | "average log prob" | Per-token surprise. The `1/N` is what makes a 10-token and a 200-token input comparable |
-| `exp(...)` | "e to the" | Undoes the log, turning surprise back into an effective branching factor |
-| `PPL < 15` | "perplexity under fifteen" | The review threshold. "The model felt fewer than ~15 words were plausible per position" |
+| Symbol | What it is |
+|--------|------------|
+| `PPL` | The score. Exponentiated average negative log-probability of the text |
+| `N` | Number of tokens in the input |
+| `p(t_i)` | The model's probability for token `i` given everything before it |
+| `log p` | Always negative (probabilities are below 1). More negative = more surprising |
+| `(1/N) sum` | Per-token surprise. The `1/N` is what makes a 10-token and a 200-token input comparable |
+| `exp(...)` | Undoes the log, turning surprise back into an effective branching factor |
+| `PPL < 15` | The review threshold. "The model felt fewer than ~15 words were plausible per position" |
 
 **Walk one example.** Two inputs, each 10 tokens, scored by a small reference model:
 
@@ -354,15 +354,15 @@ That inversion trips people up. Intuition says an attack should look weird and t
   token is what makes the comparison about fluency instead of about length.
 ```
 
-**Reading the detection rates in plain English.** "92-97% on known patterns, 60-75% on novel ones" is a recall figure split by attack familiarity — and what reaches production is the blend, weighted by how much of your real traffic is each kind.
+**Stated plainly.** "92-97% on known patterns, 60-75% on novel ones" is a recall figure split by attack familiarity — and what reaches production is the blend, weighted by how much of your real traffic is each kind.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| detection rate | "detection rate" | Recall. `caught / (caught + missed)`. Says nothing about false positives |
-| `ASR` | "A S R" / "attack success rate" | `1 - recall`. Fraction of attacks that got through. Lower is better |
-| known pattern | "known pattern" | An attack resembling something in the classifier's training set |
-| novel attack | "novel attack" | A technique invented after the classifier was trained. The number that actually matters |
-| blended recall | "blended recall" | `(share_known x recall_known) + (share_novel x recall_novel)` |
+| Symbol | What it is |
+|--------|------------|
+| detection rate | Recall. `caught / (caught + missed)`. Says nothing about false positives |
+| `ASR` | `1 - recall`. Fraction of attacks that got through. Lower is better |
+| known pattern | An attack resembling something in the classifier's training set |
+| novel attack | A technique invented after the classifier was trained. The number that actually matters |
+| blended recall | `(share_known x recall_known) + (share_novel x recall_novel)` |
 
 **Walk one example.** 1,000 attack attempts in a week against a classifier at the midpoint of each published range (94.5% known, 67.5% novel), with 70% of traffic recycling known techniques:
 
@@ -390,17 +390,17 @@ Models memorize training data proportionally to three factors:
 2. **Model size**: Larger models memorize more — a 1.5B model memorizes ~1% of training data verbatim; a 175B model memorizes ~3%
 3. **Temperature**: At T=0.0 (greedy), memorized sequences are reproduced exactly. At T=1.0, reproduction probability drops by 5-10x.
 
-**Reading the extraction numbers in plain English.** "Memorization is a rate, not a yes/no. A fixed fraction of training data is reproducible verbatim, and every defense you apply multiplies that fraction down rather than zeroing it."
+**What the formula is telling you.** "Memorization is a rate, not a yes/no. A fixed fraction of training data is reproducible verbatim, and every defense you apply multiplies that fraction down rather than zeroing it."
 
 Framing it multiplicatively is what makes the defense stack legible: deduplication, temperature floors, and output filtering each cut the surviving rate by their own factor, and the product is what an attacker actually faces.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| memorization rate | "memorization rate" | Fraction of training tokens the model can emit verbatim. ~1% at 1.5B, ~3% at 175B |
-| `hit` | "hit" | One prefix probe that returns real memorized data instead of a plausible continuation |
-| extraction rate | "extraction rate" | `hits / probes`. What an attacker measures from the outside |
-| `5-10x reduction` | "five to ten x" | A *divisor* on the hit rate, not a subtraction. T=0.6 leaves 1/5 to 1/10 of the hits |
-| `10x` (dedup) | "ten x" | Deduplication's divisor. It removes the repetition that drives memorization in the first place |
+| Symbol | What it is |
+|--------|------------|
+| memorization rate | Fraction of training tokens the model can emit verbatim. ~1% at 1.5B, ~3% at 175B |
+| `hit` | One prefix probe that returns real memorized data instead of a plausible continuation |
+| extraction rate | `hits / probes`. What an attacker measures from the outside |
+| `5-10x reduction` | A *divisor* on the hit rate, not a subtraction. T=0.6 leaves 1/5 to 1/10 of the hits |
+| `10x` (dedup) | Deduplication's divisor. It removes the repetition that drives memorization in the first place |
 
 **Walk one example.** An attacker runs 10,000 prefix probes against a fine-tuned model, using the 1% extractable figure from the ChatGPT extraction result below:
 
@@ -596,18 +596,18 @@ Phase 4: Reporting and Remediation (2-3 days)
   - Regression test suite from discovered attacks
 ```
 
-**Reading the red-team arithmetic in plain English.** "Attack success rate is the one number the whole exercise produces: of every adversarial prompt you fired, what fraction got what it wanted. Everything else in the four phases exists to make that fraction trustworthy."
+**What this actually says.** "Attack success rate is the one number the whole exercise produces: of every adversarial prompt you fired, what fraction got what it wanted. Everything else in the four phases exists to make that fraction trustworthy."
 
 The subtlety is that ASR is only meaningful relative to the suite that produced it. Halving your ASR by deleting the attacks that kept working is arithmetically identical to halving it by fixing the system, which is why the regression suite in Phase 4 is append-only.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `ASR` | "A S R" | `successful attacks / attempted attacks`. Lower is better. The headline metric of Phases 2 and 4 |
-| `n` | "n" | Number of attack prompts fired per input surface. The 500-1000 above |
-| surfaces | "surfaces" | Distinct entry points from Phase 1 — chat, upload, API, RAG. ASR is per-surface before it is aggregated |
-| `p` | "p" | Prevalence — the fraction of possible attacks in a category that actually work on you |
-| coverage | "coverage" | `1 - (1 - p)^n`. Probability that `n` random probes hit at least one working attack |
-| FPR on legit inputs | "false positive rate" | The paired metric. A filter reaching ASR 0% by blocking everything is not a pass |
+| Symbol | What it is |
+|--------|------------|
+| `ASR` | `successful attacks / attempted attacks`. Lower is better. The headline metric of Phases 2 and 4 |
+| `n` | Number of attack prompts fired per input surface. The 500-1000 above |
+| surfaces | Distinct entry points from Phase 1 — chat, upload, API, RAG. ASR is per-surface before it is aggregated |
+| `p` | Prevalence — the fraction of possible attacks in a category that actually work on you |
+| coverage | `1 - (1 - p)^n`. Probability that `n` random probes hit at least one working attack |
+| FPR on legit inputs | The paired metric. A filter reaching ASR 0% by blocking everything is not a pass |
 
 **Walk one example.** Four input surfaces, 750 prompts each, using the 85% undefended baseline and the <5% deployment gate from Section 13:
 
@@ -678,14 +678,14 @@ Researchers demonstrated that an attacker could send a malicious email to a vict
 
 The table looks like three products. It is one dial. Naming the dial is what lets you defend the setting in a review, instead of arguing about whether the filter "feels" too aggressive.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| false positive rate | "false positive rate" | Fraction of legitimate queries blocked. The cost you impose on customers |
-| attack prevention rate | "prevention rate" | Recall against attacks. `1 - ASR` |
-| `C_fp` | "C sub f p" | What one wrongly-blocked customer costs — support ticket, abandonment, churn |
-| `C_fn` | "C sub f n" | What one successful attack costs — breach, fine, incident response |
-| expected cost | "expected cost" | `(blocked_legit x C_fp) + (successful_attacks x C_fn)`. The number to minimize |
-| risk profile | "risk profile" | Shorthand for the ratio `C_fn / C_fp`. Regulated industries run it in the thousands |
+| Symbol | What it is |
+|--------|------------|
+| false positive rate | Fraction of legitimate queries blocked. The cost you impose on customers |
+| attack prevention rate | Recall against attacks. `1 - ASR` |
+| `C_fp` | What one wrongly-blocked customer costs — support ticket, abandonment, churn |
+| `C_fn` | What one successful attack costs — breach, fine, incident response |
+| expected cost | `(blocked_legit x C_fp) + (successful_attacks x C_fn)`. The number to minimize |
+| risk profile | Shorthand for the ratio `C_fn / C_fp`. Regulated industries run it in the thousands |
 
 **Walk one example.** The Section 14 system's volume — 50,000 conversations/day, of which 0.2% (100) are attack attempts and 49,900 are legitimate — priced at `C_fp` = $2 (a support contact) and `C_fn` = $5,000 (amortized incident cost):
 
@@ -808,14 +808,14 @@ A healthcare company fine-tunes an LLM on patient records for a clinical decisio
 
 The guarantee is about *one row*, and it holds no matter what the attacker already knows — which is why it survives the auxiliary-data attacks that de-identification does not. It says nothing about whether the model is accurate, and nothing about aggregate patterns, which the model is supposed to learn.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `epsilon` (`ε`) | "epsilon" | The privacy budget. Smaller = more private. The whole guarantee is a bound on `e^epsilon` |
-| `e^epsilon` | "e to the epsilon" | The likelihood ratio the attacker faces. `epsilon = 0` means ratio 1 = perfect indistinguishability |
-| `delta` (`δ`) | "delta" | Small probability the bound is allowed to fail. Convention: `delta < 1/n` for `n` records |
-| DP-SGD | "D P S G D" | The training method — clip each per-example gradient, then add calibrated Gaussian noise |
-| gradient clipping | "clipping" | Bounds one example's maximum influence. Without it, no amount of noise gives a guarantee |
-| privacy/utility tradeoff | "privacy utility tradeoff" | Lower epsilon = more noise = worse model. The 5-15% quality cost quoted above |
+| Symbol | What it is |
+|--------|------------|
+| `epsilon` (`ε`) | The privacy budget. Smaller = more private. The whole guarantee is a bound on `e^epsilon` |
+| `e^epsilon` | The likelihood ratio the attacker faces. `epsilon = 0` means ratio 1 = perfect indistinguishability |
+| `delta` (`δ`) | Small probability the bound is allowed to fail. Convention: `delta < 1/n` for `n` records |
+| DP-SGD | The training method — clip each per-example gradient, then add calibrated Gaussian noise |
+| gradient clipping | Bounds one example's maximum influence. Without it, no amount of noise gives a guarantee |
+| privacy/utility tradeoff | Lower epsilon = more noise = worse model. The 5-15% quality cost quoted above |
 
 **Walk one example.** A membership-inference attacker who wants to know whether a specific patient was in the fine-tuning set, starting from a 50/50 prior:
 

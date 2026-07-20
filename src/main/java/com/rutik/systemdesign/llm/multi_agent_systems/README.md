@@ -84,17 +84,17 @@ Best for: tasks with clear subtask boundaries and sequential dependencies.
               call-count multiplier     context-duplication multiplier
 ```
 
-**Reading it in plain English.** "Every agent pays the full context bill, so adding an agent does not add its own small share of tokens — it re-buys the entire conversation so far."
+**The idea behind it.** "Every agent pays the full context bill, so adding an agent does not add its own small share of tokens — it re-buys the entire conversation so far."
 
 The framing matters because the second multiplier is invisible in an architecture diagram. Four boxes look like 4x. The context term is what turns 4x into 15x, and it is the term you can actually engineer away.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `agents` | "agents" | Worker count. Four in the diagram above; five in the war story below |
-| `rounds` | "rounds" | Orchestration cycles. One dispatch-and-collect pass per round |
-| `shared_context` | "shared context" | Accumulated history handed to *each* worker. The duplicated part |
-| `per_agent_work` | "per agent work" | Tokens genuinely unique to that worker's subtask. The part you wanted |
-| `O(agents x history)` | "order agents times history" | Growth law of the naive design — quadratic-feeling in practice |
+| Symbol | What it is |
+|--------|------------|
+| `agents` | Worker count. Four in the diagram above; five in the war story below |
+| `rounds` | Orchestration cycles. One dispatch-and-collect pass per round |
+| `shared_context` | Accumulated history handed to *each* worker. The duplicated part |
+| `per_agent_work` | Tokens genuinely unique to that worker's subtask. The part you wanted |
+| `O(agents x history)` | Growth law of the naive design — quadratic-feeling in practice |
 
 **Walk one example.** The numbers from the war story in Section 14, after 10 back-and-forth turns:
 
@@ -159,18 +159,18 @@ Research shows multi-turn critique dramatically improves reasoning quality (Soci
     k = ceil(N/2)   majority        k = N   unanimity
 ```
 
-**Reading it in plain English.** "Raising the agreement bar makes the verdicts you *do* get more trustworthy, and makes you get far fewer of them."
+**Stated plainly.** "Raising the agreement bar makes the verdicts you *do* get more trustworthy, and makes you get far fewer of them."
 
 That trade is the whole point. A threshold is not a quality dial — it is a dial between *being wrong* and *not answering*, and the second failure has to go somewhere (a judge agent, a default, a human).
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `N` | "N" | Number of debating agents. The `N >= 5` in the majority-voting mitigation |
-| `p` | "p" | Per-agent accuracy. How often one agent alone gets it right |
-| `k` | "k" | Agreement threshold. How many must agree before you accept the verdict |
-| `C(N,j)` | "N choose j" | Ways that exactly `j` of the `N` agents could be the correct ones |
-| `rho` | "rho" | Correlation between agents' errors. 0 = independent, 1 = identical |
-| `N_eff` | "N effective" | `N / (1 + (N-1) x rho)` — how many *genuinely independent* votes you have |
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of debating agents. The `N >= 5` in the majority-voting mitigation |
+| `p` | Per-agent accuracy. How often one agent alone gets it right |
+| `k` | Agreement threshold. How many must agree before you accept the verdict |
+| `C(N,j)` | Ways that exactly `j` of the `N` agents could be the correct ones |
+| `rho` | Correlation between agents' errors. 0 = independent, 1 = identical |
+| `N_eff` | `N / (1 + (N-1) x rho)` — how many *genuinely independent* votes you have |
 
 **Walk one example.** Five agents, each 70% accurate, independent:
 
@@ -277,17 +277,17 @@ Clean separation; easy to add/remove agents by changing message routing.
   star / orchestrator:    channels  =  n - 1           every agent talks only to the hub
 ```
 
-**Reading it in plain English.** "Let agents talk to each other freely and the number of conversations you have to reason about grows with the *square* of the team; route everything through one coordinator and it grows in a straight line."
+**What the formula is telling you.** "Let agents talk to each other freely and the number of conversations you have to reason about grows with the *square* of the team; route everything through one coordinator and it grows in a straight line."
 
 This is the same result that makes distributed systems hard, arriving in agent form — which is exactly the point made in Section 2's key insight. The cost being counted is not just messages: it is the number of interactions that can deadlock, loop, or corrupt state, i.e. the size of the thing you must debug.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `n` | "n" | Number of agents in the system |
-| `n(n-1)` | "n times n minus one" | Ordered pairs — every agent paired with every other, both directions |
-| `/2` | "over two" | Halves it, because a channel between A and B is the same channel as B to A |
-| `n(n-1)/2` | "n choose 2" | Mesh channel count. The number of distinct conversations that can exist |
-| `n - 1` | "n minus one" | Star channel count. One spoke per agent, into the coordinator |
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of agents in the system |
+| `n(n-1)` | Ordered pairs — every agent paired with every other, both directions |
+| `/2` | Halves it, because a channel between A and B is the same channel as B to A |
+| `n(n-1)/2` | Mesh channel count. The number of distinct conversations that can exist |
+| `n - 1` | Star channel count. One spoke per agent, into the coordinator |
 
 **Walk one example.** Grow the team and watch the two curves separate:
 

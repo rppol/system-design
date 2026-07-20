@@ -127,7 +127,7 @@ Example: LLaMA 3 8B (FP16)
   A100 80GB: reserve ~60GB for KV cache → ~7,500 blocks → ~120K token capacity
 ```
 
-**Reading it in plain English.** "Every token a sequence has ever seen leaves behind a fixed-size
+**The idea behind it.** "Every token a sequence has ever seen leaves behind a fixed-size
 receipt in GPU memory — one K vector and one V vector for every layer — and the KV cache pool is
 just a warehouse of those receipts, rented out sixteen tokens at a time."
 
@@ -135,16 +135,16 @@ Fixing the rental unit at 16 tokens is the entire idea. Once memory is handed ou
 than in whole-sequence reservations, a sequence's memory footprint tracks what it has actually
 generated instead of what it might eventually generate.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `2` (leading) | "times two" | One vector for K, one for V. Structural, not a safety margin |
-| `num_layers` | "num layers" | Every layer keeps its own K/V. 32 for LLaMA 3 8B, 80 for the 70B |
-| `num_kv_heads` | "num K-V heads" | Heads that own K/V. GQA sets this **below** the query-head count |
-| `head_dim` | "head dim" | Width of one head's vector. 128 across the whole LLaMA 3 family |
-| `bytes_per_element` | "bytes per element" | 2 for FP16/BF16, 1 for FP8 KV cache, 0.5 for INT4 |
-| `block_size` | "block size" | Tokens per physical block. vLLM default 16, `--block-size` |
-| `num_blocks` | "num blocks" | How many blocks the pool holds. vLLM computes this at startup, not you |
-| block table | "block table" | Per-sequence array: logical block index -> physical block index |
+| Symbol | What it is |
+|--------|------------|
+| `2` (leading) | One vector for K, one for V. Structural, not a safety margin |
+| `num_layers` | Every layer keeps its own K/V. 32 for LLaMA 3 8B, 80 for the 70B |
+| `num_kv_heads` | Heads that own K/V. GQA sets this **below** the query-head count |
+| `head_dim` | Width of one head's vector. 128 across the whole LLaMA 3 family |
+| `bytes_per_element` | 2 for FP16/BF16, 1 for FP8 KV cache, 0.5 for INT4 |
+| `block_size` | Tokens per physical block. vLLM default 16, `--block-size` |
+| `num_blocks` | How many blocks the pool holds. vLLM computes this at startup, not you |
+| block table | Per-sequence array: logical block index -> physical block index |
 
 **Walk one example.** LLaMA 3 8B, FP16, GQA with 8 KV heads across 32 layers:
 
@@ -180,7 +180,7 @@ paged waste per seq      = (block_size x ceil(used / block_size)) - used
                            bounded by block_size - 1, i.e. at most 15 tokens
 ```
 
-**Reading it in plain English.** "A contiguous cache has to bet on the longest answer the model
+**Stated plainly.** "A contiguous cache has to bet on the longest answer the model
 might produce and pay for that bet on every request; a paged cache pays only for the tokens that
 exist right now, and is never more than fifteen tokens wrong."
 
@@ -188,13 +188,13 @@ The wasted fraction is not a tuning detail — it is the reason vLLM was written
 this document (continuous batching, prefix caching, CoW) is downstream of being able to hand out
 memory in small units.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `max_model_len` | "max model len" | The reservation size a contiguous allocator must assume |
-| `used` | "used" | Tokens the sequence has actually produced so far — known only at runtime |
-| `ceil(used/16)` | "ceiling of used over sixteen" | Blocks handed out. Rounds up, hence the leftover |
-| internal frag. | "internal fragmentation" | Space inside an allocation you paid for and cannot use |
-| external frag. | "external fragmentation" | Free space too scattered to satisfy a request. Paged: zero |
+| Symbol | What it is |
+|--------|------------|
+| `max_model_len` | The reservation size a contiguous allocator must assume |
+| `used` | Tokens the sequence has actually produced so far — known only at runtime |
+| `ceil(used/16)` | Blocks handed out. Rounds up, hence the leftover |
+| internal frag. | Space inside an allocation you paid for and cannot use |
+| external frag. | Free space too scattered to satisfy a request. Paged: zero |
 
 **Walk one example.** 60 GiB pool, LLaMA 3 8B at 128 KB/token, `max_model_len` 2048, real requests
 averaging 500 tokens of context:
@@ -252,19 +252,19 @@ Step 3:  [A: done → E: prefill] [D: decode] [C: decode]
 ```
 New requests join the batch the moment a slot opens. GPU utilization stays near 100%.
 
-**Reading it in plain English.** "A static batch bills every sequence for the runtime of the longest
+**What the formula is telling you.** "A static batch bills every sequence for the runtime of the longest
 one in the group; continuous batching bills each sequence only for its own length."
 
 Framed as a billing question rather than a scheduling question, the win becomes arithmetic instead
 of intuition — and you can predict it for your traffic before running a benchmark.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `B` | "B" | Batch size — sequences stepping together |
-| `L_i` | "L sub i" | Output length of sequence i, in tokens. Known only after it finishes |
-| `L_max` | "L max" | Longest output in the batch. Sets how long a static batch occupies the GPU |
-| slot-steps | "slot steps" | Batch capacity spent = `B × L_max`. The denominator of utilization |
-| useful steps | "useful steps" | Capacity that produced a token = `sum(L_i)`. The numerator |
+| Symbol | What it is |
+|--------|------------|
+| `B` | Batch size — sequences stepping together |
+| `L_i` | Output length of sequence i, in tokens. Known only after it finishes |
+| `L_max` | Longest output in the batch. Sets how long a static batch occupies the GPU |
+| slot-steps | Batch capacity spent = `B × L_max`. The denominator of utilization |
+| useful steps | Capacity that produced a token = `sum(L_i)`. The numerator |
 
 **Walk one example.** 32 requests: 31 finish at 100 tokens, one runs to 2,000 (a realistic
 long-tail — output lengths in chat traffic routinely span 20×):
@@ -358,20 +358,20 @@ swap cost      = 2 x blocks x block_bytes / pcie_bandwidth        (out, then bac
 recompute cost = tokens / prefill_throughput                       (paid once, on resume)
 ```
 
-**Reading it in plain English.** "Preempting a sequence means choosing which resource to spend to
+**What this actually says.** "Preempting a sequence means choosing which resource to spend to
 get its KV cache back later — PCIe bandwidth plus CPU RAM if you swap it out, or GPU FLOPs if you
 throw it away and re-prefill."
 
 Neither option is free and neither is universally better. The choice hinges on which resource is
 scarce *at that moment*, which is why vLLM picks per sequence rather than per deployment.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `blocks` | "blocks" | `ceil(tokens / 16)`. The sequence's whole KV footprint |
-| `block_bytes` | "block bytes" | 2 MB for LLaMA 3 8B FP16 at block_size 16 (computed above) |
-| pcie_bandwidth | "pee-see-eye-ee bandwidth" | Gen4 x16: 32 GB/s theoretical, ~25 GB/s achieved |
-| prefill_throughput | "prefill throughput" | Prompt tokens/sec on a busy GPU. ~25,000/s for 8B on A100 |
-| the leading `2` | "times two" | Swapping is a round trip. Cost out is not the whole cost |
+| Symbol | What it is |
+|--------|------------|
+| `blocks` | `ceil(tokens / 16)`. The sequence's whole KV footprint |
+| `block_bytes` | 2 MB for LLaMA 3 8B FP16 at block_size 16 (computed above) |
+| pcie_bandwidth | Gen4 x16: 32 GB/s theoretical, ~25 GB/s achieved |
+| prefill_throughput | Prompt tokens/sec on a busy GPU. ~25,000/s for 8B on A100 |
+| the leading `2` | Swapping is a round trip. Cost out is not the whole cost |
 
 **Walk one example.** LLaMA 3 8B, 2 MB blocks, PCIe Gen4 at 25 GB/s effective:
 
@@ -450,7 +450,7 @@ token_capacity= num_blocks x block_size
 max_num_seqs <= token_capacity / max_model_len         (the no-preemption condition)
 ```
 
-**Reading it in plain English.** "`gpu_memory_utilization` does not size the KV cache directly — it
+**In plain terms.** "`gpu_memory_utilization` does not size the KV cache directly — it
 sets a ceiling on the whole card, and the KV cache is whatever survives after the weights and the
 runtime overhead have taken their cut."
 
@@ -458,14 +458,14 @@ This indirection is why the flag behaves counter-intuitively. Raising it from 0.
 add 5% more capacity; it adds 5% of *total VRAM* to a pool that may only have been 60% of the card,
 and it takes that headroom from CUDA graphs and NCCL buffers that still need it.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `vram_total` | "vee-ram total" | Physical capacity. 80 GB on an A100 80GB — before the driver's cut |
-| `gpu_memory_utilization` | "gee-pee-you memory utilization" | Fraction of the card vLLM may claim. Default 0.90 |
-| `weight_bytes` | "weight bytes" | `P × bytes_per_element`, divided by TP if sharded. Measured, not guessed |
-| `overhead_bytes` | "overhead bytes" | Activations, CUDA graphs, NCCL buffers. 2-5 GB, grows with TP |
-| `max_num_seqs` | "max num seqs" | Concurrency cap. The knob that decides whether you preempt |
-| `max_model_len` | "max model len" | Longest sequence admitted. The worst-case footprint per slot |
+| Symbol | What it is |
+|--------|------------|
+| `vram_total` | Physical capacity. 80 GB on an A100 80GB — before the driver's cut |
+| `gpu_memory_utilization` | Fraction of the card vLLM may claim. Default 0.90 |
+| `weight_bytes` | `P × bytes_per_element`, divided by TP if sharded. Measured, not guessed |
+| `overhead_bytes` | Activations, CUDA graphs, NCCL buffers. 2-5 GB, grows with TP |
+| `max_num_seqs` | Concurrency cap. The knob that decides whether you preempt |
+| `max_model_len` | Longest sequence admitted. The worst-case footprint per slot |
 
 **Walk one example.** LLaMA 3 8B FP16 on one A100 80GB, `--gpu-memory-utilization 0.90`,
 `--max-model-len 2048`:
@@ -535,7 +535,7 @@ prefill_saved   = cached_tokens / prompt_tokens
 ttft_after      = queue + (prompt_tokens - cached_tokens) / prefill_throughput
 ```
 
-**Reading it in plain English.** "Each block's identity is the hash of everything before it plus
+**Read it like this.** "Each block's identity is the hash of everything before it plus
 itself, so a cache hit means 'this exact token sequence, starting from token zero, has been seen' —
 and the very first differing token ends the hit for good."
 
@@ -543,13 +543,13 @@ The chaining is what makes the cache correct: a K/V vector depends on all preced
 block is only reusable in a context with an identical history. It is also what makes the cache
 fragile in exactly one way, covered below.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `block_hash[i]` | "block hash sub i" | Identity of block i. Includes the parent hash — hence prefix-chained |
-| `cached_tokens` | "cached tokens" | Tokens whose K/V already exist. Always a multiple of `block_size` |
-| `prompt_tokens` | "prompt tokens" | Full input length, cached portion included |
-| prefill_throughput | "prefill throughput" | Prompt tokens/sec. ~25,000/s for 8B on A100 |
-| LRU eviction | "el-are-you eviction" | Cached blocks are evicted least-recently-used when the pool fills |
+| Symbol | What it is |
+|--------|------------|
+| `block_hash[i]` | Identity of block i. Includes the parent hash — hence prefix-chained |
+| `cached_tokens` | Tokens whose K/V already exist. Always a multiple of `block_size` |
+| `prompt_tokens` | Full input length, cached portion included |
+| prefill_throughput | Prompt tokens/sec. ~25,000/s for 8B on A100 |
+| LRU eviction | Cached blocks are evicted least-recently-used when the pool fills |
 
 **Walk one example.** A 2,000-token system prompt plus few-shot examples, followed by a 200-token
 user turn, LLaMA 3 8B on an A100:

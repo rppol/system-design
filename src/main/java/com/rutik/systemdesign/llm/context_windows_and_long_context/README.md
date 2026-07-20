@@ -49,7 +49,7 @@ Problem: model trained on 512 tokens has no embedding for position 513
 Used by: BERT, original GPT
 ```
 
-**Reading it in plain English.** "Stamp every position with a bundle of sine waves running at
+**The idea behind it.** "Stamp every position with a bundle of sine waves running at
 wildly different speeds — fast waves that tick over every few tokens, slow waves that barely
 move across the whole sequence — so each position gets a unique fingerprint."
 
@@ -58,14 +58,14 @@ combination is unique. That "spectrum of speeds" idea is the single most importa
 carry forward, because RoPE (§4.3) reuses the exact same `10000^(2i/d)` spectrum — it just
 applies it as a rotation instead of an addition.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `pos` | "position" | Which token slot this is: 0, 1, 2, ... |
-| `i` | "i" | Which *pair* of embedding dimensions. `2i` and `2i+1` are the sin/cos partners |
-| `d_model` | "d model" | Embedding width, e.g. 512. Sets how many pairs exist (`d_model/2`) |
-| `10000^(2i/d_model)` | "ten thousand to the two-i over d" | The wavelength scale for pair `i`. Grows from 1 to ~10,000 |
-| `pos / 10000^(2i/d)` | "pos over the scale" | The angle fed to sin/cos. Big scale = slow-moving angle |
-| `PE(pos, 2i)` | "P E of pos, two i" | The value written into dimension `2i` of the position vector |
+| Symbol | What it is |
+|--------|------------|
+| `pos` | Which token slot this is: 0, 1, 2, ... |
+| `i` | Which *pair* of embedding dimensions. `2i` and `2i+1` are the sin/cos partners |
+| `d_model` | Embedding width, e.g. 512. Sets how many pairs exist (`d_model/2`) |
+| `10000^(2i/d_model)` | The wavelength scale for pair `i`. Grows from 1 to ~10,000 |
+| `pos / 10000^(2i/d)` | The angle fed to sin/cos. Big scale = slow-moving angle |
+| `PE(pos, 2i)` | The value written into dimension `2i` of the position vector |
 
 **Walk one example.** `d_model = 512`, so `i` runs 0 to 255. Watch the wavelength explode:
 
@@ -107,22 +107,22 @@ Problem: still needs learned embeddings for all distances seen in training
 Used by: T5, DeBERTa
 ```
 
-**Reading it in plain English.** "Before token `i` scores token `j`, hand it a little note saying
+**Stated plainly.** "Before token `i` scores token `j`, hand it a little note saying
 how far apart they are — and let the model learn one note per distance."
 
 The shift from "where am I" to "how far apart are we" is the whole point. A pattern like "the
 subject is usually 3 tokens before the verb" is now learnable *once*, instead of separately at
 every absolute position in the document.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `A(i,j)` | "A of i j" | The pre-softmax attention score from query token `i` to key token `j` |
-| `q_i` | "q sub i" | Query vector of the token doing the looking |
-| `k_j` | "k sub j" | Key vector of the token being looked at |
-| `i - j` | "i minus j" | Signed distance. Positive = `j` is behind me; negative = ahead of me |
-| `r_{i-j}` | "r sub i minus j" | Learned vector for that exact distance. One per distance bucket |
-| `(...)^T k_j` | "transposed, times k j" | Dot product — the standard "how well do these match" score |
-| `∝` | "proportional to" | Ignoring the `1/sqrt(d)` scaling factor, which does not change the idea |
+| Symbol | What it is |
+|--------|------------|
+| `A(i,j)` | The pre-softmax attention score from query token `i` to key token `j` |
+| `q_i` | Query vector of the token doing the looking |
+| `k_j` | Key vector of the token being looked at |
+| `i - j` | Signed distance. Positive = `j` is behind me; negative = ahead of me |
+| `r_{i-j}` | Learned vector for that exact distance. One per distance bucket |
+| `(...)^T k_j` | Dot product — the standard "how well do these match" score |
+| `∝` | Ignoring the `1/sqrt(d)` scaling factor, which does not change the idea |
 
 **Walk one example.** Query at position 12 attends to three keys:
 
@@ -170,7 +170,7 @@ Long-context extensions:
 Used by: LLaMA (all versions), Mistral, Qwen, DeepSeek, most modern models
 ```
 
-**Reading it in plain English.** "Chop the embedding into 2D pairs and physically *spin* each
+**What the formula is telling you.** "Chop the embedding into 2D pairs and physically *spin* each
 pair by an angle proportional to the token's position. Because spinning two vectors and then
 dotting them gives an answer that depends only on the difference of their angles, attention
 automatically sees DISTANCE APART and never absolute position."
@@ -185,19 +185,19 @@ The last pair is the hour hand — one slow revolution across the whole document
 and you know position only modulo its own cycle; read all 64 hands together and the position is
 pinned down exactly. `θ_i = 10000^(-2i/d)` is nothing more than the gear ratio between the hands.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `x` | "x" | The query or key vector, read as `d/2` consecutive 2D pairs `(x_0,x_1), (x_2,x_3), ...` |
-| `position` | "position" | Token index `m`. Also written `m` for the query and `n` for the key |
-| `θ_i` | "theta i" | Rotation speed of pair `i`, in radians per token. Big = fast hand |
-| `i` | "i" | Which pair, `0` to `d/2 - 1`. Low `i` = fast/local, high `i` = slow/global |
-| `d` | "d" | Head dimension, e.g. 128. So 64 pairs, 64 clock hands |
-| `10000` | "the base" | Base frequency. Sets the spread between fastest and slowest hand |
-| `⊗` | "elementwise multiply" | Multiply matching slots, no summing. Not a matrix product |
-| `x̃` | "x twiddle" | `x` with each pair swapped and the first sign-flipped: `(-x_1, x_0, -x_3, x_2, ...)` |
-| `θ × position` | "theta times position" | The rotation angle for this pair at this token, in radians |
-| `q_m^T k_n` | "q m transposed k n" | Attention score between query at `m` and key at `n` |
-| `(m - n)` | "m minus n" | The distance between the two tokens — all the score ends up depending on |
+| Symbol | What it is |
+|--------|------------|
+| `x` | The query or key vector, read as `d/2` consecutive 2D pairs `(x_0,x_1), (x_2,x_3), ...` |
+| `position` | Token index `m`. Also written `m` for the query and `n` for the key |
+| `θ_i` | Rotation speed of pair `i`, in radians per token. Big = fast hand |
+| `i` | Which pair, `0` to `d/2 - 1`. Low `i` = fast/local, high `i` = slow/global |
+| `d` | Head dimension, e.g. 128. So 64 pairs, 64 clock hands |
+| `10000` | Base frequency. Sets the spread between fastest and slowest hand |
+| `⊗` | Multiply matching slots, no summing. Not a matrix product |
+| `x̃` | `x` with each pair swapped and the first sign-flipped: `(-x_1, x_0, -x_3, x_2, ...)` |
+| `θ × position` | The rotation angle for this pair at this token, in radians |
+| `q_m^T k_n` | Attention score between query at `m` and key at `n` |
+| `(m - n)` | The distance between the two tokens — all the score ends up depending on |
 
 **Walk one example — the spectrum of speeds.** Head dimension `d = 128`, so `i` runs 0 to 63:
 
@@ -303,7 +303,7 @@ Limitations:
 Used by: MPT, BLOOM (older models)
 ```
 
-**Reading it in plain English.** "Skip positional encoding entirely. Just subtract a penalty from
+**What this actually says.** "Skip positional encoding entirely. Just subtract a penalty from
 every attention score that grows linearly with how far away the token is — the further back you
 look, the bigger the fine you pay."
 
@@ -312,14 +312,14 @@ is injected straight into the score matrix as a fixed, un-learned penalty. That 
 extrapolates for free — a distance of 100,000 is just a bigger subtraction, and subtraction does
 not run out of table entries.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `q_i^T k_j` | "q i transposed k j" | The ordinary content-match score, before any position effect |
-| `\|i - j\|` | "absolute value of i minus j" | Distance in tokens. Unsigned — only "how far", not "which side" |
-| `m` | "m", the slope | Penalty charged per token of distance. Fixed constant, never learned |
-| `m × \|i - j\|` | "m times the distance" | Total fine for this pair of tokens |
-| `-` (the minus) | "minus" | Subtracted BEFORE softmax, so it becomes a multiplicative decay after |
-| head-specific | — | Every attention head gets a different `m`, so heads specialise by range |
+| Symbol | What it is |
+|--------|------------|
+| `q_i^T k_j` | The ordinary content-match score, before any position effect |
+| `\|i - j\|` | Distance in tokens. Unsigned — only "how far", not "which side" |
+| `m` | Penalty charged per token of distance. Fixed constant, never learned |
+| `m × \|i - j\|` | Total fine for this pair of tokens |
+| `-` (the minus) | Subtracted BEFORE softmax, so it becomes a multiplicative decay after |
+| head-specific | Every attention head gets a different `m`, so heads specialise by range |
 
 **Where the slopes come from.** For a model with `h` heads, ALiBi assigns a geometric sequence
 `m = 2^(-8k/h)` for `k = 1..h`. At `h = 8` that is a simple halving:
@@ -422,7 +422,7 @@ Ring Attention (Sequence Parallelism for Long Context):
   Enables 1M+ token training across many GPUs
 ```
 
-**Reading the complexity classes in plain English.** "`O(n²)` means every token looks at every
+**In plain terms.** "`O(n²)` means every token looks at every
 other token, so the work is the area of a square. Every trick in this list is a different way of
 refusing to fill in the whole square."
 
@@ -544,19 +544,19 @@ Compute: O(seq²/N) per GPU (1/N of full attention per device)
 Memory: O(seq/N) per GPU for K, V
 ```
 
-**Reading the three cost lines in plain English.** "Every GPU still does full attention *for its
+**Read it like this.** "Every GPU still does full attention *for its
 own slice of queries* — it just borrows the keys and values a chunk at a time instead of holding
 them all. Compute is divided by N, memory is divided by N, and the price is N rounds of passing
 data around the circle."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `seq` | "seq" | Total sequence length across all devices, e.g. 1,000,000 |
-| `N` | "N" | Number of GPUs in the ring, e.g. 8 |
-| `seq/N` | "seq over N" | Tokens each GPU owns, e.g. 125,000 |
-| `d` | "d" | Model hidden dimension — the width of each K and V vector |
-| `O(seq²/N)` | "seq squared over N" | Each GPU scores its `seq/N` queries against all `seq` keys |
-| `O(seq/N × d)` | "seq over N times d" | Bytes moved per hop: one KV chunk |
+| Symbol | What it is |
+|--------|------------|
+| `seq` | Total sequence length across all devices, e.g. 1,000,000 |
+| `N` | Number of GPUs in the ring, e.g. 8 |
+| `seq/N` | Tokens each GPU owns, e.g. 125,000 |
+| `d` | Model hidden dimension — the width of each K and V vector |
+| `O(seq²/N)` | Each GPU scores its `seq/N` queries against all `seq` keys |
+| `O(seq/N × d)` | Bytes moved per hop: one KV chunk |
 
 **Walk one example.** 1M tokens on 8 GPUs, reusing the 320 KB/token KV figure from above:
 
@@ -632,13 +632,13 @@ positions, it *slows every hand down by the same factor* so the hands still fini
 revolution after 128K tokens instead of 4K. Nothing extrapolates, because nothing leaves the
 range the model knows.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `p` | "p" | The real position of a token in the extended context, 0 to 131,071 |
-| `original_length` | — | What the model was trained on, e.g. 4,096 |
-| `new_length` | — | What you want to serve, e.g. 131,072 |
-| `s` | "the scale factor" | `new_length / original_length`. Here 32 |
-| `p × (orig / new)` | "p over s" | The fake position handed to RoPE. Now fractional |
+| Symbol | What it is |
+|--------|------------|
+| `p` | The real position of a token in the extended context, 0 to 131,071 |
+| `original_length` | What the model was trained on, e.g. 4,096 |
+| `new_length` | What you want to serve, e.g. 131,072 |
+| `s` | `new_length / original_length`. Here 32 |
+| `p × (orig / new)` | The fake position handed to RoPE. Now fractional |
 
 **Walk one example.** `original_length = 4,096`, `new_length = 131,072`, so `s = 32`:
 
@@ -679,13 +679,13 @@ The test YaRN applies per dimension is "does this hand complete a full revolutio
 original training length?" If it does, it never extrapolates and needs no help. If it does not,
 it is the one that will wander into unseen angles, so it gets interpolated.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `λ_i` | "lambda i" | Wavelength of pair `i` in tokens: `2π / θ_i` (the §4.3 table) |
-| `L` | "L" | Original training length, e.g. 4,096 |
-| `r = L / λ_i` | "r", the ratio | How many full revolutions this hand makes during training |
-| `α`, `β` | "alpha", "beta" | Band cutoffs, typically 1 and 32 |
-| `s` | "the scale factor" | Same as interpolation: `new_length / original_length` |
+| Symbol | What it is |
+|--------|------------|
+| `λ_i` | Wavelength of pair `i` in tokens: `2π / θ_i` (the §4.3 table) |
+| `L` | Original training length, e.g. 4,096 |
+| `r = L / λ_i` | How many full revolutions this hand makes during training |
+| `α`, `β` | Band cutoffs, typically 1 and 32 |
+| `s` | Same as interpolation: `new_length / original_length` |
 
 **Walk one example.** `L = 4,096`, `s = 32`, head dimension 128 — reusing the §4.3 wavelengths:
 

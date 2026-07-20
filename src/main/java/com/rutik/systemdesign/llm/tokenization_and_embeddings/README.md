@@ -58,17 +58,17 @@ The most widely used algorithm. Starts with individual bytes/characters, iterati
 3. Result: N+initial vocabulary of subword units
 ```
 
-**Reading it in plain English.** "Start with an alphabet you know can spell anything — the 256 byte values — then buy one new vocabulary entry per merge. Vocabulary size is not a knob you set; it is a count of how many merges you paid for, plus the alphabet you started with."
+**The idea behind it.** "Start with an alphabet you know can spell anything — the 256 byte values — then buy one new vocabulary entry per merge. Vocabulary size is not a knob you set; it is a count of how many merges you paid for, plus the alphabet you started with."
 
 That framing kills a common confusion. `vocab_size` in a config file is not a target the trainer approximates — it is an exact arithmetic consequence of the merge budget, which is why merge tables and vocabularies are always in lockstep and why you cannot "trim" a vocabulary without invalidating the merge ranks.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `V_init` | "V initial" | The starting alphabet. 256 for byte-level BPE — every byte, so nothing is ever `[UNK]` |
-| `N` | "N merges", the merge budget | How many times you run "find the most frequent adjacent pair and glue it". The only real hyperparameter |
-| `V_final` | "final vocab size" | `V_init + N + S`. What lands in `vocab.json` |
-| `S` | "special tokens" | Reserved slots — BOS, EOS, PAD, chat delimiters. Usually rounded up to a nice number |
-| merge rank | "merge rank" | A merge's position in the ordered list. Encoding replays merges in rank order, so rank *is* the algorithm |
+| Symbol | What it is |
+|--------|------------|
+| `V_init` | The starting alphabet. 256 for byte-level BPE — every byte, so nothing is ever `[UNK]` |
+| `N` | How many times you run "find the most frequent adjacent pair and glue it". The only real hyperparameter |
+| `V_final` | `V_init + N + S`. What lands in `vocab.json` |
+| `S` | Reserved slots — BOS, EOS, PAD, chat delimiters. Usually rounded up to a nice number |
+| merge rank | A merge's position in the ordered list. Encoding replays merges in rank order, so rank *is* the algorithm |
 
 **Walk one example.** Llama 3's tokenizer, and the byte-level general case:
 
@@ -190,17 +190,17 @@ Positional Embedding (or RoPE applied inside attention):
 Input to Transformer = token_embedding + positional_embedding
 ```
 
-**Reading it in plain English.** "The embedding layer is not a computation, it is a lookup table with `V` rows and `D` columns. Its parameter count is one multiplication — and for a small model with a big vocabulary, that one table can be a tenth of the whole model."
+**Stated plainly.** "The embedding layer is not a computation, it is a lookup table with `V` rows and `D` columns. Its parameter count is one multiplication — and for a small model with a big vocabulary, that one table can be a tenth of the whole model."
 
 Calling it a "layer" hides the cost. There is no matrix multiply at the input side, just a row fetch — but every one of those `V x D` numbers is a trained parameter that must be stored, sharded, and checkpointed like any other.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `V` | "V", vocab size | Number of rows. One per token ID |
-| `D` | "D", or `d_model` | Embedding width. Fixed by the model architecture, not the tokenizer |
-| `W_e` | "W-e", the embedding matrix | The `[V x D]` table. `W_e[i]` is token `i`'s vector |
-| `V x D` | "V times D" | Total parameters. The entire formula |
-| tied / untied | "weight tying" | Whether the output softmax reuses `W_e^T` (tied, one table) or trains its own (untied, two tables) |
+| Symbol | What it is |
+|--------|------------|
+| `V` | Number of rows. One per token ID |
+| `D` | Embedding width. Fixed by the model architecture, not the tokenizer |
+| `W_e` | The `[V x D]` table. `W_e[i]` is token `i`'s vector |
+| `V x D` | Total parameters. The entire formula |
+| tied / untied | Whether the output softmax reuses `W_e^T` (tied, one table) or trains its own (untied, two tables) |
 
 **Walk one example.** Two real configs, both `D = 4096`, and what the vocabulary jump cost:
 
@@ -272,17 +272,17 @@ Implication: An LLM with 4K context window can process:
   ~1500 Python lines of code
 ```
 
-**Reading it in plain English.** "Fertility is how many tokens it costs to say one word. The merge table was trained mostly on English, so English words got merged into single tokens and everyone else pays by the syllable."
+**What the formula is telling you.** "Fertility is how many tokens it costs to say one word. The merge table was trained mostly on English, so English words got merged into single tokens and everyone else pays by the syllable."
 
 This is the cost gotcha that surprises teams at launch: the *same sentence*, translated, is a different-sized bill and a different-sized context. Pricing is per token, not per meaning, so a tokenizer trained on an English-skewed corpus is a permanent tax on every other language.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| fertility | "fertility", tokens per word | Average tokens the tokenizer emits per whitespace word. 1.0 would be perfect |
-| `L` | "L", sequence length | Token count of the input. What you are actually billed and context-limited on |
-| `W` | "W", word count | Human-visible length of the text |
-| `L = W x fertility` | "L equals W times fertility" | The whole conversion. Everything downstream is denominated in `L`, never `W` |
-| compression ratio | "compression ratio" | `bytes / tokens`. The tokenizer-research view of the same number, inverted |
+| Symbol | What it is |
+|--------|------------|
+| fertility | Average tokens the tokenizer emits per whitespace word. 1.0 would be perfect |
+| `L` | Token count of the input. What you are actually billed and context-limited on |
+| `W` | Human-visible length of the text |
+| `L = W x fertility` | The whole conversion. Everything downstream is denominated in `L`, never `W` |
+| compression ratio | `bytes / tokens`. The tokenizer-research view of the same number, inverted |
 
 **Walk one example.** One 500-word support ticket, same content, four languages, at $3.00 per 1M input tokens:
 
@@ -331,17 +331,17 @@ Every model uses special tokens to delimit structure:
 
 Modern trend: 100K+ vocabulary for broader language coverage (GPT-4o uses 200K, Llama 3 uses 128K).
 
-**Reading it in plain English.** "A bigger vocabulary buys shorter sequences. You pay for it once in the embedding table, and again on every single token you generate, because the output softmax has to score all `V` candidates."
+**What this actually says.** "A bigger vocabulary buys shorter sequences. You pay for it once in the embedding table, and again on every single token you generate, because the output softmax has to score all `V` candidates."
 
 Stating both halves is the point. The embedding cost is a one-time storage hit that people quote constantly; the softmax cost is a per-step compute hit that gets forgotten, and it is the one that actually caps how far vocabularies can grow.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `V` | "V" | Vocabulary size. Grows the embedding table and the softmax width |
-| `L` | "L" | Sequence length in tokens. Shrinks as `V` grows, because fertility improves |
-| `D` | "D" | Hidden width. Multiplies both costs |
-| `L^2 x D` | "L squared times D" | Attention cost. Quadratic in `L`, so shortening sequences pays off superlinearly |
-| `L x V` | "L times V" | Logit cost — one score per vocabulary entry per position. Linear in both, and the counterweight |
+| Symbol | What it is |
+|--------|------------|
+| `V` | Vocabulary size. Grows the embedding table and the softmax width |
+| `L` | Sequence length in tokens. Shrinks as `V` grows, because fertility improves |
+| `D` | Hidden width. Multiplies both costs |
+| `L^2 x D` | Attention cost. Quadratic in `L`, so shortening sequences pays off superlinearly |
+| `L x V` | Logit cost — one score per vocabulary entry per position. Linear in both, and the counterweight |
 
 **Walk one example.** One 1,000-word English document under a 32K vs a 128K tokenizer, `D = 4096`:
 

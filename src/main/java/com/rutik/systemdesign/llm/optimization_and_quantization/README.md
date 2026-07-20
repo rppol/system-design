@@ -69,21 +69,21 @@ Derived from the tensor's observed range:
   zero_point = round(q_min - min / scale)      # the integer that decodes to real 0.0
 ```
 
-**Reading it in plain English.** "Pick a step size so the biggest and smallest weights in the tensor land on the ends of the integer grid, then replace every weight with the number of steps it sits from the bottom of that grid."
+**The idea behind it.** "Pick a step size so the biggest and smallest weights in the tensor land on the ends of the integer grid, then replace every weight with the number of steps it sits from the bottom of that grid."
 
 Quantization is only ever two things: choosing a ruler (`scale`) and choosing where its zero mark sits (`zero_point`). Everything GPTQ, AWQ, group-wise, and FP8 add on top is a smarter way of choosing those two numbers — the encode/decode arithmetic never changes.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `x` | "x" | One original FP16/FP32 weight. The thing you are about to destroy information about |
-| `q` | "q" | The stored integer code. This is the only thing that goes to disk and to HBM |
-| `x'` | "x prime" | The weight you get *back* after dequantizing. Never exactly equal to `x` |
-| `scale` | "scale" or "delta" | The step size of the ruler, in real units. One integer tick = this much weight |
-| `zero_point` | "zero point" or "zp" | Which integer code means real-value 0.0. Shifts the grid to sit over the data |
-| `q_min, q_max` | "q min, q max" | The ends of the integer grid. INT4 unsigned = 0..15; INT4 signed = -8..7; INT8 = -128..127 |
-| `round` | "round" | Round-to-nearest. This step, and only this step, is where quality is lost |
-| `clamp` | "clamp" | Saturate anything outside the grid to its edge. Protects against calibration outliers |
-| `x' - x` | "the quantization error" | The residual. GPTQ tries to cancel it; AWQ tries to shrink it where it matters |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `x` | One original FP16/FP32 weight. The thing you are about to destroy information about |
+| `q` | The stored integer code. This is the only thing that goes to disk and to HBM |
+| `x'` | The weight you get *back* after dequantizing. Never exactly equal to `x` |
+| `scale` | The step size of the ruler, in real units. One integer tick = this much weight |
+| `zero_point` | Which integer code means real-value 0.0. Shifts the grid to sit over the data |
+| `q_min, q_max` | The ends of the integer grid. INT4 unsigned = 0..15; INT4 signed = -8..7; INT8 = -128..127 |
+| `round` | Round-to-nearest. This step, and only this step, is where quality is lost |
+| `clamp` | Saturate anything outside the grid to its edge. Protects against calibration outliers |
+| `x' - x` | The residual. GPTQ tries to cancel it; AWQ tries to shrink it where it matters |
 
 **Walk one example — an FP16 tensor all the way down to INT4 and back.** Five weights, unsigned INT4 (`q_min = 0`, `q_max = 15`, so 16 levels and 15 steps between them):
 
@@ -223,19 +223,19 @@ Tradeoff: Requires calibration data (~128 samples); one-time offline process
 Time: 30min for 7B, 3hrs for 70B on one GPU
 ```
 
-**Reading it in plain English.** "Round the weights one column at a time, and after each one, nudge the columns you have not touched yet so they cancel out the error you just made."
+**Stated plainly.** "Round the weights one column at a time, and after each one, nudge the columns you have not touched yet so they cancel out the error you just made."
 
 Round-to-nearest treats every weight as an independent problem. GPTQ treats the *layer output* as the thing to preserve — it does not care whether each individual weight is close to its original value, only that `W'X ≈ WX` on real data. That reframing is worth the whole 30 minutes of Hessian work.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `X` | "X" | The calibration activations — the actual inputs this layer saw on ~128 real samples |
-| `XX^T` | "X X transpose" | Every input channel's magnitude, and how channels move together. The correlation matrix |
-| `H = 2XX^T` | "the Hessian" | Sensitivity: how much the layer's output error grows per unit of weight error |
-| `diag(H)` | "the diagonal" | Per-weight sensitivity. Big = that weight is multiplied by big activations = handle with care |
-| off-diagonal `H_ij` | "H i j" | How much weight `j` can be used to *undo* an error made in weight `i` |
-| `H^-1` | "H inverse" | Converts "output error I owe" back into "how far to nudge the remaining weights" |
-| `e_i` | "e sub i" | The rounding error just committed on column `i`. The debt to be paid forward |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `X` | The calibration activations — the actual inputs this layer saw on ~128 real samples |
+| `XX^T` | Every input channel's magnitude, and how channels move together. The correlation matrix |
+| `H = 2XX^T` | Sensitivity: how much the layer's output error grows per unit of weight error |
+| `diag(H)` | Per-weight sensitivity. Big = that weight is multiplied by big activations = handle with care |
+| off-diagonal `H_ij` | How much weight `j` can be used to *undo* an error made in weight `i` |
+| `H^-1` | Converts "output error I owe" back into "how far to nudge the remaining weights" |
+| `e_i` | The rounding error just committed on column `i`. The debt to be paid forward |
 
 **What the Hessian *is*, without calculus.** Take a one-row layer, `y = w1·x1 + w2·x2`. If you perturb `w1` by `e`, the output moves by `e × x1`. So a weight multiplied by a *large* activation is a *sensitive* weight — the same rounding error there costs more output error. `XX^T` is literally the table of `x_i · x_j` averaged over calibration data: its diagonal is each channel's squared magnitude (the sensitivity), and its off-diagonal is how much two channels co-vary (the substitutability). That is all GPTQ needs. No derivatives required.
 
@@ -295,16 +295,16 @@ The scaling trick in step 3 is one identity, applied per input channel:
        THIS       layernorm / linear — free at inference
 ```
 
-**Reading it in plain English.** "Blow up the weights that matter before rounding them, and shrink their inputs by the same factor afterwards — the product is unchanged, but the important weights now sit on a coarser part of the grid where a rounding step is proportionally smaller."
+**What the formula is telling you.** "Blow up the weights that matter before rounding them, and shrink their inputs by the same factor afterwards — the product is unchanged, but the important weights now sit on a coarser part of the grid where a rounding step is proportionally smaller."
 
 The insight is that quantization error is *absolute* (half a step, always) while what hurts quality is *relative* error. Scaling a salient channel up by `s` leaves the absolute error the same but divides the effective error by `s` once you rescale at inference.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `s` | "s" or "the AWQ scale" | Per-input-channel amplifier, one number per channel. Found by grid search, typically 1-4 |
-| "salient" | "salient channel" | A channel whose calibration activations are large. ~1% of channels, most of the quality |
-| `W · s` | "W times s" | The pre-scaled weights that actually get quantized and stored |
-| `x / s` | "x over s" | The compensating shrink, folded into the *previous* op so it costs zero runtime |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `s` | Per-input-channel amplifier, one number per channel. Found by grid search, typically 1-4 |
+| "salient" | A channel whose calibration activations are large. ~1% of channels, most of the quality |
+| `W · s` | The pre-scaled weights that actually get quantized and stored |
+| `x / s` | The compensating shrink, folded into the *previous* op so it costs zero runtime |
 
 **Walk one example.** One salient weight `w = 0.62`, in a group whose max is 1.30, symmetric INT4 (scale = 1.30/7 = 0.18571 — the same ruler as the symmetric table above):
 
@@ -347,14 +347,14 @@ Cost: requires GPU training time (~1-10% of original training compute)
 Used for: production deployments where quality at INT4 is critical
 ```
 
-**Reading it in plain English.** "During training, round every weight to the INT4 grid and immediately un-round it before using it — so the model computes with the damaged weights and learns to work around the damage, while the optimizer still gets to update smooth full-precision values underneath."
+**What this actually says.** "During training, round every weight to the INT4 grid and immediately un-round it before using it — so the model computes with the damaged weights and learns to work around the damage, while the optimizer still gets to update smooth full-precision values underneath."
 
-| Piece | Say it out loud | What it actually is |
-|-------|-----------------|---------------------|
-| `quantize(w)` | "quantize w" | `round(w/scale) + zp` from Section 4.1 — snap to the integer grid |
-| `dequantize(...)` | "dequantize" | `(q - zp) × scale` — back to float. Same value the deployed model will see |
-| "fake quantized" | "fake quant" | Still an FP16 number, but one that INT4 can represent exactly. Noise, not compression |
-| STE | "straight-through estimator" | Backward pass pretends `round()` was the identity function: gradient passes through unchanged |
+| Piece | What it actually is |
+|-------|---------------------|
+| `quantize(w)` | `round(w/scale) + zp` from Section 4.1 — snap to the integer grid |
+| `dequantize(...)` | `(q - zp) × scale` — back to float. Same value the deployed model will see |
+| "fake quantized" | Still an FP16 number, but one that INT4 can represent exactly. Noise, not compression |
+| STE | Backward pass pretends `round()` was the identity function: gradient passes through unchanged |
 
 **Walk one example — one weight through one QAT step.** Reusing the group from Section 4.1 (`scale = 0.09333`, `zero_point = 1`):
 
@@ -403,18 +403,18 @@ With INT4 KV quantization:
 vLLM supports: --kv-cache-dtype int8 or fp8
 ```
 
-**Reading it in plain English.** "For every token you have ever seen, every layer stored one key vector and one value vector — so cache memory is the product of how deep the model is, how wide its attention is, how long the conversation is, and how many bytes each number takes."
+**In plain terms.** "For every token you have ever seen, every layer stored one key vector and one value vector — so cache memory is the product of how deep the model is, how wide its attention is, how long the conversation is, and how many bytes each number takes."
 
 Unlike weight memory, which is fixed the moment you load the model, **KV cache memory grows linearly with every token generated and with every concurrent user**. That is why it, not the weights, is what actually OOMs a production server.
 
-| Term | Say it out loud | What it actually is |
-|------|-----------------|---------------------|
-| the leading `2` | "two, for K and V" | Two tensors per layer: one keys, one values. Not a fudge factor |
-| `num_layers` | "number of layers" | Every transformer block keeps its own cache. Llama-3-70B: 80 |
-| `num_kv_heads` | "number of KV heads" | KV heads, **not** query heads. This is exactly what GQA shrinks. Llama-3-70B: 8 |
-| `head_dim` | "head dim" | Width of one head's vector, usually `hidden_dim / num_q_heads`. Typically 128 |
-| `seq_len` | "sequence length" | Prompt + generated tokens so far. The only term that grows during a request |
-| bytes/element | "bytes per element" | FP16 = 2, FP8/INT8 = 1, INT4 = 0.5. The only term quantization touches |
+| Term | What it actually is |
+|------|---------------------|
+| the leading `2` | Two tensors per layer: one keys, one values. Not a fudge factor |
+| `num_layers` | Every transformer block keeps its own cache. Llama-3-70B: 80 |
+| `num_kv_heads` | KV heads, **not** query heads. This is exactly what GQA shrinks. Llama-3-70B: 8 |
+| `head_dim` | Width of one head's vector, usually `hidden_dim / num_q_heads`. Typically 128 |
+| `seq_len` | Prompt + generated tokens so far. The only term that grows during a request |
+| bytes/element | FP16 = 2, FP8/INT8 = 1, INT4 = 0.5. The only term quantization touches |
 
 **Walk one example — Llama-3-70B at 128K context, one request:**
 
@@ -489,14 +489,14 @@ INT8 for comparison:
   FP8 E4M3 handles outliers via floating-point exponent — no saturation
 ```
 
-**Reading it in plain English.** "Spend your 8 bits differently: INT8 spends all of them on a ruler with evenly spaced marks, while FP8 spends some on an exponent — giving marks that are fine near zero and coarse far away, so one huge outlier no longer ruins the resolution for everything else."
+**Read it like this.** "Spend your 8 bits differently: INT8 spends all of them on a ruler with evenly spaced marks, while FP8 spends some on an exponent — giving marks that are fine near zero and coarse far away, so one huge outlier no longer ruins the resolution for everything else."
 
-| Notation | Say it out loud | What it actually is |
-|----------|-----------------|---------------------|
-| `E4M3` | "E four M three" | 1 sign + 4 exponent + 3 mantissa bits = 8. Narrow range, finer steps |
-| `E5M2` | "E five M two" | 1 sign + 5 exponent + 2 mantissa bits = 8. Wider range, coarser steps |
-| exponent bits | "the exponent" | Chooses which power-of-2 *bracket* the number lives in. Buys dynamic range |
-| mantissa bits | "the mantissa" | Subdivides that bracket into `2^M` even steps. Buys precision |
+| Notation | What it actually is |
+|----------|---------------------|
+| `E4M3` | 1 sign + 4 exponent + 3 mantissa bits = 8. Narrow range, finer steps |
+| `E5M2` | 1 sign + 5 exponent + 2 mantissa bits = 8. Wider range, coarser steps |
+| exponent bits | Chooses which power-of-2 *bracket* the number lives in. Buys dynamic range |
+| mantissa bits | Subdivides that bracket into `2^M` even steps. Buys precision |
 
 **Walk one example — where the steps actually land.**
 
@@ -614,17 +614,17 @@ Key: by tracking (m, l) incrementally, softmax is computed without
      ever materializing the full [seq×seq] matrix in memory.
 ```
 
-**Reading it in plain English.** "Process the keys in blocks, and each time you meet a bigger score than you have seen before, retroactively shrink everything you have already accumulated by exactly the amount the new maximum changed — so the running total stays as if you had known the true maximum from the start."
+**What it means.** "Process the keys in blocks, and each time you meet a bigger score than you have seen before, retroactively shrink everything you have already accumulated by exactly the amount the new maximum changed — so the running total stays as if you had known the true maximum from the start."
 
 `m` and `l` are the whole trick. Softmax needs a global maximum (for numerical stability) and a global sum (for normalisation), both of which normally require seeing all `n` scores first. Tracking them incrementally with a correction factor is what makes attention streamable, and therefore tileable, and therefore O(n) memory.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `m` | "m", the running max | Largest score seen so far in this row. Subtracted before `exp` so nothing overflows |
-| `l` | "l", the running sum | Running softmax denominator: the sum of all `exp` terms seen so far |
-| `exp(m - m_new)` | "e to the old max minus new max" | The rescaling correction. Always ≤ 1 — it shrinks stale accumulations |
-| `B_r`, `B_c` | "block row / block column" | Tile sizes chosen so `Q,K,V` tiles fit in ~20 MB of SRAM |
-| `O_accum` | "O accumulate" | Partial output, rescaled at every block, divided by `l` exactly once at the end |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `m` | Largest score seen so far in this row. Subtracted before `exp` so nothing overflows |
+| `l` | Running softmax denominator: the sum of all `exp` terms seen so far |
+| `exp(m - m_new)` | The rescaling correction. Always ≤ 1 — it shrinks stale accumulations |
+| `B_r`, `B_c` | Tile sizes chosen so `Q,K,V` tiles fit in ~20 MB of SRAM |
+| `O_accum` | Partial output, rescaled at every block, divided by `l` exactly once at the end |
 
 **Walk one example — one query row, two blocks of scores.**
 
@@ -771,16 +771,16 @@ Load balancing loss coefficient controls the imbalance penalty:
   Typical: 0.01 × auxiliary_loss added to main training loss
 ```
 
-**Reading it in plain English.** "Give every expert a fixed number of seats, sized as its fair share of the batch plus a little slack — and if more tokens pick an expert than it has seats, the extras don't get in."
+**Put simply.** "Give every expert a fixed number of seats, sized as its fair share of the batch plus a little slack — and if more tokens pick an expert than it has seats, the extras don't get in."
 
 The capacity buffer exists because GPUs need **statically shaped** tensors. You cannot allocate "however many tokens happen to route here" at runtime without killing kernel performance, so every expert gets an identical fixed-size buffer decided before the batch runs.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `C` | "capacity" | Seats per expert, in tokens. A fixed tensor dimension, not a soft limit |
-| `tokens_per_batch` | "tokens per batch" | Token-to-expert *assignments* in the batch — with top-2 routing this is 2× the tokens |
-| `num_experts` | "number of experts" | How many ways the traffic is split. Mixtral: 8. DeepSeek-V3: 256 |
-| `capacity_factor` | "capacity factor" | The slack multiplier. 1.0 = zero tolerance for imbalance; 1.25 = allow 25% over fair share |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `C` | Seats per expert, in tokens. A fixed tensor dimension, not a soft limit |
+| `tokens_per_batch` | Token-to-expert *assignments* in the batch — with top-2 routing this is 2× the tokens |
+| `num_experts` | How many ways the traffic is split. Mixtral: 8. DeepSeek-V3: 256 |
+| `capacity_factor` | The slack multiplier. 1.0 = zero tolerance for imbalance; 1.25 = allow 25% over fair share |
 
 **Walk one example — Mixtral-style, 8 experts, top-2 routing, 8,192 tokens per batch:**
 
@@ -989,7 +989,7 @@ Selective checkpointing:
   Better tradeoff: 20-30% memory reduction, 5-10% slowdown
 ```
 
-**Reading it in plain English.** "Instead of keeping every layer's intermediate result until the backward pass needs it, keep only a few bookmarks and re-run the forward pass from the nearest bookmark whenever you need something in between."
+**The idea behind it.** "Instead of keeping every layer's intermediate result until the backward pass needs it, keep only a few bookmarks and re-run the forward pass from the nearest bookmark whenever you need something in between."
 
 **Why the memory becomes `O(√layers)` — where the square root comes from.** You are storing two things: the checkpoints themselves, and the activations you must temporarily re-materialise inside one segment. Choosing a segment length `s` for `L` layers:
 
@@ -1074,16 +1074,16 @@ Feature distillation:
   More complex but captures richer representations
 ```
 
-**Reading it in plain English.** "Train the student on two things at once — the right answer from the labels, and the *whole shape of the teacher's uncertainty* — and let `α` decide how much you trust each."
+**Stated plainly.** "Train the student on two things at once — the right answer from the labels, and the *whole shape of the teacher's uncertainty* — and let `α` decide how much you trust each."
 
 The second term is where distillation earns its keep. A hard label says "the answer is token 4,281." The teacher's distribution additionally says "and tokens 9,004 and 117 were nearly as good, while everything else was hopeless" — free information about how the problem is structured, which a one-hot label cannot carry. This is why it is called *dark knowledge*.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `α` | "alpha" | Mixing weight. `α=1` is plain fine-tuning; `α=0` is pure teacher-mimicry. Typically 0.1-0.5 |
-| `cross_entropy(student, labels)` | "cross entropy" | The ordinary loss: "did you get the ground-truth token right?" |
-| `KL(student, teacher)` | "K L divergence" | Distance between two probability distributions. Zero when identical, grows as they diverge |
-| soft targets | "soft targets" | The teacher's full probability vector, usually temperature-softened to expose small values |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `α` | Mixing weight. `α=1` is plain fine-tuning; `α=0` is pure teacher-mimicry. Typically 0.1-0.5 |
+| `cross_entropy(student, labels)` | The ordinary loss: "did you get the ground-truth token right?" |
+| `KL(student, teacher)` | Distance between two probability distributions. Zero when identical, grows as they diverge |
+| soft targets | The teacher's full probability vector, usually temperature-softened to expose small values |
 
 **Walk one example — 4-way classification, one training sample.**
 
@@ -1136,16 +1136,16 @@ E[speedup] ≈ (1 - α^(K+1)) / (1 - α)   with K draft tokens
 α = 0.80, K = 4 → ~3.2 tokens per target pass → 3.2× throughput improvement
 ```
 
-**Reading it in plain English.** "You keep the draft model's guesses only up to the first one the target model disagrees with — so the expected haul is a geometric series that stalls the moment the streak breaks."
+**What the formula is telling you.** "You keep the draft model's guesses only up to the first one the target model disagrees with — so the expected haul is a geometric series that stalls the moment the streak breaks."
 
 The formula is just the sum `1 + α + α² + ... + α^K` written in closed form. Each additional draft token is worth less than the last, because it only pays off if *every* token before it was already accepted.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `α` | "alpha", the acceptance rate | Probability the target model agrees with any single draft token. Typically 0.6-0.85 |
-| `K` | "K" | How many tokens the draft model speculates ahead per target pass. Typically 3-5 |
-| `α^(K+1)` | "alpha to the K plus one" | The vanishing tail — the chance of an unbroken accept streak all the way through |
-| `E[speedup]` | "expected speedup" | Mean tokens produced per target-model forward pass. Baseline without speculation is 1 |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `α` | Probability the target model agrees with any single draft token. Typically 0.6-0.85 |
+| `K` | How many tokens the draft model speculates ahead per target pass. Typically 3-5 |
+| `α^(K+1)` | The vanishing tail — the chance of an unbroken accept streak all the way through |
+| `E[speedup]` | Mean tokens produced per target-model forward pass. Baseline without speculation is 1 |
 
 **Walk one example — α = 0.80, K = 4:**
 

@@ -70,19 +70,19 @@ Loss = -log[ exp(sim(anchor, pos)/τ) / Σ exp(sim(anchor, neg_i)/τ) ]
        (InfoNCE / NT-Xent loss, τ = temperature)
 ```
 
-**Reading the InfoNCE loss in plain English.** "Out of this whole pile of candidates, the positive should look like the obvious answer. Score every candidate, turn the scores into probabilities, and penalize the model by how little probability mass it put on the right one."
+**The idea behind it.** "Out of this whole pile of candidates, the positive should look like the obvious answer. Score every candidate, turn the scores into probabilities, and penalize the model by how little probability mass it put on the right one."
 
 It is a classification loss in disguise: an N-way multiple-choice question where the positive is the correct option and every negative is a distractor.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `sim(a, b)` | "similarity of a and b" | Usually cosine similarity, so it lives in -1 to +1 |
-| `τ` | "tau" (the temperature) | Divisor that sharpens the scores. Small tau = harsher contrast. Typically 0.01-0.1 |
-| `sim/τ` | "sim over tau" | Scaled score. Dividing by 0.05 multiplies every gap by 20 |
-| `exp(...)` | "e to the" | Makes everything positive and amplifies differences exponentially |
-| `Σ` | "sum over" | Add across all candidates in the denominator |
-| `exp(pos) / Σ exp(all)` | "softmax of the positive" | Probability the model assigns to the correct answer |
-| `-log(...)` | "negative log" | Loss. `-log(1) = 0` when perfect; grows without bound as the probability falls |
+| Symbol | What it is |
+|--------|------------|
+| `sim(a, b)` | Usually cosine similarity, so it lives in -1 to +1 |
+| `τ` | Divisor that sharpens the scores. Small tau = harsher contrast. Typically 0.01-0.1 |
+| `sim/τ` | Scaled score. Dividing by 0.05 multiplies every gap by 20 |
+| `exp(...)` | Makes everything positive and amplifies differences exponentially |
+| `Σ` | Add across all candidates in the denominator |
+| `exp(pos) / Σ exp(all)` | Probability the model assigns to the correct answer |
+| `-log(...)` | Loss. `-log(1) = 0` when perfect; grows without bound as the probability falls |
 
 **Walk one example.** Anchor = "The capital of France", `τ = 0.05`. First with easy random negatives:
 
@@ -140,13 +140,13 @@ Truncated 64:   [d1, d2, ..., d64]    (64 dim, much faster, ~5% quality drop)
 
 Ordinary embeddings do not survive this. In a normal model, dimension 1400 is no less important than dimension 3; lopping off the tail destroys the geometry. MRL earns the property by computing the loss at several truncation points simultaneously during training, which forces the model to front-load meaning.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `D` | "big D" | The model's full output dimension. 1536 for text-embedding-3-small |
-| `d` | "little d" | The truncated dimension you actually store. Must be `d <= D` |
-| `v[:d]` | "v up to d" | Keep the first `d` components, discard the rest. That is the entire operation |
-| `bytes/vector` | "bytes per vector" | `d x 4` for float32, `d x 2` for float16 |
-| `N x d x 4` | "N times d times 4" | Total index memory in bytes |
+| Symbol | What it is |
+|--------|------------|
+| `D` | The model's full output dimension. 1536 for text-embedding-3-small |
+| `d` | The truncated dimension you actually store. Must be `d <= D` |
+| `v[:d]` | Keep the first `d` components, discard the rest. That is the entire operation |
+| `bytes/vector` | `d x 4` for float32, `d x 2` for float16 |
+| `N x d x 4` | Total index memory in bytes |
 
 **Walk the memory arithmetic.** 10,000,000 vectors stored as float32 (4 bytes per component):
 
@@ -277,19 +277,19 @@ Query:
 cos(a, b) = (a . b) / (||a|| * ||b||)
 ```
 
-**Reading it in plain English.** "Measure how much two vectors point the same way, and divide out how long they are so only the *direction* survives."
+**Stated plainly.** "Measure how much two vectors point the same way, and divide out how long they are so only the *direction* survives."
 
 The numerator alone already grows when vectors agree — but it also grows when either vector is simply longer. Dividing by both lengths cancels that out, which is why the result is a pure angle measurement pinned to the range -1 to +1.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `a · b` | "a dot b" | Dot product: multiply matching components, add them up. `Σ a_i b_i` |
-| `‖a‖` | "norm of a" (or "the length of a") | `sqrt(Σ a_i²)`. Pythagoras in d dimensions |
-| `‖a‖ ‖b‖` | "norm of a times norm of b" | The two lengths multiplied — the scale factor being divided out |
-| `cos(a, b)` | "cosine of a and b" | Literally the cosine of the angle between them |
-| `+1` | "plus one" | Same direction, angle 0 degrees. Maximum similarity |
-| `0` | "zero" | Perpendicular, angle 90 degrees. Unrelated |
-| `-1` | "minus one" | Opposite direction, angle 180 degrees. Maximum dissimilarity |
+| Symbol | What it is |
+|--------|------------|
+| `a · b` | Dot product: multiply matching components, add them up. `Σ a_i b_i` |
+| `‖a‖` | `sqrt(Σ a_i²)`. Pythagoras in d dimensions |
+| `‖a‖ ‖b‖` | The two lengths multiplied — the scale factor being divided out |
+| `cos(a, b)` | Literally the cosine of the angle between them |
+| `+1` | Same direction, angle 0 degrees. Maximum similarity |
+| `0` | Perpendicular, angle 90 degrees. Unrelated |
+| `-1` | Opposite direction, angle 180 degrees. Maximum dissimilarity |
 
 **Walk one example.** Two 3-dimensional vectors, worked end to end:
 
@@ -357,11 +357,11 @@ For unit vectors they agree. For raw vectors they can produce three *different* 
 
 Three metrics, three different orderings, one dataset. Note `d1` and `d2` swap between dot product and cosine purely because `d1` is long, and `d3` falls from first to last under L2 purely because it is far from `q` despite pointing exactly at it.
 
-| Metric | Say it | Answers the question | Correct when |
-|--------|--------|---------------------|--------------|
-| `a · b` | "a dot b" | "Do they agree, weighted by size?" | Magnitude is meaningful — e.g. a popularity or confidence term is deliberately baked into the norm |
-| `cos(a,b)` | "cosine similarity" | "Do they point the same way?" | Almost always for text retrieval. Length is an artifact you want removed |
-| `‖a-b‖` | "L2 norm of a minus b" / "Euclidean distance" | "How far apart are the points?" | Absolute position matters — clustering, k-means centroids, geometric embeddings |
+| Metric | Answers the question | Correct when |
+|--------|---------------------|--------------|
+| `a · b` | "Do they agree, weighted by size?" | Magnitude is meaningful — e.g. a popularity or confidence term is deliberately baked into the norm |
+| `cos(a,b)` | "Do they point the same way?" | Almost always for text retrieval. Length is an artifact you want removed |
+| `‖a-b‖` | "How far apart are the points?" | Absolute position matters — clustering, k-means centroids, geometric embeddings |
 
 The practical rule: **normalize at index time and use dot product.** Once `‖a‖ = ‖b‖ = 1`, cosine and dot product become identical, and L2 becomes a monotonic function of cosine (`‖a-b‖² = 2 - 2cos(a,b)`), so all three produce the same ranking. Every disagreement above only exists because the vectors were left un-normalized. This is exactly the pitfall listed in Section 10 — mixing a normalization assumption with raw stored vectors returns plausible-looking results that are quietly mis-ranked.
 
@@ -382,17 +382,17 @@ layer = floor( -ln(uniform(0,1)) * mL )        where mL = 1 / ln(M)
 which is equivalent to: promote each node to the next layer up with probability 1/M
 ```
 
-**Reading it in plain English.** "Every vector lives on the bottom layer. Each one then flips a weighted coin — roughly a 1-in-M chance — to also appear on the layer above, and keeps flipping until it loses. The rare survivors form a sparse express network over the top."
+**What the formula is telling you.** "Every vector lives on the bottom layer. Each one then flips a weighted coin — roughly a 1-in-M chance — to also appear on the layer above, and keeps flipping until it loses. The rare survivors form a sparse express network over the top."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `M` | "M" | Max neighbor links per node per layer. 16-64. Also sets the layer thinning rate |
-| `mL` | "m L" (the level multiplier) | `1/ln(M)`. Tunes how fast layers thin out; `1/ln(M)` is the proven optimum |
-| `ln` | "natural log" | Log base e. Turns a uniform random draw into an exponential one |
-| `uniform(0,1)` | "a uniform random draw" | A random number between 0 and 1 |
-| `floor(...)` | "floor" | Round down to a whole layer number |
-| `efConstruction` | "E F construction" | Beam width while **building**. How many candidates to keep in play per insert |
-| `efSearch` | "E F search" | Beam width while **querying**. The live recall/latency dial |
+| Symbol | What it is |
+|--------|------------|
+| `M` | Max neighbor links per node per layer. 16-64. Also sets the layer thinning rate |
+| `mL` | `1/ln(M)`. Tunes how fast layers thin out; `1/ln(M)` is the proven optimum |
+| `ln` | Log base e. Turns a uniform random draw into an exponential one |
+| `uniform(0,1)` | A random number between 0 and 1 |
+| `floor(...)` | Round down to a whole layer number |
+| `efConstruction` | Beam width while **building**. How many candidates to keep in play per insert |
+| `efSearch` | Beam width while **querying**. The live recall/latency dial |
 
 **The skip-list analogy, made concrete.** A skip list is a sorted linked list with express lanes: layer 0 has every element, layer 1 has every Mth element, layer 2 every M²th, and so on. To find something you ride the sparsest lane until you overshoot, drop down, and repeat. HNSW is that idea with "sorted order" replaced by "nearest in vector space."
 
@@ -478,18 +478,18 @@ vectors_scanned = nlist + nprobe * (N / nlist)
                   clusters
 ```
 
-**Reading it in plain English.** "Instead of comparing the query against all N vectors, compare it against nlist cluster centers, pick the nprobe closest clusters, and only look inside those. You scan a tiny slice of the corpus and hope the true nearest neighbor was in it."
+**What this actually says.** "Instead of comparing the query against all N vectors, compare it against nlist cluster centers, pick the nprobe closest clusters, and only look inside those. You scan a tiny slice of the corpus and hope the true nearest neighbor was in it."
 
 That last clause is where the recall loss lives. IVF is not approximating distances — every distance it computes is exact. It loses recall purely because a true neighbor sitting just across a cluster boundary is never examined at all.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `N` | "N" | Total vectors in the index |
-| `nlist` | "N list" | Number of k-means clusters the corpus is partitioned into |
-| `nprobe` | "N probe" | How many of those clusters to actually search. The recall dial |
-| `N / nlist` | "cluster size" | Average vectors per cluster |
-| `nlist` (first term) | "the centroid scan" | Every query must compare against all centroids first — a fixed floor cost |
-| `sqrt(N)` | "root N" | The rule of thumb for choosing `nlist`. Balances the two terms |
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total vectors in the index |
+| `nlist` | Number of k-means clusters the corpus is partitioned into |
+| `nprobe` | How many of those clusters to actually search. The recall dial |
+| `N / nlist` | Average vectors per cluster |
+| `nlist` (first term) | Every query must compare against all centroids first — a fixed floor cost |
+| `sqrt(N)` | The rule of thumb for choosing `nlist`. Balances the two terms |
 
 **Walk one example.** 1,000,000 vectors, `nlist = 1000` (= `sqrt(1,000,000)`), so ~1,000 vectors per cluster:
 

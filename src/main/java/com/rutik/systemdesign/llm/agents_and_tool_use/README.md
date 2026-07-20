@@ -110,16 +110,16 @@ Final Answer: Tim Cook is the CEO of Apple. His net worth is approximately $1.5 
 
 ReAct was proposed as a prompting pattern (2022) and is now the default architecture for most agents.
 
-**Reading it in plain English.** "An agent is a chain, and a chain succeeds only if every link does — so per-step reliability gets multiplied by itself once per step, and a 95%-reliable agent is worse than a coin flip by step 14."
+**The idea behind it.** "An agent is a chain, and a chain succeeds only if every link does — so per-step reliability gets multiplied by itself once per step, and a 95%-reliable agent is worse than a coin flip by step 14."
 
 This is the single most counterintuitive number in agent design. Engineers reason about steps additively ("each step is pretty good") when the math is multiplicative, and multiplication of numbers below 1 collapses fast.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `p` | "pee" | Probability one step succeeds: right tool, right arguments, usable result |
-| `n` | "en" | Number of steps in the trajectory. The `max_steps` of the loop |
-| `p^n` | "pee to the en" | End-to-end success. Every step must succeed; one failure kills the trajectory |
-| `p^(1/n)` | "the en-th root of pee" | Inverted: the per-step reliability needed to hit a target end-to-end rate |
+| Symbol | What it is |
+|--------|------------|
+| `p` | Probability one step succeeds: right tool, right arguments, usable result |
+| `n` | Number of steps in the trajectory. The `max_steps` of the loop |
+| `p^n` | End-to-end success. Every step must succeed; one failure kills the trajectory |
+| `p^(1/n)` | Inverted: the per-step reliability needed to hit a target end-to-end rate |
 
 **Walk one example.** The 2-tool trace above, then the same agent stretched longer:
 
@@ -194,17 +194,17 @@ Procedural memory:
   Example: successful code templates
 ```
 
-**Reading it in plain English.** "Summarizing old turns does not just save tokens once — it converts working memory from something that grows with every step into something that stops growing at a fixed ceiling."
+**Stated plainly.** "Summarizing old turns does not just save tokens once — it converts working memory from something that grows with every step into something that stops growing at a fixed ceiling."
 
 The ratio matters less than that shape change. A 3x saving on a quantity that still grows without bound only delays the overflow; capping the growth removes it.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `t_turn` | "tee turn" | Tokens one full turn adds: the assistant's thought and tool call, plus the tool result |
-| `W_before` | "double-u before" | Working-memory tokens with every turn kept verbatim |
-| `W_after` | "double-u after" | Working-memory tokens after compaction: summary plus the verbatim tail |
-| `r` | "are" | Compression ratio, `W_after / W_before`. Lower is tighter. `1/r` is the "Nx reduction" |
-| tail window | "tail window" | The most recent turns kept verbatim. Compaction never touches these |
+| Symbol | What it is |
+|--------|------------|
+| `t_turn` | Tokens one full turn adds: the assistant's thought and tool call, plus the tool result |
+| `W_before` | Working-memory tokens with every turn kept verbatim |
+| `W_after` | Working-memory tokens after compaction: summary plus the verbatim tail |
+| `r` | Compression ratio, `W_after / W_before`. Lower is tighter. `1/r` is the "Nx reduction" |
+| tail window | The most recent turns kept verbatim. Compaction never touches these |
 
 **Walk one example.** A turn that appends a 180-token thought plus tool call and a 600-token observation:
 
@@ -248,17 +248,17 @@ Common tools given to agents:
 | LLM sub-calls | Summarizer, translator | Specialized sub-tasks |
 | Vector DB | Retrieval, storage | Long-term memory |
 
-**Reading it in plain English.** "Adding a tool does two things at once: it lowers the odds the model picks the right one, and it charges you schema tokens on every request — and the confusion grows faster than the tool count does."
+**What the formula is telling you.** "Adding a tool does two things at once: it lowers the odds the model picks the right one, and it charges you schema tokens on every request — and the confusion grows faster than the tool count does."
 
 The second half is what surprises people. Tools grow linearly but *pairs* of tools grow quadratically, and it is pairs that get confused with each other.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `N` | "en" | Number of tools registered and visible to the model on a given call |
-| `1/N` | "one over en" | Random-choice baseline. The floor the model's selection accuracy must beat |
-| `t_schema` | "tee schema" | Tokens for one tool definition: name, description, and parameter schema |
-| `N x t_schema` | "en times tee schema" | Context tax paid on every request, before the task even starts |
-| `N(N-1)/2` | "en times en minus one over two" | Number of tool *pairs* — every chance for two descriptions to overlap |
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of tools registered and visible to the model on a given call |
+| `1/N` | Random-choice baseline. The floor the model's selection accuracy must beat |
+| `t_schema` | Tokens for one tool definition: name, description, and parameter schema |
+| `N x t_schema` | Context tax paid on every request, before the task even starts |
+| `N(N-1)/2` | Number of tool *pairs* — every chance for two descriptions to overlap |
 
 **Walk one example.** The 8 categories in the table above, then scaling up, at ~120 tokens per definition against a 200K window:
 
@@ -442,19 +442,19 @@ def agent_loop(task, max_steps=10):
     return "Task exceeded maximum steps. Partial results: ..."
 ```
 
-**Reading it in plain English.** "That `messages.append` in the loop is the whole cost story: every turn re-sends everything that came before it, so the cumulative token bill of an `N`-step agent grows with `N` squared, not with `N`."
+**What this actually says.** "That `messages.append` in the loop is the whole cost story: every turn re-sends everything that came before it, so the cumulative token bill of an `N`-step agent grows with `N` squared, not with `N`."
 
 The API is stateless. `messages` is not a handle the provider remembers — it is the full transcript, serialized and shipped again on every iteration. Step 10 pays for steps 1 through 9 all over again, and so did steps 2 through 9 before it. This is the single most common source of a shocking agent bill.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `S` | "es" | System prompt plus all tool definitions. Fixed, and re-sent on every step |
-| `T` | "tee" | The task/user message. Fixed, and also re-sent every step |
-| `a` | "ay" | Tokens the assistant adds per turn: its reasoning plus the tool call |
-| `o` | "oh" | Tokens the observation adds: the tool result injected back as a message |
-| `a + o` | "ay plus oh" | How much the transcript grows per completed turn |
-| `N` | "en" | Steps actually taken. Capped by `max_steps` — 10 in the loop above |
-| `N(N-1)/2` | "en times en minus one over two" | The triangular number. Why the total is quadratic |
+| Symbol | What it is |
+|--------|------------|
+| `S` | System prompt plus all tool definitions. Fixed, and re-sent on every step |
+| `T` | The task/user message. Fixed, and also re-sent every step |
+| `a` | Tokens the assistant adds per turn: its reasoning plus the tool call |
+| `o` | Tokens the observation adds: the tool result injected back as a message |
+| `a + o` | How much the transcript grows per completed turn |
+| `N` | Steps actually taken. Capped by `max_steps` — 10 in the loop above |
+| `N(N-1)/2` | The triangular number. Why the total is quadratic |
 
 **Walk one example.** Sizing the loop above with `max_steps = 10`:
 
@@ -509,15 +509,15 @@ The `except ToolError` branch above injects the error and moves on, but producti
   delay_i = random(0, min(cap, base x 2^i))       i = 0, 1, 2, ...
 ```
 
-**Reading it in plain English.** "Wait twice as long after each failure, never longer than the cap, and pick a random point inside that window so you do not retry in lockstep with everyone else."
+**In plain terms.** "Wait twice as long after each failure, never longer than the cap, and pick a random point inside that window so you do not retry in lockstep with everyone else."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `base` | "base" | First retry delay. 1 second here |
-| `i` | "eye" | Retry attempt index, starting at 0 |
-| `2^i` | "two to the eye" | Doubling factor. Backs off fast enough to let a struggling service recover |
-| `cap` | "cap" | Ceiling on any single delay. Stops the doubling running away |
-| `random(0, x)` | "random zero to ex" | Full jitter. Spreads retries across the window instead of stacking them |
+| Symbol | What it is |
+|--------|------------|
+| `base` | First retry delay. 1 second here |
+| `i` | Retry attempt index, starting at 0 |
+| `2^i` | Doubling factor. Backs off fast enough to let a struggling service recover |
+| `cap` | Ceiling on any single delay. Stops the doubling running away |
+| `random(0, x)` | Full jitter. Spreads retries across the window instead of stacking them |
 
 **Walk one example.** `base = 1s`, `cap = 8s`, 5 attempts:
 

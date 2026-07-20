@@ -282,18 +282,18 @@ Cost per token estimation:
               API models where quality is critical
 ```
 
-**Reading it in plain English.** "You rent the GPU by the hour whether it is busy or not, so the price of a token is simply the hourly rent divided by however many tokens that hour produced."
+**The idea behind it.** "You rent the GPU by the hour whether it is busy or not, so the price of a token is simply the hourly rent divided by however many tokens that hour produced."
 
 That framing matters because the numerator (rent) is fixed the moment you provision the box, while the denominator (throughput) is something you control with batching, quantization, and a better serving engine. Every self-hosting cost win is a denominator win.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `$3/hr` | "three dollars an hour" | On-demand rent for one H100 80GB. Spot pricing cuts this 60-70% |
-| `tokens/sec` | "tokens per second" | Sustained output throughput of the whole GPU, all concurrent requests summed |
-| `3600` | "thirty-six hundred" | Seconds in an hour. The unit bridge between "$/hr" and "$/token" |
-| `$0.00000083` | "eight point three times ten to the minus seven dollars" | Cost of one token. Too small to reason about — always restate per 1M |
-| `$/1M tok` | "dollars per one million tokens" | The comparable unit. Every API provider quotes this, so convert to it |
-| `$0.15/1M` | "fifteen cents per million" | gpt-4o-mini input price, the API side of the comparison |
+| Symbol | What it is |
+|--------|------------|
+| `$3/hr` | On-demand rent for one H100 80GB. Spot pricing cuts this 60-70% |
+| `tokens/sec` | Sustained output throughput of the whole GPU, all concurrent requests summed |
+| `3600` | Seconds in an hour. The unit bridge between "$/hr" and "$/token" |
+| `$0.00000083` | Cost of one token. Too small to reason about — always restate per 1M |
+| `$/1M tok` | The comparable unit. Every API provider quotes this, so convert to it |
+| `$0.15/1M` | gpt-4o-mini input price, the API side of the comparison |
 
 **Walk one example.** The H100 numbers from the block above, carried all the way to the comparable unit:
 
@@ -377,18 +377,18 @@ run. That comes from Little's Law, the one capacity formula every serving system
   replicas    = ceil( concurrency / (per_replica_concurrency x target_utilization) )
 ```
 
-**Reading it in plain English.** "The number of requests in flight at any instant equals how fast they arrive multiplied by how long each one stays — so size the fleet to hold that many at once, with headroom."
+**Stated plainly.** "The number of requests in flight at any instant equals how fast they arrive multiplied by how long each one stays — so size the fleet to hold that many at once, with headroom."
 
 The reason this matters is that neither QPS nor latency alone tells you anything about fleet size. A system at 100 QPS with 50ms responses needs 5 concurrent slots; the same 100 QPS with 5-second LLM responses needs 500. LLM latency is 10-100x traditional web latency, which is exactly why LLM fleets look absurdly oversized next to the QPS number.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `QPS` | "queries per second" | Arrival rate. Use *peak* QPS, never the monthly average |
-| `latency_seconds` | "latency in seconds" | End-to-end time a request occupies a slot. Use p95, not p50 |
-| `concurrency` | "concurrency" | Requests in flight at one instant. The actual thing you provision for |
-| `per_replica_concurrency` | "per replica concurrency" | How many simultaneous sequences one GPU replica can decode. KV-cache bound |
-| `target_utilization` | "target utilization" | Headroom factor, typically 0.6-0.8. Above this, queueing latency explodes |
-| `ceil(...)` | "ceiling of" | Round up. You cannot run 2.9 GPUs |
+| Symbol | What it is |
+|--------|------------|
+| `QPS` | Arrival rate. Use *peak* QPS, never the monthly average |
+| `latency_seconds` | End-to-end time a request occupies a slot. Use p95, not p50 |
+| `concurrency` | Requests in flight at one instant. The actual thing you provision for |
+| `per_replica_concurrency` | How many simultaneous sequences one GPU replica can decode. KV-cache bound |
+| `target_utilization` | Headroom factor, typically 0.6-0.8. Above this, queueing latency explodes |
+| `ceil(...)` | Round up. You cannot run 2.9 GPUs |
 
 **Walk one example.** The case study platform in Section 14 — 40M requests/month, p50 800ms:
 
@@ -426,18 +426,18 @@ Batching is the throughput lever, and it trades directly against per-user speed:
   gpu_throughput      = batch_size / step_time_seconds
 ```
 
-**Reading it in plain English.** "Every decode step emits one token for every request in the batch, so a bigger batch multiplies total output while each individual user waits slightly longer per token."
+**What the formula is telling you.** "Every decode step emits one token for every request in the batch, so a bigger batch multiplies total output while each individual user waits slightly longer per token."
 
 The asymmetry is the whole point: step time grows *sublinearly* with batch size (decode is
 memory-bandwidth bound, so loading the weights once serves the whole batch), while output
 grows linearly. That gap is free throughput.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `batch_size` | "batch size" | Sequences decoded simultaneously in one forward pass |
-| `step_time` | "step time" | Wall time for one decode step. Grows slowly with batch, not proportionally |
-| `TPOT` | "T-POT" or "time per output token" | `step_time` from a single user's view. The streaming smoothness metric |
-| `TTFT` | "T-T-F-T" or "time to first token" | Prefill + queue wait. Governed by batching *policy*, not batch size |
+| Symbol | What it is |
+|--------|------------|
+| `batch_size` | Sequences decoded simultaneously in one forward pass |
+| `step_time` | Wall time for one decode step. Grows slowly with batch, not proportionally |
+| `TPOT` | `step_time` from a single user's view. The streaming smoothness metric |
+| `TTFT` | Prefill + queue wait. Governed by batching *policy*, not batch size |
 
 **Walk one example.** One GPU, decode-bound, measured step times:
 
@@ -502,19 +502,19 @@ routinely misread:
                           1 in 100 requests took LONGER than 3,000 ms
 ```
 
-**Reading it in plain English.** "p99 is not 'the slow case' — it is the promise you keep 99 times out of 100, and the 1 time you break it is a real user having a real bad experience."
+**What this actually says.** "p99 is not 'the slow case' — it is the promise you keep 99 times out of 100, and the 1 time you break it is a real user having a real bad experience."
 
 Percentiles matter more than averages for LLM serving because the latency distribution is
 violently long-tailed: queueing, prefill of a long prompt, a KV-cache eviction, or a cold
 replica all produce outliers that an average absorbs and hides.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `p50` | "p fifty" (median) | Half of requests are faster. What a typical user feels |
-| `p95` | "p ninety-five" | 1 in 20 requests is slower. The right number for capacity sizing |
-| `p99` | "p ninety-nine" | 1 in 100 is slower. The usual SLA line |
-| `p99.9` | "p ninety-nine point nine" or "three nines" | 1 in 1,000. Where GC pauses and cold starts live |
-| `2 sigma` | "two sigma" | Two standard deviations from the mean. The alerting threshold in Section 12 |
+| Symbol | What it is |
+|--------|------------|
+| `p50` | Half of requests are faster. What a typical user feels |
+| `p95` | 1 in 20 requests is slower. The right number for capacity sizing |
+| `p99` | 1 in 100 is slower. The usual SLA line |
+| `p99.9` | 1 in 1,000. Where GC pauses and cold starts live |
+| `2 sigma` | Two standard deviations from the mean. The alerting threshold in Section 12 |
 
 **Walk one example — why percentiles do not add across a chain.** A request crosses four
 services, each with its own p99. The intuition "p99 of the chain = sum of the p99s" is wrong
@@ -553,20 +553,20 @@ An availability SLA converts to a concrete number of minutes you are permitted t
   burn_rate = observed_bad_minutes / error_budget_minutes
 ```
 
-**Reading it in plain English.** "An SLO of 99.95% is not a promise of perfection — it is a budget of 22 downtime minutes per month that you are allowed, and encouraged, to spend."
+**In plain terms.** "An SLO of 99.95% is not a promise of perfection — it is a budget of 22 downtime minutes per month that you are allowed, and encouraged, to spend."
 
 Framing failure as a *budget* rather than a *violation* is what makes the number actionable:
 budget remaining is the argument for shipping the risky change, and budget exhausted is the
 argument for a change freeze. It turns reliability from an opinion into arithmetic.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `SLI` | "S-L-I" (service level indicator) | The measured number, e.g. "fraction of requests served under 3s" |
-| `SLO` | "S-L-O" (service level objective) | The internal target for that number, e.g. 99.95% |
-| `SLA` | "S-L-A" (service level agreement) | The contractual version, with money attached. Always looser than the SLO |
-| `1 - SLO` | "one minus the S-L-O" | The failure fraction. 99.95% -> 0.0005 |
-| `error budget` | "error budget" | Failure fraction expressed as time or requests. The spendable quantity |
-| `burn rate` | "burn rate" | Budget consumed per unit time. Burn rate 1.0 = exactly on pace to exhaust it |
+| Symbol | What it is |
+|--------|------------|
+| `SLI` | The measured number, e.g. "fraction of requests served under 3s" |
+| `SLO` | The internal target for that number, e.g. 99.95% |
+| `SLA` | The contractual version, with money attached. Always looser than the SLO |
+| `1 - SLO` | The failure fraction. 99.95% -> 0.0005 |
+| `error budget` | Failure fraction expressed as time or requests. The spendable quantity |
+| `burn rate` | Budget consumed per unit time. Burn rate 1.0 = exactly on pace to exhaust it |
 
 **Walk one example.** The case study's 99.95% availability SLA and its 14 failover events:
 
@@ -618,19 +618,19 @@ GPU Memory Budget (A100 80GB serving LLaMA 3 8B in FP16):
   Headroom:                19-30 GB (comfortable)
 ```
 
-**Reading it in plain English.** "GPU memory is a fixed 80 GB drawer: weights take a fixed, known slice, and everything left over is KV cache — which is the only part that grows with traffic, and therefore the only part that can kill you."
+**Read it like this.** "GPU memory is a fixed 80 GB drawer: weights take a fixed, known slice, and everything left over is KV cache — which is the only part that grows with traffic, and therefore the only part that can kill you."
 
 The budget matters because three of the four line items are constants you can compute before
 deploying. Only KV cache is a function of load, so "how much headroom do I have" is really
 "how many more concurrent tokens can I hold."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `INT4` | "int four" | 4-bit weights. Roughly 0.5 bytes per parameter |
-| `FP16` | "F-P sixteen" | 16-bit weights. 2 bytes per parameter |
-| `KV cache` | "K-V cache" | Stored keys and values for every token of every live sequence. The variable term |
-| `utilization %` | "utilization percent" | `used / total`. The 75/85/95% alert ladder is set on this |
-| `headroom` | "headroom" | `total - peak`. Absorbs one long-context request or one batch spike |
+| Symbol | What it is |
+|--------|------------|
+| `INT4` | 4-bit weights. Roughly 0.5 bytes per parameter |
+| `FP16` | 16-bit weights. 2 bytes per parameter |
+| `KV cache` | Stored keys and values for every token of every live sequence. The variable term |
+| `utilization %` | `used / total`. The 75/85/95% alert ladder is set on this |
+| `headroom` | `total - peak`. Absorbs one long-context request or one batch spike |
 
 **Walk one example.** The 70B INT4 budget above, turned into the utilization number the alerts
 actually fire on, and then stress-tested with one long-context arrival:
@@ -772,20 +772,20 @@ class CostTracker:
         self.check_budget(request.metadata["team"], cost)
 ```
 
-**Reading it in plain English.** "Divide each token count by a million to get 'how many millions of tokens', multiply by the per-million price for that direction, and add the two — because input and output tokens are priced differently."
+**What it means.** "Divide each token count by a million to get 'how many millions of tokens', multiply by the per-million price for that direction, and add the two — because input and output tokens are priced differently."
 
 The `/ 1_000_000` is the only subtle part, and it exists purely because providers quote prices
 per million tokens while requests carry raw token counts. Getting this factor wrong by 1,000x
 is the classic cost-dashboard bug — and it fails silently, since the number still looks
 plausible.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `input_tokens` | "input tokens" | Prompt plus system prompt plus retrieved context. Usually the larger count |
-| `output_tokens` | "output tokens" | Generated tokens. Usually 4-10x more expensive per token |
-| `1_000_000` | "one million" | Unit bridge. Converts raw counts into the "per 1M tokens" price unit |
-| `pricing["input"]` | "input price" | Dollars per 1M input tokens. gpt-4o: 2.50 |
-| `pricing["output"]` | "output price" | Dollars per 1M output tokens. gpt-4o: 10.00 |
+| Symbol | What it is |
+|--------|------------|
+| `input_tokens` | Prompt plus system prompt plus retrieved context. Usually the larger count |
+| `output_tokens` | Generated tokens. Usually 4-10x more expensive per token |
+| `1_000_000` | Unit bridge. Converts raw counts into the "per 1M tokens" price unit |
+| `pricing["input"]` | Dollars per 1M input tokens. gpt-4o: 2.50 |
+| `pricing["output"]` | Dollars per 1M output tokens. gpt-4o: 10.00 |
 
 **Walk one example.** The gpt-4o request logged in the tagging block above (1,200 in, 450 out):
 
@@ -1281,20 +1281,20 @@ async def fixed_route_request(prompt: str) -> str:
     raise RuntimeError("All providers unavailable")
 ```
 
-**Reading it in plain English.** "Keep a rolling 30-second scrapbook of every request to a provider, count what fraction failed, and if more than one in ten failed, stop talking to that provider for a minute."
+**Put simply.** "Keep a rolling 30-second scrapbook of every request to a provider, count what fraction failed, and if more than one in ten failed, stop talking to that provider for a minute."
 
 The sliding window is the load-bearing design choice. A lifetime error counter never recovers
 from an old outage, and a fixed reset interval either forgets too fast or too slow. A window
 means the breaker's opinion is always about *right now*.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `window_seconds` | "window seconds" | How far back the breaker remembers. 30s here |
-| `error_threshold` | "error threshold" | Failure fraction that trips the circuit. `0.10` = 10% |
-| `rate` | "rate" | `errors / total` inside the window. Compared against the threshold |
-| `_opened_at` | "opened at" | Timestamp the circuit tripped. `None` means closed |
-| `half_open_probe_interval` | "half open probe interval" | Cooldown before one test request is let through. 60s |
-| `is_open` | "is open" | True = refuse traffic, take the fallback. Open circuit means blocked, as in a broken wire |
+| Symbol | What it is |
+|--------|------------|
+| `window_seconds` | How far back the breaker remembers. 30s here |
+| `error_threshold` | Failure fraction that trips the circuit. `0.10` = 10% |
+| `rate` | `errors / total` inside the window. Compared against the threshold |
+| `_opened_at` | Timestamp the circuit tripped. `None` means closed |
+| `half_open_probe_interval` | Cooldown before one test request is let through. 60s |
+| `is_open` | True = refuse traffic, take the fallback. Open circuit means blocked, as in a broken wire |
 
 **Walk one example.** GPT-4o starts returning 503s; watch the breaker trip and recover:
 
@@ -1404,19 +1404,19 @@ async def shadow_eval_quality(
 | Provider failover events | n/a | 14 in 90 days (avg 38s outage) |
 | Routing accuracy (heuristic) | n/a | 91.4% correct tier |
 
-**Reading it in plain English.** "Every percentage in that table is the same one-line calculation — how far the number moved, divided by where it started — and the blended cost is just each tier's price weighted by how much traffic it caught."
+**The idea behind it.** "Every percentage in that table is the same one-line calculation — how far the number moved, divided by where it started — and the blended cost is just each tier's price weighted by how much traffic it caught."
 
 Reading the table this way matters because the -73.8% headline is not one optimization. It is
 three multiplicative effects (cache removes requests, routing downgrades the survivors, the
 self-hosted tier is 16x cheaper than the tier it replaced) that compound.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `delta %` | "delta percent" | `(after - before) / before x 100`. Negative = improvement for cost/latency |
-| `hit rate` | "hit rate" | Fraction of requests answered from cache without any LLM call |
-| `volume share` | "volume share" | Fraction of remaining requests landing on a given tier |
-| `blended cost` | "blended cost" | Traffic-weighted average price per request across all tiers |
-| `quality delta` | "quality delta" | Routed-model judge score minus reference score. -0.6% here vs a < 1% SLA |
+| Symbol | What it is |
+|--------|------------|
+| `delta %` | `(after - before) / before x 100`. Negative = improvement for cost/latency |
+| `hit rate` | Fraction of requests answered from cache without any LLM call |
+| `volume share` | Fraction of remaining requests landing on a given tier |
+| `blended cost` | Traffic-weighted average price per request across all tiers |
+| `quality delta` | Routed-model judge score minus reference score. -0.6% here vs a < 1% SLA |
 
 **Walk one example.** Reconstruct the cost and latency headlines from the table's own numbers:
 

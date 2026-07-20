@@ -100,19 +100,19 @@ cosine(q, d) = (q · d) / (||q|| x ||d||)
   ||q||  = sqrt(Sigma over i of q_i^2)   <- Euclidean length of the query vector
 ```
 
-**Reading it in plain English.** "Ignore how long the two texts are and how loud their vectors are — compare only the *direction* they point in."
+**The idea behind it.** "Ignore how long the two texts are and how loud their vectors are — compare only the *direction* they point in."
 
 That framing is why cosine, not raw dot product, is the retrieval default. A 30-token sentence and a 400-token paragraph on the same topic produce vectors of very different lengths; dividing by both lengths cancels magnitude out so only topic direction survives.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `q`, `d` | "q", "d" | Query vector and document-chunk vector. Both live in the same 768-dim space |
-| `q · d` | "q dot d" | Dot product. Multiply matching dimensions, add them all up. One number |
-| `Σ` | "sum over" | Add up the term that follows, once per dimension |
-| `q_i` | "q sub i" | The value in dimension `i` of the query vector |
-| `\|\|q\|\|` | "norm of q" / "length of q" | How far the vector reaches from the origin. Always positive |
-| `sqrt` | "square root" | Undoes the squaring, turning summed squares back into a length |
-| result | "cosine similarity" | Lands in `[-1, 1]`. 1 = same direction; 0 = unrelated; -1 = opposite |
+| Symbol | What it is |
+|--------|------------|
+| `q`, `d` | Query vector and document-chunk vector. Both live in the same 768-dim space |
+| `q · d` | Dot product. Multiply matching dimensions, add them all up. One number |
+| `Σ` | Add up the term that follows, once per dimension |
+| `q_i` | The value in dimension `i` of the query vector |
+| `\|\|q\|\|` | How far the vector reaches from the origin. Always positive |
+| `sqrt` | Undoes the squaring, turning summed squares back into a length |
+| result | Lands in `[-1, 1]`. 1 = same direction; 0 = unrelated; -1 = opposite |
 
 **Walk one example.** Toy 3-dimensional vectors so the arithmetic is checkable by hand:
 
@@ -153,24 +153,24 @@ IDF(t) = ln( ---------------- + 1 )
                 n(t) + 0.5
 ```
 
-**Reading it in plain English.** "Score a document by adding up, for every query word it contains, how rare that word is across the whole corpus times how often it appears here — but stop rewarding repetition after a few hits, and don't let long documents win just by being long."
+**Stated plainly.** "Score a document by adding up, for every query word it contains, how rare that word is across the whole corpus times how often it appears here — but stop rewarding repetition after a few hits, and don't let long documents win just by being long."
 
 Three separate ideas are welded into one line, and each one is a knob you can turn. Reading BM25 as "rarity x saturating count x length correction" makes the parameters `k1` and `b` stop being magic numbers.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `Σ` (`t in q`) | "sum over t in q" | Do the whole calculation once per query term, then add the results |
-| `t` | "tee" | One term (word) from the query |
-| `D` | "dee" | The candidate document or chunk being scored |
-| `f(t,D)` | "f of t comma D" / "term frequency" | How many times term `t` occurs inside document `D` |
-| `\|D\|` | "size of D" | Length of this document in tokens |
-| `avgdl` | "average dee ell" | Average document length across the corpus |
-| `N` | "en" | Total number of documents in the corpus |
-| `n(t)` | "n of t" / "document frequency" | How many documents contain term `t` at all |
-| `IDF(t)` | "inverse document frequency" | Rarity weight. Common word -> small; rare word -> large |
-| `ln` | "natural log" | Compresses a huge rarity ratio into a manageable weight |
-| `k1` | "kay one" | Saturation knob. How fast extra repeats stop counting. Typical `1.2`–`2.0` |
-| `b` | "bee" | Length-normalization knob. `0` = ignore length, `1` = fully penalize. Typical `0.75` |
+| Symbol | What it is |
+|--------|------------|
+| `Σ` (`t in q`) | Do the whole calculation once per query term, then add the results |
+| `t` | One term (word) from the query |
+| `D` | The candidate document or chunk being scored |
+| `f(t,D)` | How many times term `t` occurs inside document `D` |
+| `\|D\|` | Length of this document in tokens |
+| `avgdl` | Average document length across the corpus |
+| `N` | Total number of documents in the corpus |
+| `n(t)` | How many documents contain term `t` at all |
+| `IDF(t)` | Rarity weight. Common word -> small; rare word -> large |
+| `ln` | Compresses a huge rarity ratio into a manageable weight |
+| `k1` | Saturation knob. How fast extra repeats stop counting. Typical `1.2`–`2.0` |
+| `b` | Length-normalization knob. `0` = ignore length, `1` = fully penalize. Typical `0.75` |
 
 **What each knob physically does.** `k1` sets the ceiling: as `f(t,D)` grows without bound the fraction converges to `k1 + 1`, so with `k1 = 1.2` no single term can ever contribute more than `2.2 x IDF(t)` no matter how many times it is repeated. `b` scales how much a document's length inflates the denominator: at `b = 0.75` a document four times the average length has its term counts discounted by roughly 3.25x.
 
@@ -226,17 +226,17 @@ Dense score + Sparse score combined via:
     final_score = α × dense_score + (1-α) × sparse_score
 ```
 
-**Reading it in plain English (RRF).** "Forget the scores — nobody can compare a BM25 8.3 to a cosine 0.72. Just ask each retriever for its ranked list, give every document a small vote worth `1/(60 + its position)`, and add the votes up."
+**In plain terms (RRF).** "Forget the scores — nobody can compare a BM25 8.3 to a cosine 0.72. Just ask each retriever for its ranked list, give every document a small vote worth `1/(60 + its position)`, and add the votes up."
 
 The whole design goal is to make *agreement across retrievers* worth more than *dominance within one retriever*. The `k = 60` constant is what buys that, and it is the single most consequential number in a hybrid pipeline.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `Σ` | "sum over" | Add one term per retrieval system the document appeared in |
-| `rank_i` | "rank sub i" | This document's 1-based position in system `i`'s list. Rank 1 = top hit |
-| `k` | "kay" | Damping constant, conventionally `60`. Bigger `k` = flatter votes = agreement matters more |
-| `1/(k + rank)` | "one over k plus rank" | One system's vote. Always small, always positive, always shrinking with rank |
-| `final_score` | "R R F score" | Sum of votes. Ranked descending to produce the fused list |
+| Symbol | What it is |
+|--------|------------|
+| `Σ` | Add one term per retrieval system the document appeared in |
+| `rank_i` | This document's 1-based position in system `i`'s list. Rank 1 = top hit |
+| `k` | Damping constant, conventionally `60`. Bigger `k` = flatter votes = agreement matters more |
+| `1/(k + rank)` | One system's vote. Always small, always positive, always shrinking with rank |
+| `final_score` | Sum of votes. Ranked descending to produce the fused list |
 
 **Walk two ranked lists fusing into one.** Reusing the case study's query, "What is the parental leave policy for VP-level employees?", with `k = 60`:
 
@@ -290,14 +290,14 @@ That flatness is exactly the point. Compare two documents:
 
 **Why the `k` term exists at all.** Delete it and `1/rank` makes the rank-1 document of *any* single system nearly unbeatable — a BM25 lexical fluke that happens to top the sparse list can never be outvoted by a document both systems ranked 4th. Since sparse and dense retrievers fail in different, uncorrelated ways, "both systems liked it" is the strongest available relevance signal, and `k = 60` is the constant that makes the arithmetic respect that. Push `k` far higher (say 1000) and the votes go so flat that rank stops mattering at all and RRF degenerates into "count how many systems retrieved this document."
 
-**Reading it in plain English (weighted combination).** "Rescale both scores onto a shared 0–1 ruler, then take a weighted average where `α` decides how much you trust semantics over keywords."
+**What this says (weighted combination).** "Rescale both scores onto a shared 0–1 ruler, then take a weighted average where `α` decides how much you trust semantics over keywords."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `α` | "alpha" | Dense weight, `0`–`1`. `1.0` = pure dense, `0.0` = pure sparse |
-| `(1-α)` | "one minus alpha" | Sparse weight. The two always add to 1 |
-| `dense_score` | "dense score" | Cosine similarity, natively bounded in `[-1, 1]`, in practice `[0, 1]` |
-| `sparse_score` | "sparse score" | BM25 output, unbounded above, corpus-dependent, typically `0` to `~30` |
+| Symbol | What it is |
+|--------|------------|
+| `α` | Dense weight, `0`–`1`. `1.0` = pure dense, `0.0` = pure sparse |
+| `(1-α)` | Sparse weight. The two always add to 1 |
+| `dense_score` | Cosine similarity, natively bounded in `[-1, 1]`, in practice `[0, 1]` |
+| `sparse_score` | BM25 output, unbounded above, corpus-dependent, typically `0` to `~30` |
 
 **The scale mismatch, walked with numbers.** This is why the normalization step is mandatory and not cosmetic:
 
@@ -483,14 +483,14 @@ With 100-token overlap:
   context_cost = top_k x chunk_size
 ```
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `chunk_size` | "chunk size" | Tokens per chunk. The unit both the embedder and the LLM see |
-| `overlap` | "overlap" | Tokens repeated from the end of the previous chunk into the next |
-| `stride` | "stride" | How far the window advances each step. This, not `chunk_size`, sets the chunk count |
-| `ceil` | "ceiling" | Round up — a partial trailing chunk is still a chunk |
-| `top_k` | "top kay" | How many chunks you inject into the prompt |
-| `duplication` | "duplication rate" | Fraction of your index that is copied text you pay to store and embed |
+| Symbol | What it is |
+|--------|------------|
+| `chunk_size` | Tokens per chunk. The unit both the embedder and the LLM see |
+| `overlap` | Tokens repeated from the end of the previous chunk into the next |
+| `stride` | How far the window advances each step. This, not `chunk_size`, sets the chunk count |
+| `ceil` | Round up — a partial trailing chunk is still a chunk |
+| `top_k` | How many chunks you inject into the prompt |
+| `duplication` | Fraction of your index that is copied text you pay to store and embed |
 
 **Walk one example.** The production settings from §12 — 512-token chunks with 64-token overlap — over a 100,000-token document set, compared against two alternatives:
 
@@ -564,21 +564,21 @@ The three retrieval metrics used throughout this module answer three different q
                IDCG@K                     i=1   log2(i + 1)
 ```
 
-**Reading it in plain English.** "Recall@K asks *did we find it at all* in the top K. MRR asks *how far down was the first good one*. NDCG@K asks *did we put the best ones highest*, graded against the best ordering that was theoretically possible."
+**What the formula is telling you.** "Recall@K asks *did we find it at all* in the top K. MRR asks *how far down was the first good one*. NDCG@K asks *did we put the best ones highest*, graded against the best ordering that was theoretically possible."
 
 They form a ladder of strictness: recall ignores order entirely, MRR looks only at the first hit, NDCG grades the whole ordering. A pipeline can have great recall and terrible NDCG — everything relevant is in the top 20 but buried under noise, which the LLM then has to read past.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `K` | "at kay" | Cutoff. Only the top `K` retrieved results are examined |
-| `mean over q` | "averaged over queries" | Every metric is per-query, then averaged over the eval set |
-| `intersect` | "intersection" | Documents that are both relevant and retrieved. The hits |
-| `rank_of_first` | "rank of the first relevant" | Position (1-based) of the highest-placed correct document |
-| `rel_i` | "rel sub i" | Relevance grade of the doc at position `i`. Binary `0/1`, or graded `0`–`3` |
-| `log2(i + 1)` | "log base two of i plus one" | The positional discount. Deeper position -> bigger divisor -> less credit |
-| `DCG` | "discounted cumulative gain" | Your ordering's score |
-| `IDCG` | "ideal D C G" | Same formula applied to the perfect ordering. The normalizer |
-| `NDCG` | "en D C G" | `DCG/IDCG`, so it always lands in `[0, 1]` and is comparable across queries |
+| Symbol | What it is |
+|--------|------------|
+| `K` | Cutoff. Only the top `K` retrieved results are examined |
+| `mean over q` | Every metric is per-query, then averaged over the eval set |
+| `intersect` | Documents that are both relevant and retrieved. The hits |
+| `rank_of_first` | Position (1-based) of the highest-placed correct document |
+| `rel_i` | Relevance grade of the doc at position `i`. Binary `0/1`, or graded `0`–`3` |
+| `log2(i + 1)` | The positional discount. Deeper position -> bigger divisor -> less credit |
+| `DCG` | Your ordering's score |
+| `IDCG` | Same formula applied to the perfect ordering. The normalizer |
+| `NDCG` | `DCG/IDCG`, so it always lands in `[0, 1]` and is comparable across queries |
 
 **Walk one example.** One query with 3 relevant documents in the corpus; the retriever returns 5, of which positions 2, 3 and 5 are relevant:
 

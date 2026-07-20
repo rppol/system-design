@@ -115,19 +115,19 @@ Benefits:
   - Filters high-quality reasoning chains for training data
 ```
 
-**Reading it in plain English.** "An ORM asks *did you land on the right answer*; a PRM asks *was every step you took a good one* — and then you have to decide how to squash those step scores into one number."
+**The idea behind it.** "An ORM asks *did you land on the right answer*; a PRM asks *was every step you took a good one* — and then you have to decide how to squash those step scores into one number."
 
 That last decision is the load-bearing one and it is almost never stated. The same PRM, with the same step scores, will rank candidate chains in a *different order* depending on whether you aggregate by sum, mean, min, product, or last step. Picking the aggregator is picking what you believe about reasoning.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `s_t` | "s sub t" | The PRM's score for reasoning step `t`. Here: `+0.3, +0.4, +0.4, -0.2` |
-| `T` | "capital T" | How many steps the chain has. Four, in the block above |
-| `sum(s_t)` | "sum of the step scores" | Total credit. Long good chains beat short good chains |
-| `mean(s_t)` | "mean of the step scores" | Average step quality. Length-neutral |
-| `min(s_t)` | "min of the step scores" | The weakest link. One bad step condemns the chain |
-| `prod(p_t)` | "product of the step probabilities" | Chance *every* step is right, if steps are independent |
-| `s_T` | "s sub capital T" | The last step's score only. Cheapest to compute, blindest |
+| Symbol | What it is |
+|--------|------------|
+| `s_t` | The PRM's score for reasoning step `t`. Here: `+0.3, +0.4, +0.4, -0.2` |
+| `T` | How many steps the chain has. Four, in the block above |
+| `sum(s_t)` | Total credit. Long good chains beat short good chains |
+| `mean(s_t)` | Average step quality. Length-neutral |
+| `min(s_t)` | The weakest link. One bad step condemns the chain |
+| `prod(p_t)` | Chance *every* step is right, if steps are independent |
+| `s_T` | The last step's score only. Cheapest to compute, blindest |
 
 **Walk one example.** Chain A is the four-step proof scored in the block above; chain B is a duller chain that never blunders:
 
@@ -177,19 +177,19 @@ Improves accuracy by 5-15% on reasoning tasks
 Useful when you can't afford a full reasoning model but need better reliability
 ```
 
-**Reading it in plain English.** "If the model is right more often than it is wrong in any *one* particular way, then sampling it many times and taking the most common answer is right more often than any single sample."
+**Stated plainly.** "If the model is right more often than it is wrong in any *one* particular way, then sampling it many times and taking the most common answer is right more often than any single sample."
 
 The condition hidden in that sentence is everything. Voting does not make the model smarter — it only cancels *noise*. It cancels nothing at all when the model is wrong the same way every time, and it actively hurts when the model is wrong more often than it is right.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `p` | "p" | Single-chain accuracy. The chance one sampled chain lands on the right answer |
-| `N` | "capital N" | How many chains you sample. The block above uses `N = 10` |
-| `k` | "k" | How many of those `N` chains happened to be correct |
-| `C(N,k)` | "N choose k" | The number of ways to pick which `k` of the `N` chains were the correct ones |
-| `p^k` | "p to the k" | Chance those `k` specific chains are all correct |
-| `(1-p)^(N-k)` | "one minus p, to the N minus k" | Chance the other `N-k` chains are all wrong |
-| `P(vote)` | "P of vote" | `sum over k > N/2 of C(N,k) x p^k x (1-p)^(N-k)` — chance the majority is correct |
+| Symbol | What it is |
+|--------|------------|
+| `p` | Single-chain accuracy. The chance one sampled chain lands on the right answer |
+| `N` | How many chains you sample. The block above uses `N = 10` |
+| `k` | How many of those `N` chains happened to be correct |
+| `C(N,k)` | The number of ways to pick which `k` of the `N` chains were the correct ones |
+| `p^k` | Chance those `k` specific chains are all correct |
+| `(1-p)^(N-k)` | Chance the other `N-k` chains are all wrong |
+| `P(vote)` | `sum over k > N/2 of C(N,k) x p^k x (1-p)^(N-k)` — chance the majority is correct |
 
 **Walk one example.** The block above shows 7 of 10 chains agreeing. With `p = 0.60` and `N = 10`, the majority is correct whenever at least 6 chains are correct:
 
@@ -279,20 +279,20 @@ The "UCB selection" line above is one formula doing all the work. Written out, t
                    branch looked so far"         know about this branch"
 ```
 
-**Reading it in plain English.** "Descend into the child with the best combination of *proven track record* and *unexplored potential* — and let the potential term fade automatically as you gather evidence."
+**What the formula is telling you.** "Descend into the child with the best combination of *proven track record* and *unexplored potential* — and let the potential term fade automatically as you gather evidence."
 
 The reason it is a *sum of two terms* rather than a rule with an if-statement is that the two pressures are never resolved once and for all. Early in the search the second term dominates and MCTS behaves like breadth-first sampling; late in the search the second term has decayed to near-nothing and MCTS behaves like greedy best-first descent. Nobody schedules that transition — it falls out of the arithmetic.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `Q(child)` | "Q of child" | Total reward accumulated by every rollout that passed through this child |
-| `n(child)` | "little n of child" | How many rollouts have passed through this child |
-| `Q/n` | "Q over n" | Mean reward. The **exploitation** term: this branch's observed win rate, 0 to 1 |
-| `N(parent)` | "big N of parent" | How many rollouts have passed through the parent. The total evidence budget spent here |
-| `ln N(parent)` | "natural log of big N" | Grows *slowly* with total search. Doubling the search adds only 0.69 |
-| `ln N / n` | "log N over little n" | Ignorance ratio: much search done overall, little of it here, so look here |
-| `sqrt(...)` | "square root of" | Softens the ratio so a barely-visited node is attractive, not overwhelming |
-| `c` | "c" (the exploration constant) | How much you value curiosity over track record. Typical `sqrt(2) = 1.41` |
+| Symbol | What it is |
+|--------|------------|
+| `Q(child)` | Total reward accumulated by every rollout that passed through this child |
+| `n(child)` | How many rollouts have passed through this child |
+| `Q/n` | Mean reward. The **exploitation** term: this branch's observed win rate, 0 to 1 |
+| `N(parent)` | How many rollouts have passed through the parent. The total evidence budget spent here |
+| `ln N(parent)` | Grows *slowly* with total search. Doubling the search adds only 0.69 |
+| `ln N / n` | Ignorance ratio: much search done overall, little of it here, so look here |
+| `sqrt(...)` | Softens the ratio so a barely-visited node is attractive, not overwhelming |
+| `c` | How much you value curiosity over track record. Typical `sqrt(2) = 1.41` |
 
 **Walk two candidate nodes.** The parent has been visited 100 times. `c = 1.41`. Two children compete:
 
@@ -467,17 +467,17 @@ Key insight: accuracy scales log-linearly with test-time compute
   (up to some task-specific ceiling)
 ```
 
-**Reading it in plain English.** "Every time you *multiply* the thinking compute by ten, accuracy goes up by a *fixed number of points* — not by a fixed percentage, and not by ten times anything."
+**What this actually says.** "Every time you *multiply* the thinking compute by ten, accuracy goes up by a *fixed number of points* — not by a fixed percentage, and not by ten times anything."
 
 Log-linear is a much weaker promise than it sounds, and reading the curve correctly is the difference between a sane inference budget and an unbounded one. The x-axis of the plot above is `1x, 5x, 20x, 100x` — those are equal *visual* spacings for wildly unequal *cost* jumps, which is exactly what "log-linear" encodes.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `C` | "C" | Compute multiplier at inference. The `1x / 5x / 20x / 100x` on the axis |
-| `log10(C)` | "log base ten of C" | How many *tenfold* jumps of compute you have bought. `100x` is 2 |
-| `b` | "b" | Points of accuracy per tenfold jump. The slope of the straight line |
-| `a` | "a" | Accuracy at `C = 1x`. Where the line starts, i.e. the base model |
-| `acc(C)` | "accuracy of C" | `a + b x log10(C)`, until the task ceiling clamps it |
+| Symbol | What it is |
+|--------|------------|
+| `C` | Compute multiplier at inference. The `1x / 5x / 20x / 100x` on the axis |
+| `log10(C)` | How many *tenfold* jumps of compute you have bought. `100x` is 2 |
+| `b` | Points of accuracy per tenfold jump. The slope of the straight line |
+| `a` | Accuracy at `C = 1x`. Where the line starts, i.e. the base model |
+| `acc(C)` | `a + b x log10(C)`, until the task ceiling clamps it |
 
 **Walk one example.** Take a base model at 50% and a slope of 12 points per tenfold jump, and read off the four points the chart plots:
 

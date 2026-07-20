@@ -104,18 +104,18 @@ They are not. Write both sides out and the cost comparison collapses almost imme
   break-even corpus size  C*    = (k x s x p + r) / p  =  k x s + r/p
 ```
 
-**Reading it in plain English.** "Long context makes you pay for the entire corpus on every single
+**The idea behind it.** "Long context makes you pay for the entire corpus on every single
 query; RAG makes you pay for the handful of chunks you retrieved, plus small change for the
 retrieval itself."
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `C` | "C", corpus size | Total tokens you would stuff into the window. The whole knowledge base |
-| `p` | "p", the price | Input price per token. $2.50/1M for GPT-4o = $0.0000025 per token |
-| `k` | "k", top-k | How many chunks the retriever returns. 4 in the Section 5 layout |
-| `s` | "s", chunk size | Average tokens per chunk. 1,750 in the Section 5 layout |
-| `r` | "r", retrieval overhead | Per-query cost of embedding the query plus the vector search. Fractions of a cent |
-| `C*` | "C star" | Corpus size above which RAG is cheaper. Everything larger favours retrieval |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `C` | Total tokens you would stuff into the window. The whole knowledge base |
+| `p` | Input price per token. $2.50/1M for GPT-4o = $0.0000025 per token |
+| `k` | How many chunks the retriever returns. 4 in the Section 5 layout |
+| `s` | Average tokens per chunk. 1,750 in the Section 5 layout |
+| `r` | Per-query cost of embedding the query plus the vector search. Fractions of a cent |
+| `C*` | Corpus size above which RAG is cheaper. Everything larger favours retrieval |
 
 **Walk one example.** GPT-4o pricing, the `k = 4` and `s = 1,750` from the Section 5 budget:
 
@@ -211,7 +211,7 @@ the context assembler in Section 6 enforces before it will make the call:
   and    slack     = total - sum(zones) - output_reserve
 ```
 
-**Reading it in plain English.** "Everything you put in, plus room for everything the model wants
+**Stated plainly.** "Everything you put in, plus room for everything the model wants
 to say back, has to fit in the window — and you must decide the split before you start filling, not
 after you overflow."
 
@@ -219,13 +219,13 @@ The `output_reserve` term is what separates context engineering from just trunca
 window is shared between input and output; a budget that only counts input is a budget that
 produces truncated answers under exactly the conditions where the answer matters most.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `total` | "total" | The model's full context window. 32,000 here; 128k on GPT-4o, 1M+ on Gemini 1.5 Pro |
-| `sum(zones)` | "sum of the zones" | Everything you send. Input tokens, billed at the input rate |
-| `output_reserve` | "output reserve" | Tokens held back, unspent, for the completion. Pitfall 6 is forgetting this |
-| `slack` | "slack" | Unallocated headroom. Your absorber for a long user turn or a mis-estimated chunk |
-| `<=` | "must be less than or equal to" | A hard wall. Cross it and the API returns a context-length error, not a degraded answer |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `total` | The model's full context window. 32,000 here; 128k on GPT-4o, 1M+ on Gemini 1.5 Pro |
+| `sum(zones)` | Everything you send. Input tokens, billed at the input rate |
+| `output_reserve` | Tokens held back, unspent, for the completion. Pitfall 6 is forgetting this |
+| `slack` | Unallocated headroom. Your absorber for a long user turn or a mis-estimated chunk |
+| `<=` | A hard wall. Cross it and the API returns a context-length error, not a degraded answer |
 
 **Walk one example.** The exact 32k allocation drawn above, added up zone by zone against the
 `ContextBudget` dataclass in Section 6:
@@ -283,20 +283,20 @@ average across the curve:
   lift        = E[A | ranked placement] - E[A | random placement]
 ```
 
-**Reading it in plain English.** "If you do not control where the answer lands, you get the average
+**What the formula is telling you.** "If you do not control where the answer lands, you get the average
 of the whole curve; if your reranker puts it first, you get the peak of the curve — and the gap
 between those two is free accuracy."
 
 This reframes reranking. A reranker is usually sold as "finds better documents." Its larger effect
 in a long context is positional: it decides *where in the U-curve* the right document sits.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `i` | "i", the position | Which slot in the retrieved list the key document occupies. 1 = first, 20 = last |
-| `A(i)` | "A of i" | Measured accuracy at that slot. 92% at i=1, 54% at i=10, 90% at i=20 |
-| `P(...)` | "probability that" | Your placement policy. Random ordering = 1/20 everywhere; a good reranker concentrates it at i=1 |
-| `E[A]` | "expected A" | Accuracy averaged over where the doc actually lands. The number your eval harness reports |
-| `lift` | "lift" | Accuracy gained purely by reordering. No new documents, no bigger model, no extra tokens |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `i` | Which slot in the retrieved list the key document occupies. 1 = first, 20 = last |
+| `A(i)` | Measured accuracy at that slot. 92% at i=1, 54% at i=10, 90% at i=20 |
+| `P(...)` | Your placement policy. Random ordering = 1/20 everywhere; a good reranker concentrates it at i=1 |
+| `E[A]` | Accuracy averaged over where the doc actually lands. The number your eval harness reports |
+| `lift` | Accuracy gained purely by reordering. No new documents, no bigger model, no extra tokens |
 
 **Walk one example.** 20 retrieved documents, one of which contains the answer, using the five
 sampled points from the chart above as the curve:
@@ -525,17 +525,17 @@ summarizer call pays for itself:
   break-even requests  N*  = summarizer_cost / saving_per_request, rounded UP
 ```
 
-**Reading it in plain English.** "Pay a cheap model once to shrink the history, then collect the
+**What this actually says.** "Pay a cheap model once to shrink the history, then collect the
 savings on every expensive call afterwards — and the summary only has to survive a couple of turns
 to be worth it."
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `R` | "R", the compression ratio | How many times smaller the history got. `5x` means 5,000 tokens became 1,000 |
-| `p_small` | "p small" | Price of the summarizer. gpt-4o-mini at $0.15/1M — 17x cheaper than the main model |
-| `p_main` | "p main" | Price of the model doing the real work. GPT-4o at $2.50/1M |
-| `N*` | "N star" | Turns the compacted history must survive before the summarizer call is repaid |
-| one time | "amortized" | The summary is computed once and reused on every subsequent turn — that is the whole economics |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `R` | How many times smaller the history got. `5x` means 5,000 tokens became 1,000 |
+| `p_small` | Price of the summarizer. gpt-4o-mini at $0.15/1M — 17x cheaper than the main model |
+| `p_main` | Price of the model doing the real work. GPT-4o at $2.50/1M |
+| `N*` | Turns the compacted history must survive before the summarizer call is repaid |
+| one time | The summary is computed once and reused on every subsequent turn — that is the whole economics |
 
 **Walk one example.** A 40-turn support session at 500 tokens per turn, compacted to fit the
 6,000-token history zone from the Section 5 budget:

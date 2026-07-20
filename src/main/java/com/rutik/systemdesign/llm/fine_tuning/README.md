@@ -60,21 +60,21 @@ Forward pass: h = W_frozen × x + (B × A) × x × scaling_factor
   scaling_factor = alpha / r  (alpha is a hyperparameter)
 ```
 
-**Reading it in plain English.** "Don't edit the giant weight matrix. Leave it frozen and bolt a skinny detour beside it — squeeze the input down to `r` numbers, expand it back out, and add the result on top."
+**The idea behind it.** "Don't edit the giant weight matrix. Leave it frozen and bolt a skinny detour beside it — squeeze the input down to `r` numbers, expand it back out, and add the result on top."
 
 The whole saving comes from the squeeze. A `d × k` matrix has `d × k` knobs; a squeeze-then-expand pair has only `r × (d + k)`. When `r` is tiny next to `d` and `k`, that is a rounding error's worth of parameters — and it is still a full-shape `d × k` update by the time it reaches the output.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `W` | "W", or "the frozen weight" | The pre-trained `d × k` projection. Never receives a gradient |
-| `ΔW` | "delta W" | The change fine-tuning wants to make to `W`. LoRA never stores this — it stores its two factors |
-| `A` | "A", the down-projection | `r × k`. Squeezes a `k`-dim input into `r` numbers. Random-init, so gradients can flow on step 1 |
-| `B` | "B", the up-projection | `d × r`. Expands those `r` numbers back to `d`. Zero-init, so `BA = 0` and training starts exactly at the base model |
-| `r` | "rank r" | How many numbers survive the squeeze. Typically 4–64 |
-| `d`, `k` | "d by k" | Output rows, input columns of the layer being adapted |
-| `α` | "alpha" | Scaling numerator. Sets how loud the detour is relative to the frozen path |
-| `α/r` | "alpha over r" | The volume knob actually applied to `BA` before it is added |
-| `BA` | "B times A" | The reconstructed update. Shape `d × k`, but rank at most `r` |
+| Symbol | What it is |
+|--------|------------|
+| `W` | The pre-trained `d × k` projection. Never receives a gradient |
+| `ΔW` | The change fine-tuning wants to make to `W`. LoRA never stores this — it stores its two factors |
+| `A` | `r × k`. Squeezes a `k`-dim input into `r` numbers. Random-init, so gradients can flow on step 1 |
+| `B` | `d × r`. Expands those `r` numbers back to `d`. Zero-init, so `BA = 0` and training starts exactly at the base model |
+| `r` | How many numbers survive the squeeze. Typically 4–64 |
+| `d`, `k` | Output rows, input columns of the layer being adapted |
+| `α` | Scaling numerator. Sets how loud the detour is relative to the frozen path |
+| `α/r` | The volume knob actually applied to `BA` before it is added |
+| `BA` | The reconstructed update. Shape `d × k`, but rank at most `r` |
 
 **Walk one example.** One `q_proj` layer of a Llama-shaped 7B model, `d = k = 4096`:
 
@@ -142,17 +142,17 @@ LoRA adapters: still trained in BF16
   QLoRA:           ~6GB  (frozen 3.5GB in 4-bit + LoRA adapters ~0.1GB)
 ```
 
-**Reading it in plain English.** "The frozen base model is only ever read, never updated — so store it in a crushed 4-bit format and decompress each block on the fly. Only the tiny trainable detour keeps full precision."
+**Stated plainly.** "The frozen base model is only ever read, never updated — so store it in a crushed 4-bit format and decompress each block on the fly. Only the tiny trainable detour keeps full precision."
 
 The asymmetry is the point. Quantization error is fatal for weights you are *optimizing* (gradients get rounded into nothing), and cheap for weights you are only *multiplying by*. LoRA already made the trainable set tiny, which is exactly what makes it safe to crush everything else.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| NF4 | "N-F-four", NormalFloat 4-bit | 16 code points spaced so they are equally likely under a normal distribution — matched to how pre-trained weights are actually distributed |
-| block size 64 | "blocks of sixty-four" | Weights are quantized in runs of 64, each with its own scale. Small blocks keep one outlier from wrecking a whole tensor |
-| absmax scale | "abs-max", `c` | The largest magnitude in a block. Divide by it to map the block onto NF4's range; multiply back to dequantize |
-| double quantization | "double quant", DQ | Quantizing the *scales* themselves — a second pass over the `c` values |
-| paged optimizer | "paged optimizer" | Adam states spill to CPU RAM on a memory spike instead of OOM-ing |
+| Symbol | What it is |
+|--------|------------|
+| NF4 | 16 code points spaced so they are equally likely under a normal distribution — matched to how pre-trained weights are actually distributed |
+| block size 64 | Weights are quantized in runs of 64, each with its own scale. Small blocks keep one outlier from wrecking a whole tensor |
+| absmax scale | The largest magnitude in a block. Divide by it to map the block onto NF4's range; multiply back to dequantize |
+| double quantization | Quantizing the *scales* themselves — a second pass over the `c` values |
+| paged optimizer | Adam states spill to CPU RAM on a memory spike instead of OOM-ing |
 
 **Walk one example.** A 7B base model, then the same arithmetic on 65B:
 
@@ -357,17 +357,17 @@ Rule of thumb: start with r=16, alpha=32 (alpha = 2×r is common)
 
 ### Trainable vs Frozen Parameter Ratio
 
-**Reading it in plain English.** "Count how many LoRA numbers you actually created, divide by the model size, and that fraction is the only thing your optimizer has to carry."
+**What the formula is telling you.** "Count how many LoRA numbers you actually created, divide by the model size, and that fraction is the only thing your optimizer has to carry."
 
 The percentages in the table above are not a property of `r` alone — they depend just as much on *how many modules* you attach adapters to. Doubling the target-module list doubles the trainable count at fixed rank.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `L` | "L", or "number of layers" | Transformer blocks. 32 for a 7B Llama-shaped model |
-| `m` | "m", modules per layer | How many projections you attached LoRA to (2 for q+v, 7 for full PEFT) |
-| `d_model` | "d model" | Hidden width. 4096 for 7B |
-| `d_ff` | "d f f" | FFN intermediate width. 11008 for 7B — note it is *not* 4096, so MLP adapters cost more |
-| `r x (d + k)` | "r times d plus k" | Params for one adapter pair. The per-module unit of cost |
+| Symbol | What it is |
+|--------|------------|
+| `L` | Transformer blocks. 32 for a 7B Llama-shaped model |
+| `m` | How many projections you attached LoRA to (2 for q+v, 7 for full PEFT) |
+| `d_model` | Hidden width. 4096 for 7B |
+| `d_ff` | FFN intermediate width. 11008 for 7B — note it is *not* 4096, so MLP adapters cost more |
+| `r x (d + k)` | Params for one adapter pair. The per-module unit of cost |
 
 **Walk one example.** 7B model (`L = 32`, `d_model = 4096`, `d_ff = 11008`, 6.74B total), all at `r = 16`:
 
@@ -391,17 +391,17 @@ The MLP rows are the surprise: `gate/up/down` cost 1.84x an attention adapter ea
 
 ### Effective Batch Size and Gradient Accumulation
 
-**Reading it in plain English.** "Your GPU can only hold 4 examples at once, so accumulate the gradients from 8 micro-batches before stepping the optimizer — the update is then statistically identical to a batch of 32 you could never fit."
+**What this actually says.** "Your GPU can only hold 4 examples at once, so accumulate the gradients from 8 micro-batches before stepping the optimizer — the update is then statistically identical to a batch of 32 you could never fit."
 
 Gradient accumulation trades wall-clock for memory. Activations are freed after each micro-batch's backward pass; only the gradient buffer persists, and its size depends on parameter count, not batch size.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `b` | "micro-batch size" | Sequences per forward pass. Bounded by activation memory |
-| `G` | "grad accum steps" | Backward passes performed before one `optimizer.step()` |
-| `N` | "number of GPUs" | Data-parallel replicas; each contributes its own micro-batches |
-| `B_eff` | "effective batch" | `b x G x N`. The number the learning rate should actually be tuned against |
-| `T` | "tokens per step" | `B_eff x seq_len`. The unit training curves are really measured in |
+| Symbol | What it is |
+|--------|------------|
+| `b` | Sequences per forward pass. Bounded by activation memory |
+| `G` | Backward passes performed before one `optimizer.step()` |
+| `N` | Data-parallel replicas; each contributes its own micro-batches |
+| `B_eff` | `b x G x N`. The number the learning rate should actually be tuned against |
+| `T` | `B_eff x seq_len`. The unit training curves are really measured in |
 
 **Walk one example.** The §14 SQL config — `batch_size: 4`, `gradient_accumulation: 8`, 1x A100, 5400 train examples, 3 epochs, 1024-token sequences:
 

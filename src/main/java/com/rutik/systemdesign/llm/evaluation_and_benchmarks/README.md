@@ -101,7 +101,7 @@ pass@k = 1 - C(n - c, k) / C(n, k)
   C(a, b) = "a choose b" = number of ways to pick b items from a
 ```
 
-**Reading it in plain English.** "Instead of asking 'did it pass?', ask 'if I drew k of my n
+**The idea behind it.** "Instead of asking 'did it pass?', ask 'if I drew k of my n
 attempts at random, what is the chance I would have drawn at least one working solution?'"
 
 The formula computes the *opposite* event and subtracts it from 1: `C(n-c, k)` counts the draws
@@ -110,14 +110,14 @@ that count into the probability of drawing k duds. One minus that is "at least o
 generate `n` far larger than `k` (the paper uses n = 200) so the estimate is stable; estimating
 pass@10 from exactly 10 samples would give you a noisy 0-or-1 answer per problem.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `n` | "n" | How many completions you actually sampled per problem. Bigger n = less noisy estimate |
-| `c` | "c" | How many of those n completions passed every unit test |
-| `k` | "k" | How many attempts the *product* gets to show the user. This is the number you report |
-| `C(n, k)` | "n choose k" | Count of distinct k-sized picks from n items, order ignored |
-| `C(n-c, k)` | "n minus c choose k" | Count of k-sized picks that land entirely in the failing pile |
-| `C(n-c,k)/C(n,k)` | "the ratio" | Probability all k draws fail. Subtract from 1 to get "at least one passes" |
+| Symbol | What it is |
+|--------|------------|
+| `n` | How many completions you actually sampled per problem. Bigger n = less noisy estimate |
+| `c` | How many of those n completions passed every unit test |
+| `k` | How many attempts the *product* gets to show the user. This is the number you report |
+| `C(n, k)` | Count of distinct k-sized picks from n items, order ignored |
+| `C(n-c, k)` | Count of k-sized picks that land entirely in the failing pile |
+| `C(n-c,k)/C(n,k)` | Probability all k draws fail. Subtract from 1 to get "at least one passes" |
 
 **Walk one example.** One HumanEval problem, n = 20 samples drawn, c = 6 of them pass:
 
@@ -203,7 +203,7 @@ Rating update:    R_A' = R_A + K x (S_A - E_A)
   K        = step size ("K-factor")
 ```
 
-**Reading it in plain English.** "Guess how likely each model was to win from their current
+**Stated plainly.** "Guess how likely each model was to win from their current
 ratings, then move each rating by how much the real result surprised you."
 
 The whole system is a surprise meter. Beating an opponent you were already expected to beat moves
@@ -211,16 +211,16 @@ you barely at all; beating one you were expected to lose to moves you a lot. Tha
 Elo self-correcting on a leaderboard where different models are compared wildly different numbers
 of times — a model with few votes drifts fast toward its true level, then settles.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `R_A` | "R sub A" | Model A's current rating. Only *differences* between ratings mean anything |
-| `R_B - R_A` | "the rating gap" | How far apart the two models are. 400 points = 10:1 predicted odds |
-| `400` | "four hundred" | The scale constant that *defines* what one Elo point is worth. Pure convention |
-| `10^(x/400)` | "ten to the x over four hundred" | Turns a rating gap into an odds ratio |
-| `E_A` | "E sub A" | Predicted win probability for A, between 0 and 1. `E_A + E_B = 1` always |
-| `S_A` | "S sub A" | What actually happened: 1, 0.5, or 0 |
-| `S_A - E_A` | "the surprise" | Result minus prediction. Positive = did better than expected |
-| `K` | "the K-factor" | How many rating points one full unit of surprise is worth. Chess uses 32 |
+| Symbol | What it is |
+|--------|------------|
+| `R_A` | Model A's current rating. Only *differences* between ratings mean anything |
+| `R_B - R_A` | How far apart the two models are. 400 points = 10:1 predicted odds |
+| `400` | The scale constant that *defines* what one Elo point is worth. Pure convention |
+| `10^(x/400)` | Turns a rating gap into an odds ratio |
+| `E_A` | Predicted win probability for A, between 0 and 1. `E_A + E_B = 1` always |
+| `S_A` | What actually happened: 1, 0.5, or 0 |
+| `S_A - E_A` | Result minus prediction. Positive = did better than expected |
+| `K` | How many rating points one full unit of surprise is worth. Chess uses 32 |
 
 **Walk one match.** GPT-4o at 1290 versus Claude 3.5 Sonnet at 1310, from the table above. One
 arena vote comes in and the user picks GPT-4o:
@@ -301,7 +301,7 @@ context_precision = mean over relevant ranks r of  Precision@r
 context_recall    = (ground-truth sentences attributable to context) / (ground-truth sentences)
 ```
 
-**Reading it in plain English.** "Faithfulness asks 'did you make anything up?', answer relevancy
+**What the formula is telling you.** "Faithfulness asks 'did you make anything up?', answer relevancy
 asks 'did you answer the question I asked?', context precision asks 'is the good stuff near the
 top?', and context recall asks 'did you fetch everything you needed?'"
 
@@ -311,14 +311,14 @@ of the pipeline to fix. Low recall with high faithfulness means the model is bei
 bad context — fix retrieval. High recall with low faithfulness means the model is ignoring good
 context and hallucinating — fix the prompt or the model.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| claim | "claim" | One atomic factual statement the judge splits the answer into |
-| `cosine(a, b)` | "cosine similarity of a and b" | Angle between two embeddings. 1 = same direction, 0 = unrelated |
-| `question_i` | "question sub i" | A question the judge *reverse-engineers* from the answer alone |
-| `Precision@r` | "precision at r" | Of the top r retrieved chunks, what fraction were relevant |
-| "attributable" | "attributable" | The judge can point at a context sentence that supports this ground-truth sentence |
-| mean over relevant ranks | "average over the hits" | Only positions holding a relevant chunk contribute to the average |
+| Symbol | What it is |
+|--------|------------|
+| claim | One atomic factual statement the judge splits the answer into |
+| `cosine(a, b)` | Angle between two embeddings. 1 = same direction, 0 = unrelated |
+| `question_i` | A question the judge *reverse-engineers* from the answer alone |
+| `Precision@r` | Of the top r retrieved chunks, what fraction were relevant |
+| "attributable" | The judge can point at a context sentence that supports this ground-truth sentence |
+| mean over relevant ranks | Only positions holding a relevant chunk contribute to the average |
 
 **Walk one example.** One question, 5 chunks retrieved, relevant ones at ranks 1, 2, and 4:
 
@@ -569,7 +569,7 @@ with the usual alpha = 0.05 (two-sided) and 80% power:
   -> n approximately 16 x p(1 - p) / delta^2
 ```
 
-**Reading it in plain English.** "The number of comparisons you need grows with how noisy each
+**What this actually says.** "The number of comparisons you need grows with how noisy each
 comparison is, and explodes as the square of how small an effect you are trying to see."
 
 The `delta^2` in the denominator is the part people get wrong in planning meetings. Halving the
@@ -577,15 +577,15 @@ effect you want to detect does not double the sample — it quadruples it. That 
 why "we'll just eyeball 200 comparisons" fails for LLM A/B tests and why chasing a 2% win-rate
 improvement is a fundamentally different project from chasing a 10% one.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `n` | "n" | Comparisons needed *per variant*, so budget 2n judge calls total |
-| `alpha` | "alpha" | False-positive rate you accept. 0.05 = "1 in 20 chance I cry wolf" |
-| `z_(alpha/2)` | "z alpha over two" | 1.96 — how many standard errors out the 95% cutoff sits |
-| `beta` | "beta" | False-negative rate. Power = `1 - beta`; 80% power means beta = 0.20 |
-| `z_beta` | "z beta" | 0.84 — the extra margin needed to *reliably see* a real effect, not just not-deny it |
-| `p` | "p" | Baseline win rate. `p(1-p)` is the variance of a coin flip, maximal at p = 0.5 |
-| `delta` | "delta" | The smallest win-rate lift you care about detecting. Squared in the denominator |
+| Symbol | What it is |
+|--------|------------|
+| `n` | Comparisons needed *per variant*, so budget 2n judge calls total |
+| `alpha` | False-positive rate you accept. 0.05 = "1 in 20 chance I cry wolf" |
+| `z_(alpha/2)` | 1.96 — how many standard errors out the 95% cutoff sits |
+| `beta` | False-negative rate. Power = `1 - beta`; 80% power means beta = 0.20 |
+| `z_beta` | 0.84 — the extra margin needed to *reliably see* a real effect, not just not-deny it |
+| `p` | Baseline win rate. `p(1-p)` is the variance of a coin flip, maximal at p = 0.5 |
+| `delta` | The smallest win-rate lift you care about detecting. Squared in the denominator |
 
 **Walk one example.** Pairwise A/B, baseline win rate `p = 0.50` (a true coin flip — the
 worst case, maximum variance):
@@ -662,7 +662,7 @@ proportion is:
   interval = center +/- hw          (z = 1.96 for 95% confidence)
 ```
 
-**Reading it in plain English.** "Take your observed win rate, drag it a little toward 50/50
+**In plain terms.** "Take your observed win rate, drag it a little toward 50/50
 because small samples lie, and put an error bar around it that stays inside 0 and 1."
 
 The shrink-toward-the-middle is the whole reason to prefer Wilson over the textbook
@@ -670,15 +670,15 @@ The shrink-toward-the-middle is the whole reason to prefer Wilson over the textb
 hits 0 or 1 — 20 comparisons, 20 wins, and it reports "win rate is exactly 100%, no uncertainty,"
 which is exactly the situation where you are least sure of anything.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `p_hat` | "p hat" | The *observed* win rate. The hat means "estimated from data", not the true value |
-| `n` | "n" | Number of comparisons that produced `p_hat` |
-| `z` | "z" | 1.96 for 95% confidence. Widen to 2.576 if you want 99% |
-| `z^2/(2n)` | "z squared over two n" | The nudge toward 0.5. Shrinks as n grows, vanishing on large samples |
-| `1 + z^2/n` | "the shrink factor" | Divides everything, pulling the whole interval inward for small n |
-| `sqrt(...)` | "square root of" | Converts variance back to the units of the win rate itself |
-| `hw` | "half width" | Half the error bar. Report `center +/- hw` |
+| Symbol | What it is |
+|--------|------------|
+| `p_hat` | The *observed* win rate. The hat means "estimated from data", not the true value |
+| `n` | Number of comparisons that produced `p_hat` |
+| `z` | 1.96 for 95% confidence. Widen to 2.576 if you want 99% |
+| `z^2/(2n)` | The nudge toward 0.5. Shrinks as n grows, vanishing on large samples |
+| `1 + z^2/n` | Divides everything, pulling the whole interval inward for small n |
+| `sqrt(...)` | Converts variance back to the units of the win rate itself |
+| `hw` | Half the error bar. Report `center +/- hw` |
 
 **Walk one example.** Variant B won 530 of 1,000 comparisons, so `p_hat = 0.530`:
 
@@ -821,7 +821,7 @@ METEOR  = F_mean x (1 - penalty)
   penalty = 0.5 x (chunks / matches)^3        <- chunks = contiguous runs of matched words
 ```
 
-**Reading it in plain English.** "BLEU asks 'how much of what you wrote appears in the reference?'
+**Read it like this.** "BLEU asks 'how much of what you wrote appears in the reference?'
 (precision, so it needs a brevity penalty or you'd game it by writing three words). ROUGE flips
 that and asks 'how much of the reference did you cover?' (recall, so it needs a length cap or
 you'd game it by writing everything). METEOR asks the same question but punishes you for
@@ -831,17 +831,17 @@ The precision/recall split is why BLEU became the translation metric and ROUGE t
 metric. A translation that omits half the sentence is broken, so you police length; a summary that
 omits half the source is doing its job, so you police coverage instead.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `p_n` | "p sub n" | Fraction of the candidate's n-grams found in the reference. `p_1` = single words |
-| `sum_{n=1..4}` | "sum over n from one to four" | Add up the log precisions for 1-, 2-, 3-, 4-grams |
-| `w_n` | "w sub n" | Weight per n-gram order. Uniform 0.25 each in standard BLEU-4 |
-| `exp(sum w_n log p_n)` | "the geometric mean" | Multiplying the p_n and taking the 4th root. One zero -> whole score zero |
-| `BP` | "the brevity penalty" | A multiplier <= 1 that punishes candidates shorter than the reference |
-| `c`, `r` | "c and r" | Candidate length, reference length, in tokens |
-| `LCS` | "longest common subsequence" | Longest word sequence appearing in both, order preserved, gaps allowed |
-| `F_mean` | "F mean" | METEOR's recall-heavy harmonic mean. The 9 makes recall count 9x precision |
-| chunks | "chunks" | Number of contiguous matched runs. 1 chunk = perfect order, many chunks = scrambled |
+| Symbol | What it is |
+|--------|------------|
+| `p_n` | Fraction of the candidate's n-grams found in the reference. `p_1` = single words |
+| `sum_{n=1..4}` | Add up the log precisions for 1-, 2-, 3-, 4-grams |
+| `w_n` | Weight per n-gram order. Uniform 0.25 each in standard BLEU-4 |
+| `exp(sum w_n log p_n)` | Multiplying the p_n and taking the 4th root. One zero -> whole score zero |
+| `BP` | A multiplier <= 1 that punishes candidates shorter than the reference |
+| `c`, `r` | Candidate length, reference length, in tokens |
+| `LCS` | Longest word sequence appearing in both, order preserved, gaps allowed |
+| `F_mean` | METEOR's recall-heavy harmonic mean. The 9 makes recall count 9x precision |
+| chunks | Number of contiguous matched runs. 1 chunk = perfect order, many chunks = scrambled |
 
 **Walk one example.** One candidate of `c = 9` tokens against a reference of `r = 12` tokens, with
 7 unigram matches forming 3 contiguous chunks, and an LCS of length 7:
@@ -889,22 +889,22 @@ The intrinsic metric reported for base models, before any task benchmark:
                        N  i=1
 ```
 
-**Reading it in plain English.** "On average, how many equally-likely words was the model torn
+**What it means.** "On average, how many equally-likely words was the model torn
 between at each step? Lower is better; 1 would mean perfect certainty."
 
 Perplexity is the exponential of average cross-entropy loss, which is why it is essentially free —
 it is your training loss, re-expressed in a unit humans can reason about. "Loss 1.10" means
 nothing intuitively; "the model was choosing among about 3 options per token" does.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `PPL` | "perplexity" | Effective branching factor: how many options the model was hedging across |
-| `N` | "N" | Number of tokens scored |
-| `sum_{i=1..N}` | "sum over all tokens" | Add up the log-probabilities the model assigned to the true tokens |
-| `p(x_i \| x_<i)` | "probability of x sub i given everything before it" | The model's confidence in the token that actually came next |
-| `log p(...)` | "log prob" | Always negative (probabilities < 1). Very wrong -> very large negative |
-| `-(1/N) sum` | "negative mean log prob" | This *is* cross-entropy loss, in nats |
-| `exp(...)` | "e to the" | Undoes the log, converting nats back into a token count |
+| Symbol | What it is |
+|--------|------------|
+| `PPL` | Effective branching factor: how many options the model was hedging across |
+| `N` | Number of tokens scored |
+| `sum_{i=1..N}` | Add up the log-probabilities the model assigned to the true tokens |
+| `p(x_i \| x_<i)` | The model's confidence in the token that actually came next |
+| `log p(...)` | Always negative (probabilities < 1). Very wrong -> very large negative |
+| `-(1/N) sum` | This *is* cross-entropy loss, in nats |
+| `exp(...)` | Undoes the log, converting nats back into a token count |
 
 **Walk one example.** Five tokens, with the model assigning these probabilities to the tokens that
 actually appeared:
@@ -945,7 +945,7 @@ time" claim need chance-correction before they mean anything:
     p_e uses the overall proportion of each category across ALL raters.
 ```
 
-**Reading it in plain English.** "Of the agreement that was actually available to be earned, what
+**Put simply.** "Of the agreement that was actually available to be earned, what
 fraction did the raters earn? Two people who both label everything 'pass' agree 100% of the time
 and have learned nothing."
 
@@ -954,14 +954,14 @@ agreement is inflated by whatever the base rate happens to be, and eval sets are
 imbalanced — most responses are fine — so raw agreement on a 90%-pass set starts near 0.90 before
 either annotator thinks at all.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `kappa` | "kappa" | Chance-corrected agreement. 1 = perfect, 0 = no better than chance, < 0 = worse |
-| `p_o` | "p observed" | The raw agreement rate. The number people quote and shouldn't |
-| `p_e` | "p expected" | Agreement you'd get if both raters guessed independently at their own base rates |
-| `p_o - p_e` | "agreement actually earned" | How far past chance the raters got |
-| `1 - p_e` | "agreement available to earn" | The headroom. Small when the labels are lopsided |
-| `sum over categories` | "sum over the labels" | Multiply each label's two marginal rates, then add across labels |
+| Symbol | What it is |
+|--------|------------|
+| `kappa` | Chance-corrected agreement. 1 = perfect, 0 = no better than chance, < 0 = worse |
+| `p_o` | The raw agreement rate. The number people quote and shouldn't |
+| `p_e` | Agreement you'd get if both raters guessed independently at their own base rates |
+| `p_o - p_e` | How far past chance the raters got |
+| `1 - p_e` | The headroom. Small when the labels are lopsided |
+| `sum over categories` | Multiply each label's two marginal rates, then add across labels |
 
 **Walk one example.** 100 responses double-labeled pass/fail. The two raters gave the same verdict
 on 78 of them. Rater A said "pass" 70 times, rater B said "pass" 74 times:

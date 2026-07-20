@@ -111,21 +111,21 @@ you actually pay is a blend of the cached price and the full price, weighted by 
   savings           S = 1 - E / p_full
 ```
 
-**Reading it in plain English.** "Your real token price is not the list price and it is not the
+**The idea behind it.** "Your real token price is not the list price and it is not the
 cached price — it is the two averaged together, weighted by how often you actually hit."
 
 That framing matters because teams quote the provider's 90% figure as if it were the saving. It is
 the saving *on the tokens that hit*. Hit rate is the only lever you control; the discount is a
 constant handed to you.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `h` | "h", the hit rate | Fraction of input tokens served from cache. A number from 0 to 1 |
-| `1 - h` | "one minus h", the miss rate | The share you still pay full freight on. Always the expensive half |
-| `p_cached` | "p cached" | Price per 1M cache-*read* tokens. $0.30/1M on Claude, $1.25/1M on GPT-4o |
-| `p_full` | "p full" | List price per 1M uncached input tokens. The number on the pricing page |
-| `E` | "E", effective price | The blended price per 1M — the number that actually shows up on the invoice |
-| `S` | "S", savings | How much of the list price you avoided. What you should report, not the discount |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `h` | Fraction of input tokens served from cache. A number from 0 to 1 |
+| `1 - h` | The share you still pay full freight on. Always the expensive half |
+| `p_cached` | Price per 1M cache-*read* tokens. $0.30/1M on Claude, $1.25/1M on GPT-4o |
+| `p_full` | List price per 1M uncached input tokens. The number on the pricing page |
+| `E` | The blended price per 1M — the number that actually shows up on the invoice |
+| `S` | How much of the list price you avoided. What you should report, not the discount |
 
 **Walk one example.** The 70% prompt cache hit rate from the cost anchor in Section 1, priced on
 both providers:
@@ -169,15 +169,15 @@ break-even:
   break-even reads    N*   = (p_write - p_full) / (p_full - p_read), rounded UP
 ```
 
-**Reading it in plain English.** "You overpaid a little to write the cache; how many reads does it
+**Stated plainly.** "You overpaid a little to write the cache; how many reads does it
 take to earn that back?"
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `p_write` | "p write" | Cache-*creation* price. On Claude, 1.25x the base input price |
-| `p_read` | "p read" | Cache-*read* price. On Claude, 0.10x the base input price |
-| `N*` | "N star" | Minimum number of later reads before the write turns profitable |
-| rounded UP | "ceiling" | Half a read does not exist — you need a whole one, so `ceil()` |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `p_write` | Cache-*creation* price. On Claude, 1.25x the base input price |
+| `p_read` | Cache-*read* price. On Claude, 0.10x the base input price |
+| `N*` | Minimum number of later reads before the write turns profitable |
+| rounded UP | Half a read does not exist — you need a whole one, so `ceil()` |
 
 **Walk one example.** The 7,000-token cached prefix from the Section 5 layout, over 100 requests:
 
@@ -322,7 +322,7 @@ byte that differs, then rounds that length DOWN to a whole block:
   billed   = (cached tokens at p_read) + (total - cached at p_full)
 ```
 
-**Reading it in plain English.** "Count how many tokens match from the very beginning, throw away
+**What the formula is telling you.** "Count how many tokens match from the very beginning, throw away
 the remainder that does not fill a whole block, and if what is left is too small to be worth
 storing, you get nothing."
 
@@ -330,13 +330,13 @@ The "from the very beginning" clause is the entire reason Pitfall 4 exists. A pr
 *prefix* match, not a set match — one changed character at position 20 makes tokens 21 through
 7,000 uncacheable even though they are byte-identical to the stored copy.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `L` | "L", common prefix length | Tokens that match from position 0 until the first difference |
-| `B` | "B", the block size | Cache granularity. vLLM PagedAttention uses 16 tokens per block |
-| `M` | "M", the minimum | Provider floor below which nothing is cached. 1,024 on Anthropic and OpenAI, 32,768 on Gemini |
-| `floor(L/B) x B` | "floor of L over B, times B" | L rounded down to a whole number of blocks. The partial trailing block is recomputed |
-| `cached` | "cached tokens" | What you get billed at `p_read`. Reported as `cache_read_input_tokens` |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `L` | Tokens that match from position 0 until the first difference |
+| `B` | Cache granularity. vLLM PagedAttention uses 16 tokens per block |
+| `M` | Provider floor below which nothing is cached. 1,024 on Anthropic and OpenAI, 32,768 on Gemini |
+| `floor(L/B) x B` | L rounded down to a whole number of blocks. The partial trailing block is recomputed |
+| `cached` | What you get billed at `p_read`. Reported as `cache_read_input_tokens` |
 
 **Walk one example.** The exact layout drawn above — 14,200 total tokens, 7,000 marked cacheable —
 under three scenarios:
@@ -425,7 +425,7 @@ staleness rate falls out:
   wrong_per_day = daily_requests x hit_rate x P(stale)
 ```
 
-**Reading it in plain English.** "A cache entry is wrong if the fact changed at some point between
+**What this actually says.** "A cache entry is wrong if the fact changed at some point between
 when you stored it and when you served it — so double the TTL and you roughly double your odds of
 having missed a change."
 
@@ -433,13 +433,13 @@ The `TTL / 2` is the piece people skip. An entry is not served at age TTL; it is
 age from fresh to expiring, so the *average* entry you hand out is half a TTL old. Reasoning with
 the full TTL overstates staleness by about 2x.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `lambda` | "lambda" | Change rate. A policy page edited monthly is `1/30 = 0.0333` per day |
-| `TTL` | "T-T-L", time to live | How long an entry is allowed to be served before Redis evicts it |
-| `mean_age` | "mean age" | Average staleness of an entry at the moment it is served. `TTL / 2` |
-| `e^(-lambda x t)` | "e to the minus lambda t" | Probability of NO change in time `t`. The survival curve |
-| `1 - e^(...)` | "one minus the survival" | Flip it: probability at least one change DID happen. That is your error rate |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `lambda` | Change rate. A policy page edited monthly is `1/30 = 0.0333` per day |
+| `TTL` | How long an entry is allowed to be served before Redis evicts it |
+| `mean_age` | Average staleness of an entry at the moment it is served. `TTL / 2` |
+| `e^(-lambda x t)` | Probability of NO change in time `t`. The survival curve |
+| `1 - e^(...)` | Flip it: probability at least one change DID happen. That is your error rate |
 
 **Walk one example.** A return-policy FAQ that changes about monthly (`lambda = 0.0333/day`), at
 the 1M requests/day and 60% semantic hit rate from Section 1:
@@ -516,22 +516,22 @@ it two decimal places changes who gets a wrong answer. The rule and its conseque
   hit rate   = (TP + FP) / N       what the dashboard shows -- inflated by every FP
 ```
 
-**Reading it in plain English.** "Serve the old answer only if the new question points in almost
+**In plain terms.** "Serve the old answer only if the new question points in almost
 the same direction as the old one — and `tau` is where you draw 'almost'."
 
 The trap: precision and hit rate move in *opposite* directions as you lower `tau`, but only hit
 rate is on your cost dashboard. Lowering the threshold always looks like a win from the finance
 side and always looks like a regression from the quality side.
 
-| Symbol | Say it out loud | What it actually is |
-|--------|-----------------|---------------------|
-| `tau` | "tau", the threshold | The similarity cutoff. `0.92` in the code above, `0.92` in the Section 5 diagram |
-| `cos(a, b)` | "cosine of a and b" | Angle between two embedding vectors, mapped to -1..1. Ignores length, measures direction only |
-| `TP` | "true positive" | Served a cached answer, and it was genuinely the right answer |
-| `FP` | "false positive" | Served a cached answer that was WRONG. The Japan-refund case in Section 5 |
-| `FN` | "false negative" | Called the model even though a valid cached answer was sitting right there. Costs money, not correctness |
-| precision | "precision" | Trustworthiness of a hit. The number your users feel |
-| recall | "recall" | Completeness. The number your CFO feels |
+| Symbol | What it actually is |
+|--------|---------------------|
+| `tau` | The similarity cutoff. `0.92` in the code above, `0.92` in the Section 5 diagram |
+| `cos(a, b)` | Angle between two embedding vectors, mapped to -1..1. Ignores length, measures direction only |
+| `TP` | Served a cached answer, and it was genuinely the right answer |
+| `FP` | Served a cached answer that was WRONG. The Japan-refund case in Section 5 |
+| `FN` | Called the model even though a valid cached answer was sitting right there. Costs money, not correctness |
+| precision | Trustworthiness of a hit. The number your users feel |
+| recall | Completeness. The number your CFO feels |
 
 **Walk one example.** 1,000 production queries scored against the cache, bucketed by similarity and
 hand-labelled for whether the cached answer was actually correct:

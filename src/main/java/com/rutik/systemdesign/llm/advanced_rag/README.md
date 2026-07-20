@@ -80,19 +80,19 @@ The fan-out is cheap to describe and easy to under-budget. The cost model:
   latency_seq  = t_decompose + n_sub x t_retrieve + t_rerank + t_synth
 ```
 
-**Reading it in plain English.** "Splitting one query into `n` sub-queries multiplies everything downstream by `n` — retrieval calls, candidate documents, reranker work — while latency multiplies by `n` only if you forget to run the sub-queries in parallel."
+**The idea behind it.** "Splitting one query into `n` sub-queries multiplies everything downstream by `n` — retrieval calls, candidate documents, reranker work — while latency multiplies by `n` only if you forget to run the sub-queries in parallel."
 
 The asymmetry is the whole point: *cost* scales with `n_sub` no matter what you do, but *latency* is a choice. That is why §8 lists multi-query at `~2x` latency and `2x` cost rather than `3x` — the extra decompose and synthesize LLM calls are serial, but the three retrievals are not.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `n_sub` | "n sub" | Number of sub-queries generated. Typically 3–5; beyond 5, returns flatten |
-| `fan_out` | "fan out" | Candidates retrieved per sub-query, before merging |
-| `dup_rate` | "duplication rate" | Fraction of candidates that appear under more than one sub-query |
-| `unique` | "unique candidates" | What survives deduplication. What the reranker actually pays for |
-| `t_retrieve` | "t retrieve" | Wall-clock for one retrieval round |
-| `latency_par` | "parallel latency" | Sub-queries issued concurrently — `n_sub` cancels out of the retrieval term |
-| `latency_seq` | "serial latency" | Sub-queries issued one after another — the accidental `n_sub x` blowup |
+| Symbol | What it is |
+|--------|------------|
+| `n_sub` | Number of sub-queries generated. Typically 3–5; beyond 5, returns flatten |
+| `fan_out` | Candidates retrieved per sub-query, before merging |
+| `dup_rate` | Fraction of candidates that appear under more than one sub-query |
+| `unique` | What survives deduplication. What the reranker actually pays for |
+| `t_retrieve` | Wall-clock for one retrieval round |
+| `latency_par` | Sub-queries issued concurrently — `n_sub` cancels out of the retrieval term |
+| `latency_seq` | Sub-queries issued one after another — the accidental `n_sub x` blowup |
 
 **Walk one example.** The `n_sub = 3` decomposition above, with the §13 recipe of 100 candidates per sub-query reranked to top-5. Standard RAG's `~200ms` from §8 is the baseline:
 
@@ -195,20 +195,20 @@ Hop fan-out (what a traversal costs):
   nodes_visited(H)  = Sigma over h=1..H of d^h
 ```
 
-**Reading it in plain English (modularity).** "A good community is one where the nodes inside it are connected to each other *more than random chance would predict* given how many edges each node has."
+**In plain terms (modularity).** "A good community is one where the nodes inside it are connected to each other *more than random chance would predict* given how many edges each node has."
 
 The `- (k_i x k_j)/(2m)` subtraction is the entire idea. Without it, the algorithm would happily declare "everything is one giant community" — a hub node connected to thousands of others looks maximally cohesive by raw edge count. Modularity grades against a null model instead, so a hub gets no credit for edges it was statistically bound to have.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `Q` | "cue" / "modularity" | Quality of a proposed partition. Roughly `-0.5` to `1`; above `0.3` is meaningful structure |
-| `A_ij` | "A sub i j" | Actual edges between node `i` and node `j`. Usually `1` or `0` |
-| `k_i` | "kay sub i" / "degree of i" | How many edges node `i` has in total |
-| `m` | "em" | Total number of edges in the whole graph |
-| `2m` | "two em" | Total edge endpoints. The normalizer, since each edge has two ends |
-| `(k_i k_j)/(2m)` | "expected edges" | Edges you'd expect between `i` and `j` purely by chance |
-| `delta(c_i, c_j)` | "delta of c i, c j" | `1` if both nodes were placed in the same community, `0` otherwise |
-| `Sigma over ij` | "sum over all node pairs" | Do this for every pair, then add up |
+| Symbol | What it is |
+|--------|------------|
+| `Q` | Quality of a proposed partition. Roughly `-0.5` to `1`; above `0.3` is meaningful structure |
+| `A_ij` | Actual edges between node `i` and node `j`. Usually `1` or `0` |
+| `k_i` | How many edges node `i` has in total |
+| `m` | Total number of edges in the whole graph |
+| `2m` | Total edge endpoints. The normalizer, since each edge has two ends |
+| `(k_i k_j)/(2m)` | Edges you'd expect between `i` and `j` purely by chance |
+| `delta(c_i, c_j)` | `1` if both nodes were placed in the same community, `0` otherwise |
+| `Sigma over ij` | Do this for every pair, then add up |
 
 **Walk one example (modularity).** A tiny graph, `m = 10` edges so `2m = 20`. Two nodes both of degree 4:
 
@@ -229,14 +229,14 @@ The `- (k_i x k_j)/(2m)` subtraction is the entire idea. Without it, the algorit
   sharing an edge (expected = 1/20 = 0.05, so +0.95) almost certainly do.
 ```
 
-**Reading it in plain English (hop fan-out).** "Each additional hop multiplies the number of nodes you touch by the average degree, so traversal cost is exponential in hop count, not linear."
+**What this says (hop fan-out).** "Each additional hop multiplies the number of nodes you touch by the average degree, so traversal cost is exponential in hop count, not linear."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `d` | "dee" | Average out-degree. How many neighbours a typical node has |
-| `h` | "aitch" | Which hop you are on. Hop 1 = direct neighbours |
-| `H` | "big aitch" | Maximum hop depth. The `graph_hop_depth=2` parameter in §14's code |
-| `d^h` | "d to the h" | Nodes reachable at exactly hop `h` |
+| Symbol | What it is |
+|--------|------------|
+| `d` | Average out-degree. How many neighbours a typical node has |
+| `h` | Which hop you are on. Hop 1 = direct neighbours |
+| `H` | Maximum hop depth. The `graph_hop_depth=2` parameter in §14's code |
+| `d^h` | Nodes reachable at exactly hop `h` |
 
 **Walk one example (hop cost).** §14's legal graph with `hop_depth = 2`, assuming an average of 12 citation edges per case:
 
@@ -309,21 +309,21 @@ The reflection tokens are not flags — they are ordinary vocabulary tokens, so 
   Final answer = argmax over candidate segments of segment_score(y)
 ```
 
-**Reading it in plain English.** "Generate several candidate continuations, then rank them not just by how likely the text is, but by how strongly the model's own critique tokens vouch for it being relevant, supported, and useful."
+**Stated plainly.** "Generate several candidate continuations, then rank them not just by how likely the text is, but by how strongly the model's own critique tokens vouch for it being relevant, supported, and useful."
 
 Reading the reflection tokens as *probabilities rather than decisions* is what makes this work. `[Supported]` firing at `0.51` and at `0.99` are very different situations, and collapsing them to a binary throws away exactly the signal you need to rank candidates.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `y` | "why" | A candidate output segment being scored |
-| `x` | "ex" | The user query |
-| `d` | "dee" | The retrieved passage this segment was conditioned on |
-| `log P(y \| x, d)` | "log prob of y given x and d" | Ordinary fluency score. How likely this text is |
-| `P([Relevant])` | "P of is-rel" | Model's own confidence the passage is on-topic. `IsREL` in the paper |
-| `P([Supported])` | "P of is-sup" | Confidence the claim is actually grounded in `d`. `IsSUP` in the paper |
-| `P([Useful])` | "P of is-use" | Confidence the answer helps. `IsUSE`, often graded 1–5 rather than binary |
-| `w_rel`, `w_sup`, `w_use` | "w rel, w sup, w use" | Inference-time weights. Tunable *without retraining* |
-| `argmax` | "arg max" | Pick the candidate with the highest total |
+| Symbol | What it is |
+|--------|------------|
+| `y` | A candidate output segment being scored |
+| `x` | The user query |
+| `d` | The retrieved passage this segment was conditioned on |
+| `log P(y \| x, d)` | Ordinary fluency score. How likely this text is |
+| `P([Relevant])` | Model's own confidence the passage is on-topic. `IsREL` in the paper |
+| `P([Supported])` | Confidence the claim is actually grounded in `d`. `IsSUP` in the paper |
+| `P([Useful])` | Confidence the answer helps. `IsUSE`, often graded 1–5 rather than binary |
+| `w_rel`, `w_sup`, `w_use` | Inference-time weights. Tunable *without retraining* |
+| `argmax` | Pick the candidate with the highest total |
 
 **Walk one example.** One query, three candidate segments generated against different retrieved passages. Weights `w_rel = 1.0`, `w_sup = 1.0`, `w_use = 0.5`:
 
@@ -393,19 +393,19 @@ In practice "the threshold" is two thresholds, cutting the confidence axis into 
                  Correct     if conf >  0.70
 ```
 
-**Reading it in plain English.** "Ask an evaluator how good the best retrieved document actually is. If it is clearly good, use it. If it is clearly bad, throw it away and search the web. If you genuinely cannot tell, use both and let the generator sort it out."
+**What the formula is telling you.** "Ask an evaluator how good the best retrieved document actually is. If it is clearly good, use it. If it is clearly bad, throw it away and search the web. If you genuinely cannot tell, use both and let the generator sort it out."
 
 The middle band is the design insight. A single threshold forces a confident decision at exactly the point where the evaluator is least confident — the Ambiguous bucket exists so uncertainty produces a hedge instead of a coin flip.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `q` | "cue" | The user query |
-| `d` | "dee" | One retrieved document |
-| `evaluator(q, d)` | "evaluator of q and d" | Lightweight relevance model (often a T5-large cross-encoder) scoring the pair |
-| `conf` | "confidence" | The retrieval's overall confidence. The `max`, not the mean — see below |
-| `max over d` | "max over d" | Take the single best-scoring document |
-| `0.30` | "point three" | Lower cut. Below this, retrieval is treated as having failed outright |
-| `0.70` | "point seven" | Upper cut. Above this, retrieval is trusted without augmentation |
+| Symbol | What it is |
+|--------|------------|
+| `q` | The user query |
+| `d` | One retrieved document |
+| `evaluator(q, d)` | Lightweight relevance model (often a T5-large cross-encoder) scoring the pair |
+| `conf` | The retrieval's overall confidence. The `max`, not the mean — see below |
+| `max over d` | Take the single best-scoring document |
+| `0.30` | Lower cut. Below this, retrieval is treated as having failed outright |
+| `0.70` | Upper cut. Above this, retrieval is trusted without augmentation |
 
 **Walk one example — which outcomes land in which band.** Five queries against a corporate knowledge base, top-3 retrieved each:
 
@@ -567,16 +567,16 @@ Bi-encoder and cross-encoder scores look like the same kind of number and are no
                   prob  = sigma(logit) = 1 / (1 + e^-logit)   -> bounded (0, 1)
 ```
 
-**Reading it in plain English.** "The bi-encoder measures an angle between two vectors it computed separately, so it is trapped between -1 and 1. The cross-encoder reads the query and document together and emits a raw, unbounded opinion — a logit — which only becomes a probability after you squash it."
+**What this actually says.** "The bi-encoder measures an angle between two vectors it computed separately, so it is trapped between -1 and 1. The cross-encoder reads the query and document together and emits a raw, unbounded opinion — a logit — which only becomes a probability after you squash it."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `E(q)`, `E(d)` | "E of q, E of d" | Query and document embedded *independently*. Document side is precomputable |
-| `[q ; SEP ; d]` | "q sep d" | Query and document concatenated into ONE sequence. Full cross-attention between them |
-| `logit` | "logit" | Raw pre-sigmoid output. Unbounded, model-specific scale, NOT a probability |
-| `sigma` | "sigmoid" | Squashes any real number into `(0, 1)` |
-| `e^-logit` | "e to the minus logit" | The exponential that makes sigmoid's S-curve |
-| `prob` | "probability" | Calibrated relevance. This is what you can threshold across models |
+| Symbol | What it is |
+|--------|------------|
+| `E(q)`, `E(d)` | Query and document embedded *independently*. Document side is precomputable |
+| `[q ; SEP ; d]` | Query and document concatenated into ONE sequence. Full cross-attention between them |
+| `logit` | Raw pre-sigmoid output. Unbounded, model-specific scale, NOT a probability |
+| `sigma` | Squashes any real number into `(0, 1)` |
+| `e^-logit` | The exponential that makes sigmoid's S-curve |
+| `prob` | Calibrated relevance. This is what you can threshold across models |
 
 **Walk one example.** The same 5 candidates, scored both ways:
 

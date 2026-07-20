@@ -320,19 +320,19 @@ W_Q, W_K, W_V are all [d_model × d_k] — learned during training
 
 The matrices project the same input embedding `x` into three different representation spaces. `W_Q` learns to extract "what this token needs", `W_K` learns "what this token can provide", and `W_V` learns "what content to aggregate when matched". They are trained jointly through backpropagation.
 
-**Reading it in plain English.** "One token, one embedding — but three different questions you can ask it. Multiply by three different learned matrices and the same vector answers 'what do I want?', 'what am I?', and 'what do I hand over?' separately."
+**The idea behind it.** "One token, one embedding — but three different questions you can ask it. Multiply by three different learned matrices and the same vector answers 'what do I want?', 'what am I?', and 'what do I hand over?' separately."
 
 Candidates often assume Q, K, and V come from three different places. They do not: all three are the *same* `x` viewed through three lenses. That is why a token can attend to itself at all.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `x` | "x" | The token's input embedding. Shape `[seq_len, d_model]`, d_model = 4096 in LLaMA 3 8B |
-| `W_Q` | "W Q" / "the query projection" | Learned matrix `[d_model × d_k]`. Extracts the token's search intent |
-| `W_K` | "W K" / "the key projection" | Learned matrix `[d_model × d_k]`. Extracts the token's advertised label |
-| `W_V` | "W V" / "the value projection" | Learned matrix `[d_model × d_v]`. Extracts the payload to pass on |
-| `x · W_Q` | "x dot W Q" | Matrix multiply. `[seq, d_model] · [d_model, d_k]` = `[seq, d_k]` |
-| `d_model` | "d model" | Width of the residual stream. 4096 |
-| `d_k`, `d_v` | "d k", "d v" | Per-head width. 128 in LLaMA 3 8B (4096 / 32 heads) |
+| Symbol | What it is |
+|--------|------------|
+| `x` | The token's input embedding. Shape `[seq_len, d_model]`, d_model = 4096 in LLaMA 3 8B |
+| `W_Q` | Learned matrix `[d_model × d_k]`. Extracts the token's search intent |
+| `W_K` | Learned matrix `[d_model × d_k]`. Extracts the token's advertised label |
+| `W_V` | Learned matrix `[d_model × d_v]`. Extracts the payload to pass on |
+| `x · W_Q` | Matrix multiply. `[seq, d_model] · [d_model, d_k]` = `[seq, d_k]` |
+| `d_model` | Width of the residual stream. 4096 |
+| `d_k`, `d_v` | Per-head width. 128 in LLaMA 3 8B (4096 / 32 heads) |
 
 **Walk one example.** One token, tiny dimensions (`d_model = 4`, `d_k = 2`) so the arithmetic is visible:
 
@@ -446,15 +446,15 @@ logits = hidden @ E.T    # shape: [vocab_size]
 ```
 This works because E already encodes good token representations. The LM head is asking "how similar is my hidden state to each token's embedding?" — the token with the highest similarity is the most likely next token. Weight tying saves ~500M parameters and often improves quality.
 
-**Reading it in plain English.** "Dot your final hidden state against every token's embedding vector and read off the similarities. The embedding table already knows what each token 'looks like' as a vector, so you can reuse it backwards as the output classifier instead of learning a second copy."
+**Stated plainly.** "Dot your final hidden state against every token's embedding vector and read off the similarities. The embedding table already knows what each token 'looks like' as a vector, so you can reuse it backwards as the output classifier instead of learning a second copy."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `hidden` | "hidden" | The final-layer vector for the last position. Shape `[4096]` |
-| `E` | "ee" | The embedding matrix. Shape `[vocab_size, d_model]` = `[128256, 4096]` |
-| `E.T` | "E transpose" | E flipped to `[4096, 128256]` so the multiply produces one score per token |
-| `@` | "matmul" / "at" | Matrix multiply (Python operator) |
-| `logits` | "logits" | `[128256]` raw scores. One per vocabulary entry, pre-softmax, unbounded |
+| Symbol | What it is |
+|--------|------------|
+| `hidden` | The final-layer vector for the last position. Shape `[4096]` |
+| `E` | The embedding matrix. Shape `[vocab_size, d_model]` = `[128256, 4096]` |
+| `E.T` | E flipped to `[4096, 128256]` so the multiply produces one score per token |
+| `@` | Matrix multiply (Python operator) |
+| `logits` | `[128256]` raw scores. One per vocabulary entry, pre-softmax, unbounded |
 
 **Walk one example.** Toy vocabulary of 3 tokens, `d_model = 4`:
 
@@ -498,17 +498,17 @@ T = 2.0: softmax([1.5, 0.5, 0.25])→ [0.516, 0.260, 0.224]  ← flat, diverse
 
 For factual tasks, use T≈0.0–0.3. For creative writing, T≈0.7–1.2. Above T=2.0, outputs degrade rapidly.
 
-**Reading it in plain English.** "Before turning scores into probabilities, divide every score by the same number `T` — dividing by a small number stretches the gaps apart and makes the winner run away with it; dividing by a big number squashes the gaps together and gives the underdogs a real chance."
+**What the formula is telling you.** "Before turning scores into probabilities, divide every score by the same number `T` — dividing by a small number stretches the gaps apart and makes the winner run away with it; dividing by a big number squashes the gaps together and gives the underdogs a real chance."
 
 The key realization for an interview: temperature does not change the *ranking* of tokens, only the *confidence*. The top token at T=0.5 is the same top token at T=2.0. All you are tuning is how often the model is willing to pick something other than its favourite.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `z_i` | "z sub i" | The raw logit for token `i` — an unnormalized score, any real number, can be negative |
-| `T` | "tee" | Temperature. The divisor applied to every logit before exponentiating. Typical 0.0–2.0 |
-| `exp(...)` | "e to the" | Exponential. Turns any number positive and amplifies differences multiplicatively |
-| `Σ exp(z_j / T)` | "sum over j of e to the z j over T" | The normalizer. Adds up every token's exponentiated score so the result sums to 1 |
-| `softmax_T(z_i)` | "softmax at temperature T of z i" | Final probability assigned to token `i` |
+| Symbol | What it is |
+|--------|------------|
+| `z_i` | The raw logit for token `i` — an unnormalized score, any real number, can be negative |
+| `T` | Temperature. The divisor applied to every logit before exponentiating. Typical 0.0–2.0 |
+| `exp(...)` | Exponential. Turns any number positive and amplifies differences multiplicatively |
+| `Σ exp(z_j / T)` | The normalizer. Adds up every token's exponentiated score so the result sums to 1 |
+| `softmax_T(z_i)` | Final probability assigned to token `i` |
 
 **Walk one example.** The same three logits `[3.0, 1.0, 0.5]` for tokens A/B/C, at three temperatures:
 
@@ -561,18 +561,18 @@ The `1` term creates a **gradient highway**: the gradient of the loss flows back
 
 Without residuals, gradient for layer 1 = product of 100 Jacobians — any of them < 1 → exponential decay → vanishing gradient. With residuals, each layer adds to a running sum rather than multiplying, enabling stable training of models with 100+ layers.
 
-**Reading it in plain English.** "Don't ask the layer to produce the answer — ask it to produce a *correction*, and hand the original straight through alongside it. On the way back, the gradient inherits that same shortcut and arrives at the early layers intact."
+**What this actually says.** "Don't ask the layer to produce the answer — ask it to produce a *correction*, and hand the original straight through alongside it. On the way back, the gradient inherits that same shortcut and arrives at the early layers intact."
 
 The interview-grade framing is the `1`. Differentiating `y = x + F(x)` gives `1 + dF/dx`, and that constant `1` is the entire reason depth works: it is a term that can never shrink to zero no matter how badly the sublayer behaves.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `x` | "x" | The input to the sublayer — the hidden state arriving from the previous block |
-| `F(x)` | "eff of x" | The sublayer's output. Attention or the FFN. The *correction* it proposes |
-| `y = x + F(x)` | "y equals x plus eff of x" | The residual (skip) connection. Original plus correction |
-| `dL/dy` | "dee L dee y" | Gradient of the loss with respect to this layer's output — what flows in from above |
-| `dF/dx` | "dee F dee x" | How much the sublayer's output changes when its input changes. The learned path |
-| `dL/dx` | "dee L dee x" | Gradient handed down to the previous layer. What we need to keep from vanishing |
+| Symbol | What it is |
+|--------|------------|
+| `x` | The input to the sublayer — the hidden state arriving from the previous block |
+| `F(x)` | The sublayer's output. Attention or the FFN. The *correction* it proposes |
+| `y = x + F(x)` | The residual (skip) connection. Original plus correction |
+| `dL/dy` | Gradient of the loss with respect to this layer's output — what flows in from above |
+| `dF/dx` | How much the sublayer's output changes when its input changes. The learned path |
+| `dL/dx` | Gradient handed down to the previous layer. What we need to keep from vanishing |
 
 **Walk one example.** Suppose every sublayer is badly conditioned and `dF/dx = 0.5` at each of 100 layers. Compare the gradient reaching layer 1, starting from `dL/dy = 1.0` at the top:
 
@@ -628,21 +628,21 @@ Attention(Q, K, V) = softmax(QKᵀ / √d_k) · V
 - Softmax normalizes to attention weights (sum to 1 per row)
 - Multiply by V: each token's output is a weighted sum of all value vectors
 
-**Reading it in plain English.** "Every token writes a search query; every token also advertises a label. Match each query against every label to get relevance scores, shrink those scores so the softmax stays sane, turn them into percentages, and then have each token collect a blended summary of everyone's content, weighted by how relevant they were."
+**In plain terms.** "Every token writes a search query; every token also advertises a label. Match each query against every label to get relevance scores, shrink those scores so the softmax stays sane, turn them into percentages, and then have each token collect a blended summary of everyone's content, weighted by how relevant they were."
 
 Say it as a soft dictionary lookup and you have the whole mechanism. A hard Python dict returns the value for *one* exactly matching key; attention returns a weighted average over *all* values, with the weights being how well each key matched. Nothing else in the formula is doing anything more exotic than that.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `Q` | "queue" (query) | What each token is looking for. Shape `[seq, d_k]` — one query row per token |
-| `K` | "kay" (key) | What each token advertises about itself. Shape `[seq, d_k]` — one key row per token |
-| `V` | "vee" (value) | The actual content each token contributes if attended to. Shape `[seq, d_v]` |
-| `Kᵀ` | "K transpose" | Keys flipped so the matrix multiply pairs every query with every key |
-| `QKᵀ` | "Q K transpose" | The `[seq × seq]` score matrix. Entry `(i, j)` = how much token `i` cares about token `j` |
-| `d_k` | "d k" | Dimension of each query/key vector. 128 in LLaMA 3 8B (4096 model dim / 32 heads) |
-| `√d_k` | "root d k" | The scaling divisor. `√128 ≈ 11.3` — keeps scores in a range softmax can work with |
-| `softmax(...)` | "softmax" | Turns each row of scores into percentages summing to 1.0 |
-| `· V` | "times V" | The weighted sum. Each token's output = its attention percentages applied to all values |
+| Symbol | What it is |
+|--------|------------|
+| `Q` | What each token is looking for. Shape `[seq, d_k]` — one query row per token |
+| `K` | What each token advertises about itself. Shape `[seq, d_k]` — one key row per token |
+| `V` | The actual content each token contributes if attended to. Shape `[seq, d_v]` |
+| `Kᵀ` | Keys flipped so the matrix multiply pairs every query with every key |
+| `QKᵀ` | The `[seq × seq]` score matrix. Entry `(i, j)` = how much token `i` cares about token `j` |
+| `d_k` | Dimension of each query/key vector. 128 in LLaMA 3 8B (4096 model dim / 32 heads) |
+| `√d_k` | The scaling divisor. `√128 ≈ 11.3` — keeps scores in a range softmax can work with |
+| `softmax(...)` | Turns each row of scores into percentages summing to 1.0 |
+| `· V` | The weighted sum. Each token's output = its attention percentages applied to all values |
 
 **Walk one example.** Two tokens, `d_k = 4`, one head. Token 1 = "it", token 2 = "cat". We want "it" to attend to "cat":
 
@@ -759,18 +759,18 @@ The original 2017 transformer has been refined substantially. Here is a comprehe
 | **Flash Attention 3** (2024) | H100 underutilized by FA-2 | Async pipeline; FP8 support; 75% peak FLOP utilization | H100-specific |
 | **Sliding Window Attention** | Full attention wasteful for local tasks | Each token attends to W previous tokens; O(n*W) not O(n^2); rolling KV cache stores only W entries per layer | Cannot directly attend beyond window; relies on layer stacking for long-range flow (L layers * W = effective span) |
 
-**Reading the Flash Attention memory problem in plain English.** "The score matrix has one entry for every pair of tokens, in every head, in every layer — and that count grows with the *square* of the context length. At production context lengths the intermediate matrix is larger than the model weights, even though nobody ever needs to look at it."
+**Read it like this.** "The score matrix has one entry for every pair of tokens, in every head, in every layer — and that count grows with the *square* of the context length. At production context lengths the intermediate matrix is larger than the model weights, even though nobody ever needs to look at it."
 
 That last clause is the insight Flash Attention exploits: `softmax(QKᵀ/√d_k)` is consumed immediately by the `· V` multiply. It is a means, not an output. So never write it to HBM at all — compute it a tile at a time inside on-chip SRAM.
 
-| Term | Say it | What it is |
-|------|--------|------------|
-| `N` | "en" | Sequence length in tokens. 8192 here |
-| `N²` | "en squared" | Entries in one head's score matrix — every token against every token |
-| `H` | "aitch" | Number of attention heads. 64 in LLaMA-3-70B |
-| `bytes/elem` | "bytes per element" | 2 for BF16/FP16, 1 for FP8, 4 for FP32 |
-| `O(N²)` | "big oh of en squared" | Memory grows with the square of context. Doubling context quadruples it |
-| `O(N)` | "big oh of en" | What Flash Attention achieves — memory grows linearly with context |
+| Term | What it is |
+|------|------------|
+| `N` | Sequence length in tokens. 8192 here |
+| `N²` | Entries in one head's score matrix — every token against every token |
+| `H` | Number of attention heads. 64 in LLaMA-3-70B |
+| `bytes/elem` | 2 for BF16/FP16, 1 for FP8, 4 for FP32 |
+| `O(N²)` | Memory grows with the square of context. Doubling context quadruples it |
+| `O(N)` | What Flash Attention achieves — memory grows linearly with context |
 
 **Walk the multiplication.** One layer of LLaMA-3-70B at 8192-token context, BF16:
 
@@ -827,14 +827,14 @@ Every doubling of context multiplies the attention matrix by 4. This single tabl
 
 **Reading GELU in plain English.** "Instead of ReLU's hard cutoff — keep it or zero it — GELU asks 'what fraction of the time would a value this large survive a random gate?' and scales the input by that probability. Big positives pass almost fully, big negatives get almost fully suppressed, and values near zero get partially attenuated instead of chopped."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `x` | "x" | The pre-activation value for one neuron |
-| `Φ(x)` | "phi of x" | The standard Gaussian CDF: probability a draw from N(0,1) is less than `x`. Always 0–1 |
-| `x × Φ(x)` | "x times phi of x" | GELU. The input scaled by its own "how far right am I?" percentile |
-| `max(0, x)` | "max of zero and x" | ReLU. A hard step: multiply by 1 if positive, by 0 if not |
-| `SiLU(x)` | "see-loo of x" | `x × σ(x)` — same idea with the sigmoid replacing `Φ`. Cheaper, nearly identical |
-| `⊙` | "element-wise multiply" / "Hadamard" | Multiply two vectors position by position, no summing |
+| Symbol | What it is |
+|--------|------------|
+| `x` | The pre-activation value for one neuron |
+| `Φ(x)` | The standard Gaussian CDF: probability a draw from N(0,1) is less than `x`. Always 0–1 |
+| `x × Φ(x)` | GELU. The input scaled by its own "how far right am I?" percentile |
+| `max(0, x)` | ReLU. A hard step: multiply by 1 if positive, by 0 if not |
+| `SiLU(x)` | `x × σ(x)` — same idea with the sigmoid replacing `Φ`. Cheaper, nearly identical |
+| `⊙` | Multiply two vectors position by position, no summing |
 
 **Walk one example.** The same five inputs through both activations:
 
@@ -875,16 +875,16 @@ Hoffmann et al. (2022) showed optimal compute budget splits roughly equally betw
 
 Optimal: `D ≈ 20 × N` (train 7B model on ~140B tokens for compute-optimal)
 
-**Reading it in plain English.** "For every one parameter you put in the model, feed it about twenty tokens of training data. Spend your fixed compute budget any other way — a huge model on thin data, or a small model on endless data — and you get a worse model for the same money."
+**What it means.** "For every one parameter you put in the model, feed it about twenty tokens of training data. Spend your fixed compute budget any other way — a huge model on thin data, or a small model on endless data — and you get a worse model for the same money."
 
 The units are the thing candidates fumble. `N` is counted in *parameters* (weights); `D` is counted in *tokens* (training data). They are different kinds of quantity that happen to be compared by a bare ratio, which is exactly why the sentence has to be said out loud as "twenty tokens per parameter."
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `N` | "en" | Number of model parameters. 7B means N = 7,000,000,000 weights |
-| `D` | "dee" | Number of training tokens consumed. Not documents, not words — BPE tokens |
-| `20 ×` | "twenty times" | The Chinchilla ratio. Tokens per parameter for compute-optimal training |
-| `C ≈ 6 × N × D` | "C is about six N D" | Training compute in FLOPs. The budget both N and D are spending from |
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of model parameters. 7B means N = 7,000,000,000 weights |
+| `D` | Number of training tokens consumed. Not documents, not words — BPE tokens |
+| `20 ×` | The Chinchilla ratio. Tokens per parameter for compute-optimal training |
+| `C ≈ 6 × N × D` | Training compute in FLOPs. The budget both N and D are spending from |
 
 **Walk one example.**
 

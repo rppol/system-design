@@ -54,16 +54,16 @@ Sequential LLM calls where the output of step N becomes input to step N+1. Gates
   P(chain succeeds)  =  p_1 x p_2 x ... x p_n  =  p^n     (when every step is equally reliable)
 ```
 
-**Reading it in plain English.** "A chain is not as reliable as its steps — it is as reliable as all of its steps *at once*, which is a much smaller number than anyone's intuition suggests."
+**The idea behind it.** "A chain is not as reliable as its steps — it is as reliable as all of its steps *at once*, which is a much smaller number than anyone's intuition suggests."
 
 The reason this deserves top billing is that "95% reliable" sounds like a good step and reads like a good system, and it is not. Human intuition averages; chains multiply. Everything else in this module — gates, retries, routing away from long chains — exists to fight this one exponent.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `p` | "p" | Per-step success rate. The chance one LLM call in the chain does its job correctly |
-| `n` | "n" | Chain length. How many sequential steps must all succeed |
-| `p^n` | "p to the n" | End-to-end success rate. Multiply `p` by itself once per step |
-| `1 - p^n` | "one minus p to the n" | End-to-end failure rate. What your users actually experience |
+| Symbol | What it is |
+|--------|------------|
+| `p` | Per-step success rate. The chance one LLM call in the chain does its job correctly |
+| `n` | Chain length. How many sequential steps must all succeed |
+| `p^n` | End-to-end success rate. Multiply `p` by itself once per step |
+| `1 - p^n` | End-to-end failure rate. What your users actually experience |
 
 **Walk one example.** Take a step that is 95% reliable — a perfectly respectable LLM call — and lengthen the chain:
 
@@ -245,18 +245,18 @@ Two sub-patterns:
                   min(N, W)                              ceiling on the first term
 ```
 
-**Reading it in plain English.** "You divide the chunk work by however many workers you actually have — not by however many chunks you have — and then you pay the merge step in full, every time, no matter how many workers you own."
+**Stated plainly.** "You divide the chunk work by however many workers you actually have — not by however many chunks you have — and then you pay the merge step in full, every time, no matter how many workers you own."
 
 Both hidden terms bite in production. The `min(N, W)` says buying more chunks past your pool size buys nothing. The `+ T_merge` says the merge is *serial*, so it sets a hard floor on latency that no amount of parallelism can go below.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `N` | "N" | Number of chunks the input was split into. 20 in the Big 4 contract example |
-| `W` | "W" | Worker pool size. The `max_workers=8` in the thread-pool code in Section 6 |
-| `T_chunk` | "T chunk" | Wall-clock time to process one chunk. ~2 minutes for a 10-page contract section |
-| `ceil(N/W)` | "ceiling of N over W" | Number of *waves* the pool must run. 20 chunks, 8 workers = 3 waves |
-| `T_merge` | "T merge" | The serial synthesis step. Cannot be parallelized — it needs all chunks |
-| `speedup` | "speedup" | `T_sequential / T_parallel`. Always less than `N` |
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of chunks the input was split into. 20 in the Big 4 contract example |
+| `W` | Worker pool size. The `max_workers=8` in the thread-pool code in Section 6 |
+| `T_chunk` | Wall-clock time to process one chunk. ~2 minutes for a 10-page contract section |
+| `ceil(N/W)` | Number of *waves* the pool must run. 20 chunks, 8 workers = 3 waves |
+| `T_merge` | The serial synthesis step. Cannot be parallelized — it needs all chunks |
+| `speedup` | `T_sequential / T_parallel`. Always less than `N` |
 
 **Walk one example.** The 200-page contract from Section 7: `N = 20` sections, `T_chunk = 2 min`, `T_merge = 1 min`, sequential baseline `20 x 2 = 40 min`:
 
@@ -447,18 +447,18 @@ A generator LLM produces an output. An evaluator LLM scores the output and provi
   quality(r)  =  q_max - (q_max - q_0) x d^r       geometric approach to a ceiling
 ```
 
-**Reading it in plain English.** "Each round costs the same as the one before it, but each round fixes a *fraction* of what is left wrong — so you pay in a straight line while you improve on a curve that flattens."
+**What the formula is telling you.** "Each round costs the same as the one before it, but each round fixes a *fraction* of what is left wrong — so you pay in a straight line while you improve on a curve that flattens."
 
 Two straight lines would justify looping forever; a line against a flattening curve guarantees a crossover point where the next round costs more than it is worth. That crossover is what "cap at 3-5 rounds" is a hard-coded approximation of.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `r` | "r" | Round number. One generation plus one evaluation per round |
-| `2r` | "two r" | Cost multiplier. Each round is 2 calls, so 3 rounds = 6x a single call |
-| `q_0` | "q naught" | Quality of the first draft, before any feedback. Score out of 10 |
-| `q_max` | "q max" | The ceiling. The best the generator-evaluator pair can reach, ever |
-| `d` | "d" (the decay) | Fraction of the remaining gap that *survives* a round. `d = 0.5` means each round halves the gap |
-| `1 - d` | "one minus d" | Fraction of the remaining gap each round actually closes |
+| Symbol | What it is |
+|--------|------------|
+| `r` | Round number. One generation plus one evaluation per round |
+| `2r` | Cost multiplier. Each round is 2 calls, so 3 rounds = 6x a single call |
+| `q_0` | Quality of the first draft, before any feedback. Score out of 10 |
+| `q_max` | The ceiling. The best the generator-evaluator pair can reach, ever |
+| `d` | Fraction of the remaining gap that *survives* a round. `d = 0.5` means each round halves the gap |
+| `1 - d` | Fraction of the remaining gap each round actually closes |
 
 **Walk one example.** First draft scores 6.0, the pair tops out at 9.5, each round closes half the remaining gap (`d = 0.5`), approval threshold is 8:
 
@@ -796,18 +796,18 @@ If the classifier has 90% accuracy and misroutes 10% of simple queries to the ex
 
 Classifier accuracy matters. A 5% improvement in routing accuracy can save 10-15% of inference cost in high-volume systems.
 
-**Reading it in plain English.** "Your bill is not set by what your queries *are* — it is set by what your classifier *thinks* they are, and every misread simple query gets billed at the expensive model's rate."
+**What this actually says.** "Your bill is not set by what your queries *are* — it is set by what your classifier *thinks* they are, and every misread simple query gets billed at the expensive model's rate."
 
 The framing that matters is that the classifier sits upstream of the pricing. A router with 90% accuracy is not 10% wrong about cost; it is wrong in a direction that is 33x more expensive per unit, so a small accuracy error produces a disproportionate cost error.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `f_simple` | "fraction simple" | Share of traffic that genuinely needs only the cheap model. 60% above |
-| `a` | "a" | Classifier accuracy. 0.90 in the worked figures above |
-| `1 - a` | "one minus a" | Misroute rate. The 10% that lands on the wrong model |
-| `c_cheap` | "c cheap" | Cheap model price. $0.15 per 1M tokens |
-| `c_exp` | "c expensive" | Expensive model price. $5 per 1M tokens — a **33x** ratio |
-| `blended` | "blended cost" | `c_cheap x share_cheap + c_exp x share_exp`. What you are actually billed |
+| Symbol | What it is |
+|--------|------------|
+| `f_simple` | Share of traffic that genuinely needs only the cheap model. 60% above |
+| `a` | Classifier accuracy. 0.90 in the worked figures above |
+| `1 - a` | Misroute rate. The 10% that lands on the wrong model |
+| `c_cheap` | Cheap model price. $0.15 per 1M tokens |
+| `c_exp` | Expensive model price. $5 per 1M tokens — a **33x** ratio |
+| `blended` | `c_cheap x share_cheap + c_exp x share_exp`. What you are actually billed |
 
 **Walk one example.** Reproducing the numbers above step by step:
 

@@ -340,22 +340,22 @@ Fix options:
   4. Add a 3rd GPU (TP=3)
 ```
 
-**Reading it in plain English.** "Each GPU must simultaneously hold the weights, one KV cache per
+**The idea behind it.** "Each GPU must simultaneously hold the weights, one KV cache per
 active user, and a little scratch space — and only the KV cache grows with traffic."
 
 Weights are a fixed toll you pay before serving a single token. The KV cache is the *variable* cost,
 and it is what actually decides how many users fit on the card. This is why capacity planning is
 always "solve for the number of concurrent users", never "solve for the model".
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `P` | "P" | Parameter count. 70B = 70 × 10^9 weights |
-| `bytes_per_element` | "bytes per element" | 2 for BF16/FP16, 1 for INT8/FP8, 0.5 for INT4 |
-| `num_layers` | "num layers" | Transformer blocks stacked. 80 for LLaMA 3 70B |
-| `num_kv_heads` | "num K-V heads" | Attention heads that keep their own K and V. GQA shrinks this |
-| `head_dim` | "head dim" | Width of one head's vector. 128 in every LLaMA 3 size |
-| `× 2` (leading) | "times two" | One copy for K, one copy for V. Not a fudge factor |
-| `TP` | "tee-pee" | Tensor-parallel degree — how many GPUs the weights are sliced across |
+| Symbol | What it is |
+|--------|------------|
+| `P` | Parameter count. 70B = 70 × 10^9 weights |
+| `bytes_per_element` | 2 for BF16/FP16, 1 for INT8/FP8, 0.5 for INT4 |
+| `num_layers` | Transformer blocks stacked. 80 for LLaMA 3 70B |
+| `num_kv_heads` | Attention heads that keep their own K and V. GQA shrinks this |
+| `head_dim` | Width of one head's vector. 128 in every LLaMA 3 size |
+| `× 2` (leading) | One copy for K, one copy for V. Not a fudge factor |
+| `TP` | Tensor-parallel degree — how many GPUs the weights are sliced across |
 
 **Walk one example.** LLaMA 3 70B, BF16, GQA with 8 KV heads:
 
@@ -401,20 +401,20 @@ concurrency = throughput x latency          (Little's Law)
   R   = end-to-end latency per request (seconds)
 ```
 
-**Reading it in plain English.** "You cannot pick throughput and latency independently — fix any two
+**Stated plainly.** "You cannot pick throughput and latency independently — fix any two
 of concurrency, throughput, and latency, and the third is already decided."
 
 That framing kills the most common planning error: promising both "10× throughput" and "unchanged
 p99 latency" on the same hardware. Batching buys throughput by *raising* the number of sequences in
 flight, and each of those sequences waits behind the others in every decode step.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `N` | "N" | Sequences resident in the engine at once. The `--max-num-seqs` knob |
-| `X` | "X" | Throughput — requests finished per second (or tokens/sec if you count tokens) |
-| `R` | "R" | Residence time — arrival to last token. TTFT + (output_tokens × TPOT) |
-| `TTFT` | "tee-tee-eff-tee" | Time to first token. Queue wait + one prefill pass |
-| `TPOT` | "tee-pot" | Time per output token. One decode step, memory-bandwidth-bound |
+| Symbol | What it is |
+|--------|------------|
+| `N` | Sequences resident in the engine at once. The `--max-num-seqs` knob |
+| `X` | Throughput — requests finished per second (or tokens/sec if you count tokens) |
+| `R` | Residence time — arrival to last token. TTFT + (output_tokens × TPOT) |
+| `TTFT` | Time to first token. Queue wait + one prefill pass |
+| `TPOT` | Time per output token. One decode step, memory-bandwidth-bound |
 
 **Walk one example.** vLLM, 8B on one A100 80GB, using the numbers from §4.1:
 
@@ -450,19 +450,19 @@ tokens/sec ceiling = (HBM bandwidth) / (bytes read per decode step)
   a batch of B sequences reads those weights ONCE and emits B tokens
 ```
 
-**Reading it in plain English.** "Each decode step has to drag the entire model out of HBM, so the
+**What the formula is telling you.** "Each decode step has to drag the entire model out of HBM, so the
 fastest you can possibly go is bandwidth divided by model size — and batching is the only way to
 amortize that read across more than one token."
 
 This is the sentence behind the module's key insight. It also explains why quantization is a
 *latency* lever and not just a memory lever: halving the bytes read halves the step time directly.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `HBM` | "aitch-bee-em" | High-bandwidth memory on the GPU. A100 80GB: ~2.0 TB/s; H100: ~3.35 TB/s |
-| `B` | "B" | Batch size — how many sequences step together |
-| bytes/step | "bytes per step" | Weight bytes streamed per decode iteration. `P × bytes_per_element` |
-| arithmetic intensity | "arithmetic intensity" | FLOPs done per byte read. Decode at B=1 is ~1 — dismal |
+| Symbol | What it is |
+|--------|------------|
+| `HBM` | High-bandwidth memory on the GPU. A100 80GB: ~2.0 TB/s; H100: ~3.35 TB/s |
+| `B` | Batch size — how many sequences step together |
+| bytes/step | Weight bytes streamed per decode iteration. `P × bytes_per_element` |
+| arithmetic intensity | FLOPs done per byte read. Decode at B=1 is ~1 — dismal |
 
 **Walk one example.** LLaMA 3 8B, FP16 (16 GB of weights), A100 80GB at 2.0 TB/s:
 
@@ -501,21 +501,21 @@ Pipeline parallel (PP): the model is cut into layer stages; one activation cross
   bytes per sync   = hidden_dim x bytes
 ```
 
-**Reading it in plain English.** "Both split the weights the same way — `P` divided by the degree —
+**What this actually says.** "Both split the weights the same way — `P` divided by the degree —
 but TP pays for it with two network round-trips inside every single layer, while PP pays only once
 per stage boundary."
 
 That asymmetry, not the memory math, is the whole choice. TP and PP are equally good at making a
 model fit; they are wildly unequal at how much interconnect they demand to do it.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `TP` | "tee-pee" | Tensor-parallel degree. `--tensor-parallel-size`. Must stay inside one node |
-| `PP` | "pee-pee" | Pipeline-parallel degree. `--pipeline-parallel-size`. Fine across nodes |
-| `hidden_dim` | "hidden dim" | Residual-stream width. 8192 for LLaMA 3 70B, 4096 for the 8B |
-| all-reduce | "all reduce" | Every GPU ends up with the sum of all GPUs' copies. Ring cost `2(TP-1)/TP` |
-| NVLink | "en-vee-link" | Intra-node GPU fabric. 900 GB/s per H100 SXM |
-| InfiniBand | "infiniband" | Inter-node fabric. ~50 GB/s per NIC — 18× thinner than NVLink |
+| Symbol | What it is |
+|--------|------------|
+| `TP` | Tensor-parallel degree. `--tensor-parallel-size`. Must stay inside one node |
+| `PP` | Pipeline-parallel degree. `--pipeline-parallel-size`. Fine across nodes |
+| `hidden_dim` | Residual-stream width. 8192 for LLaMA 3 70B, 4096 for the 8B |
+| all-reduce | Every GPU ends up with the sum of all GPUs' copies. Ring cost `2(TP-1)/TP` |
+| NVLink | Intra-node GPU fabric. 900 GB/s per H100 SXM |
+| InfiniBand | Inter-node fabric. ~50 GB/s per NIC — 18× thinner than NVLink |
 
 **Walk one example.** LLaMA 3 70B: `P` = 70e9, 80 layers, `hidden_dim` = 8192, BF16.
 
@@ -558,19 +558,19 @@ gpus_needed = ceil(demand_tokens_per_sec / per_gpu_tokens_per_sec)
 savings     = (gpus_vllm - gpus_trt) x $/gpu-hour x 730 hours/month
 ```
 
-**Reading it in plain English.** "A percentage speedup is worth exactly the number of whole GPUs it
+**In plain terms.** "A percentage speedup is worth exactly the number of whole GPUs it
 lets you delete — and because you cannot delete a fraction of a GPU, small percentages often buy
 nothing at all."
 
 Framing the comparison this way stops the benchmark argument cold. A 20% engine win on a 4-GPU
 fleet is not 20% of your bill; it is one GPU, if the ceiling happens to fall the right way.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `ceil` | "ceiling" | Round up. You cannot rent 16.4 GPUs |
-| demand | "demand" | Peak sustained tokens/sec you must serve, not the daily average |
-| 730 | "seven-thirty" | Hours in an average month (24 × 365 / 12) |
-| build cost | "build cost" | TensorRT-LLM compiles per model per GPU type: 30-60 min, redone on every swap |
+| Symbol | What it is |
+|--------|------------|
+| `ceil` | Round up. You cannot rent 16.4 GPUs |
+| demand | Peak sustained tokens/sec you must serve, not the daily average |
+| 730 | Hours in an average month (24 × 365 / 12) |
+| build cost | TensorRT-LLM compiles per model per GPU type: 30-60 min, redone on every swap |
 
 **Walk one example.** 70,000 tokens/sec peak demand, A100s at $4/hr reserved:
 
@@ -795,20 +795,20 @@ Quality: Acceptable — Mistral 7B matched the ~GPT-3.5-turbo bar the A/B set;
          writing tasks (that endpoint was the overkill being paid for)
 ```
 
-**Reading it in plain English.** "Self-hosting is not cheaper per GPU-hour — it is cheaper per
+**Read it like this.** "Self-hosting is not cheaper per GPU-hour — it is cheaper per
 token, and only once one GPU is kept busy enough to spread its hourly rent over enough tokens."
 
 The comparison above walks into and back out of the classic trap: priced naively, four on-demand
 A100s cost *more* than the OpenAI bill. Nothing about the hardware changed between that line and the
 84% saving — only utilization and the purchase term did.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| $/M tokens | "dollars per million tokens" | The only unit in which the two options are comparable |
-| on-demand | "on demand" | Hourly rate, cancel anytime. ~$3/hr per A100 here (4 GPUs = $12/hr) |
-| reserved | "reserved" | 1-year commit. ~$4/hr for the whole job's slice — roughly 3× cheaper per GPU |
-| utilization | "utilization" | Fraction of the rented hour that actually produced tokens |
-| standby | "standby" | A second idle GPU you pay for so a failure is not an outage |
+| Symbol | What it is |
+|--------|------------|
+| $/M tokens | The only unit in which the two options are comparable |
+| on-demand | Hourly rate, cancel anytime. ~$3/hr per A100 here (4 GPUs = $12/hr) |
+| reserved | 1-year commit. ~$4/hr for the whole job's slice — roughly 3× cheaper per GPU |
+| utilization | Fraction of the rented hour that actually produced tokens |
+| standby | A second idle GPU you pay for so a failure is not an outage |
 
 **Walk one example.** 25M tokens/day of traffic, Mistral 7B:
 

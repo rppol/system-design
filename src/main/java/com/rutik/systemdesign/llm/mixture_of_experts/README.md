@@ -227,19 +227,19 @@ def route(hidden_state, W_gate, k=2, N=8):
 
 The router weight matrix W_gate is tiny relative to the expert FFNs. For Mixtral d_model=4096, N=8: W_gate is 4096x8 = 32K parameters versus each expert FFN at ~7B parameters.
 
-**Reading the router in plain English.** "Score all 8 experts, turn the scores into percentages, keep only the two best, then re-split those two back to 100% and blend their outputs in that ratio."
+**The idea behind it.** "Score all 8 experts, turn the scores into percentages, keep only the two best, then re-split those two back to 100% and blend their outputs in that ratio."
 
 The re-normalization step is the one people forget. After top-k you are holding two probabilities that came out of an 8-way softmax, so they do NOT sum to 1 — dividing by their sum is what makes the final blend a proper weighted average instead of a shrunken one.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `h @ W_gate` | "h matmul W gate" | Token hidden state times the router matrix. Produces one logit per expert |
-| `logits` | "logits" | Raw, unbounded scores. Can be negative. Not yet comparable as probabilities |
-| `softmax(z)_i` | "softmax of z" | `exp(z_i) / sum_j exp(z_j)`. Turns any scores into positives that sum to 1 |
-| `topk(s, k)` | "top k of s" | Keep the `k` largest entries and their indices; discard the rest |
-| `k` | "k" | How many experts fire per token. 1 (Switch), 2 (Mixtral), 8 (DeepSeek-V3) |
-| `N` | "N" | Total experts available in the layer. 8 for Mixtral |
-| `w_i / sum(w)` | "renormalize" | Rescale the surviving `k` weights so they sum to exactly 1 |
+| Symbol | What it is |
+|--------|------------|
+| `h @ W_gate` | Token hidden state times the router matrix. Produces one logit per expert |
+| `logits` | Raw, unbounded scores. Can be negative. Not yet comparable as probabilities |
+| `softmax(z)_i` | `exp(z_i) / sum_j exp(z_j)`. Turns any scores into positives that sum to 1 |
+| `topk(s, k)` | Keep the `k` largest entries and their indices; discard the rest |
+| `k` | How many experts fire per token. 1 (Switch), 2 (Mixtral), 8 (DeepSeek-V3) |
+| `N` | Total experts available in the layer. 8 for Mixtral |
+| `w_i / sum(w)` | Rescale the surviving `k` weights so they sum to exactly 1 |
 
 **Walk one example.** One token, 8 experts, k=2 — the same logits as the routing diagram above:
 
@@ -312,18 +312,18 @@ where:
 When f_i = 1/N for all i (uniform distribution), aux_loss is minimized.
 ```
 
-**Reading the auxiliary loss in plain English.** "Charge the model a fee proportional to how lopsided its routing is. The fee is smallest when every expert gets an equal share, and it climbs fast when one expert hogs the traffic."
+**Stated plainly.** "Charge the model a fee proportional to how lopsided its routing is. The fee is smallest when every expert gets an equal share, and it climbs fast when one expert hogs the traffic."
 
 **Why this term exists at all.** Without it, MoE training has a runaway feedback loop. Suppose E2 wins slightly more tokens than average by pure initialization luck. E2 therefore receives more gradient updates, gets better faster, so the router scores it higher, so it wins even more tokens. Within a few thousand steps E2 and one friend take everything, the other six experts never receive gradient and stay at their random initialization, and you have paid for a 46.7B model that behaves like a 12.9B one with 34B of dead weight. The aux loss is the counterweight that keeps the loop from closing — it is not a nice-to-have regularizer, it is the thing that makes sparse training work.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `f_i` | "f sub i" | Fraction of tokens actually **routed** to expert i. Hard counts. All `f_i` sum to 1 |
-| `P_i` | "P sub i" | Mean routing **probability** the softmax assigned expert i. Also sums to 1 |
-| `sum_i` | "sum over i" | Add the product across all N experts |
-| `N *` | "times N" | Scale factor that fixes the minimum at 1.0 regardless of expert count |
-| `alpha` | "alpha" | Fee rate. 0.01 (Mixtral), 0.001 (DeepSeek-V3) |
-| `f_i * P_i` | "f i times P i" | Pairs hard counts with soft probabilities — this is what makes it differentiable |
+| Symbol | What it is |
+|--------|------------|
+| `f_i` | Fraction of tokens actually **routed** to expert i. Hard counts. All `f_i` sum to 1 |
+| `P_i` | Mean routing **probability** the softmax assigned expert i. Also sums to 1 |
+| `sum_i` | Add the product across all N experts |
+| `N *` | Scale factor that fixes the minimum at 1.0 regardless of expert count |
+| `alpha` | Fee rate. 0.01 (Mixtral), 0.001 (DeepSeek-V3) |
+| `f_i * P_i` | Pairs hard counts with soft probabilities — this is what makes it differentiable |
 
 **Walk two distributions.** Same 8 experts, same formula, `alpha = 0.01`. Take `P_i ~ f_i`:
 
@@ -372,14 +372,14 @@ applied an identity function).
 
 The word doing the work is *ideal*. Capacity is budgeted against the uniform assumption, but real routing is never uniform — the buffer is what absorbs the gap between what the aux loss achieved and what perfect balance would have been.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `batch_size * seq_len` | "tokens in the batch" | Total tokens the layer sees this forward pass |
-| `* k` | "times k" | Each token occupies `k` expert slots, not one. k=2 doubles total demand |
-| `/ N` | "divided by N" | Split the demand evenly across the N experts |
-| `tokens_per_expert_ideal` | "the fair share" | What each expert gets if routing were perfectly uniform |
-| `capacity_factor` | "the capacity factor" | Buffer multiplier over fair share. 1.25 = 25% headroom |
-| `capacity` | "capacity" | Hard slot count. Token `k+1` past this is dropped, no error raised |
+| Symbol | What it is |
+|--------|------------|
+| `batch_size * seq_len` | Total tokens the layer sees this forward pass |
+| `* k` | Each token occupies `k` expert slots, not one. k=2 doubles total demand |
+| `/ N` | Split the demand evenly across the N experts |
+| `tokens_per_expert_ideal` | What each expert gets if routing were perfectly uniform |
+| `capacity_factor` | Buffer multiplier over fair share. 1.25 = 25% headroom |
+| `capacity` | Hard slot count. Token `k+1` past this is dropped, no error raised |
 
 **Walk one example.** Batch of 512 tokens, k=2, N=8 experts — the production case study's batch size:
 
@@ -461,14 +461,14 @@ Knowledge capacity       ~ 46.7B parameter dense model
 
 This is the single most-asked MoE arithmetic question, and the name is actively misleading. "8x7B" reads like eight copies of a 7B model, which would be 56B. The real answer is 46.7B, and the ~11B gap is the entire concept.
 
-**Reading it in plain English.** "Only the FFN is replicated eight times. Attention and embeddings exist once and every expert shares them, so multiplying the whole 7B model by 8 counts the shared stack seven extra times."
+**What the formula is telling you.** "Only the FFN is replicated eight times. Attention and embeddings exist once and every expert shares them, so multiplying the whole 7B model by 8 counts the shared stack seven extra times."
 
-| Piece of the model | Say it | Replicated per expert? |
-|---|---|---|
-| Attention (Q, K, V, O projections) | "the attention stack" | **No** — one copy, all tokens use it |
-| Embeddings + output head | "the embedding table" | **No** — one copy |
-| Feed-forward network (FFN) | "the expert" | **Yes** — 8 copies, this is what "8x" counts |
-| Router / gating matrix | "the router" | One tiny 4096x8 matrix per layer (~32K params) |
+| Piece of the model | Replicated per expert? |
+|---|---|
+| Attention (Q, K, V, O projections) | **No** — one copy, all tokens use it |
+| Embeddings + output head | **No** — one copy |
+| Feed-forward network (FFN) | **Yes** — 8 copies, this is what "8x" counts |
+| Router / gating matrix | One tiny 4096x8 matrix per layer (~32K params) |
 
 **Walk the total.** Mistral-7B is really 7.24B, and it splits like this:
 

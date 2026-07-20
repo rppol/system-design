@@ -241,20 +241,20 @@ def should_escalate(response_logprobs: list[float], threshold: float = -0.5) -> 
     return mean_logprob(response_logprobs) < threshold
 ```
 
-**Reading it in plain English.** "Average how surprised the model was at each word it chose; if it
+**The idea behind it.** "Average how surprised the model was at each word it chose; if it
 was more surprised than your threshold allows, do not trust the answer — pay for a bigger model."
 
 The framing to hold onto is that this measures hesitation, not correctness. It is a cheap proxy that
 catches the model *fumbling*, which is a real and common failure mode, but it is blind to the model
 being fluently and confidently wrong.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `logprob` | "log prob" | Natural log of the probability the model assigned to the token it actually emitted. Always `<= 0`; `0` means certainty |
-| `mean_logprob` | "mean log prob" | Sum of the token log-probs divided by token count. Length-normalized, so a long answer is not penalized for being long |
-| `-0.5` | "minus zero point five" | The escalation threshold. More negative = more surprised = escalate |
-| `exp(x)` | "e to the x" | Undoes the log. Converts a log-prob back into a plain probability so you can reason about it |
-| `<` | "is less than" | Note the direction: escalate when the score falls *below* the threshold, because both are negative |
+| Symbol | What it is |
+|--------|------------|
+| `logprob` | Natural log of the probability the model assigned to the token it actually emitted. Always `<= 0`; `0` means certainty |
+| `mean_logprob` | Sum of the token log-probs divided by token count. Length-normalized, so a long answer is not penalized for being long |
+| `-0.5` | The escalation threshold. More negative = more surprised = escalate |
+| `exp(x)` | Undoes the log. Converts a log-prob back into a plain probability so you can reason about it |
+| `<` | Note the direction: escalate when the score falls *below* the threshold, because both are negative |
 
 **Walk one example.** Two 5-token responses from the cheap model, threshold `-0.5`:
 
@@ -372,21 +372,21 @@ With routing (70% Haiku, 25% Sonnet, 5% Opus):
 Savings: ~44% cost reduction
 ```
 
-**Reading it in plain English.** "Work out what one query costs at each tier, then multiply each of
+**Stated plainly.** "Work out what one query costs at each tier, then multiply each of
 those by the share of traffic that actually lands there and add them up — the routed bill is a
 weighted sum, not an average of the price list."
 
 The reason to lay it out this way rather than trust the 44% headline is that the weighted sum
 immediately exposes where the money really goes, and it is almost never where the traffic goes.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `$0.25 / 1M` | "twenty-five cents per million tokens" | A tier's unit price. Divide by 1,000,000 for the price of one token |
-| `C_i` | "C sub i" | Cost of one query at tier i: `(in_tok x r_in + out_tok x r_out) / 1M` |
-| `w_i` | "w sub i", "weight of tier i" | Fraction of traffic routed to tier i. The weights sum to 1.0 |
-| `N` | "N" | Total query volume. `10M/day` here |
-| `sum(w_i x N x C_i)` | "sum over i of w-i N C-i" | The routed daily bill. The whole routing economics in one expression |
-| baseline | "baseline" | `N x C_mid` — what you paid before routing, everything on one mid-tier model |
+| Symbol | What it is |
+|--------|------------|
+| `$0.25 / 1M` | A tier's unit price. Divide by 1,000,000 for the price of one token |
+| `C_i` | Cost of one query at tier i: `(in_tok x r_in + out_tok x r_out) / 1M` |
+| `w_i` | Fraction of traffic routed to tier i. The weights sum to 1.0 |
+| `N` | Total query volume. `10M/day` here |
+| `sum(w_i x N x C_i)` | The routed daily bill. The whole routing economics in one expression |
+| baseline | `N x C_mid` — what you paid before routing, everything on one mid-tier model |
 
 **Walk one example.** 10M queries/day, 500 input + 300 output tokens each:
 
@@ -436,7 +436,7 @@ plateau, the next win is almost always at the top of the ladder, not the bottom.
 `$0.03000` gives `$0.0122/query` and a projected `$122,000/day` — twice the *unrouted* baseline.
 The weights are what make the calculation about your traffic instead of the provider's catalogue.
 
-**Reading the cascade version in plain English.** "A cascade always pays the cheap model, on every
+**What the formula is telling you.** "A cascade always pays the cheap model, on every
 single query, and then pays the expensive model again on the fraction it escalates — so the cheap
 leg is a floor you can never get below, and the escalation rate is the only dial."
 
@@ -444,14 +444,14 @@ This differs structurally from classifier routing, where a query goes to exactly
 cascade the two costs stack on escalated queries, which is why the break-even escalation rate is the
 number to check before choosing a cascade at all.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `P_esc` | "P escalate" | Probability a query fails the confidence check and moves up a tier |
-| `1 - P_esc` | "one minus P escalate" | Share handled by the cheap model alone. The cascade's success rate |
-| `C_cheap` | "C cheap" | Cost of one cheap-model call. Paid on 100% of queries, including escalated ones |
-| `C_exp` | "C expensive" | Cost of one expensive-model call. Paid only on the escalated share |
-| `E[C]` | "expected cost", "E of C" | `C_cheap + P_esc x C_exp`. Average cost per query across the whole distribution |
-| break-even `P_esc` | "break-even escalation rate" | The `P_esc` at which `E[C]` equals just calling the expensive model directly |
+| Symbol | What it is |
+|--------|------------|
+| `P_esc` | Probability a query fails the confidence check and moves up a tier |
+| `1 - P_esc` | Share handled by the cheap model alone. The cascade's success rate |
+| `C_cheap` | Cost of one cheap-model call. Paid on 100% of queries, including escalated ones |
+| `C_exp` | Cost of one expensive-model call. Paid only on the escalated share |
+| `E[C]` | `C_cheap + P_esc x C_exp`. Average cost per query across the whole distribution |
+| break-even `P_esc` | The `P_esc` at which `E[C]` equals just calling the expensive model directly |
 
 **Walk one example.** Haiku `$0.00050` and Sonnet `$0.00600` from Step 1 above:
 
@@ -605,20 +605,20 @@ quadrantChart
 
 The three tiers form a Pareto frontier along the diagonal. Routing goal: operate near the frontier, selecting the leftmost (cheapest) model that meets the quality threshold per task — any query served from the bottom-right of its adequate tier is pure overpayment.
 
-**Reading it in plain English.** "Divide dollars by quality points to see what you are paying per
+**What this actually says.** "Divide dollars by quality points to see what you are paying per
 unit of goodness — then look at the *steps between* tiers, because that is where the price of the
 next increment of quality is actually set."
 
 The frontier chart shows that all three tiers are defensible choices. The arithmetic below shows
 that the gaps between them are priced wildly differently, and that is the fact routing exploits.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `Q` | "Q", "quality" | Empirical quality score on your eval set, normalized 0–1. The y-axis of the chart above |
-| `Q_min` | "Q min" | The minimum acceptable quality for this task type. A business decision, not a measurement |
-| `C` | "C", "cost per query" | Dollars per query at that tier, from Section 6.3 |
-| `C / Q` | "cost over quality" | Average price of a quality point. Useful for ranking, misleading for deciding |
-| `dC / dQ` | "delta C over delta Q" | *Marginal* price of the next quality point — what the upgrade actually costs you |
+| Symbol | What it is |
+|--------|------------|
+| `Q` | Empirical quality score on your eval set, normalized 0–1. The y-axis of the chart above |
+| `Q_min` | The minimum acceptable quality for this task type. A business decision, not a measurement |
+| `C` | Dollars per query at that tier, from Section 6.3 |
+| `C / Q` | Average price of a quality point. Useful for ranking, misleading for deciding |
+| `dC / dQ` | *Marginal* price of the next quality point — what the upgrade actually costs you |
 
 **Walk one example.** Quality read off the frontier chart, cost from Section 6.3:
 
@@ -698,7 +698,7 @@ A team deployed a DistilBERT router on CPU with 80ms P50 latency. Their cheap mo
 
 A startup set an aggressive cost target (90% of queries to the cheapest model). The classifier was only 75% accurate. Net result: 15% of queries (1.5M/day) routed incorrectly to a weak model. User satisfaction scores dropped 12 points before the team noticed. The problem was caught only because they had a quality monitoring pipeline. Lesson: set the routing threshold conservatively (start with 50-60% to cheap models, expand gradually) and monitor quality per route segment.
 
-**Reading it in plain English.** "A single accuracy number tells you nothing useful, because the two
+**In plain terms.** "A single accuracy number tells you nothing useful, because the two
 ways a router can be wrong are not the same kind of wrong — one costs dollars and the other costs
 users, and only one of them is bounded."
 
@@ -706,14 +706,14 @@ That asymmetry is the whole reason to report a confusion matrix instead of an ac
 75%-accurate router is fine or catastrophic depending entirely on which direction its 25% of errors
 lean, and the aggressive cheap-routing target is what decides that lean.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `A` | "A", "accuracy" | Fraction of queries sent to the correct tier. `0.75` in this incident |
-| `1 - A` | "one minus A" | Total error rate. Says nothing about direction |
-| `r_cheap` | "r cheap" | Target share of traffic routed to the cheap model. `0.90` here — the aggressive setting |
-| downward misroute | "downward misroute" | Complex query sent to the weak model. Costs quality. **Unbounded** — you cannot price a lost user |
-| upward misroute | "upward misroute" | Simple query sent to the frontier model. Costs money. **Bounded** — exactly the tier price gap |
-| `C_exp - C_cheap` | "the tier gap" | Dollars wasted per upward misroute. `$0.00600 - $0.00050 = $0.00550` |
+| Symbol | What it is |
+|--------|------------|
+| `A` | Fraction of queries sent to the correct tier. `0.75` in this incident |
+| `1 - A` | Total error rate. Says nothing about direction |
+| `r_cheap` | Target share of traffic routed to the cheap model. `0.90` here — the aggressive setting |
+| downward misroute | Complex query sent to the weak model. Costs quality. **Unbounded** — you cannot price a lost user |
+| upward misroute | Simple query sent to the frontier model. Costs money. **Bounded** — exactly the tier price gap |
+| `C_exp - C_cheap` | Dollars wasted per upward misroute. `$0.00600 - $0.00050 = $0.00550` |
 
 **Walk one example.** 10M queries/day, classifier accuracy 75%, cheap-routing target 90%:
 
@@ -1075,7 +1075,7 @@ class AdaptiveCascadeRouter:
                 alert_oncall(f"Router threshold shifted to {self.threshold:.2f} — investigate query distribution")
 ```
 
-**Reading it in plain English.** "Stop asking 'is this score above 0.6' and start asking 'is this
+**Read it like this.** "Stop asking 'is this score above 0.6' and start asking 'is this
 score in the top 35% of scores I have seen lately' — the threshold becomes a percentile, so it moves
 by itself when the query mix moves."
 
@@ -1084,15 +1084,15 @@ the scores are a property of the model *and* the incoming traffic, and only one 
 your control. Pinning the routing *rate* instead of the routing *score* is what makes the router
 survive a change in customer mix.
 
-| Symbol | Say it | What it is |
-|--------|--------|------------|
-| `score` | "score" | Classifier's complexity output for one query, `0.0`–`1.0`. Higher = more complex |
-| `threshold` | "threshold" | Cut point above which a query goes premium. The thing that used to be hardcoded at `0.6` |
-| `target_premium_rate` | "target premium rate" | The share of traffic you *intend* to send to the expensive model. `0.35` |
-| `actual_premium_rate` | "actual premium rate" | The share currently going premium: `count(score >= threshold) / window` |
-| `deviation` | "deviation" | `actual - target`. Recalibrate when `abs(deviation) > 0.10` |
-| `score_window` | "score window" | Rolling buffer of the last 10,000 scores. The empirical distribution you re-cut |
-| `new_threshold_idx` | "new threshold index" | `int(N x (1 - target))` — the position in the *sorted* scores that leaves exactly `target` above it |
+| Symbol | What it is |
+|--------|------------|
+| `score` | Classifier's complexity output for one query, `0.0`–`1.0`. Higher = more complex |
+| `threshold` | Cut point above which a query goes premium. The thing that used to be hardcoded at `0.6` |
+| `target_premium_rate` | The share of traffic you *intend* to send to the expensive model. `0.35` |
+| `actual_premium_rate` | The share currently going premium: `count(score >= threshold) / window` |
+| `deviation` | `actual - target`. Recalibrate when `abs(deviation) > 0.10` |
+| `score_window` | Rolling buffer of the last 10,000 scores. The empirical distribution you re-cut |
+| `new_threshold_idx` | `int(N x (1 - target))` — the position in the *sorted* scores that leaves exactly `target` above it |
 
 **Walk one example.** Window of 10,000 recent scores, `target_premium_rate = 0.35`:
 
