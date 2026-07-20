@@ -318,7 +318,7 @@ button:active { transform: scale(0.98); }
   border: 1px solid var(--glass-brd); border-radius: var(--radius-lg);
   padding: 26px; box-shadow: var(--shadow), var(--glass-hilite); margin: 18px 0;
 }
-.topic-card h2 { margin: 8px 0 4px; font-size: 24px; letter-spacing: -0.015em; text-transform: capitalize; }
+.topic-card h2 { margin: 8px 0 4px; font-size: 24px; letter-spacing: -0.015em; }
 .topic-card .msg { color: var(--muted); margin: 8px 0 0; }
 
 /* daily goal ring */
@@ -436,7 +436,7 @@ button:active { transform: scale(0.98); }
 /* ---------- 6. Quiz & flashcards ------------------------------------------ */
 
 .qhead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
-.qhead .module { color: var(--muted); font-family: var(--mono); font-size: 12px; text-transform: capitalize; }
+.qhead .module { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 .dots { display: flex; gap: 6px; flex-wrap: wrap; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--glass-2); border: 1px solid var(--glass-brd); transition: background 0.25s ease; }
 .dot.done { background: var(--accent); border-color: transparent; }
@@ -674,7 +674,7 @@ button:active { transform: scale(0.98); }
   padding: 14px 16px; margin: 10px 0; box-shadow: var(--glass-hilite);
 }
 .sectiontile .top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
-.sectiontile .name { font-weight: 700; text-transform: capitalize; letter-spacing: -0.01em; }
+.sectiontile .name { font-weight: 700; letter-spacing: -0.01em; }
 .sectiontile .pct { color: var(--muted); font-family: var(--mono); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
 
 /* mastery bar: single-hue sequential (accent), animated in */
@@ -736,7 +736,7 @@ button:active { transform: scale(0.98); }
 }
 .modrow:hover { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: var(--glass-2); }
 .modrow input { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
-.modrow .mname { text-transform: capitalize; }
+.modrow .mname { }
 .modrow .mcount { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
 
 /* [E1] session length: 5/10/20 segmented control, persisted as sd_deck_len */
@@ -879,7 +879,7 @@ body.reader-resizing #reader { animation: none; }
   display: flex; align-items: center; gap: 8px; padding: 11px 16px;
   border-bottom: 1px solid var(--od-line); background: var(--od-bg2); flex: 0 0 auto;
 }
-.reader-title { font-weight: 700; text-transform: capitalize; color: var(--od-text); margin-right: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.reader-title { font-weight: 700; color: var(--od-text); margin-right: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .reader-nav { background: transparent; color: var(--od-muted); font-size: 13px; line-height: 1; padding: 6px 10px; border: 1px solid var(--od-line); border-radius: 8px; }
 .reader-nav:hover:not(:disabled) { color: var(--od-text); border-color: var(--accent); }
 .reader-nav:disabled { opacity: 0.35; cursor: default; }
@@ -1022,7 +1022,7 @@ mark.rd-find-cur { background: var(--accent); color: #05070d; }
 a.mod-item {
   display: block; padding: 4px 8px; color: var(--od-muted); font-size: 12px; line-height: 1.4;
   text-decoration: none; border-right: 2px solid transparent; border-radius: 6px 0 0 6px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 a.mod-item:hover { color: var(--od-text); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 a.mod-item.active { color: var(--od-text); border-right-color: var(--sec-accent, var(--accent)); background: color-mix(in srgb, var(--sec-accent, var(--accent)) 12%, transparent); font-weight: 600; }
@@ -1033,7 +1033,7 @@ a.mod-item.read::before, a.mod-file.read::before { content: "\2713 "; color: var
 .mod-folder:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .mod-arrow { font-size: 8px; color: var(--od-muted); transition: transform 0.15s; flex-shrink: 0; line-height: 1; }
 .mod-group.open > .mod-folder .mod-arrow { transform: rotate(90deg); }
-.mod-fname { color: var(--od-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: capitalize; }
+.mod-fname { color: var(--od-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mod-group.open > .mod-folder .mod-fname { color: var(--od-text); }
 
 .mod-subfiles { display: none; padding-left: 16px; }
@@ -1059,7 +1059,7 @@ a.mod-item.read::before, a.mod-file.read::before { content: "\2713 "; color: var
 a.mod-file {
   display: block; padding: 3px 8px; color: var(--od-muted); font-size: 11px; line-height: 1.5;
   text-decoration: none; border-right: 2px solid transparent; border-radius: 6px 0 0 6px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 a.mod-file:hover { color: var(--od-text); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 a.mod-file.active { color: var(--od-text); border-right-color: var(--sec-accent, var(--accent)); background: color-mix(in srgb, var(--sec-accent, var(--accent)) 12%, transparent); font-weight: 600; }
@@ -1256,7 +1256,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   transform: translateY(-1px);
 }
 .md-body .wn-kind { font-family: var(--mono); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--sec-accent, var(--accent)); }
-.md-body .wn-title { font-weight: 600; font-size: var(--fs-md); text-transform: capitalize; line-height: 1.35; }
+.md-body .wn-title { font-weight: 600; font-size: var(--fs-md); line-height: 1.35; }
 .md-body .wn-sec {
   display: flex; align-items: center; gap: 6px; margin-top: auto;
   font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--od-muted);
@@ -1551,6 +1551,14 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   .rd-find-input { width: 120px; }
   /* [W3] enlarge tap targets that are mouse-sized affordances. */
   .qpause, .ra-btn, .nudge-dismiss { min-width: 40px; min-height: 40px; }
+  /* Topbar and footer chrome were never in the list above, so on a phone the
+     only door to theme/sound/search/shortcuts (#moreBtn) was 37px wide, and
+     the streak, wordmark and shortcuts controls were 18-27px tall. Persistent
+     chrome is exactly what gets tapped one-handed, in motion. */
+  #moreBtn { min-width: 44px; min-height: 44px; }
+  #streakChip { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+  #brandHome { min-height: 44px; display: inline-flex; align-items: center; }
+  #helpBtn { min-height: 44px; display: inline-flex; align-items: center; }
   a.mod-item, .mod-folder, a.mod-file { padding-top: 9px; padding-bottom: 9px; }
   .codecopy { padding: 8px 12px; }
   .lenopt, .pathopt { min-height: 44px; }
@@ -1585,16 +1593,22 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
-  .mesh { animation: none; }
+  /* Must out-specify .mesh.m1/.m2/.m3 (0-2-0), which is where the drift is
+     declared — a bare `.mesh` here is 0-1-0 and silently loses. */
+  .mesh.m1, .mesh.m2, .mesh.m3 { animation: none; }
   #app > * { animation: none; }
   html { scroll-behavior: auto; }
 }
 
 /* [W5] perf: drop the aurora drift where it costs the most — narrow viewports
    (mobile GPUs) and Save-Data / data-saver connections (.low-power set in boot()).
-   The mesh visuals (colour, blur, opacity) stay; only the infinite drift stops. */
-@media (max-width: 640px) { .mesh { animation: none; } }
-.low-power .mesh { animation: none; }
+   The mesh visuals (colour, blur, opacity) stay; only the infinite drift stops.
+   Selectors must carry the .m1/.m2/.m3 class too: the drift is declared on
+   `.mesh.m1` (0-2-0), so a bare `.mesh` rule (0-1-0) loses on specificity and
+   the pause never applied — every phone kept animating three 110px-blurred
+   58vmax circles forever. */
+@media (max-width: 640px) { .mesh.m1, .mesh.m2, .mesh.m3 { animation: none; } }
+.low-power .mesh.m1, .low-power .mesh.m2, .low-power .mesh.m3 { animation: none; }
 
 /* ---------- 16. Graphics & delight (round 2) ------------------------------- */
 
@@ -1841,7 +1855,7 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
   flex: 0 0 auto; font-variant-numeric: tabular-nums; opacity: 0.9;
 }
 .pn-body { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.pn-name { font-size: var(--fs-md); font-weight: 650; text-transform: capitalize; letter-spacing: -0.01em; line-height: 1.28; }
+.pn-name { font-size: var(--fs-md); font-weight: 650; letter-spacing: -0.01em; line-height: 1.28; }
 .pn-meta { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); font-variant-numeric: tabular-nums; }
 .pn-here { color: var(--accent-text); font-weight: 700; }
 .pn-check { margin-left: auto; padding-left: 8px; color: var(--good); font-weight: 800; flex: 0 0 auto; }
@@ -1873,7 +1887,7 @@ details.miss-item .miss-deeper { margin: 4px 15px 13px; }
 .leaf-fan[hidden] { display: none; }   /* display:flex above would defeat the hidden attribute */
 .pathleaf {
   padding: 5px 11px; border-radius: 9px; text-align: left;
-  font-size: 12px; color: var(--muted); text-transform: capitalize;
+  font-size: 12px; color: var(--muted);
   background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hilite);
   animation: leaf-in 0.3s var(--ease-out) backwards;
 }
@@ -2363,7 +2377,7 @@ body.boss-mode .mesh { filter: saturate(1.6) hue-rotate(-14deg) brightness(0.92)
   border-color: color-mix(in srgb, #fbbf24 55%, transparent); background-size: 200% 100%; animation: shimmer 6s linear infinite;
   background-image: linear-gradient(110deg, color-mix(in srgb, var(--accent) 10%, var(--glass)), color-mix(in srgb, var(--accent-2) 12%, var(--glass)), color-mix(in srgb, #fbbf24 10%, var(--glass)));
 }
-.cx-name { font-weight: 700; font-size: 13px; text-transform: capitalize; letter-spacing: -0.005em; }
+.cx-name { font-weight: 700; font-size: 13px; letter-spacing: -0.005em; }
 .cx-dots { display: flex; gap: 3px; flex-wrap: wrap; }
 .cx-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--glass-2); border: 1px solid var(--glass-brd); }
 .cx-dot.on { background: var(--accent); border-color: transparent; }
@@ -2464,7 +2478,7 @@ body.interview-mode #app::before {
 /* strongest / shakiest module lists */
 .mod-list { display: flex; flex-direction: column; gap: 8px; }
 .mod-row { display: grid; grid-template-columns: 1fr 78px auto auto; align-items: center; gap: 10px; }
-.mr-name { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: capitalize; }
+.mr-name { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mr-bar { height: 6px; border-radius: 3px; background: var(--glass-2); overflow: hidden; }
 .mr-bar > i { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
 .mr-seen { font-family: var(--mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; min-width: 18px; }

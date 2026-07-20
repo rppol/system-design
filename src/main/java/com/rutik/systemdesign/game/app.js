@@ -65,8 +65,53 @@ const bookOf = (id) => {
   const seg = (id || "").split("/");
   return seg[0] === "book" && seg.length >= 3 ? seg[1] : null;
 };
-const bookLabel = (slug) => (BOOK_LABELS[slug] && BOOK_LABELS[slug].name) ||
-  slug.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const bookLabel = (slug) => (BOOK_LABELS[slug] && BOOK_LABELS[slug].name) || titleize(slug);
+
+// Module ids are directory slugs (cap_theorem, grpc_and_protobuf), and a slug
+// knows nothing about capitalisation. Rendering them with CSS
+// `text-transform: capitalize` produced "Cap Theorem", "Osi Model", "Grpc" —
+// the single loudest tell that these labels were machine-made. Casing is data,
+// not presentation, so it happens here and the CSS rule is gone.
+// Only terms that actually appear in this repo's slugs are listed; a word that
+// is not a known acronym keeps ordinary title case.
+const ACRONYMS = new Map(Object.entries({
+  api: "API", apis: "APIs", cdn: "CDN", cpu: "CPU", gpu: "GPU", gpus: "GPUs",
+  sql: "SQL", nosql: "NoSQL", jvm: "JVM", jwt: "JWT", http: "HTTP", https: "HTTPS",
+  tcp: "TCP", udp: "UDP", ip: "IP", dns: "DNS", osi: "OSI", cap: "CAP",
+  cqrs: "CQRS", mvc: "MVC", aop: "AOP", jpa: "JPA", jdbc: "JDBC", ioc: "IoC",
+  orm: "ORM", rest: "REST", grpc: "gRPC", json: "JSON", yaml: "YAML", xml: "XML",
+  html: "HTML", css: "CSS", ui: "UI", ux: "UX", ml: "ML", mlops: "MLOps",
+  llm: "LLM", llms: "LLMs", rag: "RAG", gil: "GIL", asgi: "ASGI", wsgi: "WSGI",
+  aws: "AWS", gcp: "GCP", sre: "SRE", slo: "SLO", slos: "SLOs", sla: "SLA",
+  ci: "CI", cd: "CD", cuda: "CUDA", simt: "SIMT", simd: "SIMD", nccl: "NCCL",
+  rlhf: "RLHF", dnn: "DNN", faas: "FaaS", iac: "IaC", oauth: "OAuth",
+  owasp: "OWASP", otel: "OTel", quic: "QUIC", sse: "SSE", stomp: "STOMP",
+  sycl: "SYCL", hip: "HIP", vllm: "vLLM", dsa: "DSA", dsls: "DSLs",
+  junit: "JUnit", mysql: "MySQL", oci: "OCI", idp: "IdP", crds: "CRDs",
+  url: "URL", uri: "URI", os: "OS", io: "I/O", id: "ID", ids: "IDs",
+  mcp: "MCP", vla: "VLA", solid: "SOLID", gof: "GoF", tls: "TLS", ssl: "SSL",
+  xss: "XSS", csrf: "CSRF", ddd: "DDD", tdd: "TDD", etl: "ETL", kv: "KV",
+  fastapi: "FastAPI", graphql: "GraphQL", postgresql: "PostgreSQL",
+  javascript: "JavaScript", devops: "DevOps", github: "GitHub", openai: "OpenAI",
+  pytorch: "PyTorch", tensorflow: "TensorFlow", numpy: "NumPy", k8s: "K8s",
+}));
+// Touch layouts drop the hover-only prerequisite chords and the multi-column
+// serpentine, so any copy describing rows, hovering, or drawn links is false
+// there and reads as a half-finished screen.
+const coarsePointer = () => window.matchMedia("(pointer: coarse)").matches;
+
+// Small words stay lowercase inside a title, but never as the first word.
+const TITLE_STOPWORDS = new Set(["a", "an", "and", "as", "at", "by", "for", "from",
+  "in", "of", "on", "or", "the", "to", "vs", "via", "with"]);
+function titleize(s) {
+  return String(s).replace(/_/g, " ").replace(/[^\s/]+/g, (w, at, whole) => {
+    const lower = w.toLowerCase();
+    const hit = ACRONYMS.get(lower);
+    if (hit) return hit;
+    if (at > 0 && TITLE_STOPWORDS.has(lower)) return lower;
+    return w.charAt(0).toUpperCase() + w.slice(1);
+  }).replace(/\bTCP IP\b/g, "TCP/IP");
+}
 
 // Phase-order for the Study browser. Derived from each section's README learning path.
 // Modules not listed here sort to the end (alphabetically by JS Map insertion order).
@@ -945,7 +990,7 @@ function moduleStats(progress) {
 }
 
 // Display name for a module key ("hld/caching" -> "caching") — matches extract.py.
-const modDisplay = (mod) => String(mod).split("/").pop().replace(/_/g, " ");
+const modDisplay = (mod) => titleize(String(mod).split("/").pop());
 
 // Confusion tally: increment "<a>|<b>" (canonical order set by caller), cap 50 keys.
 function tallyConfusion(p, key) {
@@ -1609,7 +1654,15 @@ const bankCache = {};
 async function loadBank(section) {
   // "default" cache lets a 304 revalidate these multi-MB files instead of
   // re-downloading them on every boot.
-  if (!bankCache[section]) bankCache[section] = await fetchJSON(`questions/${section}.json`, null, "default");
+  if (!bankCache[section]) {
+    const bank = await fetchJSON(`questions/${section}.json`, null, "default");
+    // extract.py emits moduleName straight from the directory slug, so it
+    // arrives lowercase ("cap theorem"). Case it once here rather than at the
+    // ~18 places that render it. The stored JSON is untouched, so question ids
+    // and spaced-repetition state are unaffected.
+    if (Array.isArray(bank)) for (const q of bank) if (q.moduleName) q.moduleName = titleize(q.moduleName);
+    bankCache[section] = bank;
+  }
   return bankCache[section];
 }
 
@@ -2118,7 +2171,7 @@ function copyQuestion(item, btn) {
   navigator.clipboard?.writeText(text).then(() => {
     btn.classList.add("ok");
     setTimeout(() => btn.classList.remove("ok"), 1400);
-  });
+  }).catch(() => announce("Couldn't copy — clipboard is blocked."));
 }
 
 /* ---------- session guard: pause / resume ---------- */
@@ -3519,7 +3572,7 @@ function palStaticCommands() {
   for (const s of Object.keys(state.index.sections || {}).sort())
     out.push({ label: `Start ${label(s)} blitz`, hint: "blitz", run: () => startBlitz(s) });
   for (const [mod, list] of Object.entries(state.index.files || {})) {
-    const name = mod.split("/").pop().replace(/_/g, " "), sec = mod.split("/")[0];
+    const name = titleize(mod.split("/").pop()), sec = mod.split("/")[0];
     const file = (list && list[0]) || "README.md";
     out.push({ label: `Read ${name}`, hint: label(sec), run: () => { reader.back = []; openReaderPath(`${mod}/${file}`, name); } });
     out.push({ label: `Quiz ${name}`, hint: label(sec), run: () => startBlitz(sec, [mod]) });
@@ -3853,7 +3906,7 @@ async function openStudySection(sectionPath) {
   const openFans = new Set();
   if (herePath && hereMod && !/\/README\.md$/i.test(herePath)) openFans.add(hereMod);  // reveal the "here" leaf
 
-  const leafLabel = (fn) => (fn === "README.md" ? "readme" : fn.replace(/\.md$/i, "").replace(/_/g, " "));
+  const leafLabel = (fn) => (fn === "README.md" ? "Readme" : titleize(fn.replace(/\.md$/i, "")));
   const steps = mods.map((m, i) => {
     const mFiles = files[m.module] || ["README.md"];
     const multi = mFiles.length > 1;
@@ -3898,8 +3951,10 @@ async function openStudySection(sectionPath) {
   app.innerHTML = `
     <div class="path-screen">
     <div class="hero">${bookScope ? `<p class="eyebrow">${esc(label(section))}${bookMeta.author ? " &middot; " + esc(bookMeta.author) : ""}</p>` : ""}<h1>${esc(bookScope ? bookLabel(bookScope) : label(section))}</h1>
-      <p>${mods.length} ${bookScope ? "chapters" : "topics"}${onInterview ? " &middot; interview-specific path" : ""} &middot; start at 01 &mdash; the path snakes across each row in the ${bookScope ? "book's chapter order" : "section's learning order"}.</p>
-      ${graph ? `<p class="path-legend">${crossLinks
+      <p>${mods.length} ${bookScope ? "chapters" : "topics"}${onInterview ? " &middot; interview-specific path" : ""} &middot; start at 01 &mdash; ${coarsePointer()
+        ? `follow them top to bottom in the ${bookScope ? "book's chapter order" : "section's learning order"}.`
+        : `the path snakes across each row in the ${bookScope ? "book's chapter order" : "section's learning order"}.`}</p>
+      ${graph && !coarsePointer() ? `<p class="path-legend">${crossLinks
         ? `strongest prerequisite links drawn &middot; hover a topic to see all its connections &middot; ${crossLinks} cross-links mapped`
         : "no cross-link data yet &mdash; path order shown"}</p>` : ""}</div>
     <div class="topicbar">
@@ -3909,7 +3964,13 @@ async function openStudySection(sectionPath) {
     </div>
     <div class="path-wrap" id="pathWrap">
       <svg class="path-svg" id="pathSvg" aria-hidden="true">
-        <defs><linearGradient id="lpGrad" x1="0" y1="0" x2="0" y2="1">
+        <!-- userSpaceOnUse, not the default objectBoundingBox: on a phone the
+             layout is a single column, so every spine segment is a straight
+             vertical line and the path's bounding box is ZERO WIDTH. SVG does
+             not paint an objectBoundingBox gradient over a degenerate box, so
+             the whole connecting path silently vanished and the cards read as
+             floating in dead space. y2 is refreshed in layoutPath(). -->
+        <defs><linearGradient id="lpGrad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="600">
           <stop offset="0" style="stop-color:var(--accent)"/>
           <stop offset="1" style="stop-color:var(--accent-2)"/>
         </linearGradient></defs>
@@ -3984,6 +4045,7 @@ async function openStudySection(sectionPath) {
     svg.setAttribute("width", W);
     svg.setAttribute("height", H);
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    el("#lpGrad")?.setAttribute("y2", H);          // userSpaceOnUse gradient spans the laid-out height
 
     let d = "";                                    // spine: adjacent-slot connectors
     for (let v = 0; v < vis.length - 1; v++) {
@@ -4393,6 +4455,12 @@ let _mmSeq = 0;             // unique ids for manual mermaid.render() calls
 const MM_DIR_RE = /^([ \t]*(?:flowchart|graph)\s+)(TB|TD|LR|RL)\b/m;   // m: header may follow %%{init}%% lines
 const MM_FLIP = { TB: "LR", TD: "LR", LR: "TD", RL: "TD" };
 
+// Which way the *reading column* runs, not the device: a phone in portrait and
+// a narrow reader pane beside two sidebars have the same problem, and a phone
+// rotated to landscape has the laptop's. Rotating re-runs the choice through
+// the ResizeObserver below, so the same diagram follows the device.
+const mmPortrait = (avail) => window.innerHeight > window.innerWidth && avail <= 560;
+
 function mmAltOrientation(src) {
   if (MM_DIR_RE.test(src)) return src.replace(MM_DIR_RE, (_, pre, dir) => pre + MM_FLIP[dir]);
   const lines = src.split("\n");
@@ -4697,11 +4765,27 @@ async function mmRenderNode(n, src) {
         if (d1) {
           // Flipped text never drops below 0.7x (stays readable); past the
           // column width the container scrolls horizontally instead of
-          // shrinking further. Flip when that cuts the on-screen height by
-          // ≥30% and at least ~55% of the flipped diagram is visible at once.
+          // shrinking further.
           const s1 = Math.min(1, Math.max(avail / d1.w, 0.7));
           const visible = Math.min(1, avail / (d1.w * s1));
-          if (d1.h * s1 < dispH(d0) * 0.7 && visible >= 0.55) { svg = altSvg; flipScale = s1; }
+          if (mmPortrait(avail)) {
+            // A tall, narrow column (phone held upright, reader pane on a
+            // split screen) is the mirror image of the widescreen case: here a
+            // wide LR diagram is squeezed to a microscopic strip while height
+            // is the plentiful axis. The height test above never fires for it —
+            // a shrunken diagram is short by definition — so compare how large
+            // each orientation can actually be drawn and take the legible one.
+            // The 1.25x margin keeps a near-tie from oscillating on resize.
+            const s0 = Math.min(1, avail / d0.w);
+            const s1fit = Math.min(1, avail / d1.w);
+            // Refuse a swap that trades a squeezed diagram for an endless one.
+            const sane = d1.h * s1fit <= window.innerHeight * 3.5;
+            if (s1fit > s0 * 1.25 && sane) { svg = altSvg; flipScale = s1fit; }
+          } else if (d1.h * s1 < dispH(d0) * 0.7 && visible >= 0.55) {
+            // Widescreen: flip when it cuts the on-screen height by >=30% and
+            // at least ~55% of the flipped diagram is visible at once.
+            svg = altSvg; flipScale = s1;
+          }
         }
       } catch { /* flipped source failed to parse — keep the original */ }
     }
@@ -5136,7 +5220,7 @@ function wireDiagramsAndCopy(root) {
       navigator.clipboard?.writeText(code.textContent).then(() => {
         btn.textContent = "copied ✓"; btn.classList.add("ok");
         setTimeout(() => { btn.textContent = "copy"; btn.classList.remove("ok"); }, 1400);
-      });
+      }).catch(() => { btn.textContent = "blocked"; setTimeout(() => { btn.textContent = "copy"; }, 1400); });
     });
     pre.appendChild(btn);
     if (code.classList.contains("diagram")) {
@@ -5687,7 +5771,7 @@ function buildModuleNav(modEl, navCtx, currentPath) {
     const subItems = mFiles.map((fn) => {
       const filePath = `${mKey}/${fn}`;
       const isFileCurrent = filePath === currentPath;
-      const label = fn === "README.md" ? "readme" : fn.replace(".md", "").replace(/_/g, " ");
+      const label = fn === "README.md" ? "Readme" : titleize(fn.replace(".md", ""));
       return `<li><a href="#" class="mod-file${isFileCurrent ? " active" : ""}${isModuleRead(filePath) ? " read" : ""}" data-path="${esc(filePath)}" title="${esc(label)}">${esc(label)}</a></li>`;
     }).join("");
 
@@ -5917,7 +6001,7 @@ function appendEvalBlock(main, path) {
   const files = (state.index && state.index.files) || {};
   if (!files[dir]) return;                         // not a quizzable module page
   const section = dir.split("/")[0];
-  const name = dir.split("/").pop().replace(/_/g, " ");
+  const name = titleize(dir.split("/").pop());
   const block = document.createElement("div");
   block.className = "eval-block";
   block.innerHTML = `<div class="eval-h">Evaluate yourself</div>
@@ -5968,7 +6052,7 @@ async function appendWhatNext(main, path) {
     const d = p.replace(/\/[^/]+$/, "");
     if (seen.has(d) || cards.length >= 3) return;
     seen.add(d);
-    cards.push({ path: p, kind, title: title || d.split("/").pop().replace(/_/g, " ") });
+    cards.push({ path: p, kind, title: title || titleize(d.split("/").pop()) });
   };
   const list = reader.nav.list || [];
   for (let i = reader.nav.idx + 1; i < list.length; i++) {
@@ -6022,9 +6106,13 @@ function wireHeadingAnchors(main, path) {
     b.textContent = "#";
     b.addEventListener("click", () => {
       const url = location.href.split("#")[0] + readerHash(path, h.id);
-      try { if (navigator.clipboard) navigator.clipboard.writeText(url); } catch { /* denied */ }
-      b.textContent = "✓"; b.classList.add("ok");
-      setTimeout(() => { b.textContent = "#"; b.classList.remove("ok"); }, 1200);
+      // The tick used to render unconditionally, and writeText rejects
+      // asynchronously so the surrounding try never caught a denial: a blocked
+      // clipboard still claimed success. Only confirm what actually happened.
+      navigator.clipboard?.writeText(url).then(() => {
+        b.textContent = "✓"; b.classList.add("ok");
+        setTimeout(() => { b.textContent = "#"; b.classList.remove("ok"); }, 1200);
+      }).catch(() => announce("Couldn't copy the link — clipboard is blocked."));
     });
     h.appendChild(b);
   });
@@ -6054,7 +6142,7 @@ function navFromIndex(path) {
     const ai = order.indexOf(a), bi = order.indexOf(b);
     return (ai === -1 ? 9999 : ai) - (bi === -1 ? 9999 : bi);
   });
-  const list = mods.map((m) => ({ path: `${m}/README.md`, title: m.split("/").pop().replace(/_/g, " ") }));
+  const list = mods.map((m) => ({ path: `${m}/README.md`, title: titleize(m.split("/").pop()) }));
   const dir = path.replace(/\/[^/]+$/, "");
   const idx = list.findIndex((m) => m.path.replace("/README.md", "") === dir || m.path === path);
   return { list, idx: idx === -1 ? 0 : idx };
@@ -6660,7 +6748,7 @@ function questChipsHTML(quests) {
 /* ---------- [D] Friday Debrief ---------- */
 function moduleLabel(moduleKey) {
   const parts = (moduleKey || "").split("/");
-  return (parts[1] || parts[0] || moduleKey || "").replace(/_/g, " ");
+  return titleize(parts[1] || parts[0] || moduleKey || "");
 }
 function weekAgg(history, startISO, endISO, section) {
   const rows = history.filter((h) => h.date >= startISO && h.date <= endISO && h.section === section);
@@ -6994,7 +7082,7 @@ document.addEventListener("keydown", (e) => {
    ========================================================================== */
 
 /* ---------- [C] shared helpers ---------- */
-const prettyMod = (mod) => (String(mod).split("/")[1] || String(mod)).replace(/_/g, " ");
+const prettyMod = (mod) => titleize(String(mod).split("/")[1] || String(mod));
 function tierOf(section) {
   const t = sectionTier((state.progress.sections || {})[section]);
   return t ? t.toLowerCase() : null;               // null | bronze | silver | gold
