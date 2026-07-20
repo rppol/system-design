@@ -309,13 +309,13 @@ Now read the correction in the same terms. LightGBM's `num_leaves = 31` over `30
       times each row is trained on                     4
 ```
 
-Now the decision rule. The reported gap is `0.84 - 0.72 = 0.12` AUC. If `scores.std()` came back around `0.01`, that gap is roughly twelve standard deviations and the conclusion is safe. If it came back around `0.05` — entirely plausible when each fold validates on only 1,000 rows — the gap is barely two, and "LightGBM beats the DNN" is a much weaker claim than the point estimate suggests. This is why the print statement carries `± scores.std()` and why a candidate quoting a bare CV mean invites the follow-up question.
+Now the decision rule. The reported gap is `0.84 - 0.72 = 0.12` AUC. If `scores.std()` came back around `0.01`, that gap is roughly twelve standard deviations and the conclusion is safe. If it came back around `0.05` — entirely plausible when each fold validates on only 1,000 rows — the gap is only about `2.4`, and "LightGBM beats the DNN" is a much weaker claim than the point estimate suggests. This is why the print statement carries `± scores.std()` and why a candidate quoting a bare CV mean invites the follow-up question.
 
 **Why `k = 5` rather than 10 or leave-one-out.** Raising `k` trains on more data per fit (`90%` at `k = 10`), lowering bias, but the folds overlap more so their scores become correlated and the variance estimate degrades — while the cost rises linearly, `k` full fits. At the extreme, leave-one-out means 5,000 fits for a variance estimate that is famously unreliable. `k = 5` and `k = 10` are the standard compromise; go to `k = 10` when data is scarce enough that losing `20%` per fit hurts, and stay at `5` when fits are expensive.
 
 **The fold-splitting trap this code does not guard against.** Plain `cv=5` uses random splits. That is correct here because `make_classification` produces i.i.d. rows, but on real data it is the single most common way to manufacture a fake result: random folds on time-series data let the model see the future, and random folds on grouped data (multiple rows per user) leak the same user across train and validation. Reach for `TimeSeriesSplit` or `GroupKFold` the moment either structure is present, and remember that any preprocessing — scaling, target encoding, imputation — must be fitted *inside* the fold, not before the split.
 
-The DNN has ~100k parameters on 5k samples — a parameter-to-sample ratio of 20:1. Generalization theory (VC dimension, PAC learning bounds) predicts high variance. The GBDT has a regularized tree structure that is essentially a piecewise-constant function fitter, which matches how most tabular data is generated (rule-based business logic + noise).
+The DNN has 49,153 parameters on 5k samples — a parameter-to-sample ratio of roughly 10:1. Generalization theory (VC dimension, PAC learning bounds) predicts high variance. The GBDT has a regularized tree structure that is essentially a piecewise-constant function fitter, which matches how most tabular data is generated (rule-based business logic + noise).
 
 ### 6.2 Constraint-Driven Selection — Credit Risk (Regulated)
 
