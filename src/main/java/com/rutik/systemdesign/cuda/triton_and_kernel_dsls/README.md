@@ -347,6 +347,46 @@ def add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return out
 ```
 
+**What this actually says.** `grid = ceil(n_elements / BLOCK_SIZE)` says: "chop the
+vector into fixed-size tiles and round *up*, then hand every tile to one program —
+accepting that the final tile is partly empty."
+
+The rounding-up is the entire reason `mask` exists three lines above. The grid is
+always whole blocks, so the last program always owns lanes the tensor does not.
+
+| Symbol | What it is |
+|--------|------------|
+| `n_elements` | Real length of the tensor — the only bound that is actually true |
+| `BLOCK_SIZE` | Tile width one program owns, `1024` here; a `tl.constexpr`, fixed at compile time |
+| `triton.cdiv(a, b)` | Ceiling division, `(a + b - 1) // b` — rounds *up*, never truncates |
+| `grid` | How many program instances get launched; each gets a distinct `tl.program_id(0)` |
+| `offsets` | `pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)` — the `BLOCK_SIZE` indices this program owns |
+| `mask` | `offsets < n_elements` — per-lane true/false; false lanes are skipped by load/store |
+
+**Walk one example.** A vector that is deliberately not a multiple of the block size:
+
+```
+  n_elements = 1,000,000        BLOCK_SIZE = 1024
+
+  grid = cdiv(1000000, 1024)
+       = (1000000 + 1023) // 1024
+       = 1001023 // 1024
+       = 977 programs
+
+  lanes launched  = 977 x 1024 = 1,000,448
+  lanes needed    =             1,000,000
+  overshoot       =                   448 lanes past the end of the buffer
+
+  program 976 (the last one):
+    offsets span 976*1024 = 999,424  ..  1,000,447
+    valid lanes  = 1,000,000 - 999,424 = 576
+    masked lanes = 1024 - 576          = 448   <- exactly the overshoot
+```
+
+Without `mask`, those 448 lanes read and write 448 x 4 = 1,792 bytes past the buffer.
+That is Pitfall 1 in Section 10: not a crash, just 1,792 bytes of someone else's tensor
+quietly overwritten.
+
 **CUDA C++** — the same operation, one thread per element, index math written
 explicitly and replicated by the SIMT hardware:
 
@@ -423,6 +463,44 @@ and
 [warp_level_primitives_and_cooperative_groups](../warp_level_primitives_and_cooperative_groups/);
 you never write a `__shfl_down_sync` call, but the instruction is still there
 in the generated SASS.
+
+**The idea behind it.** "Three kernel launches means the tensor crosses the HBM bus
+three times in each direction; fusing them means it crosses once." Softmax does almost
+no arithmetic per byte, so the byte count *is* the runtime.
+
+The FLOP count barely changes between the two versions — one `exp` and one divide per
+element either way. What changes is traffic, and softmax is bandwidth-bound, so traffic
+is what the clock measures.
+
+| Symbol | What it is |
+|--------|------------|
+| `bytes_per_pass` | `rows x cols x 2` for FP16 — one full read *plus* one full write of the tensor |
+| `passes` | Number of separate kernel launches; each launch is one read + one write of HBM |
+| `traffic` | `2 x bytes_per_pass x passes` — the total HBM bytes the operation costs |
+| HBM bandwidth | A100 measured ceiling, `2039 GB/s` — the divisor that turns bytes into time |
+| `t = traffic / bandwidth` | Lower bound on kernel time for a bandwidth-bound op |
+
+**Walk one example.** The Section 14 batch shape, 8192 rows x 3800 cols, FP16:
+
+```
+  tensor bytes = 8192 x 3800 x 2 = 62,259,200 B  = 62.26 MB
+
+  unfused (exp, sum, div = 3 launches, each reads + writes):
+    traffic = 62.26 MB x 2 x 3 = 373.56 MB
+    time    = 373.56 MB / 2039 GB/s = 183.2 us
+
+  fused (one launch: read once, write once):
+    traffic = 62.26 MB x 2 x 1 = 124.52 MB
+    time    = 124.52 MB / 2039 GB/s =  61.1 us
+
+  traffic ratio = 373.56 / 124.52 = 3.00x less
+  time  ratio   = 183.2  /  61.1  = 3.00x faster
+```
+
+The two ratios being identical is the tell that nothing here is compute-bound: cut the
+bytes by 3x and you cut the time by 3x. Section 14 measures 2.86x rather than the ideal
+3.00x — 95% of the theoretical win, the remaining 5% being launch overhead and the fact
+that the fused kernel still holds a full row in registers.
 
 ### 6.3 Tiled matmul — `tl.dot`, block pointers, and autotuning
 
@@ -540,6 +618,53 @@ Tensor-Core instructions on Volta+ automatically (see
 [tensor_cores_and_mixed_precision](../tensor_cores_and_mixed_precision/) for
 what those instructions do underneath).
 
+**Put simply.** A tile's arithmetic intensity is "how many multiply-adds you buy per byte
+you drag in from memory" — and doubling `BLOCK_M` and `BLOCK_N` doubles it for free,
+because the tile's compute grows with its *area* while its loads grow with its *perimeter*.
+
+That single asymmetry is why the autotuner in Section 6.4 keeps picking the larger tile.
+Nothing about the algorithm changed; only the ratio of useful work to bytes moved did.
+
+| Symbol | What it is |
+|--------|------------|
+| `2*M*N*K` | Total GEMM FLOPs — the `2` is one multiply plus one add per inner-product term |
+| `BLOCK_M`, `BLOCK_N` | Output-tile height and width — these set how much compute the tile does |
+| `BLOCK_K` | Depth of one K-step; the loop in the code above walks `K / BLOCK_K` of these |
+| tile FLOPs | `2 x BLOCK_M x BLOCK_N x BLOCK_K` per K-step |
+| tile bytes | `(BLOCK_M x BLOCK_K + BLOCK_K x BLOCK_N) x 2` — the A-strip plus the B-strip, FP16 |
+| AI (intensity) | tile FLOPs ÷ tile bytes; higher = more compute-bound = better Tensor-Core use |
+| `num_stages` | K-tiles kept in flight; `3` means 2 loads are prefetching while 1 tile computes |
+
+**Walk one example.** The two extreme configs from the Section 6.4 sweep, one K-step each:
+
+```
+  small tile: BLOCK_M=64, BLOCK_N=64, BLOCK_K=32
+    FLOPs = 2 x 64 x 64 x 32                  =   262,144
+    bytes = (64x32 + 32x64) x 2 = 4096 x 2    =     8,192
+    AI    = 262144 / 8192                     =      32.0 FLOP/byte
+
+  large tile: BLOCK_M=128, BLOCK_N=128, BLOCK_K=32
+    FLOPs = 2 x 128 x 128 x 32                = 1,048,576   (4x the work)
+    bytes = (128x32 + 32x128) x 2 = 8192 x 2  =    16,384   (only 2x the bytes)
+    AI    = 1048576 / 16384                   =      64.0 FLOP/byte
+
+  intensity gained by doubling both output dims: 64.0 / 32.0 = 2.0x
+```
+
+Whole-problem check on the 4096x4096x4096 shape the sweep uses:
+
+```
+  total FLOPs = 2 x 4096 x 4096 x 4096 = 137,438,953,472 = 137.44 GFLOP
+
+  at 194 TFLOP/s (the autotuned winner):  137.44e9 / 194e12  = 0.708 ms
+  at 118 TFLOP/s (the 64/64/32 config) :  137.44e9 / 118e12  = 1.165 ms
+
+  the 2x intensity gap costs 1.165 - 0.708 = 0.457 ms, or 39% of throughput
+```
+
+That 39% is the "30-40% below" figure quoted under the sweep table — it is not a
+mysterious compiler effect, it is the arithmetic-intensity ratio showing up on the clock.
+
 ### 6.4 What the autotuner is actually searching
 
 For the matmul kernel above, `triton.autotune` benchmarks each of the 4 declared
@@ -584,6 +709,57 @@ A poorly chosen fixed config can leave 30-40% of achievable throughput on the
 table (the 64/64/32 row) — exactly the failure mode in §10 BROKEN→FIX #2. The
 autotuned Triton kernel lands at ~95% of cuBLAS on this shape, consistent with
 the section's general "80-95% of hand-tuned CUDA" claim.
+
+**Read it like this.** Autotuning is a loan: you pay the whole search cost up front on
+the first call with a new shape, and you earn it back a fraction of a millisecond at a
+time on every call after. The only question is how many calls it takes to break even.
+
+This is also the honest answer to "why only 4 configs?" — the declared list is a
+deliberately tiny sample of the full parameter cross-product, chosen so the loan stays
+small enough to repay quickly.
+
+| Symbol | What it is |
+|--------|------------|
+| `configs` | The candidate list you declare; Triton times *every* one on a cache miss |
+| `key=["M","N","K"]` | Which arguments define "a new shape"; a change in any of them re-runs the search |
+| reps | Timed repetitions per candidate — Triton averages several to reject noise |
+| search cost | `sum(time_of_each_config) x reps` — paid once per distinct key |
+| per-call saving | Naive-config time minus winner time; the rate the loan is repaid at |
+| break-even | `search cost / per-call saving` — calls needed before autotuning is net positive |
+
+**Walk one example.** The four configs in the sweep table, at 20 timed reps each:
+
+```
+  per-call times from the sweep (137.44 GFLOP / achieved TFLOP/s):
+    64,64,32   -> 1.165 ms
+    128,64,32  -> 0.823 ms
+    128,128,32 -> 0.708 ms   <- winner
+    64,128,64  -> 0.804 ms
+
+  search cost = (1.165 + 0.823 + 0.708 + 0.804) x 20 reps = 70.0 ms
+
+  per-call saving vs shipping the 64/64/32 guess:
+    1.165 - 0.708 = 0.457 ms
+
+  break-even = 70.0 / 0.457 = 153 calls
+```
+
+153 calls is nothing for a training loop and everything for a one-shot script. Now price
+the temptation to search the full space instead:
+
+```
+  full cross-product: BLOCK_M {64,128} x BLOCK_N {64,128} x BLOCK_K {32,64}
+                      x num_warps {4,8} x num_stages {2,3,4}
+                    = 2 x 2 x 2 x 2 x 3 = 48 configs
+
+  declared 4 of 48 = 8.3% of the space
+  search cost at 48 configs (avg 0.875 ms x 20 reps) = 840 ms
+  break-even = 840 / 0.457 = 1,838 calls  -- 12x worse, for a likely-identical winner
+```
+
+That 12x is why the config list is hand-curated rather than exhaustive, and why Pitfall 3
+in Section 10 warns against timing the first call: on the 4-config list you would be
+reporting 70 ms for an operation that steady-states at 0.708 ms — off by a factor of 99.
 
 ---
 
@@ -986,6 +1162,48 @@ the padding value isn't naturally a no-op under the reduction.
 | Unfused PyTorch-eager (`exp`, `sum`, `div`) | 3 | 1.00× (baseline) |
 | Fused Triton, broken (no mask) | 1 | crashes / wrong output on non-power-of-2 rows |
 | Fused Triton, fixed + `triton.autotune` over `BLOCK_SIZE` | 1 | 0.35× (≈2.9× faster than baseline) |
+
+**Stated plainly.** `BLOCK_SIZE = next_power_of_2(n_cols)` says: "round the row width up
+to the next power of two so one program can hold the whole row" — and every unit of that
+rounding is a lane the mask has to switch off.
+
+The size of the bug is therefore computable, not vague. It is exactly the gap between the
+true column count and the next power of two, multiplied by every row in the batch.
+
+| Symbol | What it is |
+|--------|------------|
+| `n_cols` | True row length — here `3800`, the real attention-score width |
+| `next_power_of_2(n)` | Smallest power of two at or above `n`; Triton tiles must be powers of two |
+| `BLOCK_SIZE` | The padded tile width one program owns — `4096` for a 3800-wide row |
+| padding lanes | `BLOCK_SIZE - n_cols` per row — off the end of the data, on in the tile |
+| `other=float("-inf")` | Value handed to masked lanes so they lose the `tl.max` reduction |
+| `tl.where(mask, x, 0.0)` | Forces padding lanes to contribute `0` to the sum, not garbage |
+
+**Walk one example.** The Section 14 batch, 8192 rows of 3800 columns:
+
+```
+  BLOCK_SIZE = next_power_of_2(3800) = 4096
+
+  padding lanes per row = 4096 - 3800 = 296
+  fraction of the tile that is padding = 296 / 4096 = 7.2%
+
+  across the batch:
+    total padding lanes = 296 x 8192 = 2,424,832
+    at FP16              = 2,424,832 x 2 B = 4.85 MB
+
+  broken version: those 4.85 MB are read past each row's true end AND
+                  written back over whatever tensor follows -- silently.
+  fixed version : those same lanes load -inf, so exp(-inf - max) = 0,
+                  contribute 0 to the denominator, and are never stored.
+```
+
+Now check the speedup against the traffic bound derived in Section 6.2:
+
+```
+  measured   : 0.35x baseline  ->  1 / 0.35 = 2.86x faster
+  traffic bound (3 round trips -> 1)         = 3.00x faster
+  efficiency : 2.86 / 3.00                   = 95.2% of the theoretical ceiling
+```
 
 The fusion itself (three HBM round trips down to one) delivers the bulk of the
 speedup; the mask fix is what makes the kernel *correct* on real, non-power-of-2

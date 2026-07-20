@@ -363,6 +363,40 @@ Spring Boot Actuator auto-instruments: `jvm.memory.used`, `jvm.gc.pause`, `hikar
 - Add user IDs, order IDs, or product IDs as **Prometheus metric labels** — high cardinality causes Prometheus OOM. Use them as span attributes instead.
 - Set `sampling.probability=1.0` in production without estimating storage costs: 1,000 req/s × 10 spans/req × 500 bytes = 5 MB/s = 432 GB/day.
 
+**What this actually says.** "Trace storage is just requests per second times spans per request times bytes per span — and sampling is the one multiplier you control." Everything on the left of that equation is set by your traffic and your instrumentation depth; `sampling.probability` is the only term you can turn down without changing the application.
+
+| Symbol | What it is |
+|--------|------------|
+| `1,000 req/s` | Request rate hitting the traced service. Set by traffic, not by you |
+| `10 spans/req` | Instrumentation depth — one span per hop: controller, JDBC, Redis, outbound HTTP |
+| `500 bytes` | Wire size of one exported span: IDs, name, timestamps, attributes |
+| `sampling.probability` | Fraction of traces kept, `0.0`–`1.0`. Multiplies the whole product |
+| `86,400` | Seconds in a day — converts a per-second rate into a daily volume |
+
+**Walk one example.** The same traffic at 100% versus the recommended 10%:
+
+```
+  spans/s   = 1,000 req/s x 10 spans/req      = 10,000 spans/s
+  bytes/s   = 10,000 x 500 bytes              = 5,000,000 B/s = 5 MB/s
+  per day   = 5 MB/s x 86,400 s               = 432,000 MB    = 432 GB/day
+
+  probability = 1.0  ->  432 GB/day
+  probability = 0.1  ->  432 x 0.1            = 43.2 GB/day
+  saved                                       = 388.8 GB/day
+
+  at 0.1 with 30-day retention: 43.2 x 30     = 1,296 GB  (~1.3 TB steady state)
+```
+
+Dropping one digit of `sampling.probability` divides the bill by ten. That is why the
+production recommendation is `0.1` plus a tail-based rule that re-adds the traces you
+actually need.
+
+**Why the tail-based rule exists.** Head-based sampling is uniform, so it keeps 10% of
+*errors* too. If your error rate is 0.1%, that is 1,000 req/s × 0.001 × 0.1 = 0.1 error
+traces per second — you lose 90% of exactly the traces you were going to debug. Tail-based
+sampling keeps 100% of errors and 10% of the rest; because errors are rare, the extra
+storage is a rounding error on the 43.2 GB/day figure.
+
 ---
 
 ## 10. Common Pitfalls

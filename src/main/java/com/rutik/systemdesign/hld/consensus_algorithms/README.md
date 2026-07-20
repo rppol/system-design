@@ -52,6 +52,39 @@ N=5:  quorum = 3,  tolerates 2 failures
 N=7:  quorum = 4,  tolerates 3 failures
 ```
 
+**In plain terms.** "Insist that every decision be witnessed by more than half the cluster, and no two decisions can ever be made behind each other's backs."
+
+The overlap is the whole point. Two groups that each contain more than half of `N` cannot be disjoint — they must share at least one node, and that node remembers the last commit.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total number of voting members in the cluster |
+| `f` | Number of simultaneous failures you want to survive |
+| `quorum` | `floor(N/2) + 1` — the smallest group that is strictly a majority |
+| `N = 2f + 1` | The cluster size needed to tolerate `f` crashes and still form a quorum |
+| overlap | `2 x quorum - N` — how many nodes any two quorums are forced to share |
+
+**Walk one example.** A 5-node cluster, the standard control-plane sizing:
+
+```
+  N = 5
+  quorum  = floor(5/2) + 1 = 2 + 1 = 3
+  tolerate= N - quorum     = 5 - 3 = 2 failures
+
+  overlap of any two quorums = 2 x 3 - 5 = 1 node
+
+  Meaning: every pair of 3-node groups shares at least 1 member.
+  That shared member saw the last committed entry, so a new leader
+  elected by ANY quorum inherits it. Nothing committed can be lost.
+
+  Now the even-sized trap, N = 4:
+  quorum  = floor(4/2) + 1 = 2 + 1 = 3
+  tolerate= 4 - 3 = 1 failure     <- same as N=3, one machine wasted
+  a 2+2 split gives neither side 3 -> the whole cluster halts.
+```
+
+The result is why 3, 5, 7 are the only sizes you see in production: odd `N` buys a full extra failure per two nodes added, even `N` buys nothing.
+
 **Term / Epoch numbers:** A monotonically increasing counter, incremented on each leadership change. Any message carrying a *lower* term is from a stale leader and is rejected; any message with a *higher* term forces the receiver to step down. This single mechanism is what prevents two leaders from both committing.
 
 ---
@@ -90,6 +123,36 @@ Castro & Liskov, 1999. Tolerates *Byzantine* faults — nodes that lie, equivoca
 - Requires **3f + 1** nodes to tolerate `f` Byzantine failures (vs `2f + 1` for crash-fault tolerance).
 - **Three phases:** Pre-prepare (leader assigns a sequence number and broadcasts the ordered request), Prepare (replicas broadcast agreement on the ordering so 2f+1 agree on "this request goes in this slot"), Commit (replicas broadcast that they will execute). A replica executes only after collecting 2f+1 matching Commit messages. Message complexity is **O(n²)** because every phase is an all-to-all broadcast.
 - **Why 3f+1 and not 2f+1?** With Byzantine nodes you must tolerate `f` liars *and* tolerate `f` honest nodes being slow/unreachable simultaneously, while still having a majority of honest responses you can trust. The math works out to needing `2f+1` honest nodes out of `3f+1` total, so any quorum of `2f+1` contains at least `f+1` honest nodes — an honest majority within every quorum.
+
+**What this actually says.** "Budget one group of `f` nodes that lie, a second group of `f` nodes that are simply unreachable, and still leave an honest majority in whatever is left."
+
+Crash tolerance only budgets for the second group, which is exactly why `2f+1` is enough there and not here.
+
+| Symbol | What it is |
+|--------|------------|
+| `f` | Number of Byzantine (lying, equivocating) nodes tolerated |
+| `3f + 1` | Total cluster size — `f` liars + `f` unreachable + `f+1` honest and reachable |
+| `2f + 1` | Byzantine quorum size — the replies you must collect before acting |
+| `f + 1` | Guaranteed honest nodes inside any `2f+1` quorum — the honest majority |
+| `O(n^2)` | Messages per phase, since every phase is an all-to-all broadcast |
+
+**Walk one example.** Tolerating a single Byzantine node, `f = 1`:
+
+```
+  total nodes   N = 3f + 1 = 3(1) + 1 = 4
+  quorum        Q = 2f + 1 = 2(1) + 1 = 3
+
+  worst case inside a quorum of 3:
+    f     = 1 reply came from the liar
+    3 - 1 = 2 replies came from honest nodes    (this is f+1 = 2)
+    2 > 1 -> honest replies outvote the liar, every time
+
+  compare crash-only tolerance of f = 1:  N = 2f + 1 = 3 nodes.
+  Byzantine tolerance costs one extra machine (4 vs 3) plus
+  4 x 4 = 16 messages per phase instead of a leader fan-out of 3.
+```
+
+Drop the `+f` for liars and you get `2f+1 = 3` nodes with a quorum of 2 — where a single liar plus a single slow node can make two honest nodes see different histories. That is the failure the extra `f` buys off.
 - **View changes:** if the primary is suspected faulty (Byzantine or crashed), replicas run a view-change protocol to elect a new primary — analogous to a Raft election but Byzantine-hardened with cryptographic signatures.
 - **Use case:** permissioned ledgers and consortium blockchains where participants do not trust each other (e.g., Hyperledger Fabric ordering, Tendermint/Cosmos, Diem). Impractical beyond ~20–30 nodes due to quadratic messaging.
 
@@ -177,6 +240,35 @@ N=3: quorum=2, tolerates 1 crash failure
 N=5: quorum=3, tolerates 2 crash failures
 N=7: quorum=4, tolerates 3 crash failures
 ```
+
+**Read it like this.** "Crash tolerance needs more than half the cluster to agree; Byzantine tolerance needs more than two-thirds — the extra third is the price of nodes that might lie."
+
+The two formulas are the same shape with a different fraction, and the fraction is set by how many *kinds* of failure you are budgeting for.
+
+| Symbol | What it is |
+|--------|------------|
+| `floor(N/2) + 1` | Crash-fault quorum — the smallest strict majority of `N` |
+| `floor(2N/3) + 1` | Byzantine quorum — the smallest group strictly larger than two-thirds |
+| `N = 2f + 1` | Minimum cluster to tolerate `f` crashes |
+| `N = 3f + 1` | Minimum cluster to tolerate `f` Byzantine nodes |
+| `floor(x)` | Round down to the nearest whole node — you cannot have 2.67 voters |
+
+**Walk one example.** Run both formulas over the same cluster sizes:
+
+```
+  N = 4 : crash quorum = floor(4/2)+1 = 3   byz quorum = floor(8/3)+1  = 2+1 = 3
+  N = 7 : crash quorum = floor(7/2)+1 = 4   byz quorum = floor(14/3)+1 = 4+1 = 5
+
+  cross-check against 3f+1 sizing:
+    f = 1 -> N = 3(1)+1 = 4,  byz quorum 3 = 2f+1 = 3   ok
+    f = 2 -> N = 3(2)+1 = 7,  byz quorum 5 = 2f+1 = 5   ok
+
+  same 7 nodes, two different worlds:
+    crash-only : 4 of 7 agree, survives 3 failures
+    Byzantine  : 5 of 7 agree, survives only 2 liars
+```
+
+At `N = 7` the Byzantine quorum is one node larger and buys one *fewer* tolerated failure. That gap, multiplied by `O(n^2)` messaging, is the whole reason PBFT stays in consortium settings and Raft runs everything else.
 
 **Single-Decree Paxos — two phases**
 
@@ -496,6 +588,34 @@ The four branches map directly to the guidance above: match the trust model and 
 
 1. **Election timeout too short → election storm.** Followers time out before the leader's heartbeat arrives (often during a GC pause or CPU saturation). Every node starts an election at once; none wins; the cluster thrashes. Fix: the election timeout should be at least 10× the heartbeat interval. etcd defaults: `heartbeat=100ms`, `election-timeout=1000ms`.
 
+**Put simply.** "Before a follower is allowed to declare the leader dead, it must have missed roughly ten heartbeats in a row — one late packet is not evidence of death."
+
+The ratio, not either number on its own, is what stops a GC pause or a network hiccup from turning into a cluster-wide election storm.
+
+| Symbol | What it is |
+|--------|------------|
+| `heartbeat` | Interval between the leader's empty `AppendEntries` messages (etcd: 100ms) |
+| `election-timeout` | How long a follower waits with no contact before becoming a Candidate (etcd: 1000ms) |
+| ratio | `election-timeout / heartbeat` — heartbeats that must all be missed |
+| randomization | Raft jitters the timeout (150–300ms range) so followers do not all fire at once |
+
+**Walk one example.** The etcd defaults, and what a bad ratio costs:
+
+```
+  ratio = 1000ms / 100ms = 10 heartbeats
+
+  a follower starts an election only after 10 consecutive misses,
+  so it tolerates 9 lost or late heartbeats before acting.
+
+  now set election-timeout = 200ms with the same 100ms heartbeat:
+  ratio = 200 / 100 = 2 heartbeats
+  a single 250ms GC pause on the leader already exceeds it ->
+  every follower times out -> all become Candidates -> split vote ->
+  no winner -> repeat. The cluster thrashes while perfectly healthy.
+```
+
+Randomizing the timeout is the second half of the fix: identical timeouts make every follower fire in the same millisecond, so even a correct 10:1 ratio would produce split votes without the jitter.
+
 2. **Quorum misconfiguration (even-sized clusters).** A 4-node Raft cluster (quorum=3) tolerates only 1 failure — the same as a 3-node cluster — but costs an extra node. Worse, a 2+2 network split leaves *neither* side with a quorum, so the whole cluster halts. Always use odd-numbered clusters (3, 5, 7).
 
 3. **etcd write amplification at Kubernetes scale.** All API-server writes flow through etcd's single Raft leader. At 5000+ nodes the leader becomes the bottleneck: high leader CPU, write latency > 5ms. Fix: rate-limit API-server LIST operations, serve reads from informer caches, use `resourceVersion` to avoid watch storms, and mandate NVMe SSD for etcd.
@@ -622,6 +742,37 @@ Consensus algorithms are CP: they choose Consistency and Partition-tolerance ove
 - 1000 writes/s × 86,400 s ≈ 86M writes/day through a single Raft leader.
 - Each write = 1 fsync on the leader + replication to a quorum. fsync budget must stay < 1ms (target 100–300µs on NVMe).
 - Keyspace: hundreds of thousands of objects; with history, etcd DB size must be bounded by compaction (keep under the 8GB default quota).
+
+**The idea behind it.** "Every one of those 86 million daily writes is funnelled through one leader's disk, so the whole cluster's write ceiling is just one machine's fsync rate."
+
+Consensus does not divide work across nodes — it replicates it. Adding voters adds durability, never throughput.
+
+| Symbol | What it is |
+|--------|------------|
+| writes/s | Sustained write rate arriving from the API servers (1000/s here) |
+| 86,400 | Seconds in a day, the constant that turns a rate into a daily volume |
+| fsync | The leader's durable-write syscall; its latency bounds commit latency |
+| leader ceiling | Practical single-leader write cap, ~10k writes/s on NVMe hardware |
+| headroom | `ceiling / design load` — how much burst the sizing absorbs |
+
+**Walk one example.** Turn the 1000 writes/s requirement into a daily volume and a per-write time budget:
+
+```
+  daily volume = 1000 writes/s x 86,400 s = 86,400,000 writes/day
+                                          ~ 86M writes/day
+
+  per-write time budget at 1000/s = 1 second / 1000 = 1000 microseconds
+    fsync on NVMe        ~100-300 us
+    same-AZ quorum RTT   ~1-2 ms  (dominates, hence AZ-local voters)
+
+  headroom = 10,000 writes/s ceiling / 1000 writes/s design = 10x
+
+  swap NVMe for a rotational disk (fsync >100ms):
+  ceiling drops to ~10 writes/s, the leader misses its 100ms heartbeat,
+  and the cluster elects instead of committing.
+```
+
+The 10x headroom is what absorbs flash-crowd bursts (a mass Pod reschedule) without pushing fsync latency past the heartbeat interval — which is the moment a throughput problem turns into an availability problem.
 
 #### 3. High-Level Architecture
 ```mermaid

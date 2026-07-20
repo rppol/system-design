@@ -157,6 +157,41 @@ GraphQL's per-field resolution makes the 101-query version the *default*; the
 DataLoader defers each `author` resolution, gathers the keys, and dispatches one batch
 — the single most important GraphQL performance pattern.
 
+**Read it like this.** "Query count with a naive resolver is `1 + N` and grows with the
+page size; query count with a DataLoader is `1 per nesting level` and does not grow at
+all." That second phrasing is the whole point — batching converts a cost that scales
+with *data volume* into a cost that scales with *schema depth*, which is a small fixed
+number you control.
+
+| Term | What it is |
+|------|------------|
+| `1` (the leading one) | The root query that fetches the parent list — one hit, always |
+| `N` | Number of parents returned, i.e. the page size. `100` books here |
+| `1 + N` | Naive total. Every parent triggers its own association query |
+| `1 + 1` | Batched total. Keys are collected, then one `IN (...)` query serves all parents |
+| "nesting level" | Each association field in the selection set, not each row |
+
+**Walk one example.** Push the same query through both resolvers at two page sizes:
+
+```
+                          page = 100        page = 500      grows with page?
+  naive  1 + N              1 + 100 = 101     1 + 500 = 501       yes, linearly
+  batch  1 + 1              1 +   1 =   2     1 +   1 =   2       no, flat
+
+  going 100 -> 500 books:
+    naive   101 -> 501 queries   = 5x more DB work for 5x more rows
+    batch     2 ->   2 queries   = same DB work, 5x more rows
+```
+
+The batched column is flat, which is why a DataLoader is not merely "faster" — it
+removes the page size from the cost model entirely. That is what makes it safe to let
+clients ask for a large page.
+
+**Why the `1` in `1 + 1` never goes away.** The root query must run before you know
+*which* keys to batch — the DataLoader cannot collect `a1..a100` until the 100 books
+exist. One round trip per nesting level is the irreducible floor, and it is why deeply
+nested schemas still need depth limits even with perfect batching.
+
 ### Field-by-field resolution walks the selection set
 
 ```
@@ -649,6 +684,43 @@ Map<OrderItem, Product> product(List<OrderItem> items) {
     return items.stream().collect(toMap(i -> i, i -> byId.get(i.productId())));
 }
 ```
+
+**What this actually says.** "Each unbatched nesting level multiplies the one above it,
+so two levels deep the query count is a *product*, not a sum." A single page of 20
+orders is enough to turn one screen into ~141 database round trips, and the multiplier
+means the next nesting level would make it far worse.
+
+| Quantity | What it is |
+|----------|------------|
+| `20` | Page size — orders returned by the root query |
+| `~6` | Average items per order (the second-level fan-out factor) |
+| `1` | The root `orders` query |
+| `20` items queries | One per order, because `items(Order)` resolves per parent |
+| `120` product queries | `20 × 6` — one per item, the fan-out squared |
+
+**Walk one example.** Compare the naive product against the batched sum:
+
+```
+  naive (per-parent resolvers)
+    orders root                       1
+    items,   one per order      20 x 1  =  20
+    products, one per item      20 x 6  = 120
+                                       -----
+    total                                141   queries for ONE screen
+
+  batched (@BatchMapping at every level)
+    orders root                          1
+    items    (one IN(...) call)          1
+    products (one IN(...) call)          1
+    shipment + payment (batched)         1
+                                       -----
+    total                                  4   queries, independent of page size
+```
+
+Raising the page from 20 to 50 orders takes the naive path to `1 + 50 + 50x6 = 351`
+queries while the batched path stays at `4`. That flatness is why the connection pool
+stopped exhausting: the naive cost was a *function of traffic shape*, which the client
+controls, and the batched cost is a function of the schema, which you control.
 
 **Outcomes (measured).**
 - Queries per screen load: **~141 → 4** (orders + batched items + batched products +

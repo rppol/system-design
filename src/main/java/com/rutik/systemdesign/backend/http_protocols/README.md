@@ -545,6 +545,39 @@ SETTINGS frames are exchanged at connection setup and can be sent anytime to upd
 2. HTTP/1.1 with 6 connections to api.example.com — 6 TLS handshakes = 6 * 300ms = 1.8 seconds of TLS overhead.
 3. 8 KB headers per request with uncompressed headers.
 
+**Stated plainly.** "Each connection pays the full handshake price on its own, so opening six of them costs six handshakes — the RTT bill multiplies by connection count, not by bytes transferred."
+
+This is the single most useful mental model for mobile performance work. The fix is never "send less data" first; it is "stop paying the same fixed toll six times."
+
+| Symbol | What it is |
+|--------|------------|
+| RTT (150 ms) | One round trip on the mobile link — set by radio latency, not bandwidth |
+| TLS 1.2 = 2 RTTs | Handshake round trips before the first encrypted byte |
+| 6 connections | HTTP/1.1's per-origin parallelism limit in browsers |
+| TLS overhead | `connections × RTTs × RTT` — the number that dominated the cold start |
+
+**Walk one example.** Price the before and after on the same 150 ms link:
+
+```
+  BEFORE -- HTTP/1.1 + TLS 1.2, 6 connections to api.example.com
+    per-connection handshake = 2 RTTs x 150 ms          =  300 ms
+    x 6 independent connections                          = 1800 ms
+
+  AFTER -- HTTP/2 + TLS 1.3, 1 connection, all 8 requests multiplexed
+    per-connection handshake = 1 RTT  x 150 ms          =  150 ms
+    x 1 connection                                       =  150 ms
+
+    saved on a cold start = 1800 - 150                   = 1650 ms
+    on a warm start (0-RTT resumption)                   =    0 ms
+
+  cross-check against the measured result:
+    cold start 3500 ms -> 900 ms = 2600 ms removed
+    of which handshake elimination alone accounts for   = 1650 ms  (63%)
+    the remaining ~950 ms came from HPACK + header cleanup
+```
+
+Two levers moved independently here, and the arithmetic shows their relative weight: `6 -> 1` connections is worth 1500 ms, while `TLS 1.2 -> 1.3` is worth only 150 ms per connection. **Connection consolidation was 10x more valuable than the TLS version bump** — a ranking that is invisible until you actually multiply it out, and the reason HTTP/2 migration is the higher-priority fix of the two.
+
 **Fixes applied**:
 1. Migrated to TLS 1.3 with session resumption: TLS handshake reduced to 1 RTT (150ms), 0-RTT on resume (0ms).
 2. Enabled HTTP/2 on the API server: reduced 6 TLS handshakes to 1. All 8 requests multiplexed.

@@ -285,6 +285,41 @@ main = rule {
 # enforcement level "hard-mandatory" blocks the apply if main is false
 ```
 
+**What this actually says.** "Walk every planned resource change; the apply is allowed only if not a single one violates the rule."
+
+Sentinel and Rego encode the same decision from opposite directions, and knowing which direction a policy language points is the whole trick to reading one.
+
+```
+Sentinel:  main = rule { all changes as rc { rc is fine } }   ->  UNIVERSAL: pass unless one fails
+Rego:      deny[msg] { rc := changes[_]; rc is bad }          ->  EXISTENTIAL: fail if one matches
+
+  same verdict, inverted logic:   main == true   <=>   count(deny) == 0
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `all X as _, rc { ... }` | Universal quantifier — the body must hold for every element of `X` |
+| `rc.type is not "aws_instance"` | Short-circuit: non-matching resource types pass the rule trivially |
+| `or` | Makes the whole clause "either irrelevant here, or compliant here" |
+| `main` | The single boolean Sentinel evaluates; `false` blocks under `hard-mandatory` |
+| `hard-mandatory` | Enforcement level with no override path — contrast `soft-mandatory`, `advisory` |
+
+**Walk one example.** A plan touching four resources, against the `allowed` list above:
+
+```
+   resource change              type           instance_type    clause result
+   aws_instance.web             aws_instance     t3.micro         true   (in allowed)
+   aws_instance.batch           aws_instance     m5.large         true   (in allowed)
+   aws_s3_bucket.logs           aws_s3_bucket    n/a              true   (type mismatch)
+   aws_instance.gpu             aws_instance     p4d.24xlarge     FALSE  (not allowed)
+
+   all(...) = true AND true AND true AND false  =  false   ->  apply BLOCKED
+```
+
+One `false` out of four collapses the whole conjunction — that is what "all" buys you, and it is why a single unreviewed instance type stops the run.
+
+**The gotcha the shape hides.** A universal quantifier over an *empty* collection is vacuously **true**. A plan with zero resource changes, or a policy whose filter accidentally matches nothing (a renamed resource type, a provider that restructured `change.after`), returns `main = true` and the apply sails through. The Rego form fails the same way in reverse: `deny` stays empty, `count(deny) == 0`, allowed. Neither engine can distinguish "nothing was wrong" from "nothing was checked" — which is exactly why section 10's pitfall 2 pairs the policy gate with tests that assert a known-bad plan is actually rejected.
+
 ### Pulumi — IaC in a real language
 
 ```python
@@ -298,6 +333,33 @@ for i, az in enumerate(["us-east-1a", "us-east-1b"]):     # ordinary Python loop
                    cidr_block=f"10.0.{i}.0/24", availability_zone=az)
 pulumi.export("vpc_id", vpc.id)
 ```
+
+**Put simply.** "The loop variable is doing double duty — it picks the availability zone *and* computes that AZ's subnet CIDR, so the two can never drift apart."
+
+```
+for i, az in enumerate(zones):
+    cidr = f"10.0.{i}.0/24"      third octet = loop index -> one /24 per AZ, no overlap
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `enumerate(zones)` | Yields `(index, value)` pairs — `i` is the position, `az` the AZ name |
+| `i` | Both the ordinal of the AZ and the third octet of its subnet |
+| `/24` | 8 host bits, so `2^8 = 256` addresses per subnet |
+| `10.0.0.0/16` | Parent VPC CIDR — `2^8 = 256` distinct `/24`s fit inside it |
+
+**Walk one example.** Unrolling the loop as written:
+
+```
+    i     az             cidr_block        addresses    usable on AWS (256 - 5)
+    0     us-east-1a     10.0.0.0/24          256               251
+    1     us-east-1b     10.0.1.0/24          256               251
+
+    adding us-east-1c appends i = 2  ->  10.0.2.0/24, no edits elsewhere
+    ceiling: the /16 holds 2^8 = 256 such /24s, so i may run 0..255
+```
+
+This is the same arithmetic as `cidrsubnet(var.cidr, 8, 1)` in [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/) — Terraform expresses it as a function call, Pulumi as an f-string over a loop index. The section 8 tradeoff row "declarative simplicity vs programming power" is visible right here: the Python version is more readable to a Python team, and it is also the version where nothing stops you from writing an expression that silently produces overlapping CIDRs, because it is just string formatting.
 
 ---
 

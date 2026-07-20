@@ -223,6 +223,38 @@ Alerting rule (Prometheus-style):
     -- fires if error rate > 1% sustained for 5 minutes
 ```
 
+**In plain terms.** "Count the requests, count the bad ones, and describe the slow tail — three numbers that between them answer whether a service is healthy."
+
+Errors is deliberately expressed as a *ratio* rather than a count, because a raw count of 31 means nothing until you know whether it came out of 300 requests or 300,000.
+
+| Symbol | What it is |
+|--------|------------|
+| Rate | Requests per second — total requests divided by the window length |
+| Errors | Failed requests as a fraction of total, not as an absolute count |
+| Duration | The latency distribution, read at p50/p95/p99 rather than as an average |
+| window | The observation period the counters are divided by (300s = 5 min here) |
+| `rate(...)[5m]` | PromQL per-second rate over a trailing 5-minute window |
+
+**Walk one example.** The 5-minute checkout window from the block above:
+
+```
+  Rate   = 12,400 requests / 300 s        = 41.33 requests/sec
+
+  Errors = 31 / 12,400                    = 0.0025 = 0.25%
+           alert threshold                = 1.00%
+           0.25% < 1.00% -> no alert, this is normal noise
+
+  Duration: p50 =  85ms   half of requests are at least this fast
+            p95 = 240ms
+            p99 = 480ms   1 in 100 requests is ~5.6x slower than the median
+
+  what p99 costs in absolute users, at this rate:
+    41.33 req/s x 1% = 0.41 requests/sec are over 480ms
+                     = ~1,488 slow requests per hour
+```
+
+That last line is why p99 is alerted on and averages are not: an average of ~100ms hides the roughly 1,500 users an hour who are having the p99 experience.
+
 ### 6.2 USE Method — Diagnosing the Bottleneck
 
 ```
@@ -252,7 +284,7 @@ Burn rate = (current error rate) / (1 - SLO)
   If current error rate = 10% for 1 hour:
     burn rate = 0.10 / 0.001 = 100x
     -> at this rate, the entire 28-day budget (40.32 min) is consumed in
-       40.32 min / 100 = ~24 minutes.
+       40,320 min (28 days) / 100 = ~403 minutes = ~6.7 hours.
     -> PAGE IMMEDIATELY (fast burn).
 
   If current error rate = 0.2% for 6 hours:
@@ -264,6 +296,37 @@ Two-window alerting (Google SRE): require BOTH a short window (5m) and a
 long window (1h) to exceed the burn-rate threshold, to avoid paging on
 a single brief blip that self-resolves.
 ```
+
+**Stated plainly.** "Your SLO hands you a fixed allowance of bad minutes for the month; the burn rate says how many times faster than budgeted you are spending it right now."
+
+Reframing reliability as a spend rate is what makes the page/ticket decision mechanical instead of a judgement call at 3 AM.
+
+| Symbol | What it is |
+|--------|------------|
+| `SLO` | The target, e.g. `0.999` — the fraction of requests that must succeed |
+| `1 - SLO` | Allowed failure fraction, the error budget rate (`0.001` = 0.1%) |
+| error budget | `(1 - SLO) x period` — allowed bad time over the whole window |
+| burn rate | `current error rate / (1 - SLO)` — `1x` means exactly on budget |
+| time to exhaustion | `period / burn rate` — how long the whole budget lasts at this pace |
+
+**Walk one example.** A 99.9% SLO over a 28-day window, under the two error rates above:
+
+```
+  window       = 28 days x 24 h x 60 min      =  40,320 minutes
+  error budget = 40,320 min x (1 - 0.999)     =      40.32 minutes
+
+  FAST BURN, current error rate = 10%
+    burn rate = 0.10 / 0.001                  = 100x
+    exhausted = 40,320 min / 100              = 403.2 min = 6.7 hours
+    -> a full month of allowance gone before the end of a workday: PAGE.
+
+  SLOW BURN, current error rate = 0.2%
+    burn rate = 0.002 / 0.001                 = 2x
+    exhausted = 28 days / 2                   = 14 days
+    -> real, but survivable until business hours: TICKET.
+```
+
+Note the two ways to read the same result: `40,320 / 100 = 403 minutes` of wall clock, or `40.32` budget-minutes spent at ten times the allowed pace. Both land on ~6.7 hours, which is what separates "wake someone" from "file it."
 
 The two-window rule is the part worth drawing: both the short and long window must independently confirm the breach before either alert fires, which is what keeps a single brief blip from paging anyone.
 
@@ -280,7 +343,7 @@ flowchart LR
     RATE(["Observed error rate"]) --> CALC{"Burn rate =<br/>error rate / (1 - SLO)"}
     CALC -->|"about 100x<br/>10% for 1h"| FAST{"5m AND 1h windows<br/>both breach?"}
     CALC -->|"about 2x<br/>0.2% for 6h"| SLOW{"1h AND 6h windows<br/>both breach?"}
-    FAST -->|"yes"| PAGE(["PAGE immediately<br/>budget gone in about 24 min"])
+    FAST -->|"yes"| PAGE(["PAGE immediately<br/>budget gone in about 6.7 h"])
     FAST -->|"no"| QUIET1(["No alert<br/>blip self-resolves"])
     SLOW -->|"yes"| TICKET(["Ticket, business hours<br/>budget gone in about 14 days"])
     SLOW -->|"no"| QUIET2(["No alert"])
@@ -338,6 +401,38 @@ Metric: http_requests_total{service, endpoint, status, user_id}
   bounded and known in advance. User IDs, request IDs, email addresses,
   and raw error messages NEVER belong in a metric label.
 ```
+
+**What the formula is telling you.** "Labels do not add to a metric's cost — they multiply it, so one unbounded label makes every other label's cardinality irrelevant."
+
+This is the single arithmetic fact behind most observability-stack outages: engineers add labels thinking additively while the storage engine pays multiplicatively.
+
+| Symbol | What it is |
+|--------|------------|
+| time series | One unique combination of label values — the unit Prometheus stores and indexes |
+| label cardinality | Number of distinct values a single label can take |
+| total series | The product of every label's cardinality, not their sum |
+| ~1-10M series | Practical per-instance Prometheus ceiling before memory and query latency degrade |
+| bounded label | A label whose value set is known in advance and stays in the 1-100 range |
+
+**Walk one example.** The same metric, with and without the `user_id` label:
+
+```
+  labels: service=30, endpoint=20, status=5, user_id=10,000,000
+
+  WITHOUT user_id
+    30 x 20 x 5                  =           3,000 series
+    -> 0.03% of a 10M ceiling. Free.
+
+  WITH user_id
+    30 x 20 x 5 x 10,000,000     =  30,000,000,000 series
+    -> 30 billion vs a 10M ceiling = 3,000x over. Prometheus OOMs.
+
+  the multiplier, isolated:
+    30,000,000,000 / 3,000       =      10,000,000x
+    one label made the metric ten million times more expensive.
+```
+
+The fix is not a smaller label but a different signal: a `user_id` on a *span* or a log field costs one attribute on one record, because traces and logs are stored per-event and never multiplied out into a series matrix.
 
 That rule of thumb is really a routing decision — where a new attribute belongs depends only on how many unique values it can take:
 
@@ -438,6 +533,36 @@ A checkout failure spike was visible in metrics within 1 minute. But the system 
 
 A team enabled 100% head-based trace sampling "to be safe" on a service handling 30,000 req/sec, each generating ~8 spans. That's 240,000 spans/sec written to the tracing backend's storage (Cassandra) — which became the **single largest write workload** in the entire platform, larger than the actual application databases combined, doubling the Cassandra cluster's cost.
 *Fix*: switched to tail-based sampling (§4.3, §5.3) at the OTel Collector layer — 100% of error and slow (>1s) traces retained, 1% of normal traces sampled. Trace storage volume dropped ~95% with no loss of debugging capability for actual incidents.
+
+**What it means.** "Every request writes not one record but one record per service it touches, so trace volume is request volume multiplied by call-chain depth."
+
+That multiplier is the number teams forget when they flip sampling to 100% "just to be safe" — it is why a tracing backend can quietly become the largest write workload in a platform.
+
+| Symbol | What it is |
+|--------|------------|
+| req/s | Application request rate reaching the service (30,000/s here) |
+| spans per request | Services/operations touched per request — the fan-out multiplier (~8) |
+| span write rate | `req/s x spans per request` — the real load on the tracing backend |
+| sampling rate | Fraction of traces actually persisted (100% head-based, then 1% + all errors) |
+| retained volume | `span write rate x sampling rate` — what storage actually pays for |
+
+**Walk one example.** The war story's numbers, before and after the sampling change:
+
+```
+  BEFORE, 100% head-based sampling
+    span rate = 30,000 req/s x 8 spans = 240,000 spans/sec
+    per day   = 240,000 x 86,400       = 20,736,000,000 spans/day
+                                       ~ 20.7 BILLION spans/day
+    -> a single Cassandra write workload larger than every
+       application database in the platform combined.
+
+  AFTER, tail-based: 100% of errors and >1s traces, 1% of the rest
+    retained ~ 240,000 x 0.05          = 12,000 spans/sec
+    reduction  = 1 - 0.05              = 95% less storage
+    but errors kept                    = 100%
+```
+
+The asymmetry is the point: the 95% that is dropped is the traces that all look identical and boring, and the 5% that is kept contains every trace an engineer would actually open during an incident.
 
 ---
 
@@ -624,6 +749,36 @@ flowchart LR
 | Tail-based sampling at regional collector | Head-based 1% sampling (cheaper) | Flash-sale traffic spikes (4x normal) make rare errors statistically likely to be missed by head-based sampling exactly when they matter most |
 | Per-service SLOs tighter than end-to-end SLA (99.95% vs 99.9%) | Same SLO at every layer | A 6-service chain at 99.9% each compounds to ~99.4% end-to-end (0.999^6) — tighter per-service targets are needed to meet the aggregate SLA |
 | OTel Collector per-region | Single global collector | Cross-region collector traffic for tail sampling would add latency and a cross-region dependency for an observability function — kept regional, with regional Prometheus/Tempo/Loki instances federated centrally for global dashboards |
+
+**Read it like this.** "Availability multiplies down a serial call chain, so six services that are each 'three nines' deliver noticeably less than three nines end to end."
+
+This is the arithmetic behind decision #1 — per-service SLOs must be set *tighter* than the customer-facing SLA, not equal to it.
+
+| Symbol | What it is |
+|--------|------------|
+| per-service SLO | Success probability of one hop in the chain (0.999 or 0.9995) |
+| `n` | Number of services on the critical path (6 here) |
+| end-to-end | `per-service SLO ^ n` — every hop must succeed for the request to succeed |
+| SLA | The contractual promise measured at the edge (99.9%) |
+| margin | `end-to-end - SLA` — the slack left before penalties apply |
+
+**Walk one example.** Six services on the checkout path, at two candidate per-service targets:
+
+```
+  each service at 99.9%  (0.999)
+    end-to-end = 0.999^6 = 0.99401 = 99.401%
+    vs the 99.9% SLA     -> SHORT by 0.499 percentage points
+    in a 28-day month that is 40,320 x 0.00599 = ~241 min of failure
+    against a 40 min budget: the SLA is breached ~6x over.
+
+  each service at 99.95% (0.9995)
+    end-to-end = 0.9995^6 = 0.99700 = 99.700%
+    still short of 99.9% on a strictly serial path -- which is why
+    the design ALSO relies on retries and partial degradation so a
+    single hop failure is not automatically a failed checkout.
+```
+
+The lesson generalizes: never set a per-service SLO equal to the end-to-end SLA. Either tighten each hop or add a mechanism (retry, fallback, cached response) that breaks the pure multiplication.
 
 ### Metrics & Results (post-rollout)
 

@@ -243,6 +243,40 @@ FROM pg_statio_user_indexes;
 - Partition throughput: 3000 RCU + 1000 WCU
 - DynamoDB Streams retention: 24 hours
 
+**Put simply.** "You are not billed for requests, you are billed for 4 KB read blocks and 1 KB write blocks — and those blocks are rounded up per item, then capped per physical partition."
+
+The rounding and the per-partition cap are what turn a capacity number into a latency incident. A table can be provisioned for enormous throughput and still throttle, because the ceiling that matters is the one on a single partition, not the one on the table.
+
+| Symbol | What it is |
+|--------|------------|
+| RCU | Read capacity unit — one strongly consistent read of up to 4 KB per second, or two eventually consistent reads |
+| WCU | Write capacity unit — one write of up to 1 KB per second |
+| `ceil(size / 4KB)` | RCUs a single read consumes. A 4.1 KB item costs 2 RCUs, not 1.025 |
+| `ceil(size / 1KB)` | WCUs a single write consumes |
+| 3000 RCU / 1000 WCU | The per-*partition* ceiling. Independent of what the table is provisioned for |
+| Adaptive capacity | AWS lending idle capacity from cold partitions to a hot one — mitigation, not a guarantee |
+
+**Walk one example.** The same partition, three item sizes:
+
+```
+  Reads, 3000 RCU per partition:
+    4 KB item   ceil(4/4)  = 1 RCU    ->  3000 strong reads/s   (6000 eventual)
+    12 KB item  ceil(12/4) = 3 RCU    ->  1000 strong reads/s
+    400 KB item ceil(400/4)= 100 RCU  ->    30 strong reads/s
+
+  Writes, 1000 WCU per partition:
+    1 KB item   ceil(1/1)  = 1 WCU    ->  1000 writes/s
+    2.5 KB item ceil(2.5/1)= 3 WCU    ->   333 writes/s
+```
+
+Now the hot-partition trap. Provision the table at 40,000 WCU and route every write to one
+partition key: `1000 / 40000 = 2.5%` of the capacity you are paying for is reachable, and the
+other 97.5% sits idle while clients receive `ProvisionedThroughputExceededException`. The
+throttle is not a table-level signal, so dashboards showing plenty of unused table capacity
+look healthy throughout. The fix is always the same shape as Cassandra's — widen the partition
+key (add a suffix, a bucket, a shard number) so the load spreads across many partitions and
+each stays under its own 3000/1000 ceiling.
+
 ### Wide-Column Stores — Apache Cassandra
 
 **Data model**:
@@ -275,6 +309,46 @@ FROM pg_statio_user_indexes;
 - `QUORUM`: write/read acknowledged by `floor(RF/2)+1` replicas (RF=3 → 2 nodes); balanced
 - `ALL`: all replicas; strongest consistency, lowest availability
 - `LOCAL_QUORUM`: quorum within local DC only; preferred for multi-DC to avoid cross-DC latency
+
+**What it means.** "If the set of nodes you wrote to and the set you read from are guaranteed to overlap in at least one node, then every read is guaranteed to see the latest write."
+
+Consistency here is not a property of any single node — it is a property of two *sets* being forced to intersect. That is the entire trick, and it is why the rule is stated as an inequality rather than a configuration flag.
+
+| Symbol | What it is |
+|--------|------------|
+| RF | Replication factor — how many copies of each row exist |
+| `floor(RF/2)+1` | Quorum size: strict majority. For RF=3 that is 2 nodes |
+| W | How many replicas must acknowledge a write before it is called successful |
+| R | How many replicas must answer a read before it is returned |
+| `W + R > RF` | The overlap condition. Satisfy it and read-your-writes holds; violate it and stale reads are legal |
+| `RF − W` | How many node failures a write can survive |
+
+**Walk one example.** Why two majorities cannot miss each other, and what each setting costs:
+
+```
+  RF = 3, quorum = floor(3/2)+1 = 2
+
+  W=2, R=2   ->  W+R = 4 > 3     overlap guaranteed    strongly consistent
+  W=1, R=1   ->  W+R = 2 < 3     no overlap forced     stale reads possible
+  W=3, R=1   ->  W+R = 4 > 3     consistent, but any one node down blocks all writes
+  W=1, R=3   ->  W+R = 4 > 3     consistent, but any one node down blocks all reads
+
+  Failure tolerance at W=R=QUORUM:
+    RF=3  quorum 2   survives 1 node down
+    RF=5  quorum 3   survives 2 nodes down
+    RF=7  quorum 4   survives 3 nodes down
+```
+
+Pigeonhole is the proof: with only 3 replicas, a write touching 2 and a read touching 2 must
+share at least one node, because `2 + 2 = 4` boxes cannot fit in 3 slots without a collision.
+The overlapping node holds the newest timestamp, and Cassandra's last-write-wins reconciliation
+picks it. This is also why `ONE/ONE` is not "slightly weaker" but *categorically* different —
+`1 + 1 = 2 ≤ 3` means there exists a legal execution where the read hits neither node that
+took the write.
+
+`LOCAL_QUORUM` is the same inequality applied per datacenter: it satisfies `W+R > RF` within
+the local DC (avoiding a cross-DC round trip on every operation) while giving up the global
+guarantee. A read in DC-B may not see a write that only reached DC-A's local quorum.
 
 **Cassandra concrete numbers**:
 - Recommended max partition size: 100MB; max rows per partition: 2 billion (theoretical)

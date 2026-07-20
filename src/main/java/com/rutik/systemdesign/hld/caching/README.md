@@ -36,6 +36,40 @@ In distributed systems, caching reduces:
 - **Invalidation**: Proactively removing or updating a cache entry when the underlying data changes. This is the hard part.
 - **Cache Coherence**: Ensuring all cache nodes (in a distributed cache) reflect a consistent view of the data.
 
+### Decoding the hit rate and what it buys you
+
+**In plain terms.** "Hit rate is the fraction of requests you never had to ask the database about — and because a miss costs roughly 100x a hit, the average latency your users feel is dominated by the small slice that misses, not the large slice that hits."
+
+That framing matters because hit rate is not a vanity metric: it is the weight in a weighted average. Going from 90% to 96% sounds like a 6-point improvement, but it more than halves the misses, and misses are the only expensive thing happening.
+
+| Symbol | What it is |
+|--------|------------|
+| `hits` | Requests where the key was found in cache and served from memory |
+| `misses` | Requests where the key was absent, forcing a fetch from the authoritative source |
+| `h` | Hit rate, `hits / (hits + misses)`. A fraction in `[0, 1]`; `0.96` means 96 of every 100 requests skip the DB |
+| `1 - h` | Miss rate — the fraction that still pays full backend cost |
+| `L_cache` | Latency of a cache hit. Redis on the same network: about `1ms` (Intuition section) |
+| `L_db` | Latency of the authoritative fetch. The library walk: about `100ms` (Intuition section) |
+| `L_eff` | Effective (average) latency actually observed: `h x L_cache + (1 - h) x L_db` |
+
+**Walk one example.** Using the 1ms cache and 100ms database from the Intuition section:
+
+```
+  h = 0.90   ->  0.90 x 1ms  +  0.10 x 100ms
+                 = 0.90ms    +  10.00ms      = 10.90 ms
+
+  h = 0.96   ->  0.96 x 1ms  +  0.04 x 100ms
+                 = 0.96ms    +   4.00ms      =  4.96 ms
+
+  h = 0.99   ->  0.99 x 1ms  +  0.01 x 100ms
+                 = 0.99ms    +   1.00ms      =  1.99 ms
+
+  90% -> 96% hit rate  : 10.90ms -> 4.96ms   (2.2x faster)
+  96% -> 99% hit rate  :  4.96ms -> 1.99ms   (2.5x faster)
+```
+
+Notice the shape: each equal-sized step in hit rate near the top buys a bigger multiplier than the one before, because you are halving and re-halving the only term that costs anything. This is also why "above 90% is typically good" is a floor, not a target — the last few points are where the latency actually lives.
+
 > "There are only two hard things in Computer Science: cache invalidation and naming things." — Phil Karlton
 
 ---
@@ -270,6 +304,34 @@ Solutions:
 3. **Background refresh**: Serve stale data while asynchronously refreshing in the background.
 4. **Jitter on TTL**: Add randomness to TTLs so entries don't all expire simultaneously.
 
+**What this actually says.** "A mutex turns N simultaneous misses on one key into exactly 1 backend query plus N-1 waiters — the DB load from an expiry event stops depending on how popular the key is."
+
+The reason this term exists is that without it, backend load scales with *concurrency at the moment of expiry*, a number you do not control. With request collapsing it scales with *number of distinct expired keys*, a number you do control (via TTL and jitter).
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Concurrent requests that arrive for the same key while it is missing |
+| `Q_naive` | Backend queries without collapsing — one per requester, so `Q_naive = N` |
+| `Q_mutex` | Backend queries with a lock — one winner rebuilds, so `Q_mutex = 1` |
+| `SETNX` | Redis "set if not exists"; it succeeds for exactly one caller, which elects the rebuilder |
+| `PX 5000` | Lock lease in milliseconds. If the winner crashes, the lock self-expires so the key is not stuck |
+| `collapse ratio` | `Q_naive / Q_mutex = N` — the load reduction factor |
+
+**Walk one example.** The Section 5 stampede diagram: one hot key, 1000 concurrent requests.
+
+```
+  without mutex :  N = 1000 misses -> 1000 parallel DB queries
+  with mutex    :  1 winner rebuilds, 999 wait or serve stale
+                   Q_mutex = 1
+
+  collapse ratio = 1000 / 1 = 1000x fewer DB queries
+
+  and the lock is bounded : PX 5000 = 5s lease, so a crashed
+  winner delays the rebuild by at most 5s -- it never wedges the key
+```
+
+The other three fixes attack a different variable. Jitter and XFetch reduce how many keys expire at the same instant; the mutex reduces what each expiry costs. Production systems use both, because either one alone still leaves a bad case.
+
 ### Cache Penetration
 Requests for keys that NEVER exist in cache or DB (e.g., `user_id=-1`). Attackers can exploit this to bypass cache and hammer the DB.
 
@@ -365,6 +427,34 @@ All three look like "the DB got slammed," but the trigger differs — one key (s
 - Data is expensive to compute or retrieve (complex joins, API calls, ML inference).
 - Tolerable staleness window exists (e.g., displaying follower count 30s stale is fine).
 - Rate limiting, session management, leaderboards — all naturally fit caching.
+
+**Read it like this.** "You do not size a cache to hold the dataset — you size it to hold the working set, and the Pareto principle says a fifth of the data carries four fifths of the reads, so a fifth of the storage bill buys you most of the benefit."
+
+That is the whole economic argument for caching. If reads were spread uniformly across the dataset there would be no working set, every entry would be equally cold, and the cache would just be an expensive smaller copy of the database — which is exactly the "uniformly random with no locality" entry in the Do-NOT list below.
+
+| Symbol | What it is |
+|--------|------------|
+| `D` | Total number of entities in the authoritative store |
+| `p` | Fraction of entities you choose to cache — the working-set coverage, `0.20` under 80/20 |
+| `h` | Read fraction that coverage `p` captures. Under 80/20, `p = 0.20` yields `h = 0.80` |
+| `s` | Bytes per cached entry, including data-structure overhead (not just the raw payload) |
+| `memory` | Cache capacity needed: `D x p x s` |
+
+**Walk one example.** Using the case study's 500M registered users and its ~12KB per cached timeline (800 IDs plus sorted-set overhead), decimal units:
+
+```
+  entities cached : D x p = 500,000,000 x 0.20 = 100,000,000 entries
+  memory needed   : 100,000,000 x 12KB         = 1.2 TB
+
+  latency at h = 0.80 :  0.80 x 1ms + 0.20 x 100ms
+                      =  0.80ms     + 20.00ms     = 20.80 ms
+
+  compare: caching all 200M daily-active users instead
+  memory needed   : 200,000,000 x 12KB         = 2.4 TB
+  -- 2x the memory to chase the last slice of reads
+```
+
+So the first 1.2TB removes 80% of database load, and the second 1.2TB is what you spend to push past it. Whether that second half is worth buying is exactly the tradeoff the effective-latency formula in Section 2 lets you price.
 
 ### Do NOT Use When:
 - Data changes every request (real-time financial tickers, live sensor streams).
@@ -636,6 +726,39 @@ private boolean shouldEarlyRefresh(CachedFeed c) {
 }
 ```
 
+**What the formula is telling you.** "Roll a random number on every read; the closer the entry is to expiring, the more likely that roll says refresh me now — so the key gets rebuilt by one early reader before it ever expires, and there is never a moment where everyone misses at once."
+
+The reason `-log(random())` appears rather than a plain threshold is that a fixed "refresh in the last 5 seconds" rule just moves the stampede 5 seconds earlier — every reader in that window still fires. Drawing from `-log(uniform)` gives an unbounded tail: most rolls are small, a few are large, so refreshes scatter across a widening window instead of clustering at one instant.
+
+| Symbol | What it is |
+|--------|------------|
+| `remaining` | Seconds of TTL left on the cached entry (`c.ttlSeconds()`) |
+| `delta` | Aggressiveness knob, `30.0` here. Larger `delta` = refresh earlier and more often |
+| `Math.random()` | Uniform draw in `(0, 1)` |
+| `-log(random())` | An exponentially distributed number, mean `1.0`. Usually below 1, occasionally much larger |
+| `-delta x log(random())` | The randomized refresh threshold in seconds. Mean is `delta` = 30s before expiry |
+| `remaining < threshold` | Refresh trigger — true more and more often as `remaining` shrinks toward 0 |
+
+**Walk one example.** With `delta = 30.0`, four different reads land four different thresholds:
+
+```
+  random() = 0.90  ->  -30 x log(0.90)  =    3.16 s
+  random() = 0.50  ->  -30 x log(0.50)  =   20.79 s
+  random() = 0.10  ->  -30 x log(0.10)  =   69.08 s
+  random() = 0.01  ->  -30 x log(0.01)  =  138.16 s
+
+  entry with remaining = 25s :
+    0.90 roll -> 25 < 3.16   is false -> serve cached
+    0.50 roll -> 25 < 20.79  is false -> serve cached
+    0.10 roll -> 25 < 69.08  is TRUE  -> one reader refreshes early
+    0.01 roll -> 25 < 138.16 is TRUE  -> refresh even earlier
+
+  entry with remaining = 2s :
+    every roll above returns TRUE -> refresh is now near-certain
+```
+
+Read the two blocks together: at 25s out only the unlucky-tail readers refresh (a trickle), and by 2s out essentially every reader would refresh — but by then the first trickle already rebuilt the key, so nobody is left to stampede. The per-key mutex in decision 7 is the safety net for the case where the trickle never fires.
+
 ### Tradeoffs
 
 | Strategy           | Fan-out on Write | Fan-out on Read | Hybrid (chosen)  |
@@ -653,8 +776,61 @@ private boolean shouldEarlyRefresh(CachedFeed c) {
 - **Timeline read p50:** 18ms, p99: 72ms, p99.9: 140ms
 - **Fan-out latency:** 95% of followers receive tweet within 1.2s
 - **DB read QPS:** reduced from theoretical 300k to 11k (27x reduction)
-- **Redis memory:** 38TB used of 50TB budget (74% utilization)
+- **Redis memory:** 38TB used of 50TB budget (76% utilization)
 - **Cost:** $180k/month for Redis cluster vs estimated $2.1M/month if served from DB
+
+**Put simply.** "Every timeline is a capped list of 800 IDs, so its size is fixed and knowable — multiply that fixed size by the number of users you intend to keep warm and you have the cluster floor, before you add anything for overhead, celebrities, or retention."
+
+The cap is the load-bearing decision. Without `ZREMRANGEBYRANK` holding each feed to 800 entries, per-user size grows with tweet volume and no capacity number is ever stable.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Tweet IDs retained per timeline — capped at `800` by decision 3 |
+| `b` | Bytes per ID — `8` (a 64-bit snowflake ID) |
+| `raw` | Payload per user: `n x b` |
+| `overhead factor` | Redis sorted-set bookkeeping (skiplist nodes, hash entry, pointers) on top of raw |
+| `s` | Realistic bytes per user after overhead: about `12KB` |
+| `U` | Users kept warm — `200,000,000` DAU |
+| `floor` | Theoretical minimum cluster memory: `U x s` |
+
+**Walk one example.** Decimal units (1KB = 1000 bytes), the convention the case study uses:
+
+```
+  raw per user   : 800 x 8 bytes            =  6,400 bytes  =  6.4 KB
+  with overhead  : ~12 KB per user          (roughly 1.9x raw)
+
+  cluster floor  : 200,000,000 x 12 KB      =  2.4 TB
+  actually used  :                             38   TB   (~16x the floor)
+  provisioned    :                             50   TB
+  utilization    : 38 / 50                  =  0.76  =  76%
+```
+
+The 16x gap between floor and reality is the point of the exercise. Celebrity-merge buffers, replication, and 30 days of inactive-user retention are not rounding errors on top of the floor — they are the majority of the bill. Compute the floor to sanity-check the order of magnitude, never to size the purchase order.
+
+**Stated plainly.** "Hit rate converts directly into backend QPS: whatever fraction misses is the fraction of peak traffic the database still has to answer."
+
+| Symbol | What it is |
+|--------|------------|
+| `QPS_peak` | Peak request rate arriving at the service — `300,000` timeline reads/sec |
+| `h` | Combined L1 + L2 hit rate — `0.964` |
+| `1 - h` | Miss rate that falls through to Manhattan |
+| `QPS_db` | Database load: `QPS_peak x (1 - h)` |
+| `reduction` | `QPS_peak / QPS_db`, equivalently `1 / (1 - h)` |
+
+**Walk one example.** Peak read traffic against the measured combined hit rate:
+
+```
+  miss rate  : 1 - 0.964                    = 0.036
+  DB QPS     : 300,000 x 0.036              = 10,800  ~= the reported 11k
+  reduction  : 300,000 / 11,000             = 27.3x
+
+  what the L1 tier alone is worth:
+    Redis-only hit rate 0.88 -> 300,000 x 0.12 = 36,000 QPS
+    combined      0.964      -> 300,000 x 0.036 = 10,800 QPS
+    the Caffeine L1 removes about 25,200 QPS of Redis and DB work
+```
+
+That last comparison is the argument for the second cache tier in one line: 88% to 96.4% looks like a small percentage move, but it is the difference between 36k and 11k queries per second hitting the store behind it.
 
 ### Common Pitfalls / Lessons Learned
 

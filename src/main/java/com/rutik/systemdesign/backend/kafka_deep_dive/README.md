@@ -609,6 +609,37 @@ kafka-consumer-groups.sh \
 **Pitfall 1 — Consumer group imbalance causing hot partitions.**
 A team deployed 8 consumer instances but their topic had only 4 partitions. Four consumers were idle, contributing nothing. The other four each processed one partition. Throughput did not scale with additional consumers. Fix: the number of partitions is the maximum parallelism for a consumer group. Partition count can only be increased (not decreased) without repartitioning. Plan partition count based on target peak throughput divided by per-consumer throughput capacity.
 
+**What the formula is telling you.** "Partitions are the only unit of parallelism a consumer group has. Adding consumers beyond the partition count adds cost and zero throughput — the extras sit assigned to nothing."
+
+The sizing rule is a ceiling function, and rounding it the wrong way is the difference between meeting your SLA and quietly falling behind.
+
+| Symbol | What it is |
+|--------|------------|
+| target peak throughput | Records/sec you must absorb at the worst moment, not the average |
+| per-consumer capacity | Records/sec one consumer instance can actually process |
+| partition count | `ceil(target ÷ per-consumer capacity)`. The parallelism ceiling |
+| effective consumers | `min(consumer instances, partitions)`. The extras are dead weight |
+
+**Walk one example.** The 8-consumer / 4-partition deployment above, priced out:
+
+```
+  per-consumer capacity = 5,000 records/sec
+
+  BROKEN -- 4 partitions, 8 consumers deployed
+    effective consumers = min(8, 4) = 4
+    actual capacity     = 4 x 5,000 = 20,000 records/sec
+    idle consumers      = 8 - 4     = 4      (50% of the fleet wasted)
+    doubling the fleet bought exactly 0 extra records/sec
+
+  SIZED -- start from the target instead
+    target peak         = 60,000 records/sec
+    partitions needed   = ceil(60,000 / 5,000)  = 12
+    with 2x headroom for growth                 = 24 partitions
+    consumers to deploy today = 12  (capacity 60,000/sec, room to scale to 24)
+```
+
+Note the asymmetry that makes this a genuine design decision: **consumers can be scaled up and down freely, partitions effectively only go up.** Increasing partitions later rehashes keys to different partitions, which breaks per-key ordering and forces repartitioning of any Kafka Streams state store keyed on those records. That is why the 2x-to-5x headroom multiplier exists — you are buying the option to scale consumers later without a migration.
+
 **Pitfall 2 — Auto-commit with processing errors causing data loss.**
 A team used `enable.auto.commit=true` (the default). When a consumer processed 500 records and one threw a NullPointerException, the exception was caught and logged, but the auto-commit timer had already committed the offset. The failed record was silently lost. Fix: always disable auto-commit in business event consumers. Use `commitSync()` only after all records in the batch are confirmed processed.
 
@@ -626,6 +657,44 @@ A team set `acks=all` believing they had full durability. However, `min.insync.r
 
 **Pitfall 7 — Ignoring consumer lag until it cascades.**
 A streaming pipeline had consistent 0-lag during normal operations. During a Black Friday traffic spike, producers sent 10x normal volume. Consumers could not keep up and lag grew to 50 million records over 6 hours. Downstream systems dependent on near-real-time data (inventory, pricing) were serving 6-hour-old state. Fix: set lag-based autoscaling (HPA on consumer group lag in Kubernetes via KEDA) with alerting thresholds at 10k records lag. Treat consumer lag as a primary SLA metric, not an afterthought.
+
+**Read it like this.** "Lag is a bathtub. It fills at whatever rate production exceeds consumption, and it drains at whatever rate consumption exceeds production — and a tub that took six hours to fill does not empty the moment you turn the tap down."
+
+The dangerous property is that lag is an *integral*, not a rate. A small, steady deficit looks harmless on a per-second dashboard and is catastrophic by dinnertime.
+
+| Symbol | What it is |
+|--------|------------|
+| lag | `Log End Offset - Committed Offset`. Records produced but not yet processed |
+| deficit | `produce rate - consume rate`. Positive = the tub is filling |
+| fill time | How long the deficit has been running. Lag = deficit × time |
+| drain rate | `consume rate - produce rate` once you have scaled up. Must be positive |
+| staleness | `lag ÷ consume rate`. How old the data your consumers emit actually is |
+
+**Walk one example.** Recover the hidden deficit from the two numbers in the incident, then price the recovery:
+
+```
+  observed: lag reached 50,000,000 records over 6 hours
+
+  deficit = 50,000,000 / (6 x 3600 s)
+          = 50,000,000 / 21,600 s
+          = 2,315 records/sec
+
+  That is the entire cause -- a 2,315/sec shortfall. Not dramatic. Not visible
+  on a throughput graph. It simply never stopped.
+
+  DRAINING IT -- how much surplus capacity you add decides the recovery time:
+
+    surplus capacity   drain time = 50,000,000 / surplus
+    ----------------   -----------------------------------
+       2,315/sec         21,598 s  =  6.0 hours   (just breaking even)
+       5,000/sec         10,000 s  =  2.8 hours
+      10,000/sec          5,000 s  =  1.4 hours
+      25,000/sec          2,000 s  =  0.6 hours
+```
+
+**Why the 10,000-record alert threshold is the whole fix.** At a 2,315/sec deficit, lag crosses 10,000 records in `10,000 / 2,315 = 4.3 seconds`. The alert fires almost immediately — hours before any human notices stale prices — and KEDA scales consumers while the backlog is still four seconds deep instead of six hours deep. Compare that to the drain table above: catching it at 10,000 records costs seconds of recovery; catching it at 50 million costs hours even with 10x surplus capacity. **The threshold is not tuned to what is "bad" — it is tuned to fire while the backlog is still cheap to clear.**
+
+Note also the staleness column implied here: with a 20,000/sec consumer group, a 50-million-record backlog means the freshest record a consumer touches is `50,000,000 / 20,000 = 2,500 seconds` old — about 42 minutes — and that gap keeps growing as long as the deficit persists. This is the arithmetic that turns "consumer lag" from an ops metric into an SLA violation you can put a number on.
 
 ---
 

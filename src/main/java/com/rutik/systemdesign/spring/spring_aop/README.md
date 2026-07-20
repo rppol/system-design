@@ -702,6 +702,43 @@ public class RateLimitAspect {
 }
 ```
 
+**Read it like this.** "Each user gets a bucket of 100 stamps. Every call spends one; the bucket is thrown away and rebuilt at 100 exactly 60 seconds after the user's first call. Spend them all early and you wait out the remainder of that minute."
+
+Note what the Lua script actually implements: the `EXPIRE key 60` is not a refill, it is a *reset*. That distinction is the difference between this fixed-window limiter and a true token bucket, and it is where the boundary burst comes from.
+
+| Symbol | What it is |
+|--------|------------|
+| `MAX_TOKENS = 100` | Bucket capacity — calls allowed per user per window |
+| `REFILL_INTERVAL_MS = 60_000` | Window length, 60 seconds |
+| `GET KEYS[1] or '100'` | Read remaining tokens; a missing key means a fresh full bucket |
+| `DECR` | Spend one token. Atomic, so concurrent calls cannot double-spend |
+| `EXPIRE key 60` | Deletes the counter 60s later, which is what "refills" the bucket |
+| Redis Lua | Runs the whole check-and-decrement as one indivisible step |
+
+**Walk one example.** One user against the stated `8,000 req/min` service load:
+
+```
+  budget = MAX_TOKENS / REFILL_INTERVAL_MS = 100 calls / 60,000 ms
+         = 1 call every 600 ms sustained
+
+  A user calling at 5 req/sec:
+    t = 0 ms      key absent -> tokens = 100, DECR -> 99, EXPIRE 60s set
+    t = 200 ms    tokens 99 -> 98
+    ...
+    t = 19,800 ms tokens  1 ->  0    (100 calls spent in 20 sec)
+    t = 20,000 ms tokens  0 -> REJECT, 429 for the next 40 seconds
+    t = 60,000 ms key expires -> next call sees 'or 100' -> full bucket again
+
+  Fleet check -- does 100/user/min fit the service budget?
+    service load  = 8,000 req/min
+    per-user cap  =   100 req/min
+    8,000 / 100   = 80 users at full throttle saturates the stated load
+```
+
+The user is idle from second 20 to second 60 despite an average rate of only 1.67 req/sec — well under the 100/min cap. Fixed windows punish bursts, which is exactly the intent for abuse control and exactly the wrong behaviour for a legitimate client doing a batch import.
+
+**Why `@Order(1)` on this aspect is arithmetic, not aesthetics.** The rate-limit aspect is ordered ahead of audit and latency, so a rejected call costs one Redis round-trip and nothing else — no audit write, no timer sample. Reverse the order and a user hammering a limit at 5 req/sec while capped generates a rejected-call audit row and a latency sample for every one of those calls, so the abuse traffic you are blocking still buys itself a database write. The boundary case makes it worse: a client can spend all 100 tokens in the last second of one window and 100 more in the first second of the next, so the true worst case is **200 calls in a two-second span** even though the configured limit reads 100 per minute. A sliding-window or true token-bucket refill removes that doubling; a fixed window never can.
+
 **Audit aspect with structured logging:**
 
 ```java

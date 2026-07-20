@@ -205,6 +205,44 @@ resources:
     nvidia.com/mig-1g.10gb: 1   # 10GB, ~1/7 of the SMs, hardware-isolated
 ```
 
+#### The MIG partition arithmetic
+
+```
+schedulableDevices = gpusPerNode x slicesPerGpu
+memoryPerSlice     = cardMemory / slicesPerGpu      (approximately; MIG reserves overhead)
+gpusNeeded         = ceil( replicas / slicesPerGpu )
+```
+
+**In plain terms.** "MIG turns one card into a fixed number of smaller cards, so the scheduler stops counting GPUs and starts counting slices — and your placement problem shrinks by exactly that factor."
+
+The word doing the work is *fixed*. Unlike time-slicing, a MIG slice is a hardware carve-out of both memory and SMs, so `memoryPerSlice` is a ceiling the tenant cannot exceed and cannot be starved below. That is the entire reason MIG is the multi-tenant answer and time-slicing is not.
+
+| Symbol | What it is |
+|--------|------------|
+| `gpusPerNode` | `8` on the p4d node above — what the device plugin advertised pre-MIG |
+| `slicesPerGpu` | `7` for the `all-1g.10gb` profile on an A100. Profile-dependent, not tunable freely |
+| `1g.10gb` | The profile name literally encodes the shape: 1 GPC of compute, 10 GB of memory |
+| `cardMemory` | `80 GB` on an A100-SXM4-80GB |
+| `schedulableDevices` | What `kubectl describe node` reports as `nvidia.com/mig-1g.10gb` |
+
+**Walk one example.** The node in the code block, plus the placement win from Pitfall 1:
+
+```
+  profile         slices/GPU   x 8 GPUs = advertised   memory each   isolation
+  none (whole)         1              8                   80 GB      full card
+  3g.40gb              2             16                   40 GB      hardware
+  2g.20gb              3             24                   20 GB      hardware
+  1g.10gb              7             56                   10 GB      hardware
+
+  Placing 12 inference replicas that each need ~3 GB:
+    whole cards   ceil(12 / 1) = 12 GPUs    real memory use 3 of 80 GB = 3.75% per card
+    1g.10gb       ceil(12 / 7) =  2 GPUs    12 of 14 slices filled -> 6x fewer cards
+```
+
+The `3.75%` figure is the indictment. A 3 GB model on an 80 GB card wastes 96% of the memory it reserved, and because Kubernetes cannot overcommit extended resources, no other Pod can touch the remainder. MIG does not make the model faster — it makes the *unused* 77 GB schedulable again.
+
+Note what the table does not offer: a `1g.10gb` slice is roughly 1/7 of the SMs, so a model needing 3 GB but 40% of the compute will run slower on a slice than on a card. Size the slice by whichever of memory or SM demand is larger, never by memory alone.
+
 ### 6.4 Time-slicing (oversubscription)
 
 Time-slicing is pure software: a ConfigMap tells the device plugin to advertise each physical GPU as N replicas. There is **no memory isolation** — all replicas share the full 80 GB and all SMs, round-robin time-multiplexed by the GPU's hardware scheduler:

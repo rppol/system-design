@@ -227,6 +227,50 @@ public FlatFileItemReader<CsvRecord> csvReader(
 
 **Rule**: any bean that uses `jobParameters`, `stepExecutionContext`, or `jobExecutionContext` in SpEL MUST be `@StepScope` or `@JobScope`. Without it, the expression evaluates to `null` at application context startup.
 
+### Reading the chunk size as a two-sided cost
+
+`chunk(500)` above is the single most consequential number in a batch job. It sets two
+costs that move in opposite directions:
+
+```
+  commits    = total_items / chunk_size
+  worst-case rework on a failure = chunk_size items
+```
+
+**Stated plainly.** "Chunk size divides your job into commits: bigger chunks mean fewer
+commits but more work thrown away when one fails." There is no universally right value —
+you are choosing where to sit between per-commit overhead and per-failure rollback cost.
+
+| Symbol | What it is |
+|--------|------------|
+| `total_items` | Rows the step will read end to end |
+| `chunk_size` | Items read + processed before one transaction commits (`chunk(N)`) |
+| `commits` | Number of transactions the step opens and closes — the fixed overhead term |
+| rework | Items re-read and re-processed when a chunk rolls back — the failure term |
+| chunk 1 | Degenerates to one transaction per item: max commits, zero rework |
+
+**Walk one example.** A 10,000,000-row import at three chunk sizes:
+
+```
+  chunk    commits = 10,000,000 / chunk    items lost per rollback
+      1      10,000,000                          1      commit-bound
+     10       1,000,000                         10
+    500          20,000                        500      the config above
+  10000           1,000                     10,000      rollback-bound
+
+  going 500 -> 10000:  commits fall 20x (20,000 -> 1,000)
+                       rework  rises 20x (500 -> 10,000 items)
+```
+
+The `500` in the config buys 20,000 commits — small enough that commit overhead is not
+the bottleneck, while a single bad row costs at most 500 items of rework. Both terms are
+merely "acceptable," which is the correct shape of a tuning answer.
+
+**Why chunk size interacts with `skipLimit`.** With `skipLimit(100)` and fault tolerance
+on, a failed chunk triggers item-by-item re-processing to isolate the bad row — so a
+chunk of 10,000 means up to 10,000 single-item retries to find one bad record. Large
+chunks make the *scan* expensive, not just the rollback.
+
 ### 6.3 ItemReader, ItemProcessor, ItemWriter
 
 ```java
@@ -355,6 +399,54 @@ public JdbcPagingItemReader<Record> workerReader(DataSource ds,
         .build();
 }
 ```
+
+The partitioner is three lines of arithmetic that decide the whole job's shape:
+
+```
+  range_width = totalRecords / gridSize
+  minId(i)    = i * range_width
+  maxId(i)    = (i + 1) * range_width - 1
+```
+
+**What it means.** "Cut the primary-key space into `gridSize` equal, non-overlapping,
+contiguous blocks and hand block `i` to worker `i`." The `- 1` is not cosmetic — it is
+what makes the blocks disjoint, and dropping it double-processes one row per boundary.
+
+| Symbol | What it is |
+|--------|------------|
+| `totalRecords` | Size of the key space being split. `10,000,000` here |
+| `gridSize` | Number of partitions (and, locally, threads). `10` here |
+| `range_width` | Rows per partition — the per-worker load |
+| `minId(i)` | Inclusive lower bound of partition `i`'s `BETWEEN` clause |
+| `maxId(i)` | Inclusive upper bound. `(i+1) * width - 1` closes the block one short of the next |
+
+**Walk one example.** `totalRecords = 10,000,000`, `gridSize = 10`:
+
+```
+  range_width = 10,000,000 / 10 = 1,000,000
+
+  partition   minId = i x 1,000,000    maxId = (i+1) x 1,000,000 - 1
+      0                       0                            999,999
+      1               1,000,000                          1,999,999
+      2               2,000,000                          2,999,999
+      ...
+      9               9,000,000                          9,999,999
+
+  check: 9,999,999 + 1 = 10,000,000 rows covered, no gaps
+  check: partition 0 ends at 999,999 and partition 1 starts at 1,000,000 -> disjoint
+```
+
+Drop the `- 1` and partition 0 would end at `1,000,000`, exactly where partition 1
+begins: every boundary row is then read by two workers and written twice. With
+`gridSize = 10` that is 9 duplicated rows — small enough to survive testing and large
+enough to corrupt a billing run.
+
+**Why equal-width is not equal-work.** This formula splits the *key range* evenly, not
+the *row count*. If IDs are sparse — deleted rows, or a sequence that skipped a
+block — one worker gets a near-empty range while another gets a dense one, and the step
+finishes only when the slowest partition does. Partitioning by row count (or over-
+partitioning to `gridSize` well above the thread count so slow partitions interleave)
+is the fix when key density is uneven.
 
 ---
 

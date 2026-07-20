@@ -165,6 +165,42 @@ violation[{"msg": msg}] {
 }
 ```
 
+**Read it like this.** "Build the set of all reasons to reject this object; if that set is non-empty, reject it."
+
+Rego rules of this shape are not functions returning true or false — they are *set comprehensions*. The rule body is a filter, and every combination of variable bindings that satisfies every line contributes one element to the set.
+
+```
+violation[msg] { line1; line2; line3 }
+
+  read as:  msg is IN the violation set  IF  line1 AND line2 AND line3 all hold
+  the [_]:  "for SOME element of this array" -- one set entry per element that matches
+  verdict:  count(violation) == 0  ->  admit        count(violation) > 0  ->  deny
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `violation[...]` | A partial set rule — each satisfying binding adds one element, not a boolean |
+| `input` | The JSON handed to OPA: the admission review, manifest, or Terraform plan |
+| `[_]` | Anonymous iteration variable — "try every element of this array in turn" |
+| `;` / newline | Implicit AND between conditions inside a rule body |
+| `count(violation)` | Number of distinct violations found; zero means the object is admitted |
+| `sprintf` | Builds the human-readable message that becomes the set element |
+
+**Walk one example.** The privileged-container rule above, against a 3-container Pod:
+
+```
+   container      privileged?      matches rule body?      contributes to set?
+     nginx           false                 no                     no
+     sidecar          true                yes                    yes  -> 1 msg
+     istio           absent                no                     no
+
+   count(violation) = 1   ->   non-empty   ->   Pod REJECTED
+```
+
+Now the same rule against a Pod where all three are unprivileged: no binding satisfies the body, the set stays empty, `count(violation) = 0`, and the Pod is admitted. That is precisely what the two `opa test` cases below assert — `== 1` for the privileged fixture, `== 0` for the clean one.
+
+The `[_]` is where the safety comes from. Written without iteration, the rule would only inspect `containers[0]` and a privileged container in second position would sail through — which is exactly the "a Rego typo can silently allow everything" pitfall in section 10. An empty set is indistinguishable from a policy that never fired, so a rule that matches nothing and a rule that is broken look identical in production. Only the test suite tells them apart.
+
 **Conftest in CI.** Conftest runs the same Rego against files. Point it at a Kubernetes manifest or a `terraform show -json` plan:
 
 ```bash
@@ -213,6 +249,42 @@ spec:
 ```
 
 **Gatekeeper audit** runs every 60 seconds by default (`--audit-interval=60`), re-evaluating existing objects and recording violations in the Constraint's `status.violations` so you find pre-existing non-compliance without blocking it.
+
+**In plain terms.** "Admission checks a change once, at the moment it happens; audit re-checks everything that already exists, on a fixed clock."
+
+```
+worst-case detection delay = audit-interval           (drift appeared just after a pass)
+average detection delay    = audit-interval / 2
+audit passes over a window = window seconds / audit-interval
+admission overhead per API write = one webhook round trip (~5-50 ms)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `audit-interval` | Seconds between full re-evaluations of existing objects; default 60 |
+| `status.violations` | Where audit records what it found — the evidence trail, not a block |
+| `enforcementAction` | `dryrun` records only; `deny` rejects at admission. Audit runs under both |
+| admission latency | Per-write cost of the webhook call, paid on every matching CREATE/UPDATE |
+
+**Walk one example.** The section 14 rollout: a 2-week dryrun at the default interval.
+
+```
+   audit passes   =  14 days x 24 h x 60 min  =  20,160 evaluations of the whole cluster
+   worst detection delay                      =      60 s
+   mean detection delay                       =      30 s
+   backlog surfaced   23 privileged pods + 11 public-registry images  =  34 violations
+```
+
+Twenty thousand passes over two weeks is the point: audit is not a scan you schedule, it is a loop that keeps running, so a violation introduced on day 9 shows up within a minute rather than waiting for the next quarterly sweep. That continuity is what turns "point-in-time snapshot" into the continuous evidence section 9 requires.
+
+**Walk the admission cost.** Now the other side — what enforcement charges you per write, using the ~12 ms measured in section 14 and the 5-50 ms band from section 8:
+
+```
+   per admission call                     5 ms  ..  12 ms  ..  50 ms
+   a Deployment rollout of 50 pods      250 ms  .. 600 ms  ..  2500 ms added
+```
+
+Sub-second on a 50-pod rollout is why admission enforcement is affordable. The number that actually matters is not this one, though: it is the failure mode. At `failurePolicy: Fail`, a webhook that stops responding does not add 50 ms — it rejects 100% of matching writes, including the writes that would restart the webhook. That asymmetry, not the latency, is why section 10 insists on excluding `kube-system` and `gatekeeper-system` from the selector.
 
 **Kyverno mutate example** — inject a secure default so developers do not have to:
 

@@ -203,6 +203,58 @@ The main request path (solid) ends at the pod; the NAT egress branch (dotted) is
 
 A Kubernetes pitfall: pods need IPs from the VPC (with the AWS VPC CNI). A `/24` per subnet = 256 IPs ≈ ~250 pods. Large clusters exhaust subnet space fast — size for peak pod count, not node count.
 
+#### Decoding `addresses = 2^(32 - N)`
+
+**What the formula is telling you.** "An IPv4 address is 32 bits; a `/N` freezes the first N of them as the network's identity, so every one of the remaining `32 - N` bits is free to vary — and that is your address count."
+
+The lever is that N moves the count by *powers of two*, not linearly. Going from `/24` to `/23` does not add a few addresses, it doubles them. Equally, every step up in N halves your space, which is why an undersized subnet cannot be nudged — you must renumber.
+
+| Symbol | What it is |
+|--------|------------|
+| `32` | Total bits in an IPv4 address (4 octets x 8 bits) |
+| `N` | The prefix length — how many leading bits are pinned to the network |
+| `32 - N` | Host bits, the ones left free to enumerate |
+| `2^(32-N)` | Total addresses in the block, including unusable ones |
+| AWS reserve `5` | `.0` network, `.1` router, `.2` DNS, `.3` future, and the last `.255` broadcast |
+
+**Walk one example.** Every block from the code above, plus the two sizes you actually pick between:
+
+```
+  prefix   host bits   2^(32-N)   AWS usable   how many fit in a /16
+   /16        16        65,536      65,531              1
+   /20        12         4,096       4,091             16
+   /24         8           256         251            256
+   /26         6            64          59          1,024
+   /28         4            16          11          4,096
+
+  10.0.1.0/28 spans 10.0.1.0 through 10.0.1.15 -> 16 - 5 = 11 pods could actually get an IP.
+```
+
+The `/28` row is the one that bites. Sixteen addresses sounds like room for a dozen pods; after the 5 AWS reservations you get **11**, a 31% tax that is invisible in the formula and never shows up until pods sit Pending with no CNI address.
+
+**Why "size for pods, not nodes" is a real constraint.** Push the numbers through for a 200-node cluster running 30 pods per node:
+
+```
+  peak pod IPs needed   =  200 nodes x 30 pods       =  6,000
+  /24 subnets required  =  ceil(6,000 / 251)         =     24 subnets
+  a whole /16 provides  =  256 x 251 usable          = 64,256 pod IPs
+```
+
+Twenty-four `/24`s is a lot of subnets to hand-manage across three AZs, and it is why teams carve `/20`s (4,091 usable each) instead. Note that the node count barely matters — the multiplier is pods per node, so raising density from 30 to 60 doubles the IP bill without adding a single instance.
+
+#### Health-check thresholds are a multiplication
+
+The Section 10 fix sets `HealthCheckIntervalSeconds: 15`, `UnhealthyThresholdCount: 3`, `HealthyThresholdCount: 2`. Those three numbers are not independent knobs — they multiply into your failover time:
+
+```
+  time to eject a bad target   = interval x unhealthyThreshold = 15 x 3 = 45 s
+  time to re-admit a fixed one = interval x healthyThreshold   = 15 x 2 = 30 s
+```
+
+**In plain terms.** "A target must fail the check three times in a row before the LB believes it, so you are blind to a dead backend for up to 45 seconds."
+
+Asymmetry is deliberate: eject slowly (3 strikes) so a single GC pause or transient blip does not drain the pool, but re-admit quickly (2 passes) so recovered capacity comes back fast. Set `UnhealthyThresholdCount: 1` and one hiccup empties your target group — which is exactly the Pitfall 1 failure mode, reached by a different route.
+
 ### Diagnosing DNS
 
 ```bash
@@ -233,6 +285,38 @@ A NAT gateway SNATs many private hosts behind one public IP. Each outbound conne
 # Symptom: rising egress errors; CloudWatch ErrorPortAllocation > 0 on the NAT GW.
 # Fix: VPC endpoints (PrivateLink) for AWS services to bypass NAT, or scale NAT/IPs.
 ```
+
+#### Why "~64K per 5-tuple" is the number that matters
+
+```
+availablePorts   = 65535 - 1024 + 1  =  64,512   (ephemeral range per NAT public IP)
+distinctFlows    = (srcIP, srcPort, dstIP, dstPort, proto)   -- the 5-tuple
+
+  headroom to ONE destination endpoint  =  64,512 x (number of NAT public IPs)
+```
+
+**What it means.** "The NAT can rewrite every private host to its own IP, but it must hand each connection a unique source port, and there are only about 64 thousand ports to give out per destination it is talking to."
+
+The reason this surprises people is the *per-destination* scoping. Fan-out traffic to a thousand different endpoints never exhausts anything, because each destination gets its own fresh 64K pool. It is the concentrated case — every pod hammering one S3 regional endpoint or one payment API — that collapses the whole fleet onto a single pool.
+
+| Symbol | What it is |
+|--------|------------|
+| `1024` | Start of the ephemeral range; ports below are reserved for well-known services |
+| `65535` | Highest port number a 16-bit port field can express |
+| 5-tuple | What makes a flow unique. Change any one field and it is a different connection |
+| `dstIP, dstPort` | Held constant in the failure case — which is what forces port reuse |
+| `TIME_WAIT` | Ports stay pinned ~2 minutes *after* close, so the pool drains slower than it refills |
+
+**Walk one example.** A fleet opening short-lived connections to a single external API through one NAT gateway:
+
+```
+  new connections/sec   pool = 64,512 ports   time to exhaust   observed symptom
+          100                 64,512               645 s        fine, ports recycle
+        1,000                 64,512                65 s        ErrorPortAllocation climbs
+        5,000                 64,512                13 s        egress timeouts, bandwidth idle
+```
+
+The middle row is the classic incident: 65 seconds to burn the pool, but `TIME_WAIT` holds each closed port for roughly 120 seconds, so at 1,000 conn/s the pool never recovers and errors are permanent, not bursty. Bandwidth graphs stay flat and healthy the entire time, which is why the fix is counterintuitive — a VPC endpoint removes the destination from NAT's books entirely, taking the pool pressure to zero rather than adding capacity.
 
 ### Stateful SG vs stateless NACL (the asymmetric-bug source)
 

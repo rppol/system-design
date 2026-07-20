@@ -343,6 +343,35 @@ shard_id = hash(key) % num_shards
 
 The hash function distributes keys pseudo-randomly across shards, achieving uniform distribution.
 
+**In plain terms.** "Scramble the key into a big meaningless number, then ask which of the N shards that number falls into."
+
+The hash step is what earns the uniformity. Without it, `user_id % 4` would still split into four groups, but any structure in how IDs are assigned (sequential signup, region-prefixed IDs, batch-imported blocks) survives the modulo and reappears as a lopsided shard. Hashing first destroys that structure so the modulo has nothing left to correlate with.
+
+| Symbol | What it is |
+|--------|------------|
+| `key` | The shard key value being routed — `user_id`, `order_id`, an email |
+| `hash(key)` | A fixed-width pseudo-random integer derived from the key. Same key always gives the same number |
+| `%` | Remainder after division — the "which bucket" operator. Always lands in `0 .. num_shards-1` |
+| `num_shards` | How many shards exist right now. Changing it re-routes almost everything (see below) |
+| `shard_id` | The answer: the index of the shard that owns this key |
+
+**Walk one example.** Using the two users from the diagram above, with `num_shards = 4`:
+
+```
+  user 1001 : hash(1001) = 7238
+              7238 / 4   = 1809 remainder 2
+              7238 % 4   = 2                  -> Shard 2
+
+  user 1004 : hash(1004) = 4356
+              4356 / 4   = 1089 remainder 0
+              4356 % 4   = 0                  -> Shard 0
+
+  The two users signed up 3 apart, but their hashes are 2882 apart and
+  they land on different shards. That decorrelation is the whole point.
+```
+
+Nothing is stored to make this work: any server that knows `num_shards` can recompute the answer from the key alone. That is why hash sharding needs no lookup table — and also why changing `num_shards` is so painful.
+
 #### ASCII Diagram
 
 ```mermaid
@@ -389,6 +418,36 @@ user_id: 1001 -> hash % 5 = 3 -> Shard 3 (new)
 ~80% of data must be moved to different shards during resharding!
 This is why Consistent Hashing was invented (see that module).
 ```
+
+**What this actually says.** "A key only stays where it is if the old divisor and the new divisor happen to give the same remainder — and that coincidence is rare."
+
+The `~80%` is not a measurement or a rule of thumb; it falls straight out of the arithmetic, and being able to derive it on a whiteboard is exactly what the interview is checking.
+
+| Symbol | What it is |
+|--------|------------|
+| `hash % 4` | Old placement: remainder when the key's hash is divided by the old shard count |
+| `hash % 5` | New placement: same hash, new shard count |
+| "stays put" | The case `hash % 4 == hash % 5` — the only way a key avoids being migrated |
+| `lcm(4, 5)` | Lowest common multiple, `20`. The interval over which both remainder patterns repeat together |
+| `~80%` | Fraction of all keys whose two remainders disagree, so they must physically move |
+
+**Walk one example.** Both remainder cycles line up again every `lcm(4, 5) = 20` hashes, so counting one block of 20 counts every key:
+
+```
+  hash :  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19
+  % 4  :  0  1  2  3  0  1  2  3  0  1  2  3  0  1  2  3  0  1  2  3
+  % 5  :  0  1  2  3  4  0  1  2  3  4  0  1  2  3  4  0  1  2  3  4
+  same?:  y  y  y  y  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n
+
+  matches per 20 hashes = 4      (only hash 0, 1, 2, 3)
+  fraction staying put  = 4 / 20 = 0.20 = 20%
+  fraction that MOVES   = 1 - 0.20 = 0.80 = 80%
+
+  On 10 TB of data that is 8 TB copied across the network to add
+  ONE shard that only buys 20% more capacity.
+```
+
+The general form is worth memorizing: going from `N` to `N+1` shards under plain modulo leaves only `1/(N+1)` of keys in place, so the migration cost approaches 100% as the cluster grows. Consistent hashing inverts this — it moves only the share the new shard is taking on, roughly `1/N`, which is the `~25%` figure in the chart below.
 
 #### Pros
 - Excellent uniform distribution (no hotspots for uniform access patterns)
@@ -766,6 +825,42 @@ results = scatter_read(all_keys)
 merged = merge(results)
 ```
 
+**Read it like this.** "Stop letting one hot key be one row on one shard — explode it into 100 rows that hash to 100 different places, and pay for it on every read."
+
+Salting is a deliberate trade: it converts a write hotspot into a read fan-out. That only pays off when the entity is write-heavy relative to reads, or when the reads can be cached in front (which is why the caching bullet sits right next to it).
+
+| Symbol | What it is |
+|--------|------------|
+| `write_key` | The key actually handed to the router. Salting changes it per write, so it hashes differently |
+| `num_splits` | How many sub-keys the hot entity is shattered into. `100` here |
+| `sub_shard` | A random integer in `0 .. num_splits-1`, drawn fresh on every write |
+| `scatter_read` | One read becomes `num_splits` reads issued in parallel, then merged |
+| `merge` | Application-side recombination, since the DB no longer sees the sub-keys as one thing |
+
+**Walk one example.** Take the 4-shard cluster used throughout this module, and one celebrity key absorbing all of the hot traffic:
+
+```
+  Before salting
+    every celebrity write -> key "celebrity:42" -> one hash -> ONE shard
+    that shard's share of celebrity writes = 100%
+
+  After salting, num_splits = 100
+    sub-keys "celebrity:42:0" .. "celebrity:42:99" hash independently
+    sub-keys per shard   = 100 / 4  = 25
+    a shard's share      =  25 / 100 = 0.25 = 25%
+    hot-shard write load = 100% -> 25%          (a 4x reduction)
+
+  What it costs on the read path
+    reads per lookup     = 1 -> 100 keys, scattered then merged
+    read amplification   = 100x
+
+  Note the ceiling: the write relief can never beat 1 / num_shards.
+  Raising num_splits from 100 to 1000 still leaves each shard 25% --
+  it only makes the read fan-out 10x worse.
+```
+
+That last line is the trap. `num_splits` should be set just high enough that sub-keys spread evenly over the shards (a small multiple of `num_shards`), not as high as possible.
+
 **Special-Case Hot Entities**
 Identify top-N hot users/items and route them to dedicated "hot shards" with more resources.
 
@@ -802,6 +897,42 @@ flowchart LR
     class PullCost base
 ```
 *A tweet write fans out to every follower's timeline; at 1M followers across 4 shards that's 250K writes per shard (write amplification). The fix is hybrid fan-out: push (fan-out-on-write) for small accounts, pull (fan-out-on-read) for celebrities.*
+
+**Put simply.** "Under the push model, the cost of a post is not one write — it is one write per follower, and the shard count only divides that bill, it does not shrink it."
+
+The reason this decides the whole architecture is that the follower count is an input you do not control. A design that is comfortable at 500 followers is a self-inflicted outage at 10M.
+
+| Symbol | What it is |
+|--------|------------|
+| `followers` | Number of timelines that must receive a copy of the post under the push model |
+| `shards` | How many shards those follower timelines are spread across — `4` here |
+| writes per shard | `followers / shards`. What each shard is actually asked to absorb |
+| push / fan-out-on-write | Do the work at post time. Cheap reads, `O(followers)` writes |
+| pull / fan-out-on-read | Do the work at read time. `O(1)` write, expensive reads |
+| write amplification | Physical writes caused per logical user action |
+
+**Walk one example.** One celebrity post, the 1M followers and 4 shards from the diagram:
+
+```
+  Push model (fan-out on write)
+    logical action      = 1 post
+    timeline rows       = 1,000,000        (one per follower)
+    writes per shard    = 1,000,000 / 4 = 250,000
+    write amplification = 1,000,000 / 1 = 1,000,000x
+
+  Pull model (fan-out on read)
+    logical action      = 1 post
+    physical writes     = 1
+    write amplification = 1x
+    ...but every follower opening their feed now merges the
+    celebrity's recent posts at read time.
+
+  Doubling the shards to 8 only halves the per-shard load:
+    writes per shard    = 1,000,000 / 8 = 125,000
+    total writes        = 1,000,000       (unchanged)
+```
+
+Sharding divides the load; it never removes it. That is why the production answer is hybrid — push for the long tail of small accounts where `followers` is a few hundred, pull for the handful of accounts where the multiplier explodes.
 
 ---
 
@@ -1022,6 +1153,44 @@ Instagram stores photo metadata for 1B users with 100B photos. Photos are immuta
 
 The strategy: 1000 logical shards mapped to 100 physical PostgreSQL instances (10 shards/instance). Shard key is `user_id`, so all of a user's photos live on one shard, enabling profile-page queries with a single shard hit. The logical-to-physical mapping is stored in a lookup table cached in Redis, so resharding is a metadata-only operation (remap logical shards to physical hosts) rather than data movement.
 
+**The idea behind it.** "Take the headline numbers, divide them by the shard count, and check that what one machine is left holding is boring."
+
+That is the entire point of a scale estimation: the design is validated not by the big numbers but by the small ones they reduce to. If the per-host figure is not obviously survivable on commodity hardware, the shard count is wrong.
+
+| Symbol | What it is |
+|--------|------------|
+| Read QPS | Total read requests per second across the whole fleet — `200k` |
+| logical shards | The routing unit, `1000`. Fixed forever, because the formula depends on it |
+| physical hosts | The machines, `100`. Free to change, because Redis maps logical to physical |
+| shards per host | `1000 / 100 = 10`. The knob you turn when adding capacity |
+| row size | Bytes of metadata per photo — `~500` (the blob itself sits in S3) |
+| peak factor | Peak QPS ÷ sustained QPS. How much burst headroom the design must carry |
+
+**Walk one example.** Push the stated scale numbers through the 1000/100 split:
+
+```
+  Read load
+    200,000 reads/sec / 1000 logical shards =   200 reads/sec per shard
+    200,000 reads/sec /  100 physical hosts = 2,000 reads/sec per host
+
+  Write load
+    sustained   =   600 writes/sec
+    peak        = 6,000 writes/sec
+    peak factor = 6,000 / 600 = 10x
+    peak per host = 6,000 / 100 = 60 writes/sec
+
+  Storage (the 10B metadata rows reported under Metrics & Results)
+    10,000,000,000 rows x 500 bytes = 5,000,000,000,000 bytes = 5 TB
+    5 TB / 100 hosts                = 50 GB per host
+    50 GB / 10 shards per host      =  5 GB per logical shard
+
+  Every per-host number is unremarkable: 2,000 reads/sec and 50 GB is a
+  workload a single Postgres box handles without effort. That slack is
+  the "4x headroom before the next reshard" claimed in the metrics.
+```
+
+Note which number is load-bearing. Doubling the hosts from 100 to 200 halves every per-host figure and requires no application change, because `shard_id = user_id % 1000` never moves. Changing the `1000` would rewrite the placement of every photo in the system.
+
 ### Architecture Overview
 
 ```mermaid
@@ -1089,6 +1258,40 @@ def generate_photo_id(user_id: int, sequence: int) -> int:
 def shard_from_photo_id(photo_id: int) -> int:
     return (photo_id >> 10) & 0x1FFF
 ```
+
+**Stated plainly.** "Pack three separate counters into one 64-bit integer by giving each a fixed slice of the bits, so the ID carries its own routing address."
+
+Without the embedded shard, resolving a permalink like `/p/8388608000353287` would need a lookup just to learn which of the 100 hosts to ask. With it, the router shifts and masks — no network hop, no cache miss.
+
+| Symbol | What it is |
+|--------|------------|
+| `now_ms` | Milliseconds since Instagram's own epoch, not 1970 — a smaller number, so it fits in 41 bits |
+| `<< 23` | Shift left 23 places to clear room for the 13 shard bits plus the 10 sequence bits |
+| `<< 10` | Shift the shard id left past the 10 sequence bits |
+| `\|` | Bitwise OR — merges the three shifted pieces without any of them overlapping |
+| `& 0x3FF` | Mask keeping the low 10 bits (`0x3FF = 1023`), so the sequence can never spill into the shard field |
+| `>> 10 & 0x1FFF` | The inverse: drop the sequence, keep the next 13 bits (`0x1FFF = 8191`) — the shard id |
+
+**Walk one example.** Generate an ID for `user_id = 12345`, sequence `7`, at `now_ms = 1,000,000,000` (about 11.6 days into the custom epoch):
+
+```
+  shard_id = 12345 % 1000 = 345
+
+  piece            value          shifted into place
+  ---------------  -------------  --------------------------
+  timestamp        1000000000     << 23 = 8388608000000000
+  shard_id         345            << 10 =            353280
+  sequence         7 & 0x3FF = 7  << 0  =                 7
+
+  photo_id = 8388608000000000 + 353280 + 7
+           = 8388608000353287        (53 bits used of 64)
+
+  Read the shard back out, no DB touched:
+    8388608000353287 >> 10 = 8192000000345
+    8192000000345 & 0x1FFF = 345      -> logical shard 345  (matches)
+```
+
+The field widths are capacity decisions, not arbitrary. `13` shard bits allow `2^13 = 8192` shards against the 1000 in use, so the scheme survives 8x growth. `10` sequence bits allow `2^10 = 1024` photos per millisecond per shard. `41` timestamp bits cover `2^41` ms, about `69.7` years from the custom epoch — which is precisely why the epoch was moved off 1970 rather than burning 40 years of the range on the past.
 
 Schema on each shard:
 

@@ -298,6 +298,64 @@ xychart-beta
 
 *The same 432 GB/day of raw traffic roughly doubles once ELK inverted-indexes every term, but collapses to a fraction once Loki compresses bodies ~10x and indexes only labels — the storage bill, not abstract preference, is what should drive the EFK-vs-Loki choice.*
 
+### Decoding the log-volume math
+
+That "10,000 logs/sec x 500 bytes -> 432 GB/day" jump is one multiplication, but it is the
+multiplication the entire retention-and-sampling discipline hangs off, so write it out:
+
+```
+raw_bytes_per_day = events_per_second x avg_event_bytes x 86,400
+stored_bytes      = raw_bytes_per_day x index_multiplier x retention_days
+```
+
+**What this actually says.** "Your log bill is traffic times verbosity times how long you keep
+it — and the backend you pick just scales that product." Nothing in the chain is a fixed cost
+you can negotiate down; each factor is a design decision you own.
+
+| Symbol | What it is |
+|--------|------------|
+| `events_per_second` | Log lines emitted across the fleet — grows linearly with traffic |
+| `avg_event_bytes` | Average serialized line size; structured JSON is bigger than plain text |
+| `86,400` | Seconds in a day, the only constant in the formula |
+| `index_multiplier` | Backend storage factor: ~2x for ELK full-text, ~0.1x for Loki compressed |
+| `retention_days` | The ILM/TTL setting — the hot/warm/cold ages in the policy above |
+
+**Walk one example.** Push the module's own 432 GB/day through each ILM stage:
+
+```
+                       raw GB/day   x days   raw total    x ELK 2.0    x Loki 0.1
+  hot     (0-7d)          432          7      3,024 GB     6,048 GB       302 GB
+  warm    (7-30d)         432         30     12,960 GB    25,920 GB     1,296 GB
+  delete  (90d)           432         90     38,880 GB    77,760 GB     3,888 GB
+```
+
+Full retention at 90 days is 77.8 TB on ELK versus 3.9 TB on Loki for byte-identical input.
+The retention row is the one people forget to multiply by, which is why "keep everything for
+90 days, fully indexed" quietly becomes a six-figure line item.
+
+**Stated plainly.** Sampling attacks the first factor, and the Vector `sample` transform above
+does it asymmetrically — `rate = 10` keeps 1 in 10, `exclude = '.status >= 400'` keeps all
+errors — so the retained fraction is not 10%:
+
+```
+retained_fraction = error_rate + (1 - error_rate) x (1 / sample_rate)
+```
+
+**Walk one example.** At `rate = 10`, with the same 432 GB/day raw:
+
+```
+  error rate   errors kept   2xx kept          retained    GB/day    volume cut
+     1%          0.010       0.99 / 10 = 0.099   0.109       47.1      9.17x
+     2%          0.020       0.98 / 10 = 0.098   0.118       51.0      8.47x
+     5%          0.050       0.95 / 10 = 0.095   0.145       62.6      6.90x
+```
+
+The error-rate term is a floor you can never sample below — at a 5% error rate you keep 14.5%
+of volume, not 10%, and a service in a bad incident approaches 100% retention exactly when
+you need every error line. That is the term working as designed: drop it and you would be
+sampling away one in ten stack traces, making the cheapest possible pipeline also useless for
+the debugging it exists to support.
+
 ---
 
 ## 7. Real-World Examples

@@ -247,7 +247,8 @@ xychart-beta
 
 ```
 Rule: NEVER alert or SLO on averages.
-      A p999 of 2100ms means 100 users/minute at 100K RPS experience > 2 second latency.
+      A p999 of 2100ms means 100 users/second (6,000/minute) at 100K RPS experience
+      > 2 second latency.
 
 Coordinated omission check:
   If test tool used 50 VUs and each waited for response before next request:
@@ -255,6 +256,64 @@ Coordinated omission check:
   - Latency histogram only has samples at those 111 req/s, missing the queued-up requests
   - Fix: use constant-arrival-rate in k6 or open-model injection in Gatling
 ```
+
+**What this actually says.** "A closed-model load generator cannot push harder than the
+server lets it, so the moment the server slows down the test quietly stops testing the load
+you asked for." The throughput a VU pool can produce is fixed by Little's Law rearranged as
+`throughput = VUs / response_time` — response time is in the denominator, so it is the server,
+not your script, that decides the arrival rate.
+
+| Symbol | What it is |
+|--------|------------|
+| `VUs` | Virtual users. Each one holds a single in-flight request and blocks until it returns |
+| `response_time` | Server-side time per request, in seconds. The thing under test |
+| `VUs / response_time` | Achieved RPS. What the tool actually generated, not what you configured |
+| target RPS | What you *intended* to send. Only equals the achieved rate when the server is fast |
+
+**Walk one example.** Same 50-VU pool, one healthy server and one degraded server:
+
+```
+                     VUs   response time   achieved RPS = VUs / time    vs 1000 target
+  healthy server      50       50 ms           50 / 0.050 = 1000            met
+  degraded server     50      450 ms           50 / 0.450 =  111            11% of target
+
+  Load actually applied dropped 9x -- but the config file never changed.
+
+  Percentile effect: the histogram now holds ~111 samples/s instead of ~1000/s,
+  and every request that production WOULD have sent during the slow window
+  simply never exists as a sample. The tail you most need to measure is the
+  exact tail you stopped recording.
+```
+
+That is coordinated omission: the load generator "coordinates" with the server's slowness
+instead of ignoring it the way real users do. Real internet traffic is open-model — a user
+clicking Buy does not wait for someone else's request to finish first — so an arrival-rate
+executor keeps firing at 1000 RPS and lets the queue build, which is what production does.
+
+**Read it like this.** The p999 rule above says "0.1% of requests are worse than 2100ms" —
+multiply that fraction by real traffic to turn a percentile into a headcount.
+
+| Symbol | What it is |
+|--------|------------|
+| `p999` | The latency 99.9% of requests beat. 1 request in 1,000 is slower |
+| `1 - 0.999` | The affected fraction, `0.001` |
+| `RPS x 0.001` | How many users per second land in that tail |
+
+**Walk one example.** Turning the 2100ms p999 into affected users at 100K RPS:
+
+```
+  affected fraction = 1 - 0.999          = 0.001
+  affected per second = 100,000 x 0.001  = 100 requests/s
+  affected per minute = 100 x 60         = 6,000 requests/min
+
+  Compare against the average, which reports 62 ms:
+    p999 / avg = 2100 / 62 = 33.9x
+
+  The average is 34x more optimistic than what 6,000 users a minute experience.
+```
+
+This is why an SLO written on the average passes while the service is visibly broken for
+thousands of people a minute. The percentile is not a statistical nicety — it is a headcount.
 
 ### Identifying Bottlenecks
 

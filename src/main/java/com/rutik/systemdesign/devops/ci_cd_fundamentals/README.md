@@ -225,6 +225,36 @@ xychart-beta
 *Caching turns a 6.5-minute run (90s npm ci + 5min docker build) into about 50 seconds (8s + 40s) — roughly an 8x speedup, the single biggest lever on pipeline wall-clock time.*
 Cache dependency directories and build layers keyed by lockfile/Dockerfile hashes; invalidate when inputs change.
 
+```
+speedup       = uncached wall-clock / cached wall-clock
+saved per run = uncached - cached
+```
+
+**Put simply.** "A cache does not shave a percentage off every step — it deletes whole steps, so the speedup is set by how much of the run was cacheable work in the first place."
+
+That is why caching is the single biggest lever here and not merely one optimization among several: the dependency install and the image build were essentially *all* of the runtime, so removing them collapses the run rather than trimming it.
+
+| Symbol | What it is |
+|--------|------------|
+| `uncached wall-clock` | Cold run: every dependency downloaded, every layer rebuilt |
+| `cached wall-clock` | Warm run: cache restored, only genuinely-changed work re-executed |
+| `speedup` | Ratio of the two — the "8x" figure, not a subtraction |
+| `saved per run` | Absolute seconds returned to every developer waiting on the PR |
+
+**Walk one example.** The two bars in the chart above, step by step:
+
+```
+                       npm ci    docker build    total
+  no cache               90s        300s          390s   (6.5 min)
+  with cache              8s         40s           48s   (about 50s)
+
+  speedup       = 390 / 48  = 8.125x
+  saved per run = 390 - 48  = 342s
+  over 100 runs = 342 x 100 = 34,200s = 9.5 engineer-hours per day
+```
+
+The 8x is a ratio, so it is unaffected by which step dominates; the 342s is what a developer actually feels per push. Multiply it by daily pipeline volume and the cache stops looking like a nicety — at 100 runs a day it is 9.5 hours of returned waiting, which is exactly the difference between the sub-10-minute PR feedback the Best Practices call for and the 40-minute pipeline Pitfall 3 warns gets bypassed.
+
 ### Parallelism and the dependency graph
 
 ```yaml

@@ -221,6 +221,48 @@ A 2D game renders chat, HUD, and dialogue text — up to 10M on-screen character
 
 Flyweight approach: `GlyphData` (font face + codepoint + bitmap + metrics) is shared. The font has 256 unique codepoints used in this scene; 256 × 2KB = 512KB total. Each on-screen character is a tiny `GlyphInstance(glyph, x, y, color)` of ~24 bytes. Total: 10M × 24 = 240MB for instances + 512KB for glyphs. 80x memory reduction. JLS §5.1.7 mandates the analogous behavior for `Integer.valueOf(127)` returning a cached instance.
 
+**The idea behind it.** Stated as a formula, Flyweight replaces `N × S_total` with
+`U × S_intrinsic + N × S_extrinsic` — "pay for the heavy shared part once per *distinct* value
+instead of once per *instance*." The saving is driven entirely by the ratio `N / U`: the more
+instances collapse onto the same few distinct values, the closer total memory falls to just the
+per-instance extrinsic bytes.
+
+| Symbol | What it is |
+|--------|-----------|
+| `N` | Total object instances live at once — 10M on-screen characters here |
+| `U` | Number of *distinct* intrinsic values — 256 unique codepoints in this scene |
+| `S_intrinsic` | Bytes of shareable, immutable state per distinct value — 2KB of glyph bitmap/metrics |
+| `S_extrinsic` | Bytes of per-instance state that cannot be shared — 24 bytes of `(x, y, color)` |
+| `N / U` | Sharing factor — how many instances reuse each flyweight; the whole source of the win |
+
+**Walk one example.** The 10M-character frame from above, both ways:
+
+```
+given   N           = 10,000,000 instances
+        U           =        256 distinct glyphs
+        S_intrinsic =      2,048 bytes  (2 KB per glyph)
+        S_extrinsic =         24 bytes  (x, y, color)
+
+naive       N x S_total = 10,000,000 x 2,048      = 20,480,000,000 B = 20.48 GB
+flyweight   U x S_intrinsic =    256 x 2,048      =        524,288 B =  0.52 MB
+          + N x S_extrinsic = 10,000,000 x 24     =    240,000,000 B =    240 MB
+                                            total =    240,524,288 B = 240.5 MB
+
+reduction   20,480,000,000 / 240,524,288                             = 85.1x
+
+sharing factor  N / U = 10,000,000 / 256                             = 39,062 instances/glyph
+```
+
+Result: 20.48GB collapses to 240.5MB — the difference between an OOM kill and a frame that fits
+in RAM. Notice that the shared glyph table is only 0.52MB of the 240.5MB total: past a sharing
+factor this large, essentially *all* remaining memory is extrinsic state, so further shrinking
+`S_intrinsic` buys nothing and shrinking `S_extrinsic` buys everything.
+
+This is also why the sharing factor, not the object count, decides whether Flyweight pays. If
+those 10M characters used 10M distinct glyphs (`N / U = 1`), the formula degenerates to
+`N × (S_intrinsic + S_extrinsic)` — strictly *worse* than the naive version by the extra
+indirection and the factory's hash lookups.
+
 ```
    Intrinsic (shared, immutable)              Extrinsic (per-instance, passed in)
    ----------------------------                ----------------------------------

@@ -172,6 +172,59 @@ public class OrderService {
 }
 ```
 
+#### Sizing those numbers instead of guessing them
+
+The three knobs above are not independent — together they set exactly how much Payment traffic
+can be alive at once, and Little's Law tells you what that number should be:
+
+```
+bulkhead capacity      = maxThreadPoolSize + queueCapacity
+required concurrency   = call_rate x call_latency        (Little's Law)
+sustained throughput   = maxThreadPoolSize / call_latency
+```
+
+**Put simply.** "A bulkhead is sized in *concurrent calls*, not in requests per second — and
+concurrent calls is your call rate multiplied by how long the dependency takes." That
+multiplication is the whole point: the same 200 RPS needs 10 threads against a fast dependency
+and 40 against a slow one, so a bulkhead sized off traffic volume alone is wrong by whatever
+factor the dependency's latency happens to be.
+
+| Symbol | What it is |
+|--------|------------|
+| `maxThreadPoolSize` | Threads that can be *executing* a Payment call. `10` above |
+| `queueCapacity` | Calls allowed to *wait* for a thread. `20` for payment, `10` for inventory |
+| capacity | `max + queue`. Past this, `BulkheadFullException` fires immediately |
+| `call_rate` | Calls per second this service makes to that one dependency |
+| `call_latency` | Round-trip seconds per call. The dependency's p95, not its p50 |
+
+**Walk one example.** 200 RPS of orders, each making one Payment call:
+
+```
+                        healthy Payment        degraded Payment
+                        (50 ms per call)       (200 ms per call)
+  ---------------------------------------------------------------
+  required concurrency   200 x 0.050 = 10       200 x 0.200 = 40
+  configured threads              10                     10
+  verdict                    exactly fits         4x over capacity
+
+  Capacity of the configured pool = 10 threads + 20 queued = 30 in flight.
+  Sustained throughput of 10 threads at 200 ms = 10 / 0.2 = 50 calls/s.
+  So at 200 RPS arriving and 50/s draining, the 20-slot queue fills in
+  20 / (200 - 50) = 0.13 s, and everything after that fails fast.
+```
+
+That fail-fast is the bulkhead working, not breaking: the alternative is 200 threads of the
+Tomcat pool all parked on a 200ms Payment call, at which point the *order listing* endpoint —
+which never touches Payment — starts timing out too. The bulkhead trades "Payment is degraded"
+for "everything is degraded."
+
+**Why under-sizing produces fake outages.** Run the same arithmetic at a real peak of 12
+concurrent calls against `maxThreadPoolSize = 10`: `(12 - 10) / 12 = 16.7%` of perfectly healthy
+Payment requests get rejected, and the dashboard shows a 16.7% availability drop that Payment
+Service had nothing to do with. Measure actual peak concurrency from traces and size to
+`12 x 1.2 = 14.4`, i.e. 15 threads — and alert on `BulkheadFullException` rate separately from
+downstream 5xx, or you cannot tell a self-inflicted rejection from a real dependency failure.
+
 ### Sidecar Pattern in Kubernetes
 
 ```yaml
@@ -461,6 +514,43 @@ spec:
                 # but iptables rules may take a few seconds to propagate
                 # The preStop sleep ensures no in-flight requests are dropped
 ```
+
+**Read it like this.** "`terminationGracePeriodSeconds` is not a timeout for one thing — it is
+a single budget that the preStop sleep, the HTTP drain, and every `@PreDestroy` hook all spend
+out of, in that order." Anything still running when the budget expires gets SIGKILL, which is
+precisely the abrupt kill graceful shutdown exists to avoid, so the sub-timeouts must sum to
+less than the total with margin left over.
+
+| Symbol | What it is |
+|--------|------------|
+| `terminationGracePeriodSeconds` | Total budget from SIGTERM to SIGKILL. `60` s here |
+| preStop sleep | Dead time bought so iptables endpoint removal propagates. `5` s |
+| `timeout-per-shutdown-phase` | Spring's cap on draining in-flight HTTP. `30` s (§6 comment) |
+| `@PreDestroy` work | Kafka `flush()` and friends, run *after* the HTTP drain |
+| margin | What is left. If this goes negative, SIGKILL lands mid-flush |
+
+**Walk one example.** Spending the 60-second budget in order:
+
+```
+  budget                                              60 s
+    - preStop sleep (iptables propagation)          -  5 s   ->  55 s left
+    - Spring HTTP drain, worst case                 - 30 s   ->  25 s left
+    - Kafka producer flush(), bounded at 5 s        -  5 s   ->  20 s margin
+
+  Healthy: 20 s of slack absorbs a slow request or an extra @PreDestroy hook.
+
+  Now set timeout-per-shutdown-phase = 60 s instead:
+    60 - 5 - 60 = -5 s  ->  SIGKILL arrives 5 s BEFORE the drain can even finish,
+                            and the Kafka flush never runs at all. Events are lost.
+```
+
+**Why the order matters as much as the numbers.** The 5-second preStop must come first because
+Kubernetes removes the pod from Service endpoints *in parallel* with sending SIGTERM — for the
+1-5 seconds it takes those iptables rules to propagate across nodes, load balancers are still
+sending new traffic to a pod that has already begun shutting down. Sleep first and the process
+is still fully healthy while that race resolves. Equally, the Kafka flush must come *last*: run
+it before the HTTP drain and a request handler that publishes an event finds itself holding an
+already-closing producer, throwing `IllegalStateException` instead of publishing.
 
 SIGTERM and endpoint removal fire at the same instant, which is exactly why the preStop sleep is needed:
 

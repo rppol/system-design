@@ -83,6 +83,44 @@ The central tension is **alert fatigue**: an alert that fires without requiring 
 | 6x | 6h | 30m | ~5% in 6h | page/ticket |
 | 3x | 1d | 2h | ~10% in 1d | ticket (slow) |
 
+**What this actually says.** "Burn rate is a speed limit on failure: 1x is the exact pace that would use up the whole month's budget in exactly a month, so 14.4x means you are failing 14.4 times faster than the SLO can afford."
+
+The whole table is generated from one definition, `burn_rate = observed_bad_ratio / error_budget`. Nothing here is a tuned magic number — pick how much budget you are willing to lose before someone's phone rings, and the multiplier falls out.
+
+| Symbol | What it is |
+|--------|------------|
+| SLO target | The promise, here 99.9% of requests succeed over a rolling 30 days |
+| Error budget | `1 - SLO` = `1 - 0.999` = `0.001`, the fraction of requests allowed to fail |
+| Observed bad ratio | Failed requests / total requests, measured over the window |
+| Burn rate | `observed_bad_ratio / 0.001`. 1x exhausts the budget in exactly 30 days |
+| Long window | The window that must confirm the burn is real (1h / 6h / 1d) |
+| Short window | The confirmation window that lets the alert clear fast (5m / 30m / 2h) |
+| Budget consumed | Share of the 30-day budget spent during one long window at that burn rate |
+
+**Walk one example.** Push the 30-day budget through each row and watch the last column appear:
+
+```
+  SLO 99.9%  ->  budget = 1 - 0.999 = 0.001
+  30 days    = 30 x 24 x 60          = 43,200 minutes
+  budget in minutes = 43,200 x 0.001 =     43.2 minutes of badness per month
+
+  row        burn   long win   bad ratio       bad minutes in window   / 43.2   consumed
+  fast page  14.4x     1h      14.4x0.001 =    60 x 0.0144 =  0.864     0.864     2%
+                               0.0144
+  mid        6.0x      6h      6x0.001    =   360 x 0.006  =  2.160     2.160     5%
+                               0.006
+  slow       3.0x      1d      3x0.001    =  1440 x 0.003  =  4.320     4.320    10%
+                               0.003
+
+  Time to burn the entire month at each rate:  720h / 14.4 =  50h
+                                               720h /  6   = 120h
+                                               720h /  3   = 240h
+```
+
+So the fast page fires having spent only 2% of the month's budget, while the slow ticket is allowed to spend 10% before it bothers anyone. That asymmetry is deliberate: a 14.4x burn would empty the entire month in 50 hours, so it must interrupt a human tonight; a 3x burn takes 240 hours to do the same damage and can wait for business hours.
+
+**Why the threshold is written as `14.4 * 0.001` and not `0.0144`.** Keeping the budget factored out means one edit re-targets every rule. Move to a 99.95% SLO and the budget becomes `0.0005`, so the same 14.4x page now fires at a `0.0072` error ratio — half the previous trigger, because you promised twice the reliability. Hardcoding `0.0144` silently leaves the alert calibrated to the old, looser promise.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -210,6 +248,38 @@ receivers:
 
 `group_wait` (default 30s) batches the first burst of a group; `group_interval` (5m) paces updates; `repeat_interval` (4h) re-notifies for unresolved alerts. These knobs are the primary anti-fatigue controls.
 
+**Read it like this.** "Three stopwatches guard three different moments: how long to wait before the first buzz, how long before the next update about the same problem, and how long before nagging you that it is still broken."
+
+| Symbol | What it is |
+|--------|------------|
+| `group_by` | The label set that defines a group; alerts sharing these values collapse into one notification |
+| `group_wait` | Delay after a group's *first* alert before the initial notification, so siblings can join |
+| `group_interval` | Minimum gap before notifying about *new* alerts joining an already-notified group |
+| `repeat_interval` | How often a still-firing, unresolved group is re-sent |
+| `continue: false` | Stop walking the routing tree after this match, so one alert hits one receiver |
+
+**Walk one example.** A node dies at `t = 0` and 200 pods start reporting down:
+
+```
+  t = 0.0s    first PodDown alert reaches Alertmanager, group opens
+  t = 0.4s    remaining 199 PodDown alerts arrive, same group_by key
+  t = 30.0s   group_wait expires -> 1 notification listing 200 pods
+              (without group_by this is 200 separate notifications, a 200:1 collapse)
+
+  t = 45.0s   a 201st pod fails and joins the already-notified group
+  t = 5m30s   group_interval (300s) since the last send expires -> update notification
+              not at t = 45s: the group already notified, so updates are paced
+
+  incident stays unresolved for 12h, repeat_interval = 4h
+              re-notified at 4h, 8h, 12h  ->  12 / 4 = 3 reminders
+              with no repeat_interval and a 15s eval loop you would instead get
+              12 x 3600 / 15 = 2,880 notifications for one incident
+```
+
+The critical route overrides `group_wait: 10s`, trading 20 seconds of batching for 20 seconds of faster detection — worth it when a human is being woken, not worth it for a Slack ticket.
+
+**What breaks without `repeat_interval`.** Alertmanager would notify once and go quiet, so an incident acknowledged at 2am and then forgotten stays silent forever. Four hours is the usual compromise: long enough that an engineer actively working the incident is not interrupted, short enough that a dropped handoff resurfaces before the next business day.
+
 ### SLO multi-window, multi-burn-rate alert rules
 
 ```yaml
@@ -242,6 +312,37 @@ groups:
 ```
 
 The short window (5m/30m) makes the alert clear quickly once the burn stops; the long window (1h/6h) confirms the burn is real before paging. Burn-rate math lives in [sre_principles_and_slos](../sre_principles_and_slos/).
+
+**Put simply.** "Fire only if the failure rate is 14.4 times the affordable rate *and* it is still that bad right now — the long window proves it happened, the short window proves it is still happening."
+
+| Symbol | What it is |
+|--------|------------|
+| `job:slo_errors:ratio_rate1h` | Recording rule: failed requests / total requests over the trailing 1h |
+| `job:slo_errors:ratio_rate5m` | Same ratio over the trailing 5m — the "is it still burning" check |
+| `14.4 * 0.001` | The trigger ratio: 14.4x burn times the 99.9% SLO's `0.001` budget = `0.0144` |
+| `and` | PromQL set intersection; both windows must exceed the threshold for the same series |
+| `for: 2m` | The condition must hold continuously for 2m before the alert leaves pending |
+
+**Walk one example.** An API serving 1,000 req/s, watched across a spike and a blip:
+
+```
+  threshold = 14.4 x 0.001 = 0.0144  (1.44% of requests failing)
+  1h of traffic at 1,000 rps = 3,600,000 requests
+  a sustained 1.44% failure rate = 3,600,000 x 0.0144 = 51,840 failed requests in 1h
+
+  30-day budget at 1,000 rps: 30x24x3600x1000 = 2,592,000,000 requests
+                              allowed failures = x 0.001 = 2,592,000
+  51,840 / 2,592,000 = 0.02  ->  one hour just spent 2% of the month. Page.
+
+  scenario          rate1h    rate5m    1h>thr   5m>thr   and   result
+  real outage       0.0180    0.0210     yes      yes     yes   pages after for: 2m
+  blip, 90s spike   0.0006    0.0250     no       yes     no    never pages
+  outage recovered  0.0160    0.0002     yes      no      no    alert clears fast
+```
+
+Row two is why the long window exists: a 90-second spike barely moves the 1h average, so nobody is woken. Row three is why the short window exists — without it the alert would keep paging for nearly an hour after the incident was fixed, because the 1h average stays polluted by the outage.
+
+**Why `for: 2m` and not `for: 0`.** The `and` already suppresses blips, but recording rules are evaluated on a schedule and a single scrape gap can momentarily spike a ratio. Two minutes costs almost nothing against a burn that takes 50 hours to exhaust the budget, and it removes the single-evaluation false page.
 
 ```mermaid
 stateDiagram-v2
@@ -500,6 +601,33 @@ inhibit_rules:
 ```
 
 After the rework, weekly pages dropped from ~400 to ~12, and every remaining page corresponded to a real, actionable, user-impacting condition. Grouping and inhibition collapsed node failures into a single meaningful page. The next time the payment path degraded, the burn-rate alert paged within 2 minutes with a runbook link, and on-call resolved it before customers noticed — MTTD fell from 25 minutes to under 3.
+
+**Stated plainly.** "The team was not under-alerted before — they were paged so often that a page stopped carrying information, and cutting the volume 33-fold is what made the remaining pages mean something."
+
+| Symbol | What it is |
+|--------|------------|
+| Pages/week before | ~400, almost all auto-acked cause-based alerts |
+| Pages/week after | ~12, all symptom-based and actionable |
+| Reduction | `(400 - 12) / 400` = 97% |
+| MTTD | Mean time to detect: 25 min before, under 3 min after |
+| Storm factor | 60 pages emitted by one node failure with no `group_by` |
+
+**Walk one example.** Convert the weekly totals into what on-call actually lives through:
+
+```
+  before:  400 pages / week   ->  400 / 7  = 57.1 pages per day
+                               ->  400 / (7 x 24) = 2.4 pages every hour, day and night
+           one node failure alone = 60 of those pages
+
+  after:    12 pages / week   ->   12 / 7  =  1.7 pages per day
+           reduction = (400 - 12) / 400 = 0.97 = 97%
+           same node failure now = 1 page (group_by + inhibition)
+
+  MTTD on the real payment outage: 25 min  ->  under 3 min
+                                   25 / 3  =  8.3x faster detection
+```
+
+At 2.4 pages per hour a responder cannot distinguish signal from noise, so the genuine 25-minute payment outage was statistically indistinguishable from the other 399 pages that week. At 1.7 pages per day, every buzz is worth reading — which is precisely why MTTD collapsed even though the detection *machinery* got no faster, only quieter.
 
 **Outcome:** a ~97% reduction in pages, the elimination of fatigue, and a dramatic MTTD improvement on real incidents — proving that fewer, symptom-based, well-routed alerts catch more real problems than a flood of cause-based ones.
 

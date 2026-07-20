@@ -270,6 +270,41 @@ public class JwtService {
 }
 ```
 
+**In plain terms.** "The access token's lifetime is your blast radius when one leaks, and the refresh token's lifetime is how often a real user has to log in again. The two constants are a single tradeoff written twice."
+
+A stateless JWT cannot be revoked mid-flight — the API accepts it until `exp` passes, because checking a revocation list is exactly the database round-trip statelessness was meant to avoid. So `ACCESS_EXPIRY_MS` *is* the revocation delay.
+
+| Symbol | What it is |
+|--------|------------|
+| `ACCESS_EXPIRY_MS` | `15 x 60 x 1000` = 900,000 ms = 15 min. Sent on every API call |
+| `REFRESH_EXPIRY_MS` | `7 x 24 x 60 x 60 x 1000` = 604,800,000 ms = 7 days. Sent only to the token endpoint |
+| `exp` claim | Absolute expiry timestamp baked into the signature — cannot be edited without breaking it |
+| worst-case exposure | Equal to `ACCESS_EXPIRY_MS`: how long a stolen access token stays valid |
+| "min 256 bits" | The HS256 secret must be at least `256 / 8 = 32` bytes |
+
+**Walk one example.** An account-takeover response at 09:00, attacker holding a token minted at 08:50:
+
+```
+  ACCESS_EXPIRY_MS  = 15 x 60 x 1000            =       900,000 ms  = 15 min
+  REFRESH_EXPIRY_MS =  7 x 24 x 60 x 60 x 1000  =   604,800,000 ms  = 7 days
+
+  Revocation timeline:
+    08:50  attacker's access token issued, exp = 09:05
+    09:00  you delete the refresh token from Redis  <- takes effect immediately
+    09:00  attacker's ACCESS token still works      <- stateless, no lookup
+    09:05  access token expires; refresh is refused -> attacker locked out
+
+    worst-case window = 15 min; average window = 7.5 min
+
+  Ratio of the two lifetimes:
+    604,800,000 / 900,000 = 672
+    -> one login supports 672 access-token renewals before re-authentication
+```
+
+That 672 is the whole point of the split. The user logs in once a week; the credential actually travelling on every request is disposable and self-destructs in 15 minutes. Shorten the access token to 5 minutes and the exposure window shrinks 3x at the cost of 3x more traffic to the token endpoint — that is the only lever, and it is a direct trade.
+
+**Why the 32-byte minimum on the HS256 secret is load-bearing.** HS256 is HMAC-SHA256, whose security ceiling is 256 bits; a shorter secret lowers that ceiling to the secret's own entropy, not the algorithm's. A 10-character passphrase carries roughly 60 bits of real entropy, brute-forceable offline by anyone holding one token, and forging tokens with a recovered symmetric secret means minting any `sub` and any `roles` claim at will. Generate the secret from a CSPRNG at the full 32 bytes — never type one.
+
 ### Stateless JWT Filter (custom, no Resource Server auto-config)
 
 ```java
@@ -824,6 +859,38 @@ JwtDecoder tenantAwareDecoder(OAuth2ResourceServerProperties props) {
 - JWKS endpoint load: **~1 request/pod/hour** = 60 req/hr total against the AS, instead of 50k/sec.
 - Refresh-token Redis revocation lookup: **0.3ms** (SISMEMBER on revoked-jti set).
 - Quarterly key rotation: zero downtime — old `kid` retained 24h, decoder refetches JWKS on unknown `kid`.
+
+**Put simply.** "Caching the public keys converts a per-request call to the authorization server into a per-pod-per-hour one — the load on the auth server stops scaling with traffic entirely and starts scaling with fleet size instead."
+
+This is the single reason local JWT validation beats token introspection at scale. Introspection asks the auth server about every request; JWKS caching asks it about every *key rotation*.
+
+| Symbol | What it is |
+|--------|------------|
+| JWKS | The auth server's public keys, fetched over HTTP and cached in the pod |
+| `kid` | Key id in the token header; a miss triggers a JWKS refetch, which is how rotation stays seamless |
+| introspection | The alternative: one network call to the AS per incoming request |
+| cache TTL | 1 hour here — sets the refetch rate, independent of request volume |
+| 60 pods | The fleet. The only thing AS load now scales with |
+
+**Walk one example.** Compare the two designs at the stated 50k req/sec:
+
+```
+  Introspection (one AS call per request):
+    50,000 req/sec x 3,600 sec = 180,000,000 AS calls per hour
+
+  Local validation with a 1-hour JWKS cache:
+    60 pods x 1 fetch/hour     =          60 AS calls per hour
+
+  Reduction: 180,000,000 / 60 = 3,000,000x
+
+  And the hot path loses its network hop entirely:
+    introspection  ~5-20 ms   (network round-trip to the AS)
+    local verify     0.4 ms p50 / 0.9 ms p99   (pure crypto, in-process)
+```
+
+The measured 0.4 ms p50 is achievable only because nothing on that path touches the network. Add one introspection call and validation latency is dominated by the AS round-trip, the AS becomes a hard availability dependency of every API call, and its capacity has to be provisioned against your peak traffic rather than your pod count.
+
+**Why the `kid`-miss refetch is what makes this safe.** A 1-hour cache would normally mean up to an hour of downtime after an emergency key rotation, since pods would keep rejecting tokens signed by the new key. Refetching JWKS on an unrecognized `kid` collapses that to a single request's latency: the first token bearing the new `kid` triggers one fetch, and every subsequent token validates from cache. That is why the old `kid` only needs to be retained for 24 hours rather than indefinitely — the fleet converges on the new key within one request of seeing it.
 
 ### Pitfalls
 

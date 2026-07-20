@@ -292,6 +292,50 @@ Error Budget:
   If error budget is healthy → deploy more aggressively
 ```
 
+**Stated plainly.** "Perfect reliability is not the goal — 99.9% means you have explicitly
+bought yourself 43.2 minutes a month to be broken in, and the only question is whether you
+spend it on incidents or on shipping." The error budget turns an abstract percentage into a
+concrete, spendable quantity, which is what makes it an engineering decision instead of an
+argument.
+
+| Symbol | What it is |
+|--------|------------|
+| `SLO` | The target success rate, e.g. `0.999`. What you promise yourselves |
+| `1 - SLO` | The error budget as a fraction. `0.001` for a 99.9% SLO |
+| window minutes | `30 x 24 x 60 = 43,200` minutes in a 30-day month |
+| `(1 - SLO) x window` | The budget in real minutes — the number you actually manage |
+| burn rate | How many times faster than `1x` you are consuming it right now |
+
+**Walk one example.** Each extra nine costs you a factor of ten:
+
+```
+     SLO       1 - SLO     budget = 43,200 min x (1 - SLO)      per day
+  ---------   ---------   --------------------------------   ------------
+   99%         0.01        43,200 x 0.01    = 432.0 min       14.4 min
+   99.9%       0.001       43,200 x 0.001   =  43.2 min        1.44 min
+   99.95%      0.0005      43,200 x 0.0005  =  21.6 min        0.72 min
+   99.99%      0.0001      43,200 x 0.0001  =   4.32 min       0.14 min
+
+  As a request count instead of minutes, at 10M requests/month and a 99.9% SLO:
+    10,000,000 x 0.001 = 10,000 failed requests allowed for the whole month.
+```
+
+**Why burn rate, not the raw remaining budget, is what you alert on.** Spending the budget
+evenly over the month is `1x` burn — that is the plan, not an incident. What matters is the
+slope:
+
+```
+  burn rate   budget lasts   720 h / rate      verdict
+  ---------   ------------------------------   -------------------------------
+     1x       720 / 1  = 720 hours (30 days)   on plan, ship freely
+     3x       720 / 3  = 240 hours (10 days)   ticket someone, not a page
+    14.4x     720 / 14.4 = 50 hours (~2 days)  page now, budget gone this week
+```
+
+Without the burn-rate framing you either alert on any error (constant noise) or on the budget
+being already gone (too late to act). Multi-window burn-rate alerting — a fast window to catch
+a sharp spike, a slow window to catch a steady leak — is the Google SRE workbook's answer.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -518,6 +562,6 @@ Without an explicit sampler, OpenTelemetry records every single span by default,
 2. Added `X-Correlation-ID` filter generating UUIDs, MDC propagation, logback JSON encoder
 3. Switched to Grafana Loki for logs, Grafana Tempo for traces, Prometheus for metrics
 4. Created SLO dashboards: checkout success rate (target 99.9%), checkout p99 latency (target < 2s)
-5. Implemented error budget burn rate alerts: fire when burning 3x budget (indicates breach within 10 hours)
+5. Implemented error budget burn rate alerts: fire when burning 3x budget (30-day budget exhausted in 720/3 = 240 hours, i.e. breach within 10 days)
 
 **Next Black Friday result**: An alert fired 45 minutes before p99 latency breached SLO. Traces showed that 95% of slow checkouts had a 1.8-second span at the inventory service. Logs showed "lock wait timeout exceeded" in the inventory DB. The root cause was a missing index on `inventory.product_id` causing full table scans under high write load. Index added in 10 minutes, latency normalized. No user-visible outage.

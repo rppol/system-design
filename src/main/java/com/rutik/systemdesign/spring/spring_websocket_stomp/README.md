@@ -450,6 +450,45 @@ Per-user destinations resolve through `UserDestinationMessageHandler` (visible i
 | `setSendTimeLimit` | Outbound write | `10 * 1000` (10 s) | Session treated as a slow client and closed |
 | `setSendBufferSizeLimit` | Outbound queue | `512 * 1024` (512 KB) | Session closed rather than let it grow unbounded |
 
+**The idea behind it.** "Every one of these numbers is really a *per-session* budget, so the only way to size them is to multiply by your connection count and see what the server is committing to." A 512 KB outbound buffer looks trivial until you remember it is 512 KB the server may have to hold for each of twelve thousand sessions at once.
+
+| Symbol | What it is |
+|--------|------------|
+| `10000,10000` | STOMP `heart-beat`: send a frame every 10 s, expect one every 10 s |
+| `25000` ms | SockJS keepalive — must be shorter than the shortest proxy idle timeout on the path |
+| `64 * 1024` | Largest single STOMP frame the decoder will accept, per session |
+| `512 * 1024` | Largest unsent backlog allowed to queue for one session before it is closed |
+| `10 * 1000` | Longest a single write may take before the session is declared a slow client |
+
+**Walk one example.** The case study's deployment — 12,000 connections across 3 instances, ~400-byte bid-update frames:
+
+```
+  sessions/instance = 12,000 / 3 instances              = 4,000 sessions
+
+  heartbeat traffic (one frame each way per 10 s):
+    per instance    = 4,000 x 2 / 10 s                  = 800 frames/s
+    fleet-wide      = 12,000 x 2 / 10 s                 = 2,400 frames/s
+
+  worst-case buffer commitment, if every session backs up at once:
+    4,000 x 512 KB                                      = 2,048,000 KB ~ 1.95 GB
+
+  one slow session's backlog, at 400 bytes per frame:
+    512 KB / 400 bytes                                  ~ 1,310 frames queued
+    at 40 frames/s to that session                      ~ 32.8 s of backlog
+```
+
+Two of those numbers should stop you. The ~1.95 GB is the memory the JVM must be able to reach
+if every client stalls simultaneously — it is a heap-sizing input, not a footnote. And the
+32.8 s never actually happens, because `setSendTimeLimit` (10 s) trips first and closes the
+session about a third of the way into filling the buffer.
+
+**Why both limits exist rather than one.** `setSendBufferSizeLimit` bounds *volume* — a
+client subscribed to a firehose it cannot drain. `setSendTimeLimit` bounds *time* — a
+client on a dying mobile link where even a small write never completes. A slow trickle
+fails the time limit long before the size limit; a fast firehose fails the size limit long
+before any single write times out. Removing either one leaves a real failure mode
+unguarded.
+
 ---
 
 ## 7. Real-World Examples

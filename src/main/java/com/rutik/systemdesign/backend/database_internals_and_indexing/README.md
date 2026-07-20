@@ -91,6 +91,54 @@ Tree height for N rows:
   → Practically all B+trees are height 3-4
 ```
 
+**In plain terms.** "Each level of the tree multiplies how many rows you can reach by the
+branching factor, so height grows like a logarithm — which is a very polite way of saying it
+barely grows at all." Going from a million rows to a trillion is a *million-fold* increase in
+data and costs you three extra page reads. That flatness is the entire reason indexes work.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Rows in the table |
+| `B` | Branching factor: how many child pointers fit in one page. `~100` here |
+| `log_B(N)` | How many times you must multiply by `B` to reach `N`. The tree's depth |
+| `ceil(...)` | Round up — you cannot have 4.5 levels, so 4.5 becomes a real height of 5 |
+| Height | Page reads per lookup. **Not** comparisons — this is the number that costs I/O |
+
+`B` comes from page geometry, not from tuning: an 8 KB page divided by a 16-byte entry
+(8-byte integer key + 8-byte child pointer) is `8192 / 16 = 512` slots in theory, and roughly
+`100` in practice once you account for page headers, per-tuple overhead, and PostgreSQL's
+policy of leaving pages partly empty so future inserts do not force an immediate split.
+
+**Walk one example.** Watch the table size explode while the height crawls:
+
+```
+      N          log_100(N)      height = ceil(...)     rows reachable = 100^height
+  ----------   ------------    --------------------   ---------------------------
+    1,000,000        3.0                3                    100^3 = 1,000,000
+1,000,000,000        4.5                5                    100^5 = 10,000,000,000
+1,000,000,000,000    6.0                6                    100^6 = 1,000,000,000,000
+
+  N grows 1,000,000x from the first row to the last.   Height grows from 3 to 6.
+```
+
+**Walk the cost that actually matters.** Height is page reads; multiply by SSD latency and
+compare against reading the whole table:
+
+```
+  1 billion rows, ~100 rows per 8 KB heap page, SSD page read ~100 microseconds
+
+  index lookup   5 page reads      x 100 us  =        500 us   =  0.0005 s
+  seq scan       1e9 / 100
+                 = 10,000,000 pages x 100 us  = 1,000,000,000 us = 1,000 s
+
+  Ratio: 1,000 s / 0.0005 s = 2,000,000x.
+```
+
+Note the difference between the `~30 comparisons` in §2 and the `5` here: `log2(1,000,000,000)
+= 29.9` is the count of *in-memory key comparisons*, which are essentially free. The `5` is the
+count of *page fetches*, which are not. B+trees are shaped the way they are — very wide, very
+shallow — specifically to trade cheap comparisons for expensive I/O.
+
 ### WAL and Checkpoint
 
 ```mermaid

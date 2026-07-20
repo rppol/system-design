@@ -216,6 +216,67 @@ resource "aws_apigatewayv2_api" "http" {
 }
 ```
 
+### Decoding the two numbers that govern every Lambda design
+
+Section 1 states the billing rule as "per millisecond of execution times allocated memory,
+plus per-request," and Section 4 caps you at 1000 concurrent executions. Both are one-line
+formulas worth writing out, because the `memory_size = 512` above is chosen by the first
+and the reserved-concurrency cap is chosen by the second.
+
+```
+cost = (memory_GB x duration_seconds x invocations) x price_per_GB_second
+     + (invocations x price_per_request)
+```
+
+**Read it like this.** "You rent a slice of RAM by the millisecond, and pay a small toll each
+time the door opens." The rented quantity is memory *multiplied by* time — a single number
+called a GB-second — which is why memory and duration are not two independent knobs.
+
+| Symbol | What it is |
+|--------|------------|
+| `memory_GB` | The `memory_size` you set, in GB (512 MB = 0.5). CPU is allocated in proportion |
+| `duration_seconds` | Billed wall-clock run time of the handler, metered per millisecond |
+| `memory_GB x duration_seconds` | One **GB-second** — the actual billed unit of compute |
+| `price_per_GB_second` | ~$0.0000166667 in us-east-1 (x86) |
+| `price_per_request` | ~$0.20 per million invocations, charged regardless of duration |
+
+**Walk one example.** 1,000,000 invocations, comparing two memory settings where the extra
+CPU at 1024 MB halves the run time of a CPU-bound handler:
+
+```
+  setting          memory   duration   GB-s per call   total GB-s   compute $   req $   total $
+  512 MB           0.5 GB     200 ms       0.100        100,000      1.6667     0.20    1.8667
+  1024 MB          1.0 GB     100 ms       0.100        100,000      1.6667     0.20    1.8667
+```
+
+Identical bill. Doubling memory is *free* whenever it at least halves duration — and strictly
+cheaper the moment it does better than halve it, while also cutting user-visible latency by
+100 ms. This is the whole reason Section 13 says to right-size via power tuning rather than
+defaulting to the smallest setting: the smallest memory is only the cheapest for work that is
+I/O-bound, where extra CPU buys no speedup and the GB-seconds simply rise.
+
+**The idea behind it.** The 1000-concurrency cap is Little's Law, not a request-rate limit:
+
+```
+  concurrent_executions = requests_per_second x average_duration_seconds
+```
+
+**Walk one example.** The same traffic sits far below or exactly at the account cap depending
+only on how long each call runs:
+
+```
+  workload                        rps    avg duration   concurrency   vs 1000 cap
+  short API handler                500      0.2 s            100       10% used
+  same handler, 4x traffic        2000      0.2 s            400       40% used
+  slow report generator            200      5.0 s          1,000       AT THE CAP
+```
+
+The report generator serves 10x fewer requests than the API yet consumes the entire account
+quota, throttling every other function that shares it — exactly the Pitfall 4 failure. Read
+the formula backwards for the sizing rule: at a 200 ms average, 1000 concurrency supports
+5,000 rps; at 5 s it supports 200 rps. Shaving duration raises headroom just as effectively
+as raising the quota, which is why reserved concurrency caps belong on the *slow* functions.
+
 ### SQS event source with DLQ (poison-message handling)
 
 ```hcl

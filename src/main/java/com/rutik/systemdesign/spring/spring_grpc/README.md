@@ -461,6 +461,40 @@ public UserResponse lookup(long id) {
 }
 ```
 
+**What the formula is telling you.** "A deadline is one wall-clock instant shared by the whole call tree, so every hop spends from the same budget — what a downstream service receives is the original budget minus everything already consumed above it." A per-hop timeout has no such subtraction, which is why the two behave completely differently under load.
+
+| Symbol | What it is |
+|--------|------------|
+| `withDeadlineAfter(200, MS)` | Sets an absolute instant `now + 200ms`, not a per-call duration |
+| gRPC `Context` | The carrier. The instant rides it to every downstream call automatically |
+| `Context.current().getDeadline()` | What a server reads to see the *remaining* budget |
+| `DEADLINE_EXCEEDED` | Status code 4. Raised the moment the instant passes, at whichever hop notices |
+
+**Walk one example.** The Section 7 chain — order calls user, then pricing, then inventory — under a single 300 ms deadline set at the edge:
+
+```
+  budget set at the edge                       = 300 ms   (absolute instant T+300)
+
+  hop 1  user       takes  40 ms  ->  remaining = 300 - 40         = 260 ms
+  hop 2  pricing    takes 120 ms  ->  remaining = 260 - 120        = 140 ms
+  hop 3  inventory  GC pause, needs 400 ms
+                    sees remaining 140 ms, already short  -> DEADLINE_EXCEEDED
+
+  contrast: per-hop timeouts of 300 ms each
+    worst-case wall clock = 300 + 300 + 300                        = 900 ms
+    the edge caller waits 3x the budget it thought it set
+```
+
+That 900 ms is the "reset at each hop" bug. The caller believes it bounded the request at
+300 ms; the actual bound is 300 ms times the depth of the call tree, and the depth grows
+every time someone adds a service in the middle.
+
+**Why the server-side check exists.** Without `deadline.isExpired()`, inventory would
+happily start 400 ms of work for a client that has already given up — burning a thread and
+a database connection on a response nobody will read. Reading the propagated deadline lets
+the deepest hop fail in microseconds instead, which is what turns a cascading pile-up back
+into a fast, clean error.
+
 On the server, observe the propagated deadline and cancellation:
 
 ```java
@@ -651,6 +685,38 @@ User u = repo.findById(req.getId())
 #   RESOURCE_EXHAUSTED: gRPC message exceeds maximum size 4194304: 6291456
 # grpc-java caps inbound messages at 4 MiB by default on BOTH ends.
 ```
+
+**Put simply.** "The limit is a byte count, not a record count — so the only way to reason about it is to divide your payload by your row count and find out what one record actually costs on the wire." Once you know the per-record size, the maximum safe page size falls straight out of the 4 MiB cap.
+
+| Symbol | What it is |
+|--------|------------|
+| `4194304` | The grpc-java default `maxInboundMessageSize`, in bytes — 4 MiB, `4 x 1024 x 1024` |
+| `6291456` | The size of the message that was actually sent — 6 MiB, `6 x 1024 x 1024` |
+| `RESOURCE_EXHAUSTED` | Status code 8. Raised by the *receiver*, so both ends need raising |
+| `max-inbound-message-size` | Per-side cap. Set on the server and on each named client channel |
+
+**Walk one example.** Turn the failing batch into a page size:
+
+```
+  cap        = 4 x 1024 x 1024               = 4,194,304 bytes
+  sent       = 6 x 1024 x 1024               = 6,291,456 bytes   -> rejected
+
+  per record = 6,291,456 / 10,000 records    ~ 629 bytes/record
+  max page   = 4,194,304 / 629               ~ 6,666 records
+
+  choose 5,000 (a safe round number below the cap):
+    5,000 x 629 bytes                        = 3,145,728 bytes = 3.0 MiB   ok
+```
+
+A page of 5,000 leaves roughly 25% headroom, which matters because Protobuf sizes vary per
+record — a few unusually long string fields in one page can push an "exactly at the limit"
+choice over the edge.
+
+**Why raising the limit is the second-best fix.** `max-inbound-message-size: 8MB` only
+buys you one doubling; the next growth in the dataset breaks it again, and in the meantime
+every receiver must buffer the whole 8 MiB in heap before your handler sees a single
+record. Server streaming or pagination keeps peak memory at one page regardless of how
+large the result set grows.
 
 ```yaml
 # FIXED (prefer): paginate or server-stream instead of one giant message.

@@ -62,6 +62,42 @@ Everything communicates through the API server — components **never** talk to 
 
 etcd uses Raft, so it needs an **odd number** (3 or 5) for quorum: 3 tolerates 1 failure, 5 tolerates 2. Even numbers add no fault tolerance and risk split-brain.
 
+#### The quorum arithmetic behind "always odd"
+
+```
+quorum        = floor(N / 2) + 1        (a strict majority of ALL members, not of survivors)
+faultsTolerated = N - quorum
+```
+
+**Read it like this.** "Any decision needs more than half the members to agree, so the number you can afford to lose is whatever is left over once you have set that majority aside."
+
+The reason a strict majority is required — rather than, say, any two nodes — is that two majorities of the same cluster must always share at least one member. That overlap is what makes it impossible for two halves of a partitioned cluster to both elect a leader and both accept writes.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total configured etcd members, including ones currently down |
+| `floor(N/2) + 1` | Strict majority — the smallest set that cannot coexist with a rival set |
+| `faultsTolerated` | Members that may fail while the cluster still accepts writes |
+| split-brain | Two leaders accepting conflicting writes. Impossible when every majority overlaps |
+| quorum loss | Fewer than `quorum` members alive; etcd goes **read-only**, not degraded-writable |
+
+**Walk one example.** Odd and even sizes side by side, which is where the rule earns its keep:
+
+```
+   N    quorum = floor(N/2)+1    faultsTolerated = N - quorum
+   1            1                        0
+   2            2                        0     <- 2x the cost of N=1, same tolerance
+   3            2                        1     <- standard HA
+   4            3                        1     <- 2x the etcd nodes of N=3, SAME tolerance
+   5            3                        2     <- large clusters
+   6            4                        2     <- again no gain over N=5
+   7            4                        3
+```
+
+Look at the `N=3` and `N=4` rows. Adding a fourth member raises quorum from 2 to 3, so you still tolerate exactly one failure — you have bought an extra machine, an extra fsync participant on every write, and zero additional resilience. Even sizes are strictly worse, never merely neutral, which is why the guidance is a hard "odd only" rather than a preference.
+
+Note also what `faultsTolerated` does *not* mean. At `N=3` losing two members does not give you a degraded single-node cluster; `quorum = 2` is unreachable, so etcd refuses all writes and the entire control plane freezes — the same read-only outcome as the NOSPACE alarm in Section 6, reached from a different direction.
+
 ### Key controllers
 
 | Controller | Reconciles |
@@ -471,6 +507,42 @@ for key := range queue {                    // rate-limited workqueue
   patchLabel(pod)                            // one bounded write
 }
 ```
+
+### Sizing the damage: what that loop actually costs
+
+The broken loop's numbers are all in the code above; multiplying them out is what turns "this operator is inefficient" into "this operator is the outage":
+
+```
+readLoad   = objectCount / interval
+writeLoad  = objectCount / interval          (because the patch is unconditional)
+etcdGrowth = writeLoad x revisionsPerWrite   (every patch mints a new MVCC revision)
+```
+
+**The idea behind it.** "One `List` of everything on a 2-second timer is not one request — it is a sustained request rate equal to the whole cluster's object count divided by your sleep."
+
+The dangerous term is `objectCount`, because it grows with the cluster while `interval` stays whatever the author hardcoded. The loop was harmless in a 40-pod dev cluster and lethal at 4,000 pods; nothing about the code changed.
+
+| Symbol | What it is |
+|--------|------------|
+| `objectCount` | `4000` pods — every one deserialized on every pass, no field selector |
+| `interval` | The hardcoded `time.Sleep(2 * time.Second)` |
+| `revisionsPerWrite` | 1 per patch, even a no-op patch that sets a label to its current value |
+| inflight limit | The apiserver's concurrency cap; saturating it queues *every other* component |
+| `etcdGrowth` | Why the DB reached `7.6 GB` against the `8 GB` quota |
+
+**Walk one example.** Broken versus fixed, at steady state with no pods actually changing:
+
+```
+                              BROKEN (list+patch every 2s)     FIXED (informer + idempotent)
+  object reads / sec          4000 / 2      = 2,000            0 (served from local cache)
+  etcd writes / sec           4000 / 2      = 2,000            0 (no diff -> no patch)
+  etcd writes / hour          2,000 x 3600  = 7,200,000        0
+  apiserver P99                              8 s                45 ms
+
+  P99 improvement: 8000 ms / 45 ms = ~178x
+```
+
+Seven million writes an hour, none of which change anything, is the whole story: it saturates the inflight limit (starving the scheduler, HPA, and `kubectl` alike), and each revision is retained until compaction, which is what walked the DB to 95% of its 8 GB quota with only 0.4 GB of headroom left. The idempotent guard — `if desiredLabel(pod) == pod.Labels["team"] { continue }` — takes the steady-state write rate to literally zero, which is a far bigger win than merely making the writes cheaper.
 
 Operationally the team also defragmented etcd (`etcdctl defrag`) to reclaim space below the quota and added alerts on `apiserver_current_inflight_requests` and `etcd_mvcc_db_total_size_in_bytes`.
 

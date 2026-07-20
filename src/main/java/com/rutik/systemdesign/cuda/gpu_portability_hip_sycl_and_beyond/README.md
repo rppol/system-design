@@ -68,6 +68,41 @@ AMD's **ROCm** (Radeon Open Compute) platform is the CUDA-equivalent software st
 
 `hipify-perl` and `hipify-clang` mechanically translate CUDA source into HIP source: `cudaMalloc` becomes `hipMalloc`, `cudaMemcpyDeviceToHost` becomes `hipMemcpyDeviceToHost`, `<<<...>>>` launches are rewritten, and most straightforward CUDA C++ ports with a >90% automated translation rate for typical kernels — the remainder needs hand-fixing for CUDA-only library calls (cuBLAS/cuDNN calls need their rocBLAS/MIOpen equivalents) or intrinsics without a direct HIP mapping.
 
+**The idea behind it.** `manual_lines = total_lines x (1 - automation_rate)` says: "a translation rate is a claim about the *residue*, and the residue is what your engineers actually spend the quarter on."
+
+A 90% rate sounds like the job is nearly done. Inverted, it says one line in ten still needs a human — and because the residue is concentrated in library calls and intrinsics rather than spread evenly, those lines are the hardest ones in the file, not average ones.
+
+| Symbol | What it is |
+|--------|------------|
+| `total_lines` | Size of the CUDA codebase being ported |
+| `automation_rate` | Fraction `hipify` rewrites unaided — **>90%** for straightforward kernels, lower for library-heavy code |
+| `1 - automation_rate` | The residue fraction. What the headline number hides |
+| `manual_lines` | Lines needing hand-porting: cuBLAS/cuDNN -> rocBLAS/MIOpen, unmapped intrinsics, hardcoded warp constants |
+| *(not in the formula)* | **Tuning.** `hipify` reports translation, never performance — §14's 31%-of-peak result was 100% translated |
+
+**Walk one example.** Apply it to a 10,000-line CUDA kernel library, and watch the residue move:
+
+```
+  automation      residue        manual lines     roughly
+  rate            fraction       (of 10,000)      equivalent to
+  ----------      --------       ------------     ---------------------------
+    90%             10%             1,000         a full rewrite of 1 in 10 lines
+    95%              5%               500         half that
+    99%              1%               100         a day or two of cleanup
+
+  Going 90% -> 95% halves the manual work; 95% -> 99% cuts it by another 5x.
+  This is why hipify-clang (real AST parsing) is worth preferring over
+  hipify-perl (text patterns): the difference between the tools shows up
+  entirely in this residue, not in the headline rate.
+
+  And the number the formula does NOT produce:
+    manual lines to make it CORRECT   =  1,000   (hipify's residue)
+    additional work to make it FAST   =  §14's "~1 additional week"
+                                          -- 0 lines of which hipify measures
+```
+
+That last contrast is the honest reading of any translation-rate claim. `hipify` optimizes for "compiles and runs," and it is genuinely excellent at that — §14's port needed **zero** manual edits to compile. The rate says nothing whatsoever about the 31%-of-peak throughput that same port delivered, because performance is not a translation property.
+
 ### 4.2 SYCL / oneAPI (Intel, open standard) — single-source, multi-backend C++
 
 **SYCL** is a Khronos-group open standard for single-source heterogeneous C++; **oneAPI** is Intel's concrete implementation and toolchain built on SYCL (via the DPC++ compiler). A SYCL program expresses parallelism through a `sycl::queue` and `parallel_for` submitted with a kernel lambda, using either **buffers** (a managed, dependency-tracked abstraction where the SYCL runtime schedules data movement automatically) or **USM** (Unified Shared Memory — explicit pointers via `malloc_device`/`malloc_shared`, closer to CUDA's mental model). SYCL backends exist for Intel GPUs natively, and via community/vendor plugins for NVIDIA (through a CUDA backend) and AMD (through a ROCm/HIP backend) — genuinely one source targeting three vendors, at the cost of the abstraction overhead described in §2.
@@ -168,6 +203,43 @@ Reduction loop hardcoded for warp=32, run unmodified on a 64-wide wavefront:
 ```
 
 Caption: a `hipify`-translated reduction that hardcodes `32` (or a loop bound derived from `warpSize` read at CUDA-compile time rather than the target's actual wavefront width) is the single most common "it compiles and looks right" bug in a naive AMD port — see the BROKEN→FIX in §10, and [Warps & SIMT Execution](../warps_and_simt_execution/) for why the warp/wavefront width is a hardware scheduling constant, not a portable one.
+
+**In plain terms.** A halving shuffle reduction folds `2^steps` lanes, so the loop's starting offset *is* the width assumption: "each iteration halves the number of live lanes, so `k` iterations can only ever combine `2^k` of them — and starting at 16 hard-codes `k = 5`, which hard-codes width 32."
+
+The bug is invisible in the source because the number `32` never appears. It is encoded in the *initial offset*, which is `width / 2`. That indirection is exactly why `hipify` cannot catch it: there is no CUDA-specific token to rewrite.
+
+| Symbol | What it is |
+|--------|------------|
+| `offset` | The shuffle distance. Starts at `width / 2` and halves each iteration until it reaches 0 |
+| `steps` | Iterations the loop runs — `log2(width)` for a correct reduction |
+| `2^steps` | Lanes actually folded into lane 0. The loop's real, implicit width assumption |
+| `width` | The hardware scheduling unit: **32** on a CUDA warp, **64** on a CDNA wavefront |
+| `__shfl_down(val, offset)` | Reads `val` from the lane `offset` positions higher. Translated correctly by `hipify`; its *argument* is not |
+
+**Walk one example.** Trace the loop's offsets on both hardware widths:
+
+```
+  The ported loop:  for (int off = 16; off > 0; off >>= 1)
+
+    iteration :    1     2     3     4     5
+    offset    :   16     8     4     2     1     -> loop ends
+    steps     =    5
+    lanes folded  =  2^5  =  32
+
+  On a CUDA warp (width 32):
+    2^5 = 32  ==  32 lanes    -> every lane contributes. CORRECT.
+
+  On a CDNA wavefront (width 64):
+    2^5 = 32  <   64 lanes    -> lanes 32-63 NEVER read by any offset.
+    coverage  =  32 / 64  =  50%  of the scheduling unit
+
+  The fix -- start at width/2 = 32, giving log2(64) = 6 steps:
+    offset    :   32    16     8     4     2     1
+    steps     =    6
+    lanes folded  =  2^6  =  64   ==  64 lanes   -> CORRECT on CDNA.
+```
+
+The 50% coverage number is the one to carry into §14: `rocprof` reports **49% wavefront efficiency** on the naive port, which is this arithmetic showing up in a profiler almost exactly. Half the lanes of every wavefront are doing work that is then discarded — and because a partial sum is a perfectly well-typed float, nothing crashes, nothing warns, and the output is simply wrong.
 
 ### Portability vs. Peak Performance — the Central Tradeoff
 
@@ -513,6 +585,42 @@ almost entirely the wavefront/LDS re-derivation from §10's BROKEN→FIX — HIP
 recovers close to CUDA's once re-tuned, while SYCL and OpenCL pay a steadier tax
 that re-tuning alone cannot close because it comes from the abstraction itself.
 
+**What it means.** `portability_tax = 100% - peak_retained`, and the wall-clock penalty is `1 / (peak_retained)` — "retaining 47% of CUDA's peak does not mean you are 53% slower, it means you need 2.1x the hardware-hours to do the same work."
+
+Reading the bar chart as *retained* percentages flatters the portable layers; converting to a slowdown multiplier is what makes the tax legible on a capacity plan, because GPU-hours are what you actually buy.
+
+| Symbol | What it is |
+|--------|------------|
+| `peak_retained` | Fraction of the CUDA-native result the layer achieves on same-generation hardware — the bar heights above |
+| `portability_tax` | Percentage points given up. A *difference*, and the number people quote |
+| `1 / peak_retained` | Slowdown multiplier — a *ratio*, and the number that sets GPU-hour cost |
+| `tuning_gain` | `tuned - untuned` for the same layer. The part re-tuning can recover |
+| `abstraction_floor` | The residual tax re-tuning cannot close, because it comes from the API's design |
+
+**Walk one example.** Convert every bar into both forms:
+
+```
+  layer            retained    tax (pts)    slowdown = 1/retained    GPU-hours for
+                                                                     100 CUDA-hours
+  --------------   --------    ---------    ---------------------    --------------
+  CUDA-native         100%         0            1.00x                    100
+  HIP tuned            89%        11            1.12x                    112
+  HIP untuned          68%        32            1.47x                    147
+  SYCL / oneAPI        65%        35            1.54x                    154
+  OpenCL               47%        53            2.13x                    213
+
+  What re-tuning HIP actually buys:
+    tuning gain      =  89 - 68        =  21 percentage points
+    relative speedup =  89 / 68        =  1.31x   (a 31% throughput gain)
+    hours saved      =  147 - 112      =  35 GPU-hours per 100 CUDA-hours
+
+  The abstraction floor SYCL/OpenCL cannot tune away:
+    SYCL   65% vs HIP-tuned 89%  ->  24 points that are not a tuning problem
+    OpenCL 47% vs HIP-tuned 89%  ->  42 points, i.e. nearly 2x the hardware
+```
+
+The 21-point HIP tuning gain and the 24-point SYCL gap are the same size — but they are entirely different kinds of number. The first is recoverable by one engineer with `rocprof` and a week (that is precisely §14). The second is structural: no amount of profiling closes it, because it is the cost of an API that must compile for hardware it is forbidden to assume anything about. Confusing a tuning gap for an abstraction floor is how teams end up burning a quarter trying to profile their way out of a language choice.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -807,6 +915,76 @@ __device__ float reduceRow(float val) {
 | Warp/wavefront efficiency | 49% | 96% |
 | Engineering time invested | ~1 day (mechanical translation only) | ~1 additional week (profiling + re-tuning tile/reduction/LDS layout) |
 | Comparison to CUDA H100 result | N/A (different hardware) | Within ~5 points of the H100 kernel's 78%-of-peak result — genuinely competitive once tuned |
+
+**What this actually says.** The recovery decomposes as `final_peak = naive_peak x lane_efficiency_gain x everything_else` — "the wavefront fix and the LDS/tile re-derivation are two separate multipliers, and reporting only the combined 31% -> 74% jump hides which one you actually still need."
+
+Decomposing it matters because the two fixes cost wildly different amounts of engineering time. The lane fix is a three-line `#define`; the LDS re-derivation is days of `rocprof` work. Knowing which bought what tells you where to start on the next port.
+
+| Symbol | What it is |
+|--------|------------|
+| `naive_peak` | **31%** of MI300X theoretical FP16 peak — straight `hipify` output, zero manual edits |
+| `lane_efficiency_gain` | `96 / 49` = the wavefront-width fix, from §10's `WAVEFRONT_WIDTH` correction |
+| `final_peak` | **74%** of peak after both fixes |
+| `everything_else` | The residual multiplier: LDS bank-layout re-derivation and tile-dimension re-tuning |
+| `78%` | The CUDA H100 kernel's own result — the bar this port is judged against, not 100% |
+
+**Walk one example.** Split the reported jump into its two contributors:
+
+```
+  Step 1 -- the wavefront fix alone (49% -> 96% lane efficiency):
+    lane efficiency gain  =  96 / 49            =  1.96x
+    projected throughput  =  31% x 1.96         =  60.7% of peak
+
+  Step 2 -- what the LDS/tile re-tuning had to supply on top:
+    measured final        =  74.0% of peak
+    explained by lanes    =  60.7%
+    residual              =  74.0 - 60.7        =  13.3 percentage points
+    residual multiplier   =  74.0 / 60.7        =  1.22x
+
+  Combined check:
+    31%  x  1.96  x  1.22  =  74%   OK
+
+  Overall:
+    total speedup         =  74 / 31            =  2.39x
+    gap to the H100 CUDA kernel's 78%:
+      absolute            =  78 - 74            =  4 percentage points
+      relative            =  4 / 78             =  5.1% behind
+```
+
+Two conclusions fall out. First, the free-looking fix is the bigger one: a `#define` change moved 31 -> 60.7, roughly two thirds of the total gain, and it is the thing to check before anything else on any AMD port. Second, the last 13.3 points cost the bulk of the week — and they landed the kernel within **5.1%** of the CUDA original, which is the concrete answer to "is AMD competitive once tuned." It is; but only the *tuned* number is competitive, and nothing about `hipify` produces it for you.
+
+**Put simply.** `effort_leverage = performance_delivered / effort_spent` says: "the mechanical translation and the manual re-tuning have inverted cost/benefit profiles, and a port plan that budgets only for the first one will ship at 31% of peak."
+
+The reason this ratio is worth computing is that the mechanical step is the visible, schedulable one — it appears in a sprint plan. The re-tuning step is invisible until someone profiles, which is precisely why it gets cut.
+
+| Symbol | What it is |
+|--------|------------|
+| `mechanical step` | `hipify-clang` + compile. **~1 day**, zero manual edits, fully automatable |
+| `tuning step` | Profiling with `rocprof` + wavefront/LDS/tile re-derivation. **~1 additional week** (5 workdays) |
+| `performance_delivered` | Share of the *final* 74%-of-peak result each step is responsible for |
+| `effort_leverage` | Performance share divided by effort share. Above 1 = better than proportional return |
+| Hidden term | The tuning step's output is invisible without a profiler — it produces no compiler output at all |
+
+**Walk one example.** Score both steps against the same 6-day total:
+
+```
+  step          effort      effort share     peak reached     perf share of final
+  -----------   --------    ------------     -------------    -------------------
+  mechanical    1 day         1/6 = 16.7%      31% of peak       31/74 = 41.9%
+  re-tuning     5 days        5/6 = 83.3%      74% of peak       43/74 = 58.1%
+                --------    ------------                       -------------------
+  total         6 days          100%           74% of peak             100%
+
+  Leverage (perf share / effort share):
+    mechanical  =  41.9 / 16.7   =  2.51x   <- superb return, and it is FREE
+    re-tuning   =  58.1 / 83.3   =  0.70x   <- sub-proportional, and unavoidable
+
+  The trap: stopping after the high-leverage step.
+    ship at 31% of peak  ->  need  74/31 = 2.39x  the MI300X hardware
+                             to match the tuned kernel's throughput
+```
+
+The leverage numbers explain why so many AMD ports stall at "it works." The mechanical step returns 2.5x its cost and finishes in a day, so it always gets done. The re-tuning step returns 0.7x its cost measured this way — genuinely sub-proportional — and so it always looks like the thing to defer. But the 2.39x hardware multiplier at the bottom is what deferring it actually costs: at MI300X prices, running 2.39x the GPUs to avoid one engineer-week is a trade that stops making sense within days of going to production.
 
 **Discussion questions:**
 1. Why did the naive `hipify` port compile and produce *correct* results but still only reach 31% of peak — what does that gap tell you about which parts of a port are automatable and which are not?

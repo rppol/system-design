@@ -153,6 +153,40 @@ If rwnd=0: sender stops, sends 1-byte "window probe" periodically
 Window scale option (WSopt): allows rwnd up to 1GB (beyond 64KB default)
 ```
 
+**In plain terms.** "You may have at most one window's worth of unacknowledged bytes in flight, and the window is whichever limit is tighter — what the receiver can store, or what the network can absorb."
+
+That single sentence is the whole reason a fast link can still be slow: the sender is not rate-limited by bandwidth, it is limited by how many bytes it is allowed to leave unacknowledged while it waits one round trip for permission to send more.
+
+| Symbol | What it is |
+|--------|------------|
+| `cwnd` | Congestion window — the sender's own guess at what the network can carry, adjusted by loss/delay signals |
+| `rwnd` | Receive window — how much free buffer the receiver advertises in every ACK |
+| `min(cwnd, rwnd)` | Effective window. Whichever side is more pessimistic wins; the other limit is irrelevant |
+| `rwnd = 0` | Receiver buffer is full. Sender freezes and sends periodic 1-byte probes to learn when it reopens |
+| WSopt | Window scale — a shift factor negotiated at handshake that lifts the 16-bit `rwnd` ceiling from 64 KB to 1 GB |
+
+**Walk one example.** Why the 64 KB default caps a fast intercontinental link:
+
+```
+  throughput = effective window / RTT
+
+  window = 64 KB, RTT = 80 ms
+    65,536 bytes / 0.080 s  =  819,200 B/s  =  0.82 MB/s  =  6.6 Mbps
+
+  window = 4 MB (window scaling on), RTT = 80 ms
+    4,194,304 bytes / 0.080 s  =  52.4 MB/s  =  419 Mbps      64x more
+
+  window = 64 KB, RTT = 1 ms (same-datacenter)
+    65,536 / 0.001  =  65.5 MB/s  =  524 Mbps                 64 KB is fine here
+```
+
+The RTT is the denominator, so the same 64 KB window that saturates a datacenter link
+delivers 6.6 Mbps across an ocean. This is the bandwidth-delay product (BDP) argument:
+to keep a 1 Gbps link busy at 80 ms RTT you need `1 Gbps / 8 x 0.080 s = 10,000,000 bytes`
+— about 9.5 MB — in flight at once, which is 150x the unscaled 64 KB ceiling. That is
+exactly why the tuning table in Section 8 raises `SO_RCVBUF`/`SO_SNDBUF` to 4–16 MB on
+high-BDP links: the buffer *is* the window, and the window *is* the throughput.
+
 ### Slow Start & Congestion Avoidance
 
 ```mermaid
@@ -184,6 +218,46 @@ stateDiagram-v2
 
 Slow start doubles cwnd every RTT (1, 2, 4, 8 MSS…) until ssthresh (e.g. 64 KB), then congestion avoidance grows linearly by about 1 MSS per RTT; a triple-duplicate ACK triggers fast recovery (ssthresh = cwnd × 0.7) while a full timeout resets to slow start (ssthresh = cwnd / 2, cwnd = 1 MSS).
 
+**What this actually says.** "Probe aggressively while you know nothing, then creep once you have found the edge — and treat a lost packet as proof you went too far."
+
+The asymmetry is deliberate: growth is multiplicative going up (doubling) but the response to loss is multiplicative going *down* (halving). This is AIMD's cousin, and it is what keeps many independent TCP flows from collectively collapsing a shared link.
+
+| Symbol | What it is |
+|--------|------------|
+| MSS | Maximum segment size — the largest payload one TCP segment carries, typically 1460 bytes on Ethernet |
+| `cwnd` | Current congestion window, counted in MSS units |
+| `ssthresh` | Slow-start threshold. Above it, switch from doubling to linear growth |
+| `cwnd += MSS·(MSS/cwnd)` per ACK | Congestion avoidance. Summed over one full window of ACKs this adds exactly 1 MSS per RTT |
+| `ssthresh = cwnd × 0.7` | Fast recovery after triple dup-ACK. Loss was mild, so give back only 30% |
+| `ssthresh = cwnd / 2, cwnd = 1` | Timeout. No ACKs came back at all, so assume the worst and restart from scratch |
+
+**Walk one example.** How many round trips a fresh connection needs before it stops being polite, with MSS = 1460 bytes and ssthresh = 64 KB:
+
+```
+  RTT 0    cwnd =  1 MSS  =   1,460 bytes
+  RTT 1    cwnd =  2 MSS  =   2,920
+  RTT 2    cwnd =  4 MSS  =   5,840
+  RTT 3    cwnd =  8 MSS  =  11,680
+  RTT 4    cwnd = 16 MSS  =  23,360
+  RTT 5    cwnd = 32 MSS  =  46,720          still under 65,536
+  RTT 6    cwnd = 64 MSS  =  93,440          crosses ssthresh -> linear from here
+
+  ssthresh 65,536 / 1,460  =  44.9 MSS
+```
+
+Six round trips to reach 64 KB. On an 80 ms intercontinental RTT that is `6 x 80 = 480 ms`
+spent before the connection is even warm — and a short HTTP response finishes long before
+then, so it never leaves slow start at all. That is the arithmetic behind connection reuse:
+every new TCP connection pays the ramp again, which is why the Nginx `keepalive 32` upstream
+pool in Section 7 and HikariCP's long-lived connections matter more than any congestion-control
+tuning flag.
+
+**Why the linear phase looks so strange.** `cwnd += MSS·(MSS/cwnd)` per ACK is written per-ACK
+but is designed to be read per-RTT. One full window generates `cwnd/MSS` ACKs, and each adds
+`MSS²/cwnd` bytes, so the round-trip total is `(cwnd/MSS) × (MSS²/cwnd) = MSS` — one segment
+per RTT, exactly. Without the `/cwnd` divisor a large window would grow proportionally to its
+own size and the ramp would never flatten.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -199,6 +273,43 @@ Selective Acknowledgment (SACK) option allows the receiver to inform the sender 
 After active close, the closer enters TIME_WAIT for 2*MSL (Maximum Segment Lifetime). On Linux, MSL is typically 30–60 seconds, so TIME_WAIT lasts 60–120 seconds. The purpose: ensure the final ACK reaches the other side, and absorb stale duplicate packets from previous connection incarnations.
 
 **Problem**: A high-throughput HTTP server making many outbound connections (reverse proxy, service mesh, database client) accumulates TIME_WAIT sockets. Ephemeral ports are typically 28,000–65,000 (32,768–60,999 on Linux by default). At 60,000 TIME_WAIT sockets, new connections fail with "Cannot assign requested address" (EADDRNOTAVAIL).
+
+**Read it like this.** "A port is not free the moment you close it — it is rented for 2×MSL afterwards, so your sustainable connection rate is the port pool divided by how long each rental lasts."
+
+This is Little's Law wearing a networking costume: sockets in TIME_WAIT are the "items in the system", the connection rate is the arrival rate, and 2×MSL is the service time. Nothing about it is specific to TCP; it is the same arithmetic as sizing a connection pool.
+
+| Symbol | What it is |
+|--------|------------|
+| MSL | Maximum segment lifetime — how long the network may plausibly still hold a stray packet. 30–60 s on Linux |
+| 2×MSL | TIME_WAIT duration, 60–120 s. One MSL for the final ACK to arrive, one for any reply it triggers |
+| Port pool | Ephemeral range width, `60999 − 32768` = 28,231 ports by default |
+| Sustainable rate | `port pool ÷ 2×MSL` — new connections per second before ports run out |
+| Ports in use | `connection rate × 2×MSL` — the steady-state TIME_WAIT count |
+
+**Walk one example.** Both directions of the same equation, per destination IP:port pair:
+
+```
+  How fast can I go?      rate = ports / TIME_WAIT
+
+    28,231 / 60 s   =   470 conn/s        (MSL = 30 s)
+    28,231 / 120 s  =   235 conn/s        (MSL = 60 s)
+
+  How many ports will I burn?    ports = rate x TIME_WAIT
+
+      500 conn/s  x 60 s  =  30,000 sockets     survivable
+    1,000 conn/s  x 60 s  =  60,000 sockets     EADDRNOTAVAIL
+
+  After widening the range to 1024-65000:
+    63,976 / 60 s   =  1,066 conn/s       roughly 2.3x headroom
+```
+
+The 60,000 figure above is not arbitrary — it is exactly what 1,000 connections/second
+sustains for 60 seconds. Note how modest 470 conn/s is: a reverse proxy that opens a fresh
+upstream connection per request hits the wall at traffic levels a single core handles
+comfortably. Widening the port range buys about 2.3x, and `tcp_tw_reuse` buys more, but both
+are second-best. Keep-alive is the real fix because it changes the *rate* term to near zero
+rather than stretching the pool — one pooled connection serving 10,000 requests consumes one
+port instead of 10,000 rentals.
 
 ```bash
 # Check TIME_WAIT count

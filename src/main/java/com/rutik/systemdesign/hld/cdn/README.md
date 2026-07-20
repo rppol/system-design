@@ -40,6 +40,34 @@ The speed of light is a hard physical limit. A user in Tokyo requesting content 
 **2. Origin Server Overload**
 Without a CDN, every user request hits the origin server. For a popular website with millions of users, this creates massive load. A CDN absorbs 80-99% of requests by serving cached content, acting as a shield for the origin.
 
+**In plain terms.** "What a user actually experiences is not the hit latency or the miss latency — it is the two blended in proportion to how often each happens, so the last few percent of hit rate carry far more weight than they look like they should."
+
+The blend is a weighted average, and the weights are wildly lopsided: a miss costs roughly 15x what a hit costs here. That asymmetry is why CDN teams fight for a point of hit rate rather than shaving milliseconds off the hit path.
+
+| Symbol | What it is |
+|--------|------------|
+| `H` | Cache hit ratio, as a fraction — `0.95` means 95% served at the edge |
+| `1 - H` | Miss ratio — the share that pays a full origin round-trip |
+| hit latency | Edge serve, `<10ms` (Tokyo PoP in the mental model above) |
+| miss latency | Origin round-trip, `~150ms` Tokyo-to-New-York propagation |
+| effective latency | `H x hit + (1-H) x miss` — what the average user actually waits |
+
+**Walk one example.** The 10ms edge and 150ms origin figures from above, swept across the 80-99% band this section quotes:
+
+```
+  H        hit part          miss part            effective
+  -----    -------------     ----------------     ---------
+  0.00     0.00 x 10 =  0    1.00 x 150 = 150      150.0 ms   no CDN
+  0.80     0.80 x 10 =  8    0.20 x 150 =  30       38.0 ms
+  0.95     0.95 x 10 =  9.5  0.05 x 150 =   7.5     17.0 ms
+  0.99     0.99 x 10 =  9.9  0.01 x 150 =   1.5     11.4 ms
+
+  80% -> 95% hit rate:  38.0 -> 17.0 ms   (-21.0 ms for 15 points)
+  95% -> 99% hit rate:  17.0 -> 11.4 ms   ( -5.6 ms for  4 points)
+```
+
+Notice the floor: even at 99% you cannot get below the 10ms hit latency itself. Hit rate buys you the distance from 150ms down to that floor; PoP placement is what lowers the floor.
+
 **3. Network Congestion**
 The public internet has congested backbone routes, especially for transoceanic traffic. CDN providers own or peer with major internet exchange points (IXPs) and have optimized private networks between PoPs, bypassing public internet congestion.
 
@@ -309,6 +337,36 @@ Cache-Control: private, no-store
 # Surrogate-Control (CDN-specific, stripped before sending to browser)
 Surrogate-Control: max-age=86400
 ```
+
+**What it means.** "`max-age` is how long the edge may serve a copy without asking anyone; `stale-while-revalidate` is how much longer it may serve that same copy *while* asking, so the user never waits for the refresh."
+
+Splitting the two is what makes long freshness windows safe. Without `stale-while-revalidate`, the first request after expiry pays the full origin round-trip; with it, that unlucky request is served instantly from the stale copy and the refetch happens in the background.
+
+| Symbol | What it is |
+|--------|------------|
+| `max-age` | Seconds the object is *fresh*. Served with no origin contact |
+| `s-maxage` | Same, but for shared caches (the CDN) — overrides `max-age` at the edge |
+| `stale-while-revalidate` | Extra seconds a *stale* copy may be served during a background refetch |
+| `immutable` | Promise the bytes will never change; suppresses revalidation entirely |
+| origin fetches/day | `86400 / max-age` per cached object — the direct cost of a short TTL |
+
+**Walk one example.** Each header line above, priced as origin fetches per object per day:
+
+```
+  header                                    max-age    86400/max-age
+  ---------------------------------------   --------   -------------
+  max-age=31536000, immutable                1 year      0.0027 /day  (~1 per year)
+  s-maxage=3600 (CDN tier)                   1 hour        24   /day
+  max-age=600, stale-while-revalidate=86400  10 min       144   /day
+  private, no-store                          n/a         every request
+
+  The SWR line in detail:
+    fresh window        =   600 s  -> served instantly, no origin contact
+    stale-serve window  = 86400 s  -> served instantly, origin refetched in background
+    total no-wait window= 87000 s  -> ~24.2 h before any user can block on origin
+```
+
+The 10-minute TTL costs 144 origin fetches a day per object, but with a 24-hour stale window not one of those 144 users waits for it. Cut the stale window to zero and 144 users a day eat the full miss latency instead.
 
 ### ETag and Conditional Requests
 
@@ -711,6 +769,39 @@ pie showData
 
 *Only 50,000 of 1,000,000 requests ever reach origin — a 95% origin offload.*
 
+**Read it like this.** "Origin offload is just the cache hit ratio wearing a different name — one counts what the edge served, the other counts what the origin was spared, and they are the same number seen from opposite ends."
+
+Keeping both metrics is still worth it, because they are denominated differently in practice: CHR is usually reported in *requests*, bandwidth savings in *bytes*. They diverge whenever cacheable objects are systematically smaller or larger than uncacheable ones, and that divergence is the signal worth watching.
+
+| Symbol | What it is |
+|--------|------------|
+| `Total Requests` | Everything arriving at the CDN — `1,000,000` in the pie above |
+| `Cache Hits` | Requests served from edge storage — `950,000` |
+| `Origin requests` | Requests forwarded upstream — `50,000` |
+| `CHR` | `Hits / Total` — the request-counted view |
+| `Origin Offload` | `1 - Origin/Total` — the same ratio, origin-counted |
+| bytes served | `requests x average object size` — how a request ratio becomes a GB ratio |
+
+**Walk one example.** Both formulas over the same million requests, then converted to bytes:
+
+```
+  CHR            =  950,000 / 1,000,000            = 95.0%
+  Origin Offload =  1 - (50,000 / 1,000,000)       = 95.0%      identical
+
+  Convert requests to bandwidth, at 1 MB average object:
+    edge bytes   =   950,000 x 1 MB  =  950 GB
+    origin bytes =    50,000 x 1 MB  =   50 GB
+    total                             = 1000 GB
+    Bandwidth Savings = 950 / 1000    = 95.0%      matches the pie above
+
+  Now suppose misses skew large -- 4 MB average, hits still 1 MB:
+    edge bytes   =   950,000 x 1 MB  =  950 GB
+    origin bytes =    50,000 x 4 MB  =  200 GB
+    Bandwidth Savings = 950 / 1150   = 82.6%   <- CHR still says 95%
+```
+
+That last row is the alarm to know: a 95% CHR sitting next to an 83% bandwidth saving means your misses are the heavy objects. The request metric looks healthy while the egress bill does not.
+
 **Latency by Region**
 - Time To First Byte (TTFB) for cached vs. uncached requests
 - P50, P95, P99 latency per geographic region
@@ -1001,6 +1092,36 @@ location ~ ^/user/ {
 | Origin bandwidth              | 0 (all cached)    | 5% miss rate               | 100%             |
 | Compute cost                  | Big upfront batch | Per-request ($0.0001/req)  | Centralized      |
 
+**The idea behind it.** "Pre-generating variants multiplies your object count by the number of variants, and storage cost is linear in bytes — so 50 sizes of every image is a 50x storage bill you pay forever for variants most users never request."
+
+The transform-at-edge alternative inverts the tradeoff: you pay compute per request instead of storage per variant. That only wins because variant demand is long-tailed — a handful of sizes serve almost all traffic, and paying to store the other 45 is pure waste.
+
+| Symbol | What it is |
+|--------|------------|
+| catalog size | `8B` original images, `300TB` on S3 |
+| variants | `50+` size/format combinations per image |
+| object count | `catalog x variants` — what pre-generation actually creates |
+| storage cost | `bytes x $/GB-month`; S3 Standard is about `$0.023/GB-month` |
+| avg variant size | `total bytes / object count` — the number that makes 15PB plausible |
+
+**Walk one example.** Decision 2's rejected alternative, priced out:
+
+```
+  objects to pre-generate
+    50 variants x 8,000,000,000 images        = 400,000,000,000 objects
+
+  implied average variant size
+    15 PB / 400B objects = 15e15 / 4e11       = 37.5 KB each   (thumbnail-sized)
+
+  monthly storage bill at $0.023/GB-month
+    pre-generate :  15 PB  = 15,000,000 GB x 0.023 = $345,000/mo  (table: $330k)
+    on-demand    : 300 TB  =     300,000 GB x 0.023 = $  6,900/mo  (table: $6.6k)
+
+  ratio  345,000 / 6,900 = 50x     <- exactly the variant count. Not a coincidence.
+```
+
+The 50x storage ratio is the variant multiplier showing through unchanged, because storage is perfectly linear in bytes. The chosen design converts that permanent 50x into a per-request `$0.0001` compute charge that is only incurred for variants someone actually asks for.
+
 ### Metrics & Results
 
 - **Cache hit rate:** 96.2% (edge), 99.1% (combined edge+tier-2)
@@ -1010,6 +1131,37 @@ location ~ ^/user/ {
 - **Bandwidth cost:** $0.021/GB blended (CDN egress + origin egress * miss rate)
 - **Monthly cost:** $1.8M (vs estimated $11.4M for origin-only delivery)
 - **Cert provisioning:** 99.7% of new white-label domains live in < 90s
+
+**What the formula is telling you.** "Blended egress is the CDN's own per-GB rate plus the origin's rate charged only on the fraction that missed — so the miss rate is a lever on the *unit price* of every gigabyte you ship, not just on origin load."
+
+That is why the tiered cache earns its keep twice. It cuts origin requests, and because the origin byte is 4.5x the price of an edge byte, each point of miss rate removed is worth 4.5x more than the same point of edge traffic.
+
+| Symbol | What it is |
+|--------|------------|
+| CDN egress | `$0.02/GB` — paid on every gigabyte delivered |
+| origin egress | `$0.09/GB` — paid only on the miss fraction, on top of CDN egress |
+| miss rate | `1 - hit rate`. `3.8%` at Tier-1 alone, `0.9%` after the Tier-2 shield |
+| blended `$/GB` | `CDN egress + origin egress x miss rate` |
+| peak RPS | `10M req/sec`; multiply by a miss rate to get forwarded RPS |
+
+**Walk one example.** Both hit rates run through the same two formulas:
+
+```
+  request volumes at 10,000,000 req/sec peak
+    Tier-1 miss   10,000,000 x (1 - 0.962) = 380,000 req/s  -> forwarded to Tier-2
+    reaches S3    10,000,000 x (1 - 0.991) =  90,000 req/s
+    budget                                   500,000 req/s   -> 380k fits, 90k trivially
+
+  blended egress cost per GB
+    Tier-1 only   0.02 + 0.09 x 0.038 = 0.02342  $/GB
+    with Tier-2   0.02 + 0.09 x 0.009 = 0.02081  $/GB   <- matches the $0.021 reported
+
+  what the Tier-2 shield bought
+    unit price    0.02342 -> 0.02081  = 11.1% cheaper per GB
+    origin RPS    380,000 -> 90,000   = 4.2x less traffic reaching S3
+```
+
+The `$0.021` blended figure reconciles only against the 99.1% combined hit rate, which confirms the reading of the two numbers: the `380k/sec` is Tier-1 misses entering the regional shield, and just `90k/sec` of that survives to touch S3.
 
 ### Common Pitfalls / Lessons Learned
 

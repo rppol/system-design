@@ -130,6 +130,32 @@ flowchart LR
 
 *A 5-VPC mesh needs 10 peering connections (N(N-1)/2); the same 5 VPCs need only 5 attachments through a Transit Gateway hub, and route tables still segment which spokes can reach which.*
 
+**In plain terms.** "Peering cost grows like every VPC shaking hands with every other VPC; a hub costs one handshake per VPC."
+
+That is the whole argument for Transit Gateway compressed into a growth rate: the mesh is quadratic in the number of VPCs, the hub is linear. Everything else — segmentation, transitivity, on-prem attachment — is a bonus on top of a curve that has already decided the outcome.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of VPCs you need to connect to each other |
+| `N(N-1)` | Ordered pairs — every VPC paired with every other one |
+| `/2` | Divide by 2 because A-to-B and B-to-A are one connection, not two |
+| `N(N-1)/2` | Peering connections for a full mesh (quadratic growth) |
+| `N` (hub) | TGW attachments — one per VPC, no matter how many VPCs exist |
+
+**Walk one example.** Push the VPC counts from this module through both formulas:
+
+```
+    VPCs N     full mesh N(N-1)/2      TGW attachments N      mesh / hub
+        2          2x1/2 =      1                      2          0.5x
+        3          3x2/2 =      3                      3          1.0x
+        5          5x4/2 =     10                      5          2.0x
+       10         10x9/2 =     45                     10          4.5x
+       30        30x29/2 =    435                     30         14.5x
+       50        50x49/2 =   1225                     50         24.5x
+```
+
+At 2-3 VPCs the mesh is genuinely cheaper, which is why section 9 says "reconsider TGW below ~5 VPCs." At 5 the two are level. Past that the ratio is just `(N-1)/2`, so it never stops widening: the 30-VPC company in the section 14 case study faces 435 peerings against 30 attachments, and the 50-VPC enterprise in section 7 faces 1225. The mesh number is also a *maintenance* number, not just a bill — each of those 435 connections needs a route entry on both sides.
+
 **PrivateLink — consume a service privately, no peering**
 
 ```mermaid
@@ -268,6 +294,54 @@ resource "aws_cloudfront_distribution" "cdn" {
 }
 ```
 
+### Reading the cache-hit numbers
+
+Two pieces of arithmetic sit underneath every `default_ttl` and cache-key decision above: what fraction of requests the origin still sees, and what the TTL does to that fraction.
+
+```
+origin requests = (1 - h) x total requests          where h = cache hit ratio
+origin offload  = 1 / (1 - h)                       how many times smaller the origin load is
+hit ratio       h = 1 - 1 / (lambda x TTL)          lambda = requests/sec for one object at one edge
+```
+
+**What this actually says.** "The origin only sees the misses, and an object only misses once per TTL window per edge — so the more requests that arrive inside one TTL, the closer the hit ratio gets to 1."
+
+The second line is the one people misjudge. Hit ratio feels linear but offload is a reciprocal, so the last few percentage points do almost all the work: going from 90% to 99% does not buy you 10% more, it buys you 10x more.
+
+| Symbol | What it is |
+|--------|------------|
+| `h` | Cache hit ratio — fraction of requests the edge answers without touching origin |
+| `1 - h` | Miss ratio — the fraction that becomes an origin request |
+| `1 / (1 - h)` | Origin offload factor: how many edge requests each origin request now covers |
+| `lambda` | Request rate for one object at one edge location, per second |
+| `TTL` | How long the edge is allowed to reuse the cached copy (`default_ttl`, seconds) |
+| `lambda x TTL` | Requests arriving per TTL window — of which exactly one is a miss |
+
+**Walk one example.** A site serving 100M requests/day, at the hit ratios this module names:
+
+```
+      h        misses = (1-h) x 100M      origin req/day      offload 1/(1-h)
+    0.00        1.00 x 100M                 100,000,000            1x
+    0.50        0.50 x 100M                  50,000,000            2x
+    0.90        0.10 x 100M                  10,000,000           10x
+    0.95        0.05 x 100M                   5,000,000           20x
+    0.99        0.01 x 100M                   1,000,000          100x
+```
+
+The section 14 team pushed static hit ratio "above 90%", which is the row that takes a saturated origin ALB from 100M to 10M requests/day. Note the top row: pitfall 3's per-user cache key drives `h` toward 0, and at `h = 0` the CDN forwards *every* request — you pay for the edge and still get 1x offload.
+
+**Walk one more.** Now the TTL relation, using this config's `default_ttl = 86400` (1 day) versus the 60s TTL from pitfall 4, for one object at one edge:
+
+```
+   lambda (req/s)     TTL (s)     lambda x TTL     h = 1 - 1/(lambda x TTL)
+        2.00           86400          172800              99.9994%
+        2.00            3600            7200              99.9861%
+        2.00              60             120              99.1667%
+        0.05              60               3              66.6667%
+```
+
+A hot object is insensitive to TTL — at 2 req/s even a 60s TTL still hits 99.17%. A cold object is where TTL decides everything: at 0.05 req/s (one request every 20s), a 60s TTL yields only 3 requests per window, so 1 in 3 is a miss and the hit ratio collapses to 66.67%. This is why long TTLs plus versioned URLs (the section 8 "cache forever" row) matter most for the long tail, not for your homepage.
+
 ### Route 53 latency routing + failover
 
 ```hcl
@@ -288,6 +362,29 @@ resource "aws_route53_record" "us" {
 aws cloudfront create-invalidation --distribution-id E123 --paths "/static/*"
 # BETTER: version asset URLs (app.a1b2c3.js) so you never invalidate; cache forever
 ```
+
+**Read it like this.** "The first 1000 invalidation paths each month are free; after that you are billed half a cent per path, every month, forever."
+
+The bill is small per path and large per habit — a team that invalidates on every deploy is buying a recurring cost to undo a caching decision it made on purpose.
+
+| Symbol | What it is |
+|--------|------------|
+| `paths` | Invalidation paths submitted in a calendar month (`/static/*` counts as one path) |
+| `1000` | Free-tier paths per month, reset monthly |
+| `$0.005` | Price per path beyond the free tier |
+| `max(0, paths - 1000) x 0.005` | The monthly invalidation bill |
+
+**Walk one example.** Four deploy cadences, same formula:
+
+```
+   paths/month     billable = max(0, paths - 1000)     cost at $0.005
+          500                        0                     $0.00
+         1000                        0                     $0.00
+         5000                     4000                    $20.00
+        20000                    19000                    $95.00
+```
+
+Versioned URLs move you permanently into the first two rows: a new content hash is a new object, so there is nothing to invalidate and the cached old copy simply ages out. That is the whole reason section 8's tradeoff table lists "versioned URLs (cache forever)" against "invalidation" — one has a $0 steady state and a higher hit ratio, the other has a monthly line item.
 
 ---
 
@@ -411,6 +508,30 @@ resource "aws_ec2_transit_gateway_vpc_attachment" "c" { transit_gateway_id = aws
 **Pitfall 3 — CDN cache key too broad (caching per-user).** Including `Authorization` or all cookies/query strings in the cache key makes every request unique, dropping hit ratio to ~0% and hammering the origin. FIX: cache only on the headers/query params that actually vary the response; strip the rest. Conversely, caching authenticated/personalized responses with a narrow key serves one user's data to another — exclude truly per-user content from caching.
 
 **Pitfall 4 — Long DNS TTL defeats failover.** A 3600s TTL on a failover record means clients keep hitting the dead Region for up to an hour. FIX: use short TTLs (30-60s) on records used for failover, or use anycast (Global Accelerator) for near-instant failover independent of DNS caching.
+
+**What it means.** "Your failover time is not decided by your health check — it is bounded below by the TTL you published to every resolver on the internet."
+
+```
+worst-case client blackhole = TTL          (resolver cached the dead IP right before the outage)
+average client blackhole    = TTL / 2      (outages land uniformly inside the cached window)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `TTL` | Seconds a resolver is allowed to reuse the cached answer before re-querying |
+| `worst case = TTL` | A resolver that cached one second before the failure waits a full TTL |
+| `TTL / 2` | Mean wait across clients, since failures land uniformly in the window |
+| anycast | No cached answer to expire — BGP withdraws the route, so the bound disappears |
+
+**Walk one example.** The two TTLs this module uses, on a Region that dies at t = 0:
+
+```
+   TTL (s)      worst-case stale      average stale      vs 3600s baseline
+      3600          3600s = 60m          1800s = 30m               1x
+        60            60s =  1m            30s = 0.5m              60x faster
+```
+
+Dropping the TTL from 3600s to 60s is a 60x improvement in the failover bound, which is exactly the "up to an hour" to "under a minute" result in section 14. But note the floor: 60s of blackholed users is still 60s of errors, and no health check anywhere makes it smaller. Anycast is qualitatively different rather than just faster — there is no cached answer to expire, so section 4's "near-instant (no DNS TTL)" is a statement about the formula not applying at all.
 
 ---
 

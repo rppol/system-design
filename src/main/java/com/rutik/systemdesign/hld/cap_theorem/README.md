@@ -264,6 +264,38 @@ flowchart LR
 
 *With N=3, W=2, R=2 the write set (Node A + Node B) and read set (Node B + Node C) are forced to overlap at Node B whenever R+W > N — that guaranteed overlap is exactly why a quorum read always sees the latest write.*
 
+**In plain terms.** "A partition cuts the cluster into pieces, and the quorum rule quietly decides which piece is allowed to keep working: whichever side still contains enough nodes to reach the quorum. Every other side must stop — and that stopping is precisely the unavailability CAP is talking about."
+
+The reason this matters is that CP unavailability is not a bug or a timeout; it is the quorum arithmetic doing its job. Only one side of any partition can hold a majority, which is exactly why two isolated halves can never both accept conflicting writes.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Replica count, `3` in the example above |
+| `W`, `R` | Write and read quorum sizes, `2` and `2` here |
+| `majority` | The usual quorum choice: `floor(N/2) + 1` — the smallest set that cannot exist twice |
+| `N - W` | Node failures a write survives — the availability budget on the write path |
+| `k` | Nodes reachable on your side of a partition |
+| `k >= W` | Whether your side can still accept writes. `k >= R` for reads |
+
+**Walk one example.** N=3 with majority quorums, then the same cluster cut in half:
+
+```
+  majority for N=3 : floor(3/2) + 1        = 2
+  failures tolerated: N - W = 3 - 2        = 1 node
+
+  partition splits the cluster 2 | 1
+    side with k = 2 :  2 >= W(2) -> writes OK
+                       2 >= R(2) -> reads  OK    <- keeps serving
+    side with k = 1 :  1 >= W(2) -> FALSE
+                       1 >= R(2) -> FALSE        <- returns errors
+
+  scaling the same rule:
+    N=5 -> majority 3, tolerates 2 node failures
+    N=7 -> majority 4, tolerates 3 node failures
+```
+
+Two things fall out. First, only one side can ever have a majority, so split-brain is arithmetically impossible — that is the whole safety argument. Second, tolerance grows only half as fast as `N`: going from 3 to 7 replicas doubles the quorum every write must wait for (2 to 4) to buy just two extra tolerated failures, which is why production clusters settle at 3 or 5 rather than growing indefinitely.
+
 ### Vector Clocks (AP Conflict Resolution)
 
 Used by DynamoDB (original Dynamo paper), Riak. Each value carries a version vector:
@@ -482,6 +514,30 @@ A distributed lock is not a substitute for database-level serializability becaus
 | Hinted Handoff Queue Depth | Backlog of writes waiting to replay | Growing queue |
 | Node Availability | % of cluster nodes healthy | < 100% (alert immediately) |
 | Read Repair Rate | Background repairs triggered | High rate = high inconsistency |
+
+**Read it like this.** "A percentage alert threshold is meaningless until you multiply it by your traffic — 0.1% sounds negligible, but at fourteen thousand reads per second it is fourteen users per second getting an error, which is an incident, not a blip."
+
+This is why error-budget thresholds must always be restated in absolute terms before they are agreed to. The same 0.1% is a rounding error on a batch job and a pager-worthy outage on a user-facing read path.
+
+| Symbol | What it is |
+|--------|------------|
+| `QPS` | Requests per second on the path being measured |
+| `t` | Alert threshold as a fraction — `0.001` for the table's "> 0.1% of requests" |
+| `failures/sec` | Absolute failure rate at threshold: `QPS x t` |
+| `failures/min` | The same rate over a minute — the number a human actually feels |
+| `lag_alert` | Replication-lag threshold from the table above: `5 seconds` |
+
+**Walk one example.** Applying the table's 0.1% quorum-failure threshold to the financial-ledger case study's peak traffic:
+
+```
+  read path  : 14,000 QPS x 0.001   =  14 failed reads per second
+                                     = 840 failed reads per minute
+
+  write path :  2,200 QPS x 0.001   = 2.2 failed writes per second
+                                     = 132 failed transfers per minute
+```
+
+For a balance-read path, 840 errors per minute is well past "alert" and into "page someone." The takeaway is not that 0.1% is the wrong number — it is that the threshold should be chosen after doing this multiplication, and tightened on the paths where each failure is a user-visible financial operation.
 
 ---
 

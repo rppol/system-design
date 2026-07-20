@@ -94,6 +94,40 @@ When going from N to N+1 servers, fraction of keys moved = `N/(N+1)`.
 
 As the system grows, adding one server displaces almost all keys. This is catastrophic for any system relying on data locality.
 
+**In plain terms.** "A key only stays put if the old server number and the new server number happen to agree — and with `N+1` boxes to land in, that happens for about one key in `N+1`."
+
+Everything else moves. That framing matters because it says the damage is *not* proportional to how many servers you added; it is driven by the modulus changing at all. Adding one server to a 99-node cluster is just as destructive as rebuilding the cluster from scratch.
+
+| Symbol | What it is |
+|--------|------------|
+| `hash(key)` | A big integer derived from the key. Fixed — it never changes |
+| `N` | Server count *before* the change. The modulus |
+| `N+1` | Server count *after* the change. The new, different modulus |
+| `%` | Remainder after division — the only thing that picks the server |
+| `N/(N+1)` | Fraction of keys that land somewhere new |
+| `1/(N+1)` | The leftover fraction that happens to stay put |
+
+**Walk one example.** The 5 keys from the table above, moving 3 servers to 4:
+
+```
+  key    hash    hash % 3   hash % 4   verdict
+  ----   -----   --------   --------   -------------
+  A         10          1          2   moved
+  B         20          2          0   moved
+  C         30          0          2   moved
+  D         40          1          0   moved
+  E         50          2          2   stayed (lucky)
+
+  moved = 4 of 5 = 80% observed
+  predicted N/(N+1) = 3/4 = 75%
+
+  Scale it up: 99 -> 100 servers
+    stays  = 1/100  =  1%
+    moves  = 99/100 = 99%
+```
+
+One key in five survived here purely by chance; the formula says expect one in four. At 99 nodes that luck runs out entirely — 99% of a million-key cache evaporates in one deploy.
+
 ---
 
 ## The Consistent Hashing Solution
@@ -121,6 +155,33 @@ xychart-beta
 
 Bars = naive modulo hashing, climbing toward ~99% of keys remapped as the cluster grows; line = consistent hashing, staying near ~1% — this divergence is the entire reason consistent hashing exists.
 
+**What this actually says.** "The new node has to be given *some* share of the data, and its fair share is one slot out of `N+1`. Consistent hashing moves exactly that share and not one key more."
+
+This is a lower bound, not a clever trick: any scheme that ends with `N+1` equally loaded nodes must relocate at least `1/(N+1)` of the keys, because the newcomer starts empty. Modulo hashing moves `N/(N+1)`, which is the *same fraction inverted* — it does the maximum where the minimum was available.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Nodes before the change |
+| `1/(N+1)` | Keys that must move — the new node's fair share |
+| `N/(N+1)` | Keys that must move under modulo — everything else |
+| ring arc | The slice of hash space a node owns; adding a node splits one arc |
+| "optimal" | No correct scheme can move fewer keys than `1/(N+1)` |
+
+**Walk one example.** Same three cluster sizes, both schemes side by side:
+
+```
+  N -> N+1     consistent 1/(N+1)     modulo N/(N+1)     ratio
+  ---------    ------------------     --------------     -----
+   3 ->  4       1/4  = 25%             3/4  = 75%          3x
+   9 -> 10       1/10 = 10%             9/10 = 90%          9x
+  99 -> 100      1/100 =  1%           99/100 = 99%        99x
+
+  The waste ratio is exactly N. At 99 nodes, modulo hashing
+  does 99 times more data movement than physics requires.
+```
+
+The penalty for modulo hashing is not a constant overhead — it grows linearly with cluster size, so the scheme gets worse precisely as the cluster gets more valuable.
+
 ---
 
 ## The Hash Ring
@@ -130,6 +191,38 @@ Bars = naive modulo hashing, climbing toward ~99% of keys remapped as the cluste
 1. Define a hash space from `0` to `2^32 - 1` (or `2^64 - 1`), arranged as a circle.
 2. Hash each node's identifier (IP address, hostname) and place it on the ring.
 3. For each key, compute `hash(key)` and find the first node clockwise from that position.
+
+**Read it like this.** "Take the hash's remainder against `2^32` so every key lands somewhere on a fixed 4.29-billion-position dial, then hand the key to whichever node's marker you meet first going clockwise."
+
+The critical difference from `% N` is *what* you divide by. Here the modulus is `2^32` — a constant of the ring, not a function of the cluster. Nodes come and go and every key's position on the dial is unchanged; only the ownership boundaries move.
+
+| Symbol | What it is |
+|--------|------------|
+| `2^32` | Ring size — `4,294,967,296` positions, numbered `0` to `2^32 - 1` |
+| `hash(key) mod 2^32` | The key's fixed address on the dial. Independent of node count |
+| `hash(node_id) mod 2^32` | A node's marker on the same dial |
+| clockwise successor | First node marker at or after the key's position |
+| wrap-around | Past `2^32 - 1` you return to `0`; the dial has no end |
+
+**Walk one example.** The four node positions listed below, plus two keys:
+
+```
+  ring size = 2^32 = 4,294,967,296 positions (0 .. 4,294,967,295)
+
+  node markers (sorted)   A: 90    B: 200    C: 250    D: 300
+
+  key K1, hash = 210
+    scan clockwise: 250 is the first marker >= 210   -> Node C
+  key K2, hash = 280
+    scan clockwise: 300 is the first marker >= 280   -> Node D
+  key K9, hash = 4,294,967,000
+    scan clockwise: no marker >= that -> wrap to 0 -> first marker 90 -> Node A
+
+  Now delete Node C. K1 rescans from 210 -> next marker 300 -> Node D.
+  K2 and K9 do not move at all: their successors were never C.
+```
+
+Removing a node re-homed exactly the keys that pointed at it. Under `% N` that same deletion would have changed the modulus and shuffled K2 and K9 too, for no reason.
 
 ### Visual representation:
 
@@ -383,6 +476,35 @@ xychart-beta
 
 Standard deviation of load drops from 45% at 1 vnode/node to just 3% at 256 — this is why Cassandra defaults to hundreds of vnodes per physical node.
 
+**The idea behind it.** "Owning one random arc is a single coin flip and can go badly wrong; owning `V` independent random arcs averages `V` coin flips, and averages of `V` samples spread out about `sqrt(V)` times less than one sample does."
+
+That is the standard averaging result — imbalance shrinks with `1/sqrt(V)`, not with `1/V`. The square root is the whole story of vnode tuning: it is why the first few vnodes buy enormous improvement and why going from 100 to 256 barely registers.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Virtual nodes per physical node — 150 in Dynamo, 256 in Cassandra |
+| load std dev | Spread of per-node load around the fair share, as a percent |
+| `1/sqrt(V)` | The shrink factor. Quadruple `V` to halve the spread |
+| `sqrt(V)` | 1, 3.16, 10, 16 for V = 1, 10, 100, 256 |
+| baseline 45% | The measured spread at `V = 1`, one arc per node |
+
+**Walk one example.** Start from the 45% baseline and divide by `sqrt(V)`:
+
+```
+  V      sqrt(V)     45 / sqrt(V)     chart value
+  ---    -------     ------------     -----------
+    1       1.00        45.00%            45%
+   10       3.16        14.23%            15%
+  100      10.00         4.50%             5%
+  256      16.00         2.81%             3%
+
+  Diminishing returns, priced out:
+    V:   1 ->  10   costs   9 extra vnodes,  saves 30 points of spread
+    V: 100 -> 256   costs 156 extra vnodes,  saves  1.7 points
+```
+
+The model reproduces every bar in the chart. It also explains the "100-200 vnodes" rule of thumb above: past `V = 100` you are paying linearly in ring entries, gossip traffic, and rebalancing bookkeeping to buy fractions of a percent of balance.
+
 ---
 
 ## Rebalancing
@@ -556,6 +678,35 @@ public class ConsistentHash<T> {
 | Space               | O(N * V)            | N physical nodes, V vnodes each             |
 
 Where N = number of physical nodes, V = vnodes per physical node.
+
+**Put simply.** "The ring holds `N x V` sorted entries, so any single lookup is one binary search over that list — and adding or removing a whole machine is just `V` of those searches, one per virtual node."
+
+The point of writing the complexity as `log(N*V)` rather than `log N` is that vnodes inflate the structure you search. Raising `V` to buy load balance is not free — it costs ring memory linearly and lookup time logarithmically, which is why the logarithm makes generous `V` affordable at all.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Physical nodes in the cluster |
+| `V` | Virtual nodes per physical node |
+| `N*V` | Total entries in the sorted ring — what you binary-search |
+| `O(log(N*V))` | Lookup cost: comparisons to find the clockwise successor |
+| `O(V log(N*V))` | Add/remove a machine: `V` inserts, each a search plus a write |
+| `O(N*V)` | Memory: one position-to-node entry per virtual node |
+
+**Walk one example.** The cache cluster from the case study below — 8 nodes at 160 vnodes each:
+
+```
+  ring entries  N x V = 8 x 160          = 1,280
+  lookup        log2(1,280)              ~ 10.3 comparisons
+
+  add the 9th node (160 vnode inserts):
+    ring entries after   9 x 160         = 1,440
+    work  V x log2(N*V) = 160 x ~10.5    ~ 1,680 comparisons
+
+  grow the ring 50% to 12 x 160 = 1,920 entries:
+    lookup log2(1,920)                   ~ 10.9 comparisons
+```
+
+Half again as much ring bought 0.6 of one extra comparison. That is the practical takeaway: lookup cost is effectively flat as the cluster grows, so vnode counts in the hundreds cost memory, not latency.
 
 ### Python Pseudocode
 
@@ -822,6 +973,38 @@ xychart-beta
 Hit rate dips from 95% to ~89% only during the ~30-second window while 8 nodes become 9, then fully recovers; database load in that window is ~55,000 QPS — versus the ~335,000 QPS a naive modulo-hash resize would have caused (see the naive-hashing problem above).
 
 Adding new nodes in groups of 1–2 at a time, with monitoring between each addition, is the safe operational practice.
+
+**Stated plainly.** "Every key that gets remapped becomes one cache miss, and every cache miss becomes one database query — so the remap fraction is a direct multiplier on database load during a resize."
+
+That is the whole reason this is an availability problem and not a housekeeping problem. The remap fraction never touches the database directly; it converts, one-for-one, into read traffic that the cache was absorbing a moment earlier.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Cache lookup rate — 500,000 lookups/sec here |
+| remap fraction | Share of keys that changed owner during the resize |
+| miss surge | `R x remap fraction` — extra queries/sec arriving at the database |
+| DB ceiling | What the database can actually serve — ~50,000 queries/sec |
+| headroom | `DB ceiling - miss surge`. Negative means cascading failure |
+
+**Walk one example.** The same 500,000 lookups/sec, resized both ways:
+
+```
+  modulo hashing, 8 -> 12 nodes
+    remap fraction  = 8/12          = 0.67
+    miss surge      = 500,000 x 0.67 = 335,000 q/s
+    DB ceiling                        =  50,000 q/s
+    headroom        = 50,000 - 335,000 = -285,000  -> 6.7x over. Outage.
+
+  consistent hashing, 8 -> 9 nodes
+    remap fraction  = 1/(8+1)        = 0.11
+    miss surge      = 500,000 x 0.11 =  55,000 q/s
+    spread over the ~30s migration window, absorbed by
+    the 95% -> 89% hit-rate dip, not by a hard cutover
+
+  ratio of the two surges: 335,000 / 55,000 = 6.1x less database load
+```
+
+Note the second row is still marginally above the 50,000 q/s ceiling on paper — that is exactly why the guidance is to add 1–2 nodes at a time and watch. The arithmetic gives you the size of the risk; it does not remove it.
 
 ---
 

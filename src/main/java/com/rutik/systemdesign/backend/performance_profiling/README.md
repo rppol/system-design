@@ -144,6 +144,48 @@ Key metrics:
   Promotion rate = MB/s of objects surviving to old gen
 ```
 
+**What the formula is telling you.** "GC throughput answers *how much of your CPU did the
+collector take*, and it is deliberately blind to *how it took it* — which is why a single
+number can look healthy while every user is seeing pauses." Written out:
+
+```
+GC throughput = 1 - (pause_duration / interval_between_pauses)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `pause_duration` | Stop-the-world time for one collection. The `12.123ms` field in the log |
+| `interval_between_pauses` | Wall-clock time between two GC events. Derived from the `1.234s` timestamps |
+| `pause / interval` | Fraction of wall-clock spent stopped. The "GC tax" |
+| `1 - tax` | GC throughput. The `> 95%` target above |
+
+**Walk one example.** Two very different services, both with a 50ms pause:
+
+```
+                        pause    interval    tax = pause/interval    throughput
+  batch job              50 ms     30 s      0.05 / 30  = 0.167%      99.83%
+  latency-sensitive      50 ms      2 s      0.05 /  2  = 2.5%        97.50%
+
+  Both clear the 95% target. Both have the SAME 50ms pause.
+  But a request landing in a pause is delayed 50ms either way, and the second
+  service opens that trap 15x more often -- 1,800 pauses/hour vs 120.
+```
+
+This is why the two numbers are not interchangeable. Throughput is the metric for a batch job,
+where only total wall-clock matters and nobody is waiting on an individual response. **Pause
+duration** is the metric for a request-serving service, because it lands directly in some
+user's p99. Tuning `-XX:MaxGCPauseMillis` trades the first for the second: shorter pause targets
+mean G1 collects smaller region sets more often, so total GC time — and therefore the
+throughput number — gets *worse* while the tail latency you actually care about gets better.
+
+**Reading the two rate metrics.** Allocation rate is what sets the interval in the formula
+above: `interval ≈ young_gen_size / allocation_rate`. Netflix's 500 MB/s allocation from §7
+against a 2 GB young generation gives `2048 / 500 = 4.1` seconds between young collections —
+kill that allocation and the interval stretches, which is exactly the "GC frequency reduced by
+80%" they reported. Promotion rate is the more dangerous one: objects surviving into old gen
+are what eventually force a Full GC, so a steadily climbing promotion rate is a leak signature,
+not a tuning problem.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -339,7 +381,7 @@ jstack's automatic deadlock detector flags exactly this pattern — each thread 
 
 **Off-heap memory leaks not visible in heap dumps**: Direct ByteBuffers (NIO, Netty), JNI-allocated memory, and memory-mapped files are not in the heap. A service leaking off-heap memory shows normal heap metrics but grows in system RSS. Use JFR's `jdk.DirectBufferStatistics` event or `/proc/<pid>/smaps` to measure off-heap usage.
 
-**GC pause time vs GC throughput confusion**: A GC with 50ms pause every 30 seconds (throughput = 99.7%) is very different from 50ms pause every 2 seconds (throughput = 97.5%). High throughput (low % of time in GC) is important for batch jobs. Low pause times are important for latency-sensitive services. G1's `-XX:MaxGCPauseMillis=50` targets pause time; Parallel GC maximizes throughput.
+**GC pause time vs GC throughput confusion**: A GC with 50ms pause every 30 seconds (throughput = 1 - 0.05/30 = 99.83%) is very different from 50ms pause every 2 seconds (throughput = 97.5%). High throughput (low % of time in GC) is important for batch jobs. Low pause times are important for latency-sensitive services. G1's `-XX:MaxGCPauseMillis=50` targets pause time; Parallel GC maximizes throughput.
 
 **Profiling the wrong thing**: A service is slow. The profiler shows 80% of CPU in `serialize()`. The developer optimizes serialization. But the actual slowness was 500ms DB query latency invisible to CPU profiling because the thread was WAITING (not RUNNABLE) during the query. CPU profilers only show CPU time — use wall-clock profiling (`-e wall`) to see where threads spend time including I/O waits.
 

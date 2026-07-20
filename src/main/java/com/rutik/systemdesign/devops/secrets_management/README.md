@@ -276,6 +276,66 @@ aws secretsmanager rotate-secret --secret-id prod/app/db \
   --rotation-rules AutomaticallyAfterDays=30
 ```
 
+### Decoding TTL and rotation windows
+
+Section 3 says "short-lived over long-lived — minimize blast radius," and the configs above
+pick `default_ttl="1h"` and `AutomaticallyAfterDays=30`. What those settings actually buy is
+an exposure window, and it is worth writing as arithmetic rather than an adjective:
+
+```
+max_exposure = validity_period                    (leak just after issue)
+avg_exposure = validity_period / 2                (leak at a uniformly random moment)
+```
+
+**In plain terms.** "A stolen credential is useful to an attacker until it expires — so the
+lifetime you configure *is* the size of the breach." Halving the TTL halves the window; it
+does not merely make the secret feel fresher.
+
+| Symbol | What it is |
+|--------|------------|
+| `validity_period` | Time the credential is accepted: a Vault lease TTL, or the rotation interval |
+| `max_exposure` | Worst case — the leak happens immediately after issue or rotation |
+| `avg_exposure` | Expected case over many incidents; the useful planning number |
+| Vault `default_ttl` / `max_ttl` | 1h / 24h above — initial lease, and the ceiling renewals cannot pass |
+| `AutomaticallyAfterDays` | Secrets Manager rotation cadence; a *static* secret's validity period |
+
+**Walk one example.** The two mechanisms in this section, on the same leaked credential:
+
+```
+  mechanism                       validity     max exposure    avg exposure
+  static + 30-day rotation         30 days       720 hours       360 hours
+  Vault dynamic lease              1 hour          1 hour         30 minutes
+                                                --------------------------
+  ratio                                             720x
+```
+
+Same leak, same attacker, 720x difference in how long the credential works — which is the
+entire argument for the "Dynamic vs Static" table in Section 4, expressed as a number. Note
+that Vault's *default* lease TTL of 768h (32 days) is worse than the Secrets Manager rotation
+schedule; the security win comes from the role explicitly setting `default_ttl="1h"`, not
+from using Vault.
+
+**Stated plainly.** The one place this arithmetic bites is the ESO `refreshInterval: 1h`
+sitting next to a 1h lease. ESO re-syncs on its own clock, so a credential can expire up to a
+full interval before the K8s Secret is refreshed, and pods reading the stale value authenticate
+against an already-revoked user. Keep `refreshInterval` comfortably below the lease TTL (or let
+Vault Agent renew the lease directly) so the refresh always lands ahead of expiry.
+
+**The idea behind it.** Secrets Manager's ~$0.40/secret/month makes secret *count* a real
+design input, which is why Section 12 recommends Parameter Store for bulk low-sensitivity
+values:
+
+```
+  secrets      per month      per year
+      50        $20.00         $240.00
+     500       $200.00       $2,400.00
+   5,000     $2,000.00      $24,000.00
+```
+
+A per-tenant or per-environment secret sprawl of 5,000 entries costs $24,000/year in storage
+fees alone before a single API call — cheap against one breach, expensive against a config
+value that was never a secret to begin with.
+
 ---
 
 ## 7. Real-World Examples

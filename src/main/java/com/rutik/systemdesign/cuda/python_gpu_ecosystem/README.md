@@ -18,6 +18,41 @@ This module is deliberately **Python-primary** rather than dual-language like mo
 
 **Mental model**: Every tool in this stack pays a **fixed, roughly constant cost per kernel launch** — somewhere around 5-20 microseconds of CPU-side driver/API overhead — completely independent of how much work the kernel actually does. A kernel that processes 10 million elements pays that cost once. A Python `for` loop that calls a tiny GPU op once per element pays that cost *N times*, and for small per-call work the launch overhead, not the arithmetic, becomes the entire runtime. This is why "is this Python code slow" almost always reduces to "how many kernel launches does this Python code issue," not "is Python slow at math" — Python never does the math; it only decides how many times to ask the GPU to.
 
+**What the formula is telling you.** The break-even array length is `N* = launch_overhead x bandwidth / bytes_per_element` — "there is a size below which the GPU cannot win, and you can compute it, because a fixed launch cost only pays for itself once the kernel moves enough bytes to take longer than the launch did."
+
+This single number converts the vague advice "vectorize your GPU code" into a testable threshold. Below `N*`, more than half your wall-clock time is the CPU talking to the driver; above it, the GPU's bandwidth is what you are actually paying for.
+
+| Symbol | What it is |
+|--------|------------|
+| `launch_overhead` | Fixed CPU-side driver/API cost per kernel launch — **~5-20 microseconds**, ~10 as a working figure |
+| `bandwidth` | Sustained HBM bandwidth. **~1.5 TB/s** on an A100; ~3 TB/s on H100 |
+| `bytes_per_element` | Bytes the kernel must move per element. SAXPY reads 2 arrays and writes 1: `3 x 4 = 12` bytes |
+| `N*` | Array length where kernel work time exactly equals launch overhead — the 50/50 point |
+| `n < N*` | Launch-bound. The GPU is mostly idle waiting for the next launch |
+
+**Walk one example.** Solve for `N*` on an A100 running an elementwise SAXPY, then check both sides of it:
+
+```
+  N*  =  launch_overhead x bandwidth / bytes_per_element
+      =  10 us  x  1.5 TB/s  /  12 bytes
+      =  10e-6 s  x  1.5e12 B/s  /  12
+      =  1,250,000 elements
+
+  Check the regimes around it:
+
+    n              work time      launch     launch share of total
+    -----------    ----------     -------    ---------------------
+         10,000       0.08 us     10.00 us          99.2%   <- pure overhead
+      1,000,000       8.00 us     10.00 us          55.6%
+      1,250,000      10.00 us     10.00 us          50.0%   <- N*, the crossover
+     10,000,000      80.00 us     10.00 us          11.1%   <- bandwidth-bound
+
+  The 10,000,000-element arrays used throughout §6 sit 8x above N*:
+  launch overhead is 11% of the call, so the GPU is genuinely doing the work.
+```
+
+Two practical consequences. First, the `10_000_000`-element arrays in every §6 example are not arbitrary — they are chosen to sit safely past `N*`, where the measurement reflects the kernel rather than the driver. Second, `N*` scales *with* bandwidth: an H100's ~3 TB/s doubles the break-even to ~2.5 million elements, so faster hardware makes small-array GPU work relatively *worse*, not better. The launch cost is a CPU-side constant that no GPU generation improves.
+
 **Why it matters**: The overwhelming majority of GPU-accelerated ML infrastructure — every RAPIDS pipeline, every PyTorch training loop, every custom fused optimizer — lives entirely in this Python layer, and the engineer who can vectorize/fuse Python-level GPU code correctly turns a kernel-launch-bound mess into code that runs within a few percent of hand-written CUDA C++, without ever leaving Python. Interviews probe this because it is the daily-driver skill for ML-infra and GPU-platform roles: writing a raw CUDA kernel is comparatively rare; knowing *when* Python-level GPU code is already fast enough, and when it silently is not, is constant.
 
 **Key insight**: The real skill in this module is not "can you write a Numba kernel" — it is knowing the **escape-hatch order**: reach for a framework op first, then `torch.compile`'s automatic fusion, then a hand-rolled CuPy/Numba kernel, and only drop to a hand-written PyTorch C++/CUDA extension (or raw CUDA C++) when the op genuinely does not exist anywhere in that chain and cannot be expressed as a composition of existing primitives without paying for extra HBM round-trips between them. Escaping too early wastes engineering time reinventing what cuBLAS/cuDNN/Inductor already do near-optimally; escaping too late leaves real fusion opportunities — and real speedups — on the table.
@@ -116,6 +151,46 @@ xychart-beta
 ```
 
 At roughly 10 microseconds of launch overhead per call, 100,000 sequential launches cost on the order of a full second of wall-clock time before a single byte of the *fixed, tiny* per-call arithmetic is counted — the loop is entirely launch-bound. Fusing the same 100,000 element-wise operations into a single kernel launch (one CuPy `ElementwiseKernel` call, or one vectorized `array + array`) collapses that to a fraction of a millisecond, a difference of roughly three to four orders of magnitude that has nothing to do with arithmetic and everything to do with launch count.
+
+**Read it like this.** `loop_time = n x launch_overhead` versus `fused_time = launch_overhead + n x bytes / bandwidth` — "the loop multiplies the fixed cost by `n`; the fused version pays it once and lets `n` multiply only the part the GPU is actually good at."
+
+The two expressions differ in *where* `n` appears. In the loop it multiplies a 10-microsecond CPU constant; in the fused kernel it multiplies a sub-nanosecond-per-element bandwidth term. Everything about the 5,000x gap follows from that placement.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of elements — **100,000** in both bars above and in §10's BROKEN/FIX pair |
+| `launch_overhead` | ~10 microseconds of driver dispatch, paid `n` times on the left bar and once on the right |
+| `bytes / bandwidth` | The real per-element work: 12 bytes at ~1.5 TB/s = 8 picoseconds per element |
+| `loop_time` | Left bar, ~1,000 ms. Entirely CPU-side dispatch; the SMs are idle nearly the whole time |
+| `fused_time` | Right bar, ~0.2 ms. One launch plus the actual memory traffic |
+
+**Walk one example.** Push `n = 100,000` through both:
+
+```
+  LOOP (one launch per element):
+    loop_time  =  100,000  x  10 us
+               =  1,000,000 us
+               =  1.0 s              <- matches the 1000 ms bar exactly
+
+  FUSED (one launch, all elements):
+    memory traffic  =  100,000 x 12 bytes        =  1.2 MB
+    transfer time   =  1.2e6 B / 1.5e12 B/s      =  0.8 us
+    launch          =                               10.0 us
+    fused_time      =  10.0 + 0.8                =  10.8 us  (the 0.2 ms bar
+                                                    is the same regime, with
+                                                    Python-side dispatch added)
+
+  Ratio, as charted:
+    1,000 ms / 0.2 ms  =  5,000x       =  10^3.7  -> "three to four orders
+                                                      of magnitude"
+
+  Where the loop's second actually went:
+    real arithmetic + memory traffic   =      0.8 us
+    driver dispatch overhead           =  1,000,000 us
+    useful fraction                    =  0.00008%
+```
+
+The final line is the one worth remembering: in the looped version, roughly **eight hundred-thousandths of one percent** of the elapsed time is the GPU doing anything. This is why the anti-pattern is so hard to spot from a utilization dashboard — every operation genuinely is a GPU operation, `nvidia-smi` shows the device as busy-ish, and the code looks like idiomatic GPU code. Only launch *count* reveals it, which is exactly what Nsight Systems' timeline shows as a wall of hairline-thin kernels.
 
 ### DLPack Zero-Copy Handoff vs. the CPU Round-Trip
 
@@ -353,6 +428,41 @@ def block_sum_reduce(data, partial_sums):
     if tid == 0:
         partial_sums[cuda.blockIdx.x] = s_data[0]
 ```
+
+**The idea behind it.** The halving `stride` loop is a tree reduction of depth `log2(block_size)` doing `block_size - 1` total additions — "every thread pairs up with a partner, half of them drop out, and repeating that until one thread remains takes only as many rounds as you can halve the block."
+
+The loop looks like it might be `O(n)` because `stride` counts down through many values. It is not: `stride` *halves* each round, so the count of rounds is logarithmic while the count of additions stays linear. Understanding which of the two is which is the whole point of the pattern.
+
+| Symbol | What it is |
+|--------|------------|
+| `block_size` | Threads in the block — **256** in the `block_sum_reduce` kernel above, matching `cuda.shared.array(shape=256)` |
+| `stride` | Partner distance. Starts at `block_size / 2` = **128** and halves: 128, 64, 32, ... 1 |
+| `steps` | Rounds the loop runs — `log2(block_size)`. The *depth*, and what sets latency |
+| `total adds` | Additions performed across all threads — `block_size - 1`. The *work*, unchanged from a serial sum |
+| `cuda.syncthreads()` | Barrier at the end of each round. Executed `steps` times — this is why depth, not work, dominates |
+
+**Walk one example.** Trace the 256-thread block through its rounds:
+
+```
+  round :    1     2     3     4     5     6     7     8
+  stride:  128    64    32    16     8     4     2     1   -> stride //= 2 -> 0, exit
+  active
+  threads: 128    64    32    16     8     4     2     1
+
+  steps      =  8            =  log2(256)
+  total adds =  128+64+32+16+8+4+2+1
+             =  255          =  256 - 1     (same work as a serial sum)
+
+  Depth vs work:
+    serial sum depth    =  255 sequential adds
+    parallel depth      =    8 rounds
+    latency speedup     =  255 / 8  =  31.9x
+
+  And the barrier count that comes with it:
+    __syncthreads() calls  =  8   (one per round, not one per add)
+```
+
+The `255 = 256 - 1` identity is not a coincidence — summing `n` values always takes exactly `n - 1` additions no matter how you arrange them, so parallelism buys you *nothing* in total work. What it buys is depth: 8 rounds instead of 255. That is also the reason the halving direction matters. A loop that grew the stride instead (1, 2, 4, ...) performs the identical 255 additions in the identical 8 rounds, but has adjacent threads reading strided shared-memory addresses — the bank-conflict pattern from `../shared_memory_and_bank_conflicts/`. Same arithmetic, same depth, several times the runtime.
 
 `@cuda.jit` compiles this Python once (first call), caches the PTX, and every subsequent call launches the already-compiled kernel — the JIT cost is paid once, not per call.
 

@@ -135,6 +135,58 @@ Note: Field names are NOT in the wire format.
       This is why field numbers must never be reused.
 ```
 
+**The idea behind it.** "Every field is announced by one packed byte that carries two facts at once — which field this is, and how to read what comes next — and then the value follows with no name attached."
+
+The tag is where the size win comes from. JSON spends the field name on every message; protobuf spends 3 bits on a type code and the rest on a number, then never mentions the name again.
+
+| Symbol | What it is |
+|--------|------------|
+| field number | The `= 1` / `= 2` in the `.proto`. The permanent identity of a field |
+| wire type | 3-bit code for how to parse the value: `0`=varint, `2`=length-delimited |
+| `<< 3` | Shift the field number left 3 bits to make room for the wire type |
+| `\|` | Bitwise OR — drops the wire type into the 3 low bits just vacated |
+| tag byte | The two packed together, the first byte of every field on the wire |
+
+**Walk one example.** Build both tag bytes from scratch, in binary:
+
+```
+  field 1, wire type 2 (length-delimited, for the string):
+    1 << 3        = 8         binary 0000 1000
+    8 | 2         = 10        binary 0000 1010   -> 0x0A
+    read back: 10 >> 3 = 1 (field), 10 & 7 = 2 (wire type)   correct
+
+  field 2, wire type 0 (varint, for the int32):
+    2 << 3        = 16        binary 0001 0000
+    16 | 0        = 16        binary 0001 0000   -> 0x10
+    read back: 16 >> 3 = 2 (field), 16 & 7 = 0 (wire type)   correct
+
+  full message:
+    0A  05  41 6C 69 63 65   10  1E
+    ^   ^   ^--- "Alice" ---  ^   ^-- 30
+    |   +-- length 5          +-- tag: field 2, varint
+    +-- tag: field 1, length-delimited
+    = 9 bytes total
+```
+
+**Why 3 bits, and what breaks without them.** The parser must know how many bytes to consume *before* it knows what the field means — otherwise an unknown field would be unparseable and the whole message unreadable. The wire type tells it "read a varint" or "read a length then that many bytes," so a receiver can skip fields it has never heard of and keep going. That single property is what makes protobuf forward-compatible: old code reading new messages just steps over the additions. Take the wire type away and every schema change becomes a breaking change.
+
+**Where the byte savings actually come from.** Compare the two encodings field by field:
+
+```
+  field       protobuf bytes            JSON bytes
+  ---------   -----------------------   -------------------------------
+  name        1 tag + 1 len + 5 data    "name":"Alice"  = 14
+                              = 7
+  age         1 tag + 1 varint = 2      "age":30        = 8
+  structure   0 (none needed)           { } and one ,   = 3
+  ---------   -----------------------   -------------------------------
+  total       9 bytes                   25 bytes
+
+  protobuf is 9/25 = 36% the size  ->  64% smaller
+```
+
+Note where the win is concentrated: `age` costs 2 bytes instead of 8, a 4x reduction, because a small integer is one varint byte rather than two ASCII digits plus a quoted 5-character name. Strings barely improve — `"Alice"` still costs 5 bytes of UTF-8 either way. This is the rule of thumb worth carrying into an interview: **protobuf's advantage scales with how numeric and how deeply-nested your messages are**, and nearly vanishes for messages that are mostly long free-text strings.
+
 ### Protobuf Schema Evolution: Safe vs. Breaking Changes
 
 ```mermaid

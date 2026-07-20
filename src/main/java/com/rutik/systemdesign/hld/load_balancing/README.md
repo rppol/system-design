@@ -107,6 +107,38 @@ A more sophisticated version of IP hash. Servers are placed on a "hash ring." Ad
 - **Best for**: Cache servers, where you want the same client to always hit the same cache node
 - **Problem**: More complex to implement than simple IP hash
 
+**What the formula is telling you.** "`server = hash(key) % N` is not a stable mapping — it is a mapping that is redefined every time `N` changes, which is why changing `N` moves almost every key."
+
+Modulo hashing looks harmless because it distributes evenly. The failure is not distribution, it is *stability under resize* — and the difference between the two schemes is the entire reason cache tiers use rings.
+
+| Symbol | What it is |
+|--------|------------|
+| `hash(key)` | A large integer derived from the routing key (client IP, `product_id`, cache key) |
+| `N` | Current number of servers in the pool — the value that changes on scale-out or failure |
+| `% N` | Remainder after division; the bucket index. Changing `N` changes every remainder |
+| keys remapped (modulo) | Approaching 100% — nearly every key lands on a different server |
+| keys remapped (ring) | About `1/N` — only the departing/arriving server's arc moves |
+
+**Walk one example.** One key through a modulo pool that grows from 4 servers to 5:
+
+```
+  hash(key) = 1,234,567
+
+  N = 4 :  1,234,567 % 4 = 3   -> server 3
+  N = 5 :  1,234,567 % 5 = 2   -> server 2      <- moved, and it never failed
+
+  Fraction of keys that keep their server when N goes 4 -> 5:
+      only keys where (h % 4) == (h % 5), about 1 in 5 -> ~20% stay, ~80% move
+
+  Consistent hashing at the case study's 200-server cache tier:
+      keys remapped = 1 / N = 1 / 200 = 0.005 = 0.5%
+      modulo        = ~100%
+
+      ratio = 100% / 0.5% = 200x fewer keys disturbed
+```
+
+The operational consequence is a cache stampede, not a correctness bug: after a modulo resize, ~100% of lookups miss and every one becomes an origin fetch at the same instant. At 0.5%, the origin barely notices — which is exactly the difference between the 41% and 94% flash-sale hit rates reported in the case study's results.
+
 #### Random
 Route requests to a randomly selected backend.
 
@@ -372,6 +404,36 @@ The load balancer sends periodic health checks to each backend:
 
 A backend is marked unhealthy after N consecutive failures (configurable). It is marked healthy again after M consecutive successes. This hysteresis prevents flapping.
 
+**In plain terms.** "How long a dead server keeps receiving traffic is not a tuning mystery — it is exactly the check interval multiplied by the failure threshold."
+
+Detection time is a product of two numbers you configure, and it trades directly against false positives. Every configuration argument about health checks is really an argument about which of the two factors to change.
+
+| Symbol | What it is |
+|--------|------------|
+| interval | Seconds between consecutive health checks, `10s` in the case study |
+| N (unhealthy threshold) | Consecutive failures required before removal from rotation, `3` |
+| M (healthy threshold) | Consecutive successes required to rejoin, `2` |
+| detection time | `interval x N` — worst-case seconds a failed backend keeps serving traffic |
+| recovery time | `interval x M` — seconds a recovered backend waits before rejoining |
+
+**Walk one example.** The case study's `interval = 10s`, `unhealthy_threshold = 3`, `healthy_threshold = 2`:
+
+```
+  detection time = 10 s x 3 = 30 s   <- bad traffic window before removal
+  recovery time  = 10 s x 2 = 20 s   <- delay before a healed server returns
+
+  Compare the pitfall configurations:
+      interval 60 s, threshold 1  ->  60 x 1 = 60 s of bad traffic
+      interval 10 s, threshold 2  ->  10 x 2 = 20 s  (the flapping config)
+      interval  5 s, threshold 3  ->   5 x 3 = 15 s  (fast AND tolerant)
+
+  Requests lost during detection, at 50,000 req/sec across 500 instances:
+      per-instance rate = 50,000 / 500 = 100 req/sec
+      100 x 30 s = 3,000 requests hit the dead backend before removal
+```
+
+Note the third row: dropping the interval to 5s while *raising* the threshold to 3 detects failure faster than the 2-threshold config yet survives a 4-second GC pause, because a pause shorter than `interval x (N - 1)` can never accumulate N consecutive failures. Shortening the interval is almost always the better lever than lowering the threshold.
+
 ---
 
 ## Real-World Examples
@@ -625,6 +687,42 @@ An e-commerce platform preparing for Black Friday:
 - **Deployment cadence:** 8 deploys/day, zero downtime required
 - **Hot products:** 1 SKU may receive 80% of read traffic during a flash sale
 
+**Read it like this.** "Fleet size per tier is not the traffic share — it is traffic share divided by what one instance of *that* tier can absorb, which is why the 60% tier gets fewer boxes than the 30% tier."
+
+The instinct is to split 500 instances 60/30/10 to match the traffic mix. The actual split (150/200/150) is the opposite for static versus API, and the per-instance arithmetic below is what justifies it.
+
+| Symbol | What it is |
+|--------|------------|
+| peak req/sec | Total offered load, `50,000` req/sec |
+| traffic share | Fraction of requests hitting a tier: `60%` static, `30%` API, `10%` WebSocket |
+| tier fleet | Instances assigned to that tier: `150` static, `200` API, `150` WebSocket |
+| per-instance load | `peak x share / tier fleet` — what one box in that tier must sustain |
+| availability target | `99.99%`, i.e. `0.01%` of the year may be downtime |
+
+**Walk one example.** Per-tier load, then the yearly error budget:
+
+```
+  static : 50,000 x 0.60 = 30,000 req/s  /  150 =  200 req/s per instance
+  API    : 50,000 x 0.30 = 15,000 req/s  /  200 =   75 req/s per instance
+  WS     : 50,000 x 0.10 =  5,000 req/s  /  150 =   33 conn/s per instance
+
+  fleet average = 50,000 / 500 = 100 req/s per instance
+
+  Static carries 200/75 = 2.7x the API tier's per-instance rate, on 25% fewer
+  boxes -- because a cached image is orders of magnitude cheaper than a
+  checkout that can run 800ms.
+
+  Availability budget:
+      unavailable fraction = 1 - 0.9999 = 0.0001
+      minutes per year     = 365 x 24 x 60 = 525,600
+      budget = 0.0001 x 525,600 = 52.6 minutes/year   (the stated "52 min")
+
+  What one slow failover costs: 60 s of bad traffic (the 60 s health-check
+  pitfall) = 60 / (52.6 x 60) = 1.9% of the annual budget, per occurrence.
+```
+
+The last line closes the loop with the health-check math above: detection time is not an isolated tuning knob, it is a direct withdrawal from the availability budget stated in this same problem statement.
+
 ### Architecture Overview
 
 ```mermaid
@@ -665,6 +763,40 @@ flowchart LR
 1. **L7 (ALB) over L4 (NLB) at the edge.** Need content-based routing for `/api/*` vs `/static/*` and WebSocket upgrade detection. *Alternative rejected:* L4 NLB — cannot inspect HTTP path, would require separate IPs per route.
 
 2. **Least-Connections for `/api/*`.** API duration varies 50ms (product page) to 800ms (checkout). Round-robin would overload servers handling long checkouts. *Alternative rejected:* round-robin — observed 3x latency variance across hot/cold servers during load tests.
+
+**Put simply.** "Round Robin equalizes the number of requests each server has received; Least Connections equalizes the amount of work each server is currently holding — and those are only the same thing when every request costs the same."
+
+The choice between them is decided by one ratio: how far apart the cheapest and most expensive request are. Below that ratio the two algorithms are indistinguishable; above it, Round Robin systematically overloads whichever server drew the long requests.
+
+| Symbol | What it is |
+|--------|------------|
+| duration spread | `slowest / fastest` request time — `800ms / 50ms` on this API tier |
+| Round Robin | Assigns request `i` to server `i mod N`; counts requests, ignores cost |
+| Least Connections | Assigns to the server with the fewest in-flight requests; tracks cost implicitly |
+| occupancy | Concurrent requests a server holds = `arrival rate x average duration` |
+| utilization variance | Spread in per-server busyness — `35%` before the switch, `8%` after |
+
+**Walk one example.** Eight requests, alternating cheap and expensive, across two servers:
+
+```
+  duration spread = 800 ms / 50 ms = 16x
+
+  Round Robin (strict alternation, S1 gets every odd request):
+      S1 <- 800, 800, 800, 800 ms  = 3,200 ms of work
+      S2 <-  50,  50,  50,  50 ms  =   200 ms of work
+      imbalance = 3,200 / 200 = 16x   <- exactly the duration spread
+
+  Least Connections (routes to whoever is free):
+      S1 <- 800, 800 ms                    = 1,600 ms
+      S2 <-  50, 50, 50, 50, 800, 800 ms   = 1,800 ms
+      imbalance = 1,800 / 1,600 = 1.125x
+
+  Occupancy check on the API tier (75 req/s per instance, from above):
+      cheap-only  : 75 x 0.05 s = 3.75 concurrent requests
+      checkout-only: 75 x 0.80 s = 60 concurrent requests
+```
+
+That 16x is not a coincidence — under strict alternation Round Robin's worst-case imbalance *is* the duration spread, which is why the metric that moved after the switch was utilization variance (35% to 8%), not throughput. Note also the occupancy line: the same arrival rate needs 16x more concurrent slots when it is checkouts rather than product pages, which is the number that should drive connection-pool and thread-pool sizing behind the load balancer.
 
 3. **Consistent hashing for WebSocket (by `user_id`).** Long-lived (avg 30 min) connections must survive deploys; consistent hashing keeps the same user on the same server until that server leaves the pool. *Alternative rejected:* cookie-based sticky sessions — cookie loss (incognito mode, app reinstall) breaks session affinity.
 
@@ -754,6 +886,37 @@ aws elbv2 modify-listener --listener-arn $LISTENER \
 - **Zero-downtime deploys:** 1,247 deploys YTD, 0 customer-impacting incidents
 - **Server utilization variance:** dropped from 35% to 8% after switch to least-connections
 - **Auto-scale events:** scaled from 50 to 487 instances in 14 minutes during Black Friday surge
+
+**What it means.** "Scale-out speed is a rate, not an event: instances added per minute, measured against how fast the traffic it is chasing is growing."
+
+An auto-scaling result is only meaningful next to the load curve it was racing. Converting "50 to 487 in 14 minutes" into a per-minute rate is what lets you check whether the fleet could ever have kept up.
+
+| Symbol | What it is |
+|--------|------------|
+| start / end fleet | Instances before and after the surge: `50` -> `487` |
+| ramp window | Wall-clock time to complete the scale-out: `14` minutes |
+| provisioning rate | `(end - start) / window` — instances added per minute |
+| growth factor | `end / start` — how many times the fleet multiplied |
+| slow start | Per-instance traffic ramp (`60s`) before a new box takes full share |
+
+**Walk one example.** The stated surge, converted to rates and capacity:
+
+```
+  instances added   = 487 - 50 = 437
+  provisioning rate = 437 / 14 min = 31.2 instances/minute
+  growth factor     = 487 / 50 = 9.7x
+
+  Capacity gained per minute, at the fleet average of 100 req/s per instance:
+      31.2 x 100 = 3,120 req/s of new capacity per minute
+
+  Time to cover the full 50,000 req/s peak from a cold 50-instance fleet:
+      50,000 / 3,120 = 16.0 minutes of pure provisioning
+
+  Plus the 60 s slow_start ramp on the last batch, so usable capacity trails
+  the instance count by about a minute throughout.
+```
+
+The 16-minute figure is the reason the case study also lists predictive/scheduled scaling as part of Black Friday prep: at 3,120 req/s of capacity added per minute, reactive scaling alone cannot follow a demand curve that goes from idle to 50,000 req/s in less time than that. Auto-scaling absorbs the surprise; it does not replace pre-warming for a known event.
 
 ### Common Pitfalls / Lessons Learned
 

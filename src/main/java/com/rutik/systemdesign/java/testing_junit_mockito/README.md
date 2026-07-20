@@ -591,6 +591,64 @@ sequenceDiagram
 
 Test pyramid position: unit 80% (this test, all three collaborators mocked) | integration 15% | e2e 5%.
 
+**In plain terms.** "1,200 tests in 8 seconds" is a per-test budget, and reading it that
+way is what turns the pyramid from a diagram into a constraint: `8,000 ms / 1,200 tests`
+leaves **6.7ms per test**, which is a budget that one real network call blows on the
+first test.
+
+| Symbol | What it is |
+|--------|------------|
+| N | Tests in the tier. 1,200 here |
+| Suite wall time | Total seconds the tier takes. Under 8s here |
+| Per-test budget | `suite time / N`. The ceiling any single test must fit under |
+| Collaborator latency | Real cost per call. 200ms for the `FraudDetector` ML service |
+| Mocked latency | Effectively 0 — Mockito returns a stubbed value with no I/O |
+
+**Walk one example.** The same 1,200 tests, with the `FraudDetector` mocked and not
+mocked, assuming one fraud call per test:
+
+```
+  mocked (as written)
+    suite wall time                                   =   8,000 ms
+    per-test budget = 8,000 / 1,200                   =     6.7 ms
+
+  FraudDetector left real at 200 ms/call
+    fraud time alone = 1,200 x 200 ms                 = 240,000 ms
+                                                      =     240 s = 4 min
+    slowdown = 240 s / 8 s                            =      30x
+```
+
+One collaborator, one call per test, and the suite goes from 8 seconds to 4 minutes — a
+30x regression from a single unmocked dependency, before counting the gateway and the
+repository. That 6.7ms budget is the real argument for mocking: not purity, but the fact
+that a suite nobody waits for is a suite nobody runs.
+
+**Read it like this.** The 80 / 15 / 5 split is a *ratio*, so it fixes the size of the
+other two tiers the moment the unit tier is known.
+
+| Symbol | What it is |
+|--------|------------|
+| Unit share | 0.80 — fast, isolated, all collaborators mocked |
+| Integration share | 0.15 — real wiring, real database, no external network |
+| E2E share | 0.05 — full user journeys, slowest and flakiest |
+| Total | `unit count / unit share`. Everything else follows from this |
+
+**Walk one example.** Back out the whole suite from the 1,200 unit tests:
+
+```
+  total   = 1,200 / 0.80        = 1,500 tests
+  unit    = 1,500 x 0.80        = 1,200 tests   (this tier)
+  integ   = 1,500 x 0.15        =   225 tests
+  e2e     = 1,500 x 0.05        =    75 tests
+                                  -----
+                                  1,500  check
+```
+
+Note what the inverted "ice-cream cone" would mean with the same 1,500 total: 75 unit
+tests and 1,200 e2e tests. At even 2 seconds per e2e test that is 2,400 seconds — 40
+minutes of CI — versus the 8 seconds the pyramid-shaped suite takes for its unit tier.
+The shape, not the count, is what sets the feedback loop.
+
 ### The Test Class
 
 ```java

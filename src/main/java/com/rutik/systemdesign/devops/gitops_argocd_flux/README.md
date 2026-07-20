@@ -177,6 +177,52 @@ spec:
   wait: true                # wait for resources to become Ready
 ```
 
+### Decoding the two intervals
+
+Flux splits polling across two objects — `GitRepository.interval: 1m` fetches commits,
+`Kustomization.interval: 5m` applies them — and they compose rather than override. The
+deploy latency an engineer actually experiences after `git push` is the sum:
+
+```
+worst_case_deploy_latency = source_interval + apply_interval
+avg_deploy_latency        = (source_interval + apply_interval) / 2
+```
+
+**What it means.** "A push has to wait for two independent clocks to tick, one after the
+other." Nobody sets `interval: 5m` intending a 6-minute deploy, but that is the ceiling this
+pair produces.
+
+| Symbol | What it is |
+|--------|------------|
+| `source_interval` | `GitRepository.interval` — how often Flux fetches the repo (1m here) |
+| `apply_interval` | `Kustomization.interval` — how often it reconciles the fetched state (5m here) |
+| Worst case | Commit lands just after a fetch, and the fetch lands just after an apply |
+| Average | Each clock is, on average, halfway through its period when the commit arrives |
+
+**Walk one example.** The same manifest, measured from `git push` to running pods:
+
+```
+  event                                       elapsed
+  git push                                     0:00
+  GitRepository fetch (up to 1m later)         1:00
+  Kustomization apply (up to 5m later)         6:00   <- worst case
+                                               3:00   <- average
+```
+
+**Read it like this.** Drift self-healing is governed by the second interval only, since a
+`kubectl edit` never touches Git and there is nothing new to fetch:
+
+```
+worst_case_drift_correction = apply_interval        (5m; average 2.5m)
+```
+
+That is the window in which an out-of-band change is live in the cluster, and it is why
+Section 10's advice is to treat `kubectl edit` as an incident-only escape hatch — with
+`selfHeal: true` the change is not rejected, it is simply reverted a few minutes later, which
+is far more confusing than an outright denial. Shrink both intervals to cut latency, or drive
+the source side with a webhook receiver so pushes reconcile immediately and the interval
+becomes a fallback rather than the primary path.
+
 ### The CI/CD handoff (image tag bump)
 
 ```yaml

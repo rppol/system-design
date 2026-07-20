@@ -297,6 +297,41 @@ few dozen instructions; L2 already costs as much as a small function call; and H
 ~800-cycle tail is precisely the latency that resident-warp oversubscription (§6) exists
 to hide.
 
+**In plain terms.** "Every step down this ladder buys you far more room at a steeply
+worse price, and the two exchange rates are not the same." The capacity ratio between two
+tiers is always much larger than the latency ratio, and that mismatch is the entire reason
+tiling is profitable rather than a wash.
+
+| Symbol | What it is |
+|--------|------------|
+| Registers | ~1 cycle, 65,536 x 32-bit per SM = 256 KB, private to one thread |
+| Shared / L1 | ~20-30 cycles, up to 228 KB per SM, addressable by every thread in a block |
+| L2 | ~200 cycles, ~40 MB, shared by all 132 SMs — the last stop before leaving the die |
+| HBM3 | ~400-800 cycles, 80 GB at ~3 TB/s — off-chip, and the only tier that survives |
+| Latency ratio | How much slower the next tier is, per access |
+| Capacity ratio | How much more data the next tier holds |
+
+**Walk one example.** Push the four numbers through both ratios, tier by tier:
+
+```
+  step                 latency ratio              capacity ratio
+  ----                 -------------              --------------
+  reg   -> shared        30 /   1 =  30x          228 KB /  256 KB =  0.9x
+  shared -> L2          200 /  30 = 6.7x           40 MB /  228 KB =  180x
+  L2    -> HBM3         800 / 200 =   4x           80 GB /   40 MB = 2048x
+
+  full drop reg -> HBM3  800 / 1  = 800x
+```
+
+Read the bottom row first: a register hit and an HBM hit differ by 800x in time. But look
+at the shared-memory row — it costs 30x more than a register while holding slightly *less*
+data than the register file. Shared memory is not a capacity tier at all; it is a
+*sharing* tier, and its only justification is that a value one thread loads can be read by
+the other 1,023 threads in the block instead of each fetching it from HBM at 800 cycles.
+The 180x and 2048x capacity jumps further down are what force tiling to exist: the data
+genuinely does not fit any higher, so the job is to make each byte that crosses the
+800-cycle boundary get reused as many times as possible before it is evicted.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -358,6 +393,50 @@ ceiling_by_block_count = max_blocks_per_sm * threads_per_block   (capped at max_
 resident_threads = min(ceiling_by_registers, ceiling_by_shared_mem, ceiling_by_block_count,
                         max_threads_per_sm)
 ```
+
+**What this actually says.** "Work out how many threads each of the three budgets would
+allow if it were the only limit, then throw away all but the stingiest answer." Occupancy
+is never the average of three constraints and never their sum — it is a `min()`, which is
+why tuning the resource that is *not* currently smallest changes nothing at all.
+
+| Symbol | What it is |
+|--------|------------|
+| `regs_per_sm` | Total 32-bit registers the SM physically owns — 65,536 on every modern NVIDIA GPU |
+| `regs_per_thread` | What `ptxas` decided this kernel needs per thread; read it off `nvcc --ptxas-options=-v` |
+| `smem_per_sm` | The SM's configurable shared-memory pool — up to 228 KB on Ampere/Hopper |
+| `smem_per_block` | Bytes of `__shared__` one block reserves; reserved for the block's whole lifetime |
+| `max_blocks_per_sm` | Hard hardware cap on resident blocks, ~32, independent of how small they are |
+| `max_threads_per_sm` | Hard hardware cap on resident threads, 2048 — the denominator of "occupancy" |
+| `//` | Integer division. It *floors*, and that flooring is where occupancy silently disappears |
+| `min(...)` | The binding constraint. Only the smallest of the four numbers ever matters |
+
+**Walk one example.** An H100 SM, a kernel at 64 registers/thread and 8 KB of shared
+memory per block, launched with 1024 threads/block:
+
+```
+  register ceiling
+    threads affordable   = 65,536 regs / 64 regs per thread = 1,024 threads
+    whole blocks of 1024 = 1,024 / 1,024                    =     1 block
+    -> ceiling_by_registers                                 = 1,024 threads
+
+  shared-memory ceiling
+    blocks affordable    = 228 KB / 8 KB per block          =    28 blocks
+    -> ceiling_by_shared_mem = 28 x 1,024                   = 28,672 threads
+
+  block-count ceiling
+    -> ceiling_by_block_count = 32 blocks x 1,024           = 32,768 threads
+
+  hard cap
+    -> max_threads_per_sm                                   =  2,048 threads
+
+  resident = min(1,024,  28,672,  32,768,  2,048)           =  1,024 threads
+  occupancy = 1,024 / 2,048                                 =   50%
+```
+
+Registers bind, and nothing else is close: the shared-memory budget could have carried 28x
+more threads than actually fit. Halving `smem_per_block` from 8 KB to 4 KB would move that
+ceiling to 58,368 and change occupancy by exactly zero percent — the only lever that moves
+this kernel is `regs_per_thread`, which matches the 64-registers row of the table below.
 
 The same three-ceiling logic as a decision flow — one launch config, three independent
 computations, and the smallest one wins:
@@ -486,6 +565,41 @@ leaves the partition with nothing else to issue, and the SM idles for the full
 400-800 cycle memory latency. With 16+ resident warps, the scheduler almost always has
 a ready alternative.
 
+**Read it like this.** "One partition can retire one warp instruction per cycle, so a
+600-cycle stall is only free if 600 other instructions are sitting there ready to issue."
+Latency hiding is a bookkeeping problem: cycles of stall on one side, issuable
+instructions on the other, and the SM idles for whatever the second column cannot cover.
+
+| Symbol | What it is |
+|--------|------------|
+| `2048` | Max resident threads per SM — the hardware cap, not a tuning knob |
+| `32` | Threads per warp; the divisor that turns a thread budget into a warp budget |
+| `4` | Processing partitions per SM, each with its own scheduler and register-file slice |
+| `1 instr/cycle` | What one partition's dispatch unit can issue — the drain rate |
+| `600` | Cycles the HBM load in the trace above takes to return |
+| `16` | Resident warps one partition can choose among at 100% occupancy |
+
+**Walk one example.** A fully occupied H100 SM, one partition, one HBM stall:
+
+```
+  resident warps per SM      = 2,048 threads / 32 threads per warp =  64 warps
+  warps per partition        =    64 warps / 4 partitions          =  16 warps
+  stall to cover             =                                        600 cycles
+  issue rate                 =                                          1 instr/cycle
+  instructions needed        = 600 cycles x 1 instr/cycle          = 600 instructions
+
+  warps available to cover   = 16 resident - 1 stalled             =  15 warps
+  independent instructions
+    each must supply         = 600 / 15                            =  40 instructions
+```
+
+Even at 100% occupancy the SM does not hide an HBM round trip for free: each of the 15
+other warps must have ~40 instructions it can run without waiting on its own load. Drop to
+2 resident warps and the single survivor would need all 600 by itself — which is why the
+trace above skips a stalled warp at "zero overhead" yet a low-occupancy kernel still
+stalls. Occupancy buys you *candidates* to issue; instruction-level parallelism inside
+each warp is what turns candidates into covered cycles.
+
 ---
 
 ## 7. Real-World Examples
@@ -582,12 +696,77 @@ a ready alternative.
    // Achieved occupancy rises from ~0-25% (spill-bound) to 100% (2048 resident threads)
    ```
 
+   **Stated plainly.** "Registers are not requested per block, they are requested per
+   thread and multiplied by every thread you launch — so a modest-sounding per-thread
+   number becomes an impossible SM-wide bill." `__launch_bounds__` is how you state the
+   occupancy you want up front and let `ptxas` solve for the register budget backwards.
+
+   | Symbol | What it is |
+   |--------|------------|
+   | `96` | Registers per thread `ptxas` chose on its own, given the aggressive unrolling |
+   | `1024` | Threads per block the author picked because it is the hardware maximum |
+   | `65,536` | Registers the whole SM owns — the number the bill is checked against |
+   | `__launch_bounds__(1024, 2)` | "Assume 1024 threads/block and make at least 2 blocks fit" |
+   | `minBlocksPerMultiprocessor` | The second argument, `2` — the knob that forces the register cap |
+   | Spill | Registers that did not fit, demoted to local memory (which lives in HBM, ~800 cycles) |
+
+   **Walk one example.** The broken launch, then what the fix demands instead:
+
+   ```
+     BROKEN
+       registers requested = 1,024 threads x 96 regs = 98,304 registers
+       registers available =                            65,536 registers
+       shortfall           = 98,304 - 65,536         =  32,768 registers
+       -> not one block fits; ptxas spills to local memory, silently, no compile error
+
+     FIX: __launch_bounds__(1024, 2)
+       threads demanded    = 2 blocks x 1,024        =   2,048 threads
+       budget per thread   = 65,536 / 2,048          =      32 registers
+       -> ptxas must now fit the kernel in 32 regs/thread or restructure the unroll
+       -> 2,048 resident threads / 2,048 cap         =    100% occupancy
+   ```
+
+   The trap is that the broken version does not fail loudly. Asking for 32,768 more
+   registers than exist is a *compile-time* impossibility, yet the compiler resolves it by
+   spilling rather than erroring — so the kernel launches, produces correct results, and
+   quietly does its "register" traffic at HBM latency. The only signals are
+   `nvcc --ptxas-options=-v` reporting spill stores/loads and Nsight Compute showing local
+   memory traffic on a kernel that has no `__shared__` and no explicit local arrays.
+
 2. **Confusing "SM count" with "core count" in marketing material.** A GPU spec sheet's
    "10,000 CUDA cores" is `SM_count x cores_per_SM` — an H100's 132 SMs x 128 FP32
    cores/SM = 16,896 "cores," but those cores execute in lockstep groups of 32 (warps),
    not as 16,896 independent scalar processors; treating the core count as if it were
    16,896 independent CPUs badly overestimates achievable parallelism for latency-bound
    code.
+
+   **Put simply.** "A CUDA core is a lane, not a processor — divide the marketing number
+   by 32 to get how many genuinely independent things the GPU can be doing." The spec
+   sheet counts arithmetic lanes; the scheduler counts warps, and only the second number
+   tells you how much *divergent* work the machine can pursue at once.
+
+   | Symbol | What it is |
+   |--------|------------|
+   | `132` | SMs on an H100 — independent schedulers, the real unit of residency |
+   | `128` | FP32 CUDA cores per SM — arithmetic lanes, not instruction streams |
+   | `16,896` | The spec-sheet "CUDA cores" figure, i.e. `132 x 128` |
+   | `32` | Warp width; 32 lanes always execute the same instruction in the same cycle |
+   | `4` | Warp-wide execution units per SM, one per processing partition (`128 / 32`) |
+
+   **Walk one example.** Convert the marketing count into scheduling reality:
+
+   ```
+     advertised lanes    = 132 SMs x 128 FP32 cores = 16,896 "CUDA cores"
+     lanes per warp                                 =     32
+     independent streams = 16,896 / 32              =    528 warp-wide units
+     cross-check         = 132 SMs x 4 partitions   =    528  (same number, both ways)
+   ```
+
+   528, not 16,896, is the number of *different* instructions an H100 can be executing in
+   one cycle. If your kernel branches 16,896 different ways, 16,368 of those lanes are
+   sitting masked off. The two derivations agreeing — lanes ÷ warp width, and SMs ×
+   partitions — is the check that you have understood the hierarchy rather than memorized
+   one path through it.
 
 3. **Hardcoding compute capability instead of querying it.** A kernel gated on
    `#if __CUDA_ARCH__ >= 800` compiled once and deployed to a fleet mixing A100s and
@@ -812,6 +991,45 @@ fused_bias_activation<<<grid, 256>>>(out, in, bias, n);
 // kernel speedup versus V100 improves from 1.1x to 1.7x, now consistent with the
 // SM-count/clock/bandwidth ratio the team originally expected.
 ```
+
+**What the formula is telling you.** "Two ceilings were computed from the same launch, one
+said 25% and one said 12.5%, and the kernel got the smaller one." The team read the
+register ceiling, found nothing alarming, and stopped — but the `min()` from §6 never
+cared about the ceiling they checked.
+
+| Symbol | What it is |
+|--------|------------|
+| `16384` | Floats in the `__shared__` tile — the only shared-memory allocation in the kernel |
+| `4 bytes` | Size of one `float`; the multiplier that turns a float count into a byte bill |
+| `256` | Threads per block in the launch, unchanged across both fleets |
+| `100` | Registers per thread reported by `nvcc --ptxas-options=-v` on both targets |
+| Carveout | How the SM's unified pool splits between shared memory and L1; defaults conservatively |
+| `2048` | Resident-thread cap per SM — the denominator both ceilings are measured against |
+
+**Walk one example.** Compute both ceilings the way the profiler does, and compare:
+
+```
+  shared-memory ceiling
+    tile bytes per block  = 16,384 floats x 4 bytes  = 65,536 B = 64 KB
+    default carveout fits =                              1 block of 64 KB
+    resident threads      = 1 block x 256 threads    =   256 threads
+    -> occupancy ceiling  = 256 / 2,048              =  12.5%
+
+  register ceiling
+    threads affordable    = 65,536 regs / 100 regs   =   655 threads
+    whole blocks of 256   = 655 / 256                =     2 blocks
+    resident threads      = 2 blocks x 256           =   512 threads
+    -> occupancy ceiling  = 512 / 2,048              =  25.0%
+
+  binding ceiling = min(12.5%, 25.0%) = 12.5%   <- shared memory, not registers
+```
+
+The register ceiling was never the problem, which is why the source looked fine: 100
+registers/thread is unremarkable and identical on both fleets. The shared-memory ceiling
+moved because the *carveout default* moved between generations while the kernel's 64 KB
+demand stayed fixed — a hardware-policy change the source code cannot show you. Reading
+occupancy off the source means computing all three ceilings; reading it off Nsight Compute
+means the hardware computes them for you.
 
 **Metrics after the fix**: Nsight Compute "Achieved Occupancy" 24.8% → 68.3%; DRAM
 throughput 41% → 79% of peak; end-to-end kernel latency 1.1x → 1.7x faster than the

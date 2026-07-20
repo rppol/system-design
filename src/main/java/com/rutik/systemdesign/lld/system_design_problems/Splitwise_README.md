@@ -229,6 +229,50 @@ flowchart TD
 
 Traces the greedy debt-simplification loop: each iteration matches the largest creditor against the largest debtor, settles the smaller of the two amounts, and requeues whichever side still has a remainder — producing at most N-1 transactions for N users.
 
+**Stated plainly.** The greedy rule `settle = min(creditAmt, debtAmt)` says "always pay off the
+larger of the two parties completely, so at least one person leaves the table each round." That is
+the whole proof of the `N-1` bound: every iteration zeroes out at least one participant, and once
+`N-1` people are settled the last one must be at zero too, because net balances always sum to
+zero — money is only ever moved, never created.
+
+| Symbol | What it is |
+|--------|-----------|
+| `N` | Number of users in the group |
+| `netBalance(u)` | One signed number per user: total paid-for-others minus total owed |
+| `creditAmt` | `netBalance` of the largest creditor, popped off the max-heap (positive) |
+| `debtAmt` | Absolute `netBalance` of the largest debtor, popped off its max-heap |
+| `settle` | `min(creditAmt, debtAmt)` — the amount transferred this round |
+| `N-1` | Upper bound on settling transactions, since each round retires a user |
+
+**Walk one example.** The three-way tangle from the intuition above — A owes B $10, B owes C $10,
+C owes A $5:
+
+```
+step 1  collapse pairwise debts into one net number per user
+        net(A) = -10 (owes B)  + 5 (C owes A)   = -5.00     debtor
+        net(B) = +10 (A owes B) - 10 (owes C)   =  0.00     already settled
+        net(C) = +10 (B owes C) -  5 (owes A)   = +5.00     creditor
+        check   -5.00 + 0.00 + 5.00             =  0.00     invariant holds
+
+step 2  heaps
+        creditorHeap = [C: 5.00]        debtorHeap = [A: 5.00]
+
+step 3  one greedy round
+        settle       = min(5.00, 5.00)          = 5.00
+        transaction  = A pays C $5.00
+        remainder_C  = 5.00 - 5.00              = 0.00   -> not pushed back
+        remainder_D  = 5.00 - 5.00              = 0.00   -> not pushed back
+        both heaps now empty -> done
+
+result  3 pairwise debts  ->  1 transaction
+        bound for N = 3 users: at most N-1 = 2; achieved 1 (B dropped out at step 1)
+```
+
+Result: B never appears in the settlement at all, despite being party to two of the three original
+debts — netting made B's $10 in and $10 out cancel before the greedy loop ever ran. This is why
+step 1 matters as much as the heap: the netting pass alone removes every user whose books already
+balance, and the `min(...)` rule then guarantees the remainder is cleared in at most `N-1` moves.
+
 ---
 
 ## Sample Output

@@ -167,6 +167,44 @@ flowchart LR
 
 Every unique label combination is a new series: 5M distinct `{path,user}` pairs at ~1.5KB each blow up to ~7.5 GB of head RAM and OOM-kill the server; the fix is dropping unbounded ID labels and keeping only bounded dimensions like `method`/`route_template`/`status`.
 
+### Decoding the cardinality arithmetic
+
+The explosion is not addition, it is a product — and that is the whole reason it surprises people:
+
+```
+  series  =  card(label_1) x card(label_2) x ... x card(label_n) x instances
+  head RAM  ~=  series x 1.5 KB
+```
+
+**What the formula is telling you.** "Adding a label does not add series, it multiplies them — and RAM tracks the series count, not the traffic." A metric's memory cost is therefore set entirely by how many distinct *values* its labels can take, and is completely unrelated to how many requests per second flow through it.
+
+| Symbol | What it is |
+|--------|------------|
+| `card(label)` | Cardinality: how many distinct values that one label can ever take |
+| `instances` | Scrape targets exposing the metric; every pod multiplies the series count again |
+| `series` | Distinct `(metric, label-set)` combinations — the thing Prometheus holds in the head |
+| `~1.5 KB` | Per-series head-block overhead (labels, index entries, open chunk), not per sample |
+
+**Walk one example.** A single `http_requests_total`, first bounded, then with one ID label added:
+
+```
+  BOUNDED labels only
+    method   5  (GET POST PUT PATCH DELETE)
+    route  200  (templated: /orders/:id/items/:item)
+    status   6  (2xx 3xx 4xx 5xx classes + 2 specials)
+    pods    20
+    series  =  5 x 200 x 6 x 20            =    120,000
+    head    =  120000 x 1.5 KB             =    ~180 MB      comfortable
+
+  ADD ONE unbounded label: user_id, 5,000 active users
+    series  =  120000 x 5000               = 600,000,000
+    head    =  6e8 x 1.5 KB                =    ~900 GB      impossible
+```
+
+Note that `user_id` did not need millions of values to be fatal — 5,000 was enough, because it multiplied an already-120,000-series metric. This is why the rule is "bounded dimensions only" rather than "keep cardinality small": there is no safe size for an unbounded label, only a delay before it kills the server.
+
+The reverse direction sizes hardware. The §6 note that 1M active series needs ~1.5 GB of head is the same equation solved for RAM, and the case study in §14 measures `11 GB / 6.5M series = ~1.69 KB per series` in practice — the 1.5 KB estimate plus WAL and query overhead. Budget RAM from `prometheus_tsdb_head_series`, never from request volume.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -236,6 +274,37 @@ A sample lands in the in-memory head block (backed by a WAL for crash recovery),
 
 Rough sizing: bytes/sample ≈ 1–2 bytes after compression; a series at 15s = 5,760 samples/day. Head RAM ≈ `active_series * ~1.5KB`. So 1M active series ≈ ~1.5 GB head plus query/WAL overhead — plan RAM around series count, not sample count.
 
+**In plain terms.** "RAM is priced per series; disk is priced per series *per scrape*." Two different multipliers on the same series count, which is why the same cardinality decision that OOMs the head also quietly triples your retention bill:
+
+```
+  samples/day  =  active_series x (86400 / scrape_interval)
+  disk/day     =  samples/day x bytes_per_sample
+  head RAM     =  active_series x ~1.5 KB          (independent of scrape_interval)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `86400 / scrape_interval` | Samples one series produces per day — 5,760 at the default 15s |
+| `bytes_per_sample` | Post-compression cost on disk, 1–2 bytes thanks to delta-of-delta + XOR encoding |
+| `active_series` | Series receiving samples right now — the driver of both RAM and disk |
+| `retention.time` | Days kept before blocks are deleted; multiplies disk, never RAM |
+
+**Walk one example.** 1M active series at the default 15s scrape, 15-day retention:
+
+```
+  samples/day  =  1,000,000 x (86400 / 15)  =  1,000,000 x 5,760  =  5.76 billion
+
+  disk/day  at 1.0 B/sample   =  5.76 GB/day    ->  86.4 GB over 15 days
+  disk/day  at 1.5 B/sample   =  8.64 GB/day    -> 129.6 GB over 15 days
+  disk/day  at 2.0 B/sample   = 11.52 GB/day    -> 172.8 GB over 15 days
+
+  head RAM  =  1,000,000 x 1.5 KB              =  ~1.5 GB   (scrape interval irrelevant)
+
+  halve the scrape rate to 30s: 2,880 samples/day/series -> 4.32 GB/day, RAM UNCHANGED
+```
+
+That last line is the practical lever and the common misconception in one place. Scraping less often halves your disk but does nothing for the memory pressure that actually kills Prometheus — only cutting series count does that. Conversely, chasing a cardinality reduction to save disk under-sells the win: it is the one change that helps both terms at once.
+
 ### Counters and `rate()` — the reset-safe pattern
 
 ```promql
@@ -252,6 +321,29 @@ sum(rate(http_requests_total[5m]))
 ```
 
 `rate()` for fast-moving counters and graphs; `increase()` for "how many in this window"; `irate()` only for high-resolution graphs of volatile counters (it uses the last two points and is noisy for alerts).
+
+**Put simply.** "`rate()` draws a straight line through every sample in the window and reports its slope per second; `increase()` reports the same slope multiplied back out over the window." They are one function with two units, which is why `increase(x[5m])` always equals `rate(x[5m]) * 300`.
+
+| Symbol | What it is |
+|--------|------------|
+| `[5m]` | The range window: how far back the query looks for samples to fit |
+| `scrape_interval` | How often a new sample lands — 15s in the config above |
+| Samples in window | `window / scrape_interval`; below 2 the function returns nothing at all |
+| Reset correction | `rate()` treats any drop in a counter as a restart and adds the pre-drop value back |
+
+**Walk one example.** Why the window is `[5m]` and not `[30s]`, given a 15s scrape:
+
+```
+  samples available  =  window / scrape_interval
+
+    [30s] / 15s  =   2 samples   <- the bare minimum; ONE missed scrape leaves 1 -> no data
+    [60s] / 15s  =   4 samples   <- the "4x rule" floor: survives a single missed scrape
+    [5m]  / 15s  =  20 samples   <- 18 can be lost before the query goes blind
+
+  the 4x rule:  window >= 4 x scrape_interval  ->  4 x 15s = 60s minimum
+```
+
+The `[5m]` in every example above is that floor with generous margin. A window at or near `2 x scrape_interval` produces an alert that silently evaluates to empty whenever a scrape times out — and an alert expression returning no data does not fire, so the failure mode is a *missing* page rather than a false one. Widen the window rather than tighten it, and remember the cost: a 5m window also smooths the spike you are trying to catch, which is exactly why the burn-rate alerts below pair a short window with a long one.
 
 ### Histogram quantiles
 
@@ -271,6 +363,44 @@ histogram_quantile(
 ```
 
 Define buckets to straddle your SLO threshold (e.g. for a 300ms p99 target, include `le="0.3"`); `histogram_quantile` linearly interpolates within a bucket, so a coarse bucket near the target gives an inaccurate quantile.
+
+**Read it as follows.** "Find which bucket the 99th-percentile request falls into, then guess where inside that bucket it sits by assuming the requests are spread evenly across it." Prometheus never stores a latency value — only counts per bucket — so every quantile it reports is that guess, and the guess is only as good as the bucket boundaries you chose:
+
+```
+  rank      =  q x count(+Inf)
+  estimate  =  le_lower  +  (le_upper - le_lower) x (rank - cum_lower)
+                                                    -------------------
+                                                    (cum_upper - cum_lower)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `le` | "less than or equal to" — a bucket's upper bound; buckets are cumulative, not disjoint |
+| `count(+Inf)` | The top cumulative bucket, i.e. every observation — the denominator for the rank |
+| `rank` | Which observation, by position, marks the quantile you asked for |
+| `cum_lower` / `cum_upper` | Cumulative counts at the boundaries the rank falls between |
+
+**Walk one example.** 10,000 requests, the same p99 query, two different bucket layouts:
+
+```
+  WELL-SIZED buckets: le = 0.1, 0.3, 0.5, 1.0, +Inf
+    cumulative counts   8000, 9500, 9800, 9950, 10000
+    rank      = 0.99 x 10000                          =  9900
+    9800 < 9900 <= 9950  ->  lands in bucket (0.5, 1.0]
+    estimate  = 0.5 + (1.0 - 0.5) x (9900-9800)/(9950-9800)
+              = 0.5 + 0.5 x (100 / 150)               =  0.833 s
+
+  COARSE buckets: le = 0.1, 1.0, +Inf   (same underlying requests)
+    cumulative counts   8000, 9950, 10000
+    rank      = 9900
+    8000 < 9900 <= 9950  ->  lands in bucket (0.1, 1.0]
+    estimate  = 0.1 + (1.0 - 0.1) x (9900-8000)/(9950-8000)
+              = 0.1 + 0.9 x (1900 / 1950)             =  0.977 s
+
+  same traffic, 17.2% different answer -- decided purely by bucket layout
+```
+
+Nothing about the requests changed between those two blocks; only the boundaries did. The interpolation assumes a uniform spread inside the bucket, and real latency inside a wide bucket is anything but uniform — so a 0.9-second-wide bucket makes the "p99" an artifact of the layout. Two practical consequences: put an `le` exactly on your SLO threshold so the question "what fraction is under 300ms?" is answered by a stored count rather than a guess, and keep bucket sets identical across instances, since `sum by (le)` silently produces nonsense when one pod uses different boundaries.
 
 ### Recording rules (precompute) and alerting rules (evaluate)
 
@@ -357,6 +487,40 @@ flowchart LR
 ```
 
 Here SLO = 99.9% so the budget is `1 - 0.999 = 0.001`. Multi-window pairing (short + long) avoids both flapping (short-only) and slow detection (long-only). See burn-rate math in [sre_principles_and_slos](../sre_principles_and_slos/) and routing in [visualization_and_alerting](../visualization_and_alerting/).
+
+**Stated plainly.** "Burn rate 1 means you will spend your entire error budget exactly at the end of the period; burn rate 14.4 means you will spend it 14.4 times faster than that." It converts an error ratio into a deadline, which is what makes the same alert work for a 99.9% and a 99.99% service without retuning thresholds.
+
+```
+  burn_rate  =  observed error ratio  /  (1 - SLO)
+  budget consumed in a window  =  burn_rate x (window / period)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `1 - SLO` | The error budget as a ratio — 0.001 for a 99.9% target |
+| `burn_rate` | Multiple of the sustainable error rate you are currently running at |
+| `period` | The SLO window the budget is defined over — 30 days = 720 hours here |
+| `window` | The range the alert measures over (`1h`, `6h`) — the alert's reaction time |
+
+**Walk one example.** Where 14.4 and 6 actually come from, and what they mean in error-rate terms:
+
+```
+  period = 30 days = 720 h,  budget = 0.001 (99.9% SLO)
+
+  FAST page: "burn 2% of the budget in 1 hour"
+    burn = 0.02 x 720 / 1        =  14.4
+    error ratio to trip it       =  14.4 x 0.001  =  0.0144  =  1.44% errors
+    time to exhaust at that rate =  720 / 14.4    =  50 h    =  ~2.1 days
+
+  SLOW ticket: "burn 5% of the budget in 6 hours"
+    burn = 0.05 x 720 / 6        =  6.0
+    error ratio to trip it       =  6.0 x 0.001   =  0.006   =  0.6% errors
+    time to exhaust at that rate =  720 / 6       =  120 h   =  5 days
+
+  reference:  burn = 1.0  ->  720 / 1  =  720 h  =  exactly 30 days (by definition)
+```
+
+Note that neither number is a latency or an error count — they are both *deadlines*, which is why 14.4 pages and 6 only tickets. A 1.44% error rate leaves you ~2 days from a blown budget and warrants waking someone; 0.6% leaves five days and can wait for business hours. The comment in the YAML above ("14.4x burns a 30-day budget in ~2 days") is that `720 / 14.4 = 50 h` line, and the AND-pairing exists because a 1-hour window alone would fire on any brief 1.44% blip that the long window proves was not sustained.
 
 ---
 

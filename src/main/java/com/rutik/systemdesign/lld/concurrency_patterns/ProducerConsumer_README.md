@@ -32,6 +32,39 @@ The buffer's capacity is critical:
 - **Too large**: memory exhaustion; backpressure signal arrives too late
 - **Rule of thumb**: queue size = (max throughput) × (max acceptable latency)
 
+**Put simply.** "Make the buffer exactly deep enough that a full queue still drains inside your
+latency budget." A queue slot is not free storage — it is a promise of delay, because the item at
+the back of a full queue must wait for everything ahead of it to be consumed. Sizing by this rule
+means the worst case you can ever observe is the worst case you already agreed to.
+
+| Symbol | What it is |
+|--------|-----------|
+| `queue size` | Bounded-buffer capacity — the `new ArrayBlockingQueue<>(n)` argument |
+| `max throughput` | Sustained consumer drain rate, in items per second (not the producer rate) |
+| `max acceptable latency` | Worst-case end-to-end queue delay your SLA permits |
+
+**Walk one example.** A pipeline whose consumers drain 5,000 messages/sec, with a 200ms latency
+budget and roughly 2KB per message:
+
+```
+given   max throughput = 5000 msg/s
+        max latency    = 0.2 s
+        message size   = 2 KB = 2048 bytes
+
+size    queue = 5000 x 0.2                     = 1000 slots
+memory  worst-case heap = 1000 x 2048 bytes    = 2.05 MB   (bounded, by construction)
+
+what the two bad sizes cost:
+        queue = 100000 slots -> drain time = 100000 / 5000 = 20 s     latency blown 100x
+                                heap       = 100000 x 2048 = 204.8 MB OOM territory
+        queue =     10 slots -> drain time =     10 / 5000 = 0.002 s  producers block constantly
+```
+
+Result: 1,000 slots is the largest buffer that still honours the 200ms promise, and it caps
+worst-case memory at ~2MB. Note that the drain rate — not the producer rate — is the correct
+`max throughput`: a queue sized off producers can never empty if consumers are slower, which is
+precisely the unbounded-growth failure the pattern exists to prevent.
+
 The buffer's own fill level *is* the backpressure signal — producers and consumers each block on exactly one edge of it, with no other coordination required:
 
 ```mermaid

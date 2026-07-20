@@ -663,6 +663,39 @@ spring:
       file-size-threshold: 2MB
 ```
 
+**In plain terms.** "Only `file-size-threshold` controls heap; `max-file-size` controls disk and rejection. Your worst-case memory is the threshold times the number of upload requests that can be in flight at once — not the maximum file size." Confusing those two is how teams set a generous `max-file-size` and then get surprised by an OOM.
+
+| Symbol | What it is |
+|--------|------------|
+| `file-size-threshold: 2MB` | Below this, a part stays in heap. Above it, Tomcat spills to a temp file |
+| `max-file-size: 25MB` | Per-part ceiling. Exceeding it fails the request before full buffering |
+| `max-request-size: 30MB` | Ceiling for the whole multipart body — all parts plus form fields |
+| Tomcat `threads.max` | 200 by default. Caps how many uploads can be in flight simultaneously |
+
+**Walk one example.** Worst-case heap for this configuration versus the same config with no threshold:
+
+```
+  with file-size-threshold: 2MB
+    200 concurrent uploads x 2 MB in heap     = 400 MB       <- bounded, survivable
+    anything past 2 MB per part goes to a temp file on disk
+
+  with everything buffered in memory (no spill)
+    200 concurrent uploads x 25 MB            = 5,000 MB ~ 4.9 GB   <- OOM
+
+  headroom between the two ceilings
+    max-request-size 30MB - max-file-size 25MB = 5 MB for form fields + part headers
+```
+
+The 5 MB gap between `max-file-size` and `max-request-size` is deliberate. Set them equal
+and a legitimate 25 MB file accompanied by any text form field fails the request-level
+check with a confusing error that points at the request rather than the field.
+
+**Why rejection happens early.** Both ceilings are enforced by the multipart parser as it
+reads the stream, so a hostile 2 GB upload is aborted after roughly `max-request-size`
+bytes have been read — the connection is closed rather than the file being read to
+completion and then judged. That early abort is what keeps p99 heap flat under partner
+abuse rather than merely returning a clean 413 after the damage is done.
+
 ### Metrics
 
 - Validation rejection: **<1ms**, returned as `application/problem+json` with a `fieldErrors` map.

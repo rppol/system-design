@@ -478,6 +478,40 @@ Each microservice configures `http.oauth2ResourceServer(oauth2 -> oauth2.jwt(...
 | 12 (recommended) | ~300ms | Production recommendation |
 | 14 | ~1200ms | High-security (consider Argon2) |
 
+**What the formula is telling you.** "The cost factor is an exponent, not a dial — each `+1` doubles the work, so the small-looking step from 10 to 12 makes an attacker's password-cracking rig four times slower."
+
+The number in `BCryptPasswordEncoder(12)` is `log2` of the iteration count. Reading it as a linear 1-to-14 scale is the standard misinterpretation, and it makes the security difference between 10 and 12 look trivial when it is 4x.
+
+| Symbol | What it is |
+|--------|------------|
+| cost factor | The exponent stored in the hash (`$2a$12$...`). Range 4-31 |
+| `2^cost` | Actual key-expansion rounds BCrypt performs |
+| encode time | Wall-clock cost of one hash, roughly proportional to `2^cost` |
+| `+1` to cost | Doubles both defender cost and attacker cost. The whole design |
+| the salt | 16 random bytes per password, stored in the hash — defeats rainbow tables |
+
+**Walk one example.** Expand the three rows of the table into their true round counts:
+
+```
+  cost    2^cost rounds    relative work    table's measured time
+    10          1,024           1x               ~100 ms
+    12          4,096           4x               ~300 ms
+    14         16,384          16x              ~1200 ms
+
+  Step arithmetic:
+    10 -> 12  =  2^12 / 2^10  =  4096 / 1024  =  4x the work
+    12 -> 14  =  2^14 / 2^12  = 16384 / 4096  =  4x the work
+
+  What it costs an attacker with a stolen password table:
+    at cost 10, cracking 1 million candidate passwords takes T
+    at cost 12, the same 1 million candidates take 4T
+    at cost 14, the same 1 million candidates take 16T
+```
+
+The published times track the doubling law loosely rather than exactly — 12 to 14 lands on a clean 4x (300 to 1200 ms) while 10 to 12 is quoted as 3x (100 to 300 ms), since these are rounded measurements on real hardware, not derived figures. Trust the `2^cost` ratio as the invariant; treat the millisecond column as hardware-specific and re-measure it on your own machines.
+
+**Why the defender's 300 ms is the real constraint.** BCrypt is deliberately slow, so the cost factor is bounded by your own login throughput, not by how much security you want. At cost 12, one core completes about `1 / 0.3 = 3.3` logins per second. A login storm of 300 concurrent sign-ins needs roughly 90 cores of headroom, which is why raising the cost factor is a capacity decision as much as a security one — and why an unthrottled login endpoint at cost 14 is itself a denial-of-service vector.
+
 Argon2id is the current OWASP recommendation for new systems, offering memory-hardness that resists GPU/ASIC attacks better than BCrypt.
 
 ### URL Pattern vs Method Security

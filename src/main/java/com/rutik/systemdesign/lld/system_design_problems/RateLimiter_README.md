@@ -182,6 +182,50 @@ sequenceDiagram
 
 **Why Sliding Window Log is still worth knowing**: it is the *reference implementation* for correctness — if an interviewer asks "what's the exact rate-limiting algorithm, with no approximation error?", this is the answer, with the explicit caveat that its O(N) memory makes it impractical for high limits (a 10,000 req/min limit = 10,000 timestamps per client = ~80KB/client, which multiplied across millions of clients becomes a real memory concern).
 
+**What the formula is telling you.** Two numbers decide this table, and both are one-liners.
+Fixed Window's flaw is `worst_rolling_count = 2 × limit` — "a counter that resets on a clock edge
+can be drained twice on either side of that edge." Sliding Window Log's cost is
+`bytes_per_client = limit × 8` — "exactness means storing one 8-byte timestamp for every request
+you are willing to allow," so the memory bill scales with the *limit itself*, not with traffic.
+
+| Symbol | What it is |
+|--------|-----------|
+| `limit` | Requests permitted per window — the configured quota |
+| `window` | Fixed window duration that the counter resets on (60s here) |
+| `2 × limit` | Worst count observable in any rolling `window`-length span under Fixed Window |
+| `bytes_per_client` | Sliding Window Log footprint, `limit × 8` (a `long` epoch-millis per request) |
+| `8` | Bytes in one Java `long` timestamp stored in the per-client `Deque<Long>` |
+
+**Walk one example.** First the boundary artifact, using the table's own `limit = 5`, 60s window:
+
+```
+client sends 5 requests at t = 59.9 s   -> window [0,60)   count 5/5, all ALLOWED
+counter resets at t = 60.0 s            -> window [60,120) count 0/5
+client sends 5 requests at t = 60.1 s   ->                 count 5/5, all ALLOWED
+
+what any rolling 60 s window actually saw:
+        span [59.9, 119.9] contains 5 + 5      = 10 requests = 2 x limit
+        elapsed between first and last          = 0.2 s
+so the client got a 60-second quota's worth of traffic twice, 0.2 s apart.
+```
+
+Now the log's memory bill, for the two limits named in the text:
+
+```
+limit = 1,000 req/min   -> 1,000 x 8 bytes =  8,000 B =  7.8 KiB per client
+limit = 10,000 req/min  -> 10,000 x 8 bytes = 80,000 B = 78.1 KiB per client
+
+scaled to a real fleet, at the 1,000 req/min limit:
+        1,000,000 clients x 8,000 B          = 8,000,000,000 B = 8.0 GB of timestamps
+compare Token Bucket, 2 fields per client (a double + a long, 16 B):
+        1,000,000 clients x 16 B             =    16,000,000 B = 16 MB
+```
+
+Result: the same fleet costs 8GB under Sliding Window Log and 16MB under Token Bucket — a 500x
+gap, and the concrete reason the "exact" algorithm loses in production despite being correct.
+Note that the log's bill grows when you make the limit *more generous*, which is the opposite of
+the intuition that a looser limit is cheaper to enforce.
+
 Turning the tradeoffs above into a concrete decision procedure for the interview:
 
 ```mermaid
@@ -248,6 +292,49 @@ flowchart TD
     class Spend,Allow train
     class Deny lossN
 ```
+
+**In plain terms.** The two-line refill rule —
+`tokensToAdd = elapsedMs / 1000.0 × refillRate`, then `tokens = min(capacity, tokens + tokensToAdd)`
+— says "credit the client for every second it *didn't* spend, but never let unspent credit pile
+up past the bucket's brim." The division converts wall-clock time into currency; the `min` is
+what separates a burst allowance from an unlimited savings account.
+
+| Symbol | What it is |
+|--------|-----------|
+| `elapsedMs` | `now - lastRefillTimestamp` — milliseconds since this bucket was last touched |
+| `refillRate` | Sustained allowance in tokens per second — the long-run rate the client gets |
+| `tokensToAdd` | Credit earned by idling, `elapsedMs / 1000.0 × refillRate` |
+| `tokens` | Current balance; one is spent per allowed request |
+| `capacity` | Bucket brim — the maximum burst that can ever be spent at once |
+| `min(...)` | The cap that discards credit earned beyond `capacity` |
+
+**Walk one example.** Use the demo's settings — `capacity = 5`, `refillRate = 1 token/sec` — and
+follow one client through a drain, a short idle, and a long idle:
+
+```
+start   tokens = 5.00, capacity = 5, refillRate = 1 token/s
+
+burst of 5 requests back-to-back (elapsed ~0 ms, so tokensToAdd ~ 0):
+        tokens 5.00 -> 4.00 -> 3.00 -> 2.00 -> 1.00 -> 0.00      all 5 ALLOWED
+        6th request: tokens = 0.00 -> below 1                        DENIED
+
+client idles 3.5 s, then sends one request:
+        elapsedMs   = 3500
+        tokensToAdd = 3500 / 1000.0 x 1        = 3.50
+        tokens      = min(5, 0.00 + 3.50)      = 3.50    (under the brim, all credit kept)
+        spend 1     -> tokens                  = 2.50        ALLOWED
+
+client idles 10 s instead, then sends one request:
+        elapsedMs   = 10000
+        tokensToAdd = 10000 / 1000.0 x 1       = 10.00
+        tokens      = min(5, 0.00 + 10.00)     = 5.00    capped: 5 tokens forfeited
+        spend 1     -> tokens                  = 4.00        ALLOWED
+```
+
+Result: idling 10 seconds earns exactly the same burst as idling 5 seconds — the `min` is what
+stops a client from being quiet all day and then firing 86,400 requests in one instant. Drop the
+`min` and `capacity` stops meaning anything; drop the `elapsedMs / 1000.0` division and you would
+be adding one token per *millisecond*, inflating the client's rate 1000x.
 
 The key subtlety: refill is **lazy** — there is no background thread ticking a timer. Tokens are only computed "as of now" when a request actually arrives, which is why `lastRefillTimestamp` must be updated on every call (even denied ones) to avoid double-counting elapsed time on the next call.
 

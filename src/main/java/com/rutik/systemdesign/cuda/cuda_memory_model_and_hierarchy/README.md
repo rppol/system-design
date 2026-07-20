@@ -56,6 +56,42 @@ The main device DRAM (HBM on data-center GPUs), allocated on the host with `cuda
 
 Declared with `__constant__` at file scope, a 64 KB read-only region backed by a dedicated per-SM constant cache. Its fast path is a **broadcast**: when every thread in a warp reads the *same* address, the cache serves all 32 lanes in one cycle-equivalent access. Divergent addresses within a warp serialize, degrading toward global-memory latency — constant memory is a specialized tool for kernel-wide parameters (transformation matrices, filter coefficients), not general read-only data.
 
+**The idea behind it.** "Constant memory has exactly one fast case — all 32 lanes want the
+same address — and its performance falls off a cliff in proportion to how many *distinct*
+addresses the warp asks for." It is not a cache with a hit rate; it is a broadcast network
+whose cost is the number of unique addresses per warp, which is why it is brilliant for
+`d_filter[k]` (same `k` everywhere) and terrible for `d_table[threadIdx.x]`.
+
+| Symbol | What it is |
+|--------|------------|
+| `__constant__` | File-scope qualifier that places data in the 64 KB constant region |
+| `32` | Lanes in a warp — the number of addresses the constant unit must satisfy per access |
+| Broadcast | All 32 lanes name the same address; one fetch serves every lane |
+| Unique addresses | Distinct addresses in one warp's request; the constant unit replays once per distinct address |
+| `64 KB` | Size of the constant working set — a hard cap, not a soft cache-pressure hint |
+
+**Walk one example.** The same `__constant__` array, read two ways by one warp:
+
+```
+  BROADCAST   d_filter[k], k identical across the warp
+    unique addresses per warp = 1
+    fetches issued            = 1
+    cost                      = ~1 access serving 32 lanes
+
+  DIVERGENT   d_table[threadIdx.x], every lane a different index
+    unique addresses per warp = 32
+    fetches issued            = 32   (the unit replays, one per distinct address)
+    cost                      = 32x the broadcast case
+    -> now SLOWER than the same data in global memory, where those 32 consecutive
+       4-byte reads would have coalesced into ONE 128-byte transaction
+```
+
+That last line is the trap, and it inverts the intuition people bring from CPUs: the
+divergent pattern is not merely "constant memory failing to help," it is constant memory
+actively losing to plain global memory. Global memory rewards *contiguous* access across a
+warp; constant memory rewards *identical* access. Handing each the pattern the other one
+likes is a 32x penalty in one direction and a wasted broadcast unit in the other.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -170,12 +206,48 @@ local for what's left unqualified).
 
    Bandwidth widens going down the ladder even as per-access latency grows: registers
    deliver the highest *aggregate* bandwidth per SM (every ALU reads its own operand
-   every cycle), shared memory sustains ~19 TB/s per SM (32 banks in parallel), L2
+   every cycle), shared memory sustains ~19 TB/s device-wide (32 banks/SM in parallel), L2
    sustains multi-TB/s device-wide, and HBM3 delivers ~3 TB/s (H100) -- enormous in
    absolute terms, but that ~3 TB/s is divided across every SM issuing requests at once.
 ```
 
 The pyramid captures the rule that drives every optimization in Phase 3: an access one level up is roughly 10-20x cheaper than the level below it, so the entire performance-engineering discipline is "promote reused data as far up this ladder as the algorithm allows, and make every trip down the ladder as wide (coalesced) as possible."
+
+**What it means.** "Bandwidth and latency move in opposite directions down this ladder, and
+the shared-memory bandwidth figure is a whole-device number built out of very modest
+per-SM ones." A single SM's shared memory is not a 19 TB/s firehose; it is 128 bytes per
+cycle, and the impressive aggregate exists only because a hundred-plus SMs each do that
+independently.
+
+| Symbol | What it is |
+|--------|------------|
+| `32` | Shared-memory banks per SM — independent SRAM slices that serve requests in parallel |
+| `4 bytes` | Width of one bank per cycle; a bank hands back exactly one 32-bit word per cycle |
+| `128 B/cycle` | One SM's peak shared-memory rate, `32 banks x 4 bytes`, when there are no conflicts |
+| SM clock | ~1.41 GHz on an A100 — the cycles-per-second that turns bytes/cycle into bytes/second |
+| `108` | SMs on an A100; the multiplier that makes the aggregate figure large |
+| `~3 TB/s` | HBM3 peak on an H100 — one shared pool, divided across every SM issuing at once |
+
+**Walk one example.** Build the ~19 TB/s shared-memory figure from the bank structure up,
+on an A100:
+
+```
+  per-SM peak
+    bytes per cycle  = 32 banks x 4 bytes             =    128 B/cycle
+    x SM clock       = 128 B x 1.41 GHz               =    181 GB/s  <- ONE SM
+  device aggregate
+    x SM count       = 181 GB/s x 108 SMs             = 19.5 TB/s    <- the headline
+
+  compare HBM        =                                  ~2-3 TB/s   (also device-wide)
+  ratio              = 19.5 / 2                        =   ~10x
+```
+
+The comparison that matters is the last line, and it is a *device-to-device* one: shared
+memory delivers roughly 10x the aggregate bandwidth of HBM, which is the quantitative
+reason tiling pays. But notice how small a single SM's 181 GB/s is — it is a *scaling*
+story, not a speed story. A kernel that runs on 4 SMs gets 4/108ths of that 19.5 TB/s, and
+a bank conflict that serializes 32 lanes drops the 128 B/cycle to 4 B/cycle, taking the
+whole advantage back (see `../shared_memory_and_bank_conflicts/`).
 
 ### Latency by Memory Level
 
@@ -450,6 +522,41 @@ line is 128 bytes and an L2 sector is 32 bytes, which is exactly why a coalesced
 access (32 threads x 4 bytes = 128 bytes) maps perfectly onto one L1 line — the full
 mechanics of exploiting this are in `../memory_coalescing_and_access_patterns/`.
 
+**Put simply.** "The hardware never fetches less than a cache line, so the only question a
+memory access really asks is: of the bytes I am forced to drag across the bus, how many
+did I actually want?" Efficiency here is a ratio of useful bytes to fetched bytes, and the
+128-byte granularity is what makes that ratio collapse so fast under striding.
+
+| Symbol | What it is |
+|--------|------------|
+| `128 bytes` | L1 cache-line size — the minimum unit that crosses into L1, always |
+| `32 bytes` | L2 sector size — the minimum unit L2 fetches from HBM; four sectors fill one line |
+| `32 threads x 4 bytes` | One warp reading consecutive `float`s = exactly 128 bytes |
+| Transaction | One line-sized trip; the thing you are counting when you count memory cost |
+| Efficiency | Bytes the kernel used, divided by bytes the hardware actually moved |
+
+**Walk one example.** One warp, one `float` per thread, two access patterns:
+
+```
+  COALESCED    a[threadIdx.x]        -- 32 consecutive floats
+    bytes wanted   = 32 threads x 4 bytes    =   128 bytes
+    lines touched  = 128 / 128               =     1 transaction
+    bytes moved    =                             128 bytes
+    efficiency     = 128 / 128               =   100%
+
+  STRIDED      a[threadIdx.x * 32]   -- every 32nd float, 128 bytes apart
+    bytes wanted   = 32 threads x 4 bytes    =   128 bytes
+    lines touched  = 32 (each lane lands on a different 128-byte line)
+    bytes moved    = 32 lines x 128 bytes    = 4,096 bytes
+    efficiency     = 128 / 4,096             =  3.1%
+```
+
+Both patterns read the same 128 useful bytes and both look like one line of C++, but the
+strided one drags 4,096 bytes across the bus and throws 97% of them away — a 32x bandwidth
+penalty for an index expression. This is also why the L2 sector is worth knowing
+separately: a warp touching only 32 of a line's 128 bytes still costs one full L2 sector
+per touched region, so partial-line access degrades in 32-byte steps rather than smoothly.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -677,6 +784,44 @@ __global__ void per_thread_histogram_fixed(const int* data, int* out, int n) {
 
 The fix trades 256 KB/block of local-memory traffic for 1 KB/block of shared memory plus a handful of global atomics — routinely a 10-50x reduction in memory traffic for histogram-shaped kernels (see the full reduction ladder in `../parallel_patterns_reduction_scan_histogram/`).
 
+**Read it like this.** "The array did not get bigger — it got *replicated 256 times*,
+because `local` in CUDA means per-thread, and a block has a lot of threads." The whole bug
+is a scope word being read as a performance word, and the cost multiplier is exactly the
+block size.
+
+| Symbol | What it is |
+|--------|------------|
+| `int hist[256]` | 256 bins x 4 bytes = 1 KB, allocated *per thread*, not per block |
+| Runtime index | `hist[data[i] & 0xFF]` — the index is not compile-time known, so registers are impossible |
+| Local memory | Private *scope*, but physically the same off-chip DRAM as global, ~400-800 cycles |
+| `256` threads/block | The replication factor that turns 1 KB into the block's real footprint |
+| `__shared__ int s_hist[256]` | The same 256 bins, allocated *once per block*, on-chip |
+
+**Walk one example.** Price the same 256-bin histogram both ways, per block:
+
+```
+  BROKEN: per-thread local array
+    per thread  = 256 bins x 4 bytes         =       1 KB
+    per block   = 1 KB x 256 threads         =     256 KB  in off-chip local memory
+    latency/access                            = ~400-800 cycles
+    output writes = 256 threads x 256 bins   =  65,536 global writes per block
+
+  FIX: one block-shared array
+    per block   = 256 bins x 4 bytes         =       1 KB  on-chip
+    latency/access                            =   ~20-30 cycles
+    output writes = 256 bins                 =     256 global atomics per block
+
+  footprint reduction = 256 KB / 1 KB        =     256x
+  global-write reduction = 65,536 / 256      =     256x
+```
+
+Both reductions land on the same 256x, and that is not a coincidence — it is the block
+size showing up twice, once as a memory multiplier and once as a traffic multiplier.
+Notice also what does *not* appear in the fix's column: the per-access latency drops by
+roughly 20x on top of the 256x volume reduction, which is why the observed end-to-end win
+lands in the 10-50x range rather than at either factor alone. Contention on the on-chip
+atomics is what keeps it from being the full product.
+
 **Other frequent pitfalls:**
 
 - **Assuming `__constant__` is a general-purpose fast read cache.** It is only fast on a uniform broadcast; per-thread-varying constant reads serialize and can be *slower* than a plain coalesced global read plus L1/L2 caching.
@@ -839,6 +984,49 @@ Each element is now read from global memory exactly once per tile (plus two halo
 | Global-memory transactions/element (interior) | ~3x | ~1x (+ halo overhead) |
 | L1/TEX hit rate | Misleadingly elevated (redundant re-fetches hitting cache) | Low (traffic already minimized before reaching cache) |
 | % of HBM peak (~2 TB/s) | ~31% | ~92% |
+
+**In plain terms.** "Three global reads per output element became one, and the measured
+bandwidth went up by almost exactly three — the profiler is confirming the arithmetic, not
+revealing something new." When a memory-bound kernel's speedup matches its traffic
+reduction to within a few percent, you have proven the diagnosis was correct.
+
+| Symbol | What it is |
+|--------|------------|
+| `TILE` | 256 — elements one block stages into shared memory before computing |
+| `TILE + 2` | 258 — the tile plus a one-element halo on each side, so edge threads find neighbors |
+| Halo | The 2 extra elements a tile must read because the stencil reaches outside its own range |
+| Effective bandwidth | Useful bytes delivered per second, as measured by Nsight Compute |
+| `~2 TB/s` | A100 HBM peak — the ceiling the `% of peak` column is measured against |
+
+**Walk one example.** Count global reads per tile, then check the count against the
+measured bandwidth:
+
+```
+  BROKEN   every thread reads its own 3 neighbors
+    global reads per tile   = 256 threads x 3 reads      = 768 reads
+
+  FIXED    one body read per thread, plus the halo
+    body reads              = 256 threads x 1 read       = 256 reads
+    halo reads              = 1 left + 1 right           =   2 reads
+    global reads per tile   = 256 + 2                    = 258 reads
+
+  traffic reduction         = 768 / 258                  = 2.98x
+  shared-memory cost        = 258 floats x 4 bytes       = 1,032 bytes per block
+
+  CHECK against the profiler
+    measured speedup        = 1,850 GB/s / 620 GB/s      = 2.98x
+    predicted from traffic  =                              2.98x   <- they agree
+    % of HBM peak, broken   = 620 / 2,000                =   31%
+    % of HBM peak, fixed    = 1,850 / 2,000              =   92%
+```
+
+The agreement to two decimal places is the point. A memory-bound kernel's runtime is its
+byte count divided by achievable bandwidth, so removing 2/3 of the bytes must buy ~3x — if
+the profiler had reported 1.4x instead, the traffic model would be wrong and something else
+(occupancy, launch overhead, a serializing atomic) would be the real bottleneck. Note the
+halo is nearly free here: 2 extra reads on 256 is 0.8% overhead, which is why `TILE` wants
+to be large — but only until the 1,032-byte shared allocation starts capping resident
+blocks, which is exactly the tension discussion question 3 raises.
 
 **Discussion Questions**:
 1. Why did the L1/TEX hit rate look "healthy" in the broken version even though the kernel was inefficient? (Because the redundant re-reads of already-cached neighbor elements were hitting L1 — a high hit rate on wasted traffic still shows as a high hit rate; hit rate alone doesn't tell you whether the traffic was necessary.)

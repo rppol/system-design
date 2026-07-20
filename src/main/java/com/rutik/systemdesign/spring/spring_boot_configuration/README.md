@@ -556,6 +556,38 @@ env:
 
 **Scale:** 23 services × 5 envs = 115 config surfaces. Secrets rotate every 90 days via HashiCorp Vault. 800 tenants × up to 50 custom properties each.
 
+**Put simply.** "Config surfaces multiply — services times environments — and every one of them is an independent chance to deploy the wrong value, so the count itself is the argument for automation." The Q1 outage was one wrong value out of a space this large; hand-managing that space is not a discipline problem, it is an arithmetic one.
+
+| Symbol | What it is |
+|--------|------------|
+| 23 services | Independently deployable Spring Boot apps, each with its own property set |
+| 5 environments | dev, staging, uat, perf, prod — each needs different URLs, brokers, secrets |
+| config surface | One (service, environment) pair: a distinct resolved property set that can be wrong |
+| 90 days | Vault secret rotation interval — how often each surface's secrets change |
+
+**Walk one example.** The size of the space being managed:
+
+```
+  config surfaces   = 23 services x 5 environments      = 115 surfaces
+  tenant properties = 800 tenants x 50 properties       = 40,000 values
+
+  rotation churn:
+    rotations per surface per year = 365 / 90           ~ 4.06
+    surface-rotations per year     = 115 x 4.06         ~ 466 events/year
+                                                        ~ 1.3 per day
+```
+
+Roughly one secret-rotation event per surface per day, fleet-wide, plus 40,000 tenant
+values that no human reviews. At that rate a manual rotation runbook is guaranteed to drift
+— which is exactly why the resolution priority puts Vault dynamic secrets above anything
+baked into a JAR or image.
+
+**Why the priority order is the real control.** The 115 surfaces do not fail independently
+— they fail when a *lower*-priority source (a classpath `application-staging.yml` shipped
+in the image) silently wins over the intended one. Ordering Kubernetes Secrets and Config
+Server above classpath files makes the wrong value structurally unable to win, so 115
+surfaces need one correct ordering rule rather than 115 correct deployments.
+
 Config resolution priority (highest to lowest):
 
 1. Kubernetes Secrets (mounted as env vars) -> `SPRING_DATASOURCE_PASSWORD`

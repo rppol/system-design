@@ -327,6 +327,40 @@ public class RequestBodyCachingFilter extends OncePerRequestFilter {
 - `ContentCachingRequestWrapper` allocates a `ByteArrayOutputStream` that grows 32 bytes at a time initially — for a 10 KB JSON body, expect ~40 KB of heap allocated (original stream + cached copy + possible deserialization)
 - Spring Security `FilterChainProxy` internally maintains a list of ~15 filters in a standard Spring Boot Security setup
 
+**Stated plainly.** "On a blocking Servlet stack, a thread is occupied for the *entire* request including every filter, so your maximum throughput is simply the thread count divided by how long one request holds a thread." This is Little's Law applied to Tomcat, and it is why a few milliseconds of I/O inside a filter is not a rounding error — it is a direct multiplier on capacity.
+
+| Symbol | What it is |
+|--------|------------|
+| `200` | `server.tomcat.threads.max` — concurrent requests the server can have in flight |
+| service time | Wall-clock a request holds its thread: filters + interceptors + handler + write |
+| throughput | `threads / service time`. The ceiling, in requests per second |
+| `100` | `acceptCount` — the OS-level backlog once all 200 threads are busy |
+
+**Walk one example.** A 20 ms endpoint, then the same endpoint with a filter that makes one 5 ms database call:
+
+```
+  baseline    200 threads / 0.020 s   = 10,000 req/s
+
+  + 5 ms of filter I/O
+              200 threads / 0.025 s   =  8,000 req/s   -> 20% of capacity gone
+
+  + 20 ms of filter I/O
+              200 threads / 0.040 s   =  5,000 req/s   -> 50% of capacity gone
+
+  once saturated, the acceptCount=100 backlog adds latency, not throughput:
+              100 queued / 8,000 req/s              = 12.5 ms of pure queue wait
+```
+
+The filter did not get slower — the *service* did. Nothing about the 5 ms call is expensive
+in isolation; it is expensive because it runs on every single request and holds a
+finite thread while it waits.
+
+**Why the queue makes it worse, not better.** Raising `acceptCount` does not add capacity;
+the arrival rate still exceeds 8,000 req/s and the queue only converts rejection into
+latency. Clients time out, retry, and push the arrival rate higher still. The fix is to
+remove the I/O from the hot path — cache the lookup, move it behind the handler where it
+runs conditionally, or push it onto a queue — not to grow the buffer in front of it.
+
 ---
 
 ## 7. Real-World Examples

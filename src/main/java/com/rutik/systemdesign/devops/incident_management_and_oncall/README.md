@@ -115,6 +115,37 @@ flowchart LR
 
 *The four metrics are consecutive segments of one incident's timeline, not independent numbers: MTTD ends at detection, MTTA at acknowledgement, MTTR at resolution, and MTBF is the gap until the next incident starts.*
 
+**Read it like this.** "Each metric is a subtraction between two timestamps on the same incident, so the only thing you ever have to be careful about is which timestamp you subtract from."
+
+| Symbol | What it is |
+|--------|------------|
+| `started` | When user impact actually began — usually reconstructed after the fact from metrics |
+| `detected` | When the alert fired and a page was sent |
+| `acked` | When a human accepted the page in the on-call tool |
+| `resolved` | When user impact ended and the incident was closed |
+| MTTD | `detected - started` |
+| MTTA | `acked - detected` |
+| MTTR | `resolved - detected` (this module's definition; see the caution below) |
+| MTBF | `next_started - resolved` |
+
+**Walk one example.** Subtract the timestamps straight out of the module's own payments postmortem:
+
+```
+  14:02  started    deploy v2.7.0 goes out, checkout begins failing
+  14:09  detected   burn-rate alert pages primary          MTTD = 14:09 - 14:02 =  7 min
+  14:11  acked      on-call accepts the page               MTTA = 14:11 - 14:09 =  2 min
+  14:14  declared   SEV1 declared, IC assigned             (+3 min of process)
+  14:21  correlated deploy identified as the cause
+  14:23  mitigated  rollback issued
+  14:40  resolved   5xx back under 1%, incident closed
+
+  MTTR measured from detection: 14:40 - 14:09 = 31 min
+  MTTR measured from start:     14:40 - 14:02 = 38 min   <- what the user experienced
+  time-to-mitigate from start:  14:23 - 14:02 = 21 min   <- the postmortem's "21m"
+```
+
+**Why the denominator matters more than the number.** The same incident is honestly reportable as 21, 31, or 38 minutes depending on whether you measure to mitigation or resolution, and from detection or from impact start. Only the 38-minute figure matches what a customer felt. Teams that quietly switch to "from detection, to mitigation" watch their MTTR improve without a single incident getting better — pick one definition, write it down, and never change it mid-quarter.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -229,6 +260,34 @@ schedule:
     layers: [follow-the-sun: [na-team, eu-team, apac-team]]   # avoid 3am pages
 ```
 
+**Stated plainly.** "The escalation delays are a countdown chain, not a single timeout: each unanswered tier hands the page up after its own delay, so the worst case before a human is guaranteed to be looking is the sum of the delays above them."
+
+| Symbol | What it is |
+|--------|------------|
+| `escalation_delay_in_minutes` | How long that tier has to acknowledge before the page moves up |
+| Rule order | Tier sequence — primary, then secondary, then the engineering manager |
+| `rotation: weekly` | How often the person holding the primary schedule changes |
+| `handoff` | The fixed moment the rotation changes hands, pinned to a named timezone |
+| `layers: follow-the-sun` | Three regional schedules stitched into one 24-hour cover |
+
+**Walk one example.** Trace the worst case, where every tier sleeps through its window:
+
+```
+  t =  0 min   alert fires  ->  paged: payments-primary
+  t = 10 min   no ack       ->  paged: payments-secondary   (rule 1 delay expires)
+  t = 20 min   no ack       ->  paged: eng-manager          (rule 2 delay expires)
+  t = 30 min   no ack       ->  policy exhausted            (rule 3 delay expires)
+
+  worst-case time to a guaranteed human = 10 + 10 = 20 min before the manager is even paged
+  this delay is pure MTTA, and it lands on top of MTTD before any fixing starts
+
+  follow-the-sun cover: 3 regional layers over a 24-hour day
+    24 / 3 = 8 hours of coverage per region -> everyone is paged inside their workday
+    without it, one region carries all 24 hours and eats the 03:00 pages
+```
+
+**Why the delay is 10 minutes and not 2 or 30.** Two minutes escalates before a woken engineer has reached their laptop, so the secondary and manager get dragged into every incident and quickly start ignoring pages themselves. Thirty minutes adds half an hour of pure MTTA to any page the primary genuinely missed. Ten minutes is the usual compromise, and the reason step 1 of the on-page runbook below is "ACK within the escalation window" — acknowledging is what stops the countdown, and it is deliberately separate from actually fixing anything.
+
 ### Declaring an incident (the runbook for the first 5 minutes)
 
 ```
@@ -323,6 +382,34 @@ xychart-beta
 ```
 
 *A single 38-minute SEV1 burns 88% of the entire month's 43.2-minute error budget, leaving about 5 minutes to spare — this is why cutting MTTR via runbooks and auto-rollback directly protects the budget.*
+
+**What this actually says.** "A month of reliability budget for a 99.9% service is 43 minutes long, so MTTR is not an engineering vanity metric — every minute of an outage is a minute spent out of a wallet that only refills once a month."
+
+| Symbol | What it is |
+|--------|------------|
+| 99.9% / 30d | The SLO: at most 0.1% of the month may be bad |
+| 43,200 | Minutes in 30 days, `30 x 24 x 60` |
+| 43.2 min | The budget: `43,200 x (1 - 0.999)` |
+| Incident minutes | Wall-clock user impact, i.e. MTTD + MTTR for that incident |
+| Budget burned | `incident_minutes / 43.2` |
+
+**Walk one example.** Price the module's SEV1 against the month, then price the fix:
+
+```
+  budget      = 43,200 x 0.001            = 43.2 minutes for the whole month
+  the SEV1    = 14:40 - 14:02             = 38.0 minutes of impact
+  burned      = 38.0 / 43.2               = 0.8796 = 88%
+  remaining   = 43.2 - 38.0               =  5.2 minutes for the rest of the month
+
+  the same incident with the case study's post-fix response (under 10 min):
+    burned    = 10.0 / 43.2               = 0.2315 = 23%
+    remaining = 43.2 - 10.0               = 33.2 minutes
+
+  so cutting MTTR from 38 min to 10 min buys back 33.2 - 5.2 = 28 minutes of budget,
+  which is 28 / 43.2 = 65 percentage points of the month's reliability allowance
+```
+
+**Two ways to count "bad", and why they disagree.** The 88% figure above treats the incident as full unavailability for 38 minutes. A request-ratio SLI counts differently: the same postmortem records that roughly 4.2% of checkout attempts failed, so on a pure request-ratio basis the failing share of those 38 minutes is `38 x 0.042 = 1.6` minute-equivalents, about 3.7% of the budget. Both are legitimate; they answer different questions ("how long was it broken" vs "how many requests did it break"). Always state which SLI a burn percentage was computed against — comparing a time-based burn to a request-based one is one of the most common ways incident reports end up quietly inconsistent with each other.
 
 ---
 
@@ -506,6 +593,35 @@ Action items (owner, due, tracked):
 ```
 
 After adopting the process: the next deploy-induced incident was detected by the burn-rate alert in 3 minutes, the on-call engineer followed the runbook, declared a SEV2, the IC coordinated while an SME rolled back within 6 minutes, and the Comms Lead kept the status page current. MTTR dropped from ~2 hours to under 10 minutes. The blameless postmortem's action items (peak-load canary, pool SLI, auto-rollback) were tracked to completion, and the connection-pool class of bug stopped recurring.
+
+**The idea behind it.** "The 12x improvement did not come from fixing bugs faster — it came from deleting the three stretches of the timeline where nobody was fixing anything at all."
+
+| Symbol | What it is |
+|--------|------------|
+| MTTD before / after | 12 minutes with a vague alert, 3 minutes with a burn-rate alert |
+| MTTR before / after | ~120 minutes (2 hours) down to under 10 minutes |
+| Improvement factor | `120 / 10` = 12x |
+| Dead time | Minutes spent orienting, colliding, or diagnosing rather than mitigating |
+| Rollback cost | ~30 seconds, unchanged before and after |
+
+**Walk one example.** Decompose where the two hours actually went:
+
+```
+  before                                          after
+    12 min  MTTD, vague HighErrorRate alert         3 min  MTTD, burn-rate alert
+    ~0 min  runbook lookup (there was none)         ~1 min  open linked runbook
+    ~90 min diagnosing + 3 people colliding         ~1 min  runbook step 1: recent deploy? yes
+            with no IC and no declaration
+    ~0.5min the actual rollback                     ~0.5min the actual rollback
+    ------                                          ------
+    ~120 min total                                  <10 min total
+
+  improvement = 120 / 10 = 12x
+  the rollback itself took ~30 seconds in BOTH columns -> 0.5 / 120 = 0.4% of the
+  original outage was spent doing the thing that fixed it
+```
+
+Under a 99.9% SLO that is the difference between burning 88% of the month's 43.2-minute budget and burning 23% of it. The lesson generalizes past this one story: when MTTR is measured in hours, the fix is almost never a faster fix — it is a runbook that removes the guessing and an IC who stops three engineers from undoing each other's changes.
 
 **Outcome:** MTTR fell ~12x, customers got transparent communication instead of silence, conflicting actions ceased (one IC, clear roles), and the blameless culture surfaced the *systemic* fix (canary at peak load + auto-rollback) that a blame-focused retro would never have produced. The error budget, previously incinerated by the 2-hour outage, was protected by the fast rollback.
 

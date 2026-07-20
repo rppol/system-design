@@ -343,6 +343,42 @@ NetworkPolicy is only enforced if the CNI supports it (Calico/Cilium yes; Flanne
 - **NodeLocal DNSCache** is widely deployed to fix CoreDNS overload: a per-node DNS cache absorbs the `ndots` amplification and cuts CoreDNS QPS dramatically.
 - **ingress-nginx / Gateway API** front dozens of microservices behind one cloud LB with host/path routing and TLS termination, instead of one expensive `LoadBalancer` Service per app.
 
+### Sizing the subnet: where "a `/24` ≈ 250 Pods" comes from
+
+```
+usable Pod IPs = 2^(32 - mask) - 5
+```
+
+**Read it like this.** "Under the AWS VPC CNI a Pod is not a cheap overlay address — it consumes one real subnet IP, so the subnet mask, not the node count, sets your Pod ceiling."
+
+That framing is what makes VPC-CNI sizing a *day-zero* decision: nodes can be added elastically, but a subnet's mask is fixed at creation, so a cluster can be nowhere near its CPU limit and still refuse to schedule Pods.
+
+| Symbol | What it is |
+|--------|------------|
+| `mask` | The subnet's prefix length — the number of leading bits fixed by the network |
+| `32 - mask` | Host bits left over; every combination of them is one address |
+| `2^(32 - mask)` | Total addresses in the subnet, before anything is reserved |
+| `- 5` | AWS reserves 5 per subnet (network, VPC router, DNS, future use, broadcast) |
+| result | The hard ceiling on simultaneously-running Pods in that subnet |
+
+**Walk one example.** Push each mask through the formula and read off the ceiling:
+
+```
+  mask    host bits   2^(32-mask)   minus 5 reserved   Pod ceiling
+  /24         8            256            -5              251
+  /23         9            512            -5              507
+  /22        10           1024            -5             1019
+  /21        11           2048            -5             2043
+  /20        12           4096            -5             4091
+
+  Each step of -1 on the mask doubles the ceiling. Going /24 -> /20 is
+  4 steps, so 251 -> 4091: about 16x the Pods for zero extra nodes.
+```
+
+So a cluster that needs 1000 Pods cannot fit in a `/24` (251) or a `/23` (507) no matter how large the instances are — a `/22` is the first mask that clears it.
+
+**Why prefix delegation helps a different problem.** Prefix delegation hands each ENI a `/28` — `2^(32-28) = 16` addresses — instead of secondary IPs one at a time. That raises *Pods per node* and cuts the ENI-attachment latency on Pod start, but it does not add subnet capacity: a `/24` with 251 usable addresses holds only `251 // 16 = 15` whole `/28` prefixes, covering 240 addresses, so a partly-used prefix still reserves all 16. Prefix delegation buys node density; only a larger or secondary CIDR raises the ceiling itself.
+
 ---
 
 ## 8. Tradeoffs

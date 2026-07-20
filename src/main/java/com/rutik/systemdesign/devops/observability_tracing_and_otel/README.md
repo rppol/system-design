@@ -211,6 +211,50 @@ service:
 
 `tail_sampling` must run on the **gateway** (not per-agent), because a complete trace's spans may arrive from many agents — only a central collector that receives all of a trace's spans can decide based on the whole trace. This requires routing all spans of a trace to the same gateway instance (load-balancing exporter by `trace_id`).
 
+### What those sampling percentages actually retain
+
+```
+head sampling:   kept = total x p
+                 errors kept = errors x p          (same blind p)
+
+tail sampling:   kept = errors + (total - errors) x p_rest
+                 errors kept = errors              (always 100%)
+```
+
+**The idea behind it.** "Head sampling applies one coin flip to every trace alike, so it discards errors at exactly the rate it discards successes; tail sampling splits the population first and only gambles on the half you do not care about."
+
+The whole argument for tail sampling lives in that split. It is not that tail sampling stores less — it usually stores *more* — it is that the stored set is chosen after outcome is known, so retention and diagnostic value stop being the same dial.
+
+| Symbol | What it is |
+|--------|------------|
+| `total` | Traces produced per day before any sampling |
+| `errors` | Traces containing at least one ERROR span — the ones you debug with |
+| `p` | Head-sampling probability, applied at the root, blind to outcome |
+| `p_rest` | Tail-sampling rate applied only to the boring fast successes |
+| `total - errors` | The successful traces, the only population tail sampling gambles on |
+
+**Walk one example.** One million traces a day at the case study's 3% error rate, config values `p = 1%` and `p_rest = 5%`:
+
+```
+  total  = 1,000,000
+  errors = 1,000,000 x 0.03 =  30,000
+  ok     = 1,000,000 - 30,000 = 970,000
+
+  head sampling at p = 1%
+    stored      = 1,000,000 x 0.01 = 10,000 traces
+    errors kept =    30,000 x 0.01 =    300
+    errors LOST =    30,000 -  300 = 29,700   (99% of your evidence)
+
+  tail sampling: keep all errors, 5% of the rest
+    stored      = 30,000 + 970,000 x 0.05 = 30,000 + 48,500 = 78,500
+    errors kept = 30,000                                      (100%)
+    retained    = 78,500 / 1,000,000 = 7.85% of all traces
+```
+
+Tail sampling stores `78,500 / 10,000 = 7.85x` more traces than head sampling at 1% — and buys, for that 7.85x, every single one of the 29,700 error traces head sampling threw away. That is the trade the incident in Section 14 lost: the team searched Jaeger for failed checkouts and found almost none, because 1% blind sampling had statistically kept about 300 of 30,000.
+
+**Why `decision_wait` has to exist.** Tail sampling cannot evaluate "did any span error" or "total latency > 1s" until the trace is complete, so the gateway must hold spans in memory until it believes no more are coming — hence `decision_wait: 10s` and the `num_traces: 100000` buffer bound. Drop the wait and you are deciding on a partial trace, which is head sampling wearing a tail-sampling config.
+
 ### Head vs tail sampling — why the choice matters
 
 ```mermaid

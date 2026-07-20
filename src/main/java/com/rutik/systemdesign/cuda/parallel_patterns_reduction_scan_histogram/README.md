@@ -319,6 +319,42 @@ not scattered by a modulo test — the warp scheduler never has to serialize div
 branches within a single warp until the final 5 steps operate on fewer than 32
 threads total.
 
+**What the formula is telling you.** "A tree costs the same total additions as a
+serial loop — you just stop *waiting* for them one at a time."
+
+The two complexities being compared are not competing costs; they measure different
+things. `O(n)` work is how much arithmetic the machine performs; `O(log n)` depth is
+how many of those additions you must wait for in sequence. The GPU's whole advantage
+here is that it can pay the first without paying the second.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of input elements the block reduces (16 in the diagram, `blockDim.x` in the kernel) |
+| `log2(n)` | Tree depth — how many `__syncthreads()`-separated rounds the loop runs |
+| `n-1` | Total additions performed, counted once across all threads and all rounds |
+| `s` | Stride for the current round; starts at `n/2` and halves each round |
+| `tid < s` | The active-thread test — a contiguous prefix, which is what keeps warps undivided |
+
+**Walk one example.** The `n=16` diagram, then the same shape scaled up:
+
+```
+  n = 16
+    rounds  = log2(16)              = 4
+    adds    = 16/2 + 8/2*2 ...      -> 8 + 4 + 2 + 1 = 15 = n-1
+    depth   = 4 barriers, not 15 sequential adds
+
+  n = 1,048,576  (2^20, the figure used in Section 3)
+    rounds  = log2(1048576)         = 20
+    adds    = n - 1                 = 1,048,575
+    serial CPU loop would wait      = 1,048,575 steps
+    GPU tree waits                  = 20 steps
+    latency ratio = 1,048,575 / 20  = 52,428.75x fewer dependent steps
+```
+
+Same arithmetic bill, ~52,000x shorter critical path. That gap is the entire reason
+reduction is a GPU pattern at all — and why an implementation that serializes warps
+throws away the only thing it bought.
+
 ### Hillis-Steele Scan — Inclusive vs. Exclusive (one step shown, n=8)
 
 ```
@@ -345,6 +381,45 @@ Inclusive scan keeps element `i`'s own value in its running total; exclusive sca
 does not — the shift-and-prepend-identity relationship is the fastest way to convert
 between them without rerunning the whole algorithm, and it is exactly what
 `thrust::exclusive_scan` does internally relative to its inclusive kernel.
+
+**Read it like this.** "Inclusive says *including me, the total so far is X*;
+exclusive says *before me, the total was X* — so exclusive is inclusive shifted one
+seat to the right, with a zero taking the empty front seat."
+
+Compaction and bucket-offset code always wants the exclusive form, because element
+`i`'s write offset must count only the elements *ahead* of it. Hand it an inclusive
+scan and every element lands one slot too far, silently overwriting its neighbour.
+
+| Symbol | What it is |
+|--------|------------|
+| `in[i]` | The `i`-th input value (`3 1 4 1 5 9 2 6` in the diagram) |
+| `inclusive[i]` | `in[0] + ... + in[i]` — running total that includes `in[i]` |
+| `exclusive[i]` | `in[0] + ... + in[i-1]` — running total that stops just before `in[i]` |
+| `d` | Step offset, doubling `1, 2, 4, ...` until it exceeds `n` |
+| `identity` | The operator's neutral value, `0` for sum — what `exclusive[0]` must be |
+
+**Walk one example.** Using the same `3 1 4 1 5 9 2 6` input:
+
+```
+  index        :  0    1    2    3    4    5    6    7
+  input        :  3    1    4    1    5    9    2    6
+
+  inclusive    :  3    4    8    9   14   23   25   31
+                  ^ 3           ^ 3+1+4+1 = 9        ^ sum of all 8 = 31
+
+  exclusive    :  0    3    4    8    9   14   23   25
+                  ^ identity    ^ = inclusive[2] = 8
+
+  check: exclusive[i] = inclusive[i-1]   ->  exclusive[5] = inclusive[4] = 14
+  check: exclusive[7] + input[7] = 25 + 6 = 31 = inclusive[7]
+
+  step count for n=8 : log2(8) = 3 steps (d = 1, 2, 4)
+  add count for n=8  : 3 steps x 8 elements = 24 adds  (vs n-1 = 7 for a reduction)
+```
+
+The last two lines are the price tag: 24 additions to learn all eight partial sums
+versus 7 additions to learn only the final one — the `O(n log n)` overhead decoded
+immediately below.
 
 ### Histogram Privatization (256-bin example, 4 blocks)
 
@@ -476,6 +551,42 @@ __global__ void scanHillisSteele(float* g_data, int n) {
 over the same input — roughly 10x more total arithmetic to get every partial sum
 instead of just the final one.
 
+**In plain terms.** "Every round, *every* thread redoes an addition — so the bill is
+one full pass over the array per round, and there are `log2(n)` rounds."
+
+Hillis-Steele is not wasteful by accident. It buys its simplicity by never shrinking
+the active set: no thread ever retires, so there is no bookkeeping about which lanes
+are still live. The redundant additions are the fee for that.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Elements scanned (one block's worth — `n <= 1024` in the kernel above) |
+| `log2(n)` | Step count — how many doublings of `d` before `d >= n` |
+| `n * log2(n)` | Total additions, since each of `log2(n)` steps touches up to `n` elements |
+| `d` | Current offset; thread `tid` adds `temp[tid - d]` when `tid >= d` |
+| `addend` | The register copy read *before* the barrier — prevents the read/write race |
+
+**Walk one example.** The `n=1024` case from the text, then `n=1,048,576`:
+
+```
+  n = 1,024
+    steps       = log2(1024)          = 10
+    total adds  = 1024 x 10           = 10,240
+    reduction   = n - 1               =  1,023
+    overhead    = 10,240 / 1,023      = 10.01x more arithmetic
+
+  n = 1,048,576
+    steps       = log2(1048576)       = 20
+    total adds  = 1,048,576 x 20      = 20,971,520   (~20.9M, the Section 3 figure)
+    reduction   = n - 1               =  1,048,575
+    overhead    = 20,971,520 / 1,048,575 = 20.0x
+```
+
+Note that the overhead multiplier *is* `log2(n)` — it was 10x at `n=1024` and doubles
+to 20x at `n=1,048,576`. That growth is precisely why the work-efficient Blelloch
+variant exists, and why "just use Hillis-Steele" stops being defensible past a few
+thousand elements.
+
 ### 6.4 Scan: Blelloch Work-Efficient (Up-Sweep / Down-Sweep)
 
 ```cpp
@@ -512,6 +623,45 @@ cost of `2 * log2(n)` sequential rounds instead of `log2(n)`. For `n=1,048,576`,
 Blelloch does ~2.1M operations across 40 rounds versus Hillis-Steele's ~20.9M
 operations across 20 rounds — 10x less total work for 2x more rounds. CUB's
 multi-block scan uses this work-efficient structure internally.
+
+**Stated plainly.** "Climb the reduction tree once to build every subtree's total,
+then walk back down handing each node the sum of everything to its left."
+
+The down-sweep is the half people cannot reconstruct in an interview. Its trick is the
+swap: at each node the left child receives the parent's incoming value, and the right
+child receives that value plus the left child's old subtree total. Zeroing the root
+before the descent is what makes the output *exclusive* rather than inclusive — delete
+that one line and every offset is wrong by its own element.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Elements scanned; must be a power of two for the stride arithmetic to line up |
+| `log2n` | Depth of one sweep; the loop runs it up and then down |
+| `2 * log2(n)` | Total sequential rounds — twice reduction's depth, the price of work efficiency |
+| `n-1` | Additions per sweep; two sweeps gives `2(n-1)`, still `O(n)` |
+| `stride` | `1 << (d+1)` — the span of the subtree handled at level `d` |
+| `temp[n-1] = 0` | Clearing the root; converts the result from inclusive to exclusive |
+
+**Walk one example.** Both algorithms at `n = 1,048,576`:
+
+```
+  Blelloch
+    up-sweep adds     = n - 1                = 1,048,575
+    down-sweep adds   = n - 1                = 1,048,575
+    total ops         = 2(n-1)               = 2,097,150   (~2.1M)
+    rounds            = 2 x log2(n) = 2 x 20 =        40
+
+  Hillis-Steele
+    total ops         = n x log2(n)          = 20,971,520  (~20.9M)
+    rounds            =     log2(n)          =        20
+
+  work  ratio = 20,971,520 / 2,097,150 = 10.0x  <- Blelloch does 10x less arithmetic
+  round ratio =         40 /        20 =  2.0x  <- Blelloch waits 2x more times
+```
+
+Trade 2x more barriers for 10x less arithmetic. At small `n` the barriers dominate and
+Hillis-Steele wins; at large `n` the arithmetic dominates and Blelloch wins — which is
+the entire step-vs-work tradeoff named in Section 2's key insight.
 
 ### 6.5 Scan via Library: Thrust and CuPy
 
@@ -576,6 +726,49 @@ __global__ void histogramPrivatized(const unsigned char* data, int n, unsigned i
 Shared-memory atomics are also serviced by a per-SM atomic unit that is faster than
 the global-memory atomic path, so privatization wins twice: less contention, and the
 contention that remains resolves faster per collision.
+
+**The idea behind it.** "Instead of every thread in the grid queueing at the same 256
+counters, each block tallies privately and then posts one summary line per bin."
+
+There is no tree here and no clever algebra — the only quantity that matters is *how
+many things contend for one address*. Privatization does not reduce the number of
+increments; it moves almost all of them into a scope where the contenders are one
+block's warps rather than the whole grid, and the per-collision cost is the fast
+shared-memory atomic unit rather than the global one.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Input elements — 2,073,600 for a 1080p frame |
+| `NUM_BINS` | Counter array size, 256 here (one bin per 8-bit pixel value) |
+| `n / NUM_BINS` | Average increments landing on a single bin — the contention depth |
+| `gridDim.x` | Blocks launched; with a grid-stride loop this is decoupled from `n` |
+| `blocks * NUM_BINS` | Global atomics issued by the merge loop — the only global contention left |
+| `stride` | `blockDim.x * gridDim.x` — the grid-stride step that lets a fixed grid cover any `n` |
+
+**Walk one example.** A 1080p frame, 256 bins, launched as 1,024 blocks x 256 threads:
+
+```
+  n = 1920 x 1080 = 2,073,600 elements,  NUM_BINS = 256
+
+  Global-atomic version
+    global atomics issued      = n                    = 2,073,600
+    contenders per bin         = n / 256              =     8,100   (grid-wide)
+
+  Privatized version
+    elements per block         = 2,073,600 / 1,024    =     2,025
+    shared atomics per block   =                            2,025   (block-local only)
+    per-bin depth inside block = 2,025 / 256          =      7.91
+    global atomics (merge)     = 1,024 blocks x 256   =   262,144
+    contenders per global bin  = 1,024 blocks         =     1,024
+
+  global-atomic traffic cut  = 2,073,600 / 262,144 = 7.91x fewer
+  per-bin global contention  =     8,100 /   1,024 = 7.91x shallower
+```
+
+Both ratios land on the same 7.91 because both are `n / (blocks * bins)` — the
+privatization win is exactly the average number of elements each block folds into one
+bin before posting it. Launch more blocks and the win shrinks; launch a grid-stride
+loop with few, long-lived blocks and it grows.
 
 ### 6.7 Histogram via Library: CuPy
 

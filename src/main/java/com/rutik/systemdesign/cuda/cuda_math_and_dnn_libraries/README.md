@@ -151,6 +151,56 @@ bytes either way):
 
 The fix is never "convert the buffer" — it is to tell cuBLAS the truth about the layout via the transpose flags (`CUBLAS_OP_T`) and, for a full row-major GEMM `C = A @ B`, to compute the mathematically equivalent column-major product `C^T = B^T @ A^T` by swapping operand order, which is exactly what Section 10's fix does.
 
+**Read it like this.** The two conventions are just two different formulas for turning a
+`(i, j)` coordinate into a flat address — `i*ncols + j` versus `i + j*nrows` — and the
+bytes never move. Feed a buffer to the wrong formula and every element still gets read,
+just at the wrong coordinate.
+
+That is precisely why the bug is silent: there is no invalid address to trap on, no
+out-of-range index, no size mismatch. Both formulas map the same buffer onto the same
+byte range. Only the meaning changes.
+
+| Symbol | What it is |
+|--------|------------|
+| `(i, j)` | Logical coordinate — row `i`, column `j`, what the math means |
+| row-major addr | `i * ncols + j` — C, NumPy, PyTorch default; walk a row, addresses go +1 |
+| col-major addr | `i + j * nrows` — Fortran, cuBLAS default; walk a column, addresses go +1 |
+| `lda` / `ldb` / `ldc` | Leading dimension = the stride between consecutive columns; `nrows` in col-major |
+| `CUBLAS_OP_N` / `CUBLAS_OP_T` | Tell cuBLAS to read the operand as stored, or as its transpose |
+| `C = A @ B` becomes `C^T = B^T @ A^T` | The identity the Section 10 fix exploits — swap operands, swap `M`/`N` |
+
+**Walk one example.** The 2x3 matrix from the diagram above, `nrows=2`, `ncols=3`:
+
+```
+  logical A = | 1  2  3 |      flat buffer = [1, 2, 3, 4, 5, 6]
+              | 4  5  6 |
+
+  element (0,2) -- the value 3 -- under each formula:
+    row-major : addr = 0*3 + 2       = 2   -> buffer[2] = 3   CORRECT
+    col-major : addr = 0 + 2*2       = 4   -> buffer[4] = 5   WRONG element
+
+  element (1,0) -- the value 4:
+    row-major : addr = 1*3 + 0       = 3   -> buffer[3] = 4   CORRECT
+    col-major : addr = 1 + 0*2       = 1   -> buffer[1] = 2   WRONG element
+
+  full col-major reading of the same 6 bytes as a 2x3:
+      | buf[0] buf[2] buf[4] |     | 1  3  5 |
+      | buf[1] buf[3] buf[5] |  =  | 2  4  6 |   <- exactly A-transpose
+
+  agreement check across all 6 coordinates (row-major addr vs col-major addr):
+    (0,0) -> 0 vs 0   AGREE       (1,0) -> 3 vs 1   differ
+    (0,1) -> 1 vs 2   differ      (1,1) -> 4 vs 3   differ
+    (0,2) -> 2 vs 4   differ      (1,2) -> 5 vs 5   AGREE
+
+  2 of 6 coordinates agree; the other 4 are silently misread.
+```
+
+Only the first and last elements agree — they are the two fixed points of the
+transpose — so 4 of 6 values land at the wrong coordinate. That is why a wrapper
+that "looks right" on a spot-check of `C[0][0]` still fails everywhere else, and
+why Best Practice 2 insists on a correctness test against a known full result
+rather than a single-element check.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -182,6 +232,55 @@ void gemm_f32(cublasHandle_t handle,
                 d_C, m);                     // ldc = m (rows of C)
 }
 ```
+
+**In plain terms.** `C = alpha * op(A) * op(B) + beta * C` says: "multiply these two
+matrices, scale the answer, and blend it into whatever is already sitting in `C`."
+
+The `beta * C` term is the part people miss. GEMM is deliberately an *accumulate*, not an
+assign — that is what lets a strided-batched or split-K GEMM add partial results into the
+same output buffer without a separate reduction kernel.
+
+| Symbol | What it is |
+|--------|------------|
+| `m`, `n`, `k` | Output is `m x n`; `k` is the contracted (summed-over) inner dimension |
+| `op(A)` | `A` as stored, or its transpose — chosen by the `CUBLAS_OP_N` / `CUBLAS_OP_T` flag |
+| `alpha` | Scale applied to the product; `1.0f` means "use it as is" |
+| `beta` | Scale applied to `C`'s **existing** contents; `0.0f` = overwrite, `1.0f` = accumulate |
+| `lda`, `ldb`, `ldc` | Leading dimensions — column-major row counts, `m`, `k`, `m` here |
+| FLOP count | `2 * m * n * k` — one multiply and one add per contracted term |
+
+**Walk one example.** A small GEMM, so the accumulate semantics are visible:
+
+```
+  m = 2, n = 2, k = 3        alpha = 1.0,  beta = 0.0
+
+  A (2x3) = | 1  2  3 |      B (3x2) = | 1  0 |
+            | 4  5  6 |                | 0  1 |
+                                       | 1  1 |
+
+  C[0][0] = 1*1 + 2*0 + 3*1 = 4        C[0][1] = 1*0 + 2*1 + 3*1 = 5
+  C[1][0] = 4*1 + 5*0 + 6*1 = 10       C[1][1] = 4*0 + 5*1 + 6*1 = 11
+
+  C = | 4   5 |      FLOPs = 2 * 2 * 2 * 3 = 24
+      |10  11 |
+
+  now re-run the SAME call with beta = 1.0 and C left in place:
+    C_new = 1.0 * (A@B) + 1.0 * C_old
+          = | 4  5| + | 4  5| = | 8  10|
+            |10 11|   |10 11|   |20  22|
+  -- the product was ADDED, not assigned. That is beta doing its job.
+```
+
+Scale that FLOP formula to the shape used throughout this module:
+
+```
+  M = N = K = 4096
+  FLOPs = 2 * 4096 * 4096 * 4096 = 137,438,953,472 = 137.44 GFLOP
+```
+
+137 GFLOP is the fixed cost of the math itself. Every performance number in this module
+is that constant divided by a different achieved throughput — the work never changes,
+only how fast the kernel gets through it.
 
 `cublasSgemm` is fixed to FP32 in, FP32 out, FP32 accumulate. For mixed precision — FP16/BF16 inputs with FP32 accumulation, or INT8/FP8 quantized paths — reach for the more general `cublasGemmEx`, which lets you specify input type, output type, and compute type independently and lets the library route through Tensor Cores when the shapes and types qualify:
 
@@ -294,6 +393,47 @@ sequenceDiagram
 
 This is why the first call on a new shape is measurably slower than every call after it — the benchmarked winner gets cached, and only the first iteration pays the search cost across all candidate algorithms.
 
+**Put simply.** The search costs you the sum of every candidate's runtime, once; it pays
+you back the difference between the winner and whatever you would otherwise have picked,
+on every call. Break-even is one divided by the other.
+
+This also explains why `torch.backends.cudnn.benchmark = True` is right for a training
+loop and wrong for a server with constantly-changing input shapes: the numerator is paid
+per *distinct shape*, so a workload that never repeats a shape pays the search forever
+and never collects.
+
+| Symbol | What it is |
+|--------|------------|
+| candidates | The algorithms cuDNN times — implicit GEMM, FFT-based, Winograd here |
+| search cost | Sum of all candidates' runtimes; paid once per distinct shape, then cached |
+| winner | Fastest candidate — `0.38 ms` (FFT-based) in the trace above |
+| per-call saving | Winner time subtracted from the algorithm you'd have shipped blind |
+| break-even | `search cost / per-call saving` — iterations before the search turns profitable |
+| `benchmark = True` | PyTorch's switch from the heuristic API to this timed search |
+
+**Walk one example.** The three measured candidates from the sequence diagram:
+
+```
+  implicit GEMM : 0.41 ms
+  FFT-based     : 0.38 ms   <- winner
+  Winograd      : 0.52 ms
+
+  search cost = 0.41 + 0.38 + 0.52 = 1.31 ms   (paid once, per shape)
+
+  case 1 -- you would have guessed implicit GEMM (a reasonable default):
+    per-call saving = 0.41 - 0.38 = 0.03 ms
+    break-even      = 1.31 / 0.03 = 44 iterations
+
+  case 2 -- you would have guessed Winograd (a bad default for this shape):
+    per-call saving = 0.52 - 0.38 = 0.14 ms
+    break-even      = 1.31 / 0.14 = 9.4 -> 10 iterations
+```
+
+44 iterations is trivial for a training loop that runs thousands of steps at a fixed shape,
+and ruinous for a request-per-shape inference server. The narrower the spread between
+candidates, the longer the search takes to repay — which is the quantitative form of the
+Section 10 warning about benchmarking without a warmup.
+
 ### CUTLASS: Assembling a Custom GEMM From Tuned Building Blocks
 
 CUTLASS does not give you one function to call — it gives you template building blocks (thread-block tile, warp tile, epilogue) you compose at compile time. This is the "near-cuBLAS performance, but customizable" middle ground:
@@ -339,6 +479,40 @@ xychart-beta
 ```
 
 The naive kernel from Section 10 lands around 5% of peak because it has no tiling or reuse; a tuned CUTLASS instantiation closes most of that gap through the same tiling/pipelining building blocks cuBLAS uses internally, and cuBLAS itself sits a few percent higher still thanks to a broader internal autotuning sweep.
+
+**What the formula is telling you.** "Percent of peak" is not a grade — it is a
+wall-clock multiplier. Divide the fixed 137.44 GFLOP by the throughput each bar
+represents and the abstract percentages turn into milliseconds you can feel.
+
+The interesting part is where the gap sits. The 4-point spread between CUTLASS and cuBLAS
+costs almost nothing; the 88-point spread between naive and CUTLASS costs almost
+everything. Chasing the wrong one of those two is the mistake this whole module is about.
+
+| Symbol | What it is |
+|--------|------------|
+| peak FLOP/s | Hardware ceiling — A100 FP32 non-Tensor-Core, `19.5 TFLOP/s` |
+| percent of peak | Achieved throughput as a fraction of that ceiling; the chart's bars |
+| achieved = peak x pct | Actual delivered throughput in FLOP/s |
+| time = FLOPs / achieved | Wall-clock for the GEMM; the only number a user notices |
+| `137.44 GFLOP` | The fixed work, `2*4096^3` — identical for all three bars |
+
+**Walk one example.** The same GEMM under all three bars, on a 19.5 TFLOP/s FP32 ceiling:
+
+```
+  work = 137.44 GFLOP  (constant across all three rows)
+
+  naive hand-kernel   5% ->  0.975 TFLOP/s -> 137.44e9 / 0.975e12 = 140.96 ms
+  CUTLASS (tuned)    93% -> 18.135 TFLOP/s -> 137.44e9 / 18.135e12 =  7.58 ms
+  cuBLAS             97% -> 18.915 TFLOP/s -> 137.44e9 / 18.915e12 =  7.27 ms
+
+  naive vs cuBLAS  : 140.96 / 7.27 = 19.4x slower
+  CUTLASS vs cuBLAS:   7.58 / 7.27 =  1.04x slower  (0.31 ms, 4% behind)
+```
+
+19.4x versus 1.04x is the entire library-vs-custom argument in two numbers. Weeks of
+hand-tuning to move from naive to CUTLASS buys you 133 ms per call; the remaining
+0.31 ms to reach cuBLAS is what closed-source, per-architecture autotuning buys — and it
+is not worth reproducing.
 
 ### Thrust: STL-Shaped Parallel Algorithms
 
@@ -592,6 +766,55 @@ cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
             M, N, K, &alpha, d_A, M, d_B, K, &beta, d_C, M);
 ```
 
+  **What it means.** The naive kernel is slow for one countable reason: it reads each
+  input element thousands of times instead of once. Arithmetic intensity — FLOPs earned
+  per byte fetched — is the number that makes "no reuse" concrete.
+
+  Tiling does not make the arithmetic faster. It makes each fetched byte serve more
+  multiply-adds before being discarded, which is the only thing that moves a kernel off
+  the memory roof and onto the compute roof.
+
+| Symbol | What it is |
+|--------|------------|
+| `M`, `N`, `K` | GEMM dimensions; `4096` each in this example |
+| naive bytes read | `M*N*K*2*4` — every one of the `M*N` threads reads `K` elements of A and `K` of B |
+| ideal bytes | `(M*K + K*N + M*N)*4` — each input read once, each output written once |
+| amplification | Naive bytes divided by ideal bytes; the reuse the kernel throws away |
+| AI (intensity) | FLOPs divided by bytes moved; low = memory-bound, high = compute-bound |
+| HBM bandwidth | A100 ceiling, `1555 GB/s` — the divisor that turns bytes into time |
+
+  **Walk one example.** The 4096-cubed FP32 GEMM this pitfall measures:
+
+```
+  naive traffic:
+    threads = M*N = 4096 x 4096 = 16,777,216
+    each reads K of A + K of B  = 2 x 4096 = 8192 elements
+    bytes = 16,777,216 x 8192 x 4 B = 549.76 GB
+
+  ideal traffic (read each input once, write each output once):
+    (4096x4096 + 4096x4096 + 4096x4096) x 4 B = 201.33 MB
+
+  amplification = 549.76 GB / 201.33 MB = 2,731x more bytes than necessary
+
+  arithmetic intensity:
+    naive = 137.44 GFLOP / 549.76 GB  =   0.25 FLOP/byte
+    ideal = 137.44 GFLOP / 201.33 MB  = 682.67 FLOP/byte
+```
+
+  Now check that this actually explains the 5% figure:
+
+```
+  time from bandwidth alone = 549.76 GB / 1555 GB/s = 353.5 ms
+  implied throughput        = 137.44 GFLOP / 353.5 ms = 0.389 TFLOP/s
+  as percent of 19.5 TFLOP/s peak                     = 2.0%
+```
+
+  The pure no-cache model predicts 2%, and the kernel measures about 5% — the gap is
+  the L2 cache catching part of the reuse the source code failed to express. Even
+  crediting the cache with more than doubling the effective bandwidth, the kernel is
+  nowhere near compute-bound. At 0.25 FLOP/byte it is pinned to the memory roof, and no
+  amount of arithmetic tweaking moves it; only reuse does.
+
   The lesson generalizes past GEMM: before writing *any* CUDA kernel for a standard dense math operation, check whether cuBLAS/cuDNN/cuFFT/cuSPARSE already implements it — the naive-to-tuned gap is rarely closable by incremental hand-tuning in less time than the library call takes to try first.
 
 - **BROKEN: row-major data fed to cuBLAS with no transpose adjustment, producing a silently transposed result.**
@@ -816,6 +1039,47 @@ cublasLtMatmul(ltHandle, matmulDesc,
 | Feed-forward block wall time | 1007 us (412 + 186 + 409) | 810 us (401 + 409) |
 | HBM traffic for the activation tensor | Written once (GEMM), read+written again (GELU) | Written once, GELU applied in-register before the write |
 | Engineering effort | N/A (baseline) | ~1 day (epilogue descriptor change, no new kernel authored) |
+
+**The idea behind it.** The win here is subtraction, not acceleration. Nobody made a GEMM
+faster — one kernel was deleted, and the block got exactly that kernel's duration back.
+
+That framing is what the junior engineer's instinct got wrong. Rewriting Linear 1 targets
+the 412 us term, where cuBLAS has already taken everything available; deleting the GELU
+launch targets the 186 us term, where 100% of the time was recoverable.
+
+| Symbol | What it is |
+|--------|------------|
+| Linear 1 / Linear 2 | The two `cublasSgemm` calls, `412 us` and `409 us` — already near peak |
+| `gelu_elementwise_kernel` | The separate `186 us` launch: read the full tensor, apply GELU, write it back |
+| fused epilogue | `CUBLASLT_EPILOGUE_GELU_BIAS` — GELU applied in-register before the GEMM's write |
+| before wall time | Sum of all three kernel durations |
+| after wall time | Linear 1 (slightly slower, now doing more work) plus Linear 2 |
+| speedup | Before divided by after |
+
+**Walk one example.** The measured durations straight from the `nsys` table above:
+
+```
+  BEFORE:
+    Linear 1 (cublasSgemm)      412 us
+    gelu_elementwise_kernel     186 us   <- the deletable term
+    Linear 2 (cublasSgemm)      409 us
+                              --------
+    total                      1007 us   with 3 kernel launches
+
+  AFTER (GELU folded into Linear 1's epilogue):
+    Linear 1 (cublasLt + GELU)  401 us   <- absorbs GELU, yet gets FASTER
+    Linear 2 (cublasSgemm)      409 us
+                              --------
+    total                       810 us   with 2 kernel launches
+
+  saved   = 1007 - 810 = 197 us
+  speedup = 1007 / 810 = 1.243x  (19.6% of the block's wall time)
+```
+
+Note that Linear 1 went 412 us -> 401 us while taking on *more* arithmetic. The GELU's
+FLOPs were never the cost; its 186 us was almost entirely the round-trip of the
+activation tensor through HBM, so folding it in removed 197 us total — more than the
+GELU kernel's own 186 us, because the separate launch's overhead vanished too.
 
 **Discussion questions:**
 1. Why did each individual kernel's "near-peak" profiler reading fail to reveal the actual bottleneck, and what profiling view (per-kernel duration vs end-to-end timeline) would have caught it faster?

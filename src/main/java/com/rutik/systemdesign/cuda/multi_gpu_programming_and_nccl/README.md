@@ -66,6 +66,47 @@ xychart-beta
 
 *NVLink 4's ~900 GB/s dwarfs every off-chip path by 14-75x. The entire point of P2P, NVSwitch, and GPUDirect is keeping traffic on the tallest bar instead of falling back to the PCIe or network bars beneath it.*
 
+**In plain terms.** "Every step down this ladder is not a few percent — it is a
+multiple, and the host-staged path pays that multiple twice."
+
+Interconnect numbers are quoted in different units by different vendors, which is where
+mistakes creep in. Network links are sold in **gigabits** per second, interconnects in
+**gigabytes** per second — a factor of 8 between them. Convert before comparing or a
+400 Gb/s NIC looks eight times better than it is.
+
+| Symbol | What it is |
+|--------|------------|
+| `~900 GB/s` | NVLink 4 aggregate bidirectional bandwidth per H100 GPU |
+| `~64 GB/s` | PCIe Gen5 x16 bandwidth — the host road, and the P2P fallback without NVLink |
+| `400 Gb/s` | InfiniBand NDR link rate, quoted in gigaBITS per second |
+| `Gb/s / 8` | Conversion to gigaBYTES per second — 8 bits to a byte |
+| "host-staged" | Device to host, then host to device: two PCIe traversals, not one |
+
+**Walk one example.** Converting and ranking every path in the table above:
+
+```
+  InfiniBand NDR : 400 Gb/s / 8            =  50 GB/s
+  PCIe Gen5 x16  :                            64 GB/s
+  NVLink 4       :                           900 GB/s
+
+  NVLink vs PCIe        : 900 / 64         = 14.06x
+  NVLink vs InfiniBand  : 900 / 50         = 18.00x
+  NVLink vs 100G Ether  : 900 / 12         = 75.00x   <- the "14-75x" range above
+
+  Host-staged copy of 1 GB between two GPUs:
+    hop 1 (GPU0 -> host RAM) : 1 GB / 64 GB/s  = 15.6 ms
+    hop 2 (host RAM -> GPU1) : 1 GB / 64 GB/s  = 15.6 ms
+    total                                       = 31.2 ms
+
+  Same 1 GB over NVLink P2P  : 1 GB / 900 GB/s =  1.1 ms
+  speedup = 31.2 / 1.1                          = 28.1x
+```
+
+The headline ratio is 14x per hop, but the host-staged path takes two hops, so the real
+penalty for forgetting `cudaDeviceEnablePeerAccess` is closer to 28x — which is why the
+Section 10 pitfall describes it as "10-15x slower" per hop and still understates the
+end-to-end cost.
+
 ### 4.3 NCCL collectives
 
 | Collective | Effect | Canonical use |
@@ -132,6 +173,46 @@ flowchart LR
 ```
 
 *NCCL never exposes this branch to the caller — it inspects message size, GPU count, and topology at call time and silently picks the winning path, which is why the same `ncclAllReduce` line is bandwidth-optimal on a large gradient buffer and latency-optimal on a small activation tensor.*
+
+**The idea behind it.** "A ring moves the fewest bytes but takes the most turns; a tree
+takes the fewest turns but moves a few more bytes — so whichever of bytes or turns
+dominates your message decides the winner."
+
+Every collective's cost is roughly `steps x latency + bytes / bandwidth`. For a large
+gradient buffer the second term swamps the first, so minimizing bytes (ring) wins. For a
+small activation tensor in a tensor-parallel decode step, the bytes are trivial and the
+`steps x latency` term is everything, so minimizing steps (tree) wins. This is why the
+crossover is a *message-size* threshold, not a GPU-count one.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Ranks in the communicator — GPUs participating in the collective |
+| `2(N-1)` | Ring step count: `N-1` reduce-scatter hops plus `N-1` all-gather hops |
+| `O(N)` | How ring latency grows — linearly with the number of GPUs |
+| `2 log2(N)` | Double-binary-tree step count — up the tree and back down |
+| `O(log N)` | How tree latency grows — the reason trees win at large `N` |
+| `2(N-1)/N` | Ring's per-GPU byte multiplier, which approaches 2 and never exceeds it |
+
+**Walk one example.** Step counts for both algorithms as the group grows:
+
+```
+  N        ring steps = 2(N-1)     tree steps = 2 x log2(N)     ring/tree
+  ----------------------------------------------------------------------
+    4              6                        4                     1.5x
+    8             14                        6                     2.3x
+   64            126                       12                    10.5x
+  512          1,022                       18                    56.8x
+
+  Meanwhile the ring's byte cost barely moves:
+    N=4   : 2(N-1)/N = 2 x 3/4   = 1.50 x size
+    N=8   : 2(N-1)/N = 2 x 7/8   = 1.75 x size
+    N=512 : 2(N-1)/N = 2 x 511/512 = 1.996 x size   <- ceiling is 2.0, never worse
+```
+
+Read the two halves together: going from 8 to 512 GPUs makes the ring 73x more
+latency-hops but only 14% more bytes. That asymmetry is the whole selection rule — at
+512 GPUs a small message must use the tree, while a multi-gigabyte gradient buffer still
+prefers the ring because 1,022 hops of latency vanish next to the transfer time.
 
 ### 4.5 Data vs. model decomposition (brief — strategy lives in ml/)
 
@@ -236,6 +317,52 @@ hundreds of GPUs instead of costing more per GPU as the group grows.
 *The reduce-scatter phase turns "N copies of a partial sum" into "N different fully-reduced shards, one per GPU"; the all-gather phase turns those N shards back into N full copies. `ncclAllReduce` is exactly these two phases fused into one call.*
 
 **Worked example**: a 7B-parameter model's gradient buffer in FP32 is `7e9 × 4 bytes ≈ 28 GB`. Across 8 GPUs, the ring all-reduce formula `2·(N-1)/N · size` gives `2 · 7/8 · 28 GB ≈ 49 GB` moved per GPU, split across 14 sequential steps (7 reduce-scatter + 7 all-gather). At H100 NVLink's ~900 GB/s, that is roughly 55 ms of pure transfer time per step-set in the ideal case — the number every "why is my step time X ms" investigation starts from before looking for overlap or topology problems.
+
+**What this actually says.** "No matter how many GPUs join, each one ships slightly under
+two copies of the buffer — never more — because the ring makes every GPU responsible for
+reducing exactly one `1/N` slice."
+
+The term that makes this work is the `1/N` chunking. Each GPU only ever carries a
+`size/N` chunk on any hop, and it makes `N-1` hops per phase, so the phase cost is
+`(N-1)/N · size` — the `N` in the numerator of "N-1 hops" cancels the `N` in the
+denominator of "1/N chunk." Drop the chunking and send whole buffers instead and the
+cost becomes `(N-1) · size`, which grows without bound as the cluster grows. That
+cancellation is the entire reason data-parallel training scales past a handful of GPUs.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of GPUs (ranks) in the ring |
+| `size` | Bytes in the buffer being all-reduced — the full gradient tensor |
+| `size/N` | One chunk; the unit actually crossing a link on any single hop |
+| `N-1` | Hops per phase — enough for a chunk to visit every other rank once |
+| `2` | The two phases: reduce-scatter, then all-gather |
+| `2(N-1)/N · size` | Total bytes each GPU sends (and receives) across the whole collective |
+
+**Walk one example.** The 7B-parameter FP32 gradient buffer from above, on 8 GPUs:
+
+```
+  size  = 7e9 params x 4 bytes         = 28,000,000,000 B = 28 GB
+  N     = 8 GPUs
+
+  chunk        = size / N   = 28 / 8         =  3.5 GB
+  phase 1 hops = N - 1                       =  7
+  phase 2 hops = N - 1                       =  7
+  total hops                                 = 14
+
+  bytes per GPU = 14 hops x 3.5 GB           = 49 GB
+  cross-check   = 2 x (7/8) x 28 GB          = 49 GB     MATCHES
+
+  time at ~900 GB/s NVLink = 49 / 900        = 0.0544 s = 54.4 ms  (the ~55 ms above)
+
+  Naive "everyone sends the whole buffer to everyone":
+    bytes per GPU = (N-1) x size = 7 x 28 GB = 196 GB
+    ring is cheaper by 196 / 49               = 4.0x
+```
+
+Now push `N` to 512: the ring multiplier `2 x 511/512 = 1.996` is barely above the 1.75
+it had at 8 GPUs, while the naive scheme would demand `511 x 28 GB = 14,308 GB` per GPU.
+The ring's per-GPU cost is bounded by `2 · size` forever; the naive one is not bounded at
+all.
 
 ### Ring all-reduce as a message sequence (Mermaid view of the same ring)
 
@@ -500,6 +627,48 @@ def train(rank: int, world_size: int, model: nn.Module, dataloader) -> None:
 
 DDP buckets gradients (default 25 MB) and overlaps the all-reduce of an earlier bucket with the backward pass still computing later layers' gradients — this overlap, not a faster all-reduce, is why DDP throughput scales close to linearly.
 
+**Put simply.** "Do not wait for the whole backward pass to finish before you start
+talking — send each 25 MB slab of gradients the moment it is ready, so the wire is busy
+while the GPU is still computing."
+
+Bucketing does not make the collective faster; the total bytes are identical. What it
+changes is *when* those bytes move. Without it, communication is a 54 ms block appended
+after compute; with it, all but the final bucket's transfer hides underneath compute that
+was going to happen anyway. The bucket size is the tuning knob for that hiding: too small
+and per-collective launch overhead dominates, too large and the first bucket is not ready
+until most of the backward pass is done.
+
+| Symbol | What it is |
+|--------|------------|
+| `25 MB` | PyTorch's default `bucket_cap_mb` — bytes of gradient accumulated before firing |
+| `size` | Total gradient bytes, 28 GB for the 7B FP32 model used throughout |
+| `size / 25 MB` | Number of buckets, i.e. number of separate `ncclAllReduce` calls per step |
+| `2(N-1)/N` | The same ring multiplier from Section 5, applied per bucket instead of once |
+| exposed cost | Only the final bucket's all-reduce — everything earlier hides under compute |
+
+**Walk one example.** The 28 GB gradient buffer, 8 GPUs, ~900 GB/s NVLink:
+
+```
+  buckets = 28,000 MB / 25 MB                        = 1,120 collectives per step
+
+  per-bucket bytes on the wire = 2 x (7/8) x 25 MB   = 43.75 MB
+  per-bucket time  = 43.75 MB / 900 GB/s             = 48.6 us
+
+  1,120 buckets x 48.6 us                            = 54.4 ms   <- same total as
+                                                                    the single 49 GB
+                                                                    all-reduce above
+
+  Unbucketed : 54.4 ms of communication AFTER the backward pass ends  (fully exposed)
+  Bucketed   : 1,119 buckets overlap with compute, only the last is exposed
+               exposed cost = 48.6 us
+               hidden fraction = 1 - (48.6 us / 54.4 ms) = 99.91%
+```
+
+The totals match exactly — 54.4 ms either way — which is the point. Bucketing buys no
+bandwidth; it converts 54.4 ms of serial communication into 48.6 us of exposed
+communication, and that conversion is what makes an 8-GPU job scale near 8x instead of
+stalling on the wire every step.
+
 ### 6.6 Python — CuPy with raw NCCL
 
 ```python
@@ -580,7 +749,7 @@ Before trusting a new node or cluster for a real training run, benchmark it agai
 ./build/all_reduce_perf -b 8M -e 8G -f 2 -g 8
 
 #   size(B)  count(elem)   type   redop   time(us)  algbw(GB/s)  busbw(GB/s)
-#   8388608     2097152  float     sum      9421      0.89e+03    1.56e+03   <- ~900 GB/s-class NVLink
+#   8388608     2097152  float     sum       9.4      0.89e+03    1.56e+03   <- ~900 GB/s-class NVLink
 ```
 
 `busbw` (bus bandwidth) is the number to compare against the hardware spec sheet (~900 GB/s for H100 NVLink 4); a result well below that on an NVSwitch node usually means P2P is disabled, the wrong GPUs are paired, or a driver/topology misdetection is silently falling back to a slower path — exactly the class of problem `NCCL_DEBUG=INFO` (Section 4.6) is built to expose.

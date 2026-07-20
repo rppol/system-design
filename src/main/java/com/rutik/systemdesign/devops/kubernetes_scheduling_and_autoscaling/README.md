@@ -224,6 +224,75 @@ spec:
 
 HPA's CPU utilization is a percentage of the **request**, so if you don't set CPU requests, HPA can't compute utilization and won't scale.
 
+#### The HPA replica formula, decoded
+
+```
+desiredReplicas = ceil( currentReplicas * (currentMetricValue / targetMetricValue) )
+
+  skip the change entirely when  | currentMetricValue / targetMetricValue - 1 | <= 0.1
+  (the default 10% tolerance band, --horizontal-pod-autoscaler-tolerance)
+```
+
+**Read it like this.** "You are running N pods at X% load and you want them at Y% — so scale the pod count by exactly the factor X/Y, and round up."
+
+The key framing is that HPA is not a controller that nudges replicas up or down by one. It computes the *whole* target in a single shot from a ratio, so a metric that doubles produces a replica count that doubles immediately. Everything that stops it from overreacting — the tolerance band, the stabilization window — is bolted on around this one line.
+
+| Symbol | What it is |
+|--------|------------|
+| `currentReplicas` | Ready pods right now (`3` at start here, capped by `minReplicas: 3` / `maxReplicas: 20`) |
+| `currentMetricValue` | Observed metric **averaged across pods** — for CPU, a percentage of the *request*, not of the node |
+| `targetMetricValue` | Your `averageUtilization: 70` |
+| ratio `current/target` | How far off you are. `>1` means underprovisioned, `<1` overprovisioned |
+| `ceil(...)` | Always round up — HPA would rather overshoot by one pod than run hot |
+| tolerance `0.1` | Dead band; a ratio inside `0.9 .. 1.1` produces *no* API call at all |
+
+**Walk one example.** The `250m` request means the 70% target is `0.70 x 250m = 175m` of actual CPU per pod. Watch each observed load turn into a replica count:
+
+```
+  replicas   observed   target   ratio    |ratio-1|   in band?   ceil(rep x ratio)   action
+    10         91%        70%   1.3000     0.3000       no            13           scale to 13
+    10         73%        70%   1.0429     0.0429       YES           (11)         do nothing
+    10         35%        70%   0.5000     0.5000       no             5           scale to 5
+    10        140%        70%   2.0000     1.0000       no            20           scale to 20 (max)
+     3         95%        70%   1.3571     0.3571       no             5           scale to 5
+
+  91% of a 250m request = 227.5m actual CPU per pod, against a 175m target.
+```
+
+Row two is the row people get wrong in interviews: 73% is *above* the 70% target and the formula says 11 replicas, but `|1.0429 - 1| = 0.0429` sits inside the 10% band, so HPA writes nothing. Without that band a metric jittering around 70% would issue a scale event every 15s sync forever, and each one would restart the 5-minute scale-down stabilization clock. The band is what makes the controller quiet at steady state.
+
+Row four shows the two clamps landing on the same number by coincidence: the formula wants `ceil(10 x 2.0) = 20` and `maxReplicas` is also 20. If load kept climbing to 210%, the formula would ask for 30 and HPA would still stop at 20 — at which point pods run hot and `maxReplicas` is your real capacity limit, not the HPA.
+
+#### What a CPU limit actually is: cgroup quota over period
+
+The Deployment above deliberately omits a CPU limit. The reason is arithmetic in the kernel, not Kubernetes policy:
+
+```
+cgroup v2:  cpu.max = "<quota> <period>"
+
+  quota_us = cpu_limit_in_cores x period_us       period_us = 100000  (100ms, the default)
+```
+
+**What this actually says.** "Every 100 milliseconds the container gets a fresh budget of CPU-microseconds; when it burns through the budget it is frozen until the next 100ms window starts."
+
+| Symbol | What it is |
+|--------|------------|
+| `period_us` | The refill window, `100000` us = 100ms. Fixed by default |
+| `quota_us` | CPU-microseconds allowed per window, summed over **all** threads |
+| `cpu_limit` | Your `limits.cpu`, in cores (`500m` = 0.5 cores) |
+| throttling | The freeze that happens when quota runs out mid-window |
+
+**Walk one example.** Three limits, same 100ms period:
+
+```
+  limits.cpu     quota_us / period_us     meaning
+    250m           25000 / 100000         25ms of CPU per 100ms window
+    500m           50000 / 100000         50ms of CPU per 100ms window
+    2 (2000m)     200000 / 100000         200ms of CPU per 100ms window -> 2 cores in parallel
+```
+
+The trap: a pod limited to `500m` running 4 worker threads burns its 50000us of quota in the first **12.5ms** of the window (4 threads x 12.5ms = 50ms of CPU time), then sits frozen for the remaining 87.5ms. Average utilization reports a comfortable 50%, while p99 latency picks up an ~87ms stall. That is why the config omits `limits.cpu` on the latency path and keeps only the memory cap — memory has no such time-slicing, it is a hard OOM-kill ceiling.
+
 ### Topology spread (HA across zones)
 
 ```yaml
@@ -282,6 +351,38 @@ spec:
       metadata: {queueURL: ..., queueLength: "20"}   # 1 replica per 20 messages
 ```
 
+#### What `queueLength: 20` computes
+
+```
+desiredReplicas = clamp( ceil(backlog / queueLength), minReplicaCount, maxReplicaCount )
+```
+
+**Put simply.** "Give me one worker for every 20 messages waiting, never fewer than zero and never more than 50."
+
+This is the same ratio shape as HPA — KEDA is in fact an HPA driving an external metric — with one difference that matters enormously for cost: `minReplicaCount: 0`. Plain HPA has a floor of 1, so an idle queue still pays for a pod. KEDA's activation path lets the count reach true zero.
+
+| Symbol | What it is |
+|--------|------------|
+| `backlog` | `ApproximateNumberOfMessages` polled from SQS |
+| `queueLength: 20` | Target backlog **per replica**, not a total. Lower = more aggressive scaling |
+| `ceil(...)` | Round up, so a single leftover message still gets a worker |
+| `minReplicaCount: 0` | The scale-to-zero floor — the whole reason to reach for KEDA |
+| `maxReplicaCount: 50` | Hard ceiling; caps effective throughput and downstream DB load |
+
+**Walk one example.** Follow a queue through a burst and back to idle:
+
+```
+  backlog     ceil(backlog / 20)   after clamp[0,50]   note
+      0               0                   0            scale to zero, cost = $0
+     15               1                   1            a partial batch still gets a worker
+     20               1                   1            exactly at target for one replica
+     21               2                   2            crossing 20 adds a whole replica
+    850              43                  43            burst; well under the ceiling
+   1200              60                  50            CLAMPED - backlog keeps growing
+```
+
+The last row is the one to design around. At `maxReplicaCount: 50` and 20 messages per replica, the deepest backlog the pool holds at target is `50 x 20 = 1000` messages. Past that, the formula's answer is discarded and queue age starts climbing without any autoscaler event to alert on — so alert on **message age**, not replica count. Raising `maxReplicaCount` is only safe if whatever the workers write to can absorb 50 concurrent writers.
+
 ### PodDisruptionBudget (survive drains)
 
 ```yaml
@@ -292,6 +393,42 @@ spec:
   selector: {matchLabels: {app: web}}
 # Without this, draining a node can evict ALL replicas at once -> outage during a routine upgrade.
 ```
+
+#### The one subtraction a PDB performs
+
+```
+disruptionsAllowed = currentHealthy - minAvailable          (floored at 0)
+
+  eviction API admits the request only while  disruptionsAllowed > 0
+  percentage form:  minAvailable: "50%"  ->  ceil(0.50 x replicas)   (K8s rounds UP)
+```
+
+**The idea behind it.** "Count how many healthy pods I have above my stated floor; that number, and only that number, may be voluntarily evicted right now."
+
+The subtlety worth internalizing is that a PDB never *stops* a drain — it makes the eviction API return 429 and forces `kubectl drain` to block and retry until pods rescheduled elsewhere restore `currentHealthy`. It converts a fast simultaneous eviction into a slow serialized one.
+
+| Symbol | What it is |
+|--------|------------|
+| `currentHealthy` | Pods matching the selector that are Ready right now |
+| `minAvailable: 2` | The floor you promise never to go below |
+| `disruptionsAllowed` | The live budget, republished in `status` after every pod state change |
+| voluntary disruption | Drains, evictions, Karpenter consolidation — the only things a PDB gates |
+| involuntary disruption | Node crash, kernel OOM, spot reclaim — a PDB does **nothing** here |
+
+**Walk one example.** A 3-replica Deployment with `minAvailable: 2` being drained node by node:
+
+```
+  step   currentHealthy   minAvailable   disruptionsAllowed   drain request
+   1           3               2                 1            ADMITTED, pod evicted
+   2           2               2                 0            BLOCKED, drain waits
+   3           2 -> 3          2                 1            replacement Ready, ADMITTED again
+
+  Same budget at other replica counts:   6 healthy -> 4 allowed    10 healthy -> 8 allowed
+```
+
+Step 2 is the whole point: in the case study below, the upgrade evicted 2 of 3 replicas at once and then the third, because with no PDB `disruptionsAllowed` is effectively unbounded. With the budget in place the drain simply takes longer and checkout never drops below 2 Ready pods.
+
+Note the arithmetic trap at small replica counts. With `replicas: 3`, writing `minAvailable: "50%"` gives `ceil(0.50 x 3) = 2` — the same as `minAvailable: 2`, so `disruptionsAllowed` is 1 and the drain proceeds one pod at a time. But `maxUnavailable: "50%"` on the same 3 replicas would permit 1 eviction too, and if you ever scale to 2 replicas the percentage form pins `minAvailable` at 1 while the fixed `minAvailable: 2` would pin `disruptionsAllowed` at 0 and **block drains forever** — a PDB set at or above your replica count deadlocks every node upgrade in the cluster.
 
 ---
 
@@ -518,6 +655,41 @@ spec: {minAvailable: 2, selector: {matchLabels: {app: checkout}}}
 | Upgrade-time outage | 4 min | 0 (PDB held 2 replicas; drains waited) |
 
 Karpenter consolidation plus honest requests halved the fleet; the PDB + topology spread made node drains non-disruptive.
+
+### Where the 80-to-40 node count comes from
+
+```
+podsPerNode  = min over each resource of  floor( nodeAllocatable / podRequest )
+nodeCount    = ceil( totalPods / podsPerNode )
+realNodeUtil = podsPerNode x actualUsage / nodeAllocatable
+```
+
+**Stated plainly.** "A node holds as many pods as its *tightest* resource allows, and the scheduler measures that against what you asked for, never against what you use."
+
+The `min over each resource` is the part everyone drops. Nodes do not fill up gradually — one dimension binds first and the rest of the node is stranded, invisible, paid for.
+
+| Symbol | What it is |
+|--------|------------|
+| `nodeAllocatable` | Capacity left after kubelet/system reserves. `8000m` CPU / `32Gi` on an 8-vCPU node |
+| `podRequest` | `requests`, the *only* number the scheduler reads |
+| `actualUsage` | What the container really burns — `~250m` / `~600Mi` here |
+| `min over resources` | CPU or memory, whichever runs out first, is the binding dimension |
+| `podsPerNode` | Bin-packing density. Halve the requests and you roughly double this |
+
+**Walk one example.** Same 8-vCPU / 32Gi node, before and after right-sizing:
+
+```
+                     BROKEN (cpu 1, mem 2Gi)      FIXED (cpu 300m, mem 768Mi)
+  by CPU     floor(8000 / 1000)  =  8 pods    floor(8000 / 300)   = 26 pods
+  by memory  floor(32768 / 2048) = 16 pods    floor(32768 / 768)  = 42 pods
+  binding    CPU  ->  8 pods/node             CPU  ->  26 pods/node
+
+  real CPU on a full node:
+     8 pods x 250m =  2000m of 8000m  =  25%   <- 6000m stranded, billed, idle
+    26 pods x 250m =  6500m of 8000m  =  81%
+```
+
+CPU binds in both columns, so CPU requests alone set the density: dropping `1000m` to `300m` is a `3.33x` request cut. The fleet only shrank `80 / 40 = 2.0x`, and average utilization rose exactly in step, `60 / 30 = 2.0x` — the same real work packed twice as densely needs half the nodes, which is the consistency check that tells you the numbers are real. The realized `2.0x` lands below the `3.33x` CPU ratio and the `2048 / 768 = 2.67x` memory ratio because DaemonSets and kubelet reserves take a fixed bite out of every node, pods do not divide evenly into node shapes, and topology spread forces some nodes to stay partly empty to keep one replica per AZ. Treat the request ratio as the ceiling on savings, never the forecast.
 
 **Discussion questions:**
 1. Why did over-requesting double the node count even though real utilization was 30%? (Scheduler packs on requests, not usage.)

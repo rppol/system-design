@@ -143,6 +143,40 @@ Each generated file becomes input to the next round, so a processor can generate
 that itself triggers further generation. Output must converge (eventually no new
 files) or the compiler errors.
 
+**In plain terms.** "Keep re-running the processors over whatever they just wrote until
+they stop writing anything, then compile the pile." The round count is not configurable
+and not arbitrary — it is `depth of the generation chain + 2`, and it is the compiler
+searching for a fixed point.
+
+| Symbol | What it is |
+|--------|------------|
+| Round | One full pass of every registered processor over the current input set |
+| Round 1 input | The original hand-written `.java` sources only |
+| Round N input | Only the files written by round N-1 via the `Filer`, not the originals again |
+| `processingOver()` | `false` in every generating round; `true` in the one final round |
+| D | Generation depth — how many times a generated file itself triggers generation |
+| Convergence | The state where a round produces zero new files. Required, or `javac` errors |
+
+**Walk one example.** Count the rounds for three different processor setups:
+
+```
+  setup                                        D    generating   final   total
+                                                    rounds       round   rounds
+  processor emits nothing at all                0        1         1        2
+  @Builder -> UserBuilder.java (diagram above)  2        3         1        4
+  emits a file that emits a file that emits     3        4         1        5
+
+  the diagram: round 1 writes Generated1, round 2 writes Generated2,
+               round 3 writes nothing (convergence), final round runs
+               -> 3 generating rounds + 1 final round = 4 total
+```
+
+The important consequence sits in the "Round N input" row: round 2 does **not** see the
+original sources again, so a processor that assumes it can re-read the whole program on
+every round is wrong. It sees only what round 1 produced. A processor that emits the
+same file on every round never converges — D is unbounded, the fixed point is never
+reached, and `javac` fails rather than looping forever.
+
 ### Compile-time codegen vs runtime reflection: where the work lands
 
 ```mermaid
@@ -661,6 +695,40 @@ public interface OrderMapper {
 // Generated OrderMapperImpl does dto.setAmount(order.getAmount()); -> no reflection,
 // native-friendly, JIT-optimizable.
 ```
+
+**What this actually says.** Count the reflective operations in that broken loop and the
+"per-field, per-call" phrase stops being a slogan. Reflective ops per `map()` call are
+`1 + 3F` — one `newInstance`, then `setAccessible`, `get`, and `set` for each of F
+fields — while the generated version is `0`, flat, forever.
+
+| Symbol | What it is |
+|--------|------------|
+| F | Fields on the DTO being mapped |
+| `newInstance()` | One reflective construction per call, outside the loop |
+| Per-field ops | `setAccessible` + `get` + `set` = 3 reflective calls, inside the loop |
+| Reflective total | `1 + 3F` per `map()` invocation |
+| Generated total | `0` — `dto.setAmount(order.getAmount())` is a plain virtual call |
+| Native hints needed | One reflection registration per reflected member; `0` for generated code |
+
+**Walk one example.** A 12-field `OrderDto` on an endpoint doing 2,000 requests/second,
+mapping twice per request (entity to DTO on the way out, DTO to entity on the way in):
+
+```
+  reflective ops per map() call   = 1 + 3 x 12          =      37
+  map() calls per request         = 2                   =       2
+  reflective ops per request      = 37 x 2              =      74
+  reflective ops per second       = 74 x 2,000          = 148,000
+
+  same workload, MapStruct-generated OrderMapperImpl:
+  reflective ops per second       = 0 x 2,000           =       0
+```
+
+148,000 reflective operations per second versus zero is why "mapping disappeared from
+the CPU profile" — the work did not get faster, it stopped existing. The `1 + 3F` shape
+also explains the GraalVM half of the outcome: every one of those 12 fields is a member
+the closed-world analyser cannot see, so the reflective version needs 12 hints per DTO
+and the generated version needs none. Both wins come from the same single change of
+*when* the field list is resolved: at build time instead of on every call.
 
 **Outcomes (measured).**
 - Mapping disappeared from the request CPU profile — generated getter/setter copies

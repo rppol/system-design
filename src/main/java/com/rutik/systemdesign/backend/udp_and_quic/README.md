@@ -134,6 +134,33 @@ sequenceDiagram
 
 Every extra round trip before data flows is pure setup tax: TCP with TLS 1.2 spends 3 RTTs before the first application byte, TCP with TLS 1.3 folds the handshake down to 2, and QUIC collapses transport and crypto into a single combined handshake — 1 RTT on a fresh connection, 0 RTT when resuming with a cached session ticket.
 
+**Put simply.** "Time wasted before your first byte = number of round trips × how long one round trip takes. You cannot make the network faster, so the only lever is doing fewer round trips."
+
+RTT count is a protocol property; RTT duration is a physics property. Interviews probe this because candidates reach for compression or bigger servers when the real cost is a fixed multiple of the speed of light.
+
+| Symbol | What it is |
+|--------|------------|
+| RTT | One round trip — request out, response back. Set by distance and link type |
+| RTT count | How many full round trips the protocol demands before app data flows |
+| setup latency | `RTT count × RTT`. Pure overhead, identical for a 1-byte and 1-MB response |
+| 0-RTT | Resumption: app data rides in the very first packet, using a cached key |
+
+**Walk one example.** The four rows of the diagram above, priced on a 60 ms mobile RTT:
+
+```
+  protocol stack            RTTs   setup latency = RTTs x 60 ms
+  ------------------------  -----  ---------------------------
+  TCP + TLS 1.2               3        180 ms
+  TCP + TLS 1.3               2        120 ms
+  QUIC, fresh connection      1         60 ms
+  QUIC, 0-RTT resumption      0          0 ms
+
+  TLS 1.2  -> QUIC fresh  : 180 - 60 = 120 ms saved   (67% of setup gone)
+  TLS 1.2  -> QUIC 0-RTT  : 180 - 0  = 180 ms saved   (all of it)
+```
+
+Scale that to a page pulling from 4 separate origins and the fresh-connection saving is 4 × 120 ms = 480 ms of dead air removed before rendering starts. Note also that 0-RTT is not free of tradeoffs: the first flight is replayable by an attacker, so 0-RTT data must be restricted to idempotent requests — which is why browsers send `GET` but never `POST` in a 0-RTT flight.
+
 ### QUIC Head-of-Line Blocking vs TCP
 
 ```mermaid
@@ -258,6 +285,42 @@ sequenceDiagram
 ```
 
 The attacker never queries from its own address; a tiny spoofed request triggers a large reply aimed at the victim, amplifying traffic 10 to 100x and turning the resolver into the attack's cannon. QUIC closes this loophole for itself by capping server-to-client bytes at 3x what it has received until the client's address is validated.
+
+**What this actually says.** "Amplification factor is just reply size divided by request size — and it is the attacker's force multiplier, because they only have to pay for the small half."
+
+The number that matters is not how much traffic hits the victim; it is how much *uplink the attacker had to own* to produce it. QUIC's `3x` cap and DNS's RRL both attack the same term: they shrink the numerator.
+
+| Symbol | What it is |
+|--------|------------|
+| request size (~50 B) | What the attacker spends per shot, from their own uplink |
+| response size (up to 5 KB) | What the resolver fires at the victim |
+| amplification factor | response ÷ request. The whole point of the attack |
+| QUIC's `3x` | Hard cap: server may send at most 3 × bytes received pre-validation |
+
+**Walk one example.** An attacker with a single 100 Mbps uplink:
+
+```
+  amplification factor = 5000 B reply / 50 B query = 100x
+
+  attacker uplink            = 100 Mbps
+  queries they can send      = 100e6 / (50 x 8)  = 250,000 queries/sec
+  traffic delivered to victim = 250,000 x 5000 x 8 = 10,000 Mbps = 10 Gbps
+
+  100 Mbps of attacker capacity  ->  10 Gbps at the victim
+```
+
+Now apply QUIC's rule to the same shot:
+
+```
+  QUIC pre-validation cap = 3 x bytes received
+  attacker sends 50 B  ->  server may return at most 150 B
+
+  amplification factor = 150 / 50 = 3x
+  same 100 Mbps uplink now delivers 300 Mbps, not 10 Gbps
+  ratio of harm removed = 10000 / 300 = 33x weaker
+```
+
+**Why the cap is `3` and not `1`.** A `1x` cap would forbid the server from ever sending more than it received, which breaks the legitimate handshake — the server's certificate chain alone is several KB against a small ClientHello. `3x` is the smallest multiple that still lets a real TLS handshake complete in one flight, which is why RFC 9000 picked it rather than something rounder. Without it, QUIC servers would be exactly as attractive a reflector as open DNS resolvers.
 
 ---
 

@@ -212,6 +212,64 @@ spec:
 
 If the canary's success rate drops below 99% during any pause, Argo Rollouts automatically shifts traffic back to stable and halts — no human in the loop.
 
+### Decoding the analysis numbers
+
+Four values in that manifest — `setWeight: 5`, `interval: 30s`, `failureLimit: 2`, and the
+`successCondition` ratio — are usually copied without anyone computing what they buy. They
+combine into two quantities: how fast you abort, and how many users pay for the bad version.
+
+```
+time_to_abort  = pause_duration + (failureLimit x interval)
+blast_radius   = traffic_weight x time_to_abort        (user-minutes of exposure)
+```
+
+**What the formula is telling you.** "Exposure is an area, not a percentage — how wide the
+slice is, multiplied by how long you leave it open." Two rollouts with the same 5% weight are
+not equally safe if one takes 30 seconds to abort and the other takes 20 minutes.
+
+| Symbol | What it is |
+|--------|------------|
+| `traffic_weight` | The `setWeight` at the current step, as a fraction of live traffic |
+| `pause_duration` | `pause: {duration: 2m}` — how long the step runs before analysis concludes |
+| `interval` | `interval: 30s` — how often the AnalysisRun re-queries Prometheus |
+| `failureLimit` | Failed checks tolerated before abort; 2 here, 1 in the §14 template |
+| `successCondition` | The Prometheus ratio that must hold; `>= 0.99` means under 1% 5xx |
+
+**Walk one example.** The first step of this rollout, against the Section 14 incident:
+
+```
+                     weight   pause    checks to abort   time to abort   blast radius
+  broken (§14)        100%     none      none (timer)         8 min       800 %-min
+  this manifest         5%     2 min     2 x 30s = 1 min      3 min        15 %-min
+```
+
+53x less exposure, which is exactly the "~5% for a few minutes instead of 30% errors for
+everyone for 8 minutes" outcome §14 reports — the 3 minutes it cites is `2m + 2 x 30s`, not
+a round number someone chose.
+
+**Put simply.** The weight also has to be large enough for the metric to *mean* anything. At
+a 5% weight the canary sees `5% x rps` requests, and the query window must contain enough of
+them to distinguish a real regression from noise:
+
+```
+canary_requests_per_window = rps x traffic_weight x window_seconds
+```
+
+**Walk one example.** At 1,000 rps with the `[2m]` rate window in the query:
+
+```
+  step        weight    canary rps    requests in the 2m window    errors seen at 1% error rate
+  first          5%          50                6,000                          60
+  second        25%         250               30,000                         300
+  third         50%         500               60,000                         600
+```
+
+6,000 requests is plenty to resolve a 1%-vs-0.1% error rate. Halve the traffic to 100 rps and
+the same step observes 600 requests with ~6 errors, where one unlucky client retry storm flips
+the ratio past 0.99 and aborts a healthy release. That is why low-traffic services need longer
+pauses or wider weights: the `failureLimit: 2` exists precisely to absorb a single noisy
+sample, and on a thin canary it is the only thing standing between you and flaky rollbacks.
+
 ### Blue-green with Argo Rollouts
 
 ```yaml

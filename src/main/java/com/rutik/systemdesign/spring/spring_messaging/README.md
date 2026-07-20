@@ -756,6 +756,38 @@ public void onOrder(ConsumerRecord<String, OrderEvent> record, Acknowledgment ac
 }
 ```
 
+**What this actually says.** "You have a fixed budget of five minutes to finish one batch. Divide that budget by how long one record takes, and that quotient is the largest batch you dare fetch."
+
+The rebalance is not a Kafka bug — it is Kafka correctly concluding that a consumer which has not called `poll()` in `max.poll.interval.ms` is dead. Every knob in this pitfall exists to keep one poll cycle comfortably under that deadline.
+
+| Symbol | What it is |
+|--------|------------|
+| `max.poll.interval.ms` | The deadline. Miss it and the broker evicts you from the group. Default `300_000` ms |
+| `max.poll.records` | How many records one `poll()` hands you. Default `500` |
+| `avg_processing_time_per_record` | Wall-clock time your listener spends on one record, including downstream I/O |
+| `total_processing_time` | `max.poll.records x avg_processing_time_per_record` — must stay under the deadline |
+| safety margin | The gap you leave for p99 slowness, GC pauses, and downstream latency spikes |
+
+**Walk one example.** Push the three per-record latencies named in the broken block through the deadline:
+
+```
+  deadline = max.poll.interval.ms = 300,000 ms
+
+  per-record   batch   total = batch x per-record        verdict
+    100 ms      500      500 x   100 =    50,000 ms      safe   (17% of deadline)
+    500 ms      500      500 x   500 =   250,000 ms      marginal (83% -- no headroom)
+  1,000 ms      500      500 x 1,000 =   500,000 ms      DEAD   (167% -> rebalance)
+
+  Solve for the batch instead of guessing it:
+    max.poll.records = 300,000 ms / 1,000 ms = 300      <- the break-even batch
+    chosen value     = 100                              <- one third of break-even
+    actual cycle     = 100 x 1,000 = 100,000 ms         = 33% of the deadline
+```
+
+The 500-records-at-500ms row is the dangerous one: it passes arithmetic at 83% of the deadline and still pages you at 3am, because 83% leaves nothing for the one batch where the external API is slow. Sizing to 100 rather than the break-even 300 buys a 3x latency blowout before the group notices.
+
+**Why the safety margin is not optional.** `avg_processing_time_per_record` is an average, and a batch's duration is driven by its *slow* records, not its typical ones. A batch of 300 records where a handful take 5 seconds each blows the deadline even though the mean is 1 second. Sizing at one third of break-even means the average has to triple before a rebalance fires — and a rebalance is expensive, since every in-flight record is redelivered to another consumer and reprocessed as a duplicate.
+
 ### Pitfall 2 — @Async on a self-invoked method (broken)
 
 ```java
@@ -1096,6 +1128,34 @@ public class Notifier {
 - Duplicate writes: **0** (idempotency key + ack-after-commit).
 - DLT volume: **<0.01%** of traffic, all alerted and replayable.
 - Notification thread pool: 8 core / 32 max, queue 500; rejection rate **0** after sizing.
+
+**Read it like this.** "Throughput and latency together tell you how many events are in flight at any instant — and that number, not the throughput figure, is what your thread pool and partition count have to cover."
+
+This is Little's Law (`L = λ x W`) applied to a consumer group. Reporting 10,200 events/sec without the latency figure hides the concurrency the system actually needs.
+
+| Symbol | What it is |
+|--------|------------|
+| `λ` (lambda) | Arrival/completion rate — here **10,200 events/sec** sustained |
+| `W` | Time one event spends being processed — here **45 ms** p99 |
+| `L` | Events in flight simultaneously. `λ x W` |
+| `concurrency = 3` | Listener containers per pod, each owning a subset of partitions |
+
+**Walk one example.** Turn the two reported numbers into a concurrency requirement:
+
+```
+  L = lambda x W = 10,200 events/sec x 0.045 sec = 459 events in flight
+
+  Split across the 3 listener containers:
+    10,200 / 3 = 3,400 events/sec per container
+       459 / 3 =   153 events in flight per container
+
+  Partition floor: concurrency cannot exceed partition count, so
+    3 containers per pod  ->  topic needs at least 3 partitions to keep all 3 busy
+```
+
+459 concurrent in-flight events is the number that sizes everything downstream — connection pools, the 8/32 notification pool, and the DB. It is also why the notification send was pushed to `@Async`: had it stayed inline at, say, 200 ms per email, `W` would jump from 45 ms to 245 ms and `L` from 459 to 2,499, a five-fold rise in required concurrency for the same 10,200 events/sec.
+
+**Why the partition count is a hard ceiling.** Kafka assigns each partition to exactly one consumer in a group, so `concurrency = 3` with only 2 partitions leaves one container permanently idle — it will never receive an assignment. Raising `concurrency` past the partition count buys nothing; the throughput ceiling is set at topic-creation time, which is why the Best Practices section says to pick 6-12 partitions up front rather than adding them later.
 
 ### Pitfalls
 

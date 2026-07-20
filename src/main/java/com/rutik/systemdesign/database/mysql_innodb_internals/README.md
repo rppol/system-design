@@ -210,6 +210,41 @@ flowchart LR
 ```
 New pages enter mid-list (3/8 from the tail) rather than at the MRU head; only pages re-touched after `innodb_old_blocks_time` (default 1s) get promoted to the young sublist, so a full table scan's pages age out of the old sublist without ever evicting genuinely hot data.
 
+**In plain terms.** "Give every newly-read page a probation cell that is 3/8 of the pool
+big, and only let it into the 5/8 penthouse if it is still being asked for a second
+later." The split is a scan-resistance budget: the old sublist is deliberately sized
+large enough to absorb a burst of one-off reads, and small enough that those reads can
+never reach the young sublist where the working set lives.
+
+| Symbol | What it is |
+|--------|------------|
+| `innodb_buffer_pool_size` | Total pool bytes. The 3/8 + 5/8 split partitions exactly this |
+| Old sublist (3/8) | Probation area. Every freshly-read page lands at its head |
+| Young sublist (5/8) | The hot working set, MRU-ordered. Promotion target |
+| `innodb_old_blocks_pct` | Old-sublist percentage. Default 37, which is where 3/8 comes from |
+| `innodb_old_blocks_time` | Milliseconds a page must survive in old before a re-touch promotes it. Default 1000 |
+
+**Walk one example.** The 24GB pool from the §14 case study, pages 16KB each:
+
+```
+  innodb_buffer_pool_size            = 24 GB
+  old sublist   = 24 x 3/8           =  9 GB
+  young sublist = 24 x 5/8           = 15 GB
+
+  pages the old sublist can hold     =  9 GB / 16 KB = 589,824 pages
+
+  full table scan reads 200,000 pages, touches each once, <1s apart
+    -> all 200,000 land in old, none survive innodb_old_blocks_time
+    -> none promoted; they evict only each other
+    -> young sublist: 15 GB untouched, working set intact
+```
+
+589,824 probation slots against a 200,000-page scan is the whole point: the scan cannot
+even fill its own sublist, so it never reaches the 15GB of genuinely hot pages. Drop
+`innodb_old_blocks_time` to 0 and every one of those 200,000 pages promotes on its
+second touch — the young sublist is flushed out and the buffer pool hit rate collapses
+the moment a nightly report runs.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -353,6 +388,33 @@ SHOW REPLICA STATUS\G
 **Pitfall 1: Redo log too small causes I/O spikes**
 When `innodb_log_file_size=48MB` (MySQL 5.7 default) and write rate is 30MB/s, the redo log fills every 1.6 seconds, triggering an emergency checkpoint (flush all dirty pages). This creates I/O spikes every 1-2 seconds. Fix: `innodb_log_file_size=1GB`. Requires MySQL restart. MySQL 8 automatically sizes the redo log.
 
+**What this actually says.** "The redo log is a fixed-size tape running in a circle, and
+`log size / write rate` is how many seconds you have before the write head laps the
+checkpoint." Sizing the redo log is not a memory decision — it is a decision about how
+much time you are giving the background flusher to get dirty pages onto disk before
+InnoDB is forced to stop the world and flush them all at once.
+
+| Symbol | What it is |
+|--------|------------|
+| `innodb_log_file_size` | Bytes per redo log file — the circumference of the tape |
+| Write rate | Redo bytes generated per second by the workload, not row bytes |
+| Wrap time | `log size / write rate`. Seconds of runway before the head laps the checkpoint |
+| Checkpoint age | Redo bytes written but whose dirty pages are still unflushed |
+| Sharp checkpoint | The emergency all-dirty-pages flush fired when checkpoint age approaches log size |
+
+**Walk one example.** Same 30MB/s workload, three redo log sizes:
+
+```
+                  log size   write rate   wrap time = size / rate   verdict
+  MySQL 5.7 default   48 MB    30 MB/s        1.6 s                stalls every 1-2 s
+  bumped to          512 MB    30 MB/s       17.1 s                usable
+  recommended fix   1024 MB    30 MB/s       34.1 s                flusher keeps up
+```
+
+Nothing about the write rate changed across those three rows — only the runway. The
+21x jump from 1.6s to 34.1s is why the fix is a one-line config change rather than
+faster disks: the flusher was never too slow, it was never given time.
+
 **Pitfall 2: NOT NULL column without default requires table rebuild**
 ```sql
 -- Broken (MySQL < 8): copies entire table
@@ -486,7 +548,60 @@ SHOW GLOBAL STATUS LIKE 'Innodb_checkpoint%';
 -- Innodb_checkpoint_age: huge value relative to log size
 ```
 
+**Read it like this.** Two independent ratios are being computed in that diagnosis block,
+and only one of them is the problem. The hit rate asks "what fraction of page requests
+were served from RAM"; the checkpoint age asks "how far ahead of the flusher has the redo
+writer run". The first comes back healthy, which is what makes the second the answer.
+
+| Symbol | What it is |
+|--------|------------|
+| `Innodb_buffer_pool_read_requests` | Total logical page requests. The denominator |
+| `Innodb_buffer_pool_reads` | The subset that missed and went to disk |
+| Hit rate | `(requests - reads) / requests`. Fraction served from RAM |
+| Log sequence number (LSN) | A monotonic byte counter of everything ever written to the redo log |
+| Checkpoint age | `LSN - last checkpoint LSN`. Redo bytes whose pages are still dirty |
+
+**Walk one example.** Push the two sets of numbers through side by side:
+
+```
+  hit rate
+    requests                        = 180,000
+    disk reads (misses)             =  15,420
+    hits = 180,000 - 15,420         = 164,580
+    hit rate = 164,580 / 180,000    = 0.9143 = 91.4 %      healthy, not the bottleneck
+
+  checkpoint age
+    log sequence number             = 82,540,000,000
+    pages flushed up to             = 81,290,000,000
+    last checkpoint at              = 80,540,000,000
+
+    dirty but unflushed  = 82,540,000,000 - 81,290,000,000 = 1.25 GB
+    checkpoint age       = 82,540,000,000 - 80,540,000,000 = 2.00 GB
+    redo capacity        = 2 files x 100 MB                = 0.20 GB
+
+    ratio = 2.00 GB / 0.20 GB = 10x over capacity          the actual bug
+```
+
+A checkpoint age 10x larger than the entire redo log means InnoDB is firing a sharp
+checkpoint continuously — it can never let the write head advance. That is why raising
+`innodb_log_file_size` to 2G fixed a latency problem that a 91.4% hit rate said was not
+a memory problem.
+
 **Root cause**: `innodb_log_file_size=100MB` (non-default, manually set poorly). At peak write rate of 50MB/s, the redo log filled every 2 seconds, triggering emergency checkpoints — I/O spikes stalling all writes.
+
+**Put simply.** The fix moves the wrap time from "shorter than a page flush" to "longer
+than a peak-hour burst":
+
+```
+                      redo per file   peak write rate   wrap time = size / rate
+  before                    100 MB         50 MB/s            2.0 s
+  after  (innodb_log_file_size = 2G)      2048 MB   50 MB/s   41.0 s
+```
+
+A 20x larger log buys a 20x longer runway at the same 50MB/s. The background flusher
+was already capable of clearing 1.25GB of dirty pages — it simply needed more than two
+seconds in which to do it, which is why the maintenance window was 5 minutes and the
+disks were never touched.
 
 **Fix**:
 ```

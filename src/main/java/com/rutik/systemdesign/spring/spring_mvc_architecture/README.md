@@ -296,6 +296,64 @@ public class OrderController {
 | Ecosystem maturity | Mature, 20+ years | 7+ years |
 | Best for | CRUD APIs, typical microservices | High-concurrency streaming, reactive pipelines |
 
+### Sizing the thread-per-request model (Little's Law)
+
+The "~200 threads" row above is not a soft guideline — it is a hard concurrency ceiling,
+and Little's Law turns it into a throughput number:
+
+```
+  concurrent_requests = arrival_rate x average_service_time      (Little's Law)
+  instances_needed    = concurrent_requests / threads_per_instance
+
+  max_throughput_per_instance = threads_per_instance / average_service_time
+```
+
+**What the formula is telling you.** "The number of requests sitting inside your service
+at any instant equals how fast they arrive multiplied by how long each one stays." A
+thread-per-request server holds one thread per in-flight request, so that product is
+exactly the number of threads you need — and it is why *latency*, not CPU, is usually
+what exhausts a Tomcat pool.
+
+| Symbol | What it is |
+|--------|------------|
+| `arrival_rate` | Requests per second reaching the instance |
+| `average_service_time` | Seconds a request occupies its thread, including blocked I/O waits |
+| `concurrent_requests` | Requests in flight at once — the number of threads actually consumed |
+| `threads_per_instance` | `server.tomcat.threads.max`, default `200` |
+| `acceptCount` | TCP backlog once all threads are busy, default `100`. Queue, not capacity |
+
+**Walk one example.** Take the 20,000 req/sec gateway from the case study below, using
+its 35 ms p99 as a conservative upper bound on service time:
+
+```
+  arrival_rate         =  20,000 req/sec
+  service_time         =       0.035 s
+
+  concurrent_requests  =  20,000 x 0.035  =    700 requests in flight
+  instances_needed     =     700 / 200    =    3.5  ->  4 instances
+
+  per-instance ceiling =     200 / 0.035  =  5,714 req/sec
+
+  now slow the backend: service_time 0.035 -> 0.350 s (one slow dependency, 10x)
+  concurrent_requests  =  20,000 x 0.350  =  7,000 requests in flight
+  instances_needed     =   7,000 / 200    =     35 instances
+  per-instance ceiling =     200 / 0.350  =    571 req/sec
+```
+
+The gateway does not need 20,000 threads — it needs 700, which four 200-thread instances
+supply. But note the second block: nothing about the traffic changed, only latency, and
+the fleet requirement went from 4 instances to 35. Thread-per-request capacity is
+inversely proportional to service time, which is the entire reason a single slow
+downstream dependency takes out a Spring MVC service.
+
+**What `acceptCount` does and does not buy you.** Once 200 threads are busy, the next
+100 connections sit in the TCP backlog and the 301st is refused. The backlog absorbs
+*bursts* — a momentary spike that drains within milliseconds — but it adds no
+throughput. If arrivals exceed `200 / service_time` on average, the queue fills at a
+constant rate and every queued request adds latency before it adds a rejection. That is
+why raising `acceptCount` to hide an overload only converts connection refusals into
+timeouts.
+
 ---
 
 ## 9. When to Use / When NOT to Use

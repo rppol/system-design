@@ -658,6 +658,52 @@ class WebhookHints {}
   signature check + one DB write, so the lost JIT peak throughput was irrelevant to
   this workload (the right reason to choose native here).
 
+**What this actually says.** Serverless bills memory *and* time together, so the two
+wins multiply rather than add:
+
+```
+  cost_per_invocation ~ memory_GB x billed_duration_seconds x price_per_GB_second
+  cold_start_headroom  = timeout - cold_start
+```
+
+"You are charged for a rectangle — memory on one side, wall-clock on the other — and
+native shrinks both sides at once." That is why native's payoff on FaaS is larger than
+either the 29x startup number or the 2.8x memory number suggests on its own.
+
+| Symbol | What it is |
+|--------|------------|
+| `memory_GB` | Configured Lambda memory, not memory used. `256 MB` before, `90 MB` measured after |
+| `billed_duration_seconds` | Wall clock including cold start — the JVM's 3.5 s was billed |
+| `timeout` | The webhook's 10 s deadline; a cold start eating it means a failed delivery |
+| `cold_start_headroom` | Seconds left for real work after the runtime finishes starting |
+| provisioned concurrency | Paying to keep instances warm — the workaround native made unnecessary |
+
+**Walk one example.** Both axes of the rectangle, using the measured numbers:
+
+```
+  cold start          3.5 s  ->  0.120 s          =  29.2x faster
+  memory              256 MB ->  90 MB            =   2.84x smaller
+                                                    ---------------
+  cost rectangle      shrinks by 29.2 x 2.84      =  ~83x on a cold invocation
+
+  headroom inside the 10 s webhook timeout
+    JVM      10 - 3.5   = 6.5 s left for work   (65% of budget survives)
+    native   10 - 0.120 = 9.88 s left           (98.8% of budget survives)
+
+  the JVM was spending 3.5 / 10 = 35% of the timeout doing nothing but booting
+```
+
+The headroom line is the one that mattered operationally: a bursty webhook workload
+cold-starts constantly, so the JVM was surrendering 35% of every deadline to startup and
+buying that back with provisioned concurrency. Native removed the cause instead of
+paying to mask it.
+
+**Why the throughput loss did not show up in the bill.** The cost rectangle is driven by
+`billed_duration`, and this function's steady-state work is one signature check plus one
+DB write — dominated by I/O, not by JIT-compiled hot loops. The ~20-30% peak-throughput
+penalty applies to code that runs long enough to be compiled, and nothing here does. Run
+the same trade on a long-lived request-serving pod and the arithmetic reverses.
+
 **Tradeoffs accepted.** Native builds added ~4 minutes to CI (isolated to a dedicated
 stage) and the team gave up some JVM profiling tooling. Both were worth eliminating
 cold-start pain and provisioned-concurrency cost for this bursty, short-lived

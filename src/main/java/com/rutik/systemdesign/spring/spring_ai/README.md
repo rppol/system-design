@@ -276,6 +276,42 @@ String answer = chatClient.prompt()
     .content();
 ```
 
+**What it means.** "`topK` and chunk size multiply together into a token bill you pay on every single query — the retrieval settings are the cost knob, and `similarityThreshold` is the only one of the two that can return *fewer* chunks." Reading `topK(4)` as "four chunks" understates it; read it as "four times my chunk size, added to every prompt, forever."
+
+| Symbol | What it is |
+|--------|------------|
+| `TokenTextSplitter` | Chunker. Default target is a few hundred tokens per chunk (~800 in the Section 5 diagram) |
+| `topK(4)` | How many nearest chunks the vector search returns and the advisor injects |
+| `similarityThreshold(0.7)` | Cosine-similarity floor. Chunks below it are dropped, so you may get fewer than `topK` |
+| prompt tokens | System prompt + injected chunks + user question — what you are billed for on input |
+
+**Walk one example.** One RAG query with these settings, against a 128k-token context window:
+
+```
+  retrieved   = topK 4 x 800 tokens/chunk        = 3,200 tokens
+  system prompt                                  =   200 tokens
+  user question                                  =    50 tokens
+  ------------------------------------------------------------
+  prompt total                                   = 3,450 tokens
+  share of a 128,000-token window                = 2.7%
+
+  raise topK to 10, same chunk size:
+  retrieved   = 10 x 800                         = 8,000 tokens
+  prompt total = 8,000 + 200 + 50                = 8,250 tokens
+  cost multiple vs topK=4  = 8,250 / 3,450       ~ 2.4x per query
+```
+
+Going from 4 to 10 chunks costs 2.4x on input tokens for every query the system ever
+serves — and retrieval quality often *drops*, because the extra six chunks are by
+definition the less-similar ones and they dilute the relevant context.
+
+**Why the threshold is the term that matters most.** Without `similarityThreshold`, a
+top-k search always returns exactly k chunks, even for a question your corpus says nothing
+about — the model then answers from four irrelevant chunks and confabulates. The threshold
+lets the result come back empty, which is what makes "answer only from the provided
+context, otherwise say you don't know" an achievable instruction rather than wishful
+prompting. This is the pitfall the Section 14 case study fixes by moving `0.7` to `0.75`.
+
 ### 6.5 Tool / Function Calling
 
 ```java

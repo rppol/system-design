@@ -536,6 +536,45 @@ A payments microservice runs on Spring Boot 3.2 / Java 17 across a Kubernetes cl
 - A downstream payment gateway whose outages must be visible without taking the whole pod down
 - A Resilience4j circuit breaker whose state must be inspectable in production
 
+**What this actually says.** "Forty pods, twelve thousand requests a second, and a quarter-second tail budget are not three separate facts — multiply and divide them and you get the per-pod concurrency the JVM must sustain, which is what actually sizes the thread pool and the connection pool."
+
+Fleet-level numbers mean nothing to a single pod. The two derived figures below are what you tune against.
+
+| Symbol | What it is |
+|--------|------------|
+| `λ` (lambda) | Aggregate arrival rate — **12,000 req/sec** across the fleet |
+| `W` | Time budget per request — the **250 ms** p99 target |
+| `N` | Pod count — **40** |
+| `λ / N` | Per-pod request rate |
+| `L = λ x W` | Requests in flight fleet-wide (Little's Law) |
+| scrape interval | **15 s** — sets metric freshness and per-pod scrape cost |
+
+**Walk one example.** Turn the three scale figures into per-pod requirements:
+
+```
+  Per-pod arrival rate:
+    12,000 req/sec / 40 pods = 300 req/sec per pod
+
+  In-flight requests (Little's Law, at the p99 budget):
+    L = 12,000 x 0.250 sec = 3,000 requests in flight fleet-wide
+    per pod: 3,000 / 40    =    75 concurrent requests
+
+  -> a Tomcat pool of 200 threads/pod covers 75 with room; a HikariCP pool
+     of 10 does NOT, so requests queue on the pool, not on the CPU.
+
+  Losing pods (the rolling-deploy case):
+    40 -> 36 pods:  12,000 / 36 = 333 req/sec per pod   (+11%)
+    40 -> 30 pods:  12,000 / 30 = 400 req/sec per pod   (+33%)
+
+  Scrape cost:
+    3,600 sec/hour / 15 sec = 240 scrapes per pod per hour
+    240 x 40 pods           = 9,600 scrapes per hour fleet-wide
+```
+
+The 75-concurrent-requests figure is the one that matters. It is why `hikaricp.connections.pending` is called out later as the first signal of trouble: at a default pool of 10 connections against 75 in-flight requests, 65 of them are waiting on the pool, and the p99 you measure is queue time rather than query time.
+
+**Why the 15-second scrape interval bounds your alerting.** Prometheus cannot detect anything faster than it samples. A p99 breach that lasts 10 seconds may be entirely invisible; an alert configured `for: 1m` needs four consecutive scrapes to fire, so the floor on detection latency is roughly 60-75 seconds regardless of how the rule is written. Tightening the scrape to 5 s triples the sample volume for the same fleet — 720 scrapes per pod per hour — which is the real cost of faster detection.
+
 The team had two recurring problems: 503 spikes during rolling deploys (probes passing before the context was ready) and a security finding that the `env` endpoint had leaked database credentials.
 
 ### Architecture Overview

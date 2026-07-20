@@ -99,6 +99,36 @@ Rebuilding aggregate state from event zero is O(N) in the number of events. For 
 
 **Snapshot storage**: Same event store (as a special event type) or a separate KV store keyed by `aggregateId + version`. Snapshots are never the source of truth — if a snapshot is corrupt, fall back to full replay.
 
+**Put simply.** "Without a snapshot, loading an aggregate costs you its entire lifetime of events; with one, it costs only the events since the last snapshot — a bounded number, no matter how old the aggregate is."
+
+The snapshot interval converts an unbounded `O(N)` load into a constant-bounded one. That is the whole trade: a little write amplification in exchange for a read cost that stops growing.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total events in the aggregate's stream over its lifetime |
+| `k` | Snapshot interval — take a snapshot every `k` events (50–100 typical) |
+| replay cost | Events applied on load: `N` without snapshots, at most `k` with them |
+| snapshot writes | `N / k` — extra writes paid over the aggregate's life |
+| speedup | `N / (N mod k)` for a given load, or roughly `N / k` in the worst case |
+
+**Walk one example.** The `order-123` stream from §5, then a long-lived trading account:
+
+```
+  ORDER, N = 52 events, snapshot at v50 (k = 50)
+    no snapshot : apply v1..v52   = 52 event applications
+    with snapshot: load v50 state
+                   apply v51, v52 =  2 event applications
+    speedup = 52 / 2 = 26x
+
+  TRADING ACCOUNT, N = 50,000 events, k = 500
+    no snapshot : 50,000 applications -> seconds of CPU per load
+    with snapshot: at most 500 applications
+    worst-case speedup = 50,000 / 500 = 100x
+    snapshot writes paid = 50,000 / 500 = 100 snapshots over its life
+```
+
+100 extra writes to make every one of thousands of loads 100x cheaper is why the threshold sits at 50–500 rather than 5: too small a `k` and you write a snapshot on nearly every command; too large and cold-start latency creeps back in.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -315,6 +345,39 @@ function rebuildProjection(projectionName):
 ```
 
 Projection rebuild processes ~100,000–500,000 events/second on modern hardware. A 100M-event store rebuilds in 3–15 minutes depending on event size and handler complexity.
+
+**The idea behind it.** "Rebuild time is just your total event count divided by how fast one projector can chew through events — and the numerator only ever grows."
+
+This is the number to quote when someone asks "can we just change the projection logic?" The answer is a stopwatch reading, and it is a linear function of how long the system has been running.
+
+| Symbol | What it is |
+|--------|------------|
+| total events | Every event in the global stream from `globalSeq = 0` to the tail |
+| throughput | Events/second one projector applies (~100K–500K, handler-dependent) |
+| rebuild time | `total events / throughput` |
+| batch size | Events fetched per round trip (1,000 in the pseudocode above) |
+| checkpoint | Last applied `globalSeq`, saved so a crashed rebuild resumes instead of restarting |
+
+**Walk one example.** A 100M-event store, at both ends of the throughput range:
+
+```
+  FAST handler, 500,000 events/sec
+    100,000,000 / 500,000 =    200 s =  3.3 minutes
+
+  SLOW handler, 100,000 events/sec
+    100,000,000 / 100,000 =  1,000 s = 16.7 minutes
+
+  -> the quoted "3-15 minutes" is exactly this range.
+
+  round trips at batch = 1,000:
+    100,000,000 / 1,000 = 100,000 fetches
+    even 1ms per fetch adds 100 s -- batch size is not a detail.
+
+  what it looks like a year later at 400,000 events/day (see the case
+  study): +146,000,000 events -> rebuild time roughly 2.5x longer.
+```
+
+Because the time grows linearly with retention, blue/green rebuild (§10, pitfall 4) is not optional at scale — you cannot take the read model offline for a window that keeps expanding every month.
 
 ### BROKEN Design — State-Only Storage Loses History
 
@@ -704,6 +767,64 @@ stateDiagram-v2
 - Events per order: ~8 average across all aggregates
 - Event store writes: 50,000 orders/day × 8 events = 400,000 events/day (~5 events/second average; 50 events/second peak)
 - Event payload size: ~500 bytes average → 200 MB/day → 73 GB/year
-- Projection rebuild time at 100M events (2.7 years accumulation): ~10 minutes at 200K events/second processing rate
+- Projection rebuild time at 100M events (~250 days of accumulation at this rate): ~8.3 minutes at 200K events/second processing rate
 - Snapshot threshold: every 50 events (Order aggregate rarely exceeds 20 events; Payment aggregate rarely exceeds 5)
 - Eventual consistency lag under normal load: 15–50ms (EventStoreDB catch-up subscription to PostgreSQL projector)
+
+**Stated plainly.** "Business volume times events-per-transaction gives you an event rate; that rate times payload size gives you a storage bill that never goes down, because nothing is ever deleted."
+
+Both multiplications matter. Teams size the event store off order volume and forget the ~8x fan-out from modelling each state transition as its own event.
+
+| Symbol | What it is |
+|--------|------------|
+| orders/day | Business transaction volume (50,000 here) |
+| events per order | Fan-out across all aggregates — Order, Payment, InventoryReservation (~8) |
+| events/day | `orders/day x events per order` |
+| payload size | Average serialized event size on disk (~500 bytes) |
+| annual growth | `events/day x payload x 365` — monotonic, since events are immutable |
+
+**Walk one example.** From orders to a yearly disk number:
+
+```
+  events/day  = 50,000 orders x 8 events   =   400,000 events/day
+  average rate= 400,000 / 86,400 s         =       4.6 events/sec
+  stated peak                              =        50 events/sec
+                                                    (~11x average)
+
+  bytes/day   = 400,000 x 500 bytes        = 200,000,000 B = 200 MB/day
+  per year    = 200 MB x 365               =      73,000 MB = 73 GB/year
+
+  headroom against EventStoreDB's ~10,000 events/sec per node:
+    10,000 / 50 peak = 200x
+  -> throughput is a non-issue here; retention is the real constraint.
+```
+
+The asymmetry in that last line is typical of event-sourced systems: you are almost never throughput-bound, you are bound by what an ever-growing log does to rebuild time and storage cost.
+
+**What this actually says.** "At 400,000 events a day it takes about 250 days to reach 100 million events — and that is the point where a full projection rebuild starts costing real minutes."
+
+Tying the rebuild figure back to a *date* rather than an event count is what turns it into a planning input: it tells you when blue/green rebuild stops being optional.
+
+| Symbol | What it is |
+|--------|------------|
+| accumulation | `target event count / events per day` — days to reach a given store size |
+| 100M events | The rebuild benchmark used throughout this module |
+| processing rate | Projector throughput for these handlers (200K events/sec) |
+| rebuild time | `event count / processing rate` |
+| snapshot threshold | Every 50 events — unrelated to rebuild, it bounds *aggregate load*, not projection replay |
+
+**Walk one example.** When 100M events arrives, and what it costs when it does:
+
+```
+  days to 100M = 100,000,000 / 400,000 per day  =  250 days
+                                                ~  0.7 years
+
+  rebuild at 200,000 events/sec
+    100,000,000 / 200,000 = 500 s = 8.3 minutes
+
+  and two years in, at the same rate:
+    400,000 x 365 x 2 = 292,000,000 events
+    292,000,000 / 200,000 = 1,460 s = 24.3 minutes
+```
+
+Note that the snapshot threshold of every 50 events does nothing for this number. Snapshots bound the cost of loading one aggregate; only archiving or tiering bounds the cost of replaying the global stream.

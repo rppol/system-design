@@ -477,6 +477,41 @@ public class PhoneE164BackfillRunner {
 }
 ```
 
+**Read it like this.** "Total rows divided by batch size gives the number of round trips; the wall-clock budget divided by that count gives you the pace each batch must hold — and the sleep, not the `UPDATE`, is what fills most of that pace." Batch sizing is therefore a two-sided choice: too small and the round-trip count explodes, too large and one transaction holds locks and generates WAL faster than the replicas can consume it.
+
+| Symbol | What it is |
+|--------|------------|
+| `80,000,000` | Rows in `orders` that need the new column populated |
+| `BATCH_SIZE = 10_000` | Rows updated inside one autocommit transaction — one lock/WAL unit |
+| `lastId` | Resumable cursor. A crashed job restarts from here, not from row 0 |
+| `sleepBriefly()` | The pacing knob. Deliberately idle time that lets replicas catch up |
+| `3h 40m` | The wall-clock budget quoted in the case study's results table |
+
+**Walk one example.** The case study's numbers, pushed through:
+
+```
+  batches      = 80,000,000 / 10,000            = 8,000 batches
+  budget       = 3h 40m = 3 x 3600 + 40 x 60    = 13,200 seconds
+  pace         = 13,200 s / 8,000 batches       = 1.65 s per batch
+  throughput   = 80,000,000 / 13,200            ~ 6,061 rows/second
+
+  if the UPDATE itself costs ~50 ms:
+    real DB work = 8,000 x 0.05 s               = 400 s = ~6.7 minutes
+    sleepBriefly = 1.65 - 0.05                  ~ 1.60 s per batch
+```
+
+The job runs for nearly four hours but only about seven minutes of that is database work.
+The other 99% is deliberate idling — that is the whole point. Replica lag stays under the
+200 ms target because writes arrive in small, spaced bursts rather than one continuous
+flood.
+
+**Why the batch size is not "as large as possible."** Raising `BATCH_SIZE` to 1,000,000
+cuts the round trips to 80, but each transaction now locks a million rows and emits a
+million rows of WAL in one burst — exactly the replication-lag spike the pacing exists to
+prevent, and a long-running transaction that blocks vacuum on a hot table. Dropping it to
+100 gives 800,000 round trips, and per-statement overhead starts dominating the actual
+work. Ten thousand rows sits in the flat middle of that curve.
+
 ```sql
 -- V22__enforce_phone_e164_not_null.sql  (Deploy 3 -- ENFORCE + CUTOVER)
 -- Run only after verifying: SELECT count(*) FROM orders WHERE customer_phone_e164 IS NULL -> 0

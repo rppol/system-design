@@ -175,6 +175,38 @@ Indexes are data structures that trade storage and write overhead for faster rea
 - Excellent for equality and range predicates on ordered data.
 - Used by: PostgreSQL, MySQL, SQL Server.
 
+**What it means.** "`O(log n)` understates how good this is in practice — a B-tree node is a whole disk page holding hundreds of keys, not two, so the tree is astonishingly shallow and a lookup in a hundred-million-row table costs about three page reads."
+
+The reason the base of the logarithm matters so much here is that it is set by hardware, not by the algorithm: the page size divided by the entry size *is* the branching factor. That is why B-trees, not binary search trees, are what databases actually use on disk.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of rows (index entries) |
+| `page` | Disk/buffer-pool page size — `8192` bytes in PostgreSQL, 16KB in InnoDB |
+| `entry` | Bytes per index entry: key plus child pointer. `16` bytes for an 8-byte key plus 8-byte pointer |
+| `f` | Fanout (branching factor): `page / entry` — how many children one node can point at |
+| `depth` | Levels traversed: `ceil(log_f(N))`. Each level is one page read |
+| `capacity` | Rows a tree of a given depth can address: `f ^ depth` |
+
+**Walk one example.** An 8KB page with 16-byte entries, indexing the case study's 100M listings:
+
+```
+  fanout   f = 8192 / 16                    = 512 entries per node
+
+  capacity by depth:
+    depth 1 :  512^1                        =         512 rows
+    depth 2 :  512^2                        =     262,144 rows
+    depth 3 :  512^3                        = 134,217,728 rows
+    depth 4 :  512^4                        = about 68.7 billion rows
+
+  100,000,000 rows  ->  fits inside depth 3 (134M capacity)
+  lookup cost       ->  3 page reads, and the top 2 levels are
+                        almost always already in the buffer pool
+                        so the real cost is ~1 disk read
+```
+
+Two consequences fall straight out of this. First, going from 100M to 1B rows adds exactly one level — index lookups barely degrade with scale, which is why "add an index" is such a reliable fix. Second, the index is not free storage: every one of those 512-entry nodes is a page that must be updated on write, which is the concrete cost behind "each index slows writes" in the pitfalls below.
+
 ### Hash Index
 - O(1) exact lookups. No range queries.
 - Used by: Redis, some memory-optimized tables.
@@ -258,6 +290,40 @@ sequenceDiagram
 - Any node accepts writes. Uses quorum writes/reads (W + R > N for consistency).
 - `N` = replication factor, `W` = write quorum, `R` = read quorum.
 - Examples: Cassandra, DynamoDB, Riak.
+
+**The idea behind it.** "If the set of nodes you wrote to and the set you read from are big enough that they cannot possibly be disjoint, then every read is guaranteed to touch at least one node holding the newest write — and a timestamp comparison picks it out."
+
+It is the pigeonhole principle applied to replicas. There is no coordination, no leader, and no consensus round involved; the guarantee comes purely from set sizes being forced to overlap. What you tune is *where* you pay for that overlap — on the write side, the read side, or split between them.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Replication factor — how many nodes hold a copy of each key |
+| `W` | Write quorum — nodes that must acknowledge before a write is reported successful |
+| `R` | Read quorum — nodes that must respond before a read is answered |
+| `W + R > N` | The overlap condition. Guarantees at least `W + R - N` nodes are common to both sets |
+| `N - W` | Node failures a write can survive and still succeed |
+| `N - R` | Node failures a read can survive and still succeed |
+
+**Walk one example.** The N=3 configuration in the Cassandra Quorum diagram below, compared with a fast-but-unsafe alternative:
+
+```
+  N = 3, W = 2, R = 2   (the diagram's setting)
+    W + R = 2 + 2 = 4  >  3          -> overlap = 4 - 3 = 1 node
+    guaranteed : every read sees >= 1 node with the latest write
+    tolerates  : N - W = 1 node down on write
+                 N - R = 1 node down on read
+
+  N = 3, W = 1, R = 1   (lowest latency)
+    W + R = 1 + 1 = 2  is NOT > 3    -> overlap = -1, i.e. none guaranteed
+    a read can hit the two nodes that never received the write
+    -> stale value returned, silently
+
+  N = 3, W = 3, R = 1   (read-optimized, still safe)
+    W + R = 3 + 1 = 4  >  3          -> overlap = 1
+    reads are single-node fast, but ANY node down blocks all writes
+```
+
+Read the three together and the tuning knob is obvious: the sum is what buys correctness, and how you split it between `W` and `R` decides whether writes or reads carry the availability risk. Cassandra and DynamoDB expose exactly this as a per-query setting, which is why the same cluster can serve a strongly-consistent balance read and an eventually-consistent view counter.
 
 ---
 
@@ -416,6 +482,32 @@ flowchart LR
 8. **Not using EXPLAIN**: Assuming queries are using indexes without verifying via query planner.
 9. **Storing large blobs in DB**: Images, PDFs in database columns waste memory and slow replication. Use object storage (S3) and store URLs.
 10. **Poor shard key selection**: Monotonically increasing keys (auto-increment) cause hot partitions in distributed systems.
+
+**Stated plainly.** "The N+1 problem is not that any single query is slow — it is that you pay the network round trip `N` extra times, so a page that renders 100 rows spends 100 round trips doing what one round trip could have done."
+
+The name is the diagnosis: `1` query to get the list, then `N` more to hydrate each item. Nothing in the query plan looks wrong, which is why it survives code review and only shows up when the list grows.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Rows in the fetched list — the loop count |
+| `Q_naive` | Queries issued by the naive pattern: `1 + N` |
+| `Q_join` | Queries after a JOIN or eager load: `1` |
+| `Q_batch` | Queries after a batched `WHERE id IN (...)`: `2` — one for the list, one for all children |
+| `rt` | Round-trip cost per query — network plus parse plus plan, not the row work itself |
+| `total` | Wall-clock cost: `Q x rt` |
+
+**Walk one example.** A list page rendering 100 rows, at a modest 2ms per round trip:
+
+```
+  naive   : Q = 1 + 100 = 101 queries  ->  101 x 2ms  =  202 ms
+  batched : Q = 2 queries              ->    2 x 2ms  =    4 ms
+  join    : Q = 1 query                ->    1 x 2ms  =    2 ms
+
+  speedup, naive -> join   : 202 / 2   =  101x
+  speedup, naive -> batched: 202 / 4   =   50x
+```
+
+Note that the cost is linear in `N` while the fix is constant, so this defect gets worse exactly as the product gets more successful — a list that was 10 items in testing and 100 in production turns a 22ms page into a 202ms one with no code change. Batching to 2 queries captures nearly all of the win and is usually easier than restructuring into a JOIN.
 
 ---
 
@@ -694,6 +786,41 @@ pt-online-schema-change \
 - Infrastructure cost: +35% vs monolith (16 shard hosts vs 1 large + replicas), justified by 8x capacity
 - Storage per shard: 110–145 GB (std dev 8%)
 
+**In plain terms.** "Pick a shard count by dividing today's data and traffic by it and asking whether one machine can comfortably hold that slice — then check that the same count still works after several years of growth, because changing it later is the expensive part."
+
+The term that does the real work here is headroom. Sizing shards to be exactly full at launch means the first growth spike forces a reshard; sizing each to roughly half capacity is what converts 16 shards into 8x the monolith's throughput rather than 16x-on-paper-and-0x-in-practice.
+
+| Symbol | What it is |
+|--------|------------|
+| `D` | Total dataset size — `2 TB` on the source monolith |
+| `S` | Logical shard count — `16` initially, `256` by design |
+| `D / S` | Storage per shard |
+| `QPS_w`, `QPS_r` | Cluster-wide write and read throughput: `30k` and `250k` QPS |
+| `headroom` | Fraction of each shard's capacity left unused — about `50%` here |
+| `capacity gain` | Effective throughput multiplier: `S x headroom` |
+| `growth` | 40% YoY compounding, applied to both data and QPS |
+
+**Walk one example.** The migration-time numbers divided across 16 shards:
+
+```
+  storage per shard :  2,000 GB / 16          = 125 GB    (matches "~125 GB each")
+  writes per shard  :  30,000 QPS / 16        = 1,875 QPS
+  reads per shard   :  250,000 QPS / 16       = 15,625 QPS
+
+  observed spread   :  110-145 GB, std dev 8%
+                       -> within about +/-16% of the 125 GB target,
+                          so the hash vindex is distributing evenly
+
+  capacity gain     :  16 shards x 50% headroom = 8x the monolith
+                       (this is exactly the reported "8x")
+
+  designed expansion:  2,000 GB / 256          = 7.8 GB per shard
+                       256 / 16                = 16x room before
+                                                 re-architecting
+```
+
+The last two lines are the design decision in numeric form. Choosing 16 now and 256 later works because Vitess splits shards by hash prefix, so each split is a clean halving — you never have to rehash the whole keyspace, which is the operation that makes shard-count changes so painful elsewhere.
+
 ### Common Pitfalls / Lessons Learned
 
 1. **Cross-shard JOINs as scatter-gather** — Broken: a "trip search" query joined `bookings` and `listings` across all 16 shards; p99 climbed to 800 ms. Fix: denormalized the booking row to include `listing_title`, `listing_city`, `host_id` so search runs on a single shard (or hits the Elasticsearch index entirely).
@@ -703,6 +830,40 @@ pt-online-schema-change \
 3. **Schema migration locking a 100M-row table** — Broken: an `ALTER TABLE` to add an index on `listings` blocked all writes for 45 minutes. Fix: switched to pt-online-schema-change (Percona) which creates a ghost copy, triggers to keep it in sync, then swaps atomically. New migration time: 4 hours but zero downtime.
 
 4. **Forgetting to update VSchema after adding a column** — Broken: a new `listing_uuid` column was added but no vindex was created. Reads by `listing_uuid` became scatter-gather across all 16 shards. Fix: enforce in CI that every column used in a WHERE clause must have an entry in VSchema or be the shard key itself.
+
+**Read it like this.** "A shard key only balances the cluster if the values are spread out — one value that owns 12% of all rows will drag its shard to several times the size of every other shard no matter how good the hash function is, because hashing distributes keys, not the rows behind a single key."
+
+This is the failure mode the size-based alerting in discussion point Q5 exists to catch. The ratio to the median, not the absolute size, is the signal — a shard at 800 GB is not itself alarming, but a shard at 6x its siblings always is.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Rows owned by the outlier key — `12,000,000` listings under one `user_id` |
+| `L_total` | Total rows in the cluster — `100,000,000` listings |
+| `share` | Fraction of the dataset trapped on one shard: `L / L_total` |
+| `size_hot` | Storage on the affected shard — `800 GB` |
+| `size_median` | Storage on a typical shard — about `125 GB` |
+| `skew` | `size_hot / size_median` — the hotspot ratio |
+| `alert threshold` | `1.5 x` the cluster median, from discussion point Q5 |
+
+**Walk one example.** The property-management company that broke shard balance:
+
+```
+  share of dataset :  12,000,000 / 100,000,000     = 0.12  = 12%
+                      -- one key holding 12% of all rows
+
+  storage skew     :  800 GB / 125 GB              = 6.4x median
+  write QPS skew   :  reported                     = 4.0x peers
+  alert threshold  :  1.5 x 125 GB                 = 187.5 GB
+
+  800 GB is 4.3x past the alert line -- this was detectable
+  long before it became an incident
+
+  after the fix: split into 50 regional sub-accounts
+    12,000,000 / 50                                = 240,000 rows each
+    those 50 keys now hash independently across the 16 shards
+```
+
+The fix works because it changes the *number of distinct shard-key values*, which is the only lever hashing responds to. Note also that the storage skew (6.4x) and the write skew (4.0x) do not match — storage reflects accumulated history while QPS reflects current activity, so a shard can be oversized long before it is overloaded, or the reverse. Alert on both.
 
 ### Interview Discussion Points
 

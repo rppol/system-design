@@ -116,6 +116,49 @@ External consistency guarantee:
   then timestamp(T2) > timestamp(T1) always.
 ```
 
+**In plain terms.** "Nobody knows exactly what time it is, but everybody knows how wrong
+they might be — so deliberately sit still for exactly that much error before admitting
+the commit happened." The commit-wait converts an unknown clock offset into a known,
+bounded delay, which is the entire trick: uncertainty you can measure is uncertainty you
+can wait out.
+
+| Symbol | What it is |
+|--------|------------|
+| `TT.now()` | Returns an interval `[earliest, latest]`, never a single instant |
+| `earliest` | Lower bound. Real time is guaranteed to be at or after this |
+| `latest` | Upper bound. Real time is guaranteed to be at or before this |
+| epsilon (ε) | `latest - earliest`, the width of the interval. 1–7ms from GPS plus atomic clocks |
+| T | The commit timestamp the leader picks, set to `TT.now().latest` |
+| Commit-wait | Blocking until `TT.now().earliest > T`, which takes exactly ε |
+
+**Walk one example.** Two transactions on two leaders that never talk to each other,
+with ε = 6ms. Times are milliseconds on an imaginary perfect clock:
+
+```
+  T1 on leader A
+    real time 100.0   TT.now() = [97.0, 103.0]   picks T1 = 103.0 (latest)
+    commit-wait until TT.now().earliest > 103.0
+    real time 106.0   TT.now() = [103.0, 109.0]  earliest = 103.0, not yet
+    real time 109.1   TT.now() = [106.1, 112.1]  earliest > 103.0 -> ACK client
+
+  T2 on leader B, starts after that ACK
+    real time 110.0   TT.now() = [107.0, 113.0]  picks T2 = 113.0
+
+  ordering check:  T2 = 113.0  >  T1 = 103.0    external consistency holds
+```
+
+Leader B never asked leader A anything. The ACK could not physically reach the client
+before real time 109.1, and any timestamp B picks after that is at least
+`109.1 - 6.0 = 103.1 > 103.0`. Delete the commit-wait and T1 would ACK at real time
+100.0; a T2 starting at 100.5 could legally pick `TT.now().latest = 103.5` — still
+greater — but a T2 on a leader whose clock skews low could pick 101.0 and then read a
+snapshot that does not contain T1. The wait is what makes the bound unconditional.
+
+Note what ε buys and costs: it is why Spanner's single-region write latency (~5ms in the
+Tradeoffs table) exceeds CockroachDB's (~2–5ms) — Spanner pays up to 7ms of deliberate
+stalling per commit — and equally why crossing regions costs Spanner no *extra*
+coordination, since ε does not grow with distance.
+
 **TiDB Architecture**
 
 ```mermaid
@@ -159,6 +202,35 @@ stateDiagram-v2
 ```
 
 A CockroachDB range or Spanner Paxos group needs a live majority to accept writes; losing 2 of 3 replicas to a partition drops it into a no-quorum state where writes block until the partition heals, rather than risk the divergence an AP system would accept — the concrete meaning of the "CP" entries in the CAP Position column above.
+
+**What this actually says.** "A majority is the smallest group that cannot be assembled
+twice at once." Quorum size is `floor(N/2) + 1`, and the reason that specific number is
+correct has nothing to do with voting fairness — it is that any two majorities of the
+same N must share at least one member, so a committed entry can never be forgotten by
+the next quorum that forms.
+
+| Symbol | What it is |
+|--------|------------|
+| N | Replicas in the Raft/Paxos group. 3 is the CockroachDB default |
+| Quorum | `floor(N/2) + 1`. Replicas that must ack before an entry is committed |
+| Failures tolerated | `N - quorum`. How many replicas can die with writes still accepted |
+| Overlap guarantee | Any two quorums intersect in at least `2 x quorum - N` replicas, which is >= 1 |
+
+**Walk one example.** Replica count against what it actually buys:
+
+```
+    N   quorum = floor(N/2)+1   tolerated = N - quorum   overlap = 2*quorum - N
+    3           2                     1                        1
+    5           3                     2                        1
+    7           4                     3                        1
+    9           5                     4                        1
+```
+
+Overlap stays pinned at 1 no matter how large N gets — that single shared replica is the
+whole safety argument, and it is why adding replicas buys fault tolerance but never
+stronger consistency. It also explains the state diagram above: at N=3 the group
+tolerates exactly 1 failure, so a partition taking 2 replicas leaves 1 live node that
+cannot form a quorum of 2, and CP forces it to block rather than serve.
 
 ---
 
@@ -326,6 +398,38 @@ Maturity               | Decades               | ~10 years            | ~12 year
 
 **Underestimating cross-region latency**: A team running Spanner multi-region expects it to feel like a local database. Cross-region commits are 100–200ms. A checkout flow with 5 serialized distributed writes becomes a 500ms–1s operation. Fix: batch writes, reduce cross-region transaction frequency with locality tables.
 
+**Read it like this.** "Serialized round trips multiply; parallel ones do not." Request
+latency is `writes x per-commit latency` only when each write must finish before the next
+begins — which is exactly what an ORM doing five sequential `save()` calls produces, and
+exactly what nobody notices in a single-region test where the multiplier is 3ms.
+
+| Symbol | What it is |
+|--------|------------|
+| W | Serialized distributed writes in one user-facing request |
+| L | Per-commit latency. ~3ms same-region, 100–200ms cross-region |
+| Total | `W x L` for serialized writes; `L` if the writes are batched into one transaction |
+| Throughput ceiling | `1000 / L` sequential commits per second on a single logical chain |
+
+**Walk one example.** The same 5-write checkout flow in three deployments:
+
+```
+                              W    L (ms)    total = W x L      user experience
+  single-region CRDB          5      3          15 ms           imperceptible
+  cross-region, low end       5    100         500 ms           sluggish
+  cross-region, high end      5    200        1000 ms           feels broken
+
+  same 5 writes batched into ONE cross-region transaction:
+                              1    200         200 ms           5x better
+```
+
+The single-region number is 15ms and the cross-region number is 1000ms — a 67x
+difference produced by zero code changes, which is why this surfaces only after the
+multi-region rollout. Batching the five writes into one transaction removes the
+multiplier entirely: `W` drops to 1 and the flow pays one round trip instead of five.
+The related throughput ceiling matters just as much — at L = 200ms a single serialized
+chain can complete only `1000 / 200 = 5` commits per second no matter how many nodes the
+cluster has.
+
 **2PC overhead misconception**: Spanner does NOT use two-phase commit for external consistency — it uses commit-wait on TrueTime. But CockroachDB uses a transaction coordinator pattern that can have similar overhead when transactions span many ranges. Minimize range fan-out per transaction.
 
 **Raft leadership contention**: In CockroachDB, a table's Raft leaders should be co-located with the gateway node handling most writes. If leaders are scattered across regions, every write incurs cross-region Raft replication. Use `ALTER TABLE ... CONFIGURE ZONE USING lease_preferences` to pin leaders.
@@ -490,3 +594,42 @@ CREATE INDEX ON payments (payer_id, created_at DESC) LOCALITY REGIONAL BY ROW;
 - Write throughput: 30K TPS → 90K TPS (3x, 3 independent regional write paths)
 - Operational cost: +40% higher than PostgreSQL (more nodes, CockroachDB licensing)
 - Trade-off accepted: cross-region payments (5% of volume) are async, which simplified settlement reconciliation
+
+**Put simply.** "Throughput tripled because there are now three independent write paths
+instead of one, and latency fell 50x because the round trip stopped crossing an ocean."
+Both results come from the same structural change — moving the Raft leader to where the
+user is — and neither required a faster machine.
+
+| Symbol | What it is |
+|--------|------------|
+| R | Regions with a local Raft leader. 3 here (NA, EU, AP) |
+| Per-region TPS | Write throughput one region's 3-node Raft group sustains |
+| Aggregate TPS | `R x per-region TPS`, valid only because regions share no write path |
+| Blended latency | `(1 - f) x local + f x cross-region`, where f is the cross-region fraction |
+| f | Fraction of payments spanning two regions. 0.05 here |
+
+**Walk one example.** Both headline numbers, derived:
+
+```
+  throughput
+    before: one us-east-1 primary                       =  30,000 TPS
+    after:  3 regions x 30,000 TPS each                 =  90,000 TPS   -> 3x
+
+  latency, EU user
+    before: EU client -> us-east-1 primary              =     150 ms
+    after:  EU client -> eu-west-1 Raft quorum          =       3 ms
+    improvement = 150 / 3                               =      50x
+
+  what the 5% cross-region tail would have cost if left synchronous
+    blended = 0.95 x 3 ms  +  0.05 x 100 ms
+            = 2.85 ms      +  5.00 ms                   =    7.85 ms
+    still 150 / 7.85                                    =    19x better
+```
+
+That last block is the design decision made explicit: even if the 5% cross-region
+payments had stayed synchronous, the blended latency would be 7.85ms — a 19x win, not
+the headline 50x. Five percent of the volume was eating 5.00ms of the 7.85ms average,
+which is 64% of the blended latency from 5% of the traffic. Pushing those into async
+settlement is what recovers the remaining gap, and it is the general shape of every
+locality decision: a small non-local tail dominates the mean long before it dominates
+the volume.

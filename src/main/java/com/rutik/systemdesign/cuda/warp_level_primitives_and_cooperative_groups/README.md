@@ -237,6 +237,46 @@ diverged — all 32 lanes are active from entry to exit of this loop. If the red
 downstream of a divergent branch, replace `0xffffffff` with `__activemask()`, captured
 *before* the branch narrows the active set (see §10).
 
+**What the formula is telling you.** "Halve the surviving population five times and you
+are down to one — so a 32-lane warp needs exactly `log2(32) = 5` exchanges, and the
+offsets are just the sizes of the halves you keep folding."
+
+The offsets are not an arbitrary sequence. Each one is the current *width* of the live
+region: 32 lanes fold with offset 16, the surviving 16 fold with offset 8, and so on.
+Write the loop as `for (offset = 16; offset > 0; offset >>= 1)` and the sequence falls
+out of the halving; hard-code the offsets in the wrong order and lanes read partners
+that have not accumulated yet.
+
+| Symbol | What it is |
+|--------|------------|
+| `32` | Lanes in a warp — fixed by the hardware on every NVIDIA GPU to date |
+| `log2(32) = 5` | Number of shuffle instructions to collapse the warp to one value |
+| `offset` | Distance to the partner lane this step; `16, 8, 4, 2, 1` |
+| `v[i]` | Lane `i`'s running partial sum, living entirely in a register |
+| `0xffffffff` | The participation mask — all 32 bits set means "every lane is here" |
+| `__shfl_down_sync` | Lane `i` reads lane `i + offset`'s register; one instruction, no memory |
+
+**Walk one example.** Load lane `i` with the value `i`, so the true total is
+`0 + 1 + ... + 31 = 496`:
+
+```
+  start        : v[i] = i          -> v[0]=0  v[1]=1  ... v[31]=31
+
+  step 1 off=16: v[0] = 0 + 16                                =  16
+  step 2 off=8 : v[0] = 16 + v[8]  where v[8] = 8 + 24 = 32   =  48
+  step 3 off=4 : v[0] = 48 + v[4]  where v[4] = 16+4*4 = 64   = 112
+  step 4 off=2 : v[0] = 112 + v[2] where v[2] = 48+4*16 = 128 = 240
+  step 5 off=1 : v[0] = 240 + v[1] where v[1] = 240+16  = 256 = 496
+
+  check: 496 = 31 x 32 / 2 = sum(0..31)                       CORRECT
+
+  cost: 5 instructions, 0 bytes shared memory, 0 __syncthreads()
+```
+
+Five instructions to combine 32 registers. The shared-memory alternative would issue
+five store/barrier/load rounds for the same result — the ~15-instruction figure in the
+Section 8 chart.
+
 ### The same reduction as an operation sequence
 
 The ASCII grid above shows *which* lane reads from *which* lane; the sequence view below
@@ -349,6 +389,43 @@ This is the pattern FlashAttention-style kernels use for row-max and row-sum ins
 softmax: every lane in the warp needs the row's max/sum to rescale its own partial output,
 so the all-reduce form is used instead of the down-and-broadcast form.
 
+**Read it like this.** "`i XOR mask` always pairs each lane with exactly one partner,
+and the pairing is symmetric — so both lanes learn each other's value in the same
+instruction, and after five rounds every lane has heard from all 32."
+
+The asymmetry of `__shfl_down_sync` is what forces the extra broadcast: only the lower
+lane accumulates, so only lane 0 ends up correct. XOR is an involution — `(i XOR m) XOR
+m == i` — which makes the exchange mutual. Same 5 steps, same instruction count, but no
+sixth broadcast instruction afterward.
+
+| Symbol | What it is |
+|--------|------------|
+| `mask` (the XOR operand) | Bit distance to the partner lane: `16, 8, 4, 2, 1` |
+| `i XOR mask` | Partner lane index — flips exactly one bit of `i` |
+| `0xffffffff` | The *participation* mask, a different argument from the XOR operand above |
+| `log2(32) = 5` | Rounds needed; each round flips one bit of the 5-bit lane index |
+| `val` | Per-lane running total, which after round 5 is identical in all 32 lanes |
+
+**Walk one example.** Follow lane 5 (binary `00101`) through the five rounds:
+
+```
+  round 1  mask=16 (bit 4): partner = 5 XOR 16 = 21   -> lane 5 now covers {5, 21}
+  round 2  mask=8  (bit 3): partner = 5 XOR  8 = 13   -> covers {5,21,13,29}
+  round 3  mask=4  (bit 2): partner = 5 XOR  4 =  1   -> covers 8 lanes
+  round 4  mask=2  (bit 1): partner = 5 XOR  2 =  7   -> covers 16 lanes
+  round 5  mask=1  (bit 0): partner = 5 XOR  1 =  4   -> covers all 32 lanes
+
+  lanes covered after round k = 2^k :  2, 4, 8, 16, 32
+  every one of the 5 index bits gets flipped exactly once -> every lane reached
+
+  down-shuffle : 5 shuffles + 1 broadcast = 6 instructions for all-lanes-have-it
+  xor-butterfly: 5 shuffles               = 5 instructions for all-lanes-have-it
+```
+
+The doubling `2, 4, 8, 16, 32` is the proof: flipping bit `k` merges two groups that
+already agreed internally, so coverage doubles every round and 5 rounds is both
+necessary and sufficient for a 5-bit lane index.
+
 ### 6.3 Prefix scan with `__shfl_up_sync`
 
 ```cpp
@@ -362,6 +439,44 @@ __device__ __forceinline__ int warpInclusiveScan(int val) {
     return val;
 }
 ```
+
+**Put simply.** "Each round, every lane that is far enough from the start adds in the
+value sitting `offset` lanes behind it — after five doublings, lane `i` has absorbed
+everything from lane 0 up to itself."
+
+The `if (lane >= offset)` guard is the whole correctness argument. Lanes nearer the
+front than `offset` have no partner to read, so they must keep their current value
+untouched; drop the guard and they fold in garbage from the shuffle's edge behavior.
+Note that this is the same Hillis-Steele shape as the block-level scan, but confined to
+one warp, so the `__syncthreads()` between phases disappears entirely.
+
+| Symbol | What it is |
+|--------|------------|
+| `lane` | `threadIdx.x & 31` — this thread's position `0..31` inside its warp |
+| `offset` | Lookback distance this round: `1, 2, 4, 8, 16` |
+| `n` (in the code) | The value fetched from lane `lane - offset` via `__shfl_up_sync` |
+| `lane >= offset` | Guard — only lanes with a real partner accumulate this round |
+| `5` rounds | `log2(32)`; after round `k`, lane `i` covers the `2^k` lanes ending at `i` |
+
+**Walk one example.** Every lane starts with `val = 1`, so lane `i`'s inclusive scan
+must end at `i + 1`. Follow lane 5:
+
+```
+  offset=1 : lane 5 >= 1  -> val = 1 + val(lane 4) = 1 + 1 =  2   covers {4,5}
+  offset=2 : lane 5 >= 2  -> val = 2 + val(lane 3) = 2 + 2 =  4   covers {2..5}
+  offset=4 : lane 5 >= 4  -> val = 4 + val(lane 1) = 4 + 2 =  6   covers {0..5}
+  offset=8 : lane 5 <  8  -> guard false, val stays          =  6
+  offset=16: lane 5 < 16  -> guard false, val stays          =  6
+
+  expected inclusive scan at lane 5 = 5 + 1 = 6              CORRECT
+
+  same trace at lane 31: 2 -> 4 -> 8 -> 16 -> 32 = 31 + 1    CORRECT
+```
+
+Lane 5 finishes early because its answer only needs 6 elements; lane 31 uses all five
+rounds. Every lane still *issues* all five shuffle instructions though — that is the
+`O(n log n)` work of Hillis-Steele showing up as wasted lane-slots rather than wasted
+time, since the idle lanes cost nothing extra in a SIMT warp.
 
 ### 6.4 Vote functions: `__ballot_sync`, `__any_sync`, `__all_sync`, `__activemask`
 
@@ -403,6 +518,58 @@ __device__ int warpAggregatedAtomicAdd(int* counter, bool active) {
     return active ? base + rank : -1;
 }
 ```
+
+**The idea behind it.** "One lane books a block of slots for the whole warp in a single
+atomic; each other lane then works out its own slot by counting how many active lanes
+sit below it."
+
+`rank = __popc(mask & ((1u << lane) - 1))` is the load-bearing line and the one
+candidates fumble. `(1u << lane) - 1` builds a mask of every bit *strictly below* this
+lane; ANDing with the ballot keeps only the active ones; `__popc` counts them. That count
+is exactly this lane's index within the group the leader reserved — a warp-local
+exclusive scan computed in two instructions instead of five shuffles. Remove it and every
+active lane writes to `base`, clobbering each other.
+
+| Symbol | What it is |
+|--------|------------|
+| `mask` | `__ballot_sync` result — bit `i` set when lane `i` wants a slot |
+| `__popc(mask)` | Population count: how many lanes want slots, i.e. how many to reserve |
+| `__ffs(mask) - 1` | Index of the lowest set bit, minus 1 — the elected leader lane |
+| `base` | Value `atomicAdd` returned to the leader: the first reserved slot index |
+| `(1u << lane) - 1` | All-ones below this lane, zeros at and above it |
+| `rank` | `__popc(mask & below)` — this lane's offset within the reserved block |
+| `base + rank` | This lane's private, collision-free destination slot |
+
+**Walk one example.** Suppose only the even lanes are active, so the ballot returns
+`0x55555555`, and the counter stood at 1,000 before the warp arrived:
+
+```
+  mask            = 0x55555555   (binary ...0101 0101 -> lanes 0,2,4,...,30)
+  __popc(mask)    = 16           active lanes wanting a slot
+  __ffs(mask)     = 1            lowest set bit is bit 0 (__ffs is 1-based)
+  leader          = 1 - 1 = 0    lane 0 issues the single atomic
+
+  lane 0: base = atomicAdd(counter, 16)  -> returns 1000, counter becomes 1016
+          one global atomic issued for the entire warp
+
+  broadcast base = 1000 to all lanes via __shfl_sync(mask, base, 0)
+
+  lane 10: below = (1 << 10) - 1        = 0x3FF  (bits 0..9)
+           mask & below                 = bits 0,2,4,6,8
+           rank = __popc(...)           = 5
+           slot = 1000 + 5              = 1005
+
+  lane 30: below = (1 << 30) - 1
+           rank = __popc(mask & below)  = 15
+           slot = 1000 + 15             = 1015
+
+  atomics issued: 1 (aggregated) vs 16 (one per active lane) -> 16x less contention
+  with all 32 lanes active the same pattern gives the full 32x cited in Section 3
+```
+
+The reduction factor is exactly `__popc(mask)` — the number of atomics you collapsed
+into one. That is why this pattern pays off precisely when contention is worst (many
+lanes hitting the same address) and does nothing when only one lane is active.
 
 ### 6.6 Cooperative Groups: tiled partitions and `cg::reduce`
 
@@ -493,6 +660,49 @@ void launchGridReduce(const float* d_in, float* d_blockSums, float* d_result,
                                 dim3(blocks), dim3(threads), args);
 }
 ```
+
+**Stated plainly.** "You may only launch as many blocks as the device can hold resident
+at once — because a barrier that waits for a block the scheduler has not started yet
+waits forever."
+
+`maxCoopBlocks = blocksPerSM * smCount` is not a performance heuristic; it is a
+correctness bound. An ordinary `<<<...>>>` launch can oversubscribe freely, because
+blocks retire and make room for the next wave. Grid sync forbids that: no block can
+retire until all have reached the barrier, so all must be co-resident. The `min()` on the
+next line is what keeps a large input legal — clamp the grid and let each block loop over
+multiple elements with a grid-stride, rather than asking for blocks that cannot fit.
+
+| Symbol | What it is |
+|--------|------------|
+| `smCount` | Streaming multiprocessors on the device (`cudaDevAttrMultiProcessorCount`) |
+| `blocksPerSM` | Concurrently resident blocks per SM at this block size, from the occupancy API |
+| `maxCoopBlocks` | `blocksPerSM * smCount` — the hard ceiling on a cooperative launch |
+| `wantedBlocks` | `ceil(n / threads)` — blocks a one-element-per-thread mapping would need |
+| `blocks` | `min(wantedBlocks, maxCoopBlocks)` — the only safe launch size |
+| `grid.sync()` | The grid-wide barrier; legal only under `cudaLaunchCooperativeKernel` |
+
+**Walk one example.** An H100-class device with 132 SMs, 256 threads per block, an
+occupancy query returning 8 resident blocks per SM, and `n = 16,777,216` (2^24) inputs:
+
+```
+  maxCoopBlocks = blocksPerSM x smCount = 8 x 132       =     1,056 blocks
+  resident threads = 1,056 x 256                        =   270,336 threads
+
+  wantedBlocks  = ceil(16,777,216 / 256)                =    65,536 blocks
+  65,536 > 1,056  ->  the naive launch is ILLEGAL, grid.sync() would hang
+
+  blocks = min(65,536, 1,056)                           =     1,056 blocks
+  elements each thread must cover = 16,777,216 / 270,336 =     62.06
+  -> ~63 grid-stride iterations per thread, then one legal grid.sync()
+
+  oversubscription that was silently requested = 65,536 / 1,056 = 62.06x
+```
+
+Note the two `62.06` figures are the same number seen twice: the work you cannot express
+as extra blocks reappears as extra loop iterations per thread. That is the whole
+engineering consequence of the residency bound — and the reason the alternative in
+Section 8 (two ordinary kernel launches, ~5-10us each) stays the safe default whenever
+the ceiling is inconvenient.
 
 ### 6.8 Numba mapping (where the concept maps cleanly)
 

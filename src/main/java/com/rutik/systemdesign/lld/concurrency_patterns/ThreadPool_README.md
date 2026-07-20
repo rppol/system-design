@@ -92,6 +92,46 @@ Example: if a task spends 90% waiting on DB and 10% computing:
 threads = 8 × (1 + 9) = 80 threads
 ```
 
+**What this actually says.** "Keep every CPU core busy by hiring enough threads that, at any
+instant, the ones parked on I/O are covered by others that still have compute to do." The
+`wait_time / compute_time` ratio is the blow-up factor: a thread that is idle nine tenths of the
+time only delivers one tenth of a core, so you need ten of them to keep one core saturated.
+
+| Symbol | What it is |
+|--------|-----------|
+| `threads` | Pool size to configure (`corePoolSize` / `maximumPoolSize`) |
+| `N_CPUs` | Available hardware cores — `Runtime.getRuntime().availableProcessors()` |
+| `wait_time` | Per-task time blocked on I/O (DB, HTTP, disk) doing no CPU work |
+| `compute_time` | Per-task time actually burning CPU |
+| `wait_time / compute_time` | Blocking coefficient — how many idle threads one core can absorb |
+
+**Walk one example.** The 8-core, 90%-waiting service from above, with a 100ms task:
+
+```
+given   N_CPUs        = 8 cores
+        wait_time     = 90 ms  (blocked on DB)
+        compute_time  = 10 ms  (actual CPU)
+
+ratio   wait / compute = 90 / 10           = 9
+size    threads        = 8 x (1 + 9)       = 80 threads
+
+check the pool is right, not just the formula:
+        each thread finishes 1 task per 100 ms = 0.1 s
+        throughput  = 80 / 0.1 s                     = 800 tasks/s
+        CPU demanded = 800 tasks/s x 0.010 s CPU     = 8.0 cores  -> all 8 saturated
+
+contrast, sizing the pool at N_CPUs = 8 because "8 cores, 8 threads":
+        throughput  = 8 / 0.1 s                      =  80 tasks/s
+        CPU demanded = 80 tasks/s x 0.010 s CPU      = 0.8 cores  -> 10% utilization
+```
+
+Result: the naive "one thread per core" pool leaves 7.2 of 8 cores idle and gives away 10x the
+throughput. The blocking coefficient is the entire difference.
+
+Why the CPU-bound formula has no such term: when `wait_time` is 0 the ratio collapses to 0 and
+`threads = N_CPUs`, and extra threads beyond that only add context-switch overhead — hence the
+bare `+1` rather than a multiplier.
+
 ### Little's Law for queue sizing:
 ```
 L = λ × W
@@ -101,6 +141,41 @@ L = λ × W
 - W = average time a task spends in queue
 
 For queue to handle peak: `queueSize ≥ peak_arrival_rate × acceptable_wait_time`
+
+**Read it like this.** "However fast work arrives, multiplied by how long you are willing to let
+it sit, is exactly how many slots you need — and no more." Little's Law turns queue capacity from
+a guess into a latency budget: you pick the wait you can tolerate, and the arrival rate tells you
+the number.
+
+| Symbol | What it is |
+|--------|-----------|
+| `L` | Average number of tasks resident in the queue — the `workQueue` capacity to configure |
+| `λ` (lambda) | Arrival rate of submitted tasks, in tasks per second |
+| `W` | Average time a task waits in the queue before a worker picks it up |
+| `peak_arrival_rate` | The burst value of λ, not the daily average — size for the spike |
+| `acceptable_wait_time` | The queueing slice of your latency SLA |
+
+**Walk one example.** Reuse the 80-thread pool above, which drains 800 tasks/s, and assume a
+250ms queueing budget:
+
+```
+given   lambda = 800 tasks/s   (peak arrival, matches drain rate above)
+        W      = 0.25 s        (queue-wait slice of the SLA)
+
+        L = lambda x W
+          = 800 x 0.25         = 200 slots
+
+so      new LinkedBlockingQueue<>(200)
+
+sanity-check the two failure modes:
+        queue = 2000 slots -> full-queue wait = 2000 / 800 = 2.50 s   (SLA blown 10x)
+        queue =   20 slots -> full-queue wait =   20 / 800 = 0.025 s  (rejects on tiny bursts)
+```
+
+Result: 200 is the only size that spends the whole 250ms budget without exceeding it. Note the
+danger of an unbounded queue — `Integer.MAX_VALUE` slots means `W` grows without limit, so tasks
+queue until memory dies rather than being rejected. Bounding the queue is what converts an OOM
+into a `RejectedExecutionException` you can actually handle.
 
 ---
 

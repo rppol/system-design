@@ -163,6 +163,39 @@ flowchart LR
 ```
 Same 2-second slowdown, two different tools: the closed model's VUs quietly throttle themselves and hide the real tail, while the open model lets requests queue and reports the honest — and far worse — p99.
 
+### Decoding the two models: Little's Law
+
+Both branches above are the same single equation read in two directions — **Little's Law**:
+
+```
+  L  =  lambda  x  W
+  concurrency  =  arrival rate  x  latency
+```
+
+**What this actually says.** "The number of requests inside the system right now equals how fast they arrive multiplied by how long each one stays." Pin any two of the three and the third is no longer yours to choose — which is exactly why a closed test cannot hold both concurrency and throughput fixed while latency moves.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Requests in flight simultaneously — the VU count in a closed test, the queue depth in an open one |
+| `lambda` | Arrival rate: new requests entering the system per second |
+| `W` | Wait: end-to-end seconds a request spends inside the system (what you report as latency) |
+
+**Walk one example.** Take the same 100 VUs and the same 2-second slowdown from the diagram:
+
+```
+  CLOSED: L is pinned at 100 VUs, so lambda is whatever falls out
+     W = 0.050 s  ->  lambda = 100 / 0.050  =  2000 req/s
+     W = 2.000 s  ->  lambda = 100 / 2.000  =    50 req/s      40x LESS load applied
+
+  OPEN:   lambda is pinned at 3000 req/s, so L is whatever falls out
+     W = 0.100 s  ->  L = 3000 x 0.100  =   300 requests in flight
+     W = 2.000 s  ->  L = 3000 x 2.000  =  6000 requests in flight   (they pile up)
+```
+
+Coordinated omission is that first block stated as arithmetic: the closed test does not *decide* to send less load, Little's Law forces it to. Throughput falls from 2000 to 50 req/s — a 40x reduction — precisely because the tool refuses to let `L` exceed 100, so the requests that would have queued are never issued and their long waits are never timed.
+
+The second block also sizes your load generator. `maxVUs` must exceed `lambda x W` at the **worst** latency you still intend to measure, because k6 needs a free VU to carry each in-flight request. The §6.1 scenario drives 3000 req/s with `maxVUs: 2000`: at a healthy 100 ms mean that needs only 300 VUs, but at its own 800 ms p99 threshold it needs `3000 x 0.8 = 2400` — over the cap, at which point the generator throttles itself and quietly becomes a closed test again.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -262,6 +295,29 @@ xychart-beta
 ```
 The knee appears at step 4: p99 rockets from 310ms to 1.9s and errors jump to 4% (SLO is p99<300ms), so the safe ceiling is ~550 RPS/replica — serving an 11k RPS peak needs ≈20 replicas with headroom, and the HPA target should trigger at ~70% of 550 ≈ 385 RPS/replica.
 
+**Read it like this.** "Divide the traffic you must serve by the traffic one replica can serve without breaking the SLO, then divide again by how full you are willing to run each replica." The capacity test's only job is to produce that denominator as a measured number rather than a guess.
+
+| Symbol | What it is |
+|--------|------------|
+| Ceiling | Max RPS a single replica sustains with p99 still under SLO — the knee, 550 here |
+| Peak RPS | Total arrival rate you must absorb at the worst moment — 11,000 here |
+| Target utilisation | Fraction of the ceiling the HPA aims for; 70% leaves room for the scale-up lag |
+| Replicas | `ceil(peak / (ceiling x target))` — the count the autoscaler must be able to reach |
+
+**Walk one example.** Push the two numbers from the chart through both readings:
+
+```
+  measured ceiling      = 550 RPS/replica        (step 4 is already past it)
+  HPA scale-out target  = 0.70 x 550   =  385 RPS/replica
+
+  sized at the raw ceiling:   11000 / 550  = 20.0  ->  20 replicas, ZERO headroom
+  sized at the HPA target:    11000 / 385  = 28.6  ->  29 replicas, 30% spare each
+```
+
+The two numbers in the caption are the two ends of that range, not a contradiction: 20 replicas is the absolute floor where every replica sits exactly on its knee, and 29 is what the 70% target actually provisions. Those extra 9 replicas *are* the headroom — the buffer that absorbs traffic arriving during the ~55s the autoscaler needs to react (see §14). Size at the floor and the first burst pushes every replica past the knee simultaneously.
+
+
+
 ### 6.5 Wiring the gate into CI
 
 ```yaml
@@ -358,7 +414,63 @@ The broken version once reported a p99 of 180ms while production users saw 6-sec
 
 **Pitfall 2: The load generator is the bottleneck, not the SUT.** A single runner maxes its CPU, exhausts ephemeral ports (~28k by default), or saturates its NIC, so throughput plateaus — and the team concludes the *service* can't go faster. Always monitor the generator's own CPU/FD/ports; distribute when it saturates.
 
+**Stated plainly.** "One machine can only open a connection as fast as the kernel frees up a port to open it with." A closed socket sits in `TIME_WAIT` for a fixed drain time, so the port budget divided by that drain time is a hard ceiling on new connections per second — completely independent of how fast your service is.
+
+| Symbol | What it is |
+|--------|------------|
+| Port pool | Ephemeral ports available for outbound connections — ~28,232 by default on Linux |
+| `TIME_WAIT` | Seconds a closed socket holds its port before the kernel reuses it — 60s typical |
+| Ports in use | `new connections/sec x TIME_WAIT` — the steady-state port occupancy |
+| Keep-alive | Reusing one connection for many requests, which removes the port cost per request |
+
+**Walk one example.** Take the 50k RPS target from §6.2 split across the operator's 8 runner pods:
+
+```
+  per-pod arrival rate  =  50000 / 8       =  6250 req/s
+
+  WITHOUT keep-alive (one connection per request):
+    ports needed  =  6250 x 60             =  375,000
+    ports available                        =   28,232
+    shortfall                              =  13.3x over budget  -> connect() fails
+
+  max sustainable rate for ONE pod without keep-alive:
+    28232 / 60                             =  ~470 req/s
+```
+
+That ~470 req/s per pod is the number teams mistake for the service's limit. Note that keep-alive does not merely soften this — it removes the term entirely, since a reused connection consumes no new port, which is why an honest generator config is the first thing to check before adding runner pods.
+
 **Pitfall 3: Reporting averages.** "Average latency 60ms" with a p99 of 3s ships a service that's broken for 1% of users (millions of requests/day). Always report and gate on percentiles.
+
+**The idea behind it.** "One percent sounds like a rounding error until you multiply it by your request volume." At the 11k RPS peak from §6.4, the 1% living above the p99 is 110 requests every second — `11000 x 86400 x 0.01 = 9,504,000` bad experiences per day, which is where "millions of requests/day" comes from.
+
+The subtler version of this mistake is averaging the percentiles themselves. Percentiles are **not** additive: you cannot take a p99 from each replica and mean them, because the mean is dominated by the healthy majority while the true p99 is drawn entirely from the sick minority.
+
+| Symbol | What it is |
+|--------|------------|
+| Per-replica p99 | The 99th-percentile latency each replica reports for its own traffic |
+| Mean of p99s | Averaging those reported numbers — the tempting, wrong aggregation |
+| True p99 | The 99th percentile of all requests pooled together, ranked as one list |
+| Rank | Position of the cut in the pooled list: `0.99 x total requests` |
+
+**Walk one example.** 20 replicas, 1,000 requests each, one replica sick:
+
+```
+                          requests    latency profile           reported p99
+  19 healthy replicas     19 x 1000   all at 100 ms                  100 ms
+   1 sick replica            1000     700 at 100ms, 300 at 5000ms   5000 ms
+
+  MEAN OF p99s   = (19 x 100 + 5000) / 20 = 6900 / 20      =   345 ms   "fine"
+
+  TRUE POOLED p99:
+    total requests                    = 20 x 1000          = 20,000
+    requests above 1s (all from sick) =                        300
+    that is  300 / 20000              = 1.5%  of all traffic
+    so the slowest 1% sits entirely inside that group      =  5000 ms
+
+  understatement:  5000 / 345  =  14.5x
+```
+
+The average of the percentiles says 345 ms and the SLO looks met; the number a real user experiences at the tail is 5,000 ms. Aggregate percentiles by pooling the underlying observations (or histogram buckets — see [observability_metrics_prometheus](../observability_metrics_prometheus/)), never by averaging the already-computed quantiles.
 
 **Pitfall 4: No warm-up window.** Measuring from t=0 includes JIT compilation, cold caches, empty connection pools, and the autoscaler still ramping — inflating latency and hiding steady-state truth. Discard the warm-up; measure the hold phase.
 

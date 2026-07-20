@@ -671,6 +671,39 @@ order.getLink("pay").ifPresent(pay ->
 - Illegal transitions (e.g. paying an already-shipped order) rejected with **409 `application/problem+json`** in **<1ms**, before touching the domain service.
 - HAL payload overhead: `_links` added **~180 bytes/response**; acceptable at 3,000 req/sec for a partner API where evolvability was the priority.
 
+**What this actually says.** "The hypermedia tax is a fixed number of bytes added to every response, so its real size is that constant multiplied by your request rate — and whether it is 'acceptable' depends entirely on how large your responses already were." Quoting 180 bytes without the rate or the baseline payload size makes the tradeoff impossible to judge.
+
+| Symbol | What it is |
+|--------|------------|
+| `~180 bytes` | The `_links` block: relation names plus absolute `href` URLs, per response |
+| `3,000 req/sec` | Sustained rate for this partner-facing checkout API |
+| baseline payload | The order representation itself, before HAL is added — the denominator |
+| `_templates` | HAL-FORMS affordances, served only on request, so they are not in the 180 |
+
+**Walk one example.** What 180 bytes actually costs at this rate:
+
+```
+  bandwidth   = 180 bytes x 3,000 req/s        = 540,000 B/s ~ 527 KB/s
+  per day     = 540,000 x 86,400 s             = 46,656,000,000 B ~ 46.7 GB/day
+  per 30 days                                  ~ 1,400 GB ~ 1.4 TB/month
+
+  as a share of the response it rides on:
+    on a 900-byte order       180 / 900        = 20.0%
+    on a 2 KB order           180 / 2,048      ~ 8.8%
+```
+
+Half a megabyte per second of pure link metadata, and about 1.4 TB a month. That is
+genuinely cheap for a partner API — but the percentage line is the one that decides it. At
+20% of a small response the overhead is a real design cost; at under 9% of a richer
+response it disappears into noise.
+
+**Why this is the argument against Level 3 for internal traffic.** An internal
+high-throughput service typically returns small responses at rates far above 3,000 req/s,
+so the same constant lands on the wrong side of both terms — a larger percentage of each
+payload, multiplied by a larger rate. Combine that with the extra round trips a
+link-following client makes and the evolvability HAL buys is worth less than it costs,
+which is exactly the Section 9 guidance.
+
 ### Pitfalls hit in production
 
 **Pitfall 1 — a partner ignored `_links` and hardcoded `/pay`, breaking on the v2 move.**

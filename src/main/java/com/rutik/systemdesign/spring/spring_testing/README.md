@@ -942,6 +942,42 @@ The team ran the test suite with JVM test logging enabled and counted Applicatio
 - 8 were caused by @DirtiesContext
 - Context startup averaged 8 seconds: 47 * 8s = 376 seconds of context startup alone
 
+**In plain terms.** "CI time is not driven by how many tests you have — it is driven by
+how many *distinct context configurations* you have, because the cache key is the
+configuration, not the class." 180 test classes cost nothing extra; the 47 unique keys
+are the entire bill.
+
+| Term | What it is |
+|------|------------|
+| `180` | Test classes. Does not appear in the cost formula at all |
+| `47` | Unique context keys — distinct combinations of config, profiles, and `@MockBean` sets |
+| `8s` | Measured average time to build one `ApplicationContext` |
+| `47 x 8s` | Total context-building cost; every cache *miss* pays the full 8 seconds |
+| cache hit | A class reusing an existing key pays `0s` — this is why key count is what matters |
+
+**Walk one example.** Trace where the 22-minute pipeline actually goes:
+
+```
+                          keys   x  8s   =  context cost     share of 22 min (1320s)
+  before consolidation      47      8      376 s               28.5%
+  after  consolidation       3      8       24 s                1.8%
+                                          -------
+  saved by key reduction                  352 s   = 5.9 minutes
+
+  plus Thread.sleep removal      46 s -> ~3 s     =   43 s
+                                                  -------
+  measured end result       22 min -> 4.5 min     = 79.5% reduction
+```
+
+Note that reducing 47 keys to 3 does not delete a single test — the same 180 classes
+run, they just share three contexts. The saving is pure cache-hit rate.
+
+**Why one stray `@MockBean` costs 8 seconds.** The context cache key includes the set of
+mocked bean types, so `@MockBean(EmailService.class)` on some classes and not others
+splits one key into two. That is the mechanism behind the 12 keys attributed to
+`EmailService` above: a one-line annotation difference is indistinguishable, to the
+cache, from a completely different application.
+
 ### Fix 1 — Consolidate @MockBeans in a base class
 
 ```java
@@ -1036,6 +1072,41 @@ flowchart TD
 ```
 
 Total CI target: (350 × 20ms) + (120 × 3s) + (5 × 45s) = 7s + 360s + 225s ≈ 10min. After slicing: (350 × 20ms) + (120 × 1.5s) + (5 × 45s) = 7s + 180s + 225s ≈ 6.9min. With context caching: reduces to ~4min.
+
+**The idea behind it.** "Total suite time is the sum, per pyramid layer, of test count
+times per-test cost — so the layer you must attack is whichever product is largest, not
+whichever layer has the most tests." Here the 350 unit tests are 74% of the test *count*
+(350 of 475) but 1% of the *time*.
+
+| Term | What it is |
+|------|------------|
+| `350 × 20ms` | Unit layer: many tests, no Spring context, negligible per-test cost |
+| `120 × 3s` | Integration layer: test slices. The dominant term before optimization |
+| `5 × 45s` | E2E layer: few tests, full Testcontainers stack, expensive each |
+| `3s → 1.5s` | Effect of slicing (`@WebMvcTest`/`@DataJpaTest` instead of `@SpringBootTest`) |
+| the sum | Wall-clock only if tests run serially; parallel executors divide it |
+
+**Walk one example.** Which layer is worth optimizing:
+
+```
+  layer          count   each      subtotal    share of 592s
+  unit             350    0.020s       7 s        1.2%
+  integration      120    3.000s     360 s       60.8%
+  e2e                5   45.000s     225 s       38.0%
+                                    -------
+  total                              592 s  = 9.87 min  (~10 min)
+
+  halving the integration layer (3.0s -> 1.5s):
+    120 x 1.5s = 180 s   ->   total 412 s = 6.87 min  (~6.9 min)
+    saved 180 s = 3.0 min for one change
+
+  halving the unit layer instead (20ms -> 10ms):
+    350 x 0.010s = 3.5 s ->   saved 3.5 s.  Not worth doing.
+```
+
+The integration row is 60.8% of the budget on 25% of the tests — that is where slicing
+pays. Optimizing the 350 unit tests, the layer that *looks* biggest, would buy back
+three and a half seconds.
 
 **Controller layer — @WebMvcTest with @MockBean:**
 

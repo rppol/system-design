@@ -221,6 +221,70 @@ output "vpc_id" {
 }
 ```
 
+Two lines in that config are quiet arithmetic rather than configuration: the `cidrsubnet` call and the `~>` version constraint.
+
+```
+cidrsubnet(prefix, newbits, netnum)
+  new prefix length = old prefix length + newbits
+  subnet            = the netnum-th block of that size inside prefix (zero-indexed)
+  blocks available  = 2 ^ newbits
+```
+
+**Stated plainly.** "Chop the parent CIDR into `2^newbits` equal pieces and hand me piece number `netnum`."
+
+| Symbol | What it is |
+|--------|------------|
+| `prefix` | The parent network being carved up — here `var.cidr` = `10.0.0.0/16` |
+| `newbits` | How many bits to borrow from the host portion; each bit halves the block size |
+| `netnum` | Which block to return, counting from 0 |
+| `2 ^ newbits` | Total blocks the parent splits into — the ceiling on `netnum` |
+| `32 - new prefix` | Bits left for hosts, so `2 ^ that` addresses per block |
+
+**Walk one example.** The exact call in the subnet resource above:
+
+```
+  cidrsubnet("10.0.0.0/16", 8, 1)
+
+    new prefix length  =  16 + 8            =  /24
+    blocks available   =  2^8               =  256 subnets
+    addresses each     =  2^(32-24) = 2^8   =  256 addresses
+    usable on AWS      =  256 - 5           =  251  (AWS reserves 5 per subnet)
+
+    netnum 0  ->  10.0.0.0/24
+    netnum 1  ->  10.0.1.0/24    <- what this config returns
+    netnum 2  ->  10.0.2.0/24
+```
+
+The payoff is that subnet CIDRs are *derived*, not typed. Change `var.cidr` from `10.0.0.0/16` to `10.5.0.0/16` and every subnet moves with it, with no chance of the overlapping-CIDR mistake pitfall 2 of the cloud networking module warns about. Hard-coded subnet strings break silently the first time someone re-uses the module in a second account.
+
+```
+~> A.B     allows  >= A.B.0  and  < (A+1).0.0     (rightmost written component = minor)
+~> A.B.C   allows  >= A.B.C  and  < A.(B+1).0     (rightmost written component = patch)
+```
+
+**The idea behind it.** "Let the last number you actually typed float upward, and freeze everything to its left."
+
+The subtlety that trips people: the ceiling depends on *how many components you wrote*, not on the values. Two components means the minor may float; three means only the patch may.
+
+| Symbol | What it is |
+|--------|------------|
+| `~>` | The pessimistic constraint operator — an upper bound you did not have to write |
+| rightmost written component | The only part allowed to increase; where you stop typing sets the ceiling |
+| `>=` (loose) | No upper bound at all — a new major provider can land in CI unannounced |
+| `.terraform.lock.hcl` | Records the exact version *resolved*, so machines agree even within the range |
+
+**Walk one example.** The `~> 5.40` pin used in this config, against the alternatives:
+
+```
+   constraint      allowed range                 5.40.7?   5.41.0?   6.0.0?
+   ~> 5.40         >= 5.40.0  and  < 6.0.0         yes       yes       no
+   ~> 5.40.1       >= 5.40.1  and  < 5.41.0        yes        no       no
+   ~> 5.0          >= 5.0.0   and  < 6.0.0         yes       yes       no
+   >= 5.0          >= 5.0.0   and  no ceiling      yes       yes      yes
+```
+
+Read the first row carefully: `~> 5.40` is a *major* pin, not a patch pin — it still admits `5.41.0`, `5.42.0`, and every later minor. Only the three-component form `~> 5.40.1` restricts you to patches within `5.40.x`. If pitfall 5's "a new provider changes a default and proposes surprise diffs" is the risk you actually care about, the two-component form does not close it on its own — the committed `.terraform.lock.hcl` is what makes every machine resolve the identical version inside whichever range you chose.
+
 ### Reading the plan output (the four operation symbols)
 
 ```bash
@@ -312,6 +376,36 @@ flowchart LR
 ```
 
 *Deleting the middle instance under `count` shifts every later index down one slot, so Terraform destroys and recreates `web[2]` even though it never changed; under `for_each`, only the removed key's instance disappears and the stable-keyed siblings are untouched.*
+
+**What it means.** "Under `count`, removing one element does not cost you one resource — it costs you every resource that was standing behind it in line."
+
+```
+count    collateral = N - 1 - k    UNCHANGED resources destroyed+recreated after removing index k
+for_each collateral = 0            nothing else moves, regardless of N or position
+```
+
+Both forms destroy the element you actually asked to remove. "Collateral" counts only the innocent bystanders — the resources you did not touch that get rebuilt anyway.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | How many instances the `count` currently produces |
+| `k` | Zero-based index of the element you are removing |
+| `N - 1 - k` | Count of elements after `k`, every one of which shifts down one slot |
+| shift | A new state address for an unchanged resource — Terraform reads that as destroy+recreate |
+| `for_each` key | A stable string address; nothing "shifts" because nothing is positional |
+
+**Walk one example.** Removing an element from fleets of different sizes:
+
+```
+    N      remove k      count collateral N-1-k      for_each collateral
+    3         0                    2                          0
+    3         1                    1                          0     <- the pitfall 3 case
+    3         2                    0                          0
+   10         2                    7                          0
+   10         9                    0                          0
+```
+
+Two things fall out of the table. Removing the *last* index is the one case where `count` is harmless (`N - 1 - k = 0`), which is why the bug hides during development — people usually shrink a fleet from the end — and detonates the first time someone deletes from the middle of a production list. And the damage scales with the fleet: pitfall 3's `count = 3` example rebuilds a single innocent node, but the same mistake at index 2 of a 10-node fleet rebuilds 7 of them, all with unintended downtime and all invisible unless you read the plan.
 
 ### Workspaces — multiple states, one config
 

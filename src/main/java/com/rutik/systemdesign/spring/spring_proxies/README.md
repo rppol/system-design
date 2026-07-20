@@ -636,6 +636,39 @@ public class OrderService {
 | getOrders p99 | 480 ms | 18 ms |
 | Transactions correctly opened | no | yes |
 
+**What it means.** "A silently-bypassed proxy does not degrade the cache — it deletes it. Every one of the 22,000 reads per second that should have been absorbed by Redis arrived at the database instead, and the fix is worth exactly the hit rate you were supposed to have."
+
+The numbers in this table are not independent measurements; three of them follow arithmetically from the hit rate. Being able to derive them is how you recognize a proxy-bypass from a dashboard alone.
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Total read rate on `getOrder` — **22,000 req/sec** |
+| `H` | Cache hit ratio. **~0%** while self-invoked, **95%** once routed through the proxy |
+| `R x (1 - H)` | Reads that reach the database — the row that changed by 20x |
+| p99 | Tail latency, dominated by whichever store actually serves the request |
+
+**Walk one example.** Derive the DB-load row from the hit-rate row:
+
+```
+  DB reads/sec = R x (1 - H)
+
+    broken (self-invocation):  22,000 x (1 - 0.00) = 22,000/sec   <- full load on DB
+    fixed  (via proxy):        22,000 x (1 - 0.95) =  1,100/sec   <- matches the table
+
+  Load removed from the database:
+    22,000 - 1,100 = 20,900 reads/sec eliminated
+    22,000 / 1,100 = 20x reduction
+
+  Effective read latency, using the p99 figures as the two service times:
+    broken: 1.00 x 480 ms                    = 480.0 ms
+    fixed : 0.95 x ~1 ms + 0.05 x 480 ms     =  24.9 ms  (table reports 18 ms
+            -- the real cache path is faster than the DB p99 used here)
+```
+
+The `1,100` in the table is not a separate measurement — it is `22,000 x 0.05`. When a service's DB read rate equals its total request rate despite a `@Cacheable` annotation being present, the hit rate is zero, and a zero hit rate on a correctly-annotated method means the annotation is not running at all.
+
+**Why the failure is silent.** A misconfigured cache logs errors; a bypassed proxy logs nothing, because from the JVM's perspective `this.getOrder(id)` is a perfectly ordinary method call that happens to skip the wrapper. Nothing throws, nothing warns, and the method returns correct data — just slowly, and without a transaction. The only signal is this arithmetic: 22,000 reads in, 22,000 reads out, hit rate zero.
+
 ### Common Pitfalls
 
 **Pitfall 1 — `@Transactional` on a `private` method is silently ignored.**

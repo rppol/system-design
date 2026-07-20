@@ -28,6 +28,48 @@ This module covers the full spectrum: cache placement strategies (aside, read-th
 - **Cache coherence**: Multiple cache instances (distributed or local) must agree on the current value. Consistency tradeoffs are unavoidable.
 - **Cold start**: When a cache starts empty (deployment, restart), all requests hit the database — a cache cold start can overwhelm the database. Warm the cache before taking traffic.
 
+### Reading the hit-rate number
+
+Hit rate is the one cache metric everything else derives from. The effective latency a caller
+sees is the weighted average of the two paths:
+
+```
+effective_latency = hit_rate x cache_latency + (1 - hit_rate) x db_latency
+db_load           = (1 - hit_rate) x request_rate
+```
+
+**In plain terms.** "The misses do all the damage." Because the miss path is 50x slower than
+the hit path, your average latency is dominated by the small slice of traffic that misses, not
+by the large slice that hits — which is why the difference between a 90% and a 99% hit rate is
+much bigger than it sounds.
+
+| Symbol | What it is |
+|--------|------------|
+| `hit_rate` | Fraction of requests served from cache. `0.90` = 90% |
+| `1 - hit_rate` | Miss rate. The fraction that falls through to the database |
+| `cache_latency` | Redis round trip. Roughly `1 ms` (from §1: "<1ms") |
+| `db_latency` | The uncached query. Roughly `50 ms` (from §1) |
+| `request_rate` | Incoming traffic in RPS. Multiplied by the miss rate to get DB QPS |
+
+**Walk one example.** Using `1 ms` cached, `50 ms` uncached, at 1,000 RPS:
+
+```
+  hit rate   effective latency = h x 1 + (1-h) x 50      DB load = (1-h) x 1000
+  -------    ---------------------------------------     ----------------------
+    80%      0.80 x 1 + 0.20 x 50  = 0.8 + 10.0 = 10.8ms      200 queries/s
+    90%      0.90 x 1 + 0.10 x 50  = 0.9 +  5.0 =  5.9ms      100 queries/s
+    97%      0.97 x 1 + 0.03 x 50  = 0.97 + 1.5 =  2.47ms      30 queries/s
+    99%      0.99 x 1 + 0.01 x 50  = 0.99 + 0.5 =  1.49ms      10 queries/s
+
+  80% -> 90% costs you 10 points of hit rate and buys 4.9ms.
+  90% -> 99% costs you  9 points of hit rate and buys 4.4ms AND a 10x cut in DB load.
+```
+
+Both jumps are worth roughly the same latency, but the second one is what actually saves the
+database: DB load scales with the *miss* rate, so the last few points of hit rate are where a
+cache stops being a latency trick and starts being a capacity strategy. This is also why
+"hit rate dropped from 97% to 90%" is a page-worthy alert — DB QPS just tripled.
+
 ---
 
 ## 4. Types / Architectures / Strategies
@@ -188,6 +230,56 @@ flowchart LR
 ```
 
 All three strategies intercept the same cache-miss moment but resolve the contention differently: the mutex lock guarantees exactly one winner while losers wait and retry, XFetch avoids locking altogether by making the refresh probabilistic as expiry nears, and stale-while-revalidate skips waiting entirely by serving the old value while a refresh runs in the background.
+
+#### Decoding the XFetch test in the diagram
+
+The `-β·δ·ln(random)` box is the whole of XFetch. Written out, every reader that gets a cache
+hit evaluates:
+
+```
+refresh early  if   now - delta x beta x ln(U)  >=  expiry_time
+                    \_______________________/
+                       a random "lookahead" window, in the same
+                       units as delta (recompute time)
+```
+
+**The idea behind it.** "Every reader rolls a die, and the closer the key gets to expiring the
+more likely someone rolls a winner and rebuilds it early — so the key is almost never alive at
+the instant it dies." It converts one synchronised stampede at expiry into a trickle of single
+voluntary refreshes spread over the seconds before it.
+
+| Symbol | What it is |
+|--------|------------|
+| `delta` (`δ`) | How long the value takes to recompute. Expensive values get a wider window |
+| `beta` (`β`) | Aggressiveness knob, default `1`. Higher = refresh earlier and more often |
+| `U` | A fresh uniform random draw in `[0,1)`, one per reader |
+| `ln(U)` | Always negative, so `-ln(U)` is positive. Usually small, occasionally large |
+| `delta x beta x -ln(U)` | The lookahead: how far into the future this reader pretends it is |
+
+`-ln(U)` is the trick. It is drawn from an exponential distribution: mostly near zero, with a
+long thin tail. So most readers pretend they are barely in the future and do nothing, while an
+occasional reader pretends it is far in the future and rebuilds.
+
+**Walk one example.** A key with a 300s TTL and `delta = 0.2s` recompute, `beta = 1`:
+
+```
+      U       -ln(U)     lookahead = 0.2 x 1 x -ln(U)   refresh if remaining TTL is under
+    ------   --------    ---------------------------   --------------------------------
+     0.90     0.1054              0.0211 s                       21 ms  (almost never)
+     0.50     0.6931              0.1386 s                      139 ms
+     0.10     2.3026              0.4605 s                      461 ms
+     0.01     4.6052              0.9210 s                      921 ms  (the lottery winner)
+
+  At 1,000 reads/s, in the final second before expiry roughly one reader draws
+  U <= 0.01 and rebuilds. Everyone else keeps getting the still-valid cached value.
+  Without XFetch, all 1,000 readers in the second AFTER expiry miss at once.
+```
+
+**Why `delta` is in there and what breaks without it.** The window scales with recompute cost,
+so a value that takes 2s to rebuild starts trying 10x earlier than one that takes 0.2s — the
+expensive keys, which are exactly the ones whose stampede would hurt most, get the most runway.
+Drop `delta` and every key gets the same lookahead regardless of how costly it is to rebuild,
+which under-protects the slow keys and needlessly churns the cheap ones.
 
 ---
 

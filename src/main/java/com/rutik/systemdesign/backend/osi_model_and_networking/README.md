@@ -157,6 +157,34 @@ The NAT gateway rewrites each internal source IP:port to a shared public IP with
 
 Maximum Transmission Unit (MTU) is the largest frame the data link layer can carry. Ethernet MTU is 1500 bytes (excluding Ethernet header). IP header is 20 bytes minimum, TCP header is 20 bytes minimum. This leaves 1460 bytes for TCP payload — the MSS (Maximum Segment Size).
 
+**In plain terms.** "The MTU is the size of the envelope; the headers are the address block printed on it. Whatever space the address block does not eat is how much letter you get to send."
+
+MSS is not a tunable you pick — it is a subtraction the link forces on you. Every byte of header is a byte of payload you did not get, on every single segment, forever.
+
+| Symbol | What it is |
+|--------|------------|
+| MTU (1500) | Largest frame the link layer will carry, in bytes |
+| IP header (20) | Minimum IPv4 header — source, destination, TTL, flags |
+| TCP header (20) | Minimum TCP header — ports, sequence, ACK, window |
+| MSS (1460) | What is left over for your actual application bytes |
+
+**Walk one example.** Two links, same arithmetic, very different results:
+
+```
+  standard Ethernet         jumbo frames (datacenter)
+    MTU        1500           MTU        9000
+  - IP hdr       20         - IP hdr       20
+  - TCP hdr      20         - TCP hdr      20
+  ----------------          ----------------
+    MSS        1460           MSS         8960
+
+  header overhead = 40 / 1500 = 2.7%      40 / 9000 = 0.44%
+  segments to move 1 MB = 1048576/1460    1048576/8960
+                        = 719 segments    = 118 segments
+```
+
+Six times fewer segments means six times fewer interrupts, ACKs, and per-packet CPU cycles. That is the entire argument for jumbo frames inside a datacenter — and why they are useless across the public internet, where the first 1500-byte hop clamps you back down.
+
 If an IP packet exceeds the MTU of a link, IP fragments it:
 
 ```mermaid
@@ -184,6 +212,39 @@ flowchart LR
 ```
 
 Reassembly happens only at the destination host, never at intermediate routers — each fragment carries the offset shown above so the receiver can reorder the 1480/1480/40-byte pieces back into the original 3000-byte packet.
+
+**What this actually says.** "Cut the payload into MTU-sized slices, and label each slice with where it started — but count that label in units of 8 bytes, not 1."
+
+The odd numbers 185 and 370 confuse everyone the first time. They are not byte positions; the fragment-offset field is only 13 bits wide, so it stores the byte offset divided by 8. That single design choice is why every fragment except the last must be a multiple of 8 bytes long.
+
+| Symbol | What it is |
+|--------|------------|
+| 3000 | Original IP packet size in bytes, header included |
+| 1500 | Link MTU — the hard ceiling per fragment |
+| 1480 | Payload each full fragment can carry (1500 minus a fresh 20-byte IP header) |
+| offset | Where this fragment's payload starts, **in 8-byte units** |
+| MF | "More Fragments" flag — 1 on every piece but the last |
+
+**Walk one example.** Push the 3000-byte packet through, byte by byte:
+
+```
+  payload to carry     = 3000 bytes
+  per-fragment payload = 1500 - 20 (each fragment gets a fresh IP header) = 1480
+
+  frag   payload bytes   byte range      offset field     MF
+  -----  --------------  --------------  ---------------  --
+    1    1480               0 - 1479      0/8    =   0     1
+    2    1480            1480 - 2959   1480/8    = 185     1
+    3      40            2960 - 2999   2960/8    = 370     0
+         ------
+  total  3000  bytes recovered by the receiver -- nothing lost, nothing duplicated
+
+  bytes actually on the wire = 3000 + 3 x 20 = 3060
+  unfragmented equivalent    = 3000 + 1 x 20 = 3020
+  fragmentation tax          = 40 extra bytes of duplicated IP headers
+```
+
+The third fragment carries only 40 payload bytes yet still pays a full 20-byte IP header — a 33% overhead runt. Worse, lose any one of the three and the receiver must discard all 3000 bytes, since IP has no per-fragment retransmission: a 1-in-100 packet loss rate becomes roughly a 3-in-100 loss rate for the datagram. That amplification is why fragmentation is treated as a bug to be avoided (via PMTUD) rather than a feature to rely on.
 
 Path MTU Discovery (PMTUD): TCP uses the DF (Don't Fragment) bit. If a router cannot forward and must fragment, it sends ICMP "Fragmentation Needed" back. The sender reduces its packet size. Blocked ICMP causes "black hole" connections.
 
@@ -268,6 +329,33 @@ Last host: 192.168.10.254
 /30: 2 hosts (point-to-point links)
 /32: single host
 ```
+
+**Read it like this.** "The prefix length says how many leading bits are frozen as the network's identity. Everything left over is address space you can hand out — minus two, because the all-zeros and all-ones addresses are reserved."
+
+The `-2` is the part people forget in interviews and in Terraform. The all-zeros host address names the network itself and the all-ones address is the broadcast; neither can be assigned to a machine.
+
+| Symbol | What it is |
+|--------|------------|
+| `/24` | Prefix length — count of frozen network bits out of 32 |
+| host bits | `32 - prefix`. Every one of them doubles the address space |
+| `2^host bits` | Total addresses in the block, reserved ones included |
+| `- 2` | Network address (all zeros) and broadcast address (all ones) |
+
+**Walk one example.** The same subtraction across the four prefixes above:
+
+```
+  prefix   host bits = 32-p   2^bits      usable = 2^bits - 2
+  ------   ---------------   ---------   -------------------
+   /16          16              65536          65534
+   /24           8                256            254
+   /28           4                 16             14
+   /30           2                  4              2
+
+  each step of -4 in the prefix multiplies usable hosts by roughly 16:
+    254 x 16  = 4064   vs  /20 actual = 4094   (the -2 shrinks as blocks grow)
+```
+
+Notice how brutal the `-2` is at the small end: a `/30` yields 4 addresses but only 2 usable, so half the block is overhead — which is exactly why `/30` is reserved for two-router point-to-point links and nothing else. At `/16` the same two reserved addresses cost 0.003% of the block and nobody notices.
 
 ---
 

@@ -742,12 +742,80 @@ boolean shouldEarlyRefresh(long ttlRemainingMs, long recomputeMs, double beta) {
 }
 ```
 
+**The idea behind it.** "Roll a weighted die on every read: the closer the key is to expiring and the more expensive it is to rebuild, the more likely this one reader is elected to refresh it early — alone, while everyone else keeps serving the still-valid cached value."
+
+The point is not to refresh earlier; it is to make *exactly one* reader refresh, chosen at random. A deterministic "refresh when TTL < 5s" rule would elect every concurrent reader at the same instant, which is the stampede it was meant to prevent.
+
+| Symbol | What it is |
+|--------|------------|
+| `ttlRemainingMs` | Milliseconds until this key actually expires. Shrinks toward 0 |
+| `recomputeMs` | How long the DB rebuild takes. Expensive keys get refreshed sooner |
+| `beta` | Aggressiveness dial. `1.0` is the default; higher refreshes earlier |
+| `-log(rand)` | The randomizer. `rand` is uniform in `(0,1)`, so this is an exponential draw |
+| `xfetch` | The randomized threshold this particular read must beat |
+
+**Walk one example.** A key costing 200 ms to rebuild, `beta = 1.0`, four different dice rolls:
+
+```
+  xfetch = recomputeMs x beta x -log(rand) = 200 x 1.0 x -log(rand)
+
+    rand    -log(rand)    xfetch      refresh if ttlRemaining <= xfetch
+    0.90       0.105        21 ms     only in the last 21 ms  -- almost never
+    0.50       0.693       139 ms     in the last 139 ms
+    0.10       2.303       461 ms     in the last 461 ms
+    0.01       4.605       921 ms     in the last 921 ms      -- rare, fires early
+
+  With 1,000 concurrent readers and ttlRemaining = 139 ms:
+    only readers drawing rand <= 0.50 are elected -- but each re-rolls
+    independently, so they do not fire in lockstep, and the first one to
+    win writes a fresh value that resets ttlRemaining for everyone else.
+```
+
+Note what the table shows: at `ttlRemaining = 21 ms` nearly every roll qualifies, while at `461 ms` only about one roll in ten does. The election probability rises smoothly toward certainty as expiry approaches, so the key is virtually guaranteed to be refreshed before it ever actually expires — a true miss becomes the rare case rather than the guaranteed one.
+
+**Why `recomputeMs` is a multiplier and not a constant.** Expensive keys deserve a longer runway. A key rebuilt in 5 ms only needs a few milliseconds of early warning; a key rebuilt in 2 seconds needs seconds of it, because a stampede on the expensive key costs 400x more DB work. Multiplying the threshold by rebuild cost makes the runway self-scaling — drop the term and every key gets the same runway, which is either wastefully early for cheap keys or fatally late for expensive ones.
+
 ### Metrics
 
 - Hit rate: **98.5%** steady state; DB read load reduced **~50x**.
 - `catalog` read: **0.6ms** from Redis vs **18ms** from DB.
 - Stampede on a viral product: DB QPS for that key capped at **~5/sec** instead of thousands.
 - Micrometer `cache.gets{cache=catalog,result=hit|miss}` exposes per-cache hit ratio.
+
+**Stated plainly.** "Your average latency is not the cache's latency — it is the cache's latency plus the miss rate times the database's latency, and past about 95% the misses still dominate that sum."
+
+Reading "98.5% hit rate" as "we are 98.5% as fast as Redis" is the mistake this arithmetic corrects. The rare misses carry disproportionate weight because they are 30x slower.
+
+| Symbol | What it is |
+|--------|------------|
+| `H` | Hit ratio — here **0.985**. The fraction served from Redis |
+| `1 - H` | Miss ratio — here **0.015**. The fraction that reaches the DB |
+| `t_hit` | Cache read latency — **0.6 ms** from Redis |
+| `t_miss` | Backing-store latency — **18 ms** from the DB |
+| effective latency | `H x t_hit + (1 - H) x t_miss` — the blended average a caller sees |
+
+**Walk one example.** Blend the two measured latencies at the reported hit ratio:
+
+```
+  effective = H x t_hit + (1 - H) x t_miss
+
+    0.985 x  0.6 ms  =  0.591 ms   <- hit contribution
+    0.015 x 18.0 ms  =  0.270 ms   <- miss contribution (31% of the total!)
+                        --------
+    effective        =  0.861 ms
+
+  Speedup vs no cache: 18.0 / 0.861 = 20.9x
+
+  Miss-rate leverage -- what one percentage point costs:
+    H = 0.985  ->  0.985 x 0.6 + 0.015 x 18 = 0.861 ms
+    H = 0.975  ->  0.975 x 0.6 + 0.025 x 18 = 1.035 ms   (+20% latency)
+    H = 0.950  ->  0.950 x 0.6 + 0.050 x 18 = 1.470 ms   (+71% latency)
+    H = 0.900  ->  0.900 x 0.6 + 0.100 x 18 = 2.340 ms   (+172% latency)
+```
+
+The miss contribution of 0.270 ms is 31% of total latency while representing only 1.5% of requests. That asymmetry is the whole argument for stampede prevention: the cheapest remaining win is not making hits faster, it is shrinking that 1.5%.
+
+**Why the alert threshold sits at 80%.** The Best Practices section says to alert when hit rate drops below 80%, and the leverage column shows why that is late rather than early: by 90% you have already given back 172% of your latency. A cache that should be warm degrading from 98.5% to 90% is a real incident that an 80% threshold will not catch — for a cache with this large a hit/miss latency gap, alert on a *relative* drop from its own steady-state baseline, not on a fixed floor.
 
 ### Pitfalls
 

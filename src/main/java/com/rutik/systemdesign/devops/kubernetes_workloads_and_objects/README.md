@@ -257,6 +257,50 @@ spec:
       template: {spec: {restartPolicy: Never, containers: [...]}}
 ```
 
+### Rolling-update arithmetic: what `maxSurge` and `maxUnavailable` actually schedule
+
+```
+peak Pods      = replicas + maxSurge
+floor of ready = replicas - maxUnavailable
+batch size     = maxSurge + maxUnavailable
+waves          = ceil(replicas / batch size)
+
+percentages resolve as:  maxUnavailable = floor(replicas x pct)
+                         maxSurge       = ceil(replicas x pct)
+```
+
+**What the formula is telling you.** "You are buying a capacity budget: `maxSurge` is how many extra Pods you will pay for during the rollout, `maxUnavailable` is how much serving capacity you will give up, and their sum is how fast the rollout can move."
+
+The rounding directions are not symmetric, and that asymmetry is deliberate — Kubernetes rounds the *availability* loss down and the *capacity* spend up, so a percentage always errs toward staying available. It also refuses to let both settle at 0, which would make the rollout unable to progress at all.
+
+| Symbol | What it is |
+|--------|------------|
+| `replicas` | Desired Pod count from the Deployment spec — 3 in the manifest above |
+| `maxSurge` | Extra Pods allowed above `replicas` while rolling; costs cluster headroom |
+| `maxUnavailable` | Ready Pods you allow to drop below `replicas`; costs serving capacity |
+| `batch size` | Pods the controller can be swapping at once — the rollout's step width |
+| `waves` | How many readiness-gated steps the whole rollout takes |
+| `floor` / `ceil` | Rounding applied to percentages: down for unavailable, up for surge |
+
+**Walk one example.** The manifest's `maxUnavailable: 0, maxSurge: 1` against the Tradeoffs table's `maxUnavailable: 25%`, at two replica counts:
+
+```
+  replicas = 3
+    0 / surge 1     peak 4   ready floor 3   batch 1   waves ceil(3/1) = 3
+    25%             unavail floor(3 x 0.25) = floor(0.75) = 0
+                    surge   ceil(3 x 0.25) = ceil(0.75)  = 1
+                    -> peak 4, ready floor 3, batch 1, waves 3   IDENTICAL
+
+  replicas = 20
+    0 / surge 1     peak 21  ready floor 20  batch 1   waves ceil(20/1) = 20
+    25%             unavail floor(5) = 5,  surge ceil(5) = 5
+                    -> peak 25, ready floor 15, batch 10, waves ceil(20/10) = 2
+```
+
+At 3 replicas the "faster" 25% option is not faster at all — it rounds to exactly the zero-downtime setting, because `floor(0.75)` is 0. The two only diverge once `replicas x pct` clears 1, and by 20 replicas the difference is stark: 2 waves instead of 20, paid for by letting ready Pods fall to 15. Wall-clock follows the wave count, so with the manifest's `periodSeconds: 5` readiness probe, a 20-replica rollout at batch 1 waits on at least 20 readiness checks, versus 2 at batch 10.
+
+**Why `maxUnavailable: 0` needs headroom.** It forces every replacement Pod to be scheduled *before* any old Pod is removed, so the cluster must have room for `replicas + maxSurge` Pods at once — 4 in the manifest above. On a cluster with no spare capacity the surge Pod stays Pending and the rollout stalls indefinitely rather than degrading; that is the tradeoff the "capacity headroom vs availability" row is naming.
+
 ---
 
 ## 7. Real-World Examples

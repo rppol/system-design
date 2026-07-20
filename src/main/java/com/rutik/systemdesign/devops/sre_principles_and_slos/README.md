@@ -71,6 +71,29 @@ Other SRE pillars: **eliminating toil through automation**, **blameless postmort
 | 99.99% (four nines) | 0.01% | 4.32 min | 52.6 min | ~10x+ |
 | 99.999% (five nines) | 0.001% | 25.9 sec | 5.26 min | massive |
 
+**What this actually says.** "Every downtime figure in this table is one multiplication: take the slice of the window you are allowed to fail, and convert it into minutes." The whole table is `downtime = (1 - SLO) x window_length` — there is no second idea hiding in it, which is why you can regenerate any row from memory in an interview.
+
+| Symbol | What it is |
+|--------|------------|
+| `SLO` | The target success ratio, e.g. `0.999` for three nines |
+| `1 - SLO` | The error budget as a *fraction* — the share of the window allowed to be bad |
+| `window` | The measurement period, in whatever unit you want the answer: 30 d = 43,200 min, 1 yr = 525,600 min |
+| `(1 - SLO) x window` | The error budget as *time* — the "Downtime" columns above |
+
+**Walk one example.** Regenerate three rows of the table from scratch, 30-day window = 43,200 minutes:
+
+```
+  SLO        1 - SLO      x 43,200 min       = budget          sanity check
+  99%        0.01         0.01   x 43,200    = 432    min      = 7h 12m
+  99.9%      0.001        0.001  x 43,200    = 43.2   min      = 43m 12s
+  99.99%     0.0001       0.0001 x 43,200    = 4.32   min      = 4m 19s
+
+  Each added nine divides 1 - SLO by 10, so the budget also divides by 10:
+     432 min  ->  43.2 min  ->  4.32 min  ->  0.432 min (25.9 sec)
+```
+
+The budget shrinks 10x per nine while the cost column climbs roughly 3-10x per nine. That divergence *is* the argument against chasing 100%: you pay exponentially more for a budget that is vanishing toward zero, and past three nines the remaining minutes are smaller than the failure the user's own ISP injects anyway.
+
 ### Burn-rate alert windows (Google SRE Workbook, 99.9% SLO)
 
 | Burn rate | Budget consumed | Long window | Short window | Action |
@@ -78,6 +101,33 @@ Other SRE pillars: **eliminating toil through automation**, **blameless postmort
 | 14.4x | ~2% in 1h | 1h | 5m | Page (fast) |
 | 6x | ~5% in 6h | 6h | 30m | Page/ticket |
 | 1x | ~10% in 3d | 3d | 6h | Ticket (slow) |
+
+**Read it like this.** "Pick how much of the month's budget you are willing to lose before someone wakes up, then work backwards to the multiplier that spends exactly that much in the alert window." The "Budget consumed" column is not decoration — it is the *design input*, and the burn rate is the derived number.
+
+| Symbol | What it is |
+|--------|------------|
+| `burn rate` | Budget spend speed relative to "evenly across the window". `1x` = on pace to finish the budget exactly at day 30 |
+| `long window` | The averaging period the burn rate is measured over. Long enough that a blip cannot trip it |
+| `short window` | A second, shorter check on the same threshold. Proves the burn is *still happening right now* |
+| `budget consumed` | `burn_rate x (long_window / 30d)` — the share of the whole month's budget spent inside that window |
+
+**Walk one example.** Derive all three rows. A 30-day window is `30 x 24 = 720` hours, so one hour is `1/720` of the budget at `1x`:
+
+```
+  tier    burn    long window       consumed = burn x (window / 720h)
+  fast    14.4x   1h                14.4 x (1   / 720)  = 0.0200  = 2%
+  mid     6x      6h                6    x (6   / 720)  = 0.0500  = 5%
+  slow    1x      3d = 72h          1    x (72  / 720)  = 0.1000  = 10%
+
+  Time to fully exhaust a 30-day budget at each rate:
+    14.4x  ->  30 / 14.4  =  2.08 days     page immediately
+    6x     ->  30 / 6     =  5.00 days     page or ticket
+    1x     ->  30 / 1     = 30.00 days     ticket; this is exactly "on pace"
+```
+
+Note the slow tier: `1x` is by definition *on budget*, not a failure. It gets a ticket rather than a page because sustaining exactly 1x leaves zero margin for the rest of the month — you will breach the moment anything else goes wrong.
+
+**Why the short window has to exist.** Drop it and the long window alone keeps firing for the full averaging period after the incident is over: a 10-minute outage stays inside the 6-hour average for 6 hours, so the page will not clear even though the service recovered. The short window is what lets the alert resolve promptly, and it is also the reason both conditions are ANDed rather than ORed.
 
 ### Toil reduction ladder
 
@@ -238,6 +288,30 @@ budget consumed = (1 - actual_SLI) / (1 - SLO)
 budget remaining = 40%   ->  ship with care; you're more than half through.
 ```
 
+**In plain terms.** "Divide how badly you actually did by how badly you were *allowed* to do; that ratio is the fraction of your budget you have spent." The subtraction from 1 on both sides is what makes it work — you are comparing two *failure* rates, not two success rates, and that is the single most common place this calculation gets botched.
+
+| Symbol | What it is |
+|--------|------------|
+| `actual_SLI` | The measured good/total ratio over the window, e.g. `0.9994` |
+| `1 - actual_SLI` | Observed failure ratio — what you actually spent |
+| `1 - SLO` | Allowed failure ratio — the budget, e.g. `0.001` |
+| `budget consumed` | `(1 - actual_SLI) / (1 - SLO)`. Above `1.0` means the SLO is already breached |
+| `budget remaining` | `1 - consumed`, the headroom you may still spend on risk |
+
+**Walk one example.** Four services on the same 99.9% SLO (budget `0.001` = 43.2 min per 30 days):
+
+```
+  service   actual SLI   1 - SLI    / 0.001   consumed   remaining   minutes left
+  A         0.99990      0.0001       0.1        10%        90%       38.9 min
+  B         0.99940      0.0006       0.6        60%        40%       17.3 min
+  C         0.99900      0.0010       1.0       100%         0%        0.0 min
+  D         0.99700      0.0030       3.0       300%      -200%       breached 3x over
+```
+
+Service A and service B differ by only `0.0005` in raw SLI — a number that looks like rounding noise on a dashboard. Expressed as budget, A has 90% left and B has 40% left. That amplification is the entire reason SRE teams put *budget consumed* on the dashboard instead of the raw availability percentage: the budget view makes a half-basis-point move legible as "you just spent half your month."
+
+Service D shows why the metric is allowed to go negative. Clamping it at 100% would erase the difference between "just missed" and "missed by 3x", which is exactly the signal that tells you whether to freeze launches or to renegotiate the SLO outright.
+
 ```promql
 # Error budget consumed as a fraction, in PromQL (for a budget dashboard panel).
 (
@@ -260,6 +334,31 @@ We want to PAGE if a 30-day budget would be gone in ~2 days:
    (14.4x over 1h consumes 14.4/720 = 2% of a 30-day budget in that hour).
 ```
 
+**The idea behind it.** "Burn rate asks: at the speed I am failing right now, how many months' worth of budget would I get through in one month?" It is a pure ratio of two failure rates, so it is dimensionless — which is why one alert rule works identically for a 99.9% and a 99.99% SLO once you plug in the right `1 - SLO`.
+
+| Symbol | What it is |
+|--------|------------|
+| `SLI_window` | Success ratio measured over the alert window (1h, 6h, ...), not over the full 30 days |
+| `1 - SLI_window` | Observed failure ratio in that window |
+| `1 - SLO` | The budget fraction, the denominator. `0.001` at 99.9% |
+| `burn rate` | The quotient. `1x` = on pace; `14.4x` = burning 14.4 times faster than sustainable |
+| `30 / burn_rate` | Days until the whole 30-day budget is gone at this rate |
+
+**Walk one example.** One service, five different hours, SLO 99.9% so the denominator is fixed at `0.001`:
+
+```
+  observed errors   / 0.001   burn rate   budget spent this hour   budget gone in
+  0.02%  (0.0002)     0.2       0.2x        0.2/720 = 0.028%        150.0 days
+  0.10%  (0.0010)     1.0       1.0x        1.0/720 = 0.139%         30.0 days
+  0.60%  (0.0060)     6.0       6.0x        6.0/720 = 0.833%          5.0 days
+  1.50%  (0.0150)    15.0      15.0x       15.0/720 = 2.083%          2.0 days
+  5.00%  (0.0500)    50.0      50.0x       50.0/720 = 6.944%          0.6 days
+```
+
+**Where 14.4 comes from, forwards instead of backwards.** The text above derives it from "gone in 2 days" (`30 / 2 = 15`). The cleaner derivation runs the other way: decide you will tolerate spending **2% of the month's budget in a single hour** before paging, then solve for the multiplier. One hour is `1/720` of the window, so `burn x (1/720) = 0.02` gives `burn = 0.02 x 720 = 14.4` exactly. The 14.4 is not a rounded 15 — it is the exact answer to "2% in 1h", and 15 is the rough sanity check.
+
+A 0.2x hour is worth noticing too: burning *below* 1x is how the budget refills on a rolling window. This is the mechanism by which an `Exhausted` service returns to `Healthy` without anyone resetting a counter.
+
 ```yaml
 # Multi-window, multi-burn-rate alert (canonical SRE pattern). SLO 99.9% -> budget 0.001.
 groups:
@@ -280,6 +379,32 @@ groups:
 ```
 
 The short window confirms the burn is *current* (and lets the alert resolve quickly); the long window confirms it's *real* (not a transient blip). Routing of these alerts is owned by [visualization_and_alerting](../visualization_and_alerting/).
+
+**Put simply.** "`14.4 * 0.001` is not a magic constant — it is the burn-rate multiplier times the budget, which turns an abstract burn rate back into a plain error ratio Prometheus can compare against." Every threshold in this file is that same two-factor product, so changing the SLO means editing exactly one number.
+
+| Symbol | What it is |
+|--------|------------|
+| `slo:errors:ratio_rate1h` | Recording rule: observed *error* ratio averaged over the last 1h (not success ratio) |
+| `0.001` | The budget fraction `1 - SLO` for a 99.9% SLO. The one number to change per service |
+| `14.4 * 0.001` | The burn threshold re-expressed as an error ratio: `0.0144` = 1.44% errors |
+| `and` | Long AND short must both breach. This is the noise filter, not a formality |
+| `for: 2m` | Both conditions must hold continuously for 2 minutes before firing |
+
+**Walk one example.** Turn each alert rule into the raw error percentage it actually watches for:
+
+```
+  rule              multiplier   x budget    threshold ratio    = errors
+  BudgetBurnFast      14.4       x 0.001     = 0.0144            1.44%
+  BudgetBurnSlow       6.0       x 0.001     = 0.0060            0.60%
+
+  Same rules if the SLO were tightened to 99.99% (budget 0.0001):
+  BudgetBurnFast      14.4       x 0.0001    = 0.00144           0.144%
+  BudgetBurnSlow       6.0       x 0.0001    = 0.00060           0.060%
+```
+
+Tightening the SLO by one nine makes the page threshold ten times more sensitive automatically, because the multipliers stayed put and only the budget moved. That is the payoff of writing `14.4 * 0.001` rather than the pre-multiplied `0.0144`: the rule stays readable as "14.4x burn" and stays correct after an SLO change.
+
+**What breaks without the `and`.** Keep only the 1h condition and a 3-minute outage stays averaged into the window for a full hour, so the page will not clear long after recovery. Keep only the 5m condition and every deploy blip pages someone at 3am. The conjunction is what buys fast detection and fast resolution at the same time.
 
 ### Error-budget policy (the document that gives SLOs teeth)
 
@@ -308,6 +433,36 @@ Plan capacity from forecast demand + headroom + failover, not last week's peak.
            + N+1 (lose one AZ of 3) -> provision 3/2 -> ~100 instances across 3 AZs
   reassess against organic growth (e.g. +30%/yr) and seasonal peaks (Black Friday x3).
 ```
+
+**Stated plainly.** "Divide forecast peak demand by what one instance can safely carry — not by what it can carry flat out — then buy enough extra that losing a zone still leaves you above the first number." The division by `target_utilization` is the whole trick: it is what converts a raw capacity number into one with headroom already baked in.
+
+| Symbol | What it is |
+|--------|------------|
+| `peak_demand_forecast` | Future peak load, from growth trends and seasonality. Not last week's peak |
+| `per-instance capacity` | What one instance serves at 100% — measured by load test, not guessed |
+| `target_utilization` | Fraction of that capacity you plan to actually use, e.g. `0.60`. Headroom for spikes and GC pauses |
+| `per-instance x target_utilization` | Safe serving rate per instance, e.g. `2,000 x 0.60 = 1,200 rps` |
+| `N+1 failover` | Extra capacity so losing one AZ of 3 still covers the forecast peak |
+
+**Walk one example.** Push the module's own numbers through, then check the failover claim actually holds:
+
+```
+  forecast peak                                     80,000 rps
+  per-instance capacity                              2,000 rps
+  target utilization                                    60%
+
+  safe rate per instance    2,000 x 0.60         =   1,200 rps
+  instances needed          80,000 / 1,200       =    66.7   -> 67 instances
+  N+1 across 3 AZs          67 x (3 / 2)         =   100.5   -> ~100 instances
+
+  Verify the failover math -- lose one AZ of three:
+    surviving instances     100 x (2 / 3)        =    66.7   -> ~67 instances
+    surviving safe capacity 67 x 1,200           =  80,400 rps   >= 80,000 rps  ok
+```
+
+The `3/2` multiplier is doing precise work: you provision so that the *two* surviving AZs alone equal the 67 instances you needed in the first place. Provision the naive 67 across 3 AZs instead and an AZ loss leaves you 45 instances serving `45 x 1,200 = 54,000` rps against an 80,000 rps peak — a 32.5% shortfall, which is an SLO breach the moment a zone hiccups.
+
+**Why the 60% is not wasted money.** At 100% target utilization the arithmetic gives `80,000 / 2,000 = 40` instances, which looks 40% cheaper. But an instance at 100% CPU has no room to absorb a traffic spike, a GC pause, or a retry storm, so queueing delay climbs sharply and latency SLIs break long before throughput does. The headroom is buying latency-SLI compliance, and the failover multiplier is buying availability-SLI compliance; both are budget items, not padding.
 
 ### Toil measurement
 

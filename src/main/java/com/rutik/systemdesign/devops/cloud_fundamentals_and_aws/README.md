@@ -33,6 +33,65 @@ The **Well-Architected Framework** organizes design review into six pillars: Ope
 
 **Key insight**: **Availability comes from spreading across AZs, not from bigger instances.** A single huge EC2 in one AZ is less reliable than two small ones in two AZs behind an ELB. The cloud's reliability primitive is the *Region/AZ topology*, and almost every managed service (RDS Multi-AZ, S3, ALB) is built to exploit it.
 
+### Decoding "spread, don't enlarge": availability composition
+
+That insight is a claim about arithmetic, and there are exactly two ways components compose:
+
+```
+  SERIAL   (every part must work):   A_total  =  A_1 x A_2 x ... x A_n
+  PARALLEL (any one part suffices):  A_total  =  1 - (1 - A_1) x (1 - A_2) x ... x (1 - A_n)
+```
+
+**What it means.** "Chaining things together multiplies your availability downward; putting things side by side multiplies your *un*availability downward." A bigger instance is still one term in a serial chain, whereas a second instance adds a parallel term — and only the parallel form has an exponent working in your favour.
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Availability as a fraction — 0.995 for AWS's single-instance EC2 SLA of 99.5% |
+| `1 - A` | Unavailability; the quantity that gets multiplied (and so shrinks fast) in parallel |
+| Serial | A dependency chain — ALB, then app, then database; any one down means the request fails |
+| Parallel | Redundant peers behind a health-checked balancer; the request survives if any one is up |
+
+**Walk one example.** The single m5.large from §14 versus the ASG across two AZs, at EC2's 99.5% single-instance SLA:
+
+```
+  ONE instance (serial, n = 1)
+    A = 0.995                        ->  downtime = 0.005 x 8760 h  =  43.8 h/year
+
+  TWO instances behind an ELB (parallel, n = 2)
+    A = 1 - (0.005 x 0.005) = 0.999975
+                                     ->  downtime = 0.000025 x 8760 h x 60
+                                                 =  13.1 min/year
+
+  THREE instances (parallel, n = 3)
+    A = 1 - 0.005^3 = 0.999999875    ->  downtime = 0.066 min/year  =  ~4 seconds
+```
+
+Two small instances beat one big one by a factor of 200 in downtime, and the second instance is where nearly all of the win lives — the third buys far less. Doubling instance *size* moves nothing in either formula, which is the whole point of the insight.
+
+The serial form is the sobering half. A realistic three-tier request path composes downward, never upward:
+
+```
+  ALB              0.99990
+  app tier (2 AZs) 0.999975
+  RDS Multi-AZ     0.99950
+  ---------------------------------------------------------------
+  A_total = 0.99990 x 0.999975 x 0.99950  =  0.999375  ->  5.5 h/year
+```
+
+The chain is worse than every single link in it — you cannot be more available than your least available dependency, only less. This is also why the two formulas must be applied in the right places: the parallel form applies *within* a tier, and the serial form applies *across* tiers. And both assume independent failures, which an AZ outage violates by definition. That is exactly why the redundancy has to cross AZs: two instances in one AZ are parallel on paper and serial in reality.
+
+For reference, the "nines" those decimals correspond to:
+
+| Availability | Downtime per month | Downtime per year |
+|--------------|--------------------|-------------------|
+| 99% ("two nines") | 432 min (7.2 h) | 5,256 min (3.65 days) |
+| 99.9% ("three nines") | 43.2 min | 525.6 min (8.76 h) |
+| 99.95% | 21.6 min | 262.8 min (4.38 h) |
+| 99.99% ("four nines") | 4.32 min | 52.6 min |
+| 99.999% ("five nines") | 26 sec | 5.26 min |
+
+Each added nine divides downtime by 10, which is why the cost of an SLA rises so steeply: going from 99.9% to 99.99% means removing 473 minutes of failure per year from a system you do not fully control.
+
 ---
 
 ## 3. Core Principles
@@ -226,6 +285,37 @@ resource "aws_security_group" "app" {
 
 Security groups are **stateful** (return traffic auto-allowed) and allow-only; NACLs are **stateless** subnet-level and support explicit deny.
 
+**In plain terms.** "The number after the slash is how many bits are locked as the network's identity; whatever bits are left are yours to hand out as addresses." So the prefix length and the host count move in opposite directions — a *bigger* number after the slash means a *smaller* subnet, which is the part that trips people up:
+
+```
+  total addresses  =  2 ^ (32 - prefix_length)
+  usable addresses =  total - 5          (AWS reserves 5 in every subnet)
+  subnets of size /m that fit in a /n  =  2 ^ (m - n)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `prefix_length` | The `/24` — count of leading bits fixed as the network portion |
+| `32 - prefix_length` | Host bits left over; each one doubles the address count |
+| The 5 reserved | Network address, VPC router, AWS DNS, one held for future use, and broadcast |
+| VPC CIDR | The outer block (`10.0.0.0/16`) that every subnet must be carved from |
+
+**Walk one example.** The `10.0.0.0/16` VPC and `10.0.1.0/24` subnet above:
+
+```
+  VPC   10.0.0.0/16   ->  2^(32-16) = 2^16  =  65,536 addresses total
+  subnet 10.0.1.0/24  ->  2^(32-24) = 2^8   =     256 addresses
+                                      minus 5 reserved  =  251 usable
+
+  how many /24 subnets fit in the /16?   2^(24-16)  =  2^8  =  256
+
+  smaller carve-outs, where the reservation really bites:
+     /26  ->  2^6  =  64 addresses  -  5  =   59 usable   ( 7.8% lost)
+     /28  ->  2^4  =  16 addresses  -  5  =   11 usable   (31.3% lost)
+```
+
+The fixed 5-address reservation is the term to remember, because it is a *constant* subtracted from an *exponential*: negligible in a /24 but a third of a /28. Sizing EKS subnets is where this bites hardest — with the VPC CNI every pod consumes a subnet IP, so a /24 per AZ caps you near 251 pods regardless of how much CPU the nodes have, and the failure mode is pods stuck in `ContainerCreating` with no obvious cause.
+
 ### EC2 launch + Auto Scaling
 
 ```hcl
@@ -376,6 +466,46 @@ resource "aws_security_group_rule" "db_from_app" {
 **Pitfall 3 — Wildcard IAM policies.** `"Action": "*", "Resource": "*"` grants full account access; a leaked key is then catastrophic. FIX: scope actions and resources, add conditions, use roles with short-lived STS credentials, and run IAM Access Analyzer.
 
 **Pitfall 4 — NAT Gateway data charges for S3.** Routing S3 traffic through NAT costs ~$0.045/GB processed. FIX: add an **S3 Gateway VPC Endpoint** (free) so S3 traffic bypasses NAT entirely.
+
+**The idea behind it.** "Every per-GB price in AWS is a monthly bill waiting for you to multiply it by your actual traffic." The rates look trivial in isolation; the arithmetic is what turns a routing decision into a line item:
+
+```
+  monthly cost  =  rate_per_GB  x  GB_moved_per_month
+  monthly cost  =  rate_per_GB_month  x  GB_stored          (for storage)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `$0.045/GB` | NAT Gateway *processing*, charged on top of the hourly NAT charge and any egress |
+| Gateway Endpoint | A route-table entry sending S3/DynamoDB traffic off the NAT path — no data charge |
+| `$/GB-month` | Storage rate; multiplied by bytes at rest, not bytes moved |
+| Lifecycle rule | Automatic transition between storage classes after N days |
+
+**Walk one example.** Both cost claims in this module, worked backwards and forwards:
+
+```
+  NAT -> Gateway Endpoint (the ~$600/month saving in §14)
+    600 / 0.045  =  13,333 GB/month  =  ~13 TB of S3 traffic that was crossing NAT
+    after the endpoint: same 13 TB, $0/GB processing        -> saving is the full $600
+
+  S3 lifecycle to Deep Archive (the "~95%" claim in §7), 10 TB of cold data
+    Standard      10240 GB x $0.023    =  $235.52 / month
+    Deep Archive  10240 GB x $0.00099  =  $10.14  / month
+    reduction  =  (0.023 - 0.00099) / 0.023  =  95.7%
+```
+
+Both are one-line configuration changes — a route-table entry and a lifecycle rule — with no application impact, which is why they are the first two things to check on any surprising AWS bill. The Deep Archive figure carries a real tradeoff the percentage hides, though: retrieval takes up to 12 hours, so the 95.7% only applies to data you genuinely will not read.
+
+While on the subject of nines, S3's headline durability is a different quantity from the availability table in §2 — it describes bytes lost, not requests failed:
+
+```
+  11 nines durability  =  99.999999999%  ->  annual loss probability per object = 1e-11
+
+  10,000,000 objects x 1e-11  =  0.0001 objects lost per year
+                              ->  expect to lose ONE object every 10,000 years
+```
+
+Durability that high means media failure stops being the risk worth designing against; the realistic ways to lose S3 data are an accidental delete, a bad lifecycle rule, or a compromised credential. None of those are covered by the eleven nines, which is exactly why versioning, MFA-delete, and Object Lock exist.
 
 ---
 

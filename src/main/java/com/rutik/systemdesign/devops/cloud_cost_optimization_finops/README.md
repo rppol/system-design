@@ -78,6 +78,34 @@ quadrantChart
 
 The two axes explain why the cheapest options aren't free: Spot buys its up-to-90% discount with zero commitment but full interruption risk (top-left), while Reserved Instances/Savings Plans buy ~30-72% off by locking in spend for 1-3 years (top-right) — On-Demand pays full price for full flexibility (bottom-left).
 
+**What the formula is telling you.** "A commitment discount is a prepayment, so the real question is not 'how big is the discount' but 'how many months must this thing keep running before the prepayment pays for itself'."
+
+Everything in the table above reduces to one break-even identity: an all-upfront commitment at discount `d` for a term of `T` months costs `(1 - d) x T` months' worth of On-Demand. That product is the break-even point in months.
+
+| Symbol | What it is |
+|--------|------------|
+| `d` | Discount fraction off On-Demand (0.40 for ~40% off, 0.72 for ~72% off) |
+| `T` | Commitment term in months (12 for 1-year, 36 for 3-year) |
+| `(1 - d)` | The fraction of On-Demand price you still pay — the "effective rate" |
+| `(1 - d) x T` | Break-even: months of On-Demand the prepayment is worth |
+| `T - (1 - d) x T` | Free months — the payoff if the workload survives the whole term |
+
+**Walk one example.** Compare the two ends of the commitment ladder, normalizing On-Demand to 1.0 month-unit:
+
+```
+  option              d      T      effective   break-even        free months if
+                                    rate        (1-d) x T         term completes
+
+  1-yr RI, 40% off   0.40   12 mo    0.60       0.60 x 12 = 7.2   12 - 7.2  =  4.8
+  1-yr SP, 30% off   0.30   12 mo    0.70       0.70 x 12 = 8.4   12 - 8.4  =  3.6
+  3-yr SP, 66% off   0.66   36 mo    0.34       0.34 x 36 = 12.2  36 - 12.2 = 23.8
+  3-yr RI, 72% off   0.72   36 mo    0.28       0.28 x 36 = 10.1  36 - 10.1 = 25.9
+```
+
+The 3-year, 72%-off commitment breaks even at month 10.1 of a 36-month term — after that, roughly 26 months run effectively free. But that is also exactly the trap: cancel or refactor at month 8 and you have paid more than you consumed. The 1-year 40% option breaks even at 7.2 months, so it forgives a mid-year architecture change that the 3-year option would not.
+
+**Why Spot has no break-even row.** Spot's discount costs no prepayment at all — it is paid for in interruption risk instead of dollars, which is why it sits at the far left of the quadrant chart above. There is nothing to amortize, so a Spot workload can be abandoned tomorrow at zero sunk cost.
+
 ### Cross-cloud commitment mapping
 
 | Concept | AWS | GCP | Azure |
@@ -203,6 +231,35 @@ flowchart LR
 
 The Auto Scaling Group (or Karpenter) splits capacity 70/30 between Spot and On-Demand; a queue or load balancer in front absorbs the 2-minute Spot reclaim as a graceful retry, not an outage.
 
+**In plain terms.** "The fleet's price is just a weighted average of the two lanes, so a 70/30 split does not give you 70% of Spot's discount — it gives you a blended rate that is dragged upward by the On-Demand third you kept for safety."
+
+| Symbol | What it is |
+|--------|------------|
+| `f_spot` | Fraction of the fleet on Spot capacity (0.70 in the diagram) |
+| `f_od` | Fraction held on On-Demand as guaranteed baseline (`1 - f_spot` = 0.30) |
+| Spot discount | How far below On-Demand Spot actually clears, varies by instance and Region |
+| Blended rate | `f_spot x (1 - discount) + f_od x 1.0`, expressed as a multiple of On-Demand |
+| Fleet savings | `1 - blended_rate` |
+
+**Walk one example.** Price a 100-instance fleet where On-Demand is normalized to $1.00/instance-hour:
+
+```
+  best case, Spot clears at 90% off  ->  Spot rate = 0.10
+    blended = 0.70 x 0.10 + 0.30 x 1.00 = 0.070 + 0.300 = 0.370
+    fleet savings = 1 - 0.370 = 63.0%
+
+  typical, Spot clears at 70% off    ->  Spot rate = 0.30
+    blended = 0.70 x 0.30 + 0.30 x 1.00 = 0.210 + 0.300 = 0.510
+    fleet savings = 1 - 0.510 = 49.0%
+
+  100 instances x 730 hours/month at $1.00/hr On-Demand = $73,000/mo
+    at 0.370 blended  ->  $27,010/mo    at 0.510 blended  ->  $37,230/mo
+```
+
+Note the gap between the headline and the outcome: "up to 90% off" becomes 63% at the fleet level, and a more realistic 70%-off Spot market lands at 49%. The 30% On-Demand slice alone sets a hard floor — no matter how cheap Spot goes, this fleet can never beat `1 - 0.30 = 70%` savings, because that third is always paid at full price.
+
+**Why keep the On-Demand 30% at all.** It is insurance against a correlated reclaim: if the whole Spot pool for that instance type is withdrawn at once, the 30% On-Demand slice keeps serving while replacement capacity is found. Setting `f_od = 0` buys another 27 points of savings in the best case (90% instead of 63%) and converts a capacity crunch into an outage.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -272,6 +329,37 @@ flowchart TD
 
 The checks run in order and return on first match: DOWNSIZE's wider band (under 40%/50%) is tested before STOP_OR_SCHEDULE's narrower idle band (under 15%/20%), so only instances clearing both fall through to OK.
 
+**The idea behind it.** "Instance families price roughly linearly in size, so dropping one size halves the bill and doubles the utilization percentage — which is why the 40% threshold exists: below it, one step down still leaves you under 80% loaded."
+
+| Symbol | What it is |
+|--------|------------|
+| `p95_cpu` | The CPU level the instance stays under 95% of the time over the observation window |
+| `p95_mem` | Same percentile for memory — checked too, since memory often binds before CPU |
+| 40% / 50% | DOWNSIZE thresholds; one size down roughly doubles utilization, landing under 80%/100% |
+| 15% / 20% | Idle thresholds; even downsizing twice leaves the instance mostly empty |
+| Size step | One family step (2xlarge to xlarge) halves vCPU, RAM, and price |
+
+**Walk one example.** Track what a downsize does to both the bill and the utilization headroom:
+
+```
+  m6i.2xlarge, 8 vCPU, normalized price 1.00
+    observed p95 CPU = 32%   p95 mem = 44%     -> both under 40 / 50 -> DOWNSIZE
+
+  step down to m6i.xlarge, 4 vCPU, price 0.50
+    the same absolute work now runs on half the cores:
+      new p95 CPU  = 32% x 2 = 64%   (headroom left: 36 points)
+      new p95 mem  = 44% x 2 = 88%   (headroom left: 12 points -> memory binds first)
+    cost change = 0.50 / 1.00 -> 50% saved on this instance
+
+  why 40% and not 50%: an instance at p95 CPU 48% would land at 96% after one step
+                       down, leaving no burst headroom at all
+
+  fleet effect: 30 instances rightsized at ~30% average saving on a $240k/mo bill
+                where those instances are $60k/mo  ->  0.30 x 60,000 = $18,000/mo
+```
+
+The memory column is what stops this being a pure CPU decision. In the walk above, CPU had 36 points of slack after the downsize but memory only 12 — so a workload with a slow memory leak or a larger cache would OOM long before CPU became the constraint. That is why the rule requires *both* p95 CPU under 40% *and* p95 memory under 50%, not either one.
+
 ### Spot with graceful interruption handling
 
 ```yaml
@@ -297,6 +385,37 @@ Target coverage 70-90% of baseline (not 100%): leave headroom for variability so
 don't over-commit and pay for unused commitment. Track utilization & coverage monthly.
 ```
 
+**What it means.** "A Savings Plan is a floor, not a discount card: you pay the committed dollars whether or not you use them, so committing above your true baseline converts savings back into waste."
+
+| Symbol | What it is |
+|--------|------------|
+| Baseline | The floor of the 30-day usage graph, in On-Demand-equivalent dollars per month |
+| Coverage target | Fraction of that baseline you commit to (70-90%, not 100%) |
+| Commitment | `baseline x coverage x (1 - discount)` — the dollars billed every month regardless |
+| Covered usage | `commitment / (1 - discount)` — how much On-Demand-equivalent it absorbs |
+| Utilization | Fraction of the commitment actually consumed; below 100% means paid-for idle |
+
+**Walk one example.** A $10,000/month On-Demand-equivalent baseline with a Savings Plan at 50% off, tested against the scenario the module warns about — usage shrinking 30% after a refactor:
+
+```
+  coverage   commitment            covers up to    usage holds at $10k   usage drops to $7k
+             10k x cov x 0.5       commit / 0.5    total bill            total bill
+
+   100%      10,000x1.0x0.5=5,000    $10,000        5,000  (save 5,000)   5,000  (floor hit)
+    80%      10,000x0.8x0.5=4,000    $ 8,000        4,000 + 2,000 OD      4,000  (floor hit)
+                                                    = 6,000               waste 500
+    70%      10,000x0.7x0.5=3,500    $ 7,000        3,500 + 3,000 OD      3,500  (exact fit)
+                                                    = 6,500               waste 0
+
+  the 100% row after the drop: you owe 5,000 but consumed only 7,000 x 0.5 = 3,500
+    of value  ->  5,000 - 3,500 = 1,500/mo paid for nothing = $18,000/yr burned
+    utilization = 3,500 / 5,000 = 70%
+```
+
+The 100% row looks best while usage holds — it saves $5,000/month against $3,500 for the 70% row. But it is the only row that keeps burning money after the drop, and on a 3-year term that $1,500/month runs for the rest of the commitment. The 70% row saves less in the good case and nothing is wasted in the bad one, which is the whole argument for under-committing.
+
+**Why the sample says "save $60k/yr".** The `$10k/mo steady compute at ~50% off` line is the 100%-coverage case with usage assumed flat: `$10,000 - $5,000 = $5,000` saved per month, and `$5,000 x 12 = $60,000` per year. That number is only real if the baseline genuinely holds for the full term — which is exactly the assumption the 70-90% coverage rule refuses to make.
+
 ### Scheduled shutdown of non-prod (free savings)
 
 ```bash
@@ -306,6 +425,37 @@ aws ec2 stop-instances --instance-ids $(aws ec2 describe-instances \
   --filters "Name=tag:env,Values=dev" "Name=instance-state-name,Values=running" \
   --query "Reservations[].Instances[].InstanceId" --output text)
 ```
+
+**Put simply.** "A week has 168 hours and you are billed for every one an instance is running, so the savings percentage is nothing more than the share of the week you leave it switched off."
+
+| Symbol | What it is |
+|--------|------------|
+| 168 | Hours in a week — `7 x 24`, the denominator of every schedule calculation |
+| `on_hours` | Hours per week the schedule leaves the instance running |
+| `off_hours` | `168 - on_hours`, the hours you are not billed for compute |
+| Savings | `(168 - on_hours) / 168` — for hourly-billed compute only |
+| `env=dev` filter | Restricts the stop to tagged non-prod, so the same cron never touches prod |
+
+**Walk one example.** Price the common schedules against a 24/7 instance:
+
+```
+  schedule                        on_hours              off_hours   savings
+
+  24x7, always on                 7 x 24     = 168        0          0.0%
+  weekdays 07:00-19:00 (12x5)     5 x 12     =  60      108         64.3%
+  weekdays 09:00-19:00 (10x5)     5 x 10     =  50      118         70.2%
+  weekdays 09:00-17:00 ( 8x5)     5 x  8     =  40      128         76.2%
+
+  check on the module's cron: stop 19:00, start 07:00 weekdays, off all weekend
+    on  = 5 days x 12h = 60 hours
+    off = 168 - 60     = 108 hours   ->  108 / 168 = 0.6429 = ~64%
+
+  on a $20,000/mo dev+staging footprint:
+    12x5 -> 20,000 x 0.643 = $12,860/mo saved
+     8x5 -> 20,000 x 0.762 = $15,240/mo saved  (a further $2,380/mo)
+```
+
+**What this does not save.** The formula covers hourly compute only. EBS volumes attached to a stopped instance keep billing, as do Elastic IPs, snapshots, and NAT gateways — which is why the waste table lists those separately. A team that schedules shutdowns and then wonders why the dev bill fell by 40% rather than 64% is usually paying for storage that never stopped.
 
 ### Budgets + anomaly detection
 

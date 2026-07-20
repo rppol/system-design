@@ -189,6 +189,56 @@ cat /sys/fs/cgroup/kubepods.slice/.../memory.events  # oom_kill counter
 
 `cpu.max = "50000 100000"` means 50 ms of CPU time per 100 ms period = 0.5 cores. Exceed it and the process is **throttled** (paused), not killed — which manifests as latency spikes, not crashes.
 
+**In plain terms.** "A CPU limit is not a speed dial — it is a budget of microseconds you may burn per 100 ms, and when it runs out you are frozen until the next period starts."
+
+```
+cores       = quota / period                       both values in microseconds
+memory.max  = <Mi value> x 1024 x 1024             Kubernetes Mi is binary, not decimal
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `quota` | First number in `cpu.max` — microseconds of CPU time granted per period |
+| `period` | Second number — length of the accounting window, default 100000 us = 100 ms |
+| `quota / period` | Effective core count; Kubernetes `500m` means 0.5 of this ratio |
+| throttled | Budget spent before the period ended — the task is descheduled until the next one |
+| `memory.max` | Hard byte ceiling for the cgroup; breaching it triggers a cgroup-local OOM kill |
+
+**Walk one example.** Kubernetes CPU requests translated into the two numbers in the file:
+
+```
+   K8s limit      cpu.max            quota / period        effective cores
+      500m        50000 100000       50000 / 100000              0.5
+     1000m       100000 100000      100000 / 100000              1.0
+     1500m       150000 100000      150000 / 100000              1.5
+     2000m       200000 100000      200000 / 100000              2.0
+```
+
+Note that `1500m` exceeds one period's wall-clock length — 150 ms of CPU cannot be spent in a 100 ms window by one thread, so a 1.5-core limit is only reachable by a *multi-threaded* process running on two cores at once. A single-threaded app can never exceed 1.0 no matter how high you set the limit.
+
+**Walk the throttling cost.** Now see why pitfall 3 below calls this a tail-latency problem rather than a capacity problem. Take a request that needs 120 ms of CPU work, under the `500m` limit (50 ms per 100 ms period):
+
+```
+   period 1    spend 50 ms of budget    ->  70 ms of work left, THROTTLED for 50 ms
+   period 2    spend 50 ms of budget    ->  20 ms of work left, THROTTLED for 50 ms
+   period 3    spend 20 ms of budget    ->  done, 30 ms of budget unused
+
+   CPU time actually used : 120 ms
+   wall-clock elapsed     : 100 + 100 + 20 = 220 ms
+   latency inflation      : 220 / 120 = 1.83x
+```
+
+The request burned 120 ms of CPU but took 220 ms to answer — the extra 100 ms is pure sitting-still. This is exactly why average CPU utilization can look low (the process is idle two-thirds of the time by force) while P99 latency nearly doubles, and why `container_cpu_cfs_throttled_periods_total` is the metric that gives it away.
+
+**Walk the memory conversion.** The `512Mi` limit at the top of this block:
+
+```
+   512Mi  =  512 x 1024 x 1024  =  536,870,912 bytes   <- matches memory.max above
+     1Gi  =  1024 x 1024 x 1024 = 1,073,741,824 bytes
+```
+
+The section 14 case study's fix leans on the same arithmetic: `-XX:MaxRAMPercentage=75.0` against a `1Gi` limit gives a max heap of `1073741824 x 0.75 = 805,306,368` bytes = **768 Mi**, deliberately leaving `1024 - 768 = 256 Mi` for metaspace, thread stacks, and native allocations — all of which count against `memory.max` but live outside the heap the JVM is capping.
+
 ### The OOM killer
 
 When memory cannot be reclaimed, the kernel computes an `oom_score` per process (roughly proportional to memory used, adjusted by `oom_score_adj` in `-1000..1000`) and kills the highest. In a cgroup-limited container, hitting `memory.max` triggers a **cgroup-local** OOM kill even if the node has free RAM:
@@ -214,6 +264,31 @@ flowchart LR
     class scope,nodescan,cgroupscan,pick mathOp
     class kill lossN
 ```
+
+**What the formula is telling you.** "The OOM killer does not look for the process that caused the problem — it ranks candidates by how much memory each one would free, then kills the biggest."
+
+```
+oom_score ~ memory used by the process, then shifted by oom_score_adj (-1000..1000)
+victim    = argmax(oom_score) within the scope that hit its ceiling
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `oom_score` | Per-process kill ranking, roughly proportional to its memory footprint |
+| `oom_score_adj` | Operator bias, `-1000` to `+1000`; `-1000` makes a process effectively unkillable |
+| scope | Either the whole node, or one cgroup — set by *which* ceiling was breached |
+| `argmax` | Highest scorer wins the kill; ties broken by the kernel's scan order |
+
+**Walk one example.** Two containers in a 1Gi cgroup, plus the guilty allocator:
+
+```
+                       memory used     oom_score_adj     effective ranking
+   java (leaking)          820 Mi            0                 highest  <- killed
+   sidecar proxy            90 Mi            0                 middle
+   log shipper              40 Mi         -998                 lowest, protected
+```
+
+Two consequences follow directly. First, "biggest, not guiltiest" means a well-behaved memory-hungry process is killed for a small leaky neighbour's pressure. Second, because the scope is whichever ceiling broke, a cgroup that hits `memory.max` picks its victim *from inside that cgroup only* — the node's remaining free RAM is never consulted.
 
 `oom_score_adj` (`-1000..1000`) shifts the ranking within whichever scope hit its ceiling — the whole node, or just the offending cgroup — which is exactly why a container can be OOM-killed while `kubectl top node` still shows free memory.
 
@@ -311,6 +386,34 @@ cat /proc/$(pgrep -n envoy)/limits | grep 'open files'   # 1024  4096
 ls /proc/$(pgrep -n envoy)/fd | wc -l                    # 1023  <- at the ceiling
 # FIX (systemd unit): LimitNOFILE=1048576   (or pod securityContext / sysctls)
 ```
+
+**Put simply.** "Every socket is a file descriptor, so a proxy needs at least two descriptors per connection it brokers — one facing the client, one facing the upstream."
+
+```
+fds needed ~= (client conns) + (upstream conns) + listeners + log files + epoll fds
+EMFILE      when open fds reach the soft limit shown by `ulimit -n`
+```
+
+| Symbol | What it is |
+|--------|------------|
+| soft limit | Enforced ceiling, raisable by the process itself up to the hard limit; often 1024 |
+| hard limit | Ceiling only root/systemd can raise; the `4096` in the `limits` output above |
+| `EMFILE` | The errno `accept()` returns once the soft limit is hit — new connections refused |
+| `LimitNOFILE` | systemd directive that sets both limits for the unit |
+
+**Walk one example.** A proxy fronting 5000 client connections against the default limit:
+
+```
+   client-side sockets            5,000
+   upstream-side sockets          5,000
+   listeners + logs + epoll         ~20
+                                 -------
+   descriptors required          10,020
+   default soft ulimit -n         1,024   <- exceeded ~10x over
+   after LimitNOFILE=1048576  1,048,576   <- ~105x headroom
+```
+
+The proxy stops at `(1024 - 20) / 2 = 502` brokered connections, not 5000, because each one costs two descriptors — which is why the diagnostic above shows `1023` open fds against a `1024` ceiling and the symptom is refused connections rather than a crash. The fix is deliberately enormous: descriptors are cheap kernel bookkeeping, so there is no reason to set a limit that merely covers today's peak.
 
 **Pitfall 3 — Setting CPU limits on a latency-sensitive service.** A limit of `cpu: 500m` throttles the process every 100 ms period once it spends 50 ms; tail latency spikes appear with `container_cpu_cfs_throttled_periods_total` climbing while average CPU looks low. Often the fix is to set **requests** for scheduling but drop the **limit**.
 

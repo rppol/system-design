@@ -257,6 +257,38 @@ ptxas info    : Used 16 registers, 380 bytes cmem[0]
 
 Read this every time you touch a hot kernel: `16 registers` bounds how many warps can be resident per SM (see [occupancy_and_launch_configuration](../occupancy_and_launch_configuration/) for the occupancy math this feeds); `0 bytes spill stores/loads` confirms the register allocator did not have to spill to slow local memory — a nonzero spill count here is a silent performance cliff that never shows up as a compiler error.
 
+**What the formula is telling you.** `blocks_per_SM = register_file / (registers_per_thread x threads_per_block)` says: "the SM has one fixed drawer of registers, and every resident block takes its whole share out of that drawer before the next block can move in."
+
+That is why `ptxas -v`'s register count is a *capacity* number, not a speed number. It never makes a single thread slower — it decides how many threads are allowed to be in flight at once, which is the only mechanism the GPU has for hiding a 400-800 cycle memory stall.
+
+| Symbol | What it is |
+|--------|------------|
+| `registers_per_thread` | The number `ptxas -v` reports — `16` for `vecAdd` above, `48` for the case-study GEMV kernel |
+| `threads_per_block` | Your launch configuration's block size, `256` in every example in this module |
+| `register_file` | Physical registers per SM: **64K 32-bit registers (256 KB)**, a hardware constant |
+| `blocks_per_SM` | How many blocks fit concurrently, limited by registers alone — floor division, no partial blocks |
+| `max_warps_per_SM` | The separate hardware ceiling: **64 warps** (2048 threads) on `sm_80`. Occupancy is the *minimum* of the two limits |
+
+**Walk one example.** Run both kernels in this module through the same arithmetic:
+
+```
+  vecAdd -- 16 registers/thread, 256 threads/block
+    registers per block  =  16 x 256              =    4,096
+    blocks by registers  =  65,536 / 4,096        =       16 blocks
+    blocks by warp cap   =  2,048 threads / 256   =        8 blocks   <- BINDING
+    resident warps       =  8 x (256/32)          =       64 warps
+    occupancy            =  64 / 64               =     100%
+
+  gemvTNK (the §14 kernel) -- 48 registers/thread, 256 threads/block
+    registers per block  =  48 x 256              =   12,288
+    blocks by registers  =  65,536 / 12,288       =        5 blocks   <- BINDING
+    blocks by warp cap   =  2,048 / 256           =        8 blocks
+    resident warps       =  5 x 8                 =       40 warps
+    occupancy            =  40 / 64               =    62.5%
+```
+
+Two kernels, same block size, same hardware — and 32 extra registers per thread cost 37.5 percentage points of occupancy. Note that `vecAdd` is *not* register-limited at all: registers would allow 16 blocks, but the 2048-threads-per-SM ceiling caps it at 8, so shaving registers below 16 would buy exactly nothing. That asymmetry is why `-maxrregcount` is a scalpel and not a dial — it only helps on the kernel where the register line is the binding one.
+
 Inspect the actual SASS instructions the GPU will execute (not PTX — this is post-`ptxas`):
 
 ```bash
@@ -288,6 +320,38 @@ nvcc -gencode arch=compute_75,code=sm_75 \
 cuobjdump --dump-elf libkernel.so | grep -E "arch|sm_"
 cuobjdump -lelf libkernel.so
 ```
+
+**In plain terms.** The build cost of a multi-arch fatbinary is `1 host pass + N device passes`, which says: "the host half of every `.cu` file is compiled once no matter what, and every extra `-gencode` entry you add buys you another full front-end-plus-`ptxas` run over all the device code."
+
+This is the number that makes `-gencode` lists feel expensive in CI long before the binary feels large. Device compilation is not amortized across targets — architecture-specialized bodies (the `__CUDA_ARCH__` branches below) mean each target genuinely recompiles from source.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | The count of `-gencode` entries, counting `code=sm_XX` and `code=compute_XX` separately |
+| `host pass` | `cudafe++` split plus gcc/clang/MSVC on the host translation unit. Runs exactly once |
+| `device pass` | NVVM front end (CUDA C++ -> PTX) plus `ptxas` (PTX -> SASS). Runs once per `code=sm_XX` |
+| `PTX-only entry` | A `code=compute_XX` entry pays the NVVM front end but **skips `ptxas`** — cheaper than a real target |
+| `artifacts` | What lands in the fatbinary: one cubin per `sm_XX`, one PTX blob per `compute_XX` |
+
+**Walk one example.** Count the passes for the RIGHT build above, which has four `-gencode` entries:
+
+```
+  -gencode arch=compute_75,code=sm_75        -> NVVM + ptxas   -> 1 cubin
+  -gencode arch=compute_80,code=sm_80        -> NVVM + ptxas   -> 1 cubin
+  -gencode arch=compute_90,code=sm_90        -> NVVM + ptxas   -> 1 cubin
+  -gencode arch=compute_90,code=compute_90   -> NVVM only      -> 1 PTX blob
+  ------------------------------------------------------------------------
+  host passes      : 1
+  NVVM passes      : 4      (one per -gencode entry)
+  ptxas passes     : 3      (only the real code=sm_XX targets)
+  fatbin artifacts : 3 cubins + 1 PTX
+
+  Compare the shorthand build:  nvcc -arch=sm_80
+  host passes 1, NVVM 1, ptxas 1, artifacts 1 cubin + 0 PTX
+  -> ~4x cheaper to build, and exactly the configuration that hard-fails in §10.
+```
+
+The relationship worth internalizing is that build time scales with `N` while *runtime* safety comes from only one of those entries — the `code=compute_XX` PTX blob, which is the cheapest entry in the list. Dropping real `sm_XX` targets to speed up CI is a legitimate tradeoff; dropping the PTX entry to speed up CI saves the least time and removes the most safety.
 
 `-O3` (host-side optimization) and `--ptxas-options=-O3` (device-side, the default) both matter independently — the host optimizer and `ptxas`'s own optimizer operate on different code and can be tuned separately. Add `-lineinfo` for a build you intend to profile with Nsight Compute:
 
@@ -324,6 +388,39 @@ __global__ void adaptiveKernel(float* data, int n)
 ```
 
 Each `-gencode` target produces its own PTX/SASS with a *different* body baked in for this kernel — the fatbinary literally contains architecture-specialized machine code side by side, and the driver's SASS-match step (Section 5) picks the one that matches at load time.
+
+**What this actually says.** `__CUDA_ARCH__ = 100 x major + 10 x minor` means: "flatten the dotted compute capability into one integer so `#if` can compare it with `>=`."
+
+The whole point of the encoding is that a preprocessor cannot compare `8.6 >= 8.0` — it only understands integers. Multiplying the major by 100 and the minor by 10 leaves enough room between generations that a numeric `>=` sorts architectures in exactly the order the hardware shipped in.
+
+| Symbol | What it is |
+|--------|------------|
+| `major` | The compute capability's first digit — the GPU *generation* (7 = Volta/Turing, 8 = Ampere/Ada, 9 = Hopper, 10 = Blackwell) |
+| `minor` | The second digit — the SKU variant inside that generation (`8.0` A100 vs `8.6` RTX 30xx vs `8.9` L40S) |
+| `100 x major` | Generation weight. Guarantees any `9.x` part outranks every `8.x` part |
+| `10 x minor` | Variant weight. Leaves the ones digit unused, so `860` and `800` never collide |
+| `__CUDA_ARCH__` | The resulting integer, defined once **per `-gencode` target** during the device pass; undefined on the host pass |
+
+**Walk one example.** Push the five generations from §5's reference table through it:
+
+```
+  target      major  minor    100 x major  +  10 x minor   =  __CUDA_ARCH__
+  --------    -----  -----    -----------     ----------      -------------
+  sm_75         7      5          700       +      50       =      750
+  sm_80         8      0          800       +       0       =      800
+  sm_86         8      6          800       +      60       =      860
+  sm_90         9      0          900       +       0       =      900
+  sm_100       10      0         1000       +       0       =     1000
+
+  Now the guard  #if __CUDA_ARCH__ >= 800  reads as an ordinary integer test:
+
+    sm_75 -> 750 >= 800 ?  NO   -> compiles the Volta/Turing fallback branch
+    sm_80 -> 800 >= 800 ?  YES  -> compiles the Ampere+ __ldg path
+    sm_86 -> 860 >= 800 ?  YES  -> same Ampere+ path (variant of the same gen)
+    sm_90 -> 900 >= 800 ?  YES  -> same path, inherited by a newer generation
+```
+
+The last row is the property that makes the macro useful: a guard written once for Ampere keeps selecting the fast path on every *later* architecture automatically, because `100 x major` makes the integers monotonically increasing with hardware age. Encode the capability any other way — say `major * 10 + minor`, giving `86` for both `8.6` and a hypothetical `8.60` — and that ordering guarantee breaks.
 
 ### Driver API vs Runtime API
 
@@ -420,6 +517,36 @@ threads = 256
 blocks = (n + threads - 1) // threads
 vec_add((blocks,), (threads,), (a, b, c, n))
 ```
+
+**Read it like this.** `blocks = (n + threads - 1) / threads` is integer *ceiling* division — "launch enough whole blocks to cover every element, and accept that the last block is usually only partly useful."
+
+The `+ threads - 1` is the whole trick: plain integer division truncates, so `n / threads` would launch too few blocks and silently leave the tail of the array unprocessed. Adding one less than the divisor forces any nonzero remainder to round the quotient up.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Element count. `1 << 20` = 1,048,576 in the CuPy example above |
+| `threads` | Threads per block, `256` here — the launch-configuration knob you choose |
+| `threads - 1` | The bias term. Large enough to push any remainder over the next integer, small enough never to add a spurious block |
+| `blocks` | Grid size. Total threads launched is `blocks x threads`, which is `>= n`, never `< n` |
+| `if (i < n)` | The bounds check inside the kernel — mandatory, because `blocks x threads` overshoots whenever `n` is not a multiple of `threads` |
+
+**Walk one example.** Contrast the exact-multiple case with the ragged one:
+
+```
+  n = 1,048,576  (= 1 << 20),  threads = 256
+    (1,048,576 + 255) / 256  =  1,048,831 / 256  =  4,096  blocks   (truncated)
+    threads launched         =  4,096 x 256      =  1,048,576
+    idle threads             =  1,048,576 - n    =          0   <- exact fit
+
+  n = 1,000,000  (not a multiple of 256),  threads = 256
+    plain division  1,000,000 / 256  =  3,906 blocks -> covers   999,936
+                                                        MISSES        64 elements
+    ceiling         (1,000,000 + 255) / 256 = 3,907 blocks -> covers 1,000,192
+    idle threads    1,000,192 - 1,000,000    =   192 threads do nothing but
+                                                 evaluate  if (i < n)  and return
+```
+
+192 wasted threads out of 1,000,192 is 0.02% — a rounding error. The 64 *missed* elements in the truncating version are a correctness bug that produces uninitialized output with no error message. That asymmetry is why every kernel in this section pairs ceiling division at the launch site with a bounds check in the kernel body: the launch always overshoots, and the guard absorbs the overshoot.
 
 The tradeoff is paid once per process (or once per distinct kernel signature, if cached): the first launch pays nvrtc's compile time plus the driver's JIT time, which can be tens to hundreds of milliseconds for a nontrivial kernel — acceptable for a long-lived server process, poor for a short CLI tool invoked thousands of times.
 
@@ -800,6 +927,72 @@ ptxas info    : Used 48 registers, 4096 bytes smem, 400 bytes cmem[0]
 | Fatbinary size | 38 MB | 61 MB (+ `sm_90` cubin + PTX) |
 | Cold-start on a future (untested) GPU | Hard crash | One-time JIT (~450 ms measured for this kernel set), cached thereafter in `~/.nv/ComputeCache` |
 | Customer-visible incidents (30 days) | 14 tickets | 0 tickets |
+
+**Put simply.** `fatbin_size = host_code + (N_sass x cubin_size) + (N_ptx x ptx_size)` says: "the binary grows one full copy of your compiled device code for every real architecture you list, and one much smaller copy for the PTX fallback."
+
+Fatbinary growth is *linear in the number of real targets*, which is what makes the "just add every architecture" instinct expensive at distribution scale. The PTX entry is the outlier: it is the cheapest row in the sum and the only one that covers hardware you have never seen.
+
+| Symbol | What it is |
+|--------|------------|
+| `host_code` | The CPU-side half of the library. Constant regardless of the `-gencode` list — small here, since this is a kernel library |
+| `N_sass` | Count of `code=sm_XX` targets. **2** in v1.0 (`sm_75`, `sm_80`), **3** in v1.1 (`+ sm_90`) |
+| `cubin_size` | Compiled SASS for one architecture. The dominant term, and roughly equal across same-era targets |
+| `N_ptx` | Count of `code=compute_XX` targets. **0** in v1.0, **1** in v1.1 |
+| `ptx_size` | The embedded PTX blob — virtual ISA, not machine code, so materially smaller than a cubin |
+
+**Walk one example.** Solve the two shipped builds for the per-target cost, treating `host_code` as negligible against the device sections:
+
+```
+  v1.0:  38 MB  =  2 cubins                     ->  cubin_size = 38 / 2   = 19 MB
+  v1.1:  61 MB  =  3 cubins  +  1 PTX blob
+                =  3 x 19  +  ptx_size          ->  ptx_size   = 61 - 57  =  4 MB
+
+  Sanity-check the reported growth:
+    delta        =  61 - 38                     =  23 MB
+    accounted by =  one sm_90 cubin (19) + one compute_90 PTX (4)  =  23 MB   OK
+
+  What each additional entry would cost from here:
+    + a 4th real sm_XX target   ->  61 + 19  =  80 MB   (+31%)
+    + a 2nd compute_XX PTX      ->  61 +  4  =  65 MB   (+7%)
+
+  Relative sizes:  ptx_size / cubin_size  =  4 / 19  =  21%
+```
+
+The 21% figure is the answer to discussion question 3. Adding the fourth real architecture costs nearly five times what the PTX fallback cost — and the fallback is the entry that covers *every* future GPU, while the fourth cubin covers exactly one. For a wheel pulled by thousands of customers, that ratio argues for a short, CI-validated `sm_XX` list plus one always-current PTX entry, rather than an ever-growing list of real targets.
+
+**Stated plainly.** The JIT fallback's true cost is `total_JIT_cost = jit_time x cache_misses`, not `jit_time x launches` — "you pay the compile once per machine per cache generation, not once per run, and the whole economics of the PTX fallback lives in that distinction."
+
+Without the on-disk cache the fallback strategy would be indefensible for anything short-lived. With it, the ~450 ms is a one-time provisioning cost that disappears into the noise of a machine's lifetime.
+
+| Symbol | What it is |
+|--------|------------|
+| `jit_time` | Driver JIT of the embedded PTX to SASS — **~450 ms** measured for this kernel set |
+| `cache_misses` | How many times the JIT actually runs. Normally **1** per machine, thanks to `~/.nv/ComputeCache` |
+| `launches` | Process starts over that machine's lifetime — the number the cost is amortized *across* |
+| `~/.nv/ComputeCache` | The persistent on-disk JIT cache. Keyed on driver version, so a driver upgrade invalidates it |
+| `amortized_cost` | `total_JIT_cost / launches` — what any individual run actually experiences |
+
+**Walk one example.** Compare the cached reality against the hypothetical uncached case:
+
+```
+  CACHED (what actually happens):
+    cache misses over a machine's life   =  1
+    total JIT cost                       =  1 x 450 ms   =    450 ms
+    amortized over 1,000 process starts  =  450 / 1,000  =   0.45 ms per run
+    as a share of one 1-hour server run  =  0.450 / 3,600 s  =  0.0125%
+
+  UNCACHED (if ComputeCache were disabled or wiped each run):
+    total JIT cost over 1,000 starts     =  1,000 x 450 ms  =  450 s  =  7.5 min
+    -> 1,000x worse, and now the dominant cost of a short-lived CLI tool
+
+  DRIVER UPGRADE (the discussion-question-4 case):
+    cache is keyed on driver version -> upgrade invalidates it
+    cache misses  =  1 per machine PER DRIVER VERSION
+    a fleet of 500 nodes upgrading drivers 4x/year:
+      500 x 4 x 450 ms  =  900 s  =  15 min of aggregate one-time JIT per year
+```
+
+The last block is the practical lesson: the cache makes JIT cheap, but it does not make it free forever. A fleet that auto-updates drivers silently re-pays the cost on every node after every upgrade — visible as a one-time latency spike on the first request each node serves post-upgrade, which is exactly the kind of thing that gets misdiagnosed as a cold-start or network problem.
 
 **Discussion questions:**
 1. Why did the team's own CI, which only had T4 and A100 runners, never catch this before customers hit it on H100?

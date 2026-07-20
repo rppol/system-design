@@ -344,6 +344,36 @@ def relay_loop():
 
 > In production, **Debezium** tailing the Postgres WAL (or MySQL binlog) replaces this poll loop entirely — sub-second latency, zero polling load on the database. The table schema is identical either way.
 
+**In plain terms.** "One relay instance can publish at most `batch size / poll interval` events per second — everything above that line needs more relay instances, or CDC."
+
+The poll loop's two literals (`LIMIT 100` and `sleep(0.1)`) are not style choices; together they set a hard throughput ceiling on the entire outbox. Knowing the ceiling is what tells you whether polling is enough or whether you must move to Debezium.
+
+| Symbol | What it is |
+|--------|------------|
+| `LIMIT 100` | Batch size — the most rows one poll can claim and publish |
+| `sleep(0.1)` | Pause between polls, in seconds. `0.1s` = 10 polls per second |
+| `FOR UPDATE SKIP LOCKED` | Lets a second relay instance grab a *different* 100 rows instead of blocking |
+| relay instances | Horizontal multiplier — each one independently runs the same loop |
+| publish lag | Worst-case wait before an unpublished row is picked up: one full poll interval |
+
+**Walk one example.** One relay instance, then the same loop scaled out:
+
+```
+  batch size          = 100 rows per poll
+  poll interval       = 0.1 s   ->  1 / 0.1 = 10 polls/sec
+
+  ceiling (1 relay)   = 100 x 10        = 1,000 events/sec
+  ceiling (3 relays)  = 1,000 x 3       = 3,000 events/sec
+
+  Worst-case publish lag for a row written just after a poll:
+      0.1 s poll interval  (plus the batch's own publish time)
+
+  PaySwift peak (Section 14) = 150 transfers/sec
+      150 / 1,000 = 15% of a single relay's ceiling  -> one instance is plenty
+```
+
+The ceiling is why the batch size and sleep must be tuned together: halving the sleep to `0.05s` doubles the ceiling to 2,000/sec but also doubles the number of queries hitting the database, which is exactly the polling load Debezium exists to remove.
+
 ### 6.4 Saga Compensation — Why "Inverse" Is the Wrong Mental Model
 
 ```mermaid
@@ -420,6 +450,37 @@ Claiming the key atomically before doing the work closes the race: only the requ
 - **Stripe Idempotency Keys**: every `POST` to the Payments API accepts an `Idempotency-Key` header; Stripe stores the key and response for **24 hours**, returning the cached response (including the original HTTP status code) on a repeated key. This is §4.6 in production at massive scale.
 - **Uber Trip Lifecycle Saga**: "Request Trip -> Match Driver -> Start Trip -> Complete Trip -> Charge Rider -> Pay Driver" is a long-running (minutes to hours) saga. A failure at "Charge Rider" triggers compensations that can include "Cancel Trip" and "Notify Driver of Cancellation" — exactly the choreography pattern in §4.3.
 - **Booking.com / airline GDS systems**: TCC is the industry-standard pattern — every "hold this fare for 15 minutes" you've seen as a consumer is a Try with a TTL.
+
+**What this actually says.** DynamoDB's "100 items / 4 MB per transaction" is one limit stated twice: "you may lock at most 100 rows, and those rows must average no more than 40 KB each."
+
+The two numbers are a deliberate pair. The item count bounds how many participants the 2PC-like protocol must coordinate; the byte cap bounds how long each one holds its lock while the payload moves over the wire.
+
+| Symbol | What it is |
+|--------|------------|
+| 100 items | Maximum unique rows in one `TransactWriteItems` call — the participant count |
+| 4 MB | Maximum total payload across all items in the transaction |
+| 4 MB / 100 | Implied average item budget if you use the full item count |
+| single region | No cross-region hop, so each round trip stays in the low milliseconds |
+| lock-hold time | Roughly (round trips) x (per-hop latency) — what both caps are really bounding |
+
+**Walk one example.** Push both limits to their edges:
+
+```
+  byte budget per item, at the full item count:
+      4 MB / 100 items = 4 x 1024 KB / 100 = 40.96 KB per item
+
+  So the caps bind in whichever order your data hits them first:
+      100 items x  1 KB each =   100 KB   -> item count binds
+      100 items x 41 KB each = 4,100 KB   -> byte cap binds FIRST (over 4 MB)
+       10 items x 400 KB each = 4,000 KB  -> byte cap binds at only 10 items
+
+  Compare 2PC round trips at 100 participants vs 2:
+      messages = 4 x participants  (PREPARE, VOTE, DECISION, ACK)
+      100 participants -> 4 x 100 = 400 messages per transaction
+        2 participants -> 4 x   2 =   8 messages per transaction
+```
+
+That 400-vs-8 message count is the whole reason AWS bounds the participant count at all: every one of those messages is a window in which the coordinator can crash and leave the remaining participants in doubt (Section 6.1).
 
 ---
 
@@ -520,6 +581,36 @@ flowchart TD
 A payments platform used a JTA transaction manager (2PC) to atomically update an `orders` table and a `ledger` table across two Postgres instances on every checkout. The transaction manager's host had a disk failure mid-recovery after a routine restart. Both Postgres instances had participants sitting in the `PREPARED` state — row locks held, connections held — for **45 minutes** while the on-call team manually inspected the transaction manager's recovery log to determine the correct decision (commit, in this case, since both had voted yes). During those 45 minutes, the connection pool (size 50) on both databases was exhausted by blocked transactions, and **all checkout traffic returned 503s** — not just the original transaction's traffic.
 *Fix*: migrated to Saga + Outbox. Order creation and ledger update became two independent local transactions, each publishing an event via outbox; a saga coordinated "ledger entry created" as the trigger for "mark order paid." A coordinator crash now means "an event is delayed," not "every database connection pool is exhausted."
 
+**Read it like this.** "A stuck 2PC does not exhaust the pool slowly over 45 minutes — it exhausts it in seconds, and the remaining 44 minutes are pure downtime."
+
+The 45-minute figure is the recovery time, not the time to failure. The number that actually explains the 503s is much smaller, and it is just pool size divided by arrival rate.
+
+| Symbol | What it is |
+|--------|------------|
+| pool size | Connections available to the database, `50` here |
+| arrival rate | New transactions per second wanting a connection |
+| hold time | How long a stuck `PREPARED` transaction keeps its connection — unbounded on coordinator crash |
+| time-to-exhaustion | `pool size / arrival rate` when hold time exceeds the outage window |
+| blast radius | Everything sharing the pool — here, balance reads too, not just transfers |
+
+**Walk one example.** Using Section 14's PaySwift volumes against the pool of 50:
+
+```
+  average arrival rate = 2,000,000 transfers/day / 86,400 s = 23.1 transfers/sec
+  peak arrival rate    = 150 transfers/sec
+
+  time to exhaust a 50-connection pool once nothing is released:
+      at average:  50 / 23.1  = 2.16 seconds
+      at peak   :  50 / 150   = 0.33 seconds
+
+  coordinator recovery time = 45 min = 2,700 seconds
+
+  fraction of the incident spent already-exhausted, at average rate:
+      (2,700 - 2.16) / 2,700 = 99.92%
+```
+
+The lesson the ratio makes concrete: there is no "degraded but coping" phase to alert on. The pool is gone inside one to two seconds, so the only useful lever is bounding the hold time itself — which is exactly what Saga plus Outbox does by never holding a connection across a remote call.
+
 **War Story 2 — The Non-Idempotent Retry That Double-Charged 12,000 Customers**
 
 A payment service's HTTP client had a 5-second timeout and retried on timeout with no idempotency key. During a brief network blip, ~12,000 charge requests timed out *after* the downstream payment processor had actually completed the charge — the response just never made it back. The client retried all 12,000, and the payment processor (which itself had no idempotency protection on this endpoint) processed them again.
@@ -534,6 +625,36 @@ A payment service's HTTP client had a 5-second timeout and retried on timeout wi
 
 A travel-booking saga's compensation for "ChargeCard" was implemented as "RefundCard(amount)". What the team missed: the payment processor deducted a $1.50 non-refundable processing fee on the *original* charge, and `RefundCard` only refunded the $450 booking amount — not the fee. When a downstream "HotelUnavailable" failure triggered the compensation chain, customers received a "Booking Cancelled — Refunded" email but were quietly out $1.50 each. At ~3,000 cancellations/month, this generated a steady stream of confused support tickets and, eventually, a regulatory complaint about "hidden fees."
 *Fix*: the compensation was redesigned to be **explicit about partial recovery** — `RefundCard` now refunds `amount - nonRefundableFee` and the cancellation email explicitly states the fee was retained, with a link to the fee policy. The lesson generalizes: **every compensating transaction must be designed and reviewed as its own operation with its own edge cases — never assume "compensate" means "undo."**
+
+**What it means.** "A compensation that recovers 99.67% of the charge is not a rounding error — multiplied by the cancellation rate, the missing 0.33% is a five-figure annual liability."
+
+The reason this bug survived review is that the per-customer gap looks negligible next to the booking amount. Compensation shortfalls only become visible when you multiply by volume, so that multiplication belongs in the design review, not the incident review.
+
+| Symbol | What it is |
+|--------|------------|
+| forward amount | What the forward step charged: `$450` booking + `$1.50` fee |
+| compensated amount | What `RefundCard` actually returned: `$450` |
+| shortfall per event | `forward - compensated` = the non-refundable `$1.50` |
+| cancellation rate | How often the compensation fires: `~3,000/month` |
+| exposure | `shortfall x rate` — the number that decides whether this is a bug or a policy |
+
+**Walk one example.** The stated booking, fee, and cancellation rate, carried out to a year:
+
+```
+  charged to customer  = $450.00 booking + $1.50 fee = $451.50
+  refunded on compensate = $450.00
+  shortfall per customer = $451.50 - $450.00 = $1.50
+
+  shortfall as a share of the booking:
+      1.50 / 450.00 = 0.333%     <- looks like noise per customer
+
+  scaled by the compensation rate:
+      monthly  : $1.50 x  3,000            = $4,500
+      annually : $4,500 x 12               = $54,000
+      customers affected annually: 3,000 x 12 = 36,000
+```
+
+Thirty-six thousand customers each told "Refunded" while being out $1.50 is what turned an accounting detail into a regulatory complaint. The generalizable check: for every compensation, compute `shortfall x expected firing rate` before shipping it.
 
 ---
 
@@ -651,6 +772,38 @@ Scale:
 - p99 latency target: 800ms end-to-end (the external payment network call itself is 200-400ms)
 - Availability target: 99.95% (~4.4 hours downtime/year budget)
 - Regulatory requirement: every wallet debit must have a corresponding ledger entry — no "phantom debits"
+
+**Put simply.** "Two divisions turn this bullet list into a design brief: daily volume over seconds-in-a-day gives the sustained rate, and the availability target over a year gives the entire error budget."
+
+Every number below is derived from something already stated. Doing the derivation up front is what makes "150/sec peak" and "99.95%" comparable to each other instead of two unrelated targets.
+
+| Symbol | What it is |
+|--------|------------|
+| daily volume | `2,000,000` transfers/day, the stated business number |
+| `86,400` | Seconds in a day — `60 x 60 x 24`, the constant that converts daily to per-second |
+| average rate | `daily volume / 86,400` — the sustained load |
+| peak factor | `peak rate / average rate` — how much headroom the fleet must carry |
+| availability target | `99.95%`, i.e. `0.05%` of the year may be downtime |
+| error budget | `(1 - target) x 8,760 hours` — total allowed downtime per year |
+
+**Walk one example.** Both derivations, end to end:
+
+```
+  average rate = 2,000,000 / 86,400 = 23.15 transfers/sec   (matches the "~23/sec")
+
+  peak factor  = 150 / 23.15 = 6.5x       <- evening peak is 6.5x the daily mean
+
+  error budget:
+      unavailable fraction = 1 - 0.9995 = 0.0005
+      hours per year       = 365 x 24   = 8,760
+      budget               = 0.0005 x 8,760 = 4.38 hours/year   (the "~4.4 hours")
+
+  what one 2PC incident costs against that budget:
+      45-minute incident = 0.75 h
+      0.75 / 4.38 = 17.1% of the ENTIRE YEAR's budget, in one event
+```
+
+That last line is the argument for the migration in one number: roughly six such coordinator crashes would consume the whole annual availability budget, and War Story 1 shows they are a routine consequence of the architecture rather than a rare event.
 
 ### Original Architecture (2PC) and Its Failure
 
@@ -792,6 +945,32 @@ public TransferResult initiateTransfer(String idempotencyKey, TransferRequest re
 - Wallet-service connection pool utilization during a simulated payments-service outage: stayed under 15% (vs. 100% / exhausted under the old 2PC design, per War Story 1)
 - Reconciliation job: handles ~40 stuck transfers/day (0.002% of volume), all auto-resolved within one 15-minute cycle
 - Zero phantom debits across 18 months post-migration (audited quarterly)
+
+**The idea behind it.** "0.002% is not a quality score — it is the sizing input that tells you the reconciliation job can be a single small worker rather than a pipeline."
+
+A reconciliation job is the safety net that turns "eventual" into "bounded." Its cost is set entirely by how many rows it has to repair per cycle, which is why the stuck-transfer rate is worth converting into an absolute per-cycle number.
+
+| Symbol | What it is |
+|--------|------------|
+| stuck transfers | Rows still `PENDING` past the threshold: `~40/day` |
+| daily volume | `2,000,000` transfers/day, from the Problem Statement |
+| stuck rate | `stuck / volume`, expressed as a percentage |
+| cycle interval | How often the job runs: every `15 minutes` |
+| per-cycle load | `stuck per day / cycles per day` — the job's actual working-set size |
+
+**Walk one example.** Turning the rate into a per-cycle workload:
+
+```
+  stuck rate = 40 / 2,000,000 = 0.00002 = 0.002%   (matches the stated figure)
+
+  cycles per day = (24 x 60) / 15 = 96 cycles
+
+  rows to repair per cycle = 40 / 96 = 0.42 rows
+
+  annual repair volume = 40 x 365 = 14,600 transfers
+```
+
+Under half a row per cycle means the job is effectively idle and can afford an expensive per-row check — re-querying the external network's idempotency key before deciding to compensate. Had the rate been 100x worse (4,000/day, ~42 rows per cycle), that per-row external call would itself become a load source and the job would need batching. The rate does not just report health; it picks the implementation.
 
 ### Common Pitfalls / Lessons Learned
 

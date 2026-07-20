@@ -64,6 +64,60 @@ Spring Boot 3.2+ ships with virtual thread integration: `spring.threads.virtual.
 | Initial delay | `@Scheduled(initialDelay=10000, fixedRate=5000)` | Wait 10s before first run |
 | Duration string | `@Scheduled(fixedDelayString="${batch.delay}")` | Property-driven; supports `PT5S` (ISO-8601) |
 
+### Decoding fixedDelay vs fixedRate
+
+The two options anchor the interval to different events, which is the whole difference:
+
+```
+  fixedDelay:  next_start = previous_END   + N
+  fixedRate:   next_start = previous_START + N     (deferred if the thread is busy)
+```
+
+**Put simply.** "`fixedDelay` guarantees a gap between runs; `fixedRate` guarantees a
+cadence of start times." Only one of them can be honoured when a run overruns `N`, and
+knowing which one you asked for is the difference between a task that quietly slips and
+a task that quietly overlaps.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | The configured interval in ms. `5000` in both rows above |
+| `previous_END` | Wall-clock time the prior invocation returned — the `fixedDelay` anchor |
+| `previous_START` | Wall-clock time the prior invocation began — the `fixedRate` anchor |
+| `initialDelay` | Offset before the first run only. `10000` above; does not repeat |
+| pool size `1` | Spring's default. Forces `fixedRate` to defer rather than overlap |
+
+**Walk one example.** A task that takes 7s, configured with `N = 5000` and
+`initialDelay = 10000`, on the default single-thread scheduler:
+
+```
+  fixedDelay = 5000        anchored to END, so the period is constant
+    run 1   start 10,000   end 17,000
+    run 2   start 22,000   end 29,000      (17,000 + 5,000)
+    run 3   start 34,000   end 41,000      (29,000 + 5,000)
+    period  = 7,000 + 5,000 = 12,000 ms, forever. Never overlaps.
+
+  fixedRate = 5000         anchored to START, but 7,000 > 5,000 so it cannot keep up
+    nominal starts: 10,000  15,000  20,000  25,000
+    run 1   nominal 10,000   actual 10,000   slip     0   end 17,000
+    run 2   nominal 15,000   actual 17,000   slip 2,000   end 24,000
+    run 3   nominal 20,000   actual 24,000   slip 4,000   end 31,000
+    run 4   nominal 25,000   actual 31,000   slip 6,000   end 38,000
+    slip grows by (7,000 - 5,000) = 2,000 ms every run, without bound.
+```
+
+The `fixedDelay` schedule is stable at a 12-second period. The `fixedRate` schedule
+falls further behind on every iteration — 2 seconds per run, and once saturated the runs
+go back-to-back every 7,000 ms, so an hour fits `3,600,000 / 7,000 = 514` runs and the
+slip reaches `514 x 2,000 = 1,028,000 ms`, about 17 minutes of drift. You asked for a
+cadence the task cannot sustain.
+
+**What the default pool size of 1 is actually protecting you from.** Raise the scheduler
+to `setPoolSize(5)` and that `fixedRate` task stops deferring: run 2 launches at its
+nominal 15,000 while run 1 is still executing until 17,000, so two invocations overlap
+for 2 seconds. For a stateful task — one holding a cursor, writing a file, or draining a
+queue — that overlap is a correctness bug, not a performance win. This is why the
+guidance is `fixedDelay` for anything that must not overlap, regardless of pool size.
+
 ---
 
 ## 5. Architecture Diagrams
