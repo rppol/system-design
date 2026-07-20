@@ -9,8 +9,10 @@ and vendors Mermaid, then Gradle builds a signed release.
 
 [![Download the Android APK](https://img.shields.io/badge/Download-Android%20APK-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/rppol/system-design/releases/latest/download/systemdesign-daily.apk) [![Latest build](https://img.shields.io/github/v/release/rppol/system-design?style=for-the-badge&label=Latest&color=1f6feb)](https://github.com/rppol/system-design/releases/latest)
 
-Every push to `main` builds and publishes a GitHub Release automatically. The
-button above always downloads the newest build; the stable URL behind it is:
+Every push to `main` triggers a build, and the newest push wins: builds are
+cancel-in-progress, so a burst of commits publishes one release for the last of
+them rather than one per commit (which is why release numbers skip). The button
+above always downloads the newest build; the stable URL behind it is:
 
 ```
 https://github.com/rppol/system-design/releases/latest/download/systemdesign-daily.apk
@@ -27,13 +29,25 @@ gh release download --pattern systemdesign-daily.apk   # grab the latest APK
 
 ## Build locally
 
-No Gradle wrapper is committed to this repo (CI uses `gradle/actions/setup-gradle`,
-which needs nothing extra). To build locally, install Gradle 8.10+ yourself (or
-run `gradle wrapper` once inside `android/` to generate one), then:
+You need **JDK 17** (AGP 8.7.2 rejects newer JDKs), **Gradle 8.10+**, and an
+Android SDK with `platforms;android-35` + `build-tools;35.0.0`. No Gradle
+wrapper is committed (CI uses `gradle/actions/setup-gradle`, which needs
+nothing extra); install Gradle yourself, or run `gradle wrapper` once inside
+`android/` to generate one.
+
+Then build in two steps — the asset step is not optional:
 
 ```bash
+bash scripts/build_android_assets.sh     # banks + graphs + content + mermaid
 gradle -p android :app:assembleDebug
 ```
+
+`assets/www` is gitignored and always regenerated, and the question banks and
+relatedness graphs are build artifacts too. Skipping the first command produces
+an APK that opens to a blank screen (no `index.html` to load); running Gradle
+against a stale payload produces one whose reader works but whose quiz is
+empty. The script generates everything (via `scripts/build_banks.sh`) and
+verifies it before Gradle ever runs.
 
 ## Install
 

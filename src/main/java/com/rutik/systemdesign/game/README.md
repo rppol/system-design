@@ -289,13 +289,22 @@ LORA also ships as a fully-offline, sideloadable Android APK — a raw-WebView
 wrapper (no Capacitor/frameworks) built by `scripts/build_android_assets.sh`,
 which mirrors the whole repo (every section's Markdown + freshly regenerated
 question banks/graphs) plus a vendored `mermaid@11.16.0` UMD build into the
-app's assets, for a ~59MB offline-first bundle. `.github/workflows/android-apk.yml`
-builds and publishes a signed GitHub Release on **every push to `main`**
-(green-skip if signing secrets are absent); the stable download is
+app's assets — a ~59MB payload that compresses to a **~27MB APK**.
+`.github/workflows/android-apk.yml` builds and publishes a signed GitHub
+Release on **every push to `main`, newest push wins** (builds are
+cancel-in-progress, so a burst of commits yields one release for the last of
+them and the release numbering skips; green-skip if any signing secret is
+absent). It also `node --check`s the SPA before building and smoke-tests the
+assembled APK — required entries, a parseable shipped `app.js`, bank/graph
+counts matching the section count, an unstamped `sw.js`, and a sane size —
+so a white-screen build cannot reach the stable download at
 `releases/latest/download/systemdesign-daily.apk`.
 
-Three `IS_APK`-gated hooks in `app.js` are the only places behavior forks from
-the Pages build (keyed on `location.hostname === "appassets.androidplatform.net"`):
+Three seams in `app.js` are the only places behavior forks from the Pages
+build. Two are gated on `IS_APK` (`location.hostname ===
+"appassets.androidplatform.net"`); the third is feature-detected on the
+injected bridge object, which is the more honest test since it is the bridge,
+not the hostname, that the code needs:
 
 - **Vendored Mermaid loader** — `_loadMermaidModule()` injects the bundled
   `vendor/mermaid.min.js` UMD script instead of the jsDelivr ESM import, since
@@ -303,9 +312,12 @@ the Pages build (keyed on `location.hostname === "appassets.androidplatform.net"
 - **Service worker skipped** — `registerServiceWorker()` returns early in the
   APK; every asset is already local and SW registration would just fail noisily
   against the WebView's asset loader.
-- **`SDAndroid.saveBackup` export bridge** — `exportProgress()` hands the
-  backup JSON to the native bridge (no browser download chrome in a WebView)
-  when `window.SDAndroid.saveBackup` exists, instead of the `<a download>` path.
+- **`SDAndroid.saveBackup` export bridge** (feature-detected on
+  `window.SDAndroid`, not on `IS_APK`) — `exportProgress()` hands the backup
+  JSON to the native bridge (no browser download chrome in a WebView) when
+  `window.SDAndroid.saveBackup` exists, instead of the `<a download>` path.
+  The bridge returns success synchronously, and the export is only recorded on
+  `true` so a failed write cannot suppress the backup nudge.
 
 Progress does not carry over automatically between the Pages site and the APK
 (separate `localStorage`); a one-time Export (Pages) / Import (APK) carries it

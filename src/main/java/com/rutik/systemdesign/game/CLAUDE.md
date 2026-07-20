@@ -17,16 +17,19 @@ The `game/` directory is an application, not study content — see
 
 - Vanilla JS + CSS, no build step, no frameworks, no external deps (the reader's
   mermaid CDN import is the only exception on Pages).
-- **`IS_APK` is the only APK/Pages fork.** LORA also ships as an offline Android
-  APK (see `android/README.md`); `IS_APK` (`app.js`, keyed on
-  `location.hostname === "appassets.androidplatform.net"`) gates exactly three
-  hooks, and no others may exist: the vendored-Mermaid-UMD loader in
-  `_loadMermaidModule()` (jsDelivr ESM is unreachable offline), the early
+- **Exactly three APK seams, and no others may exist.** LORA also ships as an
+  offline Android APK (see `android/README.md`). Two seams are gated on
+  `IS_APK` (`app.js`, keyed on `location.hostname ===
+  "appassets.androidplatform.net"`): the vendored-Mermaid-UMD loader in
+  `_loadMermaidModule()` (jsDelivr ESM is unreachable offline) and the early
   return in `registerServiceWorker()` (every asset is already local; SW
-  registration fails noisily against the WebView asset loader), and the
+  registration fails noisily against the WebView asset loader). The third — the
   `SDAndroid.saveBackup` native bridge in `exportProgress()` (no browser
-  download chrome in a WebView). Every other line must render byte-identically
-  on Pages and in the APK. The vendored `game/vendor/mermaid.min.js` (fetched
+  download chrome in a WebView) — is deliberately **feature-detected on
+  `window.SDAndroid`, not on `IS_APK`**: the code needs the bridge, not the
+  hostname, so it degrades correctly anywhere the bridge is absent. `grep -c
+  IS_APK app.js` must therefore stay at 3 (the definition plus two uses).
+  Every other line must render byte-identically on Pages and in the APK. The vendored `game/vendor/mermaid.min.js` (fetched
   once at CI build time by `scripts/build_android_assets.sh`, bundled into the
   APK, never fetched at runtime) is a second sanctioned exception to the
   no-external-deps rule, alongside the Pages Mermaid CDN import.
