@@ -20,6 +20,55 @@ This deep-dive covers client implementation: connecting to servers (stdio subpro
 
 **Key insight**: Tool name collisions are inevitable when connecting multiple servers. Standard solution: prefix tool names with server name (`github_create_issue` instead of just `create_issue`). Claude Desktop, Cursor, and most production clients do this automatically. The same `<server>_<verb>_<object>` namespacing rule — and what to do when the merged catalogue grows past ~50 tools — is covered in [Tool Selection at Scale](../agents_and_tool_use/tool_selection_at_scale.md).
 
+**What this actually says.** "Your agent's tool catalogue is not the number of servers you
+connected — it is servers times tools-per-server, and that product crosses the manageable
+threshold far earlier than the server count suggests."
+
+Worth doing the multiplication explicitly, because teams reason about MCP integration in units of
+*servers* ("we added Snowflake, JIRA, and GitHub — three things") while the model reasons about
+it in units of *tool definitions*, and the two counts diverge fast.
+
+```
+  catalogue_size = num_servers x avg_tools_per_server
+
+  every tool contributes  name + description + input_schema  to the system prompt,
+  and that prompt is re-sent on EVERY model call in the loop.
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `num_servers` | Sessions the client holds open. 32 at the §14 platform's peak |
+| `avg_tools_per_server` | Tools each server advertises via `list_tools()`. Rarely just one |
+| `catalogue_size` | Total tool definitions injected into the prompt. The number that matters |
+| `~50` | The catalogue size past which selection accuracy degrades and filtering is needed |
+
+**Walk one example.** Solve for how many tools per server it takes to cross the ~50 line:
+
+```
+  threshold / num_servers = tools_per_server at which the catalogue hits ~50
+
+  at  3 servers : 50 /  3 = 16.7 tools each   -- comfortable, unlikely to hit
+  at 12 servers : 50 / 12 =  4.2 tools each   -- realistic servers already exceed this
+  at 32 servers : 50 / 32 =  1.6 tools each   -- crossed at TWO tools per server
+
+  the §14 platform's 32 servers at a modest 8 tools each:
+      32 x 8 = 256 tool definitions  ->  5x past the threshold
+```
+
+That is the trap. At 32 connected servers, a catalogue stays under 50 tools only if the average
+server exposes fewer than two — and a Snowflake or JIRA wrapper exposes a dozen on its own. The
+platform in §14 was structurally past the threshold from the day it connected its tenth server,
+regardless of how carefully any individual team scoped its own tools.
+
+**Why the prefixing rule is load-bearing here and not merely tidy.** With `catalogue_size` in the
+hundreds, the probability that two servers independently expose a `search`, `query`, `list`, or
+`create_issue` approaches certainty — that is the collision the `{team}_{server}_{tool}` convention
+prevents. But note the second-order cost: prefixing makes every tool name longer, and names are
+paid for on every model call along with the schemas. Prefixing solves correctness and slightly
+worsens the token problem, which is why the linked *Tool Selection at Scale* filtering step is the
+actual fix once the catalogue is this large — namespacing alone only guarantees the 256 tools have
+distinct names, not that the model can choose among them.
+
 ---
 
 ## 3. Core Principles
@@ -445,4 +494,53 @@ The MCP spec allows up to whatever the transport supports (HTTP: typically multi
 1. Tool name prefixing was non-negotiable — collisions across 32 servers would have been chaos.
 2. Per-call timeout caught 3-4 hanging servers per week; reconnect logic auto-recovered most.
 3. OTEL traces revealed one server was 100× slower than others — easy target for the team to optimize.
+
+**Read it like this.** "One badly behaved server out of 32 is about 3% of the traffic — which is
+why it never showed up in the P95 the team was watching, and why it took distributed tracing
+rather than a dashboard to find it."
+
+Percentile monitoring has a blind spot whose size you can compute exactly, and it is the reason
+lesson 3 required OTEL instead of the latency metric already being collected.
+
+```
+  traffic_share_per_server = 1 / num_servers        (roughly, under even load)
+
+  a server is visible in P(x)  <=>  traffic_share > (100 - x) / 100
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `num_servers` | 32 connected at peak |
+| `traffic_share` | Fraction of all calls routed to one server |
+| `P95` | The latency below which 95% of calls land. Blind to the slowest 5% |
+| `100 - x` | The tail percentage a given percentile ignores |
+
+**Walk one example.** The slow server, against the percentiles the team had:
+
+```
+  traffic share of one server : 1 / 32 = 3.125%
+
+  P95 ignores the slowest  5.0%   ->  3.125% < 5.0%   server is INVISIBLE
+  P99 ignores the slowest  1.0%   ->  3.125% > 1.0%   server DOMINATES P99
+
+  measured P95 = 380 ms   (healthy servers only -- the slow one hides beneath it)
+  that server at 100x     = ~38 s per call, if the median were near P95
+```
+
+Daily impact, which is what makes it worth fixing rather than tolerating:
+
+```
+  0.3M calls/day x 3.125% = ~9,375 calls/day hitting the slow server
+```
+
+Nine thousand calls a day, every one of them dramatically slow, and the headline latency metric
+reports green. **The rule this generalizes to: a single bad backend among `N` is undetectable in
+`P(x)` whenever `1/N < (100-x)/100`** — so the more servers you aggregate, the deeper into the
+tail you must look to see any one of them. At 32 servers you need P99; at 200 servers even P99
+hides an individual offender and only per-server breakdowns work.
+
+That is precisely why the architecture logs `(server name, tool, latency)` per call rather than
+a single global histogram. The aggregate percentile answers "is the platform healthy"; only the
+per-server dimension answers "which of my 32 dependencies is the problem" — and lesson 3 is the
+team discovering the difference the expensive way.
 4. AsyncExitStack made the multi-server lifecycle clean; manual cleanup would have leaked subprocesses.

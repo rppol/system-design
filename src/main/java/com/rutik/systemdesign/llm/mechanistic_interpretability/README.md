@@ -49,6 +49,37 @@ A model has `d_model` neurons per layer (e.g., 12,288 for a large model) but nee
 
 The observable consequence is **polysemanticity**: individual neurons respond to multiple, often unrelated concepts (a famous early example: a neuron in an image classifier that fired for both "cat faces" and "car fronts"). Polysemanticity is *why* looking at individual neurons is a dead end for interpretability at scale, and *why* SAEs (which find a different, larger basis where features are monosemantic) became central to the field.
 
+**In plain terms.** `N >> d` says: "you have `d` storage slots but `N` concepts to store, and `N` is many times larger than `d` — so you overlap them, and get away with it because only a handful are ever switched on at the same instant."
+
+That last clause is the whole load-bearing assumption. Superposition is not a clever encoding; it is an *overbooking* strategy, and sparsity is what keeps the overbooked flight from being oversold on any given day.
+
+| Symbol | What it is |
+|--------|------------|
+| `d` (`d_model`) | Neurons per layer — the number of dimensions actually available. 12,288 for a large model |
+| `N` | Distinct concepts the model needs to represent. Estimated in the hundreds of thousands to millions |
+| `N / d` | The overbooking ratio: how many features are crammed into each dimension on average |
+| "almost-orthogonal" | Directions whose dot product is small but *not* zero. Zero would mean no interference; small means rare, tolerable interference |
+| sparsity | Fraction of the `N` features active on any one token. The smaller this is, the more overbooking the model can survive |
+
+**Walk one example.** Push the section's own numbers through the ratio:
+
+```
+  d_model = 12,288 dimensions available
+
+  N =   100,000 concepts  ->    100,000 / 12,288 =  8.1 features per dimension
+  N = 1,000,000 concepts  ->  1,000,000 / 12,288 = 81.4 features per dimension
+
+  Toy version drawn in 5.1:  N = 8 features in d = 4 dims  ->  2.0 per dimension
+
+  Why 81x overbooking does not collapse: only a few of the N fire per token.
+  In the SAE trained in 6.1, k = 32 features are active out of d_sae = 65,536:
+        32 / 65,536 = 0.049% of the dictionary "on" at once
+  Two features interfere only when both happen to be on simultaneously, and at
+  0.049% density that coincidence is rare enough for the model to eat the cost.
+```
+
+The ratio also explains why neuron-level analysis is hopeless rather than merely hard: at 8.1 features per dimension, the *average* neuron is carrying eight unrelated jobs, so "what does neuron 4,271 mean?" has no single answer to find.
+
 ### 3.3 The Residual Stream as a Shared Bus
 
 In a transformer, every attention block and MLP block reads from and additively writes to the same residual stream (`x_{l+1} = x_l + Attn(x_l) + MLP(x_l + Attn(x_l))`, roughly). This means:
@@ -188,6 +219,41 @@ flowchart TD
 ```
 
 Each nonzero entry i in f(x) means "feature i (column i of W_dec) is active with that strength" — the dictionary columns are interpretable concepts like "token follows a colon" or "emotional content: fear".
+
+**What the formula is telling you.** `Loss = ||x - x_hat||² + sparsity_term(f(x))` says: "rebuild the activation as accurately as you can, while being fined for every feature you switch on to do it."
+
+Those two terms pull in exactly opposite directions, and that tension *is* the SAE. Turn the fine off and the SAE reconstructs perfectly using hundreds of entangled features — useless for interpretation. Turn the fine up and you get a handful of beautifully crisp features that no longer describe the model. Everything in §4.3 (Gated, TopK, JumpReLU) is a different answer to "how do I impose the fine without wrecking the reconstruction?"
+
+| Symbol | What it is |
+|--------|------------|
+| `x` | The real activation at layer L, a dense vector of `d_model` numbers |
+| `x_hat` | The SAE's rebuilt copy of `x`, assembled from dictionary columns |
+| `\|\|x - x_hat\|\|²` | Squared reconstruction error. Zero = perfect copy; grows as the rebuild gets worse |
+| `f(x)` | The sparse code: `d_sae` numbers, nearly all exactly zero |
+| `\|\|f(x)\|\|₁` | The vanilla sparsity term — sum of the *magnitudes* in `f(x)`. Pays a fine per unit of activation, not per feature |
+| `λ` (L1 coefficient) | The fine rate. Low = accurate but dense; high = sparse but inaccurate |
+| L0 | How many entries of `f(x)` are nonzero. The number you actually care about; L1 is only a proxy for it |
+
+**Walk one example.** One token whose activation has squared norm `||x||² = 100`. Train the same SAE at four L1 coefficients and read off what each one buys:
+
+```
+   lambda    L0 (active feats)    ||f||_1    ||x - x_hat||^2    variance explained
+     0.0            812            390.0            1.8               98.2%
+     1.0            180            250.0            4.5               95.5%
+     4.0             32            140.0            9.0               91.0%
+    16.0              5             42.0           41.0               59.0%
+
+  Read the lambda = 4.0 row as one loss value:
+      reconstruction term = 9.0
+      sparsity penalty    = 4.0 x 140.0 = 560.0
+      total loss          = 9.0 + 560.0 = 569.0
+
+      variance explained  = 1 - (9.0 / 100.0) = 0.910 -> 91.0%
+```
+
+**Do not compare those totals across rows.** `569.0` versus `254.5` says nothing: each `λ` defines a *different* objective, so their loss values live on different scales. The only honest comparison is the `(L0, variance-explained)` pair — `(32, 91.0%)` versus `(180, 95.5%)` — which is why SAE papers report a Pareto curve of L0 against reconstruction, never a single loss number.
+
+**Why the L1 term causes "shrinkage" — and why TopK deletes it.** `||f(x)||₁` fines *magnitude*, so it does not only push borderline features to zero; it also shaves value off the features you wanted on. That is why the `λ = 4.0` row has `||f||₁ = 140.0` across 32 features (an average magnitude of about 4.4) rather than the larger values the reconstruction alone would prefer — the SAE systematically under-reports how strongly a feature fired, and reconstruction pays for it. TopK sidesteps this entirely: it keeps the `k` largest activations at their *unshrunk* values and zeros the rest, so `k` directly sets the L0 column above (`k = 32` reproduces the third row) with no fine and no coefficient to tune.
 
 ### 5.3 Activation Patching Workflow
 
@@ -408,6 +474,45 @@ def train_sae(
 
 **Concrete numbers**: for Claude 3 Sonnet, Anthropic trained SAEs with up to **34 million** features (`d_sae`) on a `d_model` in the low thousands — an expansion factor far beyond the 16x shown above. Gemma Scope trains SAEs at **every layer and sublayer** of Gemma 2 (2B and 9B), at multiple widths (16K, 65K, 1M features), totaling hundreds of individual SAEs. Training a single 16x SAE on a 7-8B model's layer over a few hundred million tokens typically takes single-digit GPU-days on a single high-end GPU — cheap relative to pretraining, but not free, and the *evaluation* of feature quality (interpreting thousands of features) is the real bottleneck.
 
+**Read it like this.** `recon_loss = (x_hat - x)² .sum(-1) / x².sum(-1)` says: "what fraction of this activation's total size did I fail to rebuild?" — a scale-free error, not a raw one.
+
+The division is the whole point. Raw squared error is meaningless on its own because activation norms differ by orders of magnitude between layers and between models; dividing by `sum(x²)` turns the loss into a percentage, so a value of `0.09` means the same thing at layer 4 as at layer 41.
+
+| Symbol | What it is |
+|--------|------------|
+| `d_model` | Width of the layer being decomposed. 4,096 here (Llama-3-8B) |
+| `d_sae` | Dictionary size, `4096 * 16 = 65,536`. The "16x expansion factor" |
+| `k` | Nonzero entries allowed per token — 32. Exact sparsity, no penalty term |
+| `(x_hat - x)².sum(-1)` | Squared error left over after reconstruction, summed over all `d_model` dims |
+| `x².sum(-1)` | Squared norm of the original activation — its total "energy" |
+| the ratio | Fraction of energy unexplained. `1 - ratio` = variance explained |
+| `aux_k` | 512 spare slots reserved for reviving dead features — a repair mechanism, not part of the sparsity budget |
+
+**Walk one example.** Size the dictionary first, then score one token's reconstruction:
+
+```
+  Config:  d_model = 4,096      d_sae = 4,096 x 16 = 65,536      k = 32
+
+  How sparse is "sparse"?
+      32 / 65,536 =  0.049%  of the dictionary is on for a given token
+      32 /  4,096 =   0.78%  as many active numbers as the layer has dimensions
+      -> a 16x WIDER representation that is ~128x EMPTIER per token
+
+  One token's normalized reconstruction loss:
+      sum((x_hat - x)^2) =   9.0     <- squared error left over
+      sum(x^2)           = 100.0     <- squared norm of the original
+      recon_loss         = 9.0 / 100.0 = 0.09
+      -> 9% of the activation unexplained, 91% explained
+
+  What it costs to store:
+      W_enc (65,536 x 4,096) = 268,435,456 params
+      W_dec (4,096 x 65,536) = 268,435,456 params
+      + b_enc (65,536) + b_dec (4,096)
+      total = 536,940,544  ~=  537M parameters -- for ONE layer.
+```
+
+That 537M is the number people miss: an SAE for a single layer of an 8B model is itself a half-billion-parameter model, which is why Gemma Scope's "every layer and sublayer at multiple widths" release is measured in hundreds of separate dictionaries, and why `d_sae` expansion is a budget decision rather than a free dial.
+
 ### 6.2 Activation Patching to Localize a Behavior
 
 Activation patching answers "which `(layer, position, component)` causally matters for this behavior?" by swapping cached activations between a clean and corrupted run and measuring the effect on a metric (usually a logit difference).
@@ -481,6 +586,44 @@ def run_activation_patching(
 
 In practice, this `O(n_layers * seq_len)` sweep (here `32 * ~15 = 480` forward passes for a short prompt) takes seconds on a single GPU for a 7-8B model and produces a heatmap where bright cells indicate "patching this activation recovers most of the clean behavior" — directly localizing the computation, exactly as shown in the patching heatmap in §5.3.
 
+**What this actually says.** `(patched_diff - corrupted_diff) / (clean_diff - corrupted_diff)` asks: "of the entire gap between the broken run and the working run, what fraction did this one activation close by itself?"
+
+Framing it as a fraction of a *gap* is what makes a heatmap readable. Raw logit differences vary with prompt, vocabulary, and model, so `+3.3` is uninterpretable — but `0.73` means the same thing in every cell of every heatmap you ever plot.
+
+| Symbol | What it is |
+|--------|------------|
+| `clean_diff` | Logit difference on the correct prompt. The target — "fully working" |
+| `corrupted_diff` | Logit difference on the corrupted prompt. The floor — "fully broken" |
+| `clean_diff - corrupted_diff` | The full gap the patch could possibly close. The denominator, the yardstick |
+| `patched_diff` | Logit difference after overwriting one activation with the clean value |
+| the ratio | `0` = patch changed nothing; `1` = patch fully restored the clean answer |
+| `results[layer, pos]` | One cell of the heatmap. Bright = causally load-bearing |
+
+**Walk one example.** Use the Eiffel Tower / Colosseum pair from §5.3, scoring on `logit(" Paris") - logit(" Rome")`:
+
+```
+  clean run     ("The Eiffel Tower is in the city of") : clean_diff     = +6.0
+  corrupted run ("The Colosseum is in the city of")    : corrupted_diff = -4.0
+
+  full gap available to close = 6.0 - (-4.0) = 10.0
+
+  Patch (L2, pos=subject) from the clean run into the corrupted run, re-run:
+      patched_diff = +3.3
+
+      score = (3.3 - (-4.0)) / 10.0
+            =  7.3 / 10.0
+            =  0.73        <- this single activation carries 73% of the difference
+
+  Sanity checks the formula gives you for free:
+      patched_diff = -4.0 (nothing moved)   -> score = 0.0
+      patched_diff = +6.0 (fully restored)  -> score = 1.0
+      patched_diff = -6.0 (made it WORSE)   -> score = -0.2, negative by design
+```
+
+That `0.73` is exactly the number the §14 case study reports for its layer-41 peak — a patch that flips the model toward the clean behavior about three-quarters of the way. Scores above `1.0` are possible and informative too: they mean the patch overshot the clean run, usually a sign your corrupted prompt was suppressing the answer rather than merely failing to produce it.
+
+**Why the sweep cost is what it is.** The double loop runs one forward pass per `(layer, position)` cell: `n_layers x seq_len = 32 x 15 = 480` passes for a short prompt. That is fine at 8B scale and seconds long — but note it grows with prompt length, and moving from residual-stream patching to *per-head* patching multiplies it by `n_heads = 32` again. This is precisely the wall attribution patching (§4.2) exists to get around: one backward pass instead of hundreds of forward ones.
+
 ### 6.3 Logit Lens and Direct Logit Attribution
 
 Both techniques exploit the fact that the final operation of a transformer is `logits = LayerNorm(resid_final) @ W_U` — a *linear* (post-LayerNorm) projection. This means any intermediate residual-stream vector, or any single component's *contribution* to the residual stream, can be projected through `W_U` to ask "what would this, alone, predict?"
@@ -547,6 +690,41 @@ def direct_logit_attribution(
 
 For the IOI task (§5.4), DLA over `attention_heads` is exactly how the "Name Mover Heads" (large *positive* contribution to `logit(" Mary") - logit(" John")`) and "Negative Name Mover Heads" (small *negative* contribution) were first identified — before path patching confirmed the full causal story.
 
+**Put simply.** `logit_diff_direction = W_U[:, correct] - W_U[:, incorrect]`, then `component_output @ direction`, says: "point an arrow in logit space from the wrong answer toward the right one, and ask each component how far it pushed along that arrow."
+
+Because the final step `logits = LayerNorm(resid) @ W_U` is linear and the residual stream is a plain sum, every component's push adds up *exactly* to the model's final logit difference. DLA is not an estimate — it is complete bookkeeping.
+
+| Symbol | What it is |
+|--------|------------|
+| `W_U` | Unembedding matrix. Column `t` is the direction in residual space that votes for token `t` |
+| `W_U[:, correct] - W_U[:, incorrect]` | The "prefer Mary over John" arrow. Projecting onto it discards everything not about this one contrast |
+| `component_output @ direction` | Dot product: how much this head/MLP pushed along that arrow. Positive = toward the correct token |
+| `stack_head_results` | Each head's write to the residual stream, *before* it is summed in — the whole reason per-head attribution is possible |
+| "direct" | Only what a component writes straight into the final logits. Effects routed through *later* components are invisible here |
+
+**Walk one example.** Decompose the IOI logit difference from §5.4 (`logit(" Mary") - logit(" John")`):
+
+```
+  component                              contribution to the logit diff
+    name mover head 9.9                            +2.6
+    name mover head 9.6                            +1.9
+    name mover head 10.0                           +1.4
+    negative name mover head 10.7                  -0.9
+    negative name mover head 11.10                 -0.4
+    all other attention heads (summed)             +0.3
+    all MLP layers (summed)                        +0.6
+                                                  ------
+    total                                          +5.5   = the model's actual diff
+
+  Three name movers alone contribute +2.6 +1.9 +1.4 = +5.9
+      -- MORE than the entire final answer of +5.5.
+  The negative name movers hand back -0.9 -0.4 = -1.3 of it.
+```
+
+The name movers overshooting and the negative name movers clawing back is the calibration story in §5.4, now as arithmetic: the circuit deliberately overshoots and then damps, rather than aiming once and landing.
+
+**Why "direct" is a real limitation, not a footnote.** The duplicate-token and S-inhibition heads (layers ~0-8) score near `0.0` in this table, despite being essential — they never write toward `" Mary"` themselves; they write a *signal* that the name movers later read. DLA sees only the last hop. A head can be indispensable and score zero, which is exactly why a DLA ranking is a starting hypothesis and path patching (§4.2) is the confirmation.
+
 ### 6.4 Contrastive Activation Addition (CAA) Steering
 
 CAA builds a steering vector from the *average difference* in activations between matched pairs of prompts that differ only in the target behavior, then adds that vector (scaled) to every token's residual stream at inference time.
@@ -604,6 +782,37 @@ def steer_with_vector(
 ```
 
 **Concrete numbers**: in "Golden Gate Claude," Anthropic took a single SAE feature direction (out of ~34M) that fires on mentions/images of the Golden Gate Bridge and **clamped** its activation to 10x its typical maximum value across all tokens — at that strength, the model could not produce a response (even "what's your favorite food?") without working the bridge into the answer. CAA steering coefficients in published work typically range **4x to 15x** the natural activation-difference norm; too low has no effect, too high degrades fluency/coherence entirely (a tradeoff covered in §8 and §10).
+
+**Stated plainly.** `resid + coefficient * steering_vector` says: "at one chosen layer, shout a fixed opinion into the model's shared bus on every single token, and let the rest of the network react to it as if it had thought of it itself."
+
+The steering vector is built by *subtraction* — average(positive activations) minus average(negative activations) — so everything the paired prompts have in common cancels out, and what survives is (ideally) only the behavior you varied. Matching the pairs carefully is the entire quality of the method.
+
+| Symbol | What it is |
+|--------|------------|
+| `pos_act - neg_act` | One pair's difference. Shared content cancels; the target behavior remains |
+| `.mean(dim=0)` | Averaging over many pairs — this is what separates CAA from single-pair ActAdd. Noise cancels, the behavior direction reinforces |
+| `steering_vector` | The resulting `d_model` direction. Its *norm* is the natural scale of the behavior's signal |
+| `coefficient` | How many multiples of that natural scale to inject. `8.0` in this code |
+| `resid + c * v` | Addition, not replacement — the model's own signal is still there, just outvoted to a degree you choose |
+| every token | The hook fires on all positions, so the opinion is re-injected at each step of generation |
+
+**Walk one example.** Measure the injection against the signal it competes with, at the steered layer for one token:
+
+```
+  ||resid||           = 40.0    <- the model's own signal at this layer
+  ||steering_vector|| =  2.0    <- averaged contrastive difference
+
+  coefficient    injected norm = c x 2.0    injected / model's own signal
+       2                 4.0                          10%
+       4                 8.0                          20%
+       8                16.0                          40%   <- the code's default
+      15                30.0                          75%
+
+  Below ~10% the prompt's own activations drown the vector out -- no effect.
+  At 75% the injection nearly rivals everything the model computed itself.
+```
+
+The published `4x-15x` band maps exactly onto that 20%-to-75% span: the low end is "noticeable," the high end is "the injected opinion is comparable to the model's own thinking." Golden Gate Claude clamped its feature to **10x its typical maximum** — above the top of the band, deliberately — which is precisely why it could not answer "what's your favorite food?" without reaching the bridge. This is also why §10.5 calls coefficient tuning a cliff rather than a slope: `||resid||` is not constant, so a coefficient calibrated at `||resid|| = 40` lands at a different *ratio* on a longer prompt where the residual norm has grown, and the same number silently moves from "20%" to "no effect" or from "40%" to "incoherent."
 
 ---
 
@@ -762,6 +971,41 @@ Attribution patching (§4.2) estimates a component's causal effect via `gradient
 ### 10.7 SAE Reconstruction Error Compounds Across Layers
 
 An SAE with even a 95% reconstruction fidelity (5% of the activation's variance unexplained) introduces a small error at every layer it's inserted into. When CLTs or stacked SAEs are used to build attribution graphs across 20+ layers, these per-layer errors compound — Anthropic's circuit-tracing work explicitly reports the fraction of model behavior an attribution graph fails to explain ("unexplained variance") as a first-class caveat, often **20-50%** of the behavior depending on the task. Treat attribution graphs as a *partial, best-effort* explanation, not a complete causal account — and always sanity-check a graph's predicted intervention (e.g., "ablate this feature to suppress this output") against the *actual* model, not just the graph.
+
+**The idea behind it.** "Fidelity compounds multiplicatively, not additively — 5% lost per layer is not 5% lost overall, it is 5% lost *again* at every layer, and the survivor is what is left after all of them."
+
+Engineers reason additively by instinct ("twenty layers, 5% each, call it a rounding error"), and that instinct is wrong by a wide margin here. The correct model is `r^L`, the same compounding that makes a 99%-uptime dependency chain unshippable.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | Per-layer reconstruction fidelity — the fraction of variance one SAE/CLT explains. `0.95` in the text |
+| `1 - r` | Variance that SAE loses. `0.05` at 95% fidelity |
+| `L` | Number of layers the attribution graph spans. "20+" for circuit-tracing work |
+| `r^L` | Fidelity that survives the whole stack. What the graph actually explains |
+| `1 - r^L` | **Unexplained variance** — the number Anthropic reports as a first-class caveat |
+
+**Walk one example.** Stack a 95%-fidelity SAE and watch the graph decay:
+
+```
+  r = 0.95  (5% of variance unexplained per layer)
+
+      L =  1 layer    0.95^1  = 0.950   ->   5.0% unexplained
+      L = 10 layers   0.95^10 = 0.599   ->  40.1% unexplained
+      L = 20 layers   0.95^20 = 0.358   ->  64.2% unexplained
+      L = 30 layers   0.95^30 = 0.215   ->  78.5% unexplained
+
+  Anthropic's reported 20-50% unexplained across ~20 layers therefore implies
+  a much tighter per-layer fidelity than 0.95:
+
+      0.990^20 = 0.818   ->  18.2% unexplained
+      0.966^20 = 0.501   ->  49.9% unexplained
+
+  So the published 20-50% band corresponds to roughly 0.966-0.990 per layer --
+  a very narrow window, and the whole reason SAE reconstruction quality is
+  tracked so obsessively.
+```
+
+Run it backwards to size a project: if you want a 20-layer attribution graph to explain at least 80% of a behavior, you need `r >= 0.99` at *every* layer. Missing that on even one layer caps the whole graph, which is why "our SAE explains 95% of the variance" is a comfortable-sounding number that quietly fails at depth.
 
 ### 10.8 Compute and Engineering Cost Is Dominated by Evaluation, Not Training
 

@@ -63,6 +63,40 @@ Memory: 4 bits = 0.5 bytes per weight
   7B model: 14GB (BF16) → 3.5GB (NF4)
 ```
 
+**In plain terms.** "Four bits buys you exactly sixteen distinct numbers per weight — so the only design question is *where on the number line you put those sixteen*, and NF4 puts them where the weights actually live."
+
+| Symbol | What it is |
+|--------|------------|
+| 4 bits | The storage budget per weight. `2^4 = 16` — the entire vocabulary of values a weight may take |
+| the 16 levels | The lookup table. Every stored weight is an index `0..15` into it, not a number |
+| NF4 quantile spacing | Levels placed so each covers `1/16 = 6.25%` of the probability mass of `N(0,1)` |
+| INT4 uniform spacing | Levels placed at equal *value* intervals instead, ignoring where the mass is |
+| bytes/weight | `4 bits / 8 = 0.5 bytes`. Against BF16's `2 bytes`, exactly `4×` compression |
+| per-block absmax | The scale that maps a real block of weights onto the fixed `[-1, +1]` table range |
+
+Note what is and is not stored: a 4-bit weight is an *index*, and the 16 float values it indexes are a constant shared by the whole model. That is why the compression is exactly 4× and not "4× minus a table" — the table costs 16 floats total, once.
+
+**Walk one example.** Base-weight memory at each precision, computed as `params × bytes/param`:
+
+```
+  model     fp16 (2 B)      int8 (1 B)     NF4 (0.5 B)     NF4 saves vs fp16
+    7B        14.0 GB          7.0 GB         3.50 GB          10.5 GB
+   13B        26.0 GB         13.0 GB         6.50 GB          19.5 GB
+   65B       130.0 GB         65.0 GB        32.50 GB          97.5 GB
+   70B       140.0 GB         70.0 GB        35.00 GB         105.0 GB
+
+  (1 GB = 1e9 bytes; base weights only, before scales/adapters/activations)
+
+  The threshold that matters is a single 80 GB A100:
+    70B at fp16 = 140.0 GB  -> does not fit, not even close
+    70B at int8 =  70.0 GB  -> "fits", but 10 GB left for everything else -> OOM
+    70B at NF4  =  35.0 GB  -> 45 GB left for adapters, grads, activations -> works
+```
+
+That last block is the whole reason QLoRA exists as a named technique rather than a footnote. The compression ratio is a boring constant 4×; what is not boring is that 4× is precisely the factor that moves a 70B model across the one-GPU line. Halving again to int8 leaves no headroom, and the section's own case study confirms it — 70B at 8-bit is 70 GB against an 80 GB card, which the Tradeoffs section flags as still too large once gradients and activations are stacked on top.
+
+**Why the level placement matters more than the bit count.** Both INT4 and NF4 spend the same 4 bits. Since roughly 68% of a standard normal's mass sits inside `±1σ`, uniform INT4 spacing spends a large share of its 16 levels on tail regions holding almost no weights, while the dense center gets coarse resolution. NF4's equal-probability construction guarantees every level is responsible for the same `6.25%` of weights, so no level is wasted and none is overloaded. Same storage, better-placed levels, `~0.5-1%` less quantization error — a free win, which is why Pitfall 2 says never to leave the quantization type at INT4.
+
 ### NF4 vs INT4 — Match the Levels to the Weights
 ```
 Why NF4 beats INT4: put the 16 quantization levels where the weights actually are.
@@ -104,6 +138,57 @@ Double quantization:
   For a 7B model: ~300MB saved (small but meaningful)
 ```
 
+**The idea behind it.** "You compressed the weights to 4 bits, but the scales you needed to do that are still full-precision — so compress the scales too, with exactly the same trick applied one level up."
+
+The right unit for this whole discussion is **bits per parameter**, not percentages. Percentages hide the fact that the scale overhead is a fixed additive cost, and additive costs are what you can actually convert to gigabytes.
+
+| Symbol | What it is |
+|--------|------------|
+| block size 64 | How many weights share one scale. Smaller blocks track local weight magnitude better but multiply the number of scales |
+| absmax scale | The largest absolute weight in the block. Divide by it and the block lands in `[-1, +1]`, the NF4 table's range |
+| 32 bits | Size of one FP32 absmax scale — the thing being paid for, once per 64 weights |
+| `32 / 64` | First-level scale cost amortized per parameter: `0.5` bits/param |
+| super-block 256 | How many *scales* share one second-level scale under double quantization |
+| `8 / 64` | Cost of the now-FP8 first-level scales: `0.125` bits/param |
+| `32 / (64 × 256)` | Cost of the FP32 second-level scale, amortized over `64 × 256 = 16,384` weights |
+
+**Walk one example.** Both overhead figures, computed exactly:
+
+```
+  SINGLE QUANTIZATION (FP32 absmax, block 64)
+
+    32 bits / 64 weights                    =  0.500000 bits/param
+
+  DOUBLE QUANTIZATION (FP8 absmax, block 64; FP32 super-scale, super-block 256)
+
+     8 bits / 64 weights                    =  0.125000 bits/param
+    32 bits / (64 x 256 = 16,384 weights)   =  0.001953 bits/param
+                                               --------
+    total                                   =  0.126953 bits/param
+
+  SAVED = 0.500000 - 0.126953              =  0.373047 bits/param
+```
+
+That `0.373` is exactly the "~0.37 bits per parameter" the block above quotes — now derived rather than asserted. Converting to memory:
+
+```
+  scale-metadata memory = params x bits/param / 8
+
+  model      single quant      double quant      saved
+    7B          437.5 MB          111.1 MB       326.4 MB
+   65B         4062.5 MB         1031.5 MB      3031.0 MB   (3.03 GB)
+   70B         4375.0 MB         1110.8 MB      3264.2 MB
+
+  Total footprint on the 65B model (payload + scales):
+    payload            4.000000 bits/param  ->  32.50 GB
+    + single quant     4.500000 bits/param  ->  36.56 GB
+    + double quant     4.126953 bits/param  ->  33.53 GB   <- 3.03 GB reclaimed
+```
+
+The 7B figure of `326.4 MB` reproduces the `~325MB` quoted in the Interview section, confirming the derivation. Note how the two levels differ in importance: the FP8 first-level scales cost `0.125` bits/param while the FP32 super-scales cost `0.001953` — **64× less**. The second level is essentially free, which is why nobody bothers with a third.
+
+**Why the effective bit-width is never 4.0.** Marketing says "4-bit"; the honest number is `4.127` bits/param with double quantization, or `4.5` without. On a 65B model that gap between `4.0` and `4.5` is `4.06 GB` of pure bookkeeping — larger than the entire LoRA adapter, gradients, and optimizer state combined. Turning double quantization off does not just cost `0.37` bits abstractly; on the case study's 70B run it costs `3.26 GB`, which is the difference between fitting the A100 and not. This is also why the block above notes the scale overhead varies with block size: shrink the block from 64 to 32 for better fidelity and the single-quant overhead *doubles* to `1.0` bits/param.
+
 ### 3.3 Paged Optimizer
 
 ```
@@ -130,6 +215,56 @@ Combined memory savings of paged 8-bit Adam vs. standard Adam:
   Standard Adam: 2 × 8M params × 4 bytes = 64MB
   PagedAdamW8bit: 2 × 8M params × 1 byte (8-bit) = 16MB
 ```
+
+**What it means.** "Optimizer state is small but arrives all at once at the worst possible moment, so instead of reserving room for it permanently, let it spill to CPU RAM and pay a bus transfer only on the steps where it would otherwise have killed the run."
+
+| Symbol | What it is |
+|--------|------------|
+| `m`, `v` | Adam's two per-parameter momentum tensors. Both exist only for *trainable* params, so only for the adapter |
+| `2 × P × bytes` | Optimizer state size. The `2` is `m` and `v`; `bytes` is 4 for fp32, 1 for 8-bit |
+| unified memory | An allocation the GPU addresses normally but that CUDA may physically place in CPU RAM |
+| page event | One spill-or-restore round trip across PCIe. Cost is `size / bandwidth`, nothing more |
+| PCIe 4.0 x16 | The pipe, ~16 GB/s usable. The only term that turns megabytes into milliseconds |
+
+**Walk one example.** Optimizer state for the 8M-parameter adapter above, and the cost of moving it:
+
+```
+  OPTIMIZER STATE SIZE  (P = 8,000,000 trainable adapter params)
+
+    Adam fp32   2 x 8e6 x 4 B  =  64 MB
+    Adam bf16   2 x 8e6 x 2 B  =  32 MB
+    AdamW8bit   2 x 8e6 x 1 B  =  16 MB     <- 4x smaller than fp32
+
+  PAGE-EVENT COST at 16 GB/s
+
+     16 MB  ->   1.00 ms
+     64 MB  ->   4.00 ms
+    160 MB  ->  10.00 ms
+    320 MB  ->  20.00 ms
+
+  8-bit states do double duty: they are 4x smaller to HOLD and 4x faster to MOVE.
+  A page event on 8-bit state costs 1 ms; the same state in fp32 costs 4 ms.
+```
+
+Paging is worth understanding as an *insurance policy*, not an optimization. It never makes a run faster. Its entire value is that the alternative outcome is not "slower" but "CUDA OOM, process dead, 14 hours of training lost." The case study's run paged 23 times across three epochs — a handful of millisecond-scale stalls bought a training run that would otherwise have crashed.
+
+**The gradient-checkpointing tradeoff, in the same units.** Activation memory is the term QLoRA does *not* shrink, and it is usually the one that actually OOMs you. Checkpointing keeps only one tensor per layer boundary and recomputes the interior during the backward pass:
+
+```
+  ACTIVATION MEMORY   7B model: 32 layers, hidden 4096, seq 2048, batch 1, bf16
+
+    one layer-boundary tensor  =  1 x 2048 x 4096 x 2 B   =   16.78 MB
+    x 32 layers stored         =                              537 MB    <- checkpointed
+    all intermediates kept     =                              3-4 GB    <- not checkpointed
+
+  COMPUTE PAID FOR IT   (units of one forward pass)
+
+    without checkpointing :  fwd 1  +  bwd 2            =  3 units
+    with checkpointing    :  fwd 1  +  bwd 2  +  refwd 1 =  4 units
+                                                            -> +33% compute
+```
+
+So the trade is roughly **6x less activation memory for 33% more compute**, and under QLoRA you take it every time. The reason is asymmetry: the 4-bit weights already bought the memory headroom, and if activations then blow past what is left, the run does not get slower — it dies. Compute overruns are survivable; memory overruns are not. That asymmetry is why Pitfall 3 makes checkpointing mandatory rather than optional, and it stacks with the `~15-30%` dequantization overhead from Pitfall 1 — a QLoRA step is meaningfully slower than a LoRA step on both counts, which is the real price of the memory savings.
 
 ### 3.4 Full QLoRA Memory Layout
 
@@ -252,6 +387,39 @@ Forward Pass:
   No BF16 weight copy stored permanently
   4-bit storage, BF16 compute — best of both
 ```
+
+**What this actually says.** "Nothing about the arithmetic changes — the matmul is the same BF16 matmul it always was. All that changed is how many bytes had to cross the memory bus to feed it."
+
+| Symbol | What it is |
+|--------|------------|
+| dequantize | Table lookup: index `0..15` to its NF4 float, times the block's absmax scale. A few FLOPs per weight |
+| "temporary" | The BF16 tile lives in registers/SRAM for the duration of one tile's matmul, then is gone |
+| matmul FLOPs | `2 × d_out × d_in` per token. **Identical** for NF4 and BF16 storage — compute dtype is BF16 either way |
+| weight traffic | Bytes pulled from HBM: `d_out × d_in × bytes_per_weight`. This is the term NF4 divides by 4 |
+| arithmetic intensity | `FLOPs / bytes`. Low = starved by the bus; high = limited by the math units |
+| ridge point | The intensity at which a GPU flips from memory-bound to compute-bound |
+
+**Walk one example.** One 4096×4096 projection, one token, on an A100 80GB (312 TFLOP/s BF16, 2039 GB/s HBM):
+
+```
+  FLOPs are constant :  2 x 4096 x 4096  =  33,554,432   for every storage format
+
+  storage    weight traffic     arithmetic intensity     vs A100 ridge (153 FLOP/B)
+   BF16        33.55 MB            1.00 FLOP/byte          153x below  -> memory-bound
+   INT8        16.78 MB            2.00 FLOP/byte           77x below  -> memory-bound
+   NF4          8.39 MB            4.00 FLOP/byte           38x below  -> memory-bound
+
+  Everything is FAR left of the ridge point. The math units are idle either way;
+  the only thing that moves the clock is how fast weights arrive.
+
+  Whole-model decode, weight-fetch bound, 7B on 2039 GB/s:
+    BF16 : 14.0 GB / 2039 GB/s  =  6.87 ms/token  ->  146 tok/s
+    NF4  :  3.5 GB / 2039 GB/s  =  1.72 ms/token  ->  583 tok/s     4x faster
+```
+
+**Why this is a bandwidth win and not a FLOPs win.** The FLOPs column above never changes — quantization does not remove a single multiply-add, and it *adds* the dequantization work on top. NF4 wins because at intensity `1.00 FLOP/byte` the A100 is running its math units at roughly `1/153` of peak, waiting on HBM. Cutting weight traffic 4× cuts the wait 4×, and the extra dequant FLOPs are absorbed for free in compute the GPU was going to spend idling anyway. Storing weights in 4 bits does not make the GPU compute faster; it makes the GPU wait less.
+
+Which is exactly why the sign of the effect flips during training. Training runs large batches, so the same weight tile is reused across many tokens: weight traffic is amortized, intensity climbs toward the ridge, and the kernel becomes compute-bound. In that regime there is no idle time left to hide the dequantization in, so it shows up directly as wall-clock — the `~15-30%` training slowdown Pitfall 1 warns about. Same technique, same hardware, opposite verdict: **NF4 is a speedup for memory-bound single-stream decode and a tax for compute-bound batched training.** You accept the tax because you are not buying speed, you are buying the ability to run at all.
 
 ---
 

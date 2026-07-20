@@ -447,6 +447,44 @@ Revenue uplift:
   Availability → capture queries that would have gone unanswered
 ```
 
+**What this actually says.** "Savings is a chain of multiplications, and every percentage in it
+applies to the step before it — not to the total headcount."
+
+That nesting is where AI business cases most often mislead. "80% automation" sounds like 80 of 100
+agents. It is 48, because the 80% applies only to the tier-1 slice.
+
+| Symbol | What it is |
+|--------|------------|
+| 100 agents | Total headcount. The base everything scales from |
+| $50K/year | Fully loaded cost per agent, not salary alone |
+| 60% tier-1 | Share of **tickets** simple enough to be automation candidates |
+| 80% automated | Share **of those tier-1 tickets** the AI actually handles |
+| $500K AI cost | Annual platform, inference, and maintenance. A fixed floor |
+
+**Walk one example.** Follow the chain, then check what the headline percentage really means:
+
+```
+  total cost today      100 x $50,000        = $5,000,000
+  automatable share     100 x 60%            =  60 agents
+  actually automated     60 x 80%            =  48 agents
+  gross savings          48 x $50,000        = $2,400,000
+  net benefit       $2,400,000 - $500,000    = $1,900,000
+  return on AI spend $1,900,000 / $500,000   = 3.8x
+
+  EFFECTIVE AUTOMATION ACROSS ALL TICKETS
+    60% x 80% = 48%   -- not the 80% in the headline
+
+  SENSITIVITY -- the $500K is fixed, so it bites hardest when volume is low
+    80% of tier-1: 48 agents freed, $2.4M gross, $500K = 21% of the benefit
+    40% of tier-1: 24 agents freed, $1.2M gross, $500K = 42% of the benefit
+```
+
+Quoting the headline 80% to a finance stakeholder promises roughly double what the architecture can
+deliver. The honest number is 48% effective automation and a 3.8x return. The sensitivity line
+explains something else this module asserts repeatedly — why customer support is the most common
+first deployment despite the lowest per-task savings. The platform cost is fixed, so the only thing
+that clears it is volume, and support has volume that healthcare and legal workflows do not.
+
 ### Domain-Specific Confidence Scoring
 
 In high-stakes domains, the model must communicate uncertainty:
@@ -719,6 +757,53 @@ Quality metrics:
   Risk flag precision:          87% (13% false positives reviewed by attorneys)
   Critical issue capture rate:  99% (most important metric — no material issue missed)
 ```
+
+**Put simply.** "Cost per contract is attorney-hours times the hourly rate. The AI does not make
+attorneys cheaper — it removes hours from the numerator, and that is the entire mechanism."
+
+Notice what is absent from both columns: the cost of the AI itself. At $500/hour of attorney time,
+inference is a rounding error, which is why domain applications in expensive-expert fields have such
+violent economics compared to consumer AI.
+
+| Symbol | What it is |
+|--------|------------|
+| attorney-hours | 5 attorneys x 8 hours = 40 hours per contract, before AI |
+| $500/hr | Fully loaded attorney rate |
+| AI first pass | 25 minutes of machine time replacing the read-and-flag phase |
+| attorney review | 3 hours of expert judgment on what the AI surfaced. Irreducible |
+| recall 94% | Share of clauses the AI finds. The 6% missed is why review stays mandatory |
+| capture rate 99% | Share of *material* issues caught. The metric that actually gates deployment |
+
+**Walk one example.** Price one contract each way:
+
+```
+  BEFORE
+    5 attorneys x 8 hours = 40 hours
+    40 x $500             = $20,000 per contract
+
+  AFTER
+    AI first-pass review              25 minutes (compute cost, negligible)
+    attorney review of AI output       3 hours
+    billable equivalent               3.25 hours
+    3.25 x $500                     = $1,625 per contract
+
+  THE DELTA
+    hours     40 -> 3.25       = 12.3x reduction
+    cost   $20,000 -> $1,625   = $18,375 saved per contract, a 91.9% cut
+
+  AT 1,000 CONTRACTS PER MONTH
+    before  1,000 x $20,000 = $20.000M
+    after   1,000 x  $1,625 =  $1.625M
+    saved                   = $18.375M
+```
+
+The 12.3x reduction comes entirely from deleting the read-and-flag phase, and the 3 remaining
+attorney-hours are the part no model removes. That floor matters more than the savings: it means the
+ceiling on this application is 40/3 ≈ 13x no matter how good the model gets, so pushing recall from
+94% to 97% is worth far less than it appears. Which is exactly why the results table puts
+**critical issue capture rate at 99%** as the most important metric rather than recall. A missed
+boilerplate clause costs a little attorney time; a missed material issue in an M&A diligence review
+costs the deal, and no amount of hours saved compensates for it.
 
 **Tradeoffs and Alternatives**
 

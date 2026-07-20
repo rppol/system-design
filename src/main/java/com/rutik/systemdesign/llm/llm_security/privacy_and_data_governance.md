@@ -38,6 +38,56 @@ Senior interviews increasingly probe both: "can you delete a user from a trained
 5. **Embeddings are not anonymized data.** Inversion attacks (Vec2Text-class) reconstruct input text from embeddings with high fidelity — exact recovery for a large share of short inputs. A vector DB of customer-text embeddings is a PII store and must be governed as one.
 6. **Provider terms are part of your architecture.** Retention windows (e.g., 30-day abuse-monitoring retention as a common default, with zero-data-retention tiers), train-on-your-data defaults (consumer products often opt-out, enterprise APIs opt-in/never), and regional processing guarantees differ by provider and tier — and they determine what you may legally send.
 
+### Decoding "memorization scales log-linearly"
+
+Principle 1 states the Carlini result in words. Written out, the shape of the finding is:
+
+```
+  extractability(sequence)  ~  a + b x log(duplicates)
+                                 + c x log(model params)
+                                 + d x log(prefix length)
+```
+
+**What this actually says.** "Each of the three risk factors has to be multiplied by a constant
+factor -- not added to -- before the memorization risk moves by one fixed step."
+
+That framing is the whole reason deduplication is the highest-leverage control. Duplicates are
+the only one of the three terms you can cut by a factor of 10 for free; you cannot shrink the
+model or shorten the attacker's prompt.
+
+| Symbol | What it is |
+|--------|------------|
+| `extractability` | Probability a greedy decode from a prefix reproduces the rest verbatim |
+| `duplicates` | How many near-identical copies of the sequence sit in the training corpus |
+| `log(...)` | Turns "how many times more" into "how many steps more". Ratio 1 -> 0; ratio 10 -> 1 step |
+| `b, c, d` | Slopes. How much risk one 10x increase in that factor buys the attacker |
+| `a` | Baseline risk floor for a sequence seen exactly once |
+
+**Walk one example.** Take the duplication tiers this file uses for canaries (1 / 10 / 100), plus
+the real offender from the Section 14 case study (a refund template duplicated 412 times):
+
+```
+  duplicates   log10(duplicates)   steps above a single-copy sequence
+      1              0.00           0.00   <- baseline, the "a" floor
+     10              1.00           1.00   <- one step
+    100              2.00           2.00   <- two steps, not 100 steps
+    412              2.61           2.61   <- the case-study boilerplate offender
+
+  Going 1 -> 100 multiplies copies by 100x but moves risk only 2 steps.
+  Going 100 -> 412 multiplies copies by 4.1x and moves risk 0.61 steps.
+```
+
+The payoff runs the other way too, and that is where the file's "~10x less regurgitation" number
+comes from: MinHash dedup that collapses a 412-copy template down to 1 copy walks the sequence
+back 2.61 steps at once. This is also why the canary tiers are spaced 1 / 10 / 100 rather than
+1 / 2 / 3 -- on a log axis, evenly spaced probes mean equal-sized steps, so three tiers cover the
+whole realistic range of corpus duplication.
+
+**Why the model-size term matters even though you cannot tune it.** The `c x log(params)` term
+says the same corpus gets more extractable purely by scaling the model. A dedup threshold and a
+canary gate that passed at 7B can fail unchanged at 70B, so the gate has to be re-run per model
+size, not inherited from the last release.
+
 ---
 
 ## 4. Types — Attack and Defense Taxonomy
@@ -146,6 +196,49 @@ def exposure_check(model, canary: Canary, prefix_len: int = 24) -> bool:
 # extraction at duplicates=100 tells you your dedup threshold must be < 100.
 ```
 
+**Put simply.** "A zero-extraction gate is not proof of zero memorization -- it is proof that the
+memorization rate is below whatever rate your number of canaries was able to detect."
+
+The gate is a statistical test, and the arithmetic that decides how much it is worth is a single
+line. If each planted canary is independently extractable with probability `p`, then a tier of `n`
+canaries misses the problem entirely with probability:
+
+```
+  P(gate passes | true rate p)  =  (1 - p)^n
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | True per-sequence extraction rate at that duplication tier. The thing you cannot observe |
+| `n` | Canaries planted at that tier. In the Section 14 case study: 300 total across 3 tiers = 100 each |
+| `(1 - p)` | Probability one canary stays hidden |
+| `(1 - p)^n` | Probability all `n` stay hidden -- a false all-clear |
+| `1 - (1 - p)^n` | The gate's statistical power: the chance it fires when there is a real problem |
+
+**Walk one example.** 100 canaries at a tier, sweeping the true extraction rate:
+
+```
+  true rate p     (1 - p)^100 = false all-clear     power = chance the gate fires
+     0.01              0.366                             63.4%
+     0.03              0.0476                            95.2%
+     0.05              0.0059                            99.4%
+     0.10              0.000027                          100.0% (to 4 decimals)
+
+  Worked for p = 0.03:  (1 - 0.03)^100 = 0.97^100 = 0.0476
+                        power = 1 - 0.0476 = 0.9524
+```
+
+Read the top row carefully: at a genuine 1% extraction rate, 100 canaries wave the release through
+roughly one time in three. So the honest claim a passing gate supports is "extraction is below
+about 3% at this tier with 95% confidence" -- not "we do not memorize." If you need to defend a
+tighter bound to a regulator, the only lever is `n`, and it costs you a log: driving the detectable
+floor from 3% to 0.3% needs roughly 10x the canaries.
+
+**Why the tiers are gated asymmetrically.** The gate demands zero extraction at `duplicates <= 10`
+but merely *reports* extraction at 100. That is deliberate: a hit at tier 100 is a finding about
+your deduplication pipeline (something got through 100 times), while a hit at tier 1 or 10 is a
+finding about the model itself. They route to different fixes, so they cannot share a threshold.
+
 ### 6.2 PII redaction — broken, then fixed
 
 ```python
@@ -212,6 +305,140 @@ This is the Presidio architecture (recognizers = patterns + NER + checksum valid
 ### 6.3 DP-SGD in three lines of intuition
 
 Differentially private SGD clips each example's gradient to a max norm C, adds Gaussian noise calibrated to C and a privacy budget ε, and accounts the budget across steps. The guarantee: the trained model is provably (ε, δ)-insensitive to any single example's presence. The catch at LLM scale: per-example gradient clipping breaks the batched-compute efficiency that makes large training feasible, and at meaningful ε the noise visibly costs perplexity. In practice DP shows up in small/medium *fine-tunes* on sensitive corpora (often DP-LoRA, where only adapter gradients are clipped/noised) — essentially never in frontier pre-training, where dedup + scrubbing + canary gates are the working substitute.
+
+### Decoding the (ε, δ) guarantee
+
+The phrase "provably (ε, δ)-insensitive to any single example" is one inequality. Written out, for
+any training mechanism `M`, any two datasets `D` and `D'` differing in exactly one record, and any
+set of outcomes `S`:
+
+```
+  Pr[ M(D) in S ]   <=   e^eps  x  Pr[ M(D') in S ]   +   delta
+```
+
+**What the formula is telling you.** "Whatever an attacker concludes from the trained model, they
+would have concluded almost the same thing from a model trained without you in the data -- and
+`e^eps` is exactly how much 'almost' is worth."
+
+The load-bearing detail is that epsilon sits in an *exponent*. Every discussion of "is ε = 8
+acceptable?" is really a discussion about `e^8`, and people who read epsilon as a linear dial
+consistently under-price the risk by three orders of magnitude.
+
+| Symbol | What it is |
+|--------|------------|
+| `M` | The whole training mechanism -- DP-SGD plus everything downstream. Randomized, so its output is a distribution |
+| `D`, `D'` | Two corpora identical except one record: you are in, or you are out |
+| `S` | Any set of possible outcomes an attacker cares about -- e.g. "models that complete this prefix" |
+| `e^eps` | The privacy loss, as a likelihood ratio. `eps = 0` -> ratio 1 -> the two worlds are indistinguishable |
+| `eps` | The budget. Not a probability, not a percentage -- the logarithm of the worst-case ratio |
+| `delta` | Probability the whole guarantee simply does not hold. The escape hatch in the inequality |
+
+**Walk one example.** An attacker starts at a 50/50 prior on "was this person's record in the
+training set?" and observes the model. Because prior odds are 1:1, the posterior odds are capped at
+exactly `e^eps`, so `posterior = e^eps / (1 + e^eps)`:
+
+```
+  eps     e^eps      posterior on membership from a 50% prior
+  1.0     2.72        2.72 / 3.72       =  73.1%
+  3.0    20.09       20.09 / 21.09      =  95.3%
+  8.0  2980.96     2980.96 / 2981.96    =  99.97%
+
+  Worked for eps = 3:  e^3 = 20.09 -> attacker moves 50% -> 95.3% certainty
+
+  And the gap between the ends of that table:
+    e^8 / e^1  =  e^7  =  1096.6
+```
+
+That last line is the sentence to say out loud in an interview: **ε = 8 is not "8x weaker" than
+ε = 1, it is about 1097x weaker in likelihood-ratio terms.** At ε = 1 an attacker who was
+maximally uncertain ends up merely suspicious; at ε = 8 they end up certain, with a 0.03% chance of
+being wrong. This is why published DP deployments cluster at single-digit epsilon, and why "we used
+DP" is a meaningless claim without the number attached.
+
+**Stated plainly.** "`delta` is the probability that the elegant `e^eps` bound above simply fails --
+that some record's presence leaks in full."
+
+So `delta` is not a knob you trade against utility the way you trade epsilon. It has to be small
+relative to the dataset, and the standard bar is `delta << 1/N`: if `delta` were as large as `1/N`,
+a mechanism could satisfy the definition while deterministically publishing one random person's
+record in the clear and still pass the audit.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of records in the corpus. This file's case study: 2,000,000 conversations |
+| `1/N` | The "one person, in the clear" scale. The line delta must sit well below |
+| `N x delta` | Expected number of records for which the guarantee provides nothing |
+
+**Walk one example.** N = 2,000,000 conversations, the Section 14 fine-tune corpus:
+
+```
+  1 / N  =  1 / 2,000,000  =  5.0e-07     <- the do-not-cross line
+
+  delta = 1e-05  ->  N x delta = 2e6 x 1e-05 = 20 records unprotected    REJECT
+                     (1e-05 is 20x LARGER than 1/N)
+  delta = 1e-08  ->  N x delta = 2e6 x 1e-08 = 0.02 records unprotected  OK
+                     (1e-08 is 50x smaller than 1/N)
+```
+
+The rule that falls out: pick `delta` near `1e-8` here, or generally one to two orders of magnitude
+below `1/N`. And re-check it when the corpus grows -- a delta that was comfortable at 2M records
+sits 5x closer to the line at 10M.
+
+**Read it like this.** "`C` decides how loud any single example is allowed to shout, and `sigma`
+decides how much static you play over the top of it."
+
+The two knobs Section 6.3 names combine into one quantity, the noise scale:
+
+```
+  clip:   g_i  <-  g_i x min(1, C / norm(g_i))     per-example, before summing
+  noise:  sum(g_i)  +  Normal(0, (C x sigma)^2)    once per batch
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `g_i` | One example's gradient. The thing that carries that example's information into the weights |
+| `C` | Clipping norm. The hard cap on any single example's influence -- typically `1.0` |
+| `norm(g_i)` | Gradient magnitude. Clipping only bites when this exceeds `C` |
+| `sigma` | Noise multiplier. Larger sigma -> smaller epsilon -> more damage to utility |
+| `C x sigma` | Noise scale. The actual standard deviation added, in gradient units |
+| `B` | Batch size. Signal grows with `B`; the noise added does not |
+
+**Walk one example.** `C = 1.0`, `sigma = 1.1`, batch size `B = 1024`:
+
+```
+  worst-case signal from the batch :  B x C     = 1024 x 1.0 = 1024
+  noise added to the batch sum     :  C x sigma = 1.0 x 1.1  = 1.1
+  noise seen per example, averaged :  1.1 / 1024             = 0.001074
+
+  Halve the batch to B = 512:
+  noise per example                :  1.1 / 512              = 0.002148   (2x worse)
+```
+
+This is the most counter-intuitive fact about DP-SGD, and it is why DP training runs use enormous
+batches: **the noise is added once per batch, so doubling the batch halves the noise each example
+has to fight through.** Large batches are a privacy-utility free lunch in a way they never are in
+ordinary training.
+
+**Why epsilon does not simply add up over steps.** Section 6.3 says the accountant tracks the budget
+"across steps." Naive composition would add epsilon per step, which at thousands of steps is
+hopeless; modern RDP/moments accountants instead grow the total roughly with the *square root* of
+the step count, because independent Gaussian noise partially cancels:
+
+```
+  N = 2,000,000 records,  B = 1024,  epochs = 3
+
+  steps  =  epochs x N / B  =  3 x 2,000,000 / 1024  =  5859 steps
+
+  naive composition  :  total eps  ~  5859 x eps_step     <- unusable
+  sqrt-scale (RDP)   :  total eps  ~  76.5 x eps_step     <- sqrt(5859) = 76.5
+
+  To land at total eps = 8 under the sqrt rule:  8 / 76.5 = 0.1045 per step
+```
+
+The planning consequence: **epochs are a privacy cost, not just a compute cost.** Going from 3
+epochs to 12 quadruples the steps and so roughly doubles total epsilon -- which, per the exponent
+table above, is a far bigger giveaway than "epsilon doubled" sounds. Budget epochs before the run
+starts; you cannot claw epsilon back afterwards.
 
 ### 6.4 Why machine unlearning mostly disappoints
 
@@ -371,6 +598,83 @@ SISA (Sharded, Isolated, Sliced, Aggregated) trains an ensemble on disjoint data
 2. **PII pipeline at four boundaries** (Presidio-style NER + Luhn-validated patterns + vault pseudonymization): inference input, RAG ingestion, fine-tune set construction, and inside the tracing SDK before export. Detector recall benchmarked at 96.4% on a 5K-message labeled sample; the gap covered by an output identifier-scan filter.
 3. **Memorization gates**: corpus MinHash dedup (removed 23% near-duplicates); 300 canaries at duplication tiers 1/10/100; release gate = zero extraction at ≤10 duplicates. The first candidate fine-tune *failed* the gate at tier-100 (boilerplate refund template containing a real agent's phone number, duplicated 412 times) — caught pre-launch, fixed by template normalization in dedup.
 4. **Governance**: logs TTL 30 days (sampled 20%), hashed user IDs, dashboard access cut from org-wide to 14 people; deletion ledger + quarterly retrain exclusion cycle; EU traffic routed to EU-region ZDR endpoints under DPA; DSR fire-drill before launch found the forgotten store — a golden eval set in git with 41 real conversations — replaced with pseudonymized versions.
+
+### Decoding the retention and deletion-latency arithmetic
+
+Two numbers in the redesign above look like policy choices but are really the output of
+calculations worth doing explicitly. The first is how much PII the trace store holds at rest:
+
+```
+  steady-state stored volume  =  daily ingest x sampling rate x retention days
+```
+
+**In plain terms.** "A log store is a bathtub -- volume settles where the daily inflow times how
+long you hold it balances out, so shortening retention and sampling both drain it multiplicatively,
+not additively."
+
+Multiplicatively is the operative word. Teams argue about sampling *or* TTL as if picking one is
+the decision; they multiply, which is why doing both modestly beats doing either aggressively.
+
+| Symbol | What it is |
+|--------|------------|
+| `daily ingest` | Prompt/response payload volume written per day, before any controls |
+| `sampling rate` | Fraction of payloads actually persisted. The redesign uses 20% |
+| `retention days` | TTL before expiry. v1 was 13 months; the redesign is 30 days |
+| `steady-state volume` | What sits in the store on any given day once inflow and expiry balance |
+
+**Walk one example.** The v1 design against the redesign, holding daily ingest constant:
+
+```
+  v1        :  ingest x 1.00 x 395.7 days  =  395.7 ingest-days   (13 months, unsampled)
+  redesign  :  ingest x 0.20 x  30.0 days  =    6.0 ingest-days
+
+  reduction =  395.7 / 6.0  =  65.9x smaller PII store
+```
+
+The blast radius of a breach of that store shrinks by the same 65.9x, and the number costs nothing
+in engineering -- it is two config values. That ratio is the argument to bring to the meeting where
+someone says "but we might need those logs."
+
+The second calculation is the one teams get wrong, because deletion is not done when the delete
+statement commits:
+
+```
+  effective deletion latency  =  deletion SLA  +  backup retention window
+```
+
+**The idea behind it.** "A record is not gone when you delete it -- it is gone when the last backup
+that still contains it expires."
+
+This term exists because every store worth having has backups, and a restore from a backup taken
+before the deletion silently resurrects the record. Without accounting for it, a team reports a
+72-hour deletion SLA to a regulator while the data is in fact recoverable for over a month.
+
+| Symbol | What it is |
+|--------|------------|
+| `deletion SLA` | Time from request to the row being gone from live stores. Here: 72h = 3 days |
+| `backup retention window` | How long the oldest surviving backup is kept. Assume nightly backups held 35 days |
+| `effective deletion latency` | When the record actually stops being recoverable anywhere |
+| GDPR window | The statutory response deadline: one month (~30 days), extensible |
+
+**Walk one example.** The redesign's 72-hour SLA against a 35-day backup rotation:
+
+```
+  deletion SLA            :   3 days   (live stores: corpora, vector DB, logs, caches)
+  backup retention window :  35 days   (oldest nightly snapshot still holding the record)
+
+  effective deletion latency = 3 + 35 = 38 days
+
+  GDPR response window       = 30 days
+  38 > 30  ->  the deletion is not complete inside the statutory window
+```
+
+Two defensible fixes, and an interview answer should name which one it picked: shorten the backup
+window below `30 - 3 = 27 days` so the tail closes inside the deadline, or keep the 35-day rotation
+and maintain a **deletion replay ledger** -- restore from backup, then immediately re-apply every
+deletion logged since that snapshot. The second is what most mature shops do, because backup
+retention is usually pinned by a disaster-recovery requirement that privacy does not get to
+overrule. What is not defensible is reporting "deleted in 72h" while the 35-day tail exists
+undocumented.
 
 **Quantified outcome**: deletion requests close in <72h across 6 stores (vs "technically impossible" in the v1 design); the canary gate has since blocked 2 of 9 fine-tune candidates; PCI assessment passed with the vault pattern (PANs never reach model, logs, or provider); incremental infra cost of the entire privacy layer measured at ~4% of inference spend — against a v1 design whose single cross-tenant leak would have been a contract-terminating event for the affected customers.
 

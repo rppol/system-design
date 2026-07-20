@@ -417,6 +417,43 @@ You mostly shouldn't — edge runtimes cap execution (Cloudflare Workers allows 
 - Maintainer time saved: ~15 min per PR (covers 80% of feedback)
 - Workers cold start with Mastra runtime: ~120ms
 
+**Stated plainly.** "Four agents that do not need each other's answers cost the same wall time as one, so the review is as slow as its slowest reviewer rather than as slow as all four combined."
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Independent agent steps inside `.parallel()`, 4 here |
+| `t` | Duration of one agent's LLM call, ~3.9s once cold start is removed |
+| `n x t` | Sequential wall time — what `.parallel()` avoids |
+| `max(t)` | Parallel wall time, since the steps do not depend on one another |
+| `c` | Workers cold start, ~120ms, paid once per invocation regardless of `n` |
+
+**Walk one example.** Decompose the measured 4-second review:
+
+```
+  measured total                                  =  4.00s
+  minus cold start c                              =  0.12s
+  LLM work visible to the user                    =  3.88s
+
+  sequential would be   n x t  =  4 x 3.88        = 15.5s   -> "16s" in the lessons
+  speedup               15.5 / 4.0                =  3.9x
+
+  cold start as a share of total
+    parallel      0.12 / 4.00                     =  3.0%
+    sequential    0.12 / 15.5                     =  0.8%
+```
+
+The speedup is 3.9× rather than a clean 4× precisely because of `c`: cold start is paid once
+either way, so it does not shrink when the LLM work does. That is a general property of
+fixed overheads — parallelizing the variable part makes the fixed part a *larger* fraction
+of what remains, which is why the 120ms nobody worried about at 16s becomes 3% of the budget
+at 4s.
+
+**Why the four agents can run in parallel at all.** Each reviews the same diff for a
+different concern — security, style, test coverage, breaking changes — and none consumes
+another's output. The dependency structure is what licenses `.parallel()`, not the framework.
+`composeReview` must still wait for all four, which is exactly the `max` above; had any agent
+needed another's findings, the arithmetic would collapse back toward `n x t` for that pair.
+
 **Lessons**:
 1. Workflow .parallel() with 4 independent agents kept latency low — sequential would have been 16s.
 2. Mastra's TypeScript types caught a schema mismatch between extractDiff and securityAgent during dev.

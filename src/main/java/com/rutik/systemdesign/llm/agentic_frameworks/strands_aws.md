@@ -398,6 +398,43 @@ Yes — AWS commitment, regular releases. As of 2025, considered stable for prod
 - ~$300/day total cost; saves ~150 engineer-hours/day across the team
 - Confidence calibration: 92% of "high confidence" suggestions accepted by engineers
 
+**What the formula is telling you.** "Per alarm, the agent spends four cents of Bedrock to avoid roughly ten minutes of an engineer's attention — the ratio, not the absolute cost, is the case for building it."
+
+| Symbol | What it is |
+|--------|------------|
+| `c` | Bedrock cost per alarm, $0.04 |
+| `m` | Engineer minutes saved per alarm, 8-12 |
+| `w` | Fully-loaded engineer cost per hour — take $100 |
+| `m / 60 x w` | Dollar value of the time the agent gave back |
+| `92%` | Acceptance rate of high-confidence suggestions — the calibration check |
+
+**Walk one example.** Price one alarm both ways, at the 10-minute midpoint:
+
+```
+  machine cost     c                            =  $ 0.040
+  human cost       10 / 60 x $100               =  $16.667
+
+  ratio            16.667 / 0.040               =  417x
+  break-even       $0.04 / ($100 / 60)          =  0.024 min  =  1.4 seconds
+
+  triage time
+    before   30-60 min, midpoint                =  45 min
+    after                                       =  1.5 min
+    speedup  45 / 1.5                           =  30x
+```
+
+The break-even is the striking figure: the agent only has to save **1.4 seconds** of
+engineer time to pay for itself, and it saves roughly 600. At that ratio, cost per alarm is
+not a design constraint at all — you should spend more per alarm if it buys accuracy, since
+even a 10× more expensive model would still break even in 14 seconds.
+
+**Why the 92% acceptance rate is the number to watch instead.** Cost is settled; trust is
+not. If high-confidence suggestions were accepted only 60% of the time, engineers would
+re-verify every one, the 10 minutes saved would collapse toward zero, and the 417× ratio
+would evaporate regardless of what Bedrock charged. Calibration — the agent being right when
+it says it is confident — is what converts a cheap suggestion into saved time, and it is the
+metric that should gate any move to a cheaper model.
+
 **Lessons**:
 1. BedrockModel + IAM removed all secret management — no key rotation, no Vault integration needed.
 2. agent_as_tool let us split "log triage" and "metric analysis" into specialist subagents, improving accuracy.

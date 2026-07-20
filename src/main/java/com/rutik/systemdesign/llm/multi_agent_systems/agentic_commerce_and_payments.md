@@ -405,6 +405,52 @@ class ProcurementAgentFixed:
 # any payment API call is even attempted, escalated to a human instead.
 ```
 
+**Read it like this.** "The check is one comparison — cart total against the ceiling the human
+signed — and it does not care in the slightest how the agent arrived at the total."
+
+```
+  cart_total = quantity x unit_price
+  authorized = cart_total <= max_price_usd   AND   category match   AND   not expired
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `quantity`, `unit_price` | Whatever the agent's reasoning produced. Untrusted, both of them |
+| `cart_total` | The Cart Mandate's price. What actually gets charged |
+| `max_price_usd` | The ceiling from the Intent Mandate, signed by the human in advance |
+| `<=` | A code comparison, not a model instruction. Cannot be argued with or injected |
+
+**Walk one example.** The hallucinated order in the comment above, against the §5.1 bound:
+
+```
+  cart_total    = 500 x $200 = $100,000
+  max_price_usd =              $   150     (from the signed Intent Mandate)
+
+  $100,000 <= $150 ?  NO
+  overshoot ratio = 100,000 / 150 = 667x the authorized ceiling
+  -> REJECTED, escalated to human. Zero dollars move.
+```
+
+Compare the legitimate cart from the same flow:
+
+```
+  cart_total = $129.99      max_price_usd = $150
+  $129.99 <= $150 ?  YES   ->  settles with no human prompt
+```
+
+**Why the ceiling has to live outside the prompt.** Both carts are produced by the same agent
+through the same reasoning process; nothing about the $100,000 cart is syntactically malformed or
+flagged as suspicious. The only thing separating them is a number the model never had the ability
+to modify. Move `max_price_usd` into the system prompt as "do not spend more than $150" and the
+667x overshoot becomes a *probability* — high compliance most of the time, and no guarantee on
+the run where a scraped page carried an injection or the model simply miscounted units.
+
+The overshoot ratio is worth internalizing precisely because it is so large. Failures of this
+class are not near-misses that a sanity heuristic would catch by looking odd; they are
+three-orders-of-magnitude errors that look completely ordinary in JSON. A structural check
+rejects `$100,000 > $150` with exactly the same code path it uses to reject `$151 > $150`, which
+is the property that makes it trustworthy.
+
 ---
 
 ## 7. Real-World Examples
@@ -443,6 +489,63 @@ class ProcurementAgentFixed:
 | | Stablecoin (x402, Skyfire) | Card Network (ACP, Visa IC, Mastercard Agent Pay) |
 |---|---|---|
 | Per-transaction fee at small amounts (<$1) | Near-zero (L2 gas fees) — viable for micropayments | Interchange fees (often $0.30 + %) make sub-$1 transactions uneconomical |
+
+**What it means.** "A card fee has a fixed floor of about thirty cents no matter how small the
+purchase is, so below a few dollars you are not paying a fee on the transaction — the fee *is*
+the transaction."
+
+The word doing the work is *fixed*. A pure percentage fee would scale down gracefully forever and
+micropayments would need no new rail at all; it is the constant term that creates a hard economic
+floor and, with it, the entire reason x402 exists.
+
+```
+  card_fee(amount) = $0.30 + pct x amount
+
+  fee_ratio = card_fee(amount) / amount
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `amount` | Transaction value. `$0.001` for the per-inference-call case in §3.5 |
+| `$0.30` | The fixed component. Identical for a $0.001 charge and a $10,000 charge |
+| `pct x amount` | The variable component. Scales, so it is never the problem at small amounts |
+| `fee_ratio` | Fee as a share of value moved. Above 1.0, the rail costs more than it carries |
+
+**Walk one example.** The $0.001-per-inference-call scenario from §3.5, fixed component only:
+
+```
+  amount = $0.001   fixed fee = $0.30
+
+  fee_ratio = 0.30 / 0.001 = 300x        the fee is 300 times the payment
+
+  1,000 API calls at $0.001 each:
+    value transferred : 1,000 x $0.001 = $  1.00
+    card fees         : 1,000 x $0.30  = $300.00
+    total billed                        = $301.00 to move $1.00
+```
+
+Now find where the floor stops mattering:
+
+```
+  fixed fee as a share of the transaction:
+    $0.001  ->  30,000%      absurd
+    $1.00   ->      30%      still ruinous
+    $6.00   ->       5%      roughly the point it becomes a normal cost of business
+    $130    ->       0.2%    invisible -- the §5.1 shoe purchase lives here
+```
+
+That threshold is the whole story of the table. The `$129.99` cart in §5.1 and the `$0.001` tool
+call in §3.5 are not two sizes of the same problem — they sit on opposite sides of a fixed cost,
+and no amount of card-network optimization moves a sub-cent payment across it. This is why AP2
+routes consumer shopping over card rails and x402 over stablecoin rails rather than picking a
+winner: the correct rail is a function of transaction size, and agentic systems generate both
+sizes at once.
+
+Read the cost the other way, too. Stablecoin rails buy the sub-cent regime by giving up the
+"Dispute/chargeback mechanisms" row below — on-chain finality means no reversal. For a $0.001
+API call that is a trivial exposure; for a $129.99 purchase from an unfamiliar merchant it is the
+entire consumer-protection story, which is why the same table that makes x402 look strictly
+better at the top makes it clearly worse three rows down.
 | Settlement speed | Seconds (on-chain finality on L2s) | Typically T+1 or T+2 for merchant settlement, though authorization is real-time |
 | Regulatory clarity (as of 2026) | Evolving — stablecoin regulation varies by jurisdiction | Mature — decades of card-network regulatory frameworks |
 | Merchant acceptance | Limited to merchants/APIs integrating x402 or Skyfire directly | Near-universal — leverages existing card-accepting merchant base |

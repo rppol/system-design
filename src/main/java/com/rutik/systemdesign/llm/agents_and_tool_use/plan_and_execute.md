@@ -175,6 +175,32 @@ def plan_and_execute(task: str, tools: list, max_replan: int = 3) -> str:
     return synthesize_final_answer(task, completed_steps)
 ```
 
+**Read it like this.** "One planning call up front, then two calls per step forever after — one to do the work and one to ask whether the plan still holds — plus two more every time you replan."
+
+The loop's LLM-call count is worth reading off the code, because it is what you actually pay for. Every iteration calls `execute_step()` once and `should_replan()` once; a replan adds `diagnose_failure()` and `replan()`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | `len(plan)` — number of steps executed |
+| `R` | How many times `should_replan()` fired. Bounded by `max_replan = 3` |
+| `1` | The single `plan_task()` call. Large model, paid once |
+| `2N` | Executor + validator, one pair per step. This is the term that scales |
+| `2R` | `diagnose_failure()` + `replan()` per replan event |
+
+**Walk one example.** Total calls `= 1 + 2N + 2R`:
+
+```
+  plan length N   replans R   calls = 1 + 2N + 2R
+  -------------   ---------   -------------------
+        5             0        1 + 10 + 0  =  11
+       15             0        1 + 30 + 0  =  31
+       15             3        1 + 30 + 6  =  37    <- max_replan ceiling
+
+  Replanning three times costs 6 extra calls on a 31-call baseline: +19%.
+```
+
+The lesson hidden in the arithmetic: the validator, not the planner, is the expensive half. Doubling per-step cost to `2N` is why the pattern insists on a *lightweight* `should_replan()` check — a cheap model or a schema assertion — rather than a second full-size reasoning call. Drop validation entirely and you save `N` calls but lose the only mechanism that keeps the compounding curve above from taking over.
+
 ### Hierarchical Task Network (HTN) Decomposition
 
 ```
@@ -200,6 +226,29 @@ a single tool call or direct action the executor can perform.
 Implementation: Planner produces nested JSON structure;
 Orchestrator walks the tree, sending leaf tasks to executors.
 ```
+
+**Put simply.** "The number of things the executor actually has to do is the branching factor raised to the depth of the tree — so one extra level of decomposition multiplies the work, it does not add to it."
+
+An HTN with branching factor `b` and depth `d` has `b^d` leaves, and only leaves become executor calls. Non-leaf nodes are pure planner output and cost nothing to run.
+
+| Symbol | What it is |
+|--------|------------|
+| `b` | Sub-tasks each node decomposes into. `2` at Level 1 above, `3` at Level 2 |
+| `d` | How many levels down before tasks are primitive |
+| `b^d` | Leaf count = primitive tasks = executor invocations |
+| Non-leaf nodes | Goals and sub-goals. Planner scaffolding, never executed directly |
+
+**Walk one example.** The tree drawn above, then two deeper hypotheticals:
+
+```
+  diagram    2 sub-goals x 3 tasks each         =  6 leaves
+  b=3, d=3   3 x 3 x 3                          = 27 leaves
+  b=4, d=3   4 x 4 x 4                          = 64 leaves
+
+  Going from d=2 to d=3 at b=3 does not add 3 tasks -- it adds 18 (9 -> 27).
+```
+
+**Why depth is the dangerous knob, not breadth.** Pair this with the compounding table further down: 6 leaves at `p = 0.85` finish clean `0.85^6 = 0.377` of the time; 27 leaves gives `0.85^27`, which rounds to `0.013`. This is the precise mechanism behind the "plan too granular" pitfall — a 50-step over-decomposed plan sits at `0.85^50 = 0.0003`. Depth is what turns a plan into a lottery ticket, which is why HTN implementations validate and synthesize at each sub-goal boundary rather than letting all `b^d` leaves ride on a single unbroken chain.
 
 ### Comparison: Plan-and-Execute vs ReAct
 
@@ -230,6 +279,32 @@ When Plan-and-Execute wins:
   - Tasks needing parallel execution of independent sub-tasks
   - Compliance requirements (must show a plan for approval before execution)
 ```
+
+**What this actually says.** "Reliability does not decay gently as tasks get longer — it collapses, because every step has to go right and the per-step success rates multiply."
+
+The comparison above claims ReAct "struggles with long-horizon tasks (goal drift after 15+ steps)". That threshold is not arbitrary; it falls straight out of compounding. If a step succeeds independently with probability `p`, an `n`-step task succeeds with probability `p^n`.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Probability one step does the right thing. Frontier models sit near `0.85` on open-ended plans, `0.95` on structured ones |
+| `n` | Number of steps in the task. The plan length, not the token count |
+| `p^n` | End-to-end success. Multiply, never average — one broken step poisons everything downstream |
+| `1 - p^n` | Probability the run needs a replan or a human |
+
+**Walk one example.** Three per-step success rates, pushed out to realistic plan lengths:
+
+```
+  per-step p    n=5      n=8      n=10     n=15     n=20
+  ----------  -------  -------  -------  -------  -------
+    0.95       0.774    0.663    0.599    0.463    0.359
+    0.90       0.591    0.431    0.349    0.206    0.122
+    0.85       0.444    0.273    0.197    0.087    0.039
+
+  Read the 0.85 row: 0.85^15 = 0.087
+    -> only 9 runs in 100 finish a 15-step plan without a single bad step.
+```
+
+That is the entire argument for the pattern. At `p = 0.85` a 5-step task is a coin flip you mostly win; a 20-step task succeeds 4% of the time. Plan-and-Execute does not raise `p` by magic — it raises the *effective* `p` by validating each step's output and replanning when one fails, so a bad step is caught and repaired instead of silently multiplying into the next fifteen. It also explains why the file's own "Rule of thumb: if the average task requires more than 8 steps, the planning overhead pays for itself" lands where it does: `0.85^8 = 0.273` is roughly where unassisted execution stops being usable.
 
 ---
 
@@ -370,6 +445,29 @@ LangGraph provides a reference implementation:
 | Initial latency | Low | High (planning call) |
 | Cost (same task) | Similar | Higher (planning LLM call) |
 
+**Stated plainly.** "You pay once for a smart planner and `N` times for a dumb executor — which beats paying `N` times for a smart model, as long as `N` is bigger than one."
+
+The table's last row says Plan-and-Execute costs more, which is true only against a like-for-like model choice. The pattern's real economics come from the fact that the two phases can use *different* models.
+
+| Symbol | What it is |
+|--------|------------|
+| `C_plan` | One planning call on the best model. `$0.05` with a large model on a rich prompt |
+| `C_exec` | One executor call on a small model. `$0.002` for a scoped single-tool step |
+| `N` | Steps in the plan |
+| `C_plan + N x C_exec` | Split-model total: one expensive call, `N` cheap ones |
+| `N x C_plan` | Uniform-model total: the large model runs every step |
+
+**Walk one example.** A 15-step plan, priced both ways:
+
+```
+  split model    : 0.05 + 15 x 0.002 = 0.05 + 0.030 = $0.080
+  uniform large  :        15 x 0.05  =                $0.750
+
+  ratio = 0.750 / 0.080 = 9.38x cheaper
+```
+
+The break-even is immediate: the split arrangement wins for any `N >= 2`, and its advantage grows linearly with plan length because the fixed `C_plan` term is amortized while the `N x C_exec` term stays cheap. This is the whole reason the LangGraph template pairs GPT-4 planning with GPT-3.5-turbo execution. The failure mode to watch is the one the loop-count decoder exposed: replans re-run the *expensive* model, so three replans on this task add `3 x 0.05 = $0.15`, nearly tripling the `$0.080` baseline. Capping `max_replan` is a cost control before it is a correctness control.
+
 ---
 
 ## When to Use / When NOT to Use
@@ -473,6 +571,32 @@ A: A planning call uses a large model (GPT-4o, Claude Opus) and generates 300-80
 4. **Cap replanning at 2-3 iterations**: unlimited replanning loops waste budget; after the cap, return best partial answer or escalate.
 5. **Summarize step results before storing**: store concise summaries (50-100 words per step) rather than full outputs — prevents context window overflow on long plans.
 6. **Test plan staleness explicitly**: inject deliberate failures in testing (tool returns empty result, unexpected data) and verify replanning triggers correctly.
+
+**What it means.** "Your maximum plan length is not a design choice — it is your context window divided by however many tokens each finished step leaves behind."
+
+Practice 5 says summarize step results instead of storing them raw. That is a division problem, and the answer is the difference between a 25-step ceiling and a 750-step one.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Usable context budget in tokens. `100,000` is the working figure this file uses |
+| `f` | Tokens each completed step leaves in context permanently |
+| `B / f` | Max steps before the window is full and the agent starts forgetting its own plan |
+| `f_raw` | Full step output carried verbatim |
+| `f_sum` | A 100-word summary instead — roughly `100 x 1.33 = 133` tokens |
+
+**Walk one example.** Both storage policies against the same `100,000`-token budget:
+
+```
+  raw outputs   : f = 100,000 / 25 steps = 4,000 tokens per step
+                  ceiling = 100,000 / 4,000  =   25 steps
+
+  100-word sums : f = 100 words x 1.33     =  133 tokens per step
+                  ceiling = 100,000 / 133   =  751 steps
+
+  compression = 4,000 / 133 = 30x
+```
+
+The `25` is derived from this file's own observation that context is nearly full "after 20-30 steps"; running that backwards gives the `4,000` tokens-per-step footprint that raw storage implies. Summarization does not make the agent smarter, it just moves the ceiling out by 30x, which is why 50-100 steps becomes reachable. Note what the summary must preserve: the *expected output* line of each step, since that is what `should_replan()` compares against. Compress the result, never the contract.
 
 ---
 

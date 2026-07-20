@@ -95,6 +95,62 @@ Dot product PE_m · PE_n depends on |m-n| for nearby positions
 but NOT for long distances -> extrapolation fails
 ```
 
+**Read it like this.** `PE(pos, 2i) = sin(pos / 10000^(2i/d))` says: "give every position a barcode, where each pair of dimensions is one stripe blinking at its own fixed speed — the first stripe cycles roughly every 6 tokens, the last roughly every 60,000."
+
+The reason there is a *ladder* of speeds rather than one frequency is resolution. A single fast stripe tells you where you are within a 6-token window but wraps constantly, so it cannot separate position 3 from position 9. A single slow stripe never wraps but barely moves between neighbours. Stacking both gives a coarse-to-fine odometer: slow stripes fix the neighbourhood, fast stripes fix the exact slot.
+
+| Symbol | What it is |
+|--------|------------|
+| `pos` | Absolute index of the token, `0, 1, 2, ...` |
+| `i` | Which dimension *pair* this is, `i = 0 .. d/2-1`. Pair `i` occupies dims `2i` and `2i+1` |
+| `d` | Model width, `512` in the original Transformer |
+| `2i/d` | Fraction of the way up the ladder, `0.0` at the fastest stripe, `~1.0` at the slowest |
+| `10000` | The base. It sets the *span* of the ladder — how far apart fastest and slowest are |
+| `theta_i = 10000^(-2i/d)` | Angular speed of stripe `i`, in radians per token |
+| `2*pi / theta_i` | Wavelength: how many tokens before that stripe repeats itself |
+
+**Walk one example.** The wavelength ladder at `d = 512`, computed exactly:
+
+```
+  wavelength = 2*pi / theta_i        theta_i = 10000^(-2i/d),  d = 512
+
+     i     dims       2i/d      theta_i          wavelength (tokens)
+     0     0,1        0.0000    1.0                          6.28
+     1     2,3        0.0039    0.964662                     6.51
+     2     4,5        0.0078    0.930572                     6.75
+    64     128,129    0.2500    0.1                         62.83
+   128     256,257    0.5000    0.01                       628.32
+   255     510,511    0.9961    0.000103663              60611.5
+```
+
+The bottom rung is `2*pi = 6.28` tokens and the top rung is about `60,611` tokens. (The
+diagram's `62832` is the idealised `theta = 1e-4` rung, i.e. `2*pi*10000`; the real last
+pair at `i = 255` sits a hair below it at `theta = 0.000103663`.) That four-order-of-magnitude
+span is entirely the base `10000`'s doing.
+
+Now read the same ladder as a `pos x dim` value table — one column per stripe, one row per position:
+
+```
+  sin(pos * theta_i)
+
+    pos      i=0        i=1        i=64       i=255
+      0     0.0000     0.0000     0.0000     0.0000
+      1     0.8415     0.8219     0.0998     0.0001
+      2     0.9093     0.9364     0.1987     0.0002
+     10    -0.5440    -0.2200     0.8415     0.0010
+    100    -0.5064     0.7975    -0.5440     0.0104
+```
+
+Read *down* a column, not across a row. Column `i=0` has already wrapped past a full cycle by
+`pos = 10` and its value at `pos = 100` is meaningless on its own. Column `i=255` has barely
+left zero even at `pos = 100`. Read *across* a row and every position gets a distinct fingerprint
+— that is the whole trick.
+
+**Why extrapolation still fails.** Nothing in the formula breaks at `pos = 5000`; the sines keep
+producing valid numbers. What breaks is the *model*, which only ever saw the particular slow-stripe
+values that occur below the training length. Past that point the low-frequency columns take on
+combinations the attention weights were never fit against, and the barcode stops being readable.
+
 ### RoPE: Rotation in 2D Pairs
 
 ```
@@ -120,6 +176,59 @@ This is the "relative position" property that makes RoPE naturally
 encode position differences in attention scores.
 ```
 
+**What this actually says.** "Do not tell a token where it is — *spin* it. Spin the query by its position, spin the key by its position, and the dot product between them can only report how far apart they were spun."
+
+| Symbol | What it is |
+|--------|------------|
+| `m`, `n` | Absolute positions of the query token and the key token |
+| `i` | Dimension pair index, `i = 1 .. d/2`. Each pair is rotated independently |
+| `theta_i = 10000^(-2(i-1)/d)` | Radians of rotation *per position* for pair `i`. Same ladder as sinusoidal |
+| `m * theta_i` | Total angle pair `i` is turned by for a token sitting at position `m` |
+| `R_m` | The block-diagonal rotation matrix: `d/2` little 2x2 rotations stacked |
+| `R_m^T = R_{-m}` | Rotations are orthogonal, so transposing one just reverses it |
+| `R_m^T R_n = R_{n-m}` | Spin backwards by `m`, forwards by `n` — only the difference survives |
+| `q^T R_{n-m} k` | The attention score. Contains `n-m` and nothing else about position |
+
+**Walk one example.** Same relative offset at wildly different absolute positions. Take
+`d_head = 8`, so four rotated pairs, and set every pair of both `q` and `k` to `(1, 0)` so the
+unrotated dot product is exactly `4.0`:
+
+```
+  theta_i = 10000^(-2i/8)  ->  i = 0,1,2,3  ->  1.0, 0.1, 0.01, 0.001
+
+  positions (m,n)  offset   pair0       pair1      pair2      pair3      score
+  ( 5,    8)          3    -0.989992   0.955336   0.999550   0.999996   1.964890
+  ( 0,    3)          3    -0.989992   0.955336   0.999550   0.999996   1.964890
+  (1000, 1003)        3    -0.989992   0.955336   0.999550   0.999996   1.964890
+  ( 2,    9)          7     0.753902   0.764842   0.997551   0.999976   3.516271
+```
+
+The first three rows are identical to every printed digit. Positions `5,8` and `1000,1003` are
+995 tokens apart in absolute terms and the score does not budge. Change the offset from `3` to `7`
+and the score moves. That is the relative-position property, observed rather than proved.
+
+Each pair contributes exactly `cos((n-m) * theta_i)` — check row one: `cos(3 * 1.0) = -0.989992`,
+`cos(3 * 0.1) = 0.955336`, `cos(3 * 0.01) = 0.999550`, `cos(3 * 0.001) = 0.999996`. The absolute
+positions `m` and `n` genuinely never appear after `R_m^T R_n` collapses to `R_{n-m}`. Notice also
+that the *fast* pair is doing all the discriminating: at offset 3 it has swung to `-0.99` while the
+slowest pair has barely left `1.0`. Near-neighbour resolution lives in the fast pairs, which is
+exactly the thing Position Interpolation crushes.
+
+**What the base buys you.** The base sets the slowest pair's wavelength, and therefore the range
+over which the score is still a monotone-ish function of distance rather than an aliased repeat.
+At `d_head = 128`:
+
+```
+  base       slowest theta_i      slowest wavelength (tokens)
+   10,000    0.000115478                     54,410
+  500,000    0.00000245514                2,559,200
+1,000,000    0.00000124094                5,063,260
+```
+
+This is why LLaMA 3 raising the base from `10,000` to `500,000` is enough on its own to reach 128K
+natively: the slowest stripe now spans 2.56M positions, so 128K sits comfortably inside the first
+half-turn.
+
 ### Context Extension: Position Interpolation vs NTK
 
 ```
@@ -132,11 +241,94 @@ Position Interpolation (scale factor s = 8 for 32K extension):
 
 NTK-aware scaling (base scaling):
   New θ_i = (10000 * s^(d/(d-2)))^(-2i/d)  where s = L'/L
-  For s=8, d=128: multiply base by 8^(128/126) ≈ 8.13
-  New base: 10000 * 8.13 = 81300
+  For s=8, d=128: multiply base by 8^(128/126) ≈ 8.268
+  New base: 10000 * 8.268 = 82,685
   Effect: low-frequency components extended (long-range positions preserved)
          high-frequency components less distorted than PI
 ```
+
+**Stated plainly.** Position Interpolation says "shrink the ruler so the long document still fits inside the trained range." NTK-aware scaling says "keep the ruler, but slow down only the stripes that were going to run out of room."
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Context the model was actually trained at, `4096` here |
+| `L'` | Context you want, `32768` here |
+| `s = L'/L` | Extension ratio, `8` |
+| `m' = m / s` | PI's rescaled position. Position 32767 is presented to the model as ~4095 |
+| `d/(d-2)` | NTK's exponent correction, `128/126 = 1.015873` at `d_head = 128` |
+| `base * s^(d/(d-2))` | NTK's new base. Slows every `theta_i`, slow ones far more than fast ones |
+| `r_i = L / wavelength_i` | YaRN's band selector: full turns pair `i` made across the *original* context |
+| `beta_fast`, `beta_slow` | YaRN's band edges, `32` and `1` in the case study config below |
+
+**Walk one example.** Extending 4096 to 32768 — an 8x jump — under each scheme:
+
+```
+  L = 4096   L' = 32768   ->   s = 8
+
+  Position Interpolation:  m' = m * (L-1)/(L'-1) = m * 4095/32767 = m * 0.12497330
+      m =      0  ->  m' =    0.0000
+      m =      8  ->  m' =    0.9998
+      m =  16384  ->  m' = 2047.5625
+      m =  32767  ->  m' = 4095.0000
+
+  Every position now lands inside the trained range [0, 4095]. The bill: adjacent
+  tokens are 0.125 position-units apart instead of 1, so the fastest pair turns
+  0.125 rad per token instead of 1.0 rad. Its wavelength stretches 6.28 -> 50.27
+  tokens -- an 8.00x blur on exactly the pair that distinguishes neighbours.
+
+  NTK-aware base scaling, d_head = 128:
+      exponent  = d/(d-2) = 128/126 = 1.015873
+      8 ^ 1.015873                  = 8.268462
+      new base  = 10000 * 8.268462  = 82684.6
+```
+
+The exponent is worth computing rather than eyeballing: `8^1.015873 = 8.268462`, so the base lands
+at `82,684.6`, not at a flat `8 * 10000 = 80,000`. Now compare what each dimension pair actually
+suffers:
+
+```
+  effective wavelength in tokens, before and after (d_head = 128)
+
+    i     theta orig      wl orig      theta NTK        wl NTK      NTK stretch   PI stretch
+    0     1.0                 6.28     1.0                 6.28        1.00x        8.00x
+   16     0.1                62.83     0.0589717         106.55        1.70x        8.00x
+   32     0.01              628.32     0.00347766       1806.73        2.88x        8.00x
+   63     0.000115478     54410.1      0.0000144348   435281           8.00x        8.00x
+```
+
+That table is the entire argument. PI applies a flat `8.00x` to every pair including pair 0. NTK
+leaves pair 0 untouched at `1.00x` and spends the whole `8.00x` on pair 63, which had the room to
+spare. Local token-order information survives; long-range range is bought anyway.
+
+**Where YaRN goes further.** NTK still applies *some* distortion to every pair. YaRN sorts the
+pairs into three bands by `r_i` — how many complete turns that pair made across the original 4096:
+
+```
+  r_i = L / wavelength_i        beta_fast = 32,  beta_slow = 1
+
+     i     wavelength       r_i       band
+     0           6.28     651.9       r > 32       -> leave completely alone
+    16          62.83      65.19      r > 32       -> leave completely alone
+    24         198.69      20.61      1 <= r <= 32 -> blend PI and NTK
+    32         628.32       6.519     1 <= r <= 32 -> blend PI and NTK
+    48        6283.19       0.6519    r < 1        -> full interpolation
+    63       54410.1        0.07528   r < 1        -> full interpolation
+
+  At d_head = 128 this splits the 64 pairs into 21 untouched, 25 blended,
+  18 fully interpolated.
+```
+
+A pair that turned 651.9 times inside the training window has seen every angle the model will ever
+ask of it — nothing to fix. A pair that turned 0.075 times never completed a cycle, so the model
+has no idea what its second half-turn looks like — interpolate it fully. The 25 pairs in between
+get a proportional blend.
+
+**The temperature term.** Redistributing attention over 8x more tokens flattens the softmax, so
+YaRN rescales the logits. Pitfall 5 below gives the form
+`sqrt(log(L') / log(L))^(1/s)`; at these numbers `sqrt(ln 32768 / ln 4096) = 1.118034` and
+`1.118034^(1/8) = 1.014044`. The canonical YaRN paper instead uses `0.1 * ln(s) + 1`, which at
+`s = 8` is `1.207944`. Either way it is a small, deliberate sharpening — omit it and, as Pitfall 5
+notes, the extended model is systematically overconfident.
 
 ### ALiBi Bias — Attention Score Penalty Grid
 
@@ -160,6 +352,77 @@ can still attend to them when truly necessary, but pays a mounting cost.
 Each attention head uses a different slope m_h = 2^(−8h/H), so some heads
 "zoom out" (small m, attend far) and others "zoom in" (large m, attend near).
 ```
+
+**Put simply.** `score_{i,j} = (q_i . k_j)/sqrt(d_k) + m_h * (j - i)` says: "compute the normal attention score, then charge a toll proportional to how far back you are reaching — and give every head its own toll rate."
+
+| Symbol | What it is |
+|--------|------------|
+| `i`, `j` | Query position and key position. Under causal masking `j <= i` always |
+| `(j - i)` | Signed distance, zero or negative. Reaching further back makes it more negative |
+| `m_h` | Head `h`'s slope, a positive number. The toll charged per token of distance |
+| `H` | Number of attention heads |
+| `2^(-8/H)` | Ratio between consecutive heads' slopes. Fixes the ladder's shape |
+| `m_h = 2^(-8h/H)` | The slope schedule itself, `h = 1 .. H`. Always ends at `2^-8` |
+| `m_h * (j - i)` | The bias. Added to the raw score *before* softmax, never after |
+
+**Walk one example.** The slope ladder is a geometric sequence pinned at both ends — computed for
+the two most common head counts:
+
+```
+  m_h = 2^(-8h/H)
+
+  H = 8    (ratio 2^(-8/8) = 0.500000)
+    h  :  1        2       3        4        5         6          7           8
+    m_h:  0.5      0.25    0.125    0.0625   0.03125   0.015625   0.0078125   0.00390625
+
+  H = 16   (ratio 2^(-8/16) = 0.707107)
+    h  :  1         2       3         4      5          6      7           8
+    m_h:  0.707107  0.5     0.353553  0.25   0.176777   0.125  0.0883883   0.0625
+    h  :  9         10      11        12       13        14        15         16
+    m_h:  0.0441942 0.03125 0.0220971 0.015625 0.0110485 0.0078125 0.00552427 0.00390625
+```
+
+Both ladders start near `1` and terminate at exactly `2^-8 = 0.00390625`. Doubling the head count
+does not extend the range — it *subdivides* it, interleaving eight new rates between the old ones.
+The `8` in the exponent is what fixes the endpoint; `H` only sets the resolution.
+
+Now the toll itself, for three heads out of the `H = 8` ladder:
+
+```
+  bias = -m_h * (i - j)
+
+    distance    head 1 (m=0.5)   head 4 (m=0.0625)   head 8 (m=0.00390625)
+           1        -0.5000            -0.0625              -0.003906
+           2        -1.0000            -0.1250              -0.007812
+           8        -4.0000            -0.5000              -0.031250
+          64       -32.0000            -4.0000              -0.250000
+         512      -256.0000           -32.0000              -2.000000
+        4096     -2048.0000          -256.0000             -16.000000
+```
+
+Head 1 is effectively a 4-to-8-token window: by distance 64 its `-32` bias is far below anything a
+normalised QK score can overcome. Head 8 is still only at `-16` after 4096 tokens, which a strong
+content match can absolutely outbid. Same mechanism, same formula, wildly different receptive
+fields — this is the division of labour the slope schedule buys.
+
+**Read it as probabilities.** Take row `T6` of the `m = 0.25` grid above and suppose every raw QK
+score is identical, so the bias alone decides the distribution:
+
+```
+    distance:      5        4        3        2        1        0
+    bias    :  -1.25    -1.00    -0.75    -0.50    -0.25     0.00
+    softmax :   0.0816   0.1047   0.1345   0.1727   0.2217   0.2847
+
+  Same row for the gentlest head, m = 2^-8 = 0.00390625:
+    softmax :   0.1650   0.1657   0.1663   0.1670   0.1676   0.1683
+```
+
+At `m = 0.25` the nearest token gets `3.49x` the weight of the token five back. At `m = 0.00390625`
+that ratio collapses to `1.02x` — very nearly uniform. Nothing is ever zeroed, which is the point:
+unlike a causal mask, ALiBi's penalty is a price, not a wall, and a sufficiently strong content
+match can still pay it. It is also why the formula extrapolates for free — a distance of 100,000
+produces a perfectly well-defined bias, whereas a sinusoidal code at position 100,000 is an input
+the model has simply never seen.
 
 ### "Lost in the Middle" — U-Curve
 
@@ -830,7 +1093,7 @@ RingAttention (Liu et al., 2023) distributes the attention computation across mu
 ```python
 # Three approaches tested:
 # 1. Pure extrapolation (no extension): positions 0..32767, no modification
-# 2. NTK-aware (factor=8): new_base = 10000 * 8^(128/126) ≈ 81,300
+# 2. NTK-aware (factor=8): new_base = 10000 * 8^(128/126) ≈ 82,685
 # 3. YaRN (factor=8) + 500 fine-tuning steps on legal text at 32K
 
 # Results on held-out legal contracts at 32K context:

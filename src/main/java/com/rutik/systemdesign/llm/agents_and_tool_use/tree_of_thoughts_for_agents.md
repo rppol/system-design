@@ -60,6 +60,32 @@ Commit to the highest-scoring child at each step, recurse until terminal or dept
 
 BFS with a beam width B: at each level, expand all nodes in the current beam, generate k children per node, score all k*B candidates, keep only the top B for the next level. Cost: B * k * depth LLM calls. Beam_width=3 with branching factor=3 and depth=3 yields ~27 candidate evaluations — tractable. This is the most common practical strategy.
 
+**In plain terms.** "BFS pays a price that multiplies with every level you go down; beam search pays one that merely adds — because it throws away all but `B` nodes before descending."
+
+That single swap, from `b^d` to `B x k x d`, is the entire reason beam search is the default in production and BFS is a paper result.
+
+| Symbol | What it is |
+|--------|------------|
+| `b` (or `k`) | Branching factor — candidate thoughts generated per node |
+| `d` | Depth — how many levels of lookahead |
+| `B` | Beam width — how many nodes survive to the next level |
+| `b^d` | BFS frontier size at depth `d`. Exponential: the level count is in the exponent |
+| `B x k x d` | Beam candidate count. Linear in `d`, because `B` caps the frontier at every level |
+
+**Walk one example.** The same tree shape, searched both ways:
+
+```
+              level 1    level 2    level 3    total nodes
+  BFS b=4  :     4         16         64          84       <- 4^1 + 4^2 + 4^3
+  BFS b=3  :     3          9         27          39
+  Beam B=3,k=3:  9          9          9          27       <- 3 kept x 3 children, every level
+
+  BFS at b=4,d=5 would be 4+16+64+256+1024 = 1,364 nodes.
+  Beam B=3,k=3,d=5 stays at 3 x 3 x 5 = 45.
+```
+
+The pruning is the point, and it is also the risk: beam search discards `k x B - B` candidates per level without ever expanding them, so a thought that scores 4/10 now but leads to the only solution is gone permanently. BFS cannot make that mistake — it is complete — which is why the tradeoff table credits it with an optimality guarantee and beam search with only an approximate one. You are buying a linear cost curve with the possibility of missing the answer.
+
 ### 4.4 Monte Carlo Tree Search (MCTS)
 
 Four phases per iteration:
@@ -146,6 +172,32 @@ SELECTION                EXPANSION              SIMULATION           BACKPROP
 UCB1(A1a) = 5.0 + C*sqrt(ln(6)/2) = selected for expansion
 ```
 
+**The idea behind it.** "Pick the node with the best score, plus a bonus for how badly you have neglected it — so a mediocre node you have barely tried can still outrank a good node you have already checked ten times."
+
+UCB1 is a two-term sum, and reading it as two terms in tension is the whole trick: the first term is what you believe, the second is how little you know.
+
+| Symbol | What it is |
+|--------|------------|
+| `value` | Average reward backpropagated through this node so far. The exploitation term |
+| `N_parent` | How many times the parent has been visited. Grows as the search runs |
+| `N_node` | How many times this specific child has been tried. Small = under-explored |
+| `sqrt(ln(N_parent) / N_node)` | Uncertainty bonus. Shrinks as `N_node` grows; `ln` makes it grow slowly with total effort |
+| `C` | Exploration weight. `1.41` (that is `sqrt(2)`) is the textbook default |
+
+**Walk one example.** The diagram's numbers, with `C = 1.41` and `ln(6) = 1.7918`:
+
+```
+  node    value   N_node   sqrt(ln(6)/N_node)   C x bonus   UCB1
+  ----   ------   ------   ------------------   ---------   ------
+  A1a      5.0       2           0.9465           1.3346    6.3346
+  A1a      5.0       1           1.3386           1.8874    6.8874   <- if less visited
+
+  Halving the visit count lifts A1a's score by 6.8874 - 6.3346 = 0.5528
+  without its value estimate changing at all.
+```
+
+**Why the `ln` and not a plain ratio.** The bonus uses `ln(N_parent)`, not `N_parent`, so as the search does more total work the exploration pressure grows very slowly — total visits have to multiply by `e` (about 2.72x) to add 1 to the numerator inside the square root. Drop `ln` and the bonus swamps the value term on long searches, degenerating MCTS into round-robin. Set `C = 0` and the opposite happens: the search becomes pure greedy DFS, locking onto whichever child happened to get a lucky first rollout. The tradeoff table calls this "UCB1-balanced"; the balance lives entirely in `C` and that logarithm.
+
 ### Cost Comparison
 
 ```
@@ -156,6 +208,33 @@ DFS           |     4     |   3   | up to 12 (best) / 84 (worst)
 Beam (B=3)    |     4     |   3   | 3*4=12 generate + 12 score = ~24
 MCTS (I=20)   |     4     |   3   | 20 iterations * ~3 calls = ~60
 ```
+
+**What the formula is telling you.** "Each strategy has a different shape of cost curve, and at `b=4, d=3` they happen to land within 7x of each other — which is exactly why this table is misleading if you read only this row."
+
+Every number above comes from a different formula. Worth separating them, because they diverge violently as `d` grows.
+
+| Symbol | What it is |
+|--------|------------|
+| BFS `= b + b^2 + ... + b^d` | Every node at every level. `4 + 16 + 64 = 84` |
+| DFS best `= b x d` | One path down, scoring `b` children per level: `4 x 3 = 12` |
+| DFS worst `= b^d` sum | Backtracks through the whole tree — identical to BFS, `84` |
+| Beam `= B x k x d` gen, doubled for eval | `3 x 4 = 12` generate + `12` score `= 24` |
+| MCTS `= I x calls_per_iter` | `20 x 3 = 60`. Set by iteration budget, not by tree shape |
+
+**Walk one example.** Hold `b = 4` and push `d` from 3 to 5:
+
+```
+  strategy        d = 3               d = 5
+  ------------  ---------  ------------------------------
+  BFS              84       4+16+64+256+1024 = 1,364
+  DFS (best)       12       4 x 5            =    20
+  Beam (B=3)       24       3 x 4 x 5 x 2    =   120
+  MCTS (I=20)      60       20 x 3           =    60      <- unchanged
+
+  BFS grows 16x; beam grows 5x; MCTS does not grow at all.
+```
+
+MCTS is the odd one out and that is its defining property: its cost is set by the iteration budget `I` you choose, not by `b` or `d` at all. Going deeper does not cost more calls, it just means each of the 20 iterations covers less of the tree — you trade coverage for depth rather than paying for it. That is precisely why the tradeoff table rates MCTS "Best" at handling deep trees while BFS rates "Poor", even though at `d = 3` BFS looks only modestly more expensive.
 
 ---
 
@@ -319,9 +398,13 @@ def tot_beam_search(
 
     Returns the best path found and its value.
 
-    LLM call budget: beam_width * branching_factor * max_depth  (generate)
-                   + beam_width * branching_factor * max_depth  (evaluate)
-    With defaults: 3 * 3 * 3 * 2 = 54 calls maximum.
+    LLM call budget: one generate call per expanded node (each returns k thoughts)
+                   + one evaluate call per generated thought.
+    With defaults (beam 3, branching 3, depth 3):
+      generate: 1 + 3 + 3            =  7 calls
+      evaluate: 3 + 9 + 9            = 21 calls
+                                       -------
+                                        28 calls maximum.
     """
     # beam holds ThoughtNode objects; start with root
     root = ThoughtNode.root(problem)
@@ -426,7 +509,7 @@ Depth 2: 3 * 3 = 9 generate + 9 evaluate calls
 Depth 3: 3 * 3 = 9 generate + 9 evaluate calls
          Kept: top 3 (final beam)
 
-Total: 54 LLM calls  (27 generate + 27 evaluate)
+Total: 28 LLM calls  (7 generate + 21 evaluate)
 At $0.005/1K tokens avg: ~$0.05–$0.15 per planning run
 ```
 
@@ -477,7 +560,7 @@ At $0.005/1K tokens avg: ~$0.05–$0.15 per planning run
 - **Routine RAG Q&A**: single-turn retrieval + generation. The answer space is dominated by information access, not planning search. Chain-of-thought is sufficient.
 - **Email drafting, summarization, classification**: no meaningful branching; any reasonable next token is acceptable. Beam search on tokens is already built into the decoder.
 - **Conversational agents**: users expect low-latency responses (< 2 s). Even beam_width=2 with depth=2 adds 8 LLM calls before the first response.
-- **Cost-sensitive applications**: at $0.01 per call, 54 calls = $0.54 per query. For a 1M query/day system that is $540K/day.
+- **Cost-sensitive applications**: at $0.01 per call, 28 calls = $0.28 per query. For a 1M query/day system that is $280K/day.
 - **Tasks without a useful value function**: if the evaluator is just restating the generator's output, scoring noise dominates and beam selection becomes random.
 - **Long-horizon open-ended tasks**: trees with depth > 5 and branching > 3 become intractable even with beam search. Use hierarchical planning instead (decompose into sub-problems, apply ToT to each — see [Plan-and-Execute](plan_and_execute.md)).
 
@@ -512,6 +595,33 @@ Problems:
 - No pruning threshold — expands dead branches identically to promising ones
 - No beam width — memory grows exponentially
 - Value tracking discarded; winner chosen by path length (meaningless)
+
+**Stated plainly.** "Two innocuous-looking default arguments — `depth=5, branching=5` — are a bill for 6,250 LLM calls, because they sit in an exponent."
+
+The docstring says `5^5 = 3125`, and that is only half the damage: each generated thought is also evaluated.
+
+| Symbol | What it is |
+|--------|------------|
+| `branching = 5` | The base. Thoughts generated per node |
+| `depth = 5` | The exponent. Levels of recursion |
+| `5^5` | Leaf paths explored: `3,125` |
+| `x 2` | One generate call plus one evaluate call per node: `6,250` total |
+| No pruning | Nothing is discarded, so the exponent applies to the full tree, not a beam |
+
+**Walk one example.** What each parameter costs, at the `$0.01` per call this file quotes:
+
+```
+  depth  branching   nodes = b^d   calls = 2 x nodes   cost at $0.01
+  -----  ---------   -----------   -----------------   -------------
+    3        3            27              54              $0.54
+    3        5           125             250              $2.50
+    5        3           243             486              $4.86
+    5        5         3,125           6,250             $62.50
+
+  Bumping depth 3 -> 5 at b=5:  250 -> 6,250 calls.  25x, from one keyword arg.
+```
+
+The asymmetry is worth internalizing before an interview: raising the branching factor by 2 multiplies cost by `(5/3)^d`, but raising depth by 2 multiplies it by `b^2`. Depth is the more expensive knob at every branching factor above 1, which is why the fix below caps `max_depth` at 3 first and only then adds a beam.
 
 ### Fixed version
 
@@ -581,6 +691,35 @@ Fix summary:
 - `max_calls=100` is a hard circuit breaker — safe for production
 - `best_value` tracked throughout; winner is highest-scored node, not longest path
 
+**Read it like this.** "Four independent brakes, each one bounding a different term: depth bounds the exponent, beam width bounds the base, the threshold bounds what survives, and `max_calls` bounds everything at once regardless of the other three."
+
+The fix summary quotes `3^3 = 27 generate + 27 evaluate = 54 max`. That `54` is the *theoretical* ceiling, and the interesting question is why `max_calls=100` sits above it rather than below.
+
+| Symbol | What it is |
+|--------|------------|
+| `max_depth = 3` | Caps `d`. Turns the exponent from 5 into 3 |
+| `beam_width = 3` | Caps surviving nodes per level, so the frontier never exceeds 3 |
+| `branching_factor = 3` | Caps children per node, so candidates per level are at most `3 x 3 = 9` |
+| `pruning_threshold = 5.0` | Drops anything below 5/10 before it can be expanded |
+| `max_calls = 100` | Circuit breaker. Checked in both loops; aborts mid-level if tripped |
+
+**Walk one example.** The fixed function's worst case, level by level:
+
+```
+  level   nodes in beam   generate calls   evaluate calls   running total
+  -----   -------------   --------------   --------------   -------------
+    1           1               1                3                4
+    2           3               3                9               16
+    3           3               3                9               28
+
+  worst case total = 28 calls   (budget 100 -> 72 calls of headroom)
+
+  Broken version, same problem : 6,250 calls
+  Fixed version                :    28 calls    -> 223x reduction
+```
+
+Note the discrepancy worth catching: the fix summary's `54` assumes 27 generate calls, one per node, but the code calls `generate_thoughts(..., k=branching_factor)` **once per node** and gets 3 thoughts back — so generation is 7 calls, not 27, and the true ceiling is 28. Either way the `max_calls=100` breaker sits comfortably above the worst case, which is the correct design: a circuit breaker that trips during normal operation is not a safety net, it is a silent truncation of your search. Set it above the analytical worst case so it only fires when an assumption (a retry loop, a mis-set parameter) has already broken.
+
 ### Pitfall 2: Evaluator and generator use the same system prompt
 
 If the same prompt drives both roles, the evaluator tends to confirm whatever the generator produced (sycophancy). Fix: use separate system prompts with explicitly adversarial framing for the evaluator ("critically assess flaws in this plan step").
@@ -627,7 +766,7 @@ The value function scores candidate thoughts to guide the search. The two strate
 BFS expands all nodes at depth k before proceeding to depth k+1, guaranteeing the shallowest solution but costing branching_factor^depth LLM calls. DFS commits to one branch and backtracks on failure, costing at most depth * branching_factor calls in the best case. Choose BFS for shallow trees where global optimality matters; choose DFS for deep trees where early commitment is acceptable and cost is constrained.
 
 **Q: What is beam search and why is it the most practical ToT strategy?**
-Beam search is BFS with a fixed beam width B: at each level, generate k children per node, score all B*k candidates, keep only the top B. Cost is O(B * k * depth), which is linear in depth rather than exponential. With B=3, k=3, depth=3, this yields ~54 LLM calls — tractable in production. Pure BFS with branching 4, depth 3 costs 84 calls even before pruning.
+Beam search is BFS with a fixed beam width B: at each level, generate k children per node, score all B*k candidates, keep only the top B. Cost is O(B * k * depth), which is linear in depth rather than exponential. With B=3, k=3, depth=3, this yields 28 LLM calls (7 generate + 21 evaluate) — tractable in production. Pure BFS with branching 4, depth 3 costs 84 calls even before pruning.
 
 **Q: How does MCTS differ from beam search for agent planning?**
 MCTS uses UCB1 to balance exploration and exploitation across iterations — nodes with high value but low visit count are preferentially expanded. Beam search is purely greedy at each level and does not revisit discarded branches. MCTS amortizes evaluation across many rollouts and is more sample-efficient for deep trees, but is harder to implement and reason about. Beam search is simpler and faster for shallow trees.
@@ -666,7 +805,7 @@ Use beam search when: depth is shallow (< 5), latency matters (serial expansion 
 
 ## 13. Best Practices
 
-**Start with beam search, not BFS.** BFS is theoretically clean but practically expensive. Beam_width=3 with branching_factor=3 and depth=3 gives 54 calls — a sensible default. Adjust beam_width up if quality is insufficient; bring branching_factor down first if cost is the constraint.
+**Start with beam search, not BFS.** BFS is theoretically clean but practically expensive. Beam_width=3 with branching_factor=3 and depth=3 gives 28 calls — a sensible default. Adjust beam_width up if quality is insufficient; bring branching_factor down first if cost is the constraint.
 
 **Always set a hard call budget.** Implement a `max_calls` circuit breaker. Rate limits, network failures, and recursive bugs can cause unbounded expansion. Log every LLM call and terminate gracefully when the budget is exhausted, returning the best path found so far.
 

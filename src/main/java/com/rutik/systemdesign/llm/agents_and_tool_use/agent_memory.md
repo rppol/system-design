@@ -181,6 +181,37 @@ class HierarchicalMemory:
                f"Last 3 steps: {'; '.join(self.step_summaries[-3:])}"
 ```
 
+**In plain terms.** "When the transcript gets too big, pin both ends and replace the boring middle with a paragraph."
+
+Every compression strategy above is the same trade in different clothing: buy context-window space with fidelity. What separates them is *which* tokens you agree to lose and how much you pay to lose them gracefully.
+
+| Symbol | What it is |
+|--------|------------|
+| `threshold_tokens` | The trigger line, `100000`. Below it, do nothing at all — compression is not free |
+| `messages[0]` | The system prompt. Pinned verbatim, always. Losing it means losing the task itself |
+| `messages[-10:]` | The recent tail, pinned verbatim. The model needs exact wording for what just happened |
+| `messages[1:-10]` | The middle. The only region eligible for summarization |
+| compression ratio | Middle tokens divided by summary tokens. "How many tokens did one summary token replace" |
+
+**Walk one example.** Using this module's own sizing — a system prompt of about 1K tokens and about 2K tokens per conversation turn:
+
+```
+  context at the moment compression fires       100,000 tokens  (the threshold)
+    system prompt   (pinned, verbatim)            1,000
+    recent 10 turns (pinned, verbatim)           20,000         10 turns x 2K
+    middle          (eligible for summary)       79,000         about 39 turns
+
+  summarize the middle: 79,000 -> 1,000 tokens
+    compression ratio = 79,000 / 1,000  =  79 : 1
+    tokens dropped    = 79,000 - 1,000  =  78,000   (98.7% of the middle)
+
+  new context = 1,000 + 1,000 + 20,000  =  22,000 tokens
+  input cost  =  22,000 x $0.000005     =  $0.11 per call
+  was         = 100,000 x $0.000005     =  $0.50 per call     4.5x cheaper
+```
+
+**Why the "keep last 10" term exists.** Drop it and you summarize everything, including the turn the model is mid-way through answering. Summaries are lossy in exactly the way that hurts most locally: they preserve "the user asked about auth" but discard the variable name, the error string, the file path. Pinning a verbatim tail costs 20,000 tokens and buys back the precision that the 79:1 ratio just destroyed. The sliding-window strategy is what you get when you keep only that tail and skip the summary entirely — zero latency, zero cost, and no memory of the first 39 turns at all.
+
 ### Token Budget Management
 
 ```python
@@ -236,6 +267,40 @@ class BudgetedAgentMemory:
         self.cost_usd += (input_tokens * MODEL_INPUT_PRICE_PER_TOKEN +
                           output_tokens * MODEL_OUTPUT_PRICE_PER_TOKEN)
 ```
+
+**What this actually says.** "Treat the context window like a fixed spending limit: pay the mandatory bills first, hold back a reserve for the answer, and let memory have whatever is left over."
+
+The budget is not the context window. `token_budget = 50000` against a 128,000-token window is a deliberate choice to leave 78,000 tokens unused, because tokens you do not send are tokens you do not pay for and do not dilute attention with.
+
+| Symbol | What it is |
+|--------|------------|
+| `token_budget` | Self-imposed per-step ceiling, `50000`. Independent of the model's real 128K limit |
+| `budget_remaining` | Running balance. Decremented as each piece is admitted to the context |
+| `> 5000` in the history loop | Reserve held back so the model has room to *generate*. Input budget is not output budget |
+| `memory_budget` | `min(5000, budget_remaining - 5000)` — a cap and a floor guard fighting each other |
+| `MODEL_INPUT_PRICE_PER_TOKEN` | `$0.000005`, i.e. `$5.00 / 1M`. Multiply by tokens to get dollars |
+
+**Walk one example.** Recent turns at the module's stated ~2K tokens each, filled greedily newest-first:
+
+```
+  token_budget                                        50,000
+  - system prompt (always admitted)                  - 1,000
+                                                    --------
+    budget_remaining                                  49,000
+
+  admit a turn while (budget_remaining - 2,000) > 5,000, i.e. remaining > 7,000
+    turns admitted = floor((49,000 - 7,000) / 2,000) = 21 turns
+    history spent  = 21 x 2,000                      = 42,000
+    budget_remaining = 49,000 - 42,000               =  7,000
+
+  memory_budget = min(5,000, 7,000 - 5,000) = 2,000     <- NOT 5,000
+
+  final context = 1,000 + 42,000 + 2,000 = 45,000 tokens
+  input cost    = 45,000 x $0.000005     = $0.225 per call
+  full 128K window for comparison        = $0.640 per call   (2.8x more)
+```
+
+**The bug hiding in the ordering.** The comment says "inject up to 5K tokens" of memory, but the walk above lands on 2,000 — because history is filled *first* and greedily, leaving only `7,000 - 5,000` for memory. Retrieval quality silently drops by 60% and nothing in the code reports it. The fix is to reserve memory's 5,000 before the history loop runs, subtracting it from `budget_remaining` up front, so that history competes for what is left rather than the other way round. This is pitfall 4 in Section 10 arriving from the opposite direction: there, memory crowded out conversation; here, conversation crowds out memory. A budget that is allocated in a fixed order always starves whatever is last in line.
 
 ### Mem0: Production Memory Library
 
@@ -666,6 +731,34 @@ Transcript: {session_transcript[:4000]}  # truncate for cost control
             )
 ```
 
+**Read it like this.** "Repeat a mistake three times and it becomes worth remembering; repeat it ten times and it is as memorable as anything ever gets."
+
+Two separate numbers are doing two separate jobs here, and conflating them is a common design error. `mistake_count >= 3` is a **gate** — it decides whether a memory is written at all. `min(1.0, mistake_count / 10)` is a **score** — it decides how loudly that memory competes at retrieval and eviction time.
+
+| Symbol | What it is |
+|--------|------------|
+| `mistake_count` | How many times the same error type appeared in one session. The raw evidence |
+| `>= 3` | Write gate. Below it, nothing is stored — this is what keeps the episodic store from filling with noise |
+| `/ 10` | Normalizer. Turns a count into a 0-1 score by declaring 10 occurrences to be "full strength" |
+| `min(1.0, ...)` | Saturation clamp. Stops any single pathological session from outranking every other memory |
+| `importance` | The stored 0-1 weight, later combined with recency for eviction (the "recency-weighted" scheme above) |
+
+**Walk one example.** Six sessions, same student, different error counts:
+
+```
+  mistake_count    passes gate (>= 3)?    count/10    min(1.0, count/10)    stored as
+        1                 no                0.1              --             not stored
+        2                 no                0.2              --             not stored
+        3                YES                0.3             0.30            weak signal
+        5                YES                0.5             0.50            moderate
+       10                YES                1.0             1.00            saturated
+       14                YES                1.4             1.00            saturated (clamped)
+
+  counts 10 and 14 are indistinguishable once stored -- the clamp threw that away
+```
+
+**Why the clamp is worth the lost resolution.** Without `min`, a single bad session with 40 sign errors would produce `importance = 4.0` and dominate every retrieval ranking for that student for months, drowning out the twelve other topics they also need help with. Saturating at 1.0 says: past ten repetitions, "this is a real pattern" is the entire message, and the exact count adds nothing a tutor would act on differently. The cost is real but small — you can no longer tell a 10-mistake topic from a 14-mistake one, so pair the score with `mistake_count` in metadata if you ever need to rank within the saturated band.
+
 **Results**:
 
 - Session personalization score (LLM judge on rubric): 4.1/5.0 vs. 2.8/5.0 without memory
@@ -679,3 +772,30 @@ Transcript: {session_transcript[:4000]}  # truncate for cost control
 - Full conversation history injection (no retrieval) was prototyped: worked well for students with <5 sessions (context fits in window) but became prohibitively expensive at 50+ sessions ($1.20/session vs. $0.18 with retrieval).
 - Single vector store (no memory type separation) was tried: retrieval quality was poor because algebra struggle events competed with learning style facts in the same index. Separating episodic, semantic, and procedural stores improved retrieval precision from 71% to 89%.
 - Opt-in memory was considered: initial testing showed students and parents trusted the product more when memory was opt-in with a visible memory dashboard, despite slightly lower engagement when memory was disabled. The opt-in dashboard is now standard.
+
+**Put simply.** "Retrieval does not make memory better here — it makes memory affordable. The whole argument is a division problem."
+
+| Symbol | What it is |
+|--------|------------|
+| `$1.20/session` | Full-history injection. Every past session replayed into context, every time |
+| `$0.18/session` | Retrieval. Only the top-K memories that match this session's topic |
+| tokens implied | Cost divided by `$0.000005/token` — converts dollars back into context tokens |
+| 71% -> 89% | Retrieval precision, single shared index versus three type-separated indexes |
+
+**Walk one example.** Start from the two published per-session costs and the input price already defined in this module:
+
+```
+  full-history injection    $1.20 / $0.000005  =  240,000 input tokens per session
+  retrieval-based           $0.18 / $0.000005  =   36,000 input tokens per session
+
+  saving per session    $1.20 - $0.18  =  $1.02      (85.0% cheaper, a 6.7x ratio)
+
+  at 80,000 students, one session per student per week:
+    full history    80,000 x $1.20  =  $96,000 / week
+    retrieval       80,000 x $0.18  =  $14,400 / week
+    saved                              $81,600 / week
+```
+
+Note the first line: 240,000 tokens does not fit in a 128,000-token window at all. At 50+ sessions the full-history approach is not merely expensive, it is **impossible** in one call — it silently becomes multiple calls or a truncation, which is why it was abandoned rather than merely budgeted for. This is the same wall the token-budget code above is built to stay behind.
+
+**Why splitting the index moved precision 18 points.** The single-store version put "struggled with factoring trinomials" and "prefers visual examples" in one embedding space, so an algebra query retrieved learning-style facts and vice versa — 71% precision means roughly 3 of every 10 retrieved memories were off-type. Separating episodic, semantic, and procedural stores does not improve any embedding; it removes the competition, lifting precision to 89% (a 25% relative gain) purely by narrowing what each query is allowed to match. The mastery map goes further and abandons similarity search entirely for a keyed lookup, because "quadratic_equations" is too short a string for cosine similarity to rank reliably.

@@ -71,6 +71,44 @@ Latency:
   Acceptable as second stage; not acceptable as first stage on millions of docs
 ```
 
+**What this actually says.** `O(n x L^2)` says: "you pay one full transformer forward pass per candidate, and each pass costs quadratically in sequence length." The bi-encoder's cost is `O(1)` forward passes at query time because the documents were encoded months ago; the cross-encoder's is `O(n)` because its document representation does not exist until the query arrives.
+
+That single structural difference — precomputable versus not — is the entire reason for the two-stage pipeline, and it is the answer interviewers are listening for.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Candidates scored at query time — 100 in the standard pipeline, `N` if used as retriever |
+| `L` | Sequence length of the concatenated query + document, capped at 512 here |
+| `L^2` | Self-attention's cost: every token attends to every other token |
+| per-pair latency | Amortized wall-clock per `(query, doc)` pair in a batched pass — 0.8 ms for BGE-reranker-large on an A10G |
+| `N` | Corpus size — 45,000 chunks in Section 12, 1,000,000 in the "why not first stage" argument |
+
+**Walk one example — why it cannot be the retriever.** Section 10's 1M-document corpus, at the 0.8 ms/pair implied by the table in Section 6 (100 candidates in ~80 ms):
+
+```
+  cross-encoder over the full corpus
+    1,000,000 pairs x 0.8 ms = 800,000 ms = 800 s = 13.3 minutes PER QUERY
+
+  bi-encoder over the full corpus
+    document embeddings : computed once, at index time, offline
+    query time          : 1 forward pass (the query) + one ANN search
+                        : ~10 ms embed + ~30 ms ANN = 40 ms
+
+  ratio: 800 s / 0.04 s = 20,000x
+```
+
+**Walk one example — why batching is not optional.** Pitfall 6 in Section 8, on 100 candidates:
+
+```
+  batched  : one padded forward pass over 100 pairs      =  80 ms
+  serial   : 100 separate passes, ~8 ms each (the GPU is
+             idle most of each call, kernel-launch bound) = 800 ms
+
+  speedup = 800 / 80 = 10x, for a one-line change
+```
+
+The `L^2` term is why Pitfall 2 matters as much as it does: doubling chunk length from 256 to 512 tokens does not double reranker cost, it roughly quadruples the attention work — so oversized chunks are punished twice, once by truncation and once by latency.
+
 ### 3.3 Reranking Implementation
 
 ```python
@@ -109,6 +147,50 @@ class CrossEncoderReranker:
         )
         return ranked[:top_k]
 ```
+
+**Stated plainly.** Reranking latency is one multiplication: `latency = k x per_pair_ms`. There is no clever amortization to find — `k` is the only knob, and it moves latency and quality in opposite directions on a straight line.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Candidates handed to the reranker — `len(documents)` in the code above |
+| `per_pair_ms` | Amortized cost of one `(query, doc)` pair; 0.8 ms for BGE-reranker-large on an A10G |
+| `top_k` | Survivors passed to the LLM; costs nothing, it is a slice of an already-computed list |
+| SLO | End-to-end budget the whole pipeline must fit in — 2000 ms in Section 12 |
+| slack | `SLO - (everything that is not reranking)`; the real ceiling on `k` |
+
+**Walk the k sweep.** At 0.8 ms/pair:
+
+```
+  k      rerank latency    what it buys (from Section 10's guidance)
+  ---------------------------------------------------------------------
+   10       8 ms           barely reorders retrieval; near-zero gain
+   20      16 ms           adequate when retriever recall@20 > 90%
+   50      40 ms           +3-5% recall@5 over k = 20
+  100      80 ms           +1-2% more over k = 50   <- standard choice
+  200     160 ms           diminishing; mostly buys latency
+```
+
+**Walk the budget.** The 2-second SLO from Section 10, laid out end to end:
+
+```
+  embedding the query          10 ms
+  ANN retrieval (top-100)      30 ms
+  reranking, k = 100           80 ms   <- the only line item you control here
+  LLM generation             1500 ms
+  network + overhead          100 ms
+  ---------------------------------
+  total                      1720 ms      margin = 2000 - 1720 = 280 ms
+
+  Everything except reranking is fixed at 1640 ms, so the true ceiling is
+    k_max = (2000 - 1640) / 0.8 = 450 candidates
+
+  You could rerank 450 candidates and still hit the SLO -- but Section 10
+  says the curve is flat past 100, so the extra 350 pairs (280 ms) would
+  buy under 2% recall. The budget is not the binding constraint here; the
+  diminishing-returns curve is.
+```
+
+**Where the linearity breaks.** `k` also multiplies cost on managed APIs. Cohere Rerank bills `$2/1000 queries` regardless of `k`, so `k = 100` costs `$0.002` per query, or `$0.00002` per pair — at Section 12's 100,000 queries/day that is `$200/day`. Self-hosting BGE-reranker-large costs roughly `$15/day` in GPU time for the same volume, a `200/15 = 13.3x` reduction, which is exactly the tradeoff the case study's alternatives section weighs.
 
 ### 3.4 ColBERT: Late Interaction
 
@@ -156,6 +238,32 @@ are summed. This is the "late interaction" middle ground — finer than one pool
 The max-per-row is what lets "capital" match a document's "political center" (d3): the
 query token finds its best lexical-semantic counterpart instead of being averaged away.
 
+**In plain terms.** `Score = Σ_i max_j (q_i · d_j)` says: "give every query token its own best match anywhere in the document, then add up those best matches." The `max` is the whole trick — it refuses to average, so one strong token-level match cannot be diluted by the surrounding text.
+
+| Symbol | What it is |
+|--------|------------|
+| `q_i` | Embedding of query token `i`; 128 dimensions in ColBERT, computed at query time |
+| `d_j` | Embedding of document token `j`; 128 dimensions, precomputed at index time |
+| `q_i · d_j` | One cell of the grid above — how well this query token matches this doc token |
+| `max_j` | Row maximum: the single best document token for this query token |
+| `Σ_i` | Sum over query tokens; longer queries produce larger raw scores |
+| `m`, `n` | Query and document token counts; the grid is `m x n` cells |
+
+**Walk the storage cost.** The same `max` that buys quality is why the index explodes:
+
+```
+  bi-encoder : 1 vector per DOCUMENT   =   768 floats
+  ColBERT    : 1 vector per TOKEN      = 128 floats x 200 tokens = 25,600 floats
+
+  ratio = 25600 / 768 = 33.3x per document
+
+  at 10M documents, float32:
+    bi-encoder  768   x 4 x 10e6 =    30.72 GB
+    ColBERT   25600   x 4 x 10e6 =  1024.00 GB  (1.02 TB)
+```
+
+The score itself scales with query length, not with quality: the grid above sums three row maxima to `0.88 + 0.40 + 0.91 = 2.19`, but a six-token query would sum six maxima and land near 4-5 for equally good matching. ColBERT scores are therefore comparable **across documents for one query** and meaningless across queries — the same caveat that makes cross-encoder scores unsafe as confidence values.
+
 ### 3.5 Cohere Rerank API
 
 ```python
@@ -179,6 +287,48 @@ Cohere Rerank 3 properties:
 - Best-in-class managed reranking API
 - ~100ms latency; $2/1000 queries
 - No GPU needed (fully managed)
+
+### Reading the Three Score Scales
+
+The three architectures in this module emit numbers that look comparable and are not. Knowing which interval each lives in — and whether it means anything in absolute terms — is what keeps Pitfall 3 from happening.
+
+```
+  bi-encoder cosine   : cos(q, d)                    range [-1, 1], in practice [0, 1]
+  cross-encoder       : sigmoid(logit)               range  (0, 1), NOT a probability
+  ColBERT MaxSim      : Σ_i max_j (q_i · d_j)        range  [0, m], grows with query length
+```
+
+**What it means.** Each of these answers a different question. Cosine answers "how aligned are two fixed summaries of meaning"; the cross-encoder logit answers "how much more relevant than not, on a scale the training loss chose"; MaxSim answers "how much total token-level evidence did I accumulate." Only the first is bounded by geometry; the other two are bounded by convention.
+
+| Symbol | What it is |
+|--------|------------|
+| `cos(q, d)` | Bi-encoder score; bounded by the unit sphere, comparable across queries |
+| `logit` | Raw cross-encoder output before squashing; unbounded, trained by ranking loss |
+| `sigmoid(x)` | `1/(1 + e^-x)` — squashes to `(0, 1)` for readability, not for calibration |
+| `m` | Query token count; MaxSim's implicit upper bound and its scale problem |
+| threshold | A cutoff applied to a score, e.g. Cohere's `0.30` in Section 12 |
+
+**Why `sigmoid` output is not a probability.** The model is trained to rank — its loss only ever compares a positive against a negative for the *same* query. Nothing in that objective forces `0.8` to mean "relevant 80% of the time." Two consequences follow directly. First, a fixed threshold must be calibrated per deployment on labeled data, which is exactly what Section 12 does when it settles on `0.30` (89% answer precision) rather than `0.40` (94% precision but 28% of queries deflected to humans). Second, scores from different reranker models are never interchangeable — swapping BGE-reranker-large for Cohere invalidates every threshold you tuned.
+
+**Walk the quantified gain.** Section 12's before/after, converted from percentages into chunks the LLM actually sees:
+
+```
+  metric              before      after      delta
+  --------------------------------------------------
+  recall@5             72%         89%      +17 points
+  precision@5          51%         81%      +30 points
+  NDCG@5              0.61        0.84      +0.23  = +37.7% relative
+
+  precision@5 as chunk counts, out of the 5 sent to the LLM:
+    before : 0.51 x 5 = 2.55 relevant, 2.45 irrelevant
+    after  : 0.81 x 5 = 4.05 relevant, 0.95 irrelevant
+
+  The reranker converts ~1.5 of the 5 context slots from noise into signal.
+  That is the mechanism behind the hallucination rate falling 31% -> 8%:
+  the generator is no longer being handed near-half a context of distractors.
+```
+
+Note which metric moved most. Recall@5 gained 17 points and precision@5 gained 30 — reranking is a *precision* intervention. It cannot invent documents the retriever never fetched, which is why Section 8's first pitfall (too small a candidate pool) is fatal: with `k = 10`, recall@10 is the hard ceiling on everything the reranker can achieve.
 
 ---
 

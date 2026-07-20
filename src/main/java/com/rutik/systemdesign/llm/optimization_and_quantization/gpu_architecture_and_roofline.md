@@ -154,9 +154,150 @@ def kv_bytes_per_token(layers: int, kv_heads: int, head_dim: int,
     # without GQA (64 KV heads):        ≈ 2.6 MB/token  -> GQA = 8x KV bandwidth/capacity
 ```
 
+The two lines the whole file rests on, written out:
+
+```
+  attainable FLOPS  =  min( peak_FLOPS ,  I x peak_bandwidth )
+  ridge point       =  peak_FLOPS / peak_bandwidth
+```
+
+**Read it like this.** "You can never run faster than the tensor cores, and you can never run
+faster than the belt can feed them — so you get whichever of those two ceilings is lower."
+
+| Symbol | What it is |
+|--------|------------|
+| `peak_FLOPS` | The chip's dense math ceiling at the precision in use. Flat, independent of the kernel |
+| `peak_bandwidth` | HBM bytes per second — the width of the belt |
+| `I` | Arithmetic intensity: FLOPs the kernel performs per byte it pulls from HBM |
+| `I x peak_bandwidth` | The sloped bandwidth roof — what your intensity lets the belt deliver, in FLOPS |
+| `min(...)` | The two roofs cross at the ridge: below it bandwidth binds, above it compute binds |
+| `ridge point` | The intensity where the two ceilings are equal, in FLOPs per byte |
+
+**Walk one example.** Every chip in Section 4's table, ridge = peak FLOPS divided by bandwidth:
+
+```
+  chip                    peak dense        bandwidth      ridge (FLOPs/byte)
+  A100 SXM 80GB          312e12 BF16        2.00 TB/s           156.00
+  H100 SXM               989e12 BF16        3.35 TB/s           295.22
+  H200 SXM               989e12 BF16        4.80 TB/s           206.04
+  B200                  2250e12 BF16        8.00 TB/s           281.25
+  TPU v5p                459e12 BF16        2.76 TB/s           166.30
+
+  H100 at FP8       :   1979e12 / 3.35e12                    =  590.75
+```
+
+Two readings people reliably get backwards. **A lower ridge is the better inference chip**: H200
+has identical compute to H100 and a ridge of `206.04` instead of `295.22` purely because the belt
+got wider, so more kernels land on the compute side. And **dropping precision raises the ridge**:
+FP8 doubles H100's FLOPS but not its bandwidth, moving the bar from `295.22` to `590.75`. Lower
+precision makes it *harder* to be compute-bound even while it speeds up both regimes — which is
+why FP8 is a prefill/training win first and a decode win only through the bytes term.
+
 ### 6.2 Prefill vs decode through the roofline
 
 Prefill processes S prompt tokens in one pass: each weight loaded once serves S tokens → GEMM intensity ≈ 2S FLOPs per weight byte. At S=2,048, intensity ~4,096 ≫ 295: firmly compute-bound; time scales with FLOPs, and FP8 (doubling FLOPS) genuinely halves it. Decode emits one token per pass: intensity ≈ 2/bytes_per_param ≈ 1 — bandwidth-bound by ~300×; time scales with *bytes*, so quantization and bandwidth (H200) help, while more FLOPS does nothing. This asymmetry is why modern serving disaggregates: prefill on compute-optimized pools, decode on bandwidth/capacity-optimized pools, KV cache shipped between them (DistServe, Mooncake; see [vLLM Deep Dive](../vllm_deep_dive/README.md) and [gpu_pool_economics.md](../case_studies/cross_cutting/gpu_pool_economics.md) for the prefill/decode disaggregation economics).
+
+That whole paragraph turns on one ratio, so it is worth computing rather than asserting:
+
+```
+  I  =  FLOPs performed  /  bytes moved from HBM
+```
+
+**What it means.** "Count the useful math a kernel does, divide by the traffic it forces across
+the belt in order to do it — that one number decides which ceiling you hit."
+
+| Symbol | What it is |
+|--------|------------|
+| `FLOPs performed` | Multiply-adds the kernel actually issues, counted once — not the datasheet peak |
+| `bytes moved` | HBM traffic: inputs read plus outputs written. Data served from SRAM or L2 does not count |
+| `I` | The ratio, in FLOPs per byte. A property of the *kernel*, not of the chip |
+| `I` vs `ridge` | `I < ridge` means memory-bound; `I > ridge` means compute-bound |
+| `I / ridge` | The best fraction of peak FLOPS that kernel can ever reach while memory-bound |
+
+**Walk four real kernels.** All BF16/FP16, judged against H100's ridge of `295.22`:
+
+```
+  kernel                    FLOPs              HBM bytes            I         verdict
+  elementwise add           N                  3 x 2 x N          0.167    memory-bound
+     c = a + b: read a, read b, write c -- one add earned per 6 bytes moved
+
+  softmax over a row        ~5N                2 x 2 x N          1.250    memory-bound
+     max, exp, sum, divide is ~5 FLOPs per element; read in once, write out once
+
+  GEMV -- decode, B=1       2 x M x K          2 x M x K          1.000    memory-bound
+     a 70B model: 140 GFLOPs per token against 140 GB of weights read = exactly 1.0
+
+  GEMM -- prefill, S=2048   2 x S x K x N   2(SK + KN + SN)    1365.333   compute-bound
+     S=2048, K=N=8192: 274,877,906,944 FLOPs / 201,326,592 bytes
+```
+
+Turn each `I` into the ceiling it implies on an H100, via `min(peak, I x 3.35e12)`:
+
+```
+  kernel                      I         attainable            share of 989 TFLOPS
+  elementwise add         0.167          0.56 TFLOPS                 0.056%
+  GEMV -- decode, B=1     1.000          3.35 TFLOPS                 0.339%
+  softmax over a row      1.250          4.19 TFLOPS                 0.423%
+  GEMM -- prefill      1365.333        989.00 TFLOPS               100.000%
+```
+
+Batch-1 decode can reach `0.339%` of an H100's advertised BF16 peak. That is not a defect to
+optimize away: 294 of every 295 FLOPs the chip is capable of simply have nothing to feed them.
+Section 6.6's "decode MFU often below 5%" is this number, plus whatever batching recovers.
+
+One honest footnote on the prefill figure. The `intensity ~= 2S` shorthand used above (`4096` at
+`S=2048`) counts only weight reuse; adding the activation traffic in and out gives the exact
+`1365.333`. Both clear the ridge comfortably — `1365.333 / 295.22 = 4.6x` and
+`4096 / 295.22 = 13.9x` — so the verdict never changes; use `2S` live in an interview, and know
+why it is an upper bound.
+
+Batch size is the one knob that moves decode's intensity, and it moves it linearly:
+
+```
+  I_decode(B)  =  2B / bytes_per_param        crossover when I_decode(B) >= ridge point
+```
+
+**The idea behind it.** "Every extra sequence in the batch squeezes one more token's worth of math
+out of the same weight bytes — batching does not make the GPU faster, it makes each byte count for
+more."
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Concurrent sequences decoding in the same forward pass |
+| `2B` | 2 FLOPs per parameter per sequence, with all `B` sequences sharing one weight read |
+| `bytes_per_param` | `2` at BF16, `1` at INT8, `0.5` at INT4 — the divisor quantization shrinks |
+| `I_decode(B)` | Decode GEMM intensity. At BF16 it reduces to numerically just `B` |
+| crossover `B` | The batch at which the GEMMs stop being memory-bound and start being compute-bound |
+
+**Walk the sweep.** H100 BF16, ridge `295.22`:
+
+```
+     B      I = 2B/2      attainable = I x 3.35e12       share of 989 TFLOPS
+     1         1.0              3.35 TFLOPS                     0.339%
+     8         8.0             26.80 TFLOPS                     2.710%
+    32        32.0            107.20 TFLOPS                    10.839%
+   128       128.0            428.80 TFLOPS                    43.357%
+   296       296.0            989.00 TFLOPS (capped)          100.000%   <- ridge crossed
+```
+
+Everything up to the crossover is close to free: each step still streams the weights exactly once,
+so per-step time stays flat while tokens produced per step multiply by `B`. Going from `B=1` to
+`B=128` buys roughly 128x the aggregate decode throughput on identical hardware. Past `B=296` the
+GEMMs are compute-bound and additional batching starts costing proportional time.
+
+Two levers shift where that crossover sits:
+
+```
+  chip     : H200's ridge is 206.04, so B=128 reaches 62.12% of peak (vs 43.36% on H100)
+             and the crossover arrives at B=207 instead of B=296
+  precision: INT8  -> I = 2B/1   = 2B  -> crossover at B = 295.22/2 =  148
+             INT4  -> I = 2B/0.5 = 4B  -> crossover at B = 295.22/4 =   74
+```
+
+Quantization therefore does two distinct things at once: it raises the decode ceiling (fewer bytes
+per token) *and* it reaches the compute roof at a quarter of the batch size. What stops you before
+any of this is almost always KV capacity, not the ridge — Section 6.5's plan runs out of HBM at
+batch 64 on a 70B, well short of `B=296` (Pitfall 3, Q6).
 
 ### 6.3 FlashAttention as an IO argument
 

@@ -689,6 +689,29 @@ class BudgetExceededError(Exception):
 
 **Enterprise Usage:** At a mid-size fintech company, an internal ChatDev-inspired system was used to generate boilerplate microservices (CRUD REST APIs with Spring Boot). A simple 5-endpoint service cost approximately 80,000 tokens (~$0.08 at GPT-4o mini pricing). Adding OAuth2 integration raised the cost to ~320,000 tokens due to multiple QA repair iterations.
 
+**Stated plainly.** "Adding one feature did not add one feature's worth of tokens — it
+quadrupled the entire run, because the repair loop re-runs the expensive phases."
+
+```
+  base service (5 endpoints, no auth) :  80,000 tokens
+  same service + OAuth2               : 320,000 tokens
+
+  ratio = 320,000 / 80,000 = 4.0x   for what a human would call "one more concern"
+  delta =                    240,000 tokens, three times the entire original build
+```
+
+The multiplier is structural, not a measurement artifact. QA repair is a *loop*: each failed
+review re-invokes the engineer on the file, and the engineer's call carries the accumulated
+context plus the bug report. If OAuth2 touches 4 files and each needs 2 repair iterations, that
+is 8 extra engineer calls and 8 extra QA calls on top of the base pass — and because
+`MAX_REPAIR_ITERATIONS = 3` is the only thing bounding it, an unlucky run stops at the cap rather
+than at correctness.
+
+This is why cost estimates for agent pipelines must be quoted as a *range keyed on repair
+iterations*, never as a point estimate keyed on feature count. The stated 50,000–200,000 band for
+a simple CRUD app and the 500,000+ figure for a complex one are the same phenomenon: the spread
+inside each band is almost entirely how many times QA sent work back.
+
 ---
 
 ## 8. Tradeoffs
@@ -1099,6 +1122,61 @@ Total QA phase cost across all 8 files: ~28,000 tokens (including repair iterati
 | Implementation | Engineer x 8 | 42,000 | 8 source files |
 | QA + repair | QA + Engineer | 28,000 | Patched source files |
 | **Total** | | **~83,000 tokens** | Working FastAPI app |
+
+**Read it like this.** "Five phases, but only two of them cost anything — planning the app is
+15% of the bill and building plus checking it is the other 85%."
+
+That split is the number to carry into a budget conversation, because it tells you which knob
+moves the total. Halving the PRD's verbosity saves ~1,750 tokens; cutting one file from the
+build saves ~8,750.
+
+| Symbol | What it is |
+|--------|------------|
+| Planning phases | Requirements + Architecture + Task breakdown — three single calls |
+| Build phases | Implementation + QA/repair — `2 x num_files` calls |
+| `num_files` | 8 here. The multiplier on everything expensive |
+| Token cost | Tokens *generated or injected* in that phase, not tokens billed on the wire |
+
+**Walk one example.** The table, decomposed per file and per call:
+
+```
+  planning : 3,500 + 5,200 + 4,000            = 12,700 tokens  (15.4%)
+  build    : 42,000 + 28,000                  = 70,000 tokens  (84.6%)
+  total    :                                    82,700  -> "~83,000"
+
+  per file : engineering 42,000 / 8 = 5,250 tokens   (in the stated 3,000-8,000 band)
+             QA + repair 28,000 / 8 = 3,500 tokens
+             marginal cost of one more file = 8,750 tokens
+
+  wall clock: 8 engineer + 8 QA = 16 calls x 60-90 s = 16 to 24 min  -> "~18 minutes"
+```
+
+Now price it, and watch the two numbers refuse to reconcile:
+
+```
+  GPT-4o: $2.50 per 1M input, $10.00 per 1M output
+
+  naive costing, assuming a 50/50 input/output split of the 83,000:
+    input  41,500 x $2.50/1M = $0.104
+    output 41,500 x $10.00/1M = $0.415
+                               -------
+                                $0.519
+
+  actual reported bill        : $0.97      ->  1.9x the naive estimate
+```
+
+**Why the gap exists, and what breaks without accounting for it.** The phase table counts
+*logical* tokens — content produced or freshly injected once. The invoice counts *wire* tokens,
+and in a document-handoff pipeline every one of those 16 calls re-sends the accumulated PRD,
+SystemDesign, and Tasks JSON as input. At $2.50/1M, closing a $0.45 gap takes roughly 180,000
+re-sent input tokens across 16 calls — about 11,000 tokens of carried context per call, which is
+exactly what "PRD + design + task list + dependency snapshot" weighs.
+
+So the working rule for any multi-agent pipeline: **budget the logical token count, then multiply
+by the number of stages that must carry the handoff documents.** A team that sizes a budget cap
+off the phase table alone will trip the cap at roughly half the work done, conclude the pipeline
+is broken, and start cutting features — when the real fix is either trimming what each stage
+carries forward (inject the dependency file, not the whole repo snapshot) or paying the known 2x.
 
 **Outcome:** The pipeline produced a runnable FastAPI application in approximately 18 minutes wall-clock time (8 sequential engineer calls + 8 QA calls, each ~60–90 seconds). The generated application passed import resolution, syntax validation, and basic endpoint smoke tests (register user, login, create task, list tasks with priority filter). Two bugs found in QA were resolved in a single repair iteration. Total API cost at GPT-4o pricing: approximately $0.97. The application required minor human fixes (adding a `.env.example` file and updating the database URL for PostgreSQL) before production use, consistent with the framework's stated goal of producing a complete first draft rather than a production-ready system.
 

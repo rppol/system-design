@@ -96,6 +96,47 @@ This is fundamentally different from **uniform** corruption (replace with a rand
 vocabulary) and from **continuous Gaussian** corruption (used for image pixels and for *continuous
 embedding* text diffusion like Diffusion-LM/Plaid — see §4).
 
+**What this actually says.** "Walk down the sequence flipping one biased coin per token — heads
+with probability `t` and that token is erased to `[MASK]`, tails and it survives untouched. At
+`t = 1` every coin comes up heads and nothing is left."
+
+The coins are independent, which is what makes the whole scheme cheap: there is no sequential
+dependency to unwind, so corruption at *any* noise level is one vectorized operation, and training
+can jump straight to an arbitrary `t` without simulating the steps before it.
+
+| Symbol | What it is |
+|--------|------------|
+| `x_0` | The clean sequence, `L` real tokens. Subscript `0` = zero noise |
+| `x_t` | That same sequence corrupted at noise level `t` |
+| `t` | Diffusion time in `[0, 1]`. Under a linear schedule it *is* the masking probability |
+| `1 - t` | Survival probability — the chance a given token is left alone |
+| `x_1` | Fully masked. The fixed starting point every generation begins from |
+| absorbing state | `[MASK]` is a one-way door: as `t` rises a token can be masked but never un-masked |
+
+**Walk one example.** The six-token sequence from §5.2, `L = 6`:
+
+```
+  Each of the 6 positions is masked independently with probability t
+
+  t = 0.3 :  expected masked = 0.3 x 6 = 1.8   ->  the diagram shows 2
+  t = 0.6 :  expected masked = 0.6 x 6 = 3.6   ->  the diagram shows 4
+  t = 1.0 :  expected masked = 1.0 x 6 = 6.0   ->  all 6, with certainty
+
+  "Expected", not exact -- independent coins mean the count at a given t is
+  a random draw scattered around t x L. Only t = 1.0 is deterministic.
+
+  At LLaDA's pretraining length L = 4096:
+    t = 0.15  ->  0.15 x 4096 =  614.4 positions masked on average
+    t = 0.90  ->  0.90 x 4096 = 3686.4 positions masked on average
+```
+
+**Why absorbing beats uniform corruption.** With absorbing (mask) transitions the model is handed
+the answer to "which positions are damaged?" for free — they are literally the `[MASK]` tokens. A
+uniform transition replaces corrupted positions with plausible-looking real tokens, so the model
+must first *detect* corruption and then *repair* it, two jobs instead of one, with no supervision
+separating them. That extra detection burden is the reason every LLM-scale text diffusion model
+(D3PM's absorbing variant, SEDD, LLaDA, Mercury) uses masking.
+
 ### 3.2 Reverse Process (Denoising)
 
 The model `p_theta(x_0 | x_t, t)` is trained to predict the clean sequence given a partially-masked
@@ -118,6 +159,51 @@ by `1/t` (heavier weight when fewer tokens are masked, since each masked token t
 "surprise"). This is provably an upper bound (ELBO) on the negative log-likelihood of the data —
 not an exact likelihood, unlike AR models where the chain rule gives an exact factorization.
 
+**Read it like this.** "Hide a random fraction `t` of the tokens, score the model only on the ones
+you hid, then multiply the penalty by `1/t` so a gentle 15%-masked example counts exactly as much
+as a brutal 90%-masked one."
+
+The `1/t` looks like a tuning hack and is not. It is the term that makes every noise level
+contribute equal gradient signal, which is what lets a single model serve every step of the
+sampling loop.
+
+| Symbol | What it is |
+|--------|------------|
+| `E_{t ~ U(0,1)}` | Average over a masking ratio drawn uniformly. Every training batch picks its own `t` |
+| `x_0 ~ data` | A clean sequence from the corpus |
+| `x_t ~ q(x_t \| x_0, t)` | One random corruption of it at level `t` — the coin flips of §3.1 |
+| `sum_{i : x_t^i = [MASK]}` | Sum over masked positions only. Unmasked positions contribute nothing |
+| `log p_theta(x_0^i \| x_t)` | Log-probability the model assigns to the *original* token at masked position `i` |
+| `-(1/t)` | Negate (turn likelihood into loss) and up-weight by `1/t` — bigger when less was hidden |
+
+**Walk one example.** Write `ce` for the model's average cross-entropy per masked token. LLaDA's
+pretraining length is `L = 4096`:
+
+```
+  t = 0.15 :  masked positions  = 0.15 x 4096  =  614
+              raw sum           = ce x 614
+              weight            = 1 / 0.15     = 6.67
+              weighted loss     = ce x 614  x 6.67  =  ce x 4093
+
+  t = 0.90 :  masked positions  = 0.90 x 4096  = 3686
+              raw sum           = ce x 3686
+              weight            = 1 / 0.90     = 1.11
+              weighted loss     = ce x 3686 x 1.11  =  ce x 4096
+
+  Both land on ce x ~4096 = ce x L.
+  The 1/t cancels the t x L masked count, so the loss magnitude is the
+  same whichever t the batch happened to draw.
+```
+
+**What breaks without the `1/t`.** Drop the weight and the raw sums are `ce x 614` versus
+`ce x 3686` — heavily-masked batches would contribute `3686 / 614 = 6.0x` the gradient of
+lightly-masked ones, purely because more positions were summed. Training would then optimize almost
+exclusively for the high-`t` regime (guessing text from near-total masking) and neglect the low-`t`
+regime, which is where the *final* denoising steps operate. The sampler would inherit a model that
+is good at the start of the loop and weak at the finish — visible as tokens committed late being
+worse than tokens committed early. The `1/t` is what keeps the model uniformly competent across the
+whole trajectory it will later be asked to walk.
+
 ### 3.4 The "Any-Order Autoregressive" Equivalence
 
 A masked diffusion model trained with the objective above is **equivalent in expectation to
@@ -136,6 +222,47 @@ forward passes is *always* `L`). Typical production configurations use `T` in th
 forward pass over the *entire* sequence (`O(L)` attention), so total compute is roughly
 `O(T x L^2)` for the diffusion model vs. `O(L)` sequential passes each costing `O(L)` amortized via
 KV-cache for AR — the diffusion model trades sequential *latency* for parallel *throughput*.
+
+**What the formula is telling you.** "`O(T x L^2)` versus AR's `O(L)`-per-step-times-`L`-steps says
+diffusion does *more total arithmetic*, but stacks it into far fewer sequential steps — and
+wall-clock latency is paid per step, not per FLOP."
+
+This is the single most misread comparison in the field. The step-count ratio and the work ratio
+point in opposite directions, and only measurement settles which one dominates on your hardware.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Output length in tokens. Fixes AR's step count exactly; has no say over diffusion's |
+| `T` | Diffusion's step count. A knob, not a consequence — `8` to `64` in production |
+| `O(L^2)` per diffusion step | Full bidirectional attention over the whole sequence, recomputed from scratch (no valid KV-cache, §5.5) |
+| `O(L)` per AR step | One new token attending over the cache. Cheap because everything prior is already stored |
+| `O(T x L^2)` | Diffusion's total attention work |
+| Sequential depth | How many passes must happen *one after another*. This is what latency actually tracks |
+
+**Walk one example.** `L = 256` output tokens, `T = 32` denoising steps:
+
+```
+  AR        :  256 sequential passes, O(L) work each
+               total attention work  ~ 256 x 256   =    65,536 units
+               sequential depth      =   256 steps
+
+  Diffusion :   32 sequential passes, O(L^2) work each
+               total attention work  =  32 x 256^2 = 2,097,152 units
+               sequential depth      =    32 steps
+
+  work   : 2,097,152 / 65,536  =  32x  MORE total arithmetic
+  depth  :       256 / 32      =   8x  FEWER sequential steps
+
+  Measured on the same A100s, same 7B class (Section 14):
+    AR  p50 = 320 ms    ->    diffusion T=32  p50 = 95 ms    =  3.4x faster
+```
+
+**Why the measured `3.4x` sits below the `8x` step ratio.** The extra `32x` of arithmetic is not
+free — it is absorbed by GPU parallelism, but only partly. A single diffusion step saturates the
+device far more than a single AR decode step (which is memory-bandwidth-bound and leaves most of
+the GPU idle), so diffusion converts wasted AR capacity into useful work. That conversion is
+efficient, not perfect, which is exactly why the `8x` step advantage lands as `3.4x` wall-clock and
+why Pitfall 10.8 rejects "`T=8` vs `L=256`, therefore 32x faster" as an unmeasured claim.
 
 ### 3.6 Confidence-Based Remasking
 
@@ -368,6 +495,43 @@ def forward_corrupt(
 sequence in each training batch, vocabulary size ~126K (extending LLaMA's tokenizer with the
 `[MASK]` token), and sequence lengths up to 4096 during pretraining.
 
+**Put simply.** "`mask_prob(t) = 1 - cos(t x pi/2)` bends the straight line `mask_prob = t` into a
+quarter-cosine, so the schedule creeps through the near-clean end and races through the middle."
+
+Both schedules agree at the two endpoints — no masking at `t=0`, total masking at `t=1`. Everything
+the cosine buys you happens strictly in between, by making equal steps in `t` correspond to
+*unequal* amounts of masking.
+
+| Symbol | What it is |
+|--------|------------|
+| `t` | Diffusion time in `[0, 1]`. The loop's counter, not the masking probability itself once the schedule is non-linear |
+| `mask_prob(t)` | The probability actually used to mask each token. This is what the forward process consumes |
+| `t x pi/2` | Rescales `t` from `[0, 1]` onto `[0, pi/2]` — exactly one quarter turn of the cosine |
+| `cos(...)` | Falls from `1` to `0` across that quarter turn |
+| `1 - cos(...)` | Flips it to rise from `0` to `1`, which is the direction masking needs |
+
+**Walk one example.** The same five values of `t` through both schedules:
+
+```
+     t        linear: t      cosine: 1 - cos(t x pi/2)
+   0.00         0.00                 0.0000
+   0.25         0.25                 0.0761
+   0.50         0.50                 0.2929
+   0.75         0.75                 0.6173
+   1.00         1.00                 1.0000
+
+  At t = 0.50 the linear schedule has already erased half the sequence.
+  The cosine schedule has erased only 29.3% -- it is still in the
+  near-clean regime, where the model has plenty of context to learn from.
+
+  Endpoints match exactly:  1 - cos(0) = 0  and  1 - cos(pi/2) = 1.
+```
+
+The curve is flat near `t=0` and steep near `t=1`. That shape is why §8.2 credits cosine with
+better sample quality at a fixed `T`: a linear schedule spends its budget uniformly, while the
+cosine allocates more of the `t` axis to the noise levels where the model's predictions are still
+worth refining.
+
 ### 6.2 Training Objective — Masked Cross-Entropy with Importance Weighting
 
 ```python
@@ -468,6 +632,49 @@ commit more as context fills in. LLaDA reports that **`T = L` (one token per ste
 recovers AR-equivalent quality**, while `T = L/8` loses only 1-3 percentage points on most
 benchmarks — this `8x` reduction in forward passes is the source of the throughput gains.
 
+**The idea behind it.** "How many positions to commit this step is just the drop in the schedule's
+masking probability between this step's `t` and the next one — and those drops necessarily add up
+to `1.0`, so exactly `L` positions get committed no matter which schedule shape you pick."
+
+That invariant is the useful part. The schedule cannot change *how many* tokens get produced in
+total; it only redistributes them across the `T` steps. Choosing a schedule is choosing pacing, not
+budget.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Total denoising steps. Inference-time knob, set by you, independent of `L` |
+| `step` | Loop counter, `0` to `T-1` |
+| `t = 1.0 - step/T` | Current noise level, walking down from `1.0` (all masked) toward `0.0` (clean) |
+| `t_next` | The noise level after this step, one notch lower |
+| `unmask_frac` | `mask_prob(t) - mask_prob(t_next)` — the slice of the sequence this step is responsible for resolving |
+| `k` | `unmask_frac x` (positions still masked). The actual count committed, chosen by confidence |
+
+**Walk one example.** The linear schedule, where `mask_prob(t) = t`, makes the arithmetic exact —
+`L = 256`, `T = 32`:
+
+```
+  step  0 :  t = 1.00000   t_next = 0.96875
+             frac = 1.00000 - 0.96875 = 0.03125     (= 1/T)
+  step  1 :  frac = 0.96875 - 0.93750 = 0.03125
+   ...        every step is the same width under a linear schedule
+  step 31 :  frac = 0.03125 - 0.00000 = 0.03125
+
+  tokens per step  = 0.03125 x 256 = 8
+  sum of all fracs = 32 x 0.03125  = 1.0   ->  256 tokens committed in total
+
+  Now the Section 14 "broken" config, T = 8 on the same L = 256:
+             frac = 1/8 = 0.125    ->  0.125 x 256 = 32 tokens per step
+```
+
+**The schedule picks how many; confidence picks which.** That split is what makes small `T`
+dangerous. At `T = 32` the sampler only has to be right about its top `8` guesses in a step; at
+`T = 8` it must be right about its top `32` — four times as far down its own confidence ranking,
+including predictions it is not confident about at all. That is the mechanism behind the
+`94% -> 71%` pass@1 collapse measured in §14 Step 2: nothing about the model changed, only how
+deep into its ranking each step was forced to commit. A non-linear (cosine) schedule keeps the
+fractions summing to `1.0` but makes the per-step widths uneven, so some steps commit a wide slice
+and others a narrow one.
+
 ### 6.4 Classifier-Free Guidance for Text Diffusion
 
 Classifier-free guidance (CFG), standard in image diffusion (Stable Diffusion's "guidance scale"),
@@ -495,6 +702,50 @@ def cfg_logits(
 range `1.2-2.0` for instruction-following; values above `~2.5` produce noticeably repetitive or
 over-literal completions (the text-diffusion analogue of "burned" / over-saturated images at high
 CFG in Stable Diffusion).
+
+**Stated plainly.** "Measure the difference between what the model says *with* the instruction and
+what it says *without* it, then push that difference further than the model itself would have."
+
+CFG never asks the model "how much do you care about the prompt?" — it *derives* that answer by
+running the model twice and subtracting. The conditioning signal is the gap between the two runs,
+and `guidance_scale` is how far past that gap you extrapolate.
+
+| Symbol | What it is |
+|--------|------------|
+| `logits_cond` | Raw scores with the instruction/prompt attached. Two forward passes are needed, so CFG costs 2x per denoising step |
+| `logits_uncond` | Raw scores with the conditioning dropped (null prompt). What the model would say unprompted |
+| `logits_cond - logits_uncond` | The conditioning's *effect*, per token. Positive = the prompt made this token more attractive |
+| `guidance_scale` | How far to extrapolate along that direction. `1.0` = don't extrapolate; `>1.0` = overshoot |
+| `logits_cfg` | The extrapolated scores actually fed to softmax and to confidence-based selection |
+
+**Walk one example.** Two candidate tokens `A` and `B` at one masked position, `guidance_scale = 1.5`:
+
+```
+                        token A   token B      softmax over the two
+  logits_uncond           2.00      2.50   ->    0.378 / 0.622
+  logits_cond             3.00      2.00   ->    0.731 / 0.269
+  difference (c - u)     +1.00     -0.50
+
+  logits_cfg = uncond + 1.5 x difference
+    token A :  2.00 + 1.5 x ( 1.00)  =  3.50
+    token B :  2.50 + 1.5 x (-0.50)  =  1.75
+                                         ->    0.852 / 0.148
+
+  The conditioning alone moved A from 0.378 to 0.731.
+  CFG extrapolates PAST the conditional, to 0.852.
+
+  Same logits, other guidance scales:
+    s = 1.0  ->  3.00 / 2.00  ->  0.731 / 0.269    (exactly the conditional)
+    s = 2.5  ->  4.50 / 1.25  ->  0.963 / 0.037    (near point mass)
+```
+
+**Why `s = 1.0` recovers plain conditional generation.** Substituting gives
+`uncond + 1.0 x (cond - uncond) = cond` — the unconditional term cancels exactly, which is why the
+docstring above calls `1.0` "no boost." Above `1.0` the distribution sharpens: at `s = 2.5` token
+`A` holds `96.3%` of the mass and there is almost nothing left to sample, which is precisely the
+"repetitive or over-literal" failure the concrete-numbers note flags past `~2.5`. In a diffusion
+sampler this sharpening compounds, because inflated confidence scores also decide *which*
+positions get committed first (§6.3) — over-guided runs commit aggressively and early.
 
 ---
 

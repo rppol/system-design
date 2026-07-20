@@ -156,6 +156,45 @@ def self_rag_generate(query: str, model, retriever, beam_width: int = 4):
     return best["response"]
 ```
 
+**What this actually says.** The selection rule `max(support_score x utility)` says: "among the answers I drafted, prefer the one that is both grounded in its passage and actually useful — and if it is grounded in nothing, it cannot win at any level of usefulness." Multiplication, not addition, is the load-bearing choice.
+
+`support_score` itself is an average over the sentence-level reflection tokens, with the mapping the comment in the code states: `[Supported] = 1.0`, `[Partially Supported] = 0.5`, `[No Support] = 0.0`.
+
+| Symbol | What it is |
+|--------|------------|
+| `support_score` | Mean of the per-sentence token weights; `[0, 1]`, one value per candidate |
+| `[Supported]` / `[Partially]` / `[No Support]` | The three weights, 1.0 / 0.5 / 0.0 |
+| `utility` | The `[Utility]` reflection token, an integer 1-5 — is the answer any good as an answer |
+| `support x utility` | The ranking key; range `[0, 5]` because support is normalized and utility is not |
+| `beam_width` | How many candidate drafts are scored before the max is taken |
+| `0.85` | The confidence cut Section 12 applies to `support_score` alone, after selection |
+
+**Walk one example.** Three candidate responses, each generated against a different relevant passage. `S` = `[Supported]`, `P` = `[Partially Supported]`, `N` = `[No Support]`:
+
+```
+  cand   sentence tokens        support_score                    utility   product
+  ---------------------------------------------------------------------------------
+  C1     S  S  P  N             (1.0+1.0+0.5+0.0)/4 = 0.6250        4       2.5000
+  C2     S  S  S                (1.0+1.0+1.0)/3     = 1.0000        3       3.0000
+  C3     S  S  S  P  S          (1.0+1.0+1.0+0.5+1.0)/5 = 0.9000    4       3.6000
+
+  ranked by support alone : C2 (1.00) > C3 (0.90) > C1 (0.62)
+  ranked by utility alone : C1 = C3 (4)          > C2 (3)
+  ranked by the PRODUCT   : C3 (3.60) > C2 (3.00) > C1 (2.50)   <- what ships
+
+  C3 wins although it is first on neither factor. C2 is perfectly grounded
+  but says less; C1 is useful but a quarter of its sentences are unsupported.
+
+  Section 12's confidence label reads support_score only, not the product:
+    C3 : 0.90 > 0.85 -> "high"     C2 : 1.00 -> "high"     C1 : 0.62 -> "medium"
+```
+
+**Why multiply instead of add.** Multiplication makes `support_score = 0` an absolute veto: a fluent, maximally useful hallucination scores `0.0 x 5 = 0.0` and can never be selected. Addition would let utility buy its way past ungroundedness. But multiplication is *not* a support-dominant rule either — a fully grounded but thin answer at `1.0 x 1 = 1.0` still loses to a half-grounded but substantive one at `0.5 x 3 = 1.5`. That asymmetry is deliberate: Self-RAG is trying to avoid unsupported claims, not to reward terseness.
+
+**Why `support_score` is a mean and not a count.** Dividing by sentence count normalizes for answer length, so a 5-sentence answer with one `[Partially Supported]` (0.9000) is not punished relative to a 3-sentence answer with none (1.0000) merely for saying more. Use a raw sum instead and the ranking collapses into "prefer the longest answer," since every additional `[Supported]` sentence would add another full point.
+
+**Where the reflection budget goes.** Each of these numbers costs a forward pass. Section 10 accounts for it: one `[Retrieve]` decision (~5-10 ms), one `[Relevant]` verdict per retrieved passage (5 passages = ~50-100 ms), and one support token per generated sentence (5 sentences = ~50-100 ms) — 150-250 ms of reflection on top of the generation itself, or 20-30% added latency. The passage evaluations are mutually independent, which is why Section 10 recommends batching them rather than looping as the code above does for clarity.
+
 ---
 
 ## 4. Architecture Diagram

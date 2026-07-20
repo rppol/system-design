@@ -499,6 +499,47 @@ memory_store = AzureAISearchMemoryStore(
 **Pitfall 5: Planner over-generation**
 `FunctionCallingStepwisePlanner` can generate 10+ step plans for simple tasks. Each step is an LLM call. A "summarize this document" task should be 1 step; the planner sometimes generates: translate → clean text → extract topics → format → summarize (5 steps × $0.005 = $0.025 per call). Use direct function invocation (`kernel.invoke(...)`) for known, simple tasks; reserve planners for genuinely complex multi-step coordination.
 
+**Put simply.** "A planner charges you one LLM call per step it invents, plus one to invent them — so the cost of a task is decided by the model's imagination rather than by the task."
+
+| Symbol | What it is |
+|--------|------------|
+| `s` | Steps the planner generated — model-chosen, not specified by you |
+| `p` | Cost per step, $0.005 at this model and prompt size |
+| `s x p` | Execution cost of the plan |
+| `s_min` | Steps the task actually required, 1 for "summarize this document" |
+| `kernel.invoke()` | Direct invocation — skips planning entirely, fixes `s` at 1 |
+
+**Walk one example.** The over-generated plan against the direct call:
+
+```
+  planner path
+    translate + clean + extract + format + summarize   =  5 steps
+    5 x $0.005                                         =  $0.025 per call
+    (plus the planning call itself, typically ~$0.005) =  $0.030
+
+  direct kernel.invoke() path
+    1 x $0.005                                         =  $0.005
+
+  overspend   $0.025 / $0.005                          =  5x
+  waste       (0.025 - 0.005) / 0.025                  =  80%
+
+  at 10,000 calls/day
+    planner    10,000 x $0.025                         =  $250 / day
+    direct     10,000 x $0.005                         =  $ 50 / day
+    annual difference  ($250 - $50) x 365              =  $73,000
+```
+
+Four of those five steps do nothing a summarizer would not do internally — translating text
+that is already English, "cleaning" text that is already clean. The planner is not
+malfunctioning; it is doing what it was asked, which is to decompose. Decomposition applied
+to a task that needs none is pure overhead, and at volume it is $73,000/year of it.
+
+**Why latency compounds the problem worse than cost.** The five steps run sequentially, each
+waiting on the last, so a 1.2s task becomes ~6s. Unlike the parallel tool case elsewhere in
+this section, planner steps are genuinely dependent — step 3 consumes step 2's output — so
+there is no `max` to fall back to. You cannot parallelize your way out of an
+over-decomposed plan; you have to not generate it.
+
 ---
 
 ## 11. Technologies & Tools

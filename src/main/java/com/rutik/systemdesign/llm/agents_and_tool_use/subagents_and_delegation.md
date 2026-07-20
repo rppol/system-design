@@ -86,6 +86,33 @@ flowchart TD
 
 All six subagents run concurrently via `asyncio.gather()` — wall-clock is max(sub_1..6) ≈ 30s instead of the 180s sequential equivalent.
 
+**In plain terms.** "Running them in parallel does not make your job take the *average* subagent's time — it makes it take the *slowest* subagent's time, plus whatever the parent still has to do afterward."
+
+That distinction is the whole reason fan-out disappoints in production. `sum` is forgiving of one slow worker; `max` is not.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of subagents dispatched. Here `6` |
+| `t_i` | Wall-clock of subagent `i`, start to structured result |
+| `sum(t_i)` | Sequential wall-clock — what you pay without `asyncio.gather()`. `180s` |
+| `max(t_i)` | Parallel wall-clock of the fan-out stage. `30s` when all six are even |
+| `t_synth` | Parent's synthesis call after every subagent returns. Not parallelizable |
+| `t_disp` | Fan-out overhead — building N prompts and opening N connections |
+| speedup | `sum(t_i) / (t_disp + max(t_i) + t_synth)` |
+
+**Walk one example.** Six subagents, `t_disp = 1s`, `t_synth = 10s`, varying only the slowest one:
+
+```
+  slowest sub    wall-clock             speedup vs 180s
+    30s          1 + 30 + 10 = 41s          4.39x
+    45s          1 + 45 + 10 = 56s          3.21x
+    75s          1 + 75 + 10 = 86s          2.09x
+
+  ideal (N = 6, no synthesis, no dispatch)                6.00x
+```
+
+The nominal win is `6x`; the realized win at even timings is `4.39x`, and one straggler at `75s` — while the other five still finish in `30s` — cuts it to `2.09x`. Note that `t_synth = 10s` is a fixed serial tax: it is Amdahl's law with `max(t_i)` as the parallel portion, which is why doubling `N` from 6 to 12 helps far less than making the slowest subagent faster. Anthropic's reported `1 hour -> 15 minutes` is exactly `4x` — the same neighbourhood as the `4.39x` above, not the `5x-20x` the subagent count might suggest.
+
 ```
 Context Comparison
 ===================
@@ -115,6 +142,30 @@ Return Contract
 
   Parent validates schema → injects into context as structured tool result
 ```
+
+**The idea behind it.** "The parent's context stops growing with the *work done* and starts growing only with the *answers returned* — and a returned answer is one to two orders of magnitude smaller than the journey that produced it."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Subagents dispatched. `6` in the diagram above |
+| `w` | Tokens of work a subagent burns internally — searches, page fetches, reasoning |
+| `r` | Tokens in the JSON it hands back: `result` + `confidence` + `artifacts` |
+| `tokens_used` | The subagent's own `w`, reported for accounting. `4523` in the contract above |
+| inline parent | Context after 20 tool calls with no delegation: `100,000+` tokens |
+| subagent parent | Context after 6 delegations: `N x r` |
+
+The ratio `w / r` is the compression factor of the return contract, and it is the entire value proposition. A subagent that spends `4,523` tokens and returns `400` compressed 11×; one that returns its raw transcript compressed nothing and you have just added latency for free.
+
+**Walk one example.** Six subagents, each returning a `400`-token structured result, priced at Sonnet input `$3.00/M`:
+
+```
+  parent context, inline (20 tool calls)   100,000 tok   ->  $0.30 per parent call
+  parent context, 6 subagents x 400 tok      2,400 tok   ->  $0.0072 per parent call
+
+  ratio                                        41.7x smaller
+```
+
+And because the parent re-sends its context on every call, that 41.7× is not a one-time saving — it multiplies across every remaining parent turn. This is also the exact mechanism behind Pitfall 1: passing the parent's history *into* the subagent inverts the whole trade, paying the `100,000` tokens `N` times over instead of zero times.
 
 ---
 
@@ -271,6 +322,31 @@ if __name__ == "__main__":
     print(result["summary"])
 ```
 
+**What it means.** The pair of caps in `run_subagent` — `max_iterations: int = 8` and `token_budget: int = 30_000` — says: "no single subagent can cost more than a known ceiling, therefore the whole fan-out has a ceiling too, and it is just `N` times that."
+
+This is the property that makes parallel dispatch safe to expose to users. Without per-subagent caps, `N` unbounded loops run *concurrently*, so a runaway costs `N` times as much and fails `N` times as fast.
+
+| Symbol | What it is |
+|--------|------------|
+| `max_iterations` | Hard loop bound per subagent. `8` — caps the *number* of LLM calls |
+| `token_budget` | Hard token bound per subagent. `30_000` — caps the *size* of those calls |
+| `tokens_used` | Running sum of `input_tokens + output_tokens`, checked at the top of each turn |
+| `N` | Fan-out width — subagents in the `asyncio.gather()` |
+| worst case | `N x token_budget` tokens, `N x max_iterations` LLM calls |
+| `confidence: 0.3` | The degraded signal returned on budget exhaustion, so the parent can discount it |
+
+**Walk one example.** The `topics` list at the bottom of the code has 5 entries, so `N = 5`:
+
+```
+  per subagent      8 iterations       30,000 tokens
+  fan-out of 5   =  40 LLM calls  =   150,000 tokens
+
+  at Sonnet input $3.00/M           ->      $0.45 worst case
+  plus one Opus synthesis call      ->      extra, but bounded by max_tokens=4096
+```
+
+`$0.45` is a number you can put in a budget spreadsheet before writing a line of orchestration, which is the point. Two subtleties the code gets right: the budget is checked *before* the call rather than after, so the cap is never overshot by a full iteration; and exhaustion returns a well-formed dict with `confidence: 0.3` instead of raising, so `asyncio.gather` still resolves and the parent can weigh a partial answer rather than losing the entire fan-out to one exhausted worker.
+
 ---
 
 ## 7. Real-World Examples
@@ -350,6 +426,33 @@ result = json.loads(sub_output)  # Reliable
 ```
 
 **War story**: A team built a market research agent dispatching 8 subagents per query. Initial implementation passed parent context to subagents "to give them background." Cost ballooned to $0.60/query (vs $0.04 budgeted). After switching to isolated subagent contexts: dropped to $0.07/query and improved quality — subagents stopped getting confused by irrelevant parent reasoning about prior tasks.
+
+**Stated plainly.** Those three dollar figures are not arbitrary — they say: "shared context is billed once, but *duplicated* context is billed `N` times, so the fan-out width is the multiplier on your mistake."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Subagents per query. `8` |
+| `C_shared` | Parent history copied into each subagent's prompt — the bug |
+| `C_own` | The subagent's own honest work: its task, its tool results, its answer |
+| broken | `N x (C_shared + C_own)` — every subagent re-pays for the parent's history |
+| fixed | `N x C_own` — `C_shared` never leaves the parent |
+| budgeted | `$0.04/query`, the number the team planned around |
+
+**Walk one example.** Push the three published figures through that model:
+
+```
+  broken       $0.60 / query
+  fixed        $0.07 / query
+  ratio        0.60 / 0.07  =  8.57x        <- and N = 8
+
+  per subagent, broken   0.60 / 8  =  $0.0750
+  per subagent, fixed    0.07 / 8  =  $0.0088
+  the copied history     0.0750 - 0.0088 =  $0.0662  per subagent, x8 = $0.53
+
+  overshoot vs the $0.04 budget:  0.60 / 0.04  =  15x
+```
+
+The `8.57x` blowup matching `N = 8` is the tell, and it is worth recognizing on sight: when a fan-out costs almost exactly `N` times its target, the cause is duplicated context, not slow subagents or bad prompts. Roughly `$0.53` of the `$0.60` — 88% — was eight copies of text no subagent needed. Note also that the fixed `$0.07` still sits 75% above the `$0.04` budget: isolation removed the duplication but not the irreducible per-subagent system prompt and tool schemas, which is the fixed overhead Section 9 warns makes subagents a bad trade for trivial subtasks.
 
 ---
 

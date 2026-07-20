@@ -102,6 +102,49 @@ def calculate_cost(model, input_tokens, output_tokens):
     return (input_tokens * prices["input"] + output_tokens * prices["output"]) / 1_000_000
 ```
 
+**In plain terms.** "Count the tokens going in and the tokens coming out, charge each at its own
+rate, then divide by a million because the price list is quoted per million tokens."
+
+The `/ 1_000_000` is the only part that trips people, and it is pure unit conversion — the pricing
+table says "$2.50 per 1M input tokens," so multiplying raw token counts by 2.50 gives you dollars
+scaled up a millionfold. The genuinely important detail is that input and output have *separate*
+rates, and output is always the expensive one.
+
+| Symbol | What it is |
+|--------|------------|
+| `input_tokens` | Everything you sent: system prompt, retrieved context, conversation history, user message |
+| `output_tokens` | Only what the model generated. Usually a small fraction of the input on RAG workloads |
+| `prices["input"]` | Dollars per 1M input tokens. $2.50 for gpt-4o |
+| `prices["output"]` | Dollars per 1M output tokens. $10.00 for gpt-4o — 4x the input rate |
+| `/ 1_000_000` | Unit conversion from "per million tokens" back to "per token" |
+
+**Walk one example.** Use the exact LLM Generation span from the RAG trace above — gpt-4o with
+2,177 input tokens and 245 output tokens:
+
+```
+  input  side: 2,177 x $2.50 = $5,442.50   (per-million units)
+  output side:   245 x $10.00 = $2,450.00   (per-million units)
+                              -----------
+  subtotal                    = $7,892.50
+  divide by 1,000,000         = $0.0078925  -> the $0.0079 logged on the span
+
+  WHERE THE MONEY ACTUALLY GOES
+    output is  245 / (2,177 + 245) = 10.1% of the tokens
+    output is  2,450 / 7,892.50    = 31.0% of the cost
+
+  SAME REQUEST ON gpt-4o-mini ($0.15 / $0.60)
+    2,177 x 0.15 + 245 x 0.60 = 326.55 + 147.00 = 473.55
+    / 1,000,000               = $0.00047355
+    ratio                     = 7,892.50 / 473.55 = 16.7x cheaper
+```
+
+That 10% of tokens costing 31% of the money is the single most useful fact this formula encodes.
+Teams instinctively attack prompt bloat because the input is visibly huge, but on a 4x output
+multiplier a capped `max_tokens` or a "be concise" instruction often moves the bill faster than
+trimming retrieved context. And at 100K calls/day the same request costs `100,000 x $0.0078925 =
+$789/day`, or roughly $288,000/year — which is why per-request cost attribution earns its place in
+the trace rather than being computed monthly from an invoice.
+
 ### 4.4 Latency Monitoring
 
 LLM latency has unique characteristics compared to traditional APIs:
@@ -470,6 +513,58 @@ Tier 4 -- Rare (0.1%):
   - Human expert review
   - Detailed annotation for fine-tuning datasets
 ```
+
+**What the tiers are telling you.** "A sampling rate is not a storage setting — it is a decision
+about how long you are willing to wait before you can say anything statistically true about a slice
+of your traffic."
+
+The tiers look like a cost ladder, and they are, but the hidden cost is *time to signal*. Dropping
+from 10% to 1% does not make your quality metrics 10x noisier; it makes them take 10x longer to
+become trustworthy, which is far worse when you are trying to catch a regression this week.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Daily request volume. 100K calls/day in the tradeoff table's high-scale case |
+| `p` | Sampling rate for the tier. 1.0, 0.10, 0.01, 0.001 for tiers 1-4 |
+| cohort share | Fraction of traffic belonging to the slice you care about — one feature, one model, one language |
+| `n` | Samples actually collected for that cohort. `N x cohort share x p` |
+| margin of error | `1.96 x sqrt(p(1-p)/n)` — the +/- band on a measured rate at 95% confidence |
+| ~1K samples | The tradeoff table's "statistically valid" floor. Below it, cohort conclusions are noise |
+
+**Walk one example.** A feature carrying 2% of traffic, at 100K calls/day, under each tier:
+
+```
+  samples per day = 100,000 x 2% x p
+
+    tier   p        samples/day    days to reach 1,000
+      1    100%       2,000              0.5
+      2     10%         200              5
+      3      1%          20             50
+      4    0.1%           2            500
+
+  WHAT n BUYS YOU -- 95% margin of error on a measured rate
+    n =     20   ->  +/- 21.9%     useless: "failure rate is 5% or 40%"
+    n =    200   ->  +/-  6.9%     directional only
+    n =  1,000   ->  +/-  3.1%     the "statistically valid" floor
+    n = 10,000   ->  +/-  1.0%     can detect small regressions
+
+  STORAGE, the cost this is trading against
+    100,000 calls/day x 2 KB      = 195 MB/day  (~200 MB, as quoted)
+    x 30 days                     = 5.7 GB/month (~6 GB, as quoted)
+    at 10% sampling               = 0.57 GB/month
+```
+
+Read the two halves together and the tier design justifies itself. Tier 1 keeps metadata at 100%
+because 2 KB of full text is what costs money — trace_id, tokens, cost, and latency are tiny, and
+you need every one of them for cost attribution and alerting to be exact rather than extrapolated.
+Tier 3 sits at 1% because a 50-day wait for cohort-level significance is acceptable for drift
+detection, which moves on a scale of weeks. Tier 4 at 0.1% is not trying to be statistically valid
+at all — 2 samples/day is a curation stream for humans, not a measurement.
+
+**Why errors and safety triggers are exempt from sampling.** They are rare by construction, so
+sampling them at 10% means a 1-in-10,000 failure mode produces one log per million requests — you
+will never accumulate enough to characterize it. Sampling is safe only for events that are common
+enough that a fraction still adds up; for rare events, the fraction *is* the whole signal.
 
 ---
 

@@ -56,6 +56,42 @@ Scaling factor alpha/r:
   This normalizes the update magnitude regardless of rank choice
 ```
 
+**Read it like this.** "Keep the pre-trained matrix exactly as it is, and bolt a narrow detour beside it: squeeze the input down to r numbers, expand it back out, scale it, and add the result to what the frozen layer already produced."
+
+The whole method is one addition. Nothing inside `W` moves; the only thing training discovers is what to add.
+
+| Symbol | What it is |
+|--------|------------|
+| `W` | The frozen pre-trained weight matrix, shape `d_out × d_in` (4096 × 4096 in a 7B attention projection). Never receives a gradient |
+| `x` | The layer input, a `d_in`-vector. Same input feeds both the frozen path and the adapter |
+| `A` | Trainable down-projection, shape `r × d_in` (16 × 4096). Squeezes the input into an r-dimensional bottleneck. Init: Gaussian `N(0, σ²)` |
+| `B` | Trainable up-projection, shape `d_out × r` (4096 × 16). Expands the bottleneck back to full width. Init: all zeros |
+| `r` | The rank — the width of the bottleneck, and the only thing that limits how expressive the update can be. Typically 4 to 64 |
+| `alpha` | A fixed scaling constant chosen by you, not learned. Conventionally `2×r` |
+| `alpha / r` | The scale actually multiplied into the adapter output. Decouples update magnitude from the rank you picked |
+| `B × A` | The update `ΔW`, shape `d_out × d_in` — same shape as `W`, but forced to rank ≤ r because it factors through a width-r bottleneck |
+
+**Walk one example.** One token through one 4096×4096 projection at `r=16, alpha=32`:
+
+```
+  input x                                     4096 numbers
+
+  frozen path :  W x                          4096x4096 -> 4096 numbers out
+  adapter step 1 :  A x                       16x4096   -> 16 numbers   (the bottleneck)
+  adapter step 2 :  B (A x)                   4096x16   -> 4096 numbers
+  adapter step 3 :  x (alpha/r) = x (32/16)   scale every entry by 2.0
+  output h    :  W x  +  2.0 * B(Ax)          4096 numbers
+
+  Everything the fine-tune learned had to fit through those 16 numbers in step 1.
+  That bottleneck is the entire compression story -- not the matrix sizes.
+```
+
+Note the order: the adapter never forms `B × A` as a 4096×4096 matrix during training. It applies `A` then `B` to the *vector*, costing `2*16*4096 = 131,072` FLOPs each way instead of the `2*4096*16*4096 = 536,870,912` FLOPs it would take to build `ΔW` explicitly — a 4096× difference.
+
+**Why B starts at zero and A does not.** With `B = 0`, the product `B × A` is the zero matrix, so `h = Wx + 0 = Wx` exactly. The wrapped model is byte-for-byte the base model on step 0 — no warmup damage, no loss spike. `A` must still be random: if both were zero, `∂L/∂A ∝ Bᵀ(...) = 0` and `∂L/∂B ∝ (Ax)ᵀ = 0`, so both gradients vanish and the adapter never leaves the origin. Random `A` plus zero `B` gives a no-op forward pass with a live gradient into `B`.
+
+If instead you initialize *both* from `N(0, 0.02²)` at `r=16, alpha=32`, each entry of the scaled update has standard deviation `sqrt(16) × 0.02 × 0.02 × 2.0 = 0.0032` against a `W` whose entries have standard deviation `0.02` — a **16%** random perturbation injected into every adapted matrix before a single training step. Across 128 adapted projections in a 7B model that is a corrupted model at step 0, and the first hundred steps are spent undoing it.
+
 ### 3.2 Parameter Count Comparison
 
 ```
@@ -83,6 +119,63 @@ Memory savings:
   LoRA r=16: weights 14GB (frozen, no grad) + adapters ~50MB + Adam ~200MB ≈ 15GB
   (Frozen weights still loaded to GPU; only adapter gradients computed)
 ```
+
+**What the formula is telling you.** "The parameter count of the adapter grows with `d_out + d_in`, but the matrix it replaces grows with `d_out × d_in` — you traded a product for a sum, and that is where every order of magnitude comes from."
+
+| Symbol | What it is |
+|--------|------------|
+| `d_out × d_in` | Full-update parameter count for one matrix. Quadratic in width — `4096 × 4096 = 16,777,216` |
+| `r × (d_out + d_in)` | LoRA pair parameter count for the same matrix. Linear in width — `r × 8192` at 4096 |
+| `r × d_in` | The `A` half of that count |
+| `d_out × r` | The `B` half. Equal to the `A` half only because this projection is square |
+| trainable fraction | `r × (d_out + d_in) / (d_out × d_in)`, which at `d_out = d_in = 4096` simplifies to `r / 2048` |
+
+**Walk one example.** Rank sweep on a single 4096×4096 attention projection (16,777,216 params):
+
+```
+   r     A: r x 4096     B: 4096 x r     pair = r*(4096+4096)    % of 16,777,216   fewer by
+   4        16,384          16,384                 32,768            0.1953%          512x
+   8        32,768          32,768                 65,536            0.3906%          256x
+  16        65,536          65,536                131,072            0.7812%          128x
+  64       262,144         262,144                524,288            3.1250%           32x
+
+  Note the fraction is exactly r/2048 -- doubling r doubles the cost, always.
+```
+
+Now scale that to a whole model. Llama-2-7B has 32 layers; adapting `q_proj`, `k_proj`, `v_proj`, `o_proj` means `4 × 32 = 128` matrices of 4096×4096:
+
+```
+   r    per matrix    x 128 matrices = trainable    % of 7,000,000,000
+   4        32,768                    4,194,304           0.0599%
+   8        65,536                    8,388,608           0.1198%
+  16       131,072                   16,777,216           0.2397%
+  64       524,288                   67,108,864           0.9587%
+
+  At r=16 the ENTIRE trainable set (16,777,216) is exactly the size of ONE
+  frozen 4096x4096 projection. You are training one matrix's worth of numbers
+  to steer 128 of them.
+```
+
+That last line is the fact worth carrying into an interview. It also explains the section's `~8.4M` figure: that targets only `q_proj + v_proj` (2 projections × 32 layers = 64 matrices), exactly half of the 16.8M above.
+
+**Why the memory win is bigger than the parameter win.** Adam keeps two fp32 moment tensors — first moment `m` and second moment `v` — per *trainable* parameter, so 8 bytes each, plus a gradient. Frozen parameters get none of that:
+
+```
+  Llama-2-7B, bf16 weights, Adam with fp32 moments (1 GB = 1e9 bytes)
+
+                         full fine-tune          LoRA r=16 (q/k/v/o, 128 matrices)
+  weights   (bf16, 2B)      14.0 GB                 14.0 GB   frozen, still resident
+  gradients (fp32, 4B)      28.0 GB                  0.067 GB  only 16,777,216 of them
+  Adam m + v (fp32, 8B)     56.0 GB                  0.134 GB
+                          ---------               ----------
+  optimizer state alone     56.0 GB                  0.134 GB   417x smaller
+  adapter file (bf16, 2B)        --                  0.034 GB   34 MB, not 14 GB
+
+  The 14 GB of frozen weights does not shrink -- LoRA does not compress the model.
+  It deletes the 84 GB of TRAINING scaffolding stacked on top of it.
+```
+
+The `28GB` Adam figure quoted in the block above assumes bf16 moments, which some frameworks use; fp32 moments are the safer and more common default and cost `7e9 × 8 = 56 GB`. Either way the LoRA column is a rounding error, which is precisely why a 7B fine-tune drops from "cluster" to "one 24 GB card."
 
 ### Shape Intuition — Full Update vs Low-Rank Factorization
 ```
@@ -130,6 +223,39 @@ r=128: ~67M params; almost never justified; use full fine-tune instead
 Rule: start with r=16, alpha=32. If quality insufficient, double r.
 If r=64 still insufficient, switch to full fine-tuning.
 ```
+
+**Put simply.** "Dividing by `r` cancels out the fact that a wider bottleneck naturally produces a bigger update, so changing the rank changes the adapter's *capacity* without changing its *loudness* — and your learning rate survives the change."
+
+| Symbol | What it is |
+|--------|------------|
+| `B × A` | The raw, unscaled update. A sum of `r` rank-1 outer products, so its magnitude grows roughly proportionally to `r` |
+| `r` in the denominator | The normalizer. Divides out that growth so the scaled update no longer tracks the rank |
+| `alpha` in the numerator | Your one free knob for how loud the adapter is, now independent of `r` |
+| `alpha / r` | The net multiplier. `> 1` amplifies the adapter, `= 1` is neutral, `< 1` damps it |
+| `alpha = 2r` convention | Pins the multiplier at `2.0` for every rank, so a rank sweep needs no LR retuning at all |
+
+**Walk one example.** Hold `alpha = 16` and sweep the rank. Suppose each of the `r` rank-1 terms contributes about `0.05` to a given output entry, so the raw sum is `0.05 × r`:
+
+```
+    r     raw |BA| = 0.05*r     alpha/r = 16/r      scaled = raw * (alpha/r)
+    8          0.40                 2.0                    0.80
+   16          0.80                 1.0                    0.80
+   32          1.60                 0.5                    0.80
+
+  Scaled column is FLAT. Rank changed 4x; the update the model actually feels
+  did not move. Same LR works for all three runs.
+
+  Now delete the /r and rescale by alpha alone (or by nothing at all):
+
+    r      raw       no scaling      what happens
+    8      0.40        0.40          tuned LR is fine here
+   16      0.80        0.80          2x louder -- mild instability
+   32      1.60        1.60          4x louder -- loss spikes, needs LR/4
+
+  Without /r, every rank change is silently also a learning-rate change.
+```
+
+**Why this term exists.** Rank is meant to be a capacity dial: "how many independent directions may the update use." Without the `1/r` normalizer it is a capacity dial *and* a step-size dial welded together, so an experiment that raises `r=16` to `r=32` to test capacity actually tests capacity-plus-double-LR, and a resulting loss spike gets misread as "rank 32 is unstable." The `alpha/r` form separates the two, which is what makes the rank ladder in the block above a clean sweep rather than four independently-tuned runs. It is also why Pitfall 1 matters: setting `alpha = r` yields a multiplier of `1.0` rather than the well-tested `2.0`, halving the adapter's contribution without any error message.
 
 ### Why Low Rank Suffices — Singular-Value Spectrum
 ```
@@ -213,6 +339,42 @@ Keep adapters separate when:
   - Experimenting with different rank combinations
   - The base model is much larger than the adapter (70B model, 50MB adapter)
 ```
+
+**Stated plainly.** "Do the addition once, offline, and bake the result into the weight file — then inference has nothing extra to do, because there is no longer a second path to run."
+
+| Symbol | What it is |
+|--------|------------|
+| `W_frozen` | The original pre-trained matrix, unchanged on disk |
+| `B × A × (alpha/r)` | The full-shape `d_out × d_in` update, materialized once at merge time |
+| `W_merged` | Their elementwise sum. Same shape, same dtype, same file format as `W_frozen` |
+| "lossless" | Exact in real arithmetic — the only error is fp rounding on the add, not an approximation of `ΔW` |
+
+**Walk one example.** FLOPs per token for one 4096×4096 projection at `r=16` — merged versus unmerged:
+
+```
+  merged:    W_merged @ x        2 * 4096 * 4096      = 33,554,432 FLOPs
+                                                        (one matmul, done)
+
+  unmerged:  W @ x               2 * 4096 * 4096      = 33,554,432
+           + A @ x               2 *   16 * 4096      =    131,072
+           + B @ (A@x)           2 * 4096 *   16      =    131,072
+                                                        ----------
+                                 total                  33,816,576 FLOPs
+
+  overhead = 262,144 / 33,554,432 = 0.7812%   ->  1.0078x the merged cost
+```
+
+The `2` in `2 * d_out * d_in` is one multiply plus one add per weight. The overhead scales with `r`, and it is exactly the same `r/2048` fraction as the parameter count:
+
+```
+    r      extra FLOPs per token per projection      overhead vs merged
+    4                  65,536                             0.195%
+    8                 131,072                             0.391%
+   16                 262,144                             0.781%
+   64               1,048,576                             3.125%
+```
+
+**So why does anyone leave adapters unmerged?** Because that sub-1% arithmetic cost is not the real cost. Unmerged serving adds two extra kernel launches per adapted layer — 256 of them at `r=16` across 128 projections — and small skinny matmuls run far below peak GPU utilization, so measured latency overhead lands nearer 5-15% than 0.78%. What you buy for it is the multi-adapter economics from the diagram above: one 14 GB base model in memory and N adapters at ~34 MB each, versus N merged 14 GB checkpoints. At `N = 4` adapters that is 14.1 GB against 56 GB. Merge when you ship exactly one task; stay unmerged the moment there are two.
 
 ### 3.6 PEFT Configuration Code
 

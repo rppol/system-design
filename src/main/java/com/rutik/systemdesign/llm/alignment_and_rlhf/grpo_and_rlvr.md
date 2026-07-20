@@ -191,7 +191,140 @@ def grpo_loss(
     return (per_token.sum(dim=1) / mask.sum(dim=1)).mean()
 ```
 
+The advantage line is the entire algorithm, so it is worth reading symbol by symbol:
+
+```
+  A_i = (r_i - mean(r)) / std(r)          for i = 1 .. G
+```
+
+**In plain terms.** "Score every response against the average of the other attempts at the *same*
+prompt, then divide by how spread out those attempts were — so 'good' can only ever mean 'better
+than what this model itself just produced on this exact question.'"
+
+That framing matters because it is where the critic goes. PPO pays a second, policy-sized network
+to predict what score this prompt *should* earn. GRPO samples the prompt G times and reads that
+number straight off the group.
+
+| Symbol | What it is |
+|--------|------------|
+| `G` | Group size — responses sampled for one prompt. `8` below; `16-64` in production runs |
+| `r_i` | Reward for response `i`. Here `math_reward` (1.0) plus `format_reward` (0.2) from Section 6.2 |
+| `mean(r)` | The group's average reward. This IS the baseline — the number PPO trains a critic to guess |
+| `std(r)` | Group spread. Divides out prompt difficulty so easy and hard prompts contribute comparably |
+| `A_i` | Advantage for response `i`, shared unchanged by every token in it (outcome-level credit) |
+
+**Walk one example.** Eight sampled responses to one math prompt, scored by Section 6.2's verifier:
+
+```
+  i   verdict                          r_i    r_i - mean    A_i = (r_i - mean)/std
+  1   correct, well-formed             1.2       +0.55              +1.014
+  2   correct, well-formed             1.2       +0.55              +1.014
+  3   correct, well-formed             1.2       +0.55              +1.014
+  4   correct, missing <think> tags    1.0       +0.35              +0.645
+  5   wrong, well-formed               0.2       -0.45              -0.829
+  6   wrong, well-formed               0.2       -0.45              -0.829
+  7   wrong, well-formed               0.2       -0.45              -0.829
+  8   wrong, malformed                 0.0       -0.65              -1.198
+
+  mean(r) = (1.2+1.2+1.2+1.0+0.2+0.2+0.2+0.0) / 8  =  5.2 / 8  =  0.65
+  std(r)  = 0.5425          (torch's rewards.std(): sample std, ddof=1)
+
+  sum of all eight A_i                             =  0.000
+```
+
+Two things to read off that table. Response 4 was *correct* and still gets only `+0.645`, 64% of
+the push responses 1-3 get, purely for dropping the `<think>` tags — that is the 0.2 format reward
+doing its job. And the advantages sum to zero, not approximately but structurally: subtracting the
+mean forces it.
+
+**Where the value network went.** Sum-to-zero is exactly the property a baseline exists to provide
+— it is what makes the policy gradient unbiased while cutting its variance. PPO buys that property
+with a trained critic; GRPO gets it free from G extra samples of a prompt it was going to sample
+anyway. Priced out for a 7B policy in bf16 with Adam:
+
+```
+  per TRAINABLE model :  2 (bf16 weights) + 2 (bf16 grads) + 12 (Adam m, v + fp32 master)
+                      =  16 bytes/param  x  7,000,000,000  =  112 GB
+  per FROZEN model    :   2 bytes/param  x  7,000,000,000  =   14 GB
+
+  PPO  :  policy 112  +  critic 112  +  reward model 14  +  reference 14  =  252 GB
+  GRPO :  policy 112  +                                     reference 14  =  126 GB
+          verifier is sympy/pytest on CPU  ->  0 GB of GPU
+
+  252 / 126  =  2.0x        exactly the "halves trainer memory" claim in Section 1
+```
+
+Four resident networks become two; two *trainable* networks become one. The critic is the
+expensive deletion precisely because it was trainable — it carried the full 112 GB, not a frozen
+model's 14 GB. Dropping the reward model saves only 14 GB; dropping the critic saves 112 GB.
+
 Concrete numbers: DeepSeekMath used group size G=64 on a 7B model and lifted GSM8K from 82.9% to 88.2% and MATH from 46.8% to 51.7% over the SFT starting point. R1-style runs commonly use G=8–64; larger G gives a lower-variance baseline but linearly more rollout compute.
+
+Those advantages then feed the objective `grpo_loss` builds. Written out, per token `t` of
+response `i`:
+
+```
+  L = -min( rho * A_i ,  clip(rho, 1-eps, 1+eps) * A_i )  +  beta * KL_k3
+
+  rho    = exp(logprob_new - logprob_old)          token importance ratio
+  KL_k3  = exp(u) - u - 1,   where u = log(pi_ref / pi_theta)
+```
+
+**What the formula is telling you.** "Take the group-relative advantage, scale it by how much more
+likely this update made the token, refuse to count any gain earned by moving more than 20% — then
+charge rent for every step of drift away from the reference model."
+
+| Symbol | What it is |
+|--------|------------|
+| `rho` | New divided by old probability of this token. `1.0` = this update did not touch it |
+| `A_i` | The group-relative advantage from above — one number reused for every token of response `i` |
+| `eps` | `clip_eps = 0.2`, so the ratio is only trusted inside `[0.8, 1.2]` |
+| `clip(rho, 0.8, 1.2)` | Clamp: below `0.8` becomes `0.8`, above `1.2` becomes `1.2` |
+| `min(...)` | Always take the pessimistic branch — caps gains, never caps penalties |
+| `u` | `log(pi_ref / pi_theta)` — how much likelier the frozen reference finds this token |
+| `KL_k3` | `exp(u) - u - 1`: the drift penalty, `0` exactly when the two policies agree |
+| `beta` | `kl_beta = 0.04`, the rent rate on that drift |
+
+**Walk one example.** Response 1 (`A = +1.014`) and response 8 (`A = -1.198`) from the group above,
+each at three possible ratios:
+
+```
+                  rho     rho x A    clip(rho) x A     min()      what happens
+  A = +1.014     1.00      1.014         1.014         1.014    full gradient flows
+  A = +1.014     1.35      1.369         1.216         1.216    CAPPED, extra 0.153 discarded
+  A = +1.014     0.70      0.710         0.811         0.710    pull-back allowed in full
+
+  A = -1.198     1.00     -1.198        -1.198        -1.198    full penalty applied
+  A = -1.198     1.35     -1.617        -1.438        -1.617    penalty NOT capped
+  A = -1.198     0.70     -0.839        -0.958        -0.958    CAPPED
+```
+
+The asymmetry is the point of `min`. On the `A > 0` rows a runaway ratio of `1.35` gets its reward
+truncated at `1.216`; on the `A < 0` rows that same `1.35` keeps the full `-1.617` penalty. The
+objective will always let a gradient drag the policy back toward safety and never let one push it
+further out.
+
+Now the KL term, which is where GRPO differs from PPO's in-reward penalty:
+
+```
+   pi_theta/pi_ref    u = log(pi_ref/pi_theta)     k3 = e^u - u - 1     naive log(pi_theta/pi_ref)
+        1.0                  0.0000                    0.00000                  0.0000
+        1.2                 -0.1823                    0.01565                 +0.1823
+        0.8                 +0.2231                    0.02686                 -0.2231
+        2.0                 -0.6931                    0.19315                 +0.6931
+        0.5                 +0.6931                    0.30685                 -0.6931
+```
+
+**Put simply.** "Measure drift from the reference in a way that can never come out negative, so no
+token is ever able to earn a KL *bonus*."
+
+Read the last column: the naive estimator goes to `-0.2231` and `-0.6931` whenever the policy made
+a token less likely than the reference did. True KL is non-negative, so those negatives are pure
+sampling noise — they cancel only in expectation, over many tokens, and meanwhile they fight the
+policy term. `k3` returns `0.02686` and `0.30685` for those same tokens: identical expectation,
+never negative, far lower variance. Note also how gentle the penalty is at `beta = 0.04` — a 1.2x
+drift costs `0.04 x 0.01565 = 0.000626` against a policy term of order `1.0`, which is why DAPO
+could drop the term entirely (Section 4) without the run immediately falling apart.
 
 ### 6.2 The verifier — broken, then fixed
 
@@ -272,6 +405,80 @@ Operationally: rollout generation dominates (often 70–85% of step time at 8K-t
 - R1-Zero: AIME 2024 pass@1 went 15.6% → 71.0% over pure RL; 86.7% with majority voting over 64 samples. Response length grew from hundreds to ~10K tokens *without anyone asking for it* — thinking longer was simply reinforced.
 - R1: AIME 79.8% pass@1, MATH-500 97.3%, Codeforces ~96th percentile — matching o1-level reasoning with a published recipe.
 - Distillation: the 800K R1 samples SFT'd into Qwen2.5-14B beat QwQ-32B-Preview; DeepSeek's ablation showed direct RL on Qwen-32B-base reached only QwQ-level, far below distilling from the big teacher. Lesson: **for small models, distill from a strong reasoner; don't RL from scratch.**
+
+### 6.5 Binary verifiable rewards, pass@k, and the zero-gradient group
+
+The worked group in Section 6.1 had four distinct reward values. Pure RLVR usually does not — a
+test suite passes or it does not, and the arithmetic collapses:
+
+```
+  r_i in {0, 1}                        verifiable reward: the check passed, or it did not
+  k                                    how many of the G responses passed
+  mean(r) = k / G                      the group mean IS the empirical pass rate
+  P(zero-std group) = (1-p)^G + p^G    p = the policy's true per-sample pass rate
+```
+
+**Stated plainly.** "With a pass/fail verifier the baseline is just the fraction of attempts that
+worked, so the entire learning signal for a prompt is decided by the count `k` — and when `k` is
+`0` or `G`, there is nothing left to compare anything against."
+
+| Symbol | What it is |
+|--------|------------|
+| `r_i` | Binary verifier output: `1` if the answer matched or the tests passed, `0` otherwise |
+| `k` | Number of correct responses among the `G` sampled — the only free variable in the group |
+| `p` | The policy's true per-sample success probability on this prompt: its difficulty, model-side |
+| `1 - (1-p)^G` | pass@G — the chance at least one of `G` samples lands correct |
+| `(1-p)^G + p^G` | Chance the group is all-wrong or all-right, i.e. contributes zero gradient |
+
+**Walk both degenerate cases.** `G = 8`, binary rewards, run through `grpo_advantages`:
+
+```
+  case A -- ALL CORRECT      r = [1,1,1,1,1,1,1,1]
+    mean = 8/8 = 1.0     std = 0.0   ->  std < eps, function returns zeros
+    A_i = 0 for every i                  gradient contribution: exactly 0
+    8 full-length rollouts generated, verified, and discarded
+
+  case B -- ALL WRONG        r = [0,0,0,0,0,0,0,0]
+    mean = 0/8 = 0.0     std = 0.0   ->  std < eps, function returns zeros
+    A_i = 0 for every i                  gradient contribution: exactly 0
+    identical waste, opposite cause
+
+  case C -- THE USEFUL ONE   r = [1,0,0,1,0,0,0,0]        (k = 2)
+    mean = 2/8 = 0.25    std = 0.4629
+    correct response :  A = (1 - 0.25) / 0.4629  =  +1.620
+    wrong   response :  A = (0 - 0.25) / 0.4629  =  -0.540
+```
+
+Case C shows the second thing the `std` division buys: on a hard prompt (`k = 2`) the two winners
+each get `+1.620` while the six losers absorb only `-0.540` apiece — a rare success is loud, and a
+common failure is quiet. Notice the advantages still sum to zero: `2(+1.620) + 6(-0.540) = 0`.
+
+**Why this makes prompt difficulty selection the whole game.** Group difficulty is not a matter of
+taste; it is a binomial, and the waste rate is computable in advance:
+
+```
+   p (per-sample pass rate)   pass@8 = 1-(1-p)^8    P(zero-std group) = (1-p)^8 + p^8
+          0.05                     33.66%                     66.34%
+          0.10                     56.95%                     43.05%
+          0.20                     83.22%                     16.78%
+          0.50                     99.61%                      0.78%
+          0.80                    100.00%                     16.78%
+          0.90                    100.00%                     43.05%
+          0.95                    100.00%                     66.34%
+```
+
+The curve is symmetric: a prompt the policy nails 90% of the time wastes exactly as much compute
+(43.05%) as one it solves 10% of the time. This is where Best Practice 2's "target group pass rates
+between ~0.2 and 0.8" comes from — that band holds the zero-signal fraction at or below 16.78%,
+while `p = 0.5` drives it to 0.78%. It is also the arithmetic behind Q7's "above ~40% zero-signal
+groups means your difficulty distribution is misaligned": 40% is what you get at roughly `p = 0.1`
+or `p = 0.9`.
+
+Priced against Section 6.3's `GRPOConfig` (256 prompts x G=16 = 4,096 rollouts/step at up to 8,192
+tokens each), a run sitting at `p = 0.1` throws away `0.4305 x 4,096 = 1,763` rollouts per step —
+up to `14.4 million` generated tokens per step producing no gradient at all. Curriculum filtering
+is not hygiene here; at 70-85% of wall-clock spent on rollouts, it is the single largest lever on
+throughput, and it is exactly what DAPO's dynamic sampling automates.
 
 ---
 

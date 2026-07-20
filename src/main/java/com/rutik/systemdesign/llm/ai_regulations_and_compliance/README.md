@@ -434,6 +434,47 @@ BROKEN: HiringScore v1.0 deployed to EU candidates with:
   (regulators can stack violations; GDPR and EU AI Act are separate regimes)
 ```
 
+**Stated plainly.** "The fine is whichever is *bigger* — a fixed euro amount or a percentage of your
+worldwide revenue. Small companies get billed the flat number; large ones get billed the
+percentage."
+
+The word doing all the work is "whichever is higher." Engineers reading "€15,000,000 or 3%"
+instinctively parse it as a menu the regulator picks from arbitrarily; it is not. It is a maximum
+function, deliberately constructed so the ceiling never becomes rounding error for a large firm nor
+existential-but-uncapped for a small one.
+
+| Symbol | What it is |
+|--------|------------|
+| fixed ceiling | The flat euro cap. €15M for EU AI Act high-risk deployer breaches, €20M for GDPR Art. 22 |
+| percentage ceiling | Share of **global annual turnover** — worldwide revenue, not EU revenue and not profit |
+| `max(fixed, percentage)` | The actual ceiling. Always the larger of the two |
+| turnover | Revenue, not margin. A low-margin business can face a fine exceeding its entire annual profit |
+| ceiling vs fine | These are maxima. Actual fines are scaled by severity, cooperation, and duration |
+
+**Walk one example.** Find where the two ceilings cross over, then apply it to three companies:
+
+```
+  CROSSOVER -- the turnover at which the percentage overtakes the flat cap
+    EU AI Act:  EUR 15M / 3% = EUR 500M turnover
+    GDPR:       EUR 20M / 4% = EUR 500M turnover
+    Both regimes cross at the SAME point -- the percentages were chosen to line up.
+
+  APPLYING max(fixed, percentage)
+
+    turnover      EU AI Act ceiling            GDPR ceiling
+    EUR   200M    max(15, 6)   = EUR 15M       max(20, 8)   = EUR 20M   <- flat cap binds
+    EUR   500M    max(15, 15)  = EUR 15M       max(20, 20)  = EUR 20M   <- exactly equal
+    EUR 2,000M    max(15, 60)  = EUR 60M       max(20, 80)  = EUR 80M   <- percentage binds
+```
+
+Below €500M turnover the percentage is irrelevant — a €200M-revenue company faces the same €15M
+ceiling as a €50M one, which is why compliance cost is regressive and why the tradeoffs section
+treats SME burden as a distinct problem. Above €500M the flat number becomes the irrelevant one and
+exposure grows without limit: at €2B turnover the same violation carries a €60M ceiling, four times
+the small-company figure. Note also that "global annual turnover" means worldwide revenue — a US
+company with 3% of its sales in the EU is still assessed against 100% of its revenue, which is the
+single most commonly underestimated fact in this entire regime.
+
 **The fix**:
 
 ```python
@@ -537,6 +578,61 @@ def quarterly_bias_reaudit(model, test_data: dict) -> bool:
         return False  # Pause deployment pending remediation
     return True
 ```
+
+**What this actually says.** "Compute the selection rate for each protected group, then report how
+far apart the best-treated and worst-treated groups are — and refuse to ship if that gap is wider
+than 10 percentage points."
+
+The subtlety that catches teams out is that this module uses **two different fairness measures with
+two different scales**, and they do not agree. `demographic_parity_difference` is a *subtraction*
+gated at 0.10. The model card's "parity score" gated at >0.90 is a *ratio*. A model can pass one and
+fail the other on the exact same data.
+
+| Symbol | What it is |
+|--------|------------|
+| selection rate | Fraction of a group the model shortlists. `P(shortlisted \| group)` |
+| `dpd` | `max(selection rate) - min(selection rate)` across groups. A difference, in percentage points |
+| parity score | `min(selection rate) / max(selection rate)`. A ratio, between 0 and 1 |
+| `sensitive_features` | The protected attribute column: gender, age_group, disability |
+| gate `< 0.10` | Ship/no-ship threshold on the difference. Ten percentage points |
+| gate `> 0.90` | Ship/no-ship threshold on the ratio, as used in the model card's bias analysis |
+| four-fifths rule | The US EEOC convention: a ratio below 0.80 is prima facie evidence of disparate impact |
+
+**Walk one example.** Take a reference-group shortlist rate of 30% and convert each parity score
+into the difference the `dpd` gate would see:
+
+```
+  base selection rate (best-treated group) = 0.30
+  protected group rate = 0.30 x parity score
+  dpd = 0.30 - (0.30 x parity score) = 0.30 x (1 - parity score)
+
+  parity   protected     dpd     ratio gate     dpd gate      MODEL CARD
+   score      rate               (> 0.90)       (< 0.10)      VERDICT
+   0.94      0.2820      0.018     PASS           PASS         Gender    PASS
+   0.91      0.2730      0.027     PASS           PASS         Racial    PASS
+   0.88      0.2640      0.036     FAIL           PASS         Age >50   REVIEW
+   0.80      0.2400      0.060     FAIL           PASS         US floor
+
+  WHEN DO THE TWO GATES AGREE?
+    dpd = base x (1 - 0.90) = 0.10  =>  base = 1.00
+    Only if EVERY candidate in the best-treated group is selected.
+    At any realistic base rate the RATIO gate is strictly stricter.
+```
+
+This is the crux. The age-group result of 0.88 is flagged REVIEW REQUIRED by the model card's ratio
+gate, yet its `dpd` of 0.036 sails through the `assert abs(dpd) < 0.10` deployment check with
+two-thirds of the budget unused. Even a 0.80 ratio — the point at which US EEOC doctrine treats the
+disparity as presumptive disparate impact — produces a `dpd` of only 0.060 and still passes. A team
+that gates solely on `dpd` at a 30% base rate has effectively set its fairness bar below the
+American legal floor while believing it set one above it.
+
+**Why the difference metric degrades at low base rates.** Differences are bounded by the base rate:
+if you shortlist only 5% of candidates, the largest possible `dpd` is 0.05, so a `< 0.10` gate can
+never fire no matter how severe the disparity — a group could be selected at literally zero rate and
+still pass. Ratios have no such collapse; `0/0.05 = 0` fails immediately. Selective systems are
+exactly where hiring AI lives, so for Annex III employment systems the ratio metric is the one that
+belongs on the deployment gate, with `dpd` reported alongside for regulators who ask for it in
+percentage-point terms.
 
 ---
 

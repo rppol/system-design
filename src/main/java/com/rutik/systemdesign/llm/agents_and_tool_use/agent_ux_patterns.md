@@ -20,6 +20,32 @@ The eight core patterns covered here — streaming thoughts, interrupt/resume, a
 
 **Key insight**: The hardest UX problem in agents is not making the agent feel fast — it's making errors and corrections feel safe. Users will tolerate a 30-second wait if they can see progress and trust that nothing irreversible happens without their approval. They will not tolerate a 5-second wait that ends with a deleted file.
 
+**In plain terms.** "A 3x abandon rate is a multiplier on the people who leave, not on the people who stay — so what it costs you depends entirely on how big your baseline abandon rate already is."
+
+This is the one number in this section that compounds, and it is routinely misread. Tripling abandonment does not third your completions.
+
+| Symbol | What it is |
+|--------|------------|
+| `a` | Baseline abandon rate with a progress indicator |
+| `3a` | Abandon rate without one, for tasks over 5 seconds |
+| `1 - a` | Completion rate with streaming |
+| `1 - 3a` | Completion rate without |
+| `(1-a) / (1-3a)` | How many more completions streaming buys you |
+
+**Walk one example.** The same 3x multiplier at three baseline abandon rates:
+
+```
+  baseline a   without (3a)   completes with   completes without   lift
+  ----------   ------------   --------------   -----------------   -----
+     5%            15%            0.95               0.85          1.12x
+    10%            30%            0.90               0.70          1.29x
+    15%            45%            0.85               0.55          1.55x
+
+  Same 3x on abandonment -> lift ranges from 12% to 55% more completions.
+```
+
+The lesson for prioritization: streaming pays off superlinearly the worse your baseline is. If your agent already completes 95% of sessions, SSE infrastructure buys you 12% more completions and the tradeoff table's "Medium (SSE infrastructure)" cost may not be worth it. If users are already bailing on 15% of tasks, the same work returns 55%. Measure `a` before building, and note the multiplier only applies at all above the 5-second threshold — below it, there is nothing to indicate progress about.
+
 ---
 
 ## 3. Core Principles
@@ -209,6 +235,34 @@ async def get_user_approval(tool_name: str, params: dict) -> bool:
     return response.get("approved", False)
 ```
 
+**Read it like this.** "Every gated tool in the set adds up to a full minute of stalled agent, and `.get("approved", False)` means a timeout is silently a denial — so an idle user does not pause the agent, they veto it."
+
+Two constants in this snippet interact, and the interaction is where the bugs live.
+
+| Symbol | What it is |
+|--------|------------|
+| `IRREVERSIBLE_TOOLS` | The gate set. `5` tools here — every call to one blocks on a human |
+| `timeout=60` | Seconds the agent waits per approval before giving up |
+| `g` | Gated calls in a run. Not the same as total steps — only gated tools count |
+| `g x 60` | Worst-case added wall time, in seconds |
+| `.get("approved", False)` | Default on timeout. Fail-closed: no answer means denied |
+
+**Walk one example.** Worst-case latency added by gating, and what a distracted user costs:
+
+```
+  gated calls g    worst-case wait    in minutes
+  -------------   ----------------   -----------
+        1            1 x 60 = 60        1.0
+        3            3 x 60 = 180       3.0
+        8            8 x 60 = 480       8.0
+
+  A user who steps away for 5 minutes during an 8-gate run
+  does not delay it -- they deny every gate that expires, and the
+  agent re-plans around 5 phantom refusals.
+```
+
+**Why fail-closed is still right.** The default could have been `True`, which would keep the agent moving, and it would be wrong: an unattended agent would then execute `charge_card` and `delete_file` with nobody watching, which is the exact scenario approval gates exist to prevent. The correct fix is not to flip the default but to distinguish the two cases in the return value — a denial and a timeout should reach the agent as different tool results, so it can re-plan around a real "no" but retry or escalate on silence. As written, the agent cannot tell them apart, and the Approval Gate Flow diagram's "agent re-plans" branch fires on both.
+
 ---
 
 ## 7. Real-World Examples
@@ -303,6 +357,31 @@ async def bash_tool(command: str):
 ```
 
 **War story**: A coding agent for a mid-sized engineering team auto-executed bash commands without approval. Within a week, a prompt injection in a fetched documentation page caused the agent to run `git reset --hard HEAD~30` on a developer's branch. After approval gates on git destructive operations: zero incidents in 6 months, developer confidence in the agent significantly increased (more usage, not less). Injection defense-in-depth beyond UI gates: [LLM Security](../llm_security/README.md).
+
+**What this actually says.** "One incident per week became zero incidents per twenty-six weeks — a gate that catches 80% of mistakes should still have let about five through, so the observed zero is better than the headline number predicts."
+
+The `~80%` reduction claim from Section 2 and this war story's timeline are checkable against each other.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | Incident rate without gates. `1` per week, from the war story's "within a week" |
+| `g` | Fraction of mistakes the gate catches. `0.80` per Section 2 |
+| `1 - g` | Residual rate multiplier. `0.20` gets through |
+| `r x (1-g)` | Expected gated incident rate |
+| `t` | Observation window. 6 months is about `26` weeks |
+
+**Walk one example.** Predicted versus observed over the post-fix window:
+
+```
+  ungated expected   :  1.0/week x 26 weeks         = 26.0 incidents
+  gated, g = 0.80    :  1.0 x 0.20 x 26             =  5.2 incidents
+  gated, g = 0.95    :  1.0 x 0.05 x 26             =  1.3 incidents
+  observed           :                                 0.0 incidents
+
+  Zero observed against 5.2 expected -> the real g here is above 0.80.
+```
+
+Two things explain the gap, and both are worth naming. First, the `~80%` figure is an average across all irreversible actions, while this deployment gated a narrow, high-signal category — git destructive operations matched by explicit regex — where detection is near-perfect. Second, and easy to miss: gates change user behaviour, not just outcomes. The war story reports usage *increased* after gating, which means the denominator grew while the numerator went to zero. A gate that catches 80% of mistakes on a fixed workload is a different thing from a gate that makes users trust the agent enough to hand it more work and still see none — the second is the result worth quoting in an interview.
 
 ---
 

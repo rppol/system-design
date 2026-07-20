@@ -66,6 +66,67 @@ Run the same model N times (N >= 3, typically odd) at varied temperatures. Colle
 
 This is not debate in the strict sense but is a degenerate case: zero communication rounds. It improves math accuracy by 5–15% on GSM8K and MATH benchmarks. It is cheaper than debate (no iterative context growth) but cannot correct systematic reasoning errors that all samples share.
 
+The 5–15% is not a magic property of voting — it is the binomial majority rule, and you can
+derive it from a single number: how often one agent is right. With N independent samples and
+per-agent accuracy `p`, the vote is correct whenever *more than half* the samples are correct:
+
+```
+  P(majority correct) = SUM over k > N/2 of  C(N,k) x p^k x (1-p)^(N-k)
+```
+
+**What this actually says.** "Voting does not need every sample to be right — it only needs the
+right answer to be the plurality, so it converts a coin that lands heads 70% of the time into a
+committee that lands heads 78% of the time."
+
+That framing matters because it tells you exactly when voting is worthless: the formula only
+climbs above `p` when `p > 0.5`. Below the coin-flip line, the majority is *more* likely wrong
+than a single sample — voting amplifies whichever way the model already leans.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of independent samples (agents). Odd, so a majority always exists |
+| `p` | Probability one agent gets this question right, on its own |
+| `k` | How many of the `N` samples happened to be correct |
+| `C(N,k)` | Number of distinct ways `k` of the `N` samples can be the correct ones |
+| `p^k x (1-p)^(N-k)` | Probability of one specific such split (k right, N-k wrong) |
+| `k > N/2` | The majority condition. At `N=3` that means `k = 2` or `k = 3` |
+
+**Walk one example.** Three agents, each right 70% of the time on the same question:
+
+```
+  p = 0.70   N = 3   majority needs k >= 2
+
+  k = 2 : C(3,2) x 0.70^2 x 0.30^1 = 3 x 0.49  x 0.30 = 0.441
+  k = 3 : C(3,3) x 0.70^3 x 0.30^0 = 1 x 0.343 x 1.00 = 0.343
+                                              majority = 0.784
+
+  single agent   : 70.0%
+  3-agent majority: 78.4%      gain = +8.4 points   <- inside the stated 5-15% band
+  5-agent majority: 83.7%      gain = +13.7 points  <- top of the band
+```
+
+Now price unanimity instead of majority — the same three agents, but the answer only ships if
+all three agree:
+
+```
+  P(all 3 correct) = 0.70^3 = 0.343   ->  34.3%
+
+  Majority ships an answer 78.4% correct.
+  Unanimity ships a CORRECT answer only 34.3% of the time; the other 65.7%
+  it either ships a wrong-but-unanimous answer or refuses to ship at all.
+```
+
+That gap is why production debate systems aggregate by majority (or by judge) and treat
+unanimity purely as an early-stop signal, never as the acceptance criterion. Unanimity is a
+precision knob bought with a brutal recall cost.
+
+The independence assumption is the term that quietly breaks. `p^k x (1-p)^(N-k)` multiplies
+probabilities, which is only legal if the samples are independent. Three instances of the same
+checkpoint sharing a systematic misconception are perfectly correlated — every one of them is
+wrong in the same place, `p` for that question is effectively 0, and the majority is confidently
+wrong. That is exactly the "cannot correct systematic reasoning errors that all samples share"
+limit stated above, and it is the entire motivation for the diversity injection in Principle 6.
+
 ### 4.4 Society of Mind (Minsky-Inspired)
 
 Multiple specialized sub-agents each handle a dimension of the problem (decomposition, calculation, verification, summarization). Their outputs are combined — not through voting but through a structured assembly process. Intelligence emerges from the interaction of specialists, not from a single generalist improving itself.
@@ -171,6 +232,63 @@ Cost climbs superlinearly with rounds because every agent re-reads all peers fro
 round: 1x baseline, 3x for majority vote (3 agents, no communication), 9x for 3-agent round-robin
 at 2 rounds, 18x at 3 rounds (where accuracy returns are already diminishing), and 20x for a
 5-agent 2-round setup that is rarely justified.
+
+**The idea behind it.** "Every agent pays to re-read every other agent's last answer, so the
+bill is not `agents x rounds` — it is `agents x rounds x how much has been said so far`, and the
+third term is the one that runs away."
+
+The multiplier is worth writing out because the superlinearity is easy to miss when budgeting.
+Total tokens for `N` agents over `R` communication rounds after round 0, with a `Q`-token
+question and `A`-token answers:
+
+```
+  input  = N x Q                          (round 0: question only)
+         + SUM over r = 1..R of  N x (Q + (N-1) x A x r)
+
+  output = N x A x (R + 1)                (every agent answers in every round)
+
+  multiplier = (input + output) / (Q + A)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Agents in the debate |
+| `R` | Communication rounds *after* round 0. `R=1` means two total rounds |
+| `Q` | Question length in tokens |
+| `A` | Average answer length in tokens |
+| `(N-1) x A` | One round's worth of peer text: everyone's answer except your own |
+| `x r` | The runaway term — at round `r` the prompt carries `r` rounds of peer history |
+| `Q + A` | The denominator: what one plain single-agent call would have cost |
+
+**Walk one example.** `Q = 200`, `A = 300` — the same numbers §6's budget estimator uses:
+
+```
+  N = 3, R = 1   (two total rounds -- the chart's "3 agents, 2 rds")
+    round 0 : in  3 x 200                 =   600     out 3 x 300 = 900
+    round 1 : peer = 2 x 300 x 1 = 600
+              in  3 x (200 + 600)         = 2,400     out 3 x 300 = 900
+    totals  : in 3,000   out 1,800   sum 4,800
+    single call = 200 + 300 = 500
+    multiplier  = 4,800 / 500 = 9.6x           <- the chart's 9x
+
+  N = 3, R = 2   (three total rounds)
+    round 2 : peer = 2 x 300 x 2 = 1,200
+              in  3 x (200 + 1,200)       = 4,200     out 3 x 300 = 900
+    totals  : in 7,200   out 2,700   sum 9,900
+    multiplier  = 9,900 / 500 = 19.8x          <- the chart's 18x
+
+  N = 5, R = 1
+    peer = 4 x 300 x 1 = 1,200
+    in 5 x 200 + 5 x (200 + 1,200) = 1,000 + 7,000 = 8,000   out 5 x 300 x 2 = 3,000
+    multiplier = 11,000 / 500 = 22.0x          <- the chart's 20x
+```
+
+Read the split, not just the total: at `N=3, R=2` the output side grew a tame 3x
+(900 to 2,700) while the input side grew 12x (600 to 7,200). Debate is an *input-token*
+problem. Every round adds `N x (N-1) x A` fresh input tokens, so cost is quadratic in agents
+and quadratic in rounds — going from `R=1` to `R=2` roughly doubles the bill for an accuracy
+gain the literature reports as marginal. That single fact is why `N=3, R=2` is the stated sweet
+spot and why the convergence check in Section 10 pays for itself.
 
 ---
 
@@ -649,6 +767,28 @@ def build_next_round_prompt_fixed(
 ```
 
 At 3 agents, 300 tokens per response, 3 rounds: the broken version accumulates 2,700 tokens of history per agent per round by round 3. The fixed version caps peer context at 600 tokens (2 peers × 300 tokens) regardless of round count.
+
+**Read it like this.** "The broken version's prompt grows with the length of the meeting; the
+fixed version's prompt grows with the size of the room — and only one of those has a ceiling."
+
+```
+  broken (full history)  : history_r = r x N x A       = r x 3 x 300 = 900r tokens
+  fixed  (last round only): peer_r   = (N - 1) x A     = 2 x 300     =  600 tokens
+
+  round 1 : broken   900   fixed 600
+  round 2 : broken 1,800   fixed 600
+  round 3 : broken 2,700   fixed 600     <- 4.5x the fixed cost, same information value
+  round 8 : broken 7,200   fixed 600     <- 12x, and now flirting with context limits
+
+  broken is O(r); fixed is O(1) in the round index.
+```
+
+The `r` that vanishes from the fixed formula is the whole fix. Round `r-1`'s answers already
+incorporate everything the agents said in rounds `0..r-2` — that is what "revise your answer in
+light of your peers" means — so replaying the older rounds pays full input price for information
+that is already summarised in the text you are also sending. Drop the `r` and the debate becomes
+runnable at any round count; keep it and the round budget is capped by the context window rather
+than by whether the debate is still producing value.
 
 ---
 

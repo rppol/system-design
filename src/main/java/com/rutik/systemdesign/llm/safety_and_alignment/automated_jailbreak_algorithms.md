@@ -78,6 +78,44 @@ autoregressive-commitment phenomenon discussed for reasoning models' "thinking t
 is `L(x') = -log P(target_prefix | x')`, and the algorithms in §4 differ in how they minimize `L`
 over the space of valid `x'`.
 
+**What this actually says.** "Score a candidate prompt by how surprised the model would be to
+start its reply with `Sure, here is how to...` — and search for the prompt that makes that opening
+least surprising."
+
+The whole attack is a substitution of objectives. "Harmfulness" has no differentiable definition,
+but "probability of this exact string" is just a forward pass, so the attacker swaps the goal they
+want for a proxy goal they can actually measure, and bets the proxy drags the real one along.
+
+| Symbol | What it is |
+|---|---|
+| `x'` | The modified input — original harmful request plus whatever suffix/framing is being searched |
+| `target_prefix` | The fixed compliant opening the attacker picked, e.g. `"Sure, here is how to ..."` |
+| `P(target_prefix \| x')` | How likely the model is to emit that exact opening, given `x'`. Between 0 and 1 |
+| `-log(...)` | Turns a probability into a penalty: `P` near 1 gives ~0, `P` near 0 blows up |
+| `L(x')` | The loss the search drives down. Lower = the model is closer to agreeing |
+
+**Walk one example.** The same target prefix under three candidate suffixes:
+
+```
+                          P(target_prefix | x')      L = -log P
+  aligned model, no suffix        0.001                6.908     model refuses; huge penalty
+  suffix after 100 steps          0.050                2.996     starting to bend
+  suffix after 500 steps          0.400                0.916     near-coin-flip on complying
+
+  Perfect compliance would be P = 1.0 -> L = 0. The search never gets there;
+  it only needs P high enough that greedy decoding picks the affirmative token.
+```
+
+The jump from `0.001` to `0.400` is 400x in probability but only `6.908 -> 0.916` in loss — the
+log compresses the scale, which is exactly why it makes a usable gradient signal. A raw-probability
+objective would be numerically flat at `0.001` and give the optimizer nothing to descend.
+
+**Why the target string is load-bearing.** `L` says nothing about harm — it only measures agreement
+with one hardcoded sentence. Pick a target prefix the model would never phrase that way and `L`
+stays high no matter how good the suffix is, so the search stalls on a formatting mismatch rather
+than a safety property. This is also the defensive opening (§Q14): the thing being optimized is a
+short, predictable, *detectable* prefix.
+
 ### 3.2 The Discrete Optimization Problem
 
 Unlike image adversarial examples (continuous pixel space, vanilla gradient descent works), prompt
@@ -88,6 +126,50 @@ then **evaluate** (via an actual forward pass — not just the gradient approxim
 candidates that swap one position at a time, keeping whichever swap most reduces the loss. This
 is **greedy coordinate descent guided by gradients**, not gradient descent itself — the gradient
 narrows the search space; an actual forward pass makes the final decision.
+
+**Put simply.** "There are more possible suffixes than atoms in the universe, so nobody is
+enumerating them — the gradient's only job is to shrink each step's shortlist from the whole
+vocabulary down to a few hundred tokens worth actually trying."
+
+The size of the full space is what makes the gradient non-optional. Understand these two numbers
+and the entire design of GCG follows from them.
+
+| Quantity | What it is |
+|---|---|
+| `V` | Vocabulary size — how many distinct tokens can sit in any one suffix slot (~32,000 for Llama/Vicuna) |
+| `n` | Suffix length in tokens; GCG's default is `suffix_len = 20` (§6.1) |
+| `V^n` | Total distinct suffixes — the true search space, if you were to enumerate |
+| `k` | Tokens kept per position after gradient ranking; GCG's `top_k = 256` |
+| `k x n` | The per-step shortlist the gradient produces — what the search actually looks at |
+| `B` | Candidates actually forward-passed per step; GCG's `batch_size = 512` |
+
+**Walk one example.** GCG's own published configuration, both numbers side by side:
+
+```
+  FULL SPACE       V^n  = 32000^20
+                        = 1.27 x 10^90 distinct suffixes
+                        (log10 = 90.1 -- for scale, ~10^80 atoms in the observable universe)
+
+  PER-STEP SHORTLIST    k x n = 256 x 20 = 5,120 candidate substitutions
+                        gradient scored all 20 x 32000 = 640,000 (position, token) pairs
+                        and kept the best 256 per position = 0.8% of the vocabulary
+
+  ACTUALLY EVALUATED    B = 512 forward passes per step (10% of the 5,120 shortlist)
+                        x 500 steps = 256,000 forward passes total  (10^5.4)
+
+  Fraction of the space ever touched:  10^5.4 / 10^90.1  =  10^-84.7
+```
+
+An attack that inspects `10^-84.7` of its own search space and still succeeds is the real result
+here. It works because the loss surface is not remotely random — the gradient is a good enough
+guide that the tiny sampled region reliably contains an improving move.
+
+**Why the forward pass survives in the loop.** The gradient is computed on a *continuous
+relaxation* (one-hot embeddings), so its ranking of discrete swaps is only approximate; the token
+it likes best is often not the token that lowers real loss. Drop the `B` verification passes and
+trust the gradient's top pick outright and the search degrades badly — you would be optimizing the
+relaxation rather than the model. Keeping both is the whole trick: gradient for recall, forward
+pass for precision.
 
 ### 3.3 Transferability
 
@@ -122,6 +204,48 @@ parent; **pruning** removes branches the judge scores as off-topic or unlikely t
 the search tractable (typically far fewer queries than exhaustive search, and substantially fewer
 than PAIR's purely iterative refinement). TAP is fully **black-box** — no gradients, no access to
 target-model internals, only input/output queries — making it directly applicable to closed APIs.
+
+**Read it like this.** "If each attempt has an independent chance `p` of working, you should expect
+to spend about `1/p` attempts before the first success — and after `N` attempts you have found one
+with probability `1 - (1-p)^N`."
+
+Every query-budget claim in this module ("~45 queries/prompt vs PAIR's ~75", §14) is a statement
+about this geometric model. It is also why "the attack failed" and "the attack ran out of budget"
+are different findings that red-team reports routinely confuse.
+
+| Symbol | What it is |
+|---|---|
+| `p` | Per-query probability that one candidate prompt jailbreaks the target |
+| `N` | Query budget — how many candidates you are willing to send before giving up |
+| `E = 1/p` | Expected number of queries until the first success (the geometric mean) |
+| `(1-p)^N` | Probability that all `N` queries fail — each independent failure multiplied together |
+| `1 - (1-p)^N` | Probability of at least one success inside the budget |
+
+**Walk one example.** A prompt where each refined candidate works 5% of the time (`p = 0.05`):
+
+```
+  E = 1/p = 1/0.05 = 20 queries expected before the first success
+
+  N       (1-p)^N = 0.95^N      P(success within N) = 1 - 0.95^N
+   5          0.774                    22.6%
+  10          0.599                    40.1%
+  20          0.358                    64.2%   <- N = E, and it is NOT 50%
+  45          0.099                    90.1%   <- TAP's ~45 queries/prompt
+  75          0.021                    97.9%   <- PAIR's ~75 queries/prompt
+
+  Going 45 -> 75 queries buys 90.1% -> 97.9%: 67% more spend for 7.8 points.
+```
+
+Note the `N = 20` row. Spending exactly the expected number of queries gives a `64.2%` success
+chance, not `50%` — the geometric distribution has a long right tail, so the mean sits well above
+the median. Budgeting `N = E` and reporting the failures as "the model resisted" understates the
+true ASR by a wide margin.
+
+**Why the tail is the whole argument for pruning.** The `1 - (1-p)^N` curve is steep early and flat
+late — nearly all the success you are ever going to buy arrives in the first `~2/p` queries. Past
+that, extra budget is almost pure spend, which is precisely the waste TAP's judge removes by
+killing off-topic branches before they consume queries. Pruning does not raise `p` for a good
+branch; it stops you spending the flat part of the curve on branches whose `p` is near zero.
 
 ### 3.6 The Fluency-vs-Effectiveness Axis
 
@@ -348,6 +472,40 @@ attack-success rates on the open models and **nonzero transfer** (tens of percen
 and, with lower rates, GPT-4 and Claude — at the time of publication, before model providers
 deployed countermeasures informed by this research.
 
+**In plain terms.** "Each of the 500 steps costs one backward pass plus 512 forward passes, so the
+published configuration is roughly a quarter of a million model evaluations to produce one suffix."
+
+That total is the honest price tag on GCG, and it is the number that makes GCG a *lab* method
+rather than an *online* one. It also explains why the field kept searching: BEAST's headline claim
+(§4) is the same job in under a minute on one GPU.
+
+| Quantity | What it is |
+|---|---|
+| `num_steps = 500` | Outer loop iterations — how many single-token swaps get committed |
+| `batch_size = 512` | Candidate suffixes forward-passed per step, each swapping one position |
+| `top_k = 256` | Replacement tokens kept per position after gradient ranking |
+| `suffix_len = 20` | Positions available to swap, so `20 x 256 = 5,120` legal moves per step |
+| backward pass | One per step, to produce `grad` — the `(suffix_len, hidden_dim)` gradient |
+
+**Walk one example.** Costing out the paper's exact config:
+
+```
+  per step   1 backward pass          (gradient over 20 x 32000 = 640,000 pairs)
+           + 512 forward passes       (the _evaluate_loss call, once per candidate)
+
+  total      500 x 512 = 256,000 forward passes
+           +       500 = 500 backward passes
+
+  Candidates seen per step:  512 of the 5,120 legal moves = 10.0%
+  So GCG commits a swap after sampling one tenth of even its own shortlist.
+```
+
+The `10.0%` figure is the underappreciated part. GCG is not greedy over the shortlist — it is
+greedy over a *random sample* of the shortlist, which is what keeps the per-step cost at 512 rather
+than 5,120 forward passes and injects enough stochasticity to avoid getting stuck. Re-running with a
+different seed genuinely produces a different suffix, which is exactly the fact that defeats
+adversarial training on a fixed suffix corpus (Pitfall 10.2).
+
 ### 6.2 AutoDAN: Fluency-Constrained Genetic Mutation
 
 ```python
@@ -403,6 +561,46 @@ def _probe_jailbreak(target_model, text: str) -> float: ...
 def _compute_perplexity(reference_lm, text: str) -> float: ...
 def _crossover(text_a: str, text_b: str) -> str: ...
 ```
+
+**The idea behind it.** "Rank each candidate mostly on whether it jailbreaks, but add a small bonus
+for reading like real English — so gibberish can never win a tie."
+
+The `1.0 / (1.0 + perplexity)` shape matters more than the weights do. It maps any perplexity onto
+`(0, 1]` without dividing by zero, and it is monotonically decreasing, so lower perplexity always
+scores higher. What it is *not* is linear.
+
+| Symbol | What it is |
+|---|---|
+| `jailbreak_score` | Target-model probe result, `0` to `1`. Higher = closer to a successful jailbreak |
+| `perplexity` | Reference-LM surprise at the prompt's wording. ~15-25 fluent (§6.3), 1000s for gibberish |
+| `1/(1 + perplexity)` | The fluency term. Perfect fluency (`ppl = 0`) gives 1; huge perplexity gives ~0 |
+| `w_jb = 0.7` | Weight on jailbreak success — the dominant term |
+| `w_fluency = 0.3` | Weight on the fluency term — the tiebreaker, not the driver |
+| `fitness` | `w_jb x jailbreak_score + w_fluency x fluency_term`; population sorts on this |
+
+**Walk one example.** A gibberish candidate that jailbreaks well, against a fluent one that is a
+little weaker:
+
+```
+                        jb_score   ppl     1/(1+ppl)   0.7 x jb   0.3 x term   fitness
+  GCG-style gibberish     0.90     1500     0.00067     0.630      0.00020     0.63020
+  AutoDAN-style fluent    0.70       20     0.04762     0.490      0.01429     0.50429
+
+  The gibberish candidate WINS this comparison: 0.630 > 0.504.
+```
+
+That result is the point, and it is counterintuitive. The fluency term is worth at most `0.3`, but
+at realistic perplexities it delivers `0.014` versus `0.0002` — a gap of `0.0141`, which a
+jailbreak-score advantage of only `0.0141 / 0.7 = 0.020` completely erases. A candidate just two
+points of jailbreak score better can be arbitrarily less fluent and still win.
+
+**Why AutoDAN's outputs are fluent anyway.** Not because this term forces it — the arithmetic above
+shows it barely can — but because the *mutation operator* is an LLM paraphrase (`paraphraser_lm`),
+which can only produce fluent text in the first place. The population never contains gibberish for
+the fluency term to have to reject. The term is a guardrail against drift, while the real fluency
+constraint is structural: unlike GCG's token-level swaps, no operator in this loop can leave the
+manifold of natural language. Swap the paraphraser for random token edits and this fitness function
+would not save you.
 
 ### 6.3 BROKEN -> FIX: Perplexity Filter Bypassed by Fluent Jailbreaks
 
@@ -577,6 +775,48 @@ information is a more severe finding than one that succeeds often but only elici
 impolite text. Red-team reports should pair **success rate** with **severity distribution**
 (per [Safety & Alignment §3](README.md): "safety is not binary").
 
+**Stated plainly.** "Attack success rate is just successes divided by prompts tried — which means
+it is an estimate with an error bar, and on a small prompt set that error bar is wide enough to
+swallow most of the differences people report."
+
+ASR is a proportion estimated from a binomial sample, so it carries the standard error every
+proportion carries. Reporting `ASR = 22%` without `n` is reporting half a result.
+
+| Symbol | What it is |
+|---|---|
+| `k` | Number of prompts where the attack succeeded (judge-scored as a jailbreak) |
+| `n` | Number of harmful-behavior prompts attempted — the denominator that is usually omitted |
+| `ASR = k/n` | The point estimate. A sample proportion, not the true underlying rate |
+| `SE = sqrt(ASR(1-ASR)/n)` | Standard error — how much `k/n` would bounce across repeated runs |
+| `95% CI = ASR +/- 1.96 x SE` | Normal-approximation interval; the range the true rate plausibly sits in |
+| `1.96` | The z-value cutting off 2.5% in each tail of a normal distribution |
+
+**Walk one example.** The same attack measured on 50 prompts and on §14's 520:
+
+```
+  n = 50,  k = 42
+    ASR = 42/50           = 84.0%
+    SE  = sqrt(.84 x .16 / 50)  = 0.0518  = 5.18%
+    CI  = 84.0 +/- 1.96 x 5.18  = [73.8%, 94.2%]     width 20.3 points
+
+  n = 520, k = 114
+    ASR = 114/520         = 21.9%
+    SE  = sqrt(.219 x .781 / 520) = 0.0181 = 1.81%
+    CI  = 21.9 +/- 1.96 x 1.81    = [18.4%, 25.5%]   width 7.1 points
+```
+
+Now the comparison that matters. At `n = 50`, an attack scoring `22%` has CI `[10.5%, 33.5%]` and
+one scoring `14%` has CI `[4.4%, 23.6%]` — those intervals overlap across nearly their whole range,
+so "AutoDAN beat TAP" is not a finding, it is noise. Run the same two attacks at `n = 520` and the
+intervals become `[18.4%, 25.5%]` and `[11.1%, 17.0%]`, which do not overlap at all, and the
+ordering is now real.
+
+**Why `n` belongs in every reported ASR.** The `sqrt(n)` in the denominator means precision improves
+only with the square root of effort: at a fixed underlying rate, going from 50 to 520 prompts is
+10.4x the compute for `sqrt(10.4) = 3.2x` tighter bounds. That is the actual reason AdvBench-style suites are sized in the hundreds
+rather than the dozens — and the reason a red-team report claiming a mitigation "cut ASR from 18%
+to 14%" on 50 prompts has demonstrated nothing at all.
+
 **10.4 Ignoring Transferability When Evaluating Closed Models**
 
 Teams sometimes assume "we only need to test attacks designed for *our* model architecture." GCG's
@@ -696,6 +936,53 @@ from this evaluation's successful jailbreaks across all four methods (reducing o
 2%, including the 3 PAP-only successes the circuit breaker caught despite no optimization
 signature). The team scheduled this exact pipeline to re-run **monthly** against the production
 model and on every fine-tune, per Best Practice 5.
+
+### 14.1 Reading This Evaluation's Numbers Honestly
+
+**What the formula is telling you.** "Every percentage above is `k/520`, so attach the Pitfall 10.3
+confidence interval to each one before deciding which differences are real and which are sampling
+noise."
+
+At `n = 520` the intervals are tight enough that most of this report's conclusions survive — but
+not all of them, and the exception is the one the team would most want to believe.
+
+| Quantity | What it is |
+|---|---|
+| `n = 520` | AdvBench-style prompt set size, shared by all four attacks and both defense states |
+| `k` | Successful jailbreaks per method — recovered as `ASR x 520`, rounded to whole prompts |
+| `SE` | `sqrt(ASR(1-ASR)/520)`, this evaluation's per-method standard error |
+| `CI` | `ASR +/- 1.96 x SE`, the 95% normal-approximation interval |
+
+**Walk one example.** Every headline number in the case study, with its error bar:
+
+```
+  method / state        k     ASR      SE       95% CI            width
+  GCG transfer         47    9.04%   1.26%   [ 6.6%, 11.5%]       4.9
+  TAP                  73   14.04%   1.52%   [11.1%, 17.0%]       6.0
+  PAP                  57   10.96%   1.37%   [ 8.3%, 13.6%]       5.4
+  AutoDAN             114   21.92%   1.81%   [18.4%, 25.5%]       7.1
+
+  AutoDAN after SmoothLLM   31    5.96%   1.04%   [ 3.9%,  8.0%]   4.1
+  overall after full stack  10    1.92%   0.60%   [ 0.7%,  3.1%]   2.4
+```
+
+Two readings fall out. First, the defense worked and the evidence is solid: AutoDAN's
+`[18.4%, 25.5%]` and its post-SmoothLLM `[3.9%, 8.0%]` are nowhere near touching, so the drop is
+real, not a lucky re-run. Same for AutoDAN being genuinely worse than TAP — `[18.4%, 25.5%]` versus
+`[11.1%, 17.0%]` do not overlap.
+
+Second, the comparison the report treats as meaningful is not. TAP at `14.04%` `[11.1%, 17.0%]` and
+PAP at `10.96%` `[8.3%, 13.6%]` overlap across `[11.1%, 13.6%]` — this evaluation does **not**
+establish that TAP outperforms PAP, and ranking them in a summary table would be overclaiming. Note
+also that PAP's 3 unique successes are `3/520 = 0.58%`, a count small enough that its own interval
+is dominated by having seen only three events; the qualitative finding (optimization-free attacks
+reach prompts optimized ones miss) is what carries weight there, not the rate.
+
+**Why the final `1.92%` needs the severity pairing, not a tighter interval.** Its CI is
+`[0.7%, 3.1%]` — the narrowest in the table, because low rates have small standard errors. That
+precision is real but says nothing about what those 10 successes *elicited*, which is exactly
+Pitfall 10.3: a well-measured `1.92%` of CBRN-grade completions is a worse result than a sloppily
+measured `20%` of mild impoliteness. Narrow error bars measure confidence, never consequence.
 
 ---
 

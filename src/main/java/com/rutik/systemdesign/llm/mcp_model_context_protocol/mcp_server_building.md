@@ -388,6 +388,48 @@ async def get_user(user_id: str) -> str:
 
 **War story**: A team built an internal Snowflake MCP server. Worked great until LLMs started "creatively" interpreting cryptic error messages. After expanding error messages to include context ("Query failed: ORA-00942: table 'salse' doesn't exist — did you mean 'sales'?"), agent success rate jumped from 60% to 88%.
 
+**What the formula is telling you.** "Going from 60% to 88% is not a 28% improvement — it is a
+70% cut in how often the agent fails, and failure count is what your users actually experience."
+
+Success rates invite the wrong subtraction. The useful transformation is the error rate, because
+that is the quantity a retry loop multiplies and a user counts.
+
+```
+  error_rate      = 1 - success_rate
+  error_reduction = (error_before - error_after) / error_before
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `success_rate` | Share of agent query attempts that ultimately succeed. 0.60 → 0.88 |
+| `error_rate` | The complement. What the retry loop and the user both see |
+| `error_reduction` | Relative cut in failures — the honest headline for this change |
+
+**Walk one example.** The same two numbers, read as failures instead of successes:
+
+```
+  before : error_rate = 1 - 0.60 = 0.40    ->  2 in 5 attempts fail
+  after  : error_rate = 1 - 0.88 = 0.12    ->  about 1 in 8 attempts fail
+
+  absolute gain    : 88 - 60           = 28 percentage points
+  error reduction  : (0.40 - 0.12)/0.40 = 70%       <- the number worth quoting
+
+  at the §14 volume of 480 queries/day:
+    before : 480 x 0.40 = 192 failed attempts/day
+    after  : 480 x 0.12 =  58 failed attempts/day     -> 134 fewer failures/day
+```
+
+**Why the error message is the lever, and what breaks without it.** `ORA-00942` is a fully
+correct error that carries no repair signal — the agent knows it failed and cannot tell whether
+to fix a typo, request a permission, or abandon the query, so it retries semi-randomly and burns
+tokens. Adding `did you mean 'sales'?` converts the failure from a dead end into an instruction:
+the next attempt is a one-token edit rather than a guess.
+
+The general principle for MCP tool authors is that **your error strings are prompt engineering**,
+not logging. They land directly in the model's context and are the only channel through which a
+failed call can teach the next one. A server that returns terse errors is not being efficient; it
+is withholding the information that determines whether the retry succeeds.
+
 ---
 
 ## 11. Technologies & Tools
@@ -493,6 +535,53 @@ MCP supports binary content via base64-encoded resources or tool results. For la
 - ~$200/month additional Snowflake compute (mostly small ad-hoc queries)
 - Zero accidental data modifications (read-only enforcement)
 - Saved analysts ~20 min/day each on routine queries
+
+**In plain terms.** "Two hundred dollars a month of extra warehouse compute bought back thirteen
+analyst-hours a day — which is why nobody had to build a business case for this one."
+
+Every line in that results list is a rate; the ratio between two of them is the argument. Putting
+the cost and the benefit in the same units is the entire exercise.
+
+```
+  queries_per_day   = active_analysts x queries_per_analyst_per_day
+  cost_per_query    = monthly_cost / (queries_per_day x working_days)
+  hours_saved_daily = active_analysts x minutes_saved / 60
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `active_analysts` | 40 of the 50 who adopted it — the denominator that actually matters |
+| `queries_per_analyst_per_day` | 12 via the LLM, up from 8 manual |
+| `monthly_cost` | ~$200 of additional Snowflake compute |
+| `working_days` | ~22 per month |
+| `minutes_saved` | ~20 per analyst per day |
+
+**Walk one example.** The whole results block, reduced to one number in each direction:
+
+```
+  volume  : 40 analysts x 12 queries = 480 queries/day
+            480 x 22 working days    = 10,560 queries/month
+
+  cost    : $200 / 10,560            = $0.019 per query   (under two cents)
+
+  benefit : 40 analysts x 20 min     = 800 min/day = 13.3 analyst-hours/day
+            13.3 x 250 working days  = ~3,333 analyst-hours/year
+
+  adoption: 40 / 50                  = 80% in six weeks
+  behaviour change: 8 -> 12 queries  = +50% queries per analyst
+```
+
+Two cents a query against 3,333 hours a year is not a close call, and that is the point of
+computing it: the interesting engineering question here was never cost, it was blast radius —
+which is why the lessons list leads with read-only enforcement rather than with the price.
+
+**Watch the +50% query line, because it is the one that could have gone wrong.** Analysts did not
+run the same 8 queries more cheaply; they ran 12, because asking got easier. Lowering the friction
+on a metered resource reliably increases consumption, and the guardrails in the implementation are
+what kept that increase bounded: `LIMIT 1000` caps the rows any single query can drag back, the
+60-second timeout caps how long a runaway scan bills for, and the 5-minute schema cache removes
+catalog queries entirely from the repeated path. Without those three, a 50% jump in query volume
+against an unbounded warehouse is exactly how a $200/month line item becomes a $2,000 one.
 
 **Lessons**:
 1. Read-only enforcement was non-negotiable — protected against LLM-generated DROP TABLE.

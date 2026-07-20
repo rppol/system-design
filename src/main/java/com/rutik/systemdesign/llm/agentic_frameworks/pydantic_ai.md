@@ -395,6 +395,43 @@ Default 3. Configurable via `Agent(retries=N)`. On each retry, the validation er
 - Customer support time per refund: 8 min → 1.5 min (5× improvement)
 - Cost per refund: $0.019 average
 
+**The idea behind it.** "A 30× drop in schema errors is not 30× less work — at 800 refunds a day it is the difference between two dozen broken refunds daily and less than one."
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Refund requests per day, 800 |
+| `e` | Schema error rate — malformed or wrong-typed agent output |
+| `V x e` | Broken refunds per day reaching a customer or a support agent |
+| `e_before / e_after` | The "30×" headline, a ratio of rates |
+
+**Walk one example.** Convert both rates into daily incident counts:
+
+```
+  before   e = 0.03      800 x 0.03            =  24.0 broken refunds / day
+  after    e = 0.001     800 x 0.001           =   0.8 broken refunds / day
+
+  avoided                24.0 - 0.8            =  23.2 / day
+  ratio                  0.03 / 0.001          =  30x
+  per year               23.2 x 365            =  8,468 incidents avoided
+
+  cost of running the agent
+    800 x $0.019                               =  $15.20 / day
+    per incident avoided   $15.20 / 23.2       =  $0.66
+```
+
+Sixty-six cents to prevent one wrong refund amount is the number that makes this system
+obviously worth running — a single refund issued in cents instead of dollars costs far more
+than that to detect, reverse, and apologize for. Note also that going from 24/day to 0.8/day
+crosses a qualitative threshold: below roughly one per day, incidents become individually
+investigable rather than a background rate someone triages in bulk.
+
+**Why the type system, not the model, produced this.** The 30× did not come from a better
+LLM. It came from `amount` being an `int` of cents rather than a `float` of dollars, and
+`status` being a `Literal` rather than a `str` — constraints that make the historically most
+common bug *unrepresentable* rather than merely unlikely. Validation catches errors after
+they occur; a tight schema removes the state space in which they can occur, which is why the
+remaining 0.1% are genuine model mistakes rather than type confusion.
+
 **Lessons**:
 1. Tight Result schema (amount in cents as int, status as Literal) eliminated the largest class of historical bugs.
 2. Dependency injection made it trivial to test against MockCRM in CI — zero real API calls in PRs.

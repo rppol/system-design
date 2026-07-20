@@ -175,6 +175,87 @@ chunks. Strategy 2 embeds pixels directly into CLIP's joint image-text space, a 
 The tradeoff is direct: Strategy 1 buys accuracy and infra reuse at the cost of a vision-LLM
 call per image; Strategy 2 buys throughput and low cost but inherits the alignment gap above.
 
+### The Two Arithmetics Behind That Tradeoff
+
+**Stated plainly.** Strategy 1's price is one number multiplied three times: `images x tokens_per_image x price_per_token`. The `tokens_per_image` factor is the one people miss — it is not fixed by the image, it is chosen by the `detail` parameter, and the two settings differ by more than an order of magnitude.
+
+| Symbol | What it is |
+|--------|------------|
+| `pages x images_per_page` | Image count — 10,000 x 3 = 30,000 in Section 10's estimate |
+| `detail="low"` | 85 tokens per image, regardless of resolution |
+| `detail="high"` | Up to 2048 tokens per image — tiled at higher resolution |
+| price | `$5` per 1M tokens for GPT-4o image tokens |
+| `f` | Fraction of images routed to the expensive high-detail path |
+
+**Walk the indexing bill.** 30,000 images:
+
+```
+  detail="low"  : 30,000 x    85 =  2,550,000 tok -> 2.55  x $5 = $ 12.75
+  detail="high" : 30,000 x 2,048 = 61,440,000 tok -> 61.44 x $5 = $307.20
+
+  ratio = 2048 / 85 = 24.1x, for one keyword argument
+
+  at 100,000 pages x 3 images: 300,000 x 2048 x $5/1M = $3,072 one-time
+```
+
+**Walk the routing saving.** Section 12 reports a 65% cut from classifying images before processing — GPT-4o high-detail at `~$0.01` each for schematics, GPT-4o-mini low-detail at `~$0.001` each for photos. Solve for what fraction that implies:
+
+```
+  uniform high-detail : 30,000 x $0.010                 = $300.00
+  mixed               : 30,000 x (f x 0.010 + (1-f) x 0.001)
+
+  target = 0.35 x $300 = $105.00
+    30,000 x (0.009f + 0.001) = 105
+             0.009f + 0.001   = 0.0035
+                          f   = 0.2778
+
+  So the classifier sends 27.8% of images down the expensive path. The
+  headline "65% cost reduction" is really the claim "only about a quarter
+  of our images are schematics" -- a statement about the corpus, not the model.
+```
+
+**Walk the query-time budget.** The same token accounting reappears in the prompt, where it competes directly with text:
+
+```
+  3 retrieved images, detail="high" : 3 x 2048 = 6,144 tokens
+  3 retrieved images, detail="low"  : 3 x   85 =   255 tokens
+
+  at the case study's 800-token text chunks, those 6,144 tokens are
+  6,144 / 800 = 7.68 text chunks that no longer fit in the context
+
+  This is Pitfall "images consume context": three high-detail images
+  displace nearly eight text chunks. Retrieving the stored VLM description
+  instead of the pixels costs ~500 tokens for all three combined.
+```
+
+**The idea behind cross-modal fusion.** Strategy 2's alignment gap is why the case study does not rank the two modalities in one list. It scores them separately and blends: `fused = w_text x text_score + w_img x image_score`, with `w_text = 0.6`, `w_img = 0.4`.
+
+| Symbol | What it is |
+|--------|------------|
+| `text_score` | Normalized text-retrieval score for the candidate |
+| `image_score` | Normalized CLIP score, from a *different* space with its own scale |
+| `w_text`, `w_img` | The 0.6 / 0.4 split; they sum to 1 so `fused` stays in `[0, 1]` |
+| asymmetry | `w_text > w_img` encodes distrust of CLIP's text-to-image alignment |
+
+**Walk one example.**
+
+```
+  candidate            text   image    fused = 0.6 x text + 0.4 x image
+  ---------------------------------------------------------------------
+  A: strong text        0.80   0.55    0.6x0.80 + 0.4x0.55 = 0.7000
+  B: strong image       0.60   0.90    0.6x0.60 + 0.4x0.90 = 0.7200
+  C: moderate on both   0.72   0.72    0.6x0.72 + 0.4x0.72 = 0.7200
+
+  B only TIES C. Against C it is 0.18 ahead on image and 0.12 behind on text:
+    0.4 x (+0.18) + 0.6 x (-0.12) = +0.072 - 0.072 = 0.000
+
+  An image advantage of 0.18 buys exactly what a text advantage of 0.12 buys
+  -- the ratio 0.18/0.12 = 1.5 is just 0.6/0.4. Image evidence must clear a
+  1.5x higher bar to move the ranking, which is what the asymmetry is for.
+```
+
+That weighting is the practical answer to the alignment gap: rather than trying to make CLIP scores comparable to text scores, the system assumes they are not and caps how much influence the less-trusted modality can have. Combined with figure-reference linking, it is what lifts image recall from 52% (CLIP alone) to 87% in Section 12.
+
 ### 3.4 Generation with Vision LLMs
 
 Retrieved context must include both text and images; the generation LLM must be vision-capable (architecture details in [Multimodal Models](../multimodal_models/README.md)):

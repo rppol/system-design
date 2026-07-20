@@ -74,6 +74,37 @@ Results (2024):
   Human annotators: 92% Level 1, 82% Level 2, 47% Level 3
 ```
 
+**Stated plainly.** "A single headline GAIA number is a weighted average, and the weights are not equal — half the benchmark is Level 2."
+
+Per-level scores are the honest reporting format; a one-number score is what leaderboards want. Converting between them requires the task counts, which is why they are published alongside.
+
+| Symbol | What it is |
+|--------|------------|
+| `165 / 232 / 69` | Task counts at Levels 1, 2, 3. They sum to the 466 total |
+| level share | `tasks at level / 466`. The weight that level carries in any overall score |
+| per-level rate | Fraction of that level's tasks answered exactly right. Binary 0/1 per task, then averaged |
+| overall score | `sum(share x rate)` across levels — a weighted, not arithmetic, mean |
+
+**Walk one example.** Claude 3.5 Sonnet with tools, collapsed to one number:
+
+```
+                     tasks    share of 466    rate    contribution
+  Level 1 (easy)      165        35.4%         50%    0.354 x 0.50 = 0.177
+  Level 2 (medium)    232        49.8%         35%    0.498 x 0.35 = 0.174
+  Level 3 (hard)       69        14.8%         15%    0.148 x 0.15 = 0.022
+                     -----      ------                --------------------
+                      466       100.0%                overall      = 0.373
+
+  overall = 37.3%
+
+  same weighting applied to the human annotators (92 / 82 / 47):
+    0.354 x 0.92 + 0.498 x 0.82 + 0.148 x 0.47 = 0.804  ->  80.4%
+
+  gap to human = 80.4 - 37.3 = 43.1 points
+```
+
+**Why the plain average would mislead.** Averaging 50, 35 and 15 gives 33.3% — nearly four points below the true 37.3%, because it silently promotes Level 3 from 14.8% of the benchmark to 33.3% of the score. The bias runs the other way too: a system tuned only on easy tasks looks better under the weighted score than a plain average would suggest, since Level 1 carries more than double Level 3's weight. Always ask which mean a reported agent score used, and prefer the per-level breakdown when comparing two systems.
+
 ### SWE-bench
 
 ```
@@ -120,6 +151,36 @@ What 20% means in practice:
   - Remaining 50-80% require: codebase-specific knowledge, test writing,
     design judgment, architecture decisions
 ```
+
+**What it means.** "Resolve rate is a pass/fail test-suite count, nothing more — no partial credit, no style points, no reviewer."
+
+That severity is the benchmark's greatest strength and its sharpest limitation. It cannot be gamed with plausible-looking prose, and it also cannot recognize a patch that is correct but written against a test the repository never had.
+
+| Symbol | What it is |
+|--------|------------|
+| `2294` | Full SWE-bench issue count, drawn from 12 real Python repositories |
+| `500` | The Verified subset — manually checked to be well-specified. 21.8% of the full set |
+| resolve | Binary `1` if every relevant test passes after applying the patch, else `0`. No middle ground |
+| resolve rate | Resolved issues divided by issues attempted. What every number in the chart above is |
+
+**Walk one example.** Turn the published percentages into issue counts, all expressed against the 500-task Verified subset for comparability:
+
+```
+  resolve rate                             issues resolved out of 500
+     1.74%   GPT-4 (2023, no tools)      ->     8.7
+    13.8%    Devin (2024)                ->    69.0
+    18.1%    SWE-agent (2024)            ->    90.5
+    49%      Claude 3.5 + scaffold       ->   245.0
+    71.7%    o3 + scaffold               ->   358.5
+
+  1.74% -> 71.7% is a 41.2x improvement in roughly two years
+
+  reading the "1 in 5" framing: at a 20% resolve rate,
+    issues attempted per issue resolved = 1 / 0.20 = 5
+    on the full 2,294-issue set, 1.74% would have been about 40 issues
+```
+
+**Why the scaffold, not just the model, is on the x-axis.** Every entry past GPT-4 pairs a model with a harness: file navigation, test execution, patch validation, retry logic. The 49% and 71.7% figures are not model scores, they are system scores, and swapping the scaffold moves them by tens of points on an unchanged model. This is why "SWE-bench score" is close to meaningless without naming the scaffold, and why a resolve rate reported without stating full-set versus Verified is unusable — the Verified subset is deliberately easier, having filtered out issues whose descriptions were too vague to be solvable at all.
 
 ### AgentBench
 
@@ -224,6 +285,41 @@ def efficiency_metrics(trajectory: AgentTrajectory) -> dict:
         "cost_per_step": trajectory.total_cost_usd / trajectory.num_steps
     }
 ```
+
+**The idea behind it.** "Of the steps that actually had to happen, what fraction did the agent get right?" — and notice that the steps which did not have to happen are excluded from both sides of the fraction.
+
+Outcome metrics answer "did it work"; step success rate answers "did it work *for the right reasons*". An agent can reach a correct final answer through a chain of wrong steps, and this is the metric that separates skill from luck.
+
+| Symbol | What it is |
+|--------|------------|
+| `is_necessary` | Was this step required for the task? Junk and detours are `False` |
+| `is_correct` | Given the state at that moment, was this the right action? Judged per step, not globally |
+| `necessary_correct` | Numerator. Steps that were both required and done right |
+| `total_necessary` | Denominator. Every required step, right or wrong. Unnecessary steps never appear here |
+| `unnecessary_steps` | Counted separately in `efficiency_metrics` — deliberately kept out of the success ratio |
+| `cost_per_step` | `total_cost_usd / num_steps`. Uses *all* steps, so waste does show up here |
+
+**Walk one example.** One 12-step trajectory costing $0.96 in total:
+
+```
+  step classification                       count
+    necessary AND correct                     7
+    necessary but incorrect                   2
+    unnecessary (detours, junk)               3
+                                            ----
+    num_steps                                12
+    total_necessary = 7 + 2 =                 9
+
+  step_success_rate = 7 / 9 = 0.778
+
+  efficiency_metrics:
+    unnecessary_steps  = 3
+    waste fraction     = 3 / 12       = 25.0%
+    cost_per_step      = $0.96 / 12   = $0.080
+    cost of the waste  = 3 x $0.080   = $0.24    (25% of the bill)
+```
+
+**Why the two metrics must be read together.** Watch what the denominator excludes: an agent that takes 9 correct necessary steps plus 30 pointless ones still scores `9/9 = 1.000` on step success rate. It looks flawless while burning 4x the budget. That is pitfall 2 in Section 10 made arithmetic — outcome-only and step-quality metrics both miss it, and only `unnecessary_steps` and `cost_per_step` catch it. Ship a dashboard with step success rate alone and you will optimize an agent into being expensively, confidently correct.
 
 ### LLM-as-Judge for Agent Traces
 
@@ -370,6 +466,39 @@ Usage:
   gap between pass@1 and pass@5: measures output variance
   Large gap: agent is inconsistent; investigate why it fails on some runs
 ```
+
+**What the formula is telling you.** "Take k of the runs you already made. What is the chance you did *not* draw a bucket of pure failures?"
+
+The formula is built as one minus the bad case because the bad case is the easy one to count. There is exactly one way to fail — every single one of your k draws must be a failure — and combinations count that directly.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Total runs actually executed on this task, at temperature > 0 so they differ |
+| `c` | How many of those `n` runs succeeded |
+| `n - c` | How many failed. The pool a "total failure" draw must come entirely from |
+| `C(a, b)` | Combinations: ways to choose `b` items from `a`, order irrelevant. Zero when `b > a` |
+| `C(n-c, k) / C(n, k)` | Probability that a size-`k` draw lands entirely inside the failure pool |
+| `1 - (...)` | Flip it: probability at least one success is in the draw. That is pass@k |
+
+**Walk one example.** The file's own case — 5 runs, 3 successes, 2 failures:
+
+```
+  n = 5, c = 3, n - c = 2 failures
+
+  k=1   1 - C(2,1)/C(5,1)  =  1 -  2/5   =  1 - 0.400  =  0.600
+  k=2   1 - C(2,2)/C(5,2)  =  1 -  1/10  =  1 - 0.100  =  0.900
+  k=3   1 - C(2,3)/C(5,3)  =  1 -  0/10  =  1 - 0      =  1.000
+  k=5   1 - C(2,5)/C(5,5)  =  1 -  0/1   =  1 - 0      =  1.000
+
+  C(2,3) = 0 -- you cannot draw 3 failures when only 2 exist.
+  So from k=3 upward at least one success is guaranteed, and pass@k pins at 1.0.
+
+  pass@5 - pass@1 = 1.000 - 0.600 = 0.400   <- the variance gap
+```
+
+**Two different pass@2 values, and why.** The combinatorial form above gives exactly `0.900`. The commonly quoted shortcut `1 - (1-p)^k` with `p = 0.60` gives `1 - 0.40^2 = 0.840` — the value shown in the example block. They differ because they answer slightly different questions: the shortcut assumes two *fresh, independent* runs each succeeding at rate 0.60 (sampling with replacement), while the combinatorial form draws 2 of the 5 runs you already have (without replacement). The without-replacement version is the unbiased estimator introduced with HumanEval and is what benchmark papers report; the shortcut is a biased plug-in that gets worse as `n` shrinks. With `n = 5` the disagreement is already 6 points, which is why you should never estimate pass@k from a success rate alone — you need `n` and `c`.
+
+**Why the pass@1-to-pass@5 gap is the number to watch.** `pass@1` is what a user experiences: one run, one shot. `pass@5` is what the agent is *capable* of when you can afford five attempts and have an oracle to pick the winner — which in production you usually do not. A gap of 0.400 says the capability is there but the reliability is not, and that is a scaffolding problem (better verification, retry-on-failure, self-checking) rather than a model problem. A small gap with a low `pass@1` says the opposite: the agent fails the same way every time, and no amount of retrying will help.
 
 ---
 
@@ -681,3 +810,37 @@ class CustomerServiceEvalSuite:
 - The 200-task eval dataset requires quarterly refresh (30 hours of annotation) to stay representative of evolving ticket types
 - Adversarial suite maintenance: new attack patterns discovered through red teaming are added monthly; the suite grew from 50 to 78 cases over 6 months
 - Full trace logging generates ~2TB/month of trajectory data; retention policy set to 90 days with sampling-based long-term archival
+
+**In plain terms.** "Judging every trace costs more than the agent itself, so judge a fixed slice and accept that you are measuring the population through a straw."
+
+The 5% figure is not a rule of thumb — it is the output of a cost constraint meeting a detection requirement, and both sides are computable from numbers already stated above.
+
+| Symbol | What it is |
+|--------|------------|
+| `5,000 tickets/day` | Production volume. The population being sampled |
+| `5%` | Sample rate. Fraction of traces that go to the LLM judge |
+| `$12/day` | Published judge spend at that rate. Divide by traces judged to get unit cost |
+| `$0.07` | Agent cost per ticket, from the Results section. The baseline judging is compared against |
+| `200-task` nightly | The other eval arm — a fixed dataset, not a sample. Deterministic, not statistical |
+
+**Walk one example.** Derive the unit economics, then price the alternatives:
+
+```
+  traces judged per day   5,000 x 0.05      =    250
+  cost per judged trace   $12 / 250         =  $0.048
+  cost per year           $12 x 365         =  $4,380      (quoted as ~$4,400)
+
+  judging 100% instead:
+    5,000 x $0.048  =  $240 / day  =  $87,600 / year
+    the 5% rate gives back 95% of that bill
+
+  compare the two eval arms:
+    judge on 5% sample     $12.00 / day
+    nightly 200-task run   200 x $0.07  =  $14.00 / night
+    combined                            =  $26.00 / day  =  $9,490 / year
+
+  detection power of the sample:
+    a defect hitting 2% of tickets shows up as 250 x 0.02 = 5 flagged traces/day
+```
+
+**What the sample rate costs you, beyond dollars.** At 250 traces/day a defect affecting 2% of tickets surfaces about 5 times daily — comfortably detectable. A defect affecting 0.1% surfaces `250 x 0.001 = 0.25` times per day, roughly once every four days, and will look like noise before it looks like a trend. That is the real trade the 5% number encodes: it buys reliable detection of common regressions and gives up on rare ones, which is precisely why the 50-case adversarial suite is run at 100% on every deployment instead of being sampled. Rare-but-catastrophic failures must never be left to a sampler.

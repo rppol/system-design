@@ -244,6 +244,63 @@ if __name__ == "__main__":
     sys.exit(0 if score >= THRESHOLD else 1)
 ```
 
+**In plain terms.** "Score every golden example with a judge, average the scores, and ship only if
+the average clears 0.85. The gate is one number standing in for the whole dataset."
+
+Collapsing a dataset to its mean is what makes the gate cheap to run and easy to reason about — and
+it is also the gate's central weakness. A mean cannot distinguish "uniformly decent" from "mostly
+excellent with a few catastrophic failures," and the second is the case you actually needed the gate
+to catch.
+
+| Symbol | What it is |
+|--------|------------|
+| `judge_response` | Returns `integer / 10.0`, so every individual score is quantized to 0.0, 0.1, ... 1.0 |
+| `scores` | One score per golden example. Length = dataset size |
+| `statistics.mean(scores)` | The gate value. An unweighted average — every example counts equally |
+| `THRESHOLD = 0.85` | Ship/no-ship line |
+| `sys.exit(0 or 1)` | Exit code is the CI contract. Non-zero fails the pipeline and blocks promotion |
+
+**Walk one example.** A 50-example golden dataset, and what the 0.85 line actually permits:
+
+```
+  QUANTIZATION -- what the judge can even express
+    individual score steps: 1/10          = 0.1
+    mean steps over N = 50:  0.1 / 50     = 0.002
+    A "0.851 vs 0.849" distinction is real, but only 2 steps wide.
+
+  CASE A -- uniformly decent
+    all 50 examples score 8/10 = 0.85 each
+    mean = 0.85                              -> PASS (exactly on the line)
+
+  CASE B -- mostly great, some catastrophic
+    45 examples score 9/10 = 0.90  -> 40.5
+     5 examples score 5/10 = 0.50  ->  2.5
+    mean = 43.0 / 50 = 0.86                  -> PASS
+    ...even though 10% of the golden set is failing badly.
+
+  HOW MANY TOTAL FAILURES (score 0.0) HIDE BEHIND 0.85?
+    rest of the dataset at 0.90:
+      k = 0  ->  0.900   PASS
+      k = 1  ->  0.882   PASS
+      k = 2  ->  0.864   PASS
+      k = 3  ->  0.846   FAIL
+
+    Three zero-scoring examples out of fifty is what it takes to trip the gate.
+    Two complete failures ship.
+```
+
+Two total failures shipping past a quality gate is not a rounding error — on a support chatbot that
+is an entire category of question answered wrong. The fix is not a higher threshold (raising it to
+0.90 makes Case A fail while still permitting one zero) but a **second gate on the minimum or on the
+count below a floor**: `min(scores) >= 0.5`, or "no more than 1 example below 0.6." Means gate the
+average experience; floors gate the worst one, and users churn over the worst one.
+
+**Why the exit code carries the whole contract.** CI knows nothing about scores — it only sees 0 or
+1. That means every judgment call (threshold, which failures matter, whether a flaky judge run gets
+retried) has to be encoded *inside* this script. Anything left implicit becomes an engineer eyeballing
+a number in the log and deciding to merge anyway, which is exactly the ungated state PromptOps
+exists to replace.
+
 ### Alias-based hot-swap (no redeploy)
 
 ```python
@@ -578,6 +635,46 @@ Monitor (Langfuse dashboard)
 - Eval-gated CI blocks promotion of any version that regresses quality below threshold.
 - Shadow mode used for the tone experiment (v3) so users see no impact during evaluation.
 - Token count tracked per version; version exceeding 350 tokens requires justification.
+
+**What it means.** "A prompt's token count is a per-request tax paid on every single call forever,
+so the registry treats prompt length as a tracked, budgeted resource rather than a side effect of
+editing."
+
+This is why `token_count` sits in the registry alongside `content` and `eval_run_id`. A prompt
+change is simultaneously a quality change and a cost change, and without the token count recorded
+per version you can see the first but not the second — which makes "v3 scored better" an
+unfalsifiable claim.
+
+| Symbol | What it is |
+|--------|------------|
+| baseline | The v1 system prompt at ~300 tokens |
+| growth factor | How much a revision inflates the prompt. The tone experiment added 12% |
+| 350-token cap | The review trigger. Not a hard block — exceeding it requires justification |
+| headroom | `cap - current`. How much a future revision can add before triggering review |
+| quality delta | What the growth bought. The tone change cut escalation rate by 8% |
+
+**Walk one example.** Apply the tone experiment's measured 12% growth to the 300-token baseline:
+
+```
+  v1 baseline                        300 tokens
+  v3 tone experiment  300 x 1.12 =   336 tokens
+  cap                                350 tokens
+  headroom remaining  350 - 336 =     14 tokens    <- under 5% of the baseline
+
+  TOTAL GROWTH THE CAP ALLOWS FROM BASELINE
+    350 / 300 - 1 = 16.7%
+
+  SO THE 12% TONE CHANGE CONSUMES
+    12% / 16.7% = 72% of the entire budget, in one revision
+```
+
+The tone experiment ships — 336 is under 350 — but it spends nearly three-quarters of the available
+budget and leaves 14 tokens for everything that comes after it. That is the number to bring to the
+promotion review: the next person who wants to add two sentences of refund-policy nuance now
+triggers a justification cycle, not because their change is large but because v3 already spent the
+room. Set against 8% fewer escalations the trade is clearly worth making here; the point of tracking
+`token_count` per version is that the trade is *visible and arguable* at promotion time instead of
+being discovered in an invoice three months later.
 
 **Tradeoffs and Alternatives**
 

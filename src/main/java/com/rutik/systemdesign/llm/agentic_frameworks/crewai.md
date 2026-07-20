@@ -420,6 +420,45 @@ Without `expected_output`, agents produce variable-format outputs that downstrea
 **Pitfall 4: Context explosion**
 Each task receives all previous task outputs as context. With 6 tasks and 1000 tokens each, task 6 receives 5000 tokens of context before its own prompt. At 10K tokens per task: context window exhaustion. Mitigation: be selective with `context=[specific_task]` rather than auto-passing all previous; summarize intermediate outputs.
 
+**Stated plainly.** "Auto-passing context means task 1's output is paid for six times — once when it is produced and once again inside every task that follows it."
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Position of the task in the sequential crew, 1 through 6 |
+| `o` | Tokens each task emits, 1000 here |
+| `(n - 1) x o` | Context task `n` inherits — every earlier output, in full |
+| `sum (n - 1) x o` | Total context tokens the crew pays for, across all tasks |
+| `context=[...]` | The override that replaces "all previous" with "the ones I need" |
+
+**Walk one example.** The six-task crew, task by task:
+
+```
+  task n    inherited context (n-1) x 1000
+    1                 0
+    2             1,000
+    3             2,000
+    4             3,000
+    5             4,000
+    6             5,000        <- the pitfall's number
+              ----------
+  total        15,000 context tokens for 6,000 tokens of actual output
+
+  redundancy   15,000 / 6,000                =  2.5x
+  at 10K per task   total = 150,000 tokens   -> past GPT-4o's 128K window
+```
+
+The crew produces 6,000 tokens of work and pays to move 15,000 — a 2.5× tax that nobody
+chose. The shape matters more than the numbers: context grows as a triangle, so it is fine
+at 6 tasks and fatal at 20, where the same arithmetic gives 190,000 context tokens against
+20,000 of output, a 9.5× tax.
+
+**Why selective `context=` beats a bigger model.** Reaching for a longer context window
+treats the symptom. Most tasks genuinely need one or two upstream outputs, not all of them —
+a writer needs the outline and the research, not the SEO keyword list. Naming those
+dependencies explicitly turns the triangle back into something close to a constant, and has
+the side benefit of improving quality, since irrelevant upstream text is a distraction the
+model must actively ignore.
+
 **Pitfall 5: Tool errors not handled**
 If a tool raises an exception, the agent gets an error message and tries to work around it — often by hallucinating the expected output. Add explicit error handling in tool implementations and test tools independently before integrating.
 

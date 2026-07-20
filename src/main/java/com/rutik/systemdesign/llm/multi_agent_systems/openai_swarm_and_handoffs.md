@@ -731,6 +731,44 @@ Use gpt-4o-mini (fast, cheap: ~$0.15/1M input) for triage since it only needs to
 
 3. **Set max_turns explicitly.** Never rely on the default of 10 for production. Analyse your longest expected workflow (e.g., 3 handoffs × 2 turns each = 6) and set max_turns = workflow_max + 2.
 
+**What the formula is telling you.** "Size the turn budget from the shape of your worst legitimate
+workflow, then add a small fixed slack — not from a number that felt safe."
+
+```
+  workflow_max = num_handoffs x turns_per_handoff
+  max_turns    = workflow_max + 2
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `num_handoffs` | How many agent-to-agent transfers the longest real path makes |
+| `turns_per_handoff` | Turns each agent burns before transferring. Typically 2: act, then hand off |
+| `+ 2` | Slack for one retry or one clarifying exchange. Not a safety factor, a repair allowance |
+| `max_turns` | Hard stop. Exceeding it aborts the run |
+
+**Walk one example.** The stated workflow, and the latency it implies:
+
+```
+  3 handoffs x 2 turns = 6 turns   ->  max_turns = 6 + 2 = 8
+
+  each turn is one LLM call at ~200-400 ms:
+    typical path  : 6 turns x 200 ms = 1.2 s
+    worst allowed : 8 turns x 400 ms = 3.2 s   <- matches the case study's 3.2 s average
+```
+
+Both failure directions cost something real. Set it too low and legitimate long conversations
+abort mid-flight — the user sees a truncated session, not an error you can explain. Set it too
+high (the case study ran `max_turns=12`, well above the `+2` rule) and a loop between two agents
+that keep transferring to each other burns 12 LLM calls before anything stops it. The case study
+recorded 12 turns firing 0.3% of the time and traced every instance to a user repeating the same
+question — a real signal that a cheaper detector, not a bigger budget, was the fix.
+
+This is why best practice 4 ("design handoffs as one-way") is the load-bearing companion to this
+one. In a directed acyclic handoff graph, `num_handoffs` is bounded by the graph's longest path
+and `workflow_max` is a number you can actually compute. Allow cycles and there is no longest
+path — `max_turns` stops being a budget derived from the design and becomes the only thing
+standing between you and an unbounded bill.
+
 4. **Design handoffs as one-way.** Specialists should never transfer back to triage or to each other unless you have explicitly audited the graph for cycles. A directed acyclic handoff graph is easiest to reason about.
 
 5. **Write a guardrail for every external input surface.** Customer-facing agents must have an input_guardrail for PII (credit card numbers, SSNs) and prompt injection. The guardrail should run in under 100ms using regex or a fast classifier.
@@ -792,6 +830,51 @@ All runs used Runner.run with max_turns=12. Trace URLs were stored in the CRM al
 - Human escalation rate: 22% → 9%
 - Average cost per conversation: $0.021 → $0.009 (mix of mini for triage, gpt-4o only for specialists)
 - GDPR audit requests satisfied in < 2 minutes (trace URL lookup in CRM)
+
+**In plain terms.** "Every one of these percentages is a rate, and a rate only becomes a
+decision once you multiply it by the 3,000 tickets a day that actually flow through it."
+
+Percentages hide magnitude. The same 3,000/day multiplier turns each result line into a number
+you can take to a budget or a staffing meeting, which is the only form in which any of these
+improvements is arguable.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Ticket volume. 3,000 per day here |
+| `rate_before` / `rate_after` | The measured fraction, e.g. 0.14 → 0.018 hallucination |
+| `V x rate` | Tickets per day actually affected |
+| `cost_per_conv` | Blended model spend for one conversation, $0.021 → $0.009 |
+| Relative reduction | `(before - after) / before` — the number quoted in the results list |
+
+**Walk one example.** All four headline results, converted to daily units:
+
+```
+  hallucinated billing answers : 3,000 x 0.140 =  420/day
+                                 3,000 x 0.018 =   54/day    -> 366 fewer wrong answers/day
+
+  human escalations            : 3,000 x 0.220 =  660/day
+                                 3,000 x 0.090 =  270/day    -> 390 fewer handoffs to staff/day
+
+  model spend                  : 3,000 x $0.021 = $63.00/day
+                                 3,000 x $0.009 = $27.00/day
+                                 saving          = $36.00/day = $13,140/year
+
+  first-response latency       : 8.0 s -> 3.2 s   = 60% faster, on every one of the 3,000
+
+  relative reductions: cost 57.1%   latency 60.0%   escalation 59.1%   hallucination 87.1%
+```
+
+Note which number is *not* impressive in isolation and is decisive at volume: `max_turns=12` fired
+0.3% of the time, which sounds like noise until it is `3,000 x 0.003 = 9 conversations per day`
+hitting a hard stop — nine users per day getting a truncated session. Driving it to 0.05% leaves
+1.5/day. A rate below 1% is exactly the regime where per-ticket multiplication changes whether
+something is worth engineering.
+
+The $13,140/year is also the honest framing of the cost win. A 57% reduction sounds like the
+headline, but the absolute figure is small relative to an engineer's time — which is why the
+lessons list ranks the *hallucination* and *escalation* wins above it. 390 fewer human escalations
+per day is the result that pays for the architecture; the token savings are a rounding error
+beside it.
 
 **Lessons learned:**
 1. The amount_sanity_guardrail caught 3 production incidents in the first week where the LLM hallucinated a refund amount 10x larger than the actual charge.

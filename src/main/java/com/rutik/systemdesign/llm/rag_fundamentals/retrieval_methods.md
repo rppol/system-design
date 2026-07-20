@@ -101,6 +101,73 @@ Where:
   |d|       = document length (tokens); avgdl = average document length
 ```
 
+**Read it like this.** "Score a document by how rare each query term is, times how often it appears here — but stop rewarding repetition after a few hits, and dock points if the document is just long."
+
+Every part of BM25 exists to defeat a specific way of gaming plain term-frequency counting. Read it as three independent knobs bolted onto `tf`, and it stops looking like a magic formula.
+
+| Symbol | What it is |
+|--------|------------|
+| `t` | One term from the query; the score is a sum over all of them |
+| `tf(t,d)` | How many times `t` appears in this document |
+| `df(t)` | How many documents in the corpus contain `t` at all |
+| `N` | Corpus size — 120,000 chunks in the Section 12 case study |
+| `IDF(t)` | Rarity weight, `log((N - df + 0.5)/(df + 0.5) + 1)`; big for rare terms |
+| `k1` | Saturation knob, 1.2-2.0; caps how much repeated occurrences can add |
+| `b` | Length-normalization knob, 0-1; how hard long documents are penalized |
+| `\|d\| / avgdl` | This document's length relative to the corpus average |
+
+**Walk the IDF knob.** With `N = 120000`:
+
+```
+  df(t)     term looks like           IDF = log((N - df + 0.5)/(df + 0.5) + 1)
+  ------------------------------------------------------------------------
+      3     "ERR_SOCKET_TIMEOUT_4203"   10.4425
+     40     "myocardial"                 7.9940
+   4000     "certification"              3.4011
+  40000     "error"                      1.0986
+
+  The rare identifier is worth 10.4425 / 1.0986 = 9.5x a common word, per
+  occurrence. This single column is why BM25 beats dense retrieval on
+  identifier queries: rarity is measured, not learned.
+```
+
+**Walk the k1 knob.** Same rare term (`IDF = 10.4425`), `|d| = 300`, `avgdl = 250`, `b = 0.75`, `k1 = 1.2`. The length factor is fixed at `1 - 0.75 + 0.75 x 300/250 = 1.15`, so the denominator is `tf + 1.2 x 1.15 = tf + 1.38`:
+
+```
+  tf    numerator      denominator      score = 10.4425 x num/den
+  --------------------------------------------------------------
+   1    1 x 2.2 = 2.2    1 + 1.38 = 2.38      9.6527
+   2    2 x 2.2 = 4.4    2 + 1.38 = 3.38     13.5938
+   5    5 x 2.2 = 11.0   5 + 1.38 = 6.38     18.0043
+  10   10 x 2.2 = 22.0  10 + 1.38 = 11.38    20.1876
+  50   50 x 2.2 = 110   50 + 1.38 = 51.38    22.3564
+
+  1 -> 2 occurrences  : +3.94 points
+  10 -> 50 occurrences: +2.17 points for 40 more mentions
+
+  The ceiling is IDF x (k1 + 1) = 10.4425 x 2.2 = 22.9735, approached but
+  never reached. Keyword-stuffing a document 50 times buys almost nothing.
+```
+
+**Why saturation exists.** Without `k1`, `tf` enters linearly and a page repeating a term 50 times outranks the authoritative page that states it twice — the classic spam vector. `k1` turns the response into a hyperbola with a hard ceiling of `IDF x (k1 + 1)`. Raising `k1` pushes the knee rightward, so repetition matters longer; lowering it makes BM25 nearly binary ("does the term appear at all").
+
+**Walk the b knob.** Same term, `tf = 2`, three document lengths:
+
+```
+  b       |d|=100      |d|=250 (= avgdl)    |d|=1000
+  -----------------------------------------------------
+  0.00    14.3584      14.3584              14.3584     <- length ignored entirely
+  0.75    17.2733      14.3584               7.7876     <- default
+  1.00    18.5270      14.3584               6.7569     <- full normalization
+
+  At |d| = avgdl the length factor is exactly 1.0, so every b gives the same
+  score -- that is the pivot the knob rotates around. At |d| = 1000 with
+  b = 0.75 the score falls to 7.7876 / 14.3584 = 54% of the average-length
+  document's score, purely for being 4x longer.
+```
+
+**What breaks without `b`.** Set `b = 0` (Pitfall 2 in Section 8) and length drops out: a 1000-token chunk that mentions the term twice scores identically to a 100-token chunk that mentions it twice, even though the short chunk is far more *about* the term. Long documents then flood the top of every result list simply because length gives them more chances to contain any given query term.
+
 BM25 strengths:
 ```
 Query: "ISO 27001 certification requirements"
@@ -167,6 +234,33 @@ that tops a single list: `doc_B` (3rd + 2nd) edges out `doc_A` (1st + 5th).
   doc_B is #1 in neither list yet wins: RRF rewards cross-retriever agreement, and the
   reciprocal makes raw score magnitudes irrelevant — only ranks matter.
 ```
+
+**What this actually says.** `1/(k + rank)` says: "convert every retriever's opinion into the same currency — position — then let the retrievers vote by adding up." Scores never enter the arithmetic, so no normalization step can be got wrong.
+
+| Symbol | What it is |
+|--------|------------|
+| `rank_r(doc)` | Where retriever `r` placed this document, 1-based; absent = contributes nothing |
+| `k` | Damping constant, 60 by default; added to every rank before inverting |
+| `1/(k + rank)` | One retriever's vote — always positive, always shrinking with rank |
+| `Σ over retrievers` | The fusion itself; documents found by both retrievers get two votes |
+
+**Walk the k knob.** How much a first place is worth relative to a hundredth:
+
+```
+  k      rank 1     rank 10    rank 100   rank1 / rank100
+  -------------------------------------------------------
+   10    0.09091    0.05000    0.00909    10.000x
+   60    0.01639    0.01429    0.00625     2.623x   <- default
+  100    0.00990    0.00909    0.00500     1.980x
+
+  Small k = winner-take-most: one retriever's #1 can carry the fusion alone.
+  Large k = flatten everything: appearing in both lists matters more than
+  where. k = 60 sits deliberately near the flat end -- which is exactly why
+  doc_B (3rd + 2nd, sum 0.03200) beats doc_A (1st + 5th, sum 0.03178) above.
+  The whole margin is 0.00022, and it comes from agreement, not from rank.
+```
+
+**Why `k` is added at all.** Without it the formula is `1/rank`, where rank 1 scores 1.0 and rank 2 scores 0.5 — a single retriever's top hit would outweigh any amount of agreement further down, and fusion would degenerate into "trust whoever is most confident." Adding 60 compresses the whole usable range into `[0.00625, 0.01639]`, a 2.6x spread instead of a 100x one, which is what makes cross-retriever agreement the dominant signal.
 
 ```python
 def reciprocal_rank_fusion(
@@ -240,6 +334,50 @@ doing anything. Min-max rescaling maps each onto [0, 1] before the α-weighted b
 The fix is per-query, not global: min and max are computed over *this query's* candidate
 set, because BM25's absolute range shifts with query length and term rarity.
 
+**Put simply.** `hybrid = α x normalize(dense) + (1-α) x normalize(sparse)` says: "put both scores on a 0-to-1 ruler first, then decide how much each vote counts." Skip the normalize step and `α` becomes decorative — the retriever with the wider numeric range wins regardless of what you set it to.
+
+| Symbol | What it is |
+|--------|------------|
+| `α` | Blend weight; 1.0 = pure dense, 0.0 = pure sparse, 0.5 = equal |
+| `normalize(x)` | Min-max rescale, `(x - min)/(max - min)`, over **this query's** candidates |
+| `min`, `max` | The smallest and largest score in the candidate set — recomputed per query |
+| range width | `max - min`; the term with the wider width dominates any raw sum |
+
+**Walk one example.** Four candidates for one query, cosine on the left and BM25 on the right:
+
+```
+  doc   cosine   BM25
+  ------------------------
+  D1     0.68    14.7      (exact keyword hit, weak semantic match)
+  D2     0.79     9.2
+  D3     0.71     3.1
+  D4     0.83     0.0      (strong paraphrase, zero keyword overlap)
+
+  range widths:  cosine 0.83 - 0.68 = 0.15
+                 BM25   14.7 - 0.0  = 14.7      ratio = 98.0x
+
+  RAW sum, alpha = 0.5:
+    D1 = 0.5x0.68 + 0.5x14.7 = 7.6900   <- 1st
+    D2 = 0.5x0.79 + 0.5x9.2  = 4.9950   <- 2nd
+    D3 = 0.5x0.71 + 0.5x3.1  = 1.9050   <- 3rd
+    D4 = 0.5x0.83 + 0.5x0.0  = 0.4150   <- 4th
+  That is the BM25 ranking, exactly. The cosine column moved nothing.
+
+  NORMALIZED, alpha = 0.5:
+    doc   cos_norm   bm25_norm   hybrid
+    ------------------------------------
+    D1     0.0000     1.0000     0.5000
+    D2     0.7333     0.6259     0.6796   <- 1st, strong on BOTH
+    D3     0.2000     0.2109     0.2054
+    D4     1.0000     0.0000     0.5000
+
+  Now D2 wins -- the document neither retriever ranked first but both liked.
+  D1 and D4, each a specialist, tie at exactly 0.5000. The ranking changed
+  completely, and only now does moving alpha change anything.
+```
+
+**Why min and max are recomputed per query.** BM25's absolute magnitude depends on query length and term rarity: a two-word query with a `df = 3` identifier can score 20+, while a ten-word conversational query over common terms tops out near 4. A global normalization constant fitted on one query distribution silently mis-scales the other. Cosine has no such problem — it is bounded in `[-1, 1]` by construction — which is the asymmetry that makes rank-based RRF the safer default.
+
 ### 3.5 Metadata Filtering
 
 Scope retrieval to a subset of the index using structured metadata:
@@ -274,6 +412,81 @@ results = (
 ```
 
 Metadata filtering is often more impactful than retrieval algorithm choice for precision-sensitive applications. A filter for `document_date >= 2024-01-01` eliminates all stale documents regardless of embedding similarity.
+
+### 3.6 Reading the Retrieval Metrics — Recall@K, MRR, NDCG@K
+
+Section 10 asks you to evaluate retrieval with Recall@K, MRR, and NDCG@K. They are three different questions asked of the same ranked list, and they routinely disagree — which is the point of computing all three.
+
+```
+Recall@K  = (relevant docs in top K) / (total relevant docs in corpus)
+Precision@K = (relevant docs in top K) / K
+MRR       = 1 / (rank of the FIRST relevant document)
+DCG@K     = Σ_{i=1..K} rel_i / log2(i + 1)
+NDCG@K    = DCG@K / IDCG@K      where IDCG is DCG of the perfect ranking
+```
+
+**The idea behind it.** Recall@K asks "did we find them"; MRR asks "how fast did we find the first one"; NDCG@K asks "how well ordered is the whole list." A system can win one and lose another, so reporting a single number hides the tradeoff you are actually making.
+
+| Symbol | What it is |
+|--------|------------|
+| `K` | Cutoff depth — how far down the list you are willing to look |
+| `rel_i` | Relevance of the document at position `i`; 1 or 0 for binary judgements |
+| `1 / log2(i + 1)` | The discount: position 1 keeps 1.0000, position 10 keeps 0.2891 |
+| `DCG@K` | Discounted Cumulative Gain — relevance credited, discounted by depth |
+| `IDCG@K` | The best DCG achievable, i.e. all relevant docs stacked at the top |
+| `NDCG@K` | `DCG/IDCG`, normalized to `[0, 1]` so lists with different numbers of relevant docs compare |
+
+**Walk one example.** One query with exactly 3 relevant documents. Two retrievers return the same ten candidates in different orders; `R` marks a relevant hit:
+
+```
+  position :   1    2    3    4    5    6    7    8    9   10
+  discount : 1.000 .631 .500 .431 .387 .356 .333 .316 .301 .289
+
+  System A :   .    R    .    .    R    .    .    .    R    .    (ranks 2, 5, 9)
+  System B :   R    .    .    .    .    .    .    R    .    R    (ranks 1, 8, 10)
+```
+
+Perfect ranking would put all three at positions 1, 2, 3:
+
+```
+  IDCG@10 = 1.0000 + 0.6309 + 0.5000 = 2.1309
+```
+
+Now compute both systems:
+
+```
+  System A
+    Recall@5  = 2 / 3            = 0.6667      (ranks 2 and 5 are inside 5)
+    Recall@10 = 3 / 3            = 1.0000
+    Precision@5 = 2 / 5          = 0.4000
+    MRR       = 1 / 2            = 0.5000
+    DCG@10    = 0.6309 + 0.3869 + 0.3010 = 1.3188
+    NDCG@10   = 1.3188 / 2.1309  = 0.6189
+
+  System B
+    Recall@5  = 1 / 3            = 0.3333      (only rank 1 is inside 5)
+    Recall@10 = 3 / 3            = 1.0000
+    Precision@5 = 1 / 5          = 0.2000
+    MRR       = 1 / 1            = 1.0000
+    DCG@10    = 1.0000 + 0.3155 + 0.2891 = 1.6045
+    NDCG@10   = 1.6045 / 2.1309  = 0.7530
+```
+
+**Where they disagree, and who is right.**
+
+```
+  metric        System A   System B   winner
+  ------------------------------------------
+  Recall@5       0.6667     0.3333    A  (2x)
+  Precision@5    0.4000     0.2000    A  (2x)
+  MRR            0.5000     1.0000    B  (2x)
+  NDCG@10        0.6189     0.7530    B
+  Recall@10      1.0000     1.0000    tie
+```
+
+Three metrics, three different verdicts on the same pair of lists. Recall@10 calls them identical because both eventually surface everything. Recall@5 prefers A because A packs two hits into the window a RAG prompt actually reads. MRR prefers B because B's very first result is correct. NDCG@10 also prefers B, because its 1.0000 discount at position 1 outweighs A's three mid-list hits.
+
+For RAG the tie-break is structural: the LLM sees only the top-K chunks you paste into the prompt, and it sees them all at once — it does not care which was ranked first. That makes **Recall@5 the metric that predicts answer quality**, and it is why Section 10 tells you to fix retrieval before touching the generator when Recall@5 is under 80%. Use MRR when a human scans results top-down (search UI), and NDCG when graded relevance levels exist and ordering genuinely matters.
 
 ---
 

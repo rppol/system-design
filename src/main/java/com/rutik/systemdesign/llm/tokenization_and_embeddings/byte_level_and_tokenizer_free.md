@@ -301,6 +301,34 @@ print(f"Naive byte attention FLOPs: {naive_cost:,.0f}  ({naive_cost / bpe_cost:.
 # purely from feeding the model raw bytes with no patching whatsoever.
 ```
 
+**What this actually says.** "Attention charges you for every *pair* of positions, so a sequence
+that is 4x longer costs 16x — the length penalty is squared, not linear."
+
+The `4x` comes from English text and BPE fertility; the squaring comes from attention itself. A
+byte-level model inherits both, and the second one is what turns an annoyance into a blocker.
+
+| Symbol | What it is |
+|--------|------------|
+| `seq_len` | Number of positions attended over — BPE tokens in one encoding, raw bytes in the other |
+| `seq_len ** 2` | Every position attending to every other; the term that punishes long sequences |
+| `d_model` | Width of each position's vector, `4096` here. Scales cost linearly, not quadratically |
+| `2 *` | Two matmuls per attention layer: `QK^T`, then `softmax(...) @ V` |
+| `bpe_token_count * 4` | ~4 bytes per BPE token for English — the fertility figure from README.md Sec 6 |
+
+**Walk one example.** One 2048-BPE-token document, encoded two ways:
+
+```
+  encoding                positions    positions^2      x 2 x d_model (4096)
+  BPE tokens                  2,048      4,194,304           34,359,738,368
+  raw UTF-8 bytes             8,192     67,108,864          549,755,813,888
+
+  length ratio :  8,192 / 2,048                          =   4.0x
+  FLOP ratio   :  549,755,813,888 / 34,359,738,368       =  16.0x   (= 4.0^2)
+```
+
+The document did not get harder, longer, or more informative — only its *encoding* changed, and
+the bill went up 16-fold. That single squared term is why every architecture in Section 4 exists.
+
 ### 6.3 FIX, Part 1: Fixed-Size Patching (MEGABYTE-Style)
 
 ```python
@@ -361,6 +389,51 @@ print(f"Patched byte total FLOPs:  {patched_cost:,.0f}  ({patched_cost / bpe_cos
 # territory (~21% cheaper), while the model still reads and writes raw,
 # tokenizer-free bytes.
 ```
+
+The attention term is only half the story. MEGABYTE's paper states the *whole* training cost of
+the local/global split as `2T(m_g/P + m_l)` FLOPs, versus a flat Transformer's `2mT`:
+
+```
+  MEGABYTE  :  2 * T * (m_g / P  +  m_l)
+  flat      :  2 * T *  m
+```
+
+**The idea behind it.** "Run the big model once per patch instead of once per byte, and its cost
+per byte drops by exactly the patch size — so for the same compute budget you can afford a global
+model `P` times larger."
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Total bytes in the sequence |
+| `P` | Patch size — how many bytes the local model absorbs per one global step |
+| `m_g` | Parameters in the global model: the large, expensive one, run once per patch |
+| `m_l` | Parameters in the local model: the small, cheap one, run at every byte |
+| `m_g / P` | The amortization — the entire architectural payoff lives in this division |
+| `2 *` | Standard forward-pass FLOPs per parameter per position |
+
+**Walk one example.** Section 7's actual MEGABYTE configuration (1.3B global, 218M local, `P=8`)
+against Section 7's own 350M flat dense Transformer baseline, on a per-byte basis:
+
+```
+  global, amortized  :  1,300,000,000 / 8      =    162,500,000
+  local, every byte  :                              218,000,000
+  sum of params paid per byte                  =    380,500,000
+  x 2 FLOPs/param                              =    761,000,000  FLOPs per byte
+
+  flat 350M dense    :  2 x 350,000,000        =    700,000,000  FLOPs per byte
+
+  compute ratio      :  761,000,000 / 700,000,000        =  1.087x
+  parameter ratio    :  1,518,000,000 / 350,000,000      =  4.34x
+```
+
+4.34x the parameters for 1.087x the per-byte compute. That gap is the architecture's entire return,
+and it is exactly why Section 7's 1.3B/218M MEGABYTE beats a 350M dense model on bits-per-byte
+(0.991 vs. 1.064) while *also* generating 40% faster.
+
+**What breaks without the `/P`.** Set `P = 1` — no patching, the global model runs at every byte —
+and the same 1.518B parameters cost `2 x 1,518,000,000 = 3,036,000,000` FLOPs per byte, which is
+`3,036,000,000 / 700,000,000 = 4.34x` the flat baseline instead of `1.09x`. The divide-by-`P` is
+not an optimization bolted onto MEGABYTE; it *is* MEGABYTE.
 
 ### 6.4 FIX, Part 2: Entropy-Based Dynamic Patching (BLT-Style)
 
@@ -424,6 +497,51 @@ def group_bytes_into_patches(byte_ids: torch.Tensor, boundaries: list[int]) -> l
     return [byte_ids[s:e] for s, e in zip(boundaries, ends)]
 ```
 
+The two boundary rules, written out:
+
+```
+  global constraint      :  H(x_t)  >  1.5 bits
+  monotonic constraint   :  H(x_t) - H(x_{t-1})  >  0.5 bits
+  cut a new patch if EITHER holds
+```
+
+**Read it like this.** "Start a new patch when the next byte is genuinely hard to guess — either
+it is hard in absolute terms, or it just got sharply harder than the byte right before it."
+
+| Symbol | What it is |
+|--------|------------|
+| `H(x_t)` | Entropy, in bits, of the entropy model's predicted next-byte distribution at position `t` |
+| `global_threshold` | The absolute difficulty bar, `1.5` bits. Cross it and a patch always ends |
+| `H(x_t) - H(x_{t-1})` | The *change* in difficulty from one byte to the next |
+| `monotonic_threshold` | Jump size that triggers a cut, `0.5` bits, even while still under the bar |
+| `or` | The two rules are OR'd, not AND'd — either one alone is sufficient |
+
+**Walk one example.** Eleven bytes, their entropies in bits, both rules evaluated at every step:
+
+```
+  t              0     1     2     3     4     5     6     7     8     9    10
+  H            0.4   0.2   0.1   2.1   0.3   0.2   0.1   1.9   0.6   1.4   0.2
+  dH             -  -0.2  -0.1  +2.0  -1.8  -0.1  -0.1  +1.8  -1.3  +0.8  -1.2
+
+  H > 1.5 ?                      YES                     YES
+  dH > 0.5 ?                     YES                     YES         YES
+
+  boundaries at t = 0, 3, 7, 9
+  4 patches over 11 bytes  ->  11 / 4 = 2.75 bytes per patch
+```
+
+**Why the monotonic rule exists.** Look only at `t = 9`: entropy is `1.4`, which never crosses the
+`1.5` global bar, so the absolute rule would have swallowed that byte into the patch that began at
+`t = 7`. The `+0.8` jump catches it anyway. Without that second rule, a stretch of steadily-rising
+difficulty that never quite tops the threshold rides inside one long patch and receives a single
+global step it cannot afford — precisely the failure mode fixed-size patching has by construction
+(Pitfall 10.2).
+
+Scaling that to real text: BLT measures ~4.5 bytes/patch under its learned entropy model, so the
+8,192-byte document from Section 6.2 becomes `8,192 / 4.5 = 1,820.4` patch positions against 2,048
+BPE tokens — `1,820.4 / 2,048 = 0.89x` the sequence the expensive model attends over. The 4x
+inflation from Section 6.2 is not merely cancelled; it is inverted.
+
 ### 6.5 Hash N-Gram Embeddings (BLT's Cheap Local-Context Trick)
 
 ```python
@@ -441,6 +559,59 @@ def hash_ngram_feature(byte_window: torch.Tensor, table_size: int = 2 ** 16, bas
         h = (h * base + b) % table_size
     return h
 ```
+
+### 6.6 The Vocabulary Tax Runs the Other Way
+
+Sequence length is the cost byte-level models pay. The embedding table is the cost they *avoid*,
+and it is worth sizing, because it moves in the opposite direction:
+
+```
+  input embedding table   :  V x d_model
+  output (unembedding)    :  V x d_model        (untied)
+  total parameters        :  2 x V x d_model
+  logit FLOPs per position:  2 x d_model x V
+```
+
+**Stated plainly.** "Every vocabulary entry buys a learned vector of width `d_model`, and you pay
+for it twice — once reading tokens in, once scoring them on the way out."
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Vocabulary size: `256` for raw bytes, `128,000` for a modern BPE tokenizer |
+| `d_model` | Model width, `4096` — Section 6.2's default, reused here |
+| `V x d_model` | The input embedding table: one learned vector per vocabulary entry |
+| `2 x V x d_model` | Input embedding plus a separate, untied output projection |
+| `2 x d_model x V` | FLOPs to turn one position's hidden vector into logits over the vocabulary |
+
+**Walk one example.** Four real vocabularies from this file, at `d_model = 4096`:
+
+```
+  vocabulary                        V     embed + unembed params (2 x V x 4096)
+  raw bytes (MEGABYTE, BLT)       256                            2,097,152
+  ByT5 (bytes + sentinels)        384                            3,145,728
+  GPT-2 byte-level BPE         50,257                          411,705,344
+  modern 128K BPE             128,000                        1,048,576,000
+
+  saved by dropping the vocabulary:
+    1,048,576,000 - 2,097,152        =  1,046,478,848 parameters
+    1,046,478,848 / 8,000,000,000    =  13.08% of an 8B model's budget
+```
+
+Now the output projection over one whole document, where the byte model's 4x position count fights
+its 500x smaller vocabulary head-on:
+
+```
+  128K BPE :   2,048 positions x 2 x 4096 x 128,000  =  2,147,483,648,000 FLOPs
+  256 byte :   8,192 positions x 2 x 4096 x     256  =     17,179,869,184 FLOPs
+
+  ratio    :   2,147,483,648,000 / 17,179,869,184    =  125x cheaper for bytes
+```
+
+Four times as many positions, but each one scored against `128,000 / 256 = 500` times fewer
+candidates, nets out `500 / 4 = 125x` in the byte model's favor. So the byte-level trade is not
+uniformly worse and then patched back to parity: it is 16x *worse* in attention (Section 6.2), 125x
+*better* at the output layer, and it hands back roughly 13% of an 8B parameter budget to spend on
+actual layers instead of a lookup table.
 
 **Concrete numbers, tied together**: at 8,192 raw bytes (the ~2048-BPE-token document from
 Section 6.2), naive per-byte attention costs 549,755,813,888 relative FLOPs versus the BPE

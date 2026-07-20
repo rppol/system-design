@@ -75,6 +75,41 @@ discrete tokens, it's **discretized** with a timestep `delta` (zero-order hold):
 `A_bar = exp(delta * A)` and `B_bar ≈ delta * B` (first-order approximation). `A`, `B`, `C`, and
 `delta` are the learned (or, in Mamba, input-dependent) parameters that define the recurrence.
 
+**What this actually says.** "Pick a timestep `delta`, run the continuous system forward by exactly
+that much, and whatever the state decays to over that interval becomes your per-token multiplier
+`A_bar`."
+
+`delta` is not a numerical-methods footnote — it is the model's clock speed. Because
+`A_bar = exp(delta * A)` with `A < 0`, `A_bar` always lands in `(0, 1)`, and its distance from `1`
+is exactly how fast the state forgets. Mamba making `delta` input-dependent (§3.3) is therefore the
+model choosing, per token, how long a memory to keep.
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Continuous-time decay rate, forced negative via `A = -exp(A_log)` so the system is stable |
+| `delta` | Timestep / clock speed. Forced positive via `softplus`. Large = big jump forward in time |
+| `A_bar = exp(delta * A)` | Per-token retention factor in `(0, 1)`. `0.99` = remember; `0.05` = wipe the state |
+| `B_bar ~= delta * B` | How much of the current token gets written in. Scales with the same `delta` |
+| `C` | The read-out projection: what part of the state becomes this token's output |
+| `D x_t` | Optional skip term — the token's own value routed around the state entirely |
+
+**Walk one example.** Hold `A = -0.5` fixed and vary only `delta`, then watch the memory horizon
+move. "Half-life" is how many tokens until a stored value has decayed to half its size:
+
+```
+   delta    A_bar = exp(delta * A)   half-life (tokens)   retained after 10 tokens
+   0.02            0.99005                 69.3                  0.90484
+   0.20            0.90484                  6.9                  0.36788
+   2.00            0.36788                  0.7                  0.00005
+
+   half_life = ln(0.5) / ln(A_bar)
+```
+
+A 100x swing in `delta` moves the memory horizon by 100x — from "still 90% intact ten tokens later"
+to "essentially erased in a single step." This is the whole selection mechanism in one number, and
+it is also Pitfall 10.4 in numeric form: let `delta` drift large and `A_bar` collapses toward `0`,
+so the state forgets everything each step and the model has no memory left to train.
+
 ### 3.2 Two (or Three) Equivalent Computational Views
 
 The *same* linear recurrence can be computed three ways:
@@ -112,6 +147,40 @@ work spread across GPU threads — this is Mamba's "hardware-aware" parallel sca
 fused CUDA kernel (`mamba-ssm`'s `selective_scan_fn`) that never materializes the full state
 sequence in slow HBM.
 
+**The idea behind it.** "Two consecutive recurrence steps can be squashed into one equivalent step,
+so instead of walking the sequence you can fold it in half, then in half again, until nothing is
+left."
+
+The recurrence *looks* strictly sequential — `h_t` needs `h_{t-1}`. Associativity is the escape
+hatch: it says the order in which you group the folds does not change the answer, only the order in
+which you *do* them. That is what converts an O(N)-deep dependency chain into an O(log N)-deep tree.
+
+| Symbol | What it is |
+|--------|------------|
+| `(A_t, b_t)` | One step packaged as a pair, where `b_t = B_t x_t`. An affine map `h -> A_t h + b_t` |
+| `o` | Compose two steps into the single step that does both, in order |
+| `(A2, b2) o (A1, b1)` | `= (A2*A1, A2*b1 + b2)` — apply step 1, then step 2, in one shot |
+| sequential depth | How many operations must happen one after another. This is the latency |
+| total work | How many operations happen in all. This is the energy/FLOP bill |
+
+**Walk one example.** Count the two costs at real sequence lengths:
+
+```
+      N        sequential steps      parallel-scan depth      depth reduction
+              (naive loop, O(N))     (ceil(log2 N))
+    2,048            2,048                   11                   186x
+    8,192            8,192                   13                   630x
+   32,768           32,768                   15                 2,184x
+  131,072          131,072                   17                 7,710x
+
+  Quadrupling the sequence adds exactly 2 to the depth -- log2(4) = 2.
+```
+
+Note what did *not* improve: total work stays O(N) either way. The scan does not do less
+arithmetic — it does the *same* arithmetic in 17 dependent stages instead of 131,072, so a GPU with
+thousands of idle threads can actually be fed. That is why §10.1's Python loop is 10-100x slower
+despite computing the identical result: 131,072 tiny kernel launches versus one fused kernel.
+
 ### 3.5 The Linear-Attention <-> SSM Duality (Mamba-2 / SSD)
 
 Standard attention computes `softmax(QK^T / sqrt(d)) V`. **Drop the softmax**: `(QK^T)V` is now
@@ -124,6 +193,41 @@ running state `S_t = S_{t-1} + k_t v_t^T` (an outer-product accumulation) and re
 computed using the *same* matmul-heavy kernels GPUs are optimized for — this is the source of
 Mamba-2's 2-8x training speedup over Mamba-1's scan-based kernel. (Caveat: this duality is with
 *linear* attention, not full softmax attention — see Pitfall 10.5.)
+
+**In plain terms.** The reorder `(QK^T)V -> Q(K^T V)` says: "stop comparing every query against
+every key and then weighting values — instead summarize all the keys and values into one small
+matrix first, and let each query read that summary."
+
+Softmax is what blocks this. `softmax(QK^T)V` normalizes across the `N` keys *before* multiplying
+by `V`, so the `N x N` matrix must exist before `V` is ever touched. Delete the softmax and the
+product is plain matrix multiplication, which is associative — you may bracket it either way.
+
+| Symbol | What it is |
+|--------|------------|
+| `Q, K, V` | Query / key / value matrices, each `N x d_head` for one head |
+| `QK^T` | The `N x N` score matrix. The quadratic term — one entry per token *pair* |
+| `K^T V` | A `d_head x d_head` summary of the whole sequence. Size independent of `N` |
+| `phi(.)` | The feature map replacing softmax (`elu(x)+1`, identity, or a random projection) |
+| `S_t = S_{t-1} + k_t v_t^T` | The same `K^T V` built incrementally — the causal, streaming form |
+
+**Walk one example.** One head, `d_head = 128`, at a 131,072-token context. The two bracketings
+compute the same product but build very different intermediates:
+
+```
+                       intermediate built       entries          grows with
+  (QK^T) V             N x N score matrix       17,179,869,184   N squared
+  Q (K^T V)            d x d summary matrix             16,384   nothing -- fixed
+
+  ratio = 17,179,869,184 / 16,384 = 1.049e+06 -- about a million-fold smaller
+```
+
+What you give up is exactness, and it is worth naming precisely. Softmax is a *sharp, normalized*
+weighting: it can put 0.99 of the mass on one token 100,000 positions back and retrieve it
+verbatim. `phi(Q)(phi(K)^T V)` compresses every key-value pair into one fixed `128 x 128` state, so
+two different past tokens can — and at long context do — collide in that state and become
+unrecoverable. The lost capability is precisely *exact retrieval of an arbitrary far-back token*,
+which is the same structural gap §8.1 measures on needle-in-haystack and §10.3 warns against trying
+to train away. It is also why hybrids (§5.4) keep a minority of real softmax layers.
 
 ### 3.6 Gating / Forget Mechanisms
 
@@ -350,6 +454,41 @@ class NaiveSSMLayer(nn.Module):
         return torch.stack(outputs, dim=1)
 ```
 
+**Stated plainly.** The two lines inside that loop — `h = A_bar * h + B_bar * x_t` and
+`y_t = C * h` — are the entire model: "shrink what you already remember, add a scaled version of
+what you just read, then project the result out as this token's answer."
+
+Everything else in the SSM literature is a variation on *how those three coefficients are produced*
+and *in what order the loop is scheduled*. The update itself never changes.
+
+| Symbol | What it is |
+|--------|------------|
+| `h_{t-1}` | Everything the model remembers going into step `t`, in a fixed-size buffer |
+| `A_bar * h_{t-1}` | The forget half. Multiplying by a number in `(0,1)` shrinks all old content |
+| `B_bar * x_t` | The write half. How much of the current token gets deposited into the state |
+| `h_t` | The updated summary. Same shape as `h_{t-1}` no matter how long the sequence is |
+| `y_t = C * h_t` | The read. Note it reads the state, never the raw history — there is no history |
+
+**Walk one example.** Scalar case, using the discretization from §3.1: `A = -0.5`, `delta = 0.2` so
+`A_bar = exp(-0.1) = 0.9048`, and `B = 2.5` so `B_bar = delta * B = 0.5`. Take `C = 1.0` and feed
+one informative token, two empty ones, then a second informative token:
+
+```
+   t    x_t     A_bar * h_{t-1}          + B_bar * x_t     =  h_t        y_t
+   1    1.0     0.9048 x 0.0000 = 0.0000   + 0.5 x 1.0 = 0.5000   0.5000   0.5000
+   2    0.0     0.9048 x 0.5000 = 0.4524   + 0.5 x 0.0 = 0.0000   0.4524   0.4524
+   3    0.0     0.9048 x 0.4524 = 0.4094   + 0.5 x 0.0 = 0.0000   0.4094   0.4094
+   4    2.0     0.9048 x 0.4094 = 0.3704   + 0.5 x 2.0 = 1.0000   1.3704   1.3704
+
+   How much of token 1 survives to step 4:  0.5 x 0.9048^3 = 0.3704  (74% of it)
+```
+
+Read the two mechanisms off the columns. Steps 2 and 3 receive no input at all, yet `y_t` is
+non-zero — the state is *carrying token 1 forward*, which is memory. And it shrinks each step
+(`0.5000 -> 0.4524 -> 0.4094`), which is decay: at `A_bar = 0.9048` a value halves every 6.9 tokens
+(§3.1), so token 1 contributes `0.3704` to step 4 while token 4 itself contributes `1.0000`. Recent
+tokens dominate, old ones fade — automatic, and the price of a fixed-size buffer.
+
 ### 6.2 Selective SSM (Mamba-style)
 
 ```python
@@ -504,6 +643,48 @@ def parallel_scan(A_seq: torch.Tensor, b_seq: torch.Tensor) -> torch.Tensor:
 | Recall / in-context retrieval (e.g., needle-in-haystack) | Weaker — fixed state can't losslessly retain arbitrary far-back tokens | Strong — any past token is exactly retrievable via its KV entry |
 | Long-context throughput | Much higher (no growing cache to read) | Degrades as context grows (cache bandwidth-bound) |
 | Ecosystem / tooling maturity (quantization, serving engines) | Newer, partial support (Pitfall 10.6) | Mature — every major serving engine optimized for it |
+
+**What it means.** The `O(N^2)` vs `O(N)` labels in the first two rows are cost formulas, and they
+only become an argument once you substitute real dimensions:
+
+```
+softmax attention   ops ~ 2 * N^2 * d_model          memory ~ N^2 scores per head
+linear attn / SSM   ops ~ 2 * N * d_model * d_state  memory ~ d_state^2 per head, fixed
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Sequence length. The only term that differs between the two — squared vs linear |
+| `d_model` | Model width, `4096` for a 7B-class model. Appears identically on both sides |
+| `d_state` | Size of the fixed summary: `head_dim = 128` for linear attention, `16` for Mamba |
+| the leading `2` | Two passes over the data: `QK^T` then `scores @ V`, or write-state then read-state |
+| ratio `N / d_state` | Divide the two formulas and everything cancels but this. The entire argument |
+
+**Walk one example.** A 7B-class model, `d_model = 4096`, `d_state = head_dim = 128`, one full
+forward pass over the sequence:
+
+```
+       N        softmax ops       linear ops      softmax / linear    N^2 scores (FP16, 32 heads)
+      128        1.342e+08        1.342e+08             1.0x                    1 MB
+    2,048        3.436e+10        2.147e+09            16.0x                 0.25 GB
+    8,192        5.498e+11        8.590e+09            64.0x                 4.00 GB
+   32,768        8.796e+12        3.436e+10           256.0x                64.00 GB
+  131,072        1.407e+14        1.374e+11         1,024.0x             1,024.00 GB
+
+  Crossover: softmax/linear = N / d_state = 1, so the two cost the SAME at N = 128.
+```
+
+Three readings. Below `N = 128` softmax attention is *cheaper* — the quadratic term has not caught
+up yet, which is why nobody proposes linear attention for short-sequence workloads. The advantage
+then grows strictly linearly in `N`: every doubling of context doubles the gap, reaching 1,024x at
+131K tokens. And the last column is the harder constraint — the score matrix alone would need
+1,024 GB at 131K tokens, which is why FlashAttention tiles it and never materializes it, and why the
+SSM's fixed `128 x 128` (or Mamba's `2560 x 16`, §6.2) state is the structural fix rather than a
+memory-hierarchy trick.
+
+The same arithmetic with Mamba's own numbers: `d_model = 2560, d_state = 16` gives
+`2 * 2560 * 16 = 81,920` ops per token, so a full 131,072-token sequence costs `1.074e+10` ops —
+about 13,000x less than softmax attention's `1.407e+14` at that length.
 
 ### 8.2 Non-Selective (S4) vs. Selective (Mamba) SSMs
 

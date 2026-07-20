@@ -518,6 +518,58 @@ Model collapse occurs when a model trained on outputs from itself or similar mod
   └──────────────────────────────────────────────────────────────┘
 ```
 
+**Read it like this.** "Generation is a funnel, not a faucet. You do not decide how many training
+examples you get — you decide how many you generate, and the filter stack decides how many survive."
+
+Everything downstream is governed by one ratio: the **yield**. Plan a dataset by starting from the
+size you need and dividing by the yield you expect, never by the size you generate. Teams that skip
+this step generate exactly the target number, watch half of it die in filtering, and then weaken
+their filters to make the number come back — which is precisely the failure the LIMA result warns
+against.
+
+| Symbol | What it is |
+|--------|------------|
+| seeds | 800 human-annotated examples. The only genuinely trusted data in the pipeline |
+| variants per seed | 5 evolved prompts produced per seed per round |
+| rounds | 3 passes of Evol-Instruct complexity evolution |
+| raw total | Everything generated, before any filter. 102,000 pairs from three sources |
+| removals | Counts dropped by each filter stage, applied in sequence |
+| yield | `final / raw` — the fraction that survives the whole stack |
+
+**Walk one example.** Trace the 102,000 down to 52,000, one filter at a time:
+
+```
+  WHERE THE 12,000 COMES FROM
+    800 seeds x 5 variants x 3 rounds = 12,000 base pairs   (LINEAR evolution)
+
+    note: if each round's variants BECAME the next round's seeds -- the
+    "exponential" framing in 4.2 -- the count would be 800 x 5^3 = 100,000.
+    This pipeline re-evolves the ORIGINAL seeds each round, trading raw
+    volume for staying anchored to human-verified starting points.
+
+  THE FUNNEL
+                                      removed      remaining
+    raw total (12,000 + 30,000 + 60,000)           102,000
+    1. dedup (SimHash >= 0.85)         -8,200       93,800
+    2. length filter                   -3,100       90,700
+    3. legal accuracy (score < 0.6)    -4,800       85,900
+    4. instruction-following judge     -6,200       79,700
+    5. diversity sampling (K=2/cluster)-27,700      52,000
+
+  YIELD = 52,000 / 102,000 = 51.0%
+
+  PLANNING IN REVERSE -- the number that actually matters
+    to land 50,000 examples at a 51% yield, generate 50,000 / 0.51 = 98,000
+```
+
+Two things stand out. First, the yield of 51% sits right inside the "typically removes 40-60%" band
+this module quotes — so 2x over-generation is the correct default assumption, not a pessimistic one.
+Second, **diversity sampling is by far the largest filter**, discarding 27,700 pairs — more than the
+four quality filters combined (22,300). That is counterintuitive and important: most of the data
+thrown away was not *bad*, it was *redundant*. The quality filters remove errors; the diversity
+filter removes sameness, and sameness is the more abundant problem when a single generator model
+writes a hundred thousand examples.
+
 **Key implementation — 3 Python code blocks:**
 
 Block 1 — Evol-Instruct complexity evolution pipeline:
@@ -875,6 +927,68 @@ def build_training_dataset(
 | Dedup removal rate | — | 8.4% | — |
 | Judge filter removal rate | — | 22.7% | — |
 | Final dataset size after filtering | 800 | 52,000 | — |
+
+**What the formula is telling you.** "Divide total spend by usable examples and you get the only
+cost number worth comparing — cost per surviving training example, not cost per API call and not
+cost per generated pair."
+
+Cost per *generated* pair flatters synthetic data, because half of what you generate is discarded.
+Cost per *surviving* pair is the honest denominator, and it is still overwhelming.
+
+| Symbol | What it is |
+|--------|------------|
+| human cost | $120,000 for 800 examples — six months of paralegal annotation |
+| synthetic cost | $3,800 total: generator API calls plus judge scoring |
+| surviving examples | 52,000, the post-filter count. Uses the yield, not the raw total |
+| judge cost | Separately budgeted: `pairs x tokens per pair x price per token` |
+
+**Walk one example.** Price one usable example on each track, then price the judge:
+
+```
+  COST PER SURVIVING EXAMPLE
+    human      $120,000 /    800 = $150.0000 per example
+    synthetic    $3,800 / 52,000 =   $0.0731 per example
+    ratio       $150.00 / $0.0731 = 2,053x cheaper
+
+  JUDGE COST (the filter stack is itself an LLM workload -- budget it)
+    tokens = 100,000 pairs x 500 tokens = 50,000,000 = 50M tokens
+    GPT-4o-mini at $0.15/1M:  50 x $0.15 =  $7.50
+    Haiku at $0.25/1M:        50 x $0.25 = $12.50
+
+  JUDGE AS A SHARE OF TOTAL SPEND
+    $12.50 / $3,800 = 0.33%
+```
+
+The judging step costs a third of one percent of the budget. That single figure settles a debate
+teams have constantly — whether to judge a sample of the data or all of it. At 0.33% of spend, there
+is no economic reason to sample; judge every pair. The expensive part was never the filtering, it
+was the generation, and every pair you filter out is generation cost already sunk. Note too what the
+2,053x does *not* say: it is a cost ratio, not a quality ratio. The 800 human examples remain the
+only trusted anchor in the dataset, which is why the next block oversamples rather than discards
+them.
+
+**Read the mixing ratio carefully.** Oversampling repeats the human data `h` times, so its share of
+the final dataset is `800h / (800h + 52,000)`:
+
+```
+    h = 6   ->  4,800 / 56,800  =  8.5%
+    h = 10  ->  8,000 / 60,000  = 13.3%
+    h = 14  -> 11,200 / 63,200  = 17.7%
+    h = 15  -> 12,000 / 64,000  = 18.8%
+
+  to hit an 18% share exactly:
+    0.18 = 800h / (800h + 52,000)
+    0.18 x 52,000 = 0.82 x 800h
+    h = 9,360 / 656 = 14.3
+```
+
+The share does not scale linearly with `h`, because raising the factor grows the numerator and the
+denominator together — doubling `h` from 6 to 12 does not double 8.5% to 17%. Anyone targeting the
+"10-20% human gold" band should solve for `h` from the target share rather than picking a factor and
+hoping. And remember what oversampling actually does: repeating 800 examples 14 times gives you 14
+gradient passes over the same 800 items, not 11,200 distinct ones. It re-weights the loss toward
+trusted data; it does not add information, and past a point it just teaches the model to memorize
+those 800 examples verbatim.
 
 **Interview Q&As:**
 

@@ -324,6 +324,58 @@ CaMeL's key insight: the Controller is plain code — it can never be prompt-inj
   appearing as a 1-vs-2 minority.
 ```
 
+**Stated plainly.** "A majority vote survives compromised participants only while fewer than half
+of them are compromised — and a Sybil attack does not raise the compromised count, it lowers the
+participant count."
+
+Both scenarios above are the same inequality evaluated with a different denominator, which is
+exactly why they look identical from outside and behave oppositely.
+
+```
+  honest_votes = N - f
+
+  system is robust  <=>  N - f > N/2   <=>   f < N/2   <=>   N >= 2f + 1
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of voting participants the system *believes* it has |
+| `f` | Votes an attacker controls, by any means — compromise, Sybil, or collusion |
+| `N - f` | Honest votes remaining |
+| `N/2` | The majority line. Strictly more than this wins |
+| `N >= 2f + 1` | Rearranged: how many participants you need to survive `f` bad ones |
+
+**Walk one example.** The two scenarios in the diagram, run through the inequality:
+
+```
+  BYZANTINE  N = 3, f = 1
+    honest = 3 - 1 = 2      majority line = 1.5
+    2 > 1.5  -> ROBUST      attacker holds 1/3 = 33.3% of votes
+
+  SYBIL      N = 3 identities, but only 2 independent PARTIES
+    attacker controls f = 2
+    honest = 3 - 2 = 1      majority line = 1.5
+    1 < 1.5  -> BROKEN      attacker holds 2/3 = 66.7% of votes
+
+  Required N to tolerate f, from N >= 2f + 1:
+    f = 1 -> N >= 3      f = 2 -> N >= 5      f = 3 -> N >= 7
+```
+
+**Why the term that breaks is `N`, not `f`.** Every Byzantine-tolerance argument silently assumes
+`N` counts *independent parties*. A Sybil attack never touches `f` in the defender's bookkeeping —
+the defender still sees 3 votes and one dissenter and concludes it is in the robust case. What
+changed is that the real `N` is 2, and against `N = 2` an attacker needs `f = 2` only because
+they already have it. Adding more agents does not help if the attacker can register them too:
+going to `N = 5` requires `f <= 2`, but an attacker who can mint identities freely simply mints
+three.
+
+This is the precise reason identity verification (KYA-style registration, §3.6's mitigation)
+is not a "nice to have" layered on top of a robust voting scheme — it is the thing that makes
+`N` a real number. Without it, every quorum threshold in the system is computed against a count
+the attacker controls, and the diversity mechanisms from
+[Agent Debate and Consensus](agent_debate_and_consensus.md) defend against correlated *errors*
+while remaining completely blind to correlated *ownership*.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -763,6 +815,38 @@ log — i.e., discovered AFTER the fact, not prevented). Output-scanning flagged
 pages over the following month with similar embedded-instruction patterns, all routed to human
 review — 3 were confirmed injection attempts (added to a source-exclusion list), 1 was a false
 positive (a legitimate article discussing prompt injection as its subject matter, per §Q10).
+
+**Put simply.** "Three of every four alerts this scanner raised were real attacks — and the
+fourth cost one human glance, which is the trade that makes routing to review affordable."
+
+```
+  precision = true_positives / (true_positives + false_positives)
+            = 3 / (3 + 1)
+            = 0.75   ->  75%
+
+  human cost = 4 reviews / month
+  benefit    = 3 malicious sources excluded, at ~1.3 reviews per real catch
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `true_positives` | Flagged pages that really were injection attempts. 3 |
+| `false_positives` | Flagged pages that were benign. 1 — an article *about* prompt injection |
+| `precision` | Share of alerts worth acting on. What determines whether humans keep reading them |
+| `4 reviews / month` | The actual operational load this layer imposes |
+
+The absolute volume is what makes 75% acceptable here. At 4 alerts a month a reviewer spends
+minutes; the same 75% precision at 4,000 alerts a month would mean 1,000 wasted reviews and the
+queue would be ignored inside a week — alert fatigue is a function of false-positive *count*, not
+false-positive *rate*. Precision alone never tells you whether a detection layer is deployable;
+precision times volume does.
+
+The single false positive is also the instructive one. An article discussing prompt injection
+contains the same lexical patterns as an attack, because the scanner matches on surface form and
+cannot recover intent. That failure is irreducible at this layer, and it is precisely why this
+scanner routes to *human review* rather than to automatic exclusion — a 25% false-positive rate
+wired directly to a block action would have silently removed a legitimate source, with no one
+looking at the decision.
 
 **Transferable lesson**: the capability scope (`allowed_recipients`, set from the USER's original
 request, never from any agent's output) was the layer that would have prevented the incident

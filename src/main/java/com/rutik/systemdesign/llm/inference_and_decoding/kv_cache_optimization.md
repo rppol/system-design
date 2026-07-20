@@ -72,6 +72,36 @@ Llama-3-70B:  2 × 80 × 8 × 128 × 2 bytes = 327,680 bytes ≈ 320 KB / token
 Total cache = (per-token bytes) × (sequence length) × (concurrent sequences)
 ```
 
+**Read it like this.** "Every token you have ever processed leaves behind one Key and one Value number-vector in *every* layer, for *every* KV head — multiply those four counts together, times the size of one number, and that is the rent that token pays for as long as it stays in the cache."
+
+The framing that matters is *per token*. Nothing here depends on the prompt's content, the batch size, or how hard the question is — it is a fixed toll per token, so the whole capacity problem becomes simple multiplication.
+
+| Symbol | What it is |
+|--------|------------|
+| `2` | K **and** V. Attention caches two tensors per token per layer. Not "2 bytes" |
+| `num_layers` | Depth of the model. Each layer keeps its own independent K/V (unless CLA/YOCO share them) |
+| `num_kv_heads` | The **KV** head count (`num_key_value_heads` in a HF config) — NOT `num_attention_heads`. Under GQA these differ by the group size G |
+| `head_dim` | Width of one head's vector, usually `hidden_size / num_attention_heads`, commonly 128 |
+| `bytes_per_element` | Size of one stored number: BF16 = 2, FP8/INT8 = 1, INT4/KIVI = 0.5 |
+| `seq_len` | Tokens currently held for this request (prompt + everything generated so far) |
+| `concurrent_sequences` | How many requests are in flight at once. This is the term that turns a per-user cost into a fleet cost |
+
+**Walk one example.** Llama-3-70B, BF16, carrying the units through each factor:
+
+```
+  2               K and V                 (dimensionless count)
+  x  80           layers                  (layers)
+  x   8           KV heads                (heads per layer)   <- NOT the 64 query heads
+  x 128           head_dim                (elements per head)
+  x   2           bytes per BF16 element  (bytes per element)
+  ------------------------------------------------------------
+  = 327,680 bytes per token
+  = 327,680 / 1024 = 320 KB per token
+```
+
+The units cancel cleanly: `layers x heads/layer x elements/head x bytes/element = bytes`. If your
+answer does not reduce to plain bytes per token, you dropped or doubled a factor.
+
 ### 5.2 Where the memory goes — capacity planning at a glance
 
 ```mermaid
@@ -179,6 +209,46 @@ print(total_kv_cache_bytes(per_token, seq_len=131_072))                # ~40.96 
 print(total_kv_cache_bytes(per_token, seq_len=8_192, concurrent_requests=100))  # ~256 GB
 ```
 
+**What the formula is telling you.** "Pick a model and you have fixed the per-token toll forever; after that, GPU memory is spent purely on how many tokens you agreed to remember, multiplied by how many people you agreed to remember them for."
+
+That separation is the whole reason this formula is worth memorizing. The first four factors are architecture you look up once. The last two are product decisions — context window and concurrency — and they are the only ones you can negotiate in a planning meeting.
+
+| Symbol | What it is |
+|--------|------------|
+| `num_kv_heads` | The GQA key/value head count. Llama-3-70B has **8**, while its headline "64 attention heads" is the *query* count. Using 64 here inflates the answer by exactly the group size G = 64/8 = 8 |
+| `num_attention_heads` | The query head count. It sets `head_dim` and appears **nowhere else** in this formula |
+| `bytes_per_element` | Storage precision of the cache, independent of the weights' precision — you can serve BF16 weights with an FP8 KV cache |
+| `seq_len` | Live token count for one request, growing by 1 every decode step |
+| `concurrent_requests` | In-flight requests sharing the GPU. Linear multiplier on everything left of it |
+| `GiB` | `1024^3` bytes. The unit GPU memory is actually reported in |
+
+**Walk one example.** Llama-3-70B at 128K context, from raw bytes to a number you can put on a slide:
+
+```
+  per-token bytes = 2 x 80 x 8 x 128 x 2 = 327,680 bytes      (= 320 KB)
+
+  one request at seq_len = 131,072 tokens:
+      327,680 bytes/token x 131,072 tokens = 42,949,672,960 bytes
+
+  convert to GiB (divide by 1024 three times):
+      42,949,672,960 / 1024 = 41,943,040 KB
+      41,943,040     / 1024 =     40,960 MB
+      40,960         / 1024 =         40 GiB
+
+  scale to concurrency:
+      8 analysts x 40 GiB = 320 GiB   <- exactly a full 4x H100 80GB node, weights excluded
+```
+
+One 128K request costs 40 GiB of pure cache — 29% of the model's own 140 GB of BF16 weights, for a
+single user. Eight of them need an entire 4-GPU node before a single weight is loaded.
+
+**A note on the "GB" figures nearby.** The surrounding text's `2.56 / 10.24 / 40.96 GB` come from
+carrying the megabyte count and dividing by 1000; in binary units the same quantities are exactly
+`2.5 / 10 / 40 GiB`. The gap is about 2% and never changes a conclusion here, but state your unit
+in an interview — `40 GiB` and `42.9 GB` are the same cache.
+
+**Why the `2` is the factor people drop.** Attention needs both a Key (what this token can be matched against) and a Value (what gets returned when it matches). Cache only K and you can score the token but have nothing to retrieve; cache only V and you cannot decide whether to retrieve it. Forget the `2` and every capacity number you produce is exactly half of reality — the most expensive off-by-one in LLM infrastructure planning.
+
 **Sanity-check against weights**: Llama-3-70B weights in BF16 = `70e9 params × 2 bytes ≈ 140 GB`. A single request at 128K context (~41 GB KV) is already ~29% of the weight size — and 10 such requests (~410 GB) dwarf the weights entirely. This is the calculation behind Section 2's "weights are fixed, KV cache is variable, and variable wins at scale" claim.
 
 **Without GQA (MHA, 64 KV heads instead of 8)**: `per_token = 2 × 80 × 64 × 128 × 2 = 2,621,440 bytes ≈ 2.5 MB/token` — **8× larger**. This is the single most important number to internalize: GQA's 8× head-count reduction is an 8× reduction in the *dominant* serving-cost term, which is why essentially every production model since Llama-2-70B uses GQA. For *why* GQA preserves quality despite this reduction (the shared-projection derivation), see [attention_mechanisms.md](../foundations_and_architecture/attention_mechanisms.md).
@@ -212,6 +282,37 @@ print(max_concurrent_requests(80, 2, 140, 327_680, 32_768))   # ~1 request  @ 32
 print(max_concurrent_requests(80, 2, 140, 327_680, 131_072))  # 0 requests  @ 128K -- INFEASIBLE without eviction/quant
 ```
 
+**In plain terms.** "Buy the memory, pay the weights and the safety margin off the top, then see how many context-length-sized tenants fit in whatever is left."
+
+It is a landlord calculation, and the order of operations is the point: weights are deducted *before* anyone gets served, so a bigger model does not just cost more — it shrinks the room every user has to share.
+
+| Symbol | What it is |
+|--------|------------|
+| `gpu_memory_gb x num_gpus` | Raw fleet memory. 2 x H100 80GB = 160 GB |
+| `headroom_fraction` | Reserve for activations, CUDA context, and fragmentation. 0.05 = keep 5% unspent |
+| `model_weights_gb` | Deducted once, not per request. 140 GB for Llama-3-70B in BF16 |
+| `available_for_kv_gb` | What is actually left for cache. The number that is usually far smaller than people expect |
+| `kv_per_request_gb` | `kv_bytes_per_token x context_len`, i.e. one tenant's rent |
+| `int(...)` | Floor. A request that fits 1.9 times fits once — there is no half a cache |
+
+**Walk one example.** The 2 x H100 fleet in the code above, at all three context lengths:
+
+```
+  total_memory        = 80 x 2 x (1 - 0.05)      = 152 GB
+  available_for_kv    = 152 - 140                =  12 GB    <- only 8% of the fleet
+
+  context      kv_per_request        available / per-request      max concurrent
+  8K           320KB x   8,192 =  2.5 GB    12 / 2.5 = 4.80   ->     4
+  32K          320KB x  32,768 = 10.0 GB    12 / 10  = 1.20   ->     1
+  128K         320KB x 131,072 = 40.0 GB    12 / 40  = 0.30   ->     0
+```
+
+Read the last column downward: quadrupling the context window does not cut concurrency by four, it
+collapses it to nothing. The `int()` floor is brutal at this scale — 0.30 requests means the fleet
+cannot serve *one* 128K user, not that it serves a fraction of one.
+
+**Why the headroom fraction is not padding.** Drop `headroom_fraction` to 0 and the same fleet reports 20 GB available instead of 12 — a 67% larger answer, and a plan that OOMs the first time activations spike or the allocator fragments. The 5% is the difference between a capacity number you can page someone with and one you cannot.
+
 The 128K row is the entire motivation for Sections 6.5-6.9: **without eviction, quantization, or cross-layer sharing, a 2×H100 deployment cannot serve a single 128K-context request alongside its own weights** (40.96GB KV > 20GB headroom). This is not a hypothetical — it is the exact wall every team hits when a product manager asks "can we support 128K context" without asking "...for how many concurrent users."
 
 ### 6.3 GQA / MQA / MLA — impact summary (derivation owned elsewhere)
@@ -226,6 +327,38 @@ MQA  (Multi-Query Attention):   num_kv_heads = 1                    -> /num_quer
 MLA  (Multi-head Latent Attn):  K/V replaced by a low-rank latent    -> ~10x vs MHA
                                  (DeepSeek-V2: 93% KV cache reduction vs MHA)
 ```
+
+**Stated plainly.** "Query heads are free — they read from the cache. KV heads are expensive — they *are* the cache. So let many readers share one entry, and your memory bill divides by however many share it."
+
+Once you see the asymmetry, the whole GQA/MQA family stops being three architectures and becomes one dial: how many query heads per cached KV head. G = 1 is MHA, G = 64 is MQA, and everything shipped in production sits somewhere between.
+
+| Symbol | What it is |
+|--------|------------|
+| `num_query_heads` | How many heads *ask* questions. Llama-3-70B: 64. Costs compute, costs no cache |
+| `num_kv_heads` | How many heads *store* answers. Llama-3-70B: 8. This is the term in the memory formula |
+| `G` | Group size, `num_query_heads / num_kv_heads`. The literal divisor on KV memory |
+| MHA | `G = 1` — every query head has a private KV head. The expensive baseline |
+| GQA | `1 < G < num_query_heads` — the production middle ground |
+| MQA | `G = num_query_heads` — one KV head for all. Cheapest, most quality risk |
+| MLA | Not a head count at all: K/V are projected into one shared low-rank latent, so the saving is a rank ratio rather than a head ratio |
+
+**Walk one example.** Same 80-layer, 64-query-head, head_dim-128 model in BF16, varying only `num_kv_heads`:
+
+```
+  variant   kv_heads   G     per-token bytes                  KB/token   @128K
+  MHA          64      1     2 x 80 x 64 x 128 x 2 = 2,621,440   2560     320 GiB
+  GQA           8      8     2 x 80 x  8 x 128 x 2 =   327,680    320      40 GiB
+  MQA           1     64     2 x 80 x  1 x 128 x 2 =    40,960     40       5 GiB
+
+  GQA vs MHA : 2,621,440 / 327,680 = 8x   exactly G
+  MQA vs MHA : 2,621,440 /  40,960 = 64x  exactly num_query_heads
+```
+
+The savings ratio is not approximately G, it *is* G — every other factor in the formula is identical
+across the three rows. A 128K request costs 320 GiB under MHA and 40 GiB under GQA: four H100s versus
+half of one.
+
+**The failure mode this table exists to prevent.** Plug `num_attention_heads = 64` into the formula for a GQA model and you compute the MHA row — 2.5 MB/token instead of 320 KB/token, 320 GiB instead of 40 GiB at 128K. The error is silent, always in the direction of over-provisioning, and lands exactly on the factor G. Always read `num_key_value_heads` out of the model config; if a spec sheet only gives you one head count, it is the query count and you do not yet have enough information to size the cache.
 
 The takeaway for *this* file: when you compute the Section 6.1 formula for a model, **`num_kv_heads` is an architectural fact you must look up per model** (not assume equals the number of attention heads reported in headline specs, which is usually the *query* head count) — getting this wrong is the single most common error in back-of-envelope KV cache sizing.
 
@@ -245,6 +378,39 @@ Quality impact (typical, calibrated):
                 quantization specifically targets the outlier channels that make
                 naive INT4 KV quantization fail
 ```
+
+**Put simply.** "Keep every token, keep every head, keep every layer — just write each stored number in fewer bits. The cache shrinks by exactly the ratio of the two formats' widths."
+
+Quantization is the only lever here that is *lossless in structure*: nothing is forgotten, so a needle-in-a-haystack query can still find its needle. That is why it belongs first in the escalation order, ahead of any eviction scheme.
+
+| Symbol | What it is |
+|--------|------------|
+| `bytes_per_element` | The single factor quantization touches. Everything else in the formula is untouched |
+| BF16 | 16-bit brain float, 2 bytes. The default the cache is written in |
+| FP8 | 8-bit float, 1 byte. Native on H100/H200, so no dequantize penalty |
+| INT8 | 8-bit integer, 1 byte. Needs a calibrated scale per tensor/channel |
+| INT4 / KIVI | 4-bit, 0.5 bytes. KIVI quantizes K per-channel and V per-token because K's outliers concentrate in channels |
+| reduction ratio | `2 / bytes_per_element` — 2x for 8-bit, 4x for 4-bit. Nothing subtler than that |
+
+**Walk one example.** One Llama-3-70B request at 128K context, changing only the precision:
+
+```
+  format      bytes/elt   per-token bytes            KB/token   @131,072 tokens
+  BF16          2.0       2 x 80 x 8 x 128 x 2.0 = 327,680   320       40 GiB
+  FP8 / INT8    1.0       2 x 80 x 8 x 128 x 1.0 = 163,840   160       20 GiB
+  INT4 / KIVI   0.5       2 x 80 x 8 x 128 x 0.5 =  81,920    80       10 GiB
+
+  vs the 2x H100 headroom of 12 GB computed in Section 6.2:
+      BF16  40 GiB  ->  does not fit
+      FP8   20 GiB  ->  does not fit
+      INT4  10 GiB  ->  fits, barely, with one request and nothing to spare
+```
+
+Two full halvings and a 128K request still leaves no room for a second user. That is the number
+behind this section's point: at extreme context, quantization buys you the right to serve *one*
+request, not the right to serve many.
+
+**Why 4-bit needs a smarter scheme than 8-bit.** K and V do not misbehave the same way. Key tensors carry a few channels with far larger magnitudes than the rest, so a single per-tensor scale spends its whole range on outliers and crushes everything else to zero; Value tensors are better behaved per channel but vary across tokens. KIVI's per-channel-K / per-token-V split exists precisely because a naive symmetric INT4 applied uniformly to both is where 4-bit KV quantization visibly breaks.
 
 The practical interaction with Section 6.2: quantizing KV from BF16 to FP8 turns the "128K context, 0 requests feasible" row into "128K context, 0 requests feasible" *still* (40.96GB / 2 = 20.48GB, still exceeds the 20GB headroom) — illustrating that **quantization alone is often insufficient at extreme context lengths, and must be combined with eviction or cross-layer sharing** (Section 14's case study works through exactly this combination).
 
@@ -384,6 +550,37 @@ class StreamingLLMCache:
 # eliminate the cliff entirely.
 ```
 
+**What this actually says.** "Stop letting the cache be a function of how long the conversation is. Fix its size at `sinks + window` and let old tokens fall off the end forever — the memory bill becomes a constant you choose in advance."
+
+Every other technique in this file makes `seq_len` smaller. StreamingLLM makes it *irrelevant*: the formula's `seq_len` term is replaced by a constant, which is what turns "runs until OOM" into "runs forever."
+
+| Symbol | What it is |
+|--------|------------|
+| `num_sink_tokens` | First few positions, retained permanently. 4 is enough; they are a numerical attention dump, not content |
+| `window_size` | Count of most-recent tokens kept. The only tunable that costs real memory |
+| `sinks + window` | The **entire** cache size, at every point in the generation, forever |
+| `current_length` | Total tokens seen. Appears in the eviction check but **not** in the memory cost |
+| kept fraction | `(sinks + window) / current_length` — shrinks toward zero as the stream runs on |
+
+**Walk one example.** Llama-3-70B at 320 KB/token, comparing a full 128K cache against fixed-size policies:
+
+```
+  policy                       tokens kept    cache size            vs full 128K
+  full 128K context              131,072      320KB x 131,072 = 40 GiB      1x
+  StreamingLLM (4 + 1020)          1,024      320KB x   1,024 = 0.31 GiB  128x
+  sinks + 2044 window              2,048      320KB x   2,048 = 0.63 GiB   64x
+  H2O (256 recent + 128 heavy)       384      320KB x     384 = 0.12 GiB  341x
+
+  kept fraction for StreamingLLM at 128K:  1,024 / 131,072 = 0.78%
+  kept fraction at 4M tokens streamed:     1,024 / 4,000,000 = 0.026%
+```
+
+Note what the last two lines do: the cache stays 0.31 GiB in both rows. Streaming 4M tokens costs the
+same memory as streaming 1,024 — that constant is the entire result, and it is why a 0.31 GiB budget
+can outlive a 40 GiB one.
+
+**Why the 4 sink tokens are not a rounding error.** They are 0.4% of a 1024-slot cache and removing them does not save measurable memory — the reason they exist is the softmax. Attention weights must sum to 1, so when no cached token is a good match the model dumps the leftover mass onto the earliest positions it can always see. Evict them and that mass has nowhere to go; it gets forced onto semantically irrelevant tokens, and the distortion compounds through all 80 layers. This is the difference between a policy that degrades 2-5% and one that produces a perplexity cliff at exactly the step the window first passes position 0.
+
 **Tradeoff**: 80-95% memory reduction, **constant** memory regardless of generation length (genuinely unbounded streaming) — but mid-context information is permanently lost. Only safe when the task doesn't require recalling arbitrary earlier content (e.g., a streaming summarization agent that only needs recent context plus a fixed "anchor"; NOT safe for long-document QA where the answer might be anywhere in the document).
 
 ### 6.8 Scissorhands — cheaper dynamic eviction via persistence of importance
@@ -429,6 +626,39 @@ cla2_config = {"num_layers": 80, "kv_cache_layers": 40}  # 2:1 -> 2x reduction
 # Effective "layers" term for the cross-decoder half drops to ~1.
 yoco_config = {"num_layers": 80, "kv_cache_layers": 41}  # 40 self-decoder + 1 shared -> ~2x reduction
 ```
+
+**The idea behind it.** "The formula's `layers` term never had to equal the model's depth — it only counts how many *distinct* KV caches exist. Let neighbouring layers read the same one and the model stays 80 layers deep while the cache thinks it is 40."
+
+This is the same trick GQA plays on heads, applied one axis over. That is also why the two multiply cleanly: sharing across heads and sharing across layers are independent redundancies.
+
+| Symbol | What it is |
+|--------|------------|
+| `num_layers` | The model's real depth. Unchanged — every layer still computes attention |
+| `kv_cache_layers` | How many distinct KV caches get allocated. **This** is the term in the memory formula |
+| CLA-`k` | Groups of `k` adjacent layers share one cache. `kv_cache_layers = num_layers / k` |
+| self-decoder | YOCO's first half: computes and caches K/V normally |
+| cross-decoder | YOCO's second half: every layer cross-attends to that one shared cache, contributing ~1 |
+| reduction | `num_layers / kv_cache_layers`. Exactly 2 for CLA-2 |
+
+**Walk one example.** Llama-3-70B geometry (8 KV heads, head_dim 128, BF16), varying only the cache-layer count:
+
+```
+  config       kv_cache_layers   per-token bytes              KB/token   @128K
+  standard             80        2 x 80 x 8 x 128 x 2 = 327,680   320    40.0 GiB
+  CLA-2                40        2 x 40 x 8 x 128 x 2 = 163,840   160    20.0 GiB
+  YOCO (40 + 1)        41        2 x 41 x 8 x 128 x 2 = 167,936   164    20.5 GiB
+
+  CLA-2 reduction : 80 / 40 = 2.00x
+  YOCO reduction  : 80 / 41 = 1.95x   (the shared cross-decoder cache is the "+1")
+
+  stacked with FP8 (bytes_per_element 2 -> 1):
+      CLA-2 + FP8 = 2 x 40 x 8 x 128 x 1 = 81,920 bytes = 80 KB/token = 10 GiB @128K
+```
+
+CLA-2 and FP8 land on different factors, so they compose exactly: 2x times 2x is 4x, taking a 128K
+request from 40 GiB to 10 GiB with no token ever discarded.
+
+**Why this one cannot be a config flag.** Quantization changes how a cached number is *stored*; cross-layer sharing changes what a layer *computes*. A CLA layer has no K/V projection weights of its own — they were never trained, because during pretraining it read its neighbour's. Point an existing 80-layer checkpoint at a `kv_cache_layers=40` serving config and layer 2 attends to keys it was never trained against; you get a running model producing nonsense rather than a clean error. This is the structural reason GQA is everywhere and CLA is rare: both are architectural, but GQA was adopted early enough that the checkpoints already exist.
 
 **Why this is architectural, not a serving knob**: unlike eviction (a serving-time policy you can toggle per-request) or quantization (a serving-time precision choice), cross-layer KV sharing changes what the model *computes* during the forward pass — layers that "reuse" K/V from another layer are architecturally wired that way and must be **trained** with that wiring. You cannot retrofit CLA or YOCO onto an existing checkpoint's serving config the way you can toggle FP8 KV cache; it is a pretraining-time decision, which is why it is far less commonly deployed today than GQA (which is also architectural but has been standard since Llama-2 and is present in nearly every serving target) — covered here for completeness as "where the field is heading" on the `layers` term of the formula.
 
@@ -627,6 +857,35 @@ Result: only 4 of the required 8 concurrent analysts can be served at
 full 128K context. The 5th request triggers vLLM preemption (request-
 level swap/recompute), and the analyst sees a multi-second stall.
 ```
+
+**What it means.** "Four GPUs, a 128K context window on the model card, and the arithmetic says half the team gets served — the product requirement was written against a capability number, not a capacity number."
+
+This is Section 6.2's formula with the numbers a real deployment produces, and the gap between "supports 128K" and "supports 128K for 8 people" is the whole case study.
+
+| Symbol | What it is |
+|--------|------------|
+| Weights 140 GB | `70e9 params x 2 bytes` in BF16. Paid once, before any user |
+| Total 320 GB | `4 x 80GB` H100s |
+| Headroom 180 GB | `320 - 140`. All that remains for cache |
+| 320 KB/token | Section 6.1's per-token cost — GQA's 8 KV heads, **not** 64 query heads |
+| 41 GB per request | One analyst's 128K document held in cache |
+| Preemption | vLLM swapping a whole request's cache out when the 5th arrives — the stall the analyst sees |
+
+**Walk one example.** The v1 numbers, taken to the concurrency floor:
+
+```
+  headroom       = 320 - 140                      = 180 GB
+  per request    = 320KB x 131,072 = 42,949,672,960 bytes = 40 GiB
+
+  max concurrent = 180 / 40 = 4.5  ->  floor  ->  4 analysts
+
+  required 8 analysts x 40 GiB = 320 GiB  vs  180 GB headroom
+  shortfall factor = 320 / 180 = 1.8x short
+```
+
+Four served, eight required — and note the shortfall is only 1.8x, not 10x. That is why FP8 alone
+(a 2x lever, Section 6.4) clears it: the gap was always within reach of the cheapest tool, which is
+exactly why the team's later SnapKV work was headroom, not necessity.
 
 **v2 design** — applied levers in order of risk (cheapest/lowest-risk first):
 

@@ -70,6 +70,40 @@ Where:
 
 Higher temperature produces a softer probability distribution, making the relative probabilities of non-top tokens more visible. At T=1, the teacher might output (cat: 0.95, lynx: 0.04, dog: 0.01). At T=10, the same distribution becomes (cat: 0.40, lynx: 0.30, dog: 0.15) — now the student can learn that lynx is much more similar to cat than dog is.
 
+**What the formula is telling you.** "Grade the student on two things at once: getting the right answer (CE against the hard label), and getting the whole *shape* of the teacher's guess right (KL against the softened distribution) — and turn up the T^2 knob so that softening the shape does not quietly turn the second grade down."
+
+The blend is the whole design. Pure hard-label training throws away the teacher's uncertainty; pure KL lets the student drift wherever the teacher was wrong. `alpha` sets the mix, and `T` sets how much of the teacher's low-probability tail the student is asked to reproduce.
+
+| Symbol | What it is |
+|--------|------------|
+| `CE(student_logits, hard_label)` | Standard cross-entropy against the one correct answer. "Did you get it right?" |
+| `KL(p, q)` | How far the student's distribution `q` sits from the teacher's `p`. `0` when identical, growing as they disagree |
+| `softmax(logits/T)` | Divide every logit by `T` before softmaxing. Bigger `T` shrinks all the gaps, flattening the distribution |
+| `T` | Temperature, 2-20. `T=1` is the model's native distribution; higher `T` exposes the dark knowledge in the tail |
+| `alpha` | Mix weight, 0.1-0.5. Here it weights the *hard-label* term; the code in Section 14 uses the opposite convention (alpha on the soft term) — always check which |
+| `T^2` | Gradient rescue. The soft loss and its gradient shrink roughly as `1/T^2`; multiplying by `T^2` puts them back |
+
+**Walk one example.** Four classes, teacher logits `[8.0, 4.8, 3.2, -1.2]`, student logits `[7.0, 5.0, 4.0, 0.0]`. Watch the soft loss collapse when `T` rises, and `T^2` restore it:
+
+```
+                            cat      lynx     dog      car
+  T = 1   teacher p        0.9532   0.0389   0.0078   0.0001
+          student q        0.8431   0.1141   0.0420   0.0008
+          KL(p || q)                                = 0.0617
+
+  T = 4   teacher p        0.5403   0.2428   0.1627   0.0542
+          student q        0.4439   0.2692   0.2097   0.0771
+          KL(p || q)                                = 0.0207   <- 3.0x smaller
+          x T^2 = x16                               = 0.3304   <- weight restored
+
+  Largest per-logit gradient of the soft term, (q - p)/T:
+          T = 1                                     = 0.1101
+          T = 4, no T^2                             = 0.0241   <- 4.6x weaker
+          T = 4, with T^2                           = 0.3856   <- same order as T=1
+```
+
+The student disagrees with the teacher by exactly the same amount in both rows — only the reading changed. Drop the `T^2` and raising `T` from 1 to 4 silently cuts the distillation gradient 4.6x, so the hard-label CE term takes over and `alpha` no longer means what you tuned it to mean. With `T^2` in place, `alpha` keeps a stable meaning across temperatures, which is the only reason you can sweep `T` on a validation set without re-tuning `alpha` every time.
+
 #### Feature Distillation
 
 Match intermediate layer representations, not just final outputs:
@@ -178,6 +212,38 @@ Why better than linear: Linear interpolation can shrink weight magnitudes at t=0
 vectors is shorter than either). SLERP traverses the geodesic on the hypersphere, preserving norms.
 ```
 
+**Read it like this.** "Walk from model A to model B along the surface of a sphere instead of cutting straight across the middle — you arrive at the same place, but you never dip toward the origin on the way."
+
+Both interpolations are just "some of A plus some of B." The difference is entirely in the two coefficients: linear uses `(1-t)` and `t`, which always sum to 1 and therefore shrink the result whenever A and B point in different directions. SLERP uses coefficients that sum to *more* than 1, exactly enough to cancel the shrinkage.
+
+| Symbol | What it is |
+|--------|------------|
+| `w_A`, `w_B` | The two models' weight vectors (per tensor, flattened) |
+| `t` | How far along the path, `0` = pure A, `1` = pure B, `0.5` = midpoint |
+| `theta` | The angle between the two weight vectors. `0` = identical direction, 90 degrees = unrelated |
+| `w_A . w_B` | Dot product — how much the two vectors agree, before normalizing |
+| `\|\|w_A\|\|` | Length (L2 norm) of the vector. This is the quantity SLERP protects |
+| `arccos(...)` | Turns "agreement fraction" back into an angle. Agreement 1.0 -> 0 degrees; 0.0 -> 90 degrees |
+| `sin((1-t)*theta) / sin(theta)` | A's coefficient. Note it does NOT equal `1-t` unless theta is tiny |
+
+**Walk one example.** Two unit-length weight vectors, merged at the midpoint `t = 0.5`:
+
+```
+  theta = 90 degrees (orthogonal -- the worst case)
+    lerp  coefficients : 0.5000 and 0.5000  -> result length 0.7071   (29.3% SHORTER)
+    SLERP coefficients : sin(45)/sin(90) = 0.7071 and 0.7071
+                                            -> result length 1.0000   (norm preserved)
+    check: cos(theta/2) = cos(45) = 0.7071  <- matches the lerp length exactly
+
+  theta = 30 degrees (typical for two fine-tunes of the same base)
+    lerp  coefficients : 0.5000 and 0.5000  -> result length 0.9659   (3.4% shorter)
+    SLERP coefficients : sin(15)/sin(30) = 0.5176 and 0.5176
+                                            -> result length 1.0000
+    check: cos(15) = 0.9659                 <- matches again
+```
+
+The `cos(theta/2)` shrinkage in the prose is not an approximation — it is exactly what `0.5*(A+B)` measures. Note how mild it is at 30 degrees: 3.4%. That is why the section says the SLERP-vs-LERP gap is only 1-3% on benchmarks for same-base fine-tunes — they are nearly parallel, so the two methods nearly coincide. SLERP's advantage grows precisely when the models are far apart, which is also when merging is riskiest.
+
 SLERP merges exactly two models. It is the most commonly used method on the open-source Hugging Face merge leaderboard.
 
 #### TIES (Trim, Elect Sign, Merge)
@@ -217,6 +283,43 @@ meaningful quality loss. Sparsification makes merging more effective by reducing
 between task vectors.
 ```
 
+**Put simply.** "Throw away most of what fine-tuning changed, at random, then make the survivors bigger by exactly the amount you threw away — so the delta still *adds up* to the same thing, but now it touches far fewer parameters."
+
+The rescale is what makes this safe rather than reckless. Dropping 90% of a delta without rescaling would leave the model 90% un-fine-tuned; dividing by `(1 - p)` restores the total in expectation. This is the same trick as inverted dropout at training time, applied to a task vector instead of activations.
+
+| Symbol | What it is |
+|--------|------------|
+| `delta` | The task vector, `fine_tuned - base` — everything fine-tuning changed |
+| `p` | Drop rate, 0.7-0.9. The fraction of delta entries forced to zero |
+| `Bernoulli(1 - p)` | A coin flip per parameter that lands 1 (keep) with probability `1 - p` |
+| `m` | The resulting 0/1 mask, same shape as `delta` |
+| `delta * m` | The sparsified delta — survivors keep their value, everyone else is exactly 0 |
+| `1 / (1 - p)` | The rescale factor. `p = 0.9` -> multiply survivors by 10; `p = 0.8` -> by 5 |
+
+**Walk one example.** One parameter whose task vector entry is `+0.30`, at `p = 0.9`:
+
+```
+  keep probability = 1 - p = 0.10
+  rescale factor   = 1 / 0.10 = 10
+
+  if dropped (90% of the time) : contribution = 0.00
+  if kept    (10% of the time) : contribution = 0.30 x 10 = 3.00
+
+  expected contribution = 0.90 x 0.00 + 0.10 x 3.00 = 0.30   <- unchanged
+```
+
+**Why sparsifying first makes the merge better.** The payoff is not compression — the merged model is exactly the same size. It is collision avoidance:
+
+```
+  Probability two task vectors both modify the SAME parameter:
+
+    no DARE          : 1.00 x 1.00 = 100%   <- every parameter is a potential conflict
+    DARE p = 0.8     : 0.20 x 0.20 =   4%
+    DARE p = 0.9     : 0.10 x 0.10 =   1%
+```
+
+At `p = 0.9`, 99% of parameters are touched by at most one model, so TIES's sign election has almost nothing left to arbitrate — and the 1% that do collide are the genuinely shared parameters worth arbitrating over. That is the whole reason DARE+TIES beats TIES alone.
+
 DARE works well as a preprocessing step before TIES or linear merge.
 
 #### Model Soups (Wortsman et al. 2022)
@@ -242,6 +345,36 @@ task_vector_math = math_model - base_model
 Combined model:   base + 0.8 * task_vector_code + 0.5 * task_vector_math
 Remove toxicity:  model - 0.3 * task_vector_toxic  (where toxic model was fine-tuned on toxic data)
 ```
+
+**The idea behind it.** "A skill is a direction in weight space, not a place. Subtract the base to isolate the direction, scale it to set how strongly you want that skill, and add or subtract it like any other vector."
+
+The coefficients are the interesting part: `0.8` and `0.5` are not probabilities and do not have to sum to 1. They are volume knobs, one per skill, tuned on a validation set.
+
+| Symbol | What it is |
+|--------|------------|
+| `base_model` | The shared pre-trained checkpoint. The origin every task vector is measured from |
+| `code_model - base_model` | Subtracting the origin leaves only what fine-tuning on code added |
+| `task_vector_code` | That difference, stored as a full-shape tensor set. The "direction of being good at code" |
+| `0.8 *` | Strength dial for that skill. `1.0` = full fine-tune strength, `0.5` = half, `> 1.0` = amplified past what training produced |
+| `- 0.3 * task_vector_toxic` | Negative coefficient — move *away* from a skill you can measure but do not want |
+
+**Walk one example.** Follow a single parameter through the composition. Reuse the conflicting pair from the diagram above (`tau_code = +0.30`, `tau_math = -0.20`), with the base weight at `2.0`:
+
+```
+  base                                          = 2.0000
+  + 0.8 x tau_code   = 0.8 x (+0.30) = +0.2400
+  + 0.5 x tau_math   = 0.5 x (-0.20) = -0.1000
+  ------------------------------------------------------
+  merged weight                                 = 2.1400
+
+  Compare plain averaging of the same two deltas:
+    (+0.30 + -0.20) / 2 = +0.05  ->  merged weight = 2.0500
+
+  Task arithmetic lands at 2.14 because the code skill was dialed to 0.8 and
+  math to 0.5 -- the two deltas no longer get equal votes, so they cannot cancel.
+```
+
+Averaging is just task arithmetic with every coefficient pinned to `1/N`, which is exactly the setting that lets opposing deltas annihilate. Unequal coefficients are the cheapest available fix, and tuning them is why merge recipes are iterated in minutes rather than trained.
 
 Task arithmetic enables modular capability composition without retraining.
 
@@ -323,6 +456,31 @@ Algorithm:
 
 Result: Matches SparseGPT quality at 50% sparsity with 10-100x less compute.
 ```
+
+**What it means.** "A weight only matters if it is big *and* the thing it multiplies is big. Score every weight by that product, and prune the smallest scores."
+
+Magnitude pruning answers "how large is this weight?" Wanda answers "how much does this weight actually move the output?" — which is the question you meant to ask all along. The activation norm is measured once, offline, on calibration data, which is why it costs a single forward pass.
+
+| Symbol | What it is |
+|--------|------------|
+| `W_ij` | The weight connecting input feature `j` to output `i` |
+| `\|W_ij\|` | Its magnitude, sign discarded. What plain magnitude pruning uses alone |
+| `X_j` | Input feature `j`'s values across the whole calibration set |
+| `\|\|X_j\|\|_2` | Its L2 norm — "how loud is this input feature, typically". One number per input channel |
+| `S_ij` | The importance score. Prune the lowest `p%` of these |
+
+**Walk one example.** Two weights in the same row, scored both ways:
+
+```
+                    |W_ij|    ||X_j||    S_ij = |W_ij| x ||X_j||
+  weight A           0.90       0.05          0.045
+  weight B           0.20       3.00          0.600
+
+  Magnitude pruning ranks by |W| : keeps A (0.90), prunes B (0.20)   <- wrong
+  Wanda ranks by S               : keeps B (0.600), prunes A (0.045) <- right
+```
+
+Weight A is 4.5x larger than B but sits on a feature that is essentially always near zero, so it contributes `0.045` of signal; B is small but rides a loud feature and contributes `0.600` — 13x more. Magnitude pruning gets this backwards on every dead-feature weight in the model, and transformers have many of them (unused vocabulary rows, saturated attention channels). Note the score is per-weight but the activation norm is per-*column*, so Wanda compares weights within a row, never across the whole matrix — that per-row normalization is a second, easily-missed reason it beats global magnitude ranking.
 
 Wanda is the simplest competitive pruning method for LLMs.
 
@@ -450,6 +608,38 @@ Trained Model (7B params, FP16, 14GB)
 Pruned Model (3.5B effective params, ~8GB, 1.5-2x faster)
 ```
 
+**Stated plainly.** "The sparsity percentage is a claim about how many weights became zero. It is not a claim about the file size, and it is definitely not a claim about the speed — those depend entirely on whether the zeros can be *thrown away* or merely *stored*."
+
+This is the single most expensive misunderstanding in the pruning literature, and it is what produced Pitfall 4. Read a sparsity number as an upper bound on savings, never as the savings.
+
+| Symbol | What it is |
+|--------|------------|
+| `7B params, FP16` | 7e9 weights at 2 bytes each. The starting footprint |
+| Unstructured 50% | Half the individual weights are zero, scattered. Matrix shape unchanged |
+| Structured 50% | Half the rows/heads/neurons deleted outright. Matrix shape physically shrinks |
+| 2:4 semi-structured | Exactly 2 zeros per group of 4. Shape unchanged, but the pattern is regular enough for hardware to skip |
+| "effective params" | The count *after* deletion — meaningful only for structured pruning |
+
+**Walk one example.** The same 50% sparsity, three ways, on the 7B FP16 model at the top of the diagram:
+
+```
+  Dense baseline      : 7.0e9 x 2 bytes                   = 14.00 GB   speedup 1.0x
+
+  Unstructured 50%    : still 7.0e9 slots, half of them 0
+                        stored dense                      = 14.00 GB   speedup 1.0x
+                        (zero savings on a T4 -- Pitfall 4)
+
+  2:4 semi-structured : 3.5e9 kept values x 2 bytes       =  7.00 GB
+                        + 2 bits metadata per kept value  =  0.88 GB
+                        total                             =  7.88 GB   speedup 2.0x
+                        (matches the ~8GB in the diagram; 1.8x smaller, not 2x)
+
+  Structured 50%      : 3.5e9 params actually deleted     =  7.00 GB   speedup ~1.5x
+                        (dense matrix, just smaller -- works on any GPU)
+```
+
+Three identical "50% sparse" models; footprints of 14.00, 7.88, and 7.00 GB and speedups of 1.0x, 2.0x, and 1.5x. Note also that the percentages do not translate linearly into speed: the case study's Wanda **20%** structured prune takes 8B to `8 x 0.8 = 6.4B` params, which is a `1 / 0.8 = 1.25x` compute reduction — a 20% prune buys 20% less work, not 20% more speed on top of anything else. Always quote the deployment triple (footprint, wall-clock speedup, target hardware), never the sparsity alone.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -465,6 +655,35 @@ T=20: cat: 0.15,  lynx: 0.12,  dog: 0.09,  car: 0.06, ...
 ```
 
 Higher temperature makes the distribution softer, exposing relative similarities between classes. The student learns richer relationships at higher T but with noisier gradients. Typical range: T=2-4 for classification, T=4-20 for language model distillation. The T^2 scaling in the loss formula compensates for the reduced gradient magnitude at high temperatures.
+
+**In plain terms.** "Dividing every logit by T before the softmax squeezes all the gaps between them toward zero — and since softmax turns gaps into ratios, squeezing the gaps flattens the whole distribution."
+
+The mechanism is one line of algebra: softmax cares only about *differences* of logits, and `exp((z_i - z_j)/T)` is the ratio between any two classes. Raise `T` and every ratio decays toward 1, which is what "softer" means.
+
+| Symbol | What it is |
+|--------|------------|
+| `z_i` | The raw logit for class `i`, before any softmax. Unbounded, can be negative |
+| `z_i / T` | The tempered logit. `T > 1` shrinks every logit toward 0, shrinking the gaps between them |
+| `z_i - z_j` | The gap that actually determines the ratio between two classes |
+| `exp((z_i - z_j)/T)` | The resulting probability ratio. `T -> infinity` drives it to `exp(0) = 1`, i.e. uniform |
+| `T = 1` | No change — the model's native, sharply-peaked distribution |
+
+**Walk one example.** The exact numbers behind the three rows above, from logits `cat 8.0, lynx 4.8, dog 3.2, car -1.2`:
+
+```
+                        cat      lynx     dog      car      cat/lynx ratio
+  T = 1               0.9532   0.0389   0.0078   0.0001         24.5x
+  T = 5               0.4833   0.2549   0.1851   0.0768          1.9x
+  T = 20              0.3058   0.2606   0.2406   0.1930          1.2x
+
+  Check the ratio directly, no softmax needed:
+    gap = z_cat - z_lynx = 8.0 - 4.8 = 3.2
+    T = 1  : exp(3.2 /  1) = exp(3.20) = 24.53
+    T = 5  : exp(3.2 /  5) = exp(0.64) =  1.90
+    T = 20 : exp(3.2 / 20) = exp(0.16) =  1.17
+```
+
+At `T = 1` the student is told "cat, and nothing else matters" — car at `0.0001` carries no usable gradient. At `T = 5` cat is still the clear winner but lynx now holds a quarter of the mass, which is the dark knowledge you were after. At `T = 20` the distribution is nearly uniform: cat leads car by only 1.6x, so the teacher's actual opinion is drowning in noise. That degradation is the reason the recommended range tops out around 20 rather than going higher, and why temperature is tuned on a validation set rather than maximized.
 
 ### SLERP Geometric Interpretation
 
@@ -769,6 +988,43 @@ Deployment:
   Cost: $0.015/query (vs $0.15 for 70B) = 10x reduction
   Throughput: 200 QPS (vs 30 QPS for 70B)
 ```
+
+**What this actually says.** "Compression ratios multiply; quality retentions also multiply. Four stages that each look nearly free compound into 40x smaller — and into a quality figure that no single stage's number predicts."
+
+This is the arithmetic that decides whether the project ships. Each phase is quoted in isolation ("1% regression", "0.5% regression"), but the business only ever sees the product of all four.
+
+| Symbol | What it is |
+|--------|------------|
+| 70B FP16 | The teacher's footprint: 70e9 params x 2 bytes = 140 GB of weights |
+| 10x (distill) | Architecture change, 70B -> 7B class. The only stage that changes the model itself |
+| 1.25x (prune) | Wanda 20% structured: 8B -> 6.4B params. Compute drops by `1 / 0.8` |
+| 4x (quantize) | AWQ INT4: 2 bytes/param -> 0.5 bytes/param. Same architecture, fewer bits |
+| "% of teacher" | Quality retention, measured against the teacher on the same held-out eval set |
+
+**Walk one example.** Push the four phases through, footprint first:
+
+```
+  Teacher   70B  x 2 bytes (FP16)            = 140.0 GB
+  Phase 1   distill to 8B  x 2 bytes         =  16.0 GB
+  Phase 2   merge (no size change)           =  16.0 GB
+  Phase 3   prune 20% -> 6.4B x 2 bytes      =  12.8 GB
+  Phase 4   INT4  -> 6.4B x 0.5 bytes        =   3.2 GB  (~3.5 GB file with overhead)
+
+  Total compression = 140.0 / 3.5 = 40x      <- the "~40x" quoted in Section 12
+
+  Quality, same four phases:
+    Phase 1 distill  ->  88% of teacher
+    Phase 2 merge    ->  92%   (+4, domain knowledge recovered)
+    Phase 3 prune    ->  91%   (-1)
+    Phase 4 quantize ->  90%   (-0.5, rounded)
+
+  Cost at 50K queries/day:
+    70B  : 50,000 x $0.150 = $7,500/day
+    7B   : 50,000 x $0.015 =   $750/day
+    saved                  = $6,750/day = $2.46M/year
+```
+
+Two things fall out that the individual phase numbers hide. First, merging is the only stage that *adds* quality (+4 points) while costing nothing in size — which is why the recommended order puts it before pruning, not after. Second, the 10x cost reduction does not come from the 40x compression; it comes from the hardware tier the smaller model unlocks (1x A10G instead of 4x A100). Compression buys you a cheaper box, and the cheaper box is where the money actually is.
 
 **Evaluation Results**:
 

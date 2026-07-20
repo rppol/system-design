@@ -153,6 +153,33 @@ Step 4: LLM generation from specific context
   No community summaries needed; answer from subgraph context
 ```
 
+**Stated plainly.** "Traverse `h` hops from the query's entities" is exponential, not linear: with an average node degree `d`, hop `h` reaches `d^h` new nodes and the whole neighborhood is `d + d^2 + ... + d^h`. Depth is a knob that multiplies context size, so it must be chosen against the graph's density, not picked as a round number.
+
+| Symbol | What it is |
+|--------|------------|
+| `d` | Average out-degree — how many relationships a typical entity has |
+| `h` | Traversal depth; `depth = 3` in the case study's `multi_hop_retrieve` |
+| `d^h` | Nodes newly reached at exactly hop `h` |
+| `Σ d^i` for `i = 1..h` | Total neighborhood size — everything assembled into context |
+| `\|V\|` | Entity count in the graph; 41,000 after deduplication in Section 12 |
+| tokens/node | Entity description length fed to the LLM, roughly 50 tokens |
+
+**Walk one example.** Three graph densities at `depth = 3`, against the case study's 41,000-entity graph:
+
+```
+  d     hop 1   hop 2    hop 3     total     context @50 tok/node   share of graph
+  --------------------------------------------------------------------------------
+   8       8      64       512        584          29,200 tokens          1.4%
+  15      15     225     3,375      3,615         180,750 tokens          8.8%
+  30      30     900    27,000     27,930       1,396,500 tokens         68.1%
+
+  At d = 8 the third hop is affordable. At d = 30 the SAME depth = 3 pulls in
+  more than two-thirds of the entire graph and 1.4M tokens of description --
+  the traversal has stopped being retrieval and become a full-corpus scan.
+```
+
+**Why depth is capped at 2-3 in practice.** The exponent is unforgiving: at `d = 15`, going from `h = 2` to `h = 3` adds 3,375 nodes to a neighborhood of 240 — a 15x jump from one extra hop. Beyond three hops nearly any real-world graph becomes fully connected through hub entities (a node like "Microsoft" or "digital transformation" links to thousands of others), so hop 4 returns "everything" and carries no signal. The practical control is not `h` alone but the pair `(h, edge-weight cutoff)`: pruning low-weight edges lowers the effective `d`, which is the only way to buy depth without paying `d^h`.
+
 ### 3.3 Indexing Cost Estimation
 
 ```
@@ -170,6 +197,54 @@ For a corpus of 1M tokens (approximately 750 pages):
     Indexing cost: ~$1400-1500 (one-time)
     Query cost: 20-50 LLM calls per global query vs. 1-2 for standard RAG
 ```
+
+**In plain terms.** Indexing cost is `(input tokens x input price) + (output tokens x output price)`, run twice — once for extraction over every chunk, once for summarization over every community. The whole estimate is four multiplications; what makes it large is that extraction touches the corpus *entirely*, at LLM prices rather than embedding prices.
+
+| Symbol | What it is |
+|--------|------------|
+| `C` | Corpus size in tokens — 1,000,000 in the estimate above |
+| chunk size | 1000 tokens, so `C / 1000 = 1000` chunks, one extraction call each |
+| input price | `$5` per 1M tokens (GPT-4o) |
+| output price | `$15` per 1M tokens — 3x input, which is why output volume dominates |
+| `N_comm` | Communities detected, 100 here |
+| compression ratio | `C / (N_comm x summary tokens)` — how much smaller the summary layer is |
+
+**Walk the bill.**
+
+```
+  entity extraction
+    input  : 1000 chunks x 1000 tok = 1,000,000 tok -> 1.0  x $5  = $ 5.00
+    output : ~500,000 tok (entities + relations as JSON)
+                                                   -> 0.5  x $15 = $ 7.50
+                                                            subtotal $12.50
+
+  community summarization
+    input  : 100 communities x 2000 tok = 200,000  -> 0.2  x $5  = $ 1.00
+    output : 100 x 500 tok = 50,000                -> 0.05 x $15 = $ 0.75
+                                                            subtotal $ 1.75
+
+  total for 1M tokens                                              $14.25
+  per chunk: 12.50 / 1000 = $0.0125     scaled to 100M tokens: $1,425
+```
+
+Notice where the money is: output tokens are 58% of the bill (`7.50 + 0.75 = 8.25` of `14.25`) while accounting for only 550,000 of the 1,750,000 tokens moved — purely from the 3x price. Extraction prompts that ask for verbose descriptions are therefore the single most expensive authoring choice in the pipeline.
+
+**Walk the compression ratio.** The summary layer is what makes global queries affordable:
+
+```
+  corpus                 1,000,000 tokens
+  community summaries   100 x 500 = 50,000 tokens
+
+  compression = 1,000,000 / 50,000 = 20x
+
+  a global query that map-reduces over 50 communities reads
+    50 x 500 = 25,000 tokens -> 25,000/1e6 x $5 = $0.125 per query
+
+  the same question answered by reading the corpus would need 1,000,000
+  tokens of input -- 40x more, and past most context windows anyway.
+```
+
+That 20x is the trade Graph RAG actually makes: `$14.25` paid once, so that thematic questions cost `$0.125` instead of being impossible. It only pays back if global queries are frequent — at 1-2 LLM calls, a standard RAG query costs a fraction of a cent, so a corpus asked only pinpoint questions never recovers the indexing spend.
 
 ---
 

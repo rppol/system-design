@@ -253,6 +253,51 @@ async def connect_to_remote_mcp(mcp_url: str) -> ClientSession:
             yield session
 ```
 
+**What it means.** "PKCE turns a stolen authorization code into a useless string, because the
+code alone cannot be redeemed — only whoever holds the 256-bit secret that was never transmitted
+can complete the exchange."
+
+The security rests on two quantities in that code: how much entropy `secrets.token_bytes(32)`
+produces, and the one-wayness of SHA-256. Both are worth reading as numbers.
+
+```
+  code_verifier  = base64url( 32 random bytes )        -> 43 chars, 256 bits of entropy
+  code_challenge = base64url( SHA256(code_verifier) )  -> sent over the wire
+  server check   : SHA256(verifier_presented) == challenge_stored ?
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `token_bytes(32)` | 32 cryptographically random bytes = 256 bits. Never leaves the client |
+| `code_challenge` | The hash. Public — travels in the authorization URL |
+| `code_verifier` | The secret. Sent only in the final token exchange, over TLS, once |
+| `S256` | The method name telling the server to compare using SHA-256, not plaintext |
+| `state` | A separate 32-byte value, CSRF protection — not part of the PKCE proof |
+
+**Walk one example.** The entropy an attacker faces if they intercept the challenge:
+
+```
+  entropy   = 32 bytes x 8 bits = 256 bits
+  keyspace  = 2^256 ~= 1.16 x 10^77 possible verifiers
+
+  for scale: ~10^80 atoms in the observable universe
+
+  attack paths and why each fails:
+    guess the verifier        -> 1 in 2^256. Not a real option
+    reverse SHA-256           -> preimage resistance. Not a real option
+    steal the auth code alone -> useless: exchange requires the verifier too
+```
+
+**Why the verifier must be generated fresh per flow, and what breaks if it is not.** Reuse a
+verifier across authorizations and the 256 bits stop protecting anything: an attacker who
+observed one completed exchange now holds a secret that redeems future codes too. The pairing is
+the whole mechanism — a challenge is only meaningful while exactly one live code depends on it.
+
+This is also why §4's token-theft threat targets the *access token* rather than the flow. PKCE
+closes the authorization-code interception path so thoroughly that the remaining attack surface
+is the credential the server actually holds — which is exactly the pressure that makes the
+1-hour TTL noted above (`"expires_in": 3600`) the real control, not a formality.
+
 ### Tool Description Sanitization
 
 ```python
@@ -480,6 +525,60 @@ Signed servers (cryptographic publisher verification), unified server health/saf
 - 2 prompt injection attempts detected in logs (both blocked before tool execution by description filter)
 - 0 confirmed credential compromises
 - ~$0.40/user/month security overhead (audit pipeline, OAuth gateway compute)
+
+**Stated plainly.** "Forty cents a head sounds like nothing until you multiply by five thousand
+employees and twelve months — and even then it is small enough that the argument was never
+really about the money."
+
+Per-user costs are designed to be unarguable; scaling them out is how you find out whether that
+is true.
+
+```
+  program_cost = cost_per_user_month x num_users x 12
+
+  approval_rate = approved / (approved + rejected)
+  precision     = true_positives / (true_positives + false_positives)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `cost_per_user_month` | $0.40 — Splunk ingest for the audit pipeline plus OAuth gateway compute |
+| `num_users` | 5,000 employees in scope |
+| `approval_rate` | Share of reviewed servers that cleared the security bar |
+| `precision` | Share of description-filter alerts that were real attacks |
+
+**Walk one example.** The program's first year, in absolute terms:
+
+```
+  program_cost : $0.40 x 5,000        = $2,000 / month
+                 $2,000 x 12          = $24,000 / year
+
+  server review: 22 approved, 12 rejected
+                 approval_rate = 22 / 34 = 64.7%
+                 -> better than one in three submissions failed review
+
+  description filter: 2 true positives, 8 false positives
+                 precision = 2 / 10 = 20%
+                 -> 4 false alarms for every real attack caught
+```
+
+$24,000/year is roughly a fortnight of one engineer's fully-loaded cost, set against 5,000 people
+using LLM tooling and `0` confirmed credential compromises. That ratio is the entire business
+case, and it is why lesson 1 records the pushback as being about *restriction*, not budget — the
+allowlist model's real price was developer friction, which no line item captures.
+
+**The number to sit with is the 20% precision.** Four false alarms per genuine catch would be
+intolerable at high volume — but 10 alerts across a full year is roughly one manual review every
+five weeks, so a 20% hit rate is entirely affordable here. Contrast with §14's own 64.7% approval
+rate, where the *rejections* were the cheap outcome: refusing 12 servers costs nothing but a
+conversation, while admitting one bad one costs an incident. Both numbers are asymmetric-cost
+decisions, and both are tuned toward the expensive side of the asymmetry rather than toward
+balanced accuracy.
+
+Note also the token-lifetime lever in element 2, which is the same reasoning in the time domain:
+a **30-minute TTL versus a 30-day credential is a 1,440x reduction in the window** a stolen token
+is useful for. That is what lesson 2 means by "eliminated a whole class of attacks" — not that
+theft became impossible, but that the value of a stolen token fell by three orders of magnitude.
 
 **Lessons**:
 1. Allowlist-only model felt restrictive at first; teams pushed back. Eventually accepted as the "iOS App Store model for AI tools."

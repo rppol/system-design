@@ -694,6 +694,49 @@ class AgentAuthValidator:
 | DID resolution (ANP) | 500ms–2s (DNS + HTTPS) |
 | Registry query | 50–500ms |
 
+**Put simply.** "None of these numbers is large on its own, but a single A2A delegation walks
+through three or four of them in sequence before any work starts — and it is the sum, not the
+worst line, that your latency budget has to absorb."
+
+The rows are per-operation; the thing you actually ship is a path through them. Writing the path
+out is what turns the table into a design rule.
+
+| Symbol | What it is |
+|--------|------------|
+| Agent card fetch | One HTTPS GET to discover the peer's skills and endpoint. Cacheable |
+| Registry query | Lookup to find *which* agent has the skill. Cacheable |
+| Task submission | The POST that hands over the work, plus server-side queue admission |
+| SSE first event | Time until the first streamed progress token comes back |
+| JWT validation | Local signature check. No network, hence sub-millisecond |
+| DID resolution | DNS + HTTPS to fetch a decentralized identity document. Network-bound |
+
+**Walk one example.** A cold delegation — nothing cached — from request to first byte back:
+
+```
+  agent card fetch     :   50 ms   ...   200 ms
+  task submission      :  100 ms   ...   500 ms
+  SSE first event      :  200 ms   ...  2000 ms
+  JWT validation       :   <1 ms   ...    <1 ms   (rounds to zero either way)
+                          -------        -------
+  time to first signal :  350 ms   ...  2700 ms
+
+  Add ANP DID resolution instead of a registry:  +500 ms ... +2000 ms
+  worst case becomes                              ~4.7 s before work is confirmed started.
+```
+
+That 350ms floor is the arithmetic behind the "do NOT use A2A when you need sub-100ms latency"
+rule stated below. It is not a warning about A2A being slow — it is that the *cheapest possible*
+path already spends 3.5x the entire budget on handshakes, before the remote agent has thought
+about the task at all. No amount of tuning recovers that; the only fix is a different mechanism
+(direct call, MCP, in-process).
+
+The two cacheable rows are where the recoverable time lives. Agent card and registry results
+change on the order of deployments, not requests, so caching them removes `100–700ms` from every
+subsequent delegation and leaves task submission as the floor. Notice which row is *not*
+cacheable by design: the JWT. It is sub-millisecond precisely so that minting a fresh short-lived
+token per request stays free — the security property and the latency property are the same
+decision.
+
 ---
 
 ## 9. When to Use / When NOT to Use
@@ -1040,6 +1083,52 @@ flowchart TD
 ```
 
 The orchestrator fans out five A2A tasks in parallel — each specialist fetches its data through its own MCP tool — so elapsed time is bounded by the slowest agent (~8 minutes) instead of sequential execution (~40 minutes).
+
+**What it means.** "Running the five fetches at once turns a sum into a maximum, and a maximum
+over five roughly-equal agents is one fifth of the sum."
+
+```
+  sequential : T = SUM of t_i           = 8 + 8 + 8 + 8 + 8 = 40 min
+  parallel   : T = MAX of t_i  + orch   = 8 + 1             =  9 min
+  speedup    : 40 / 9 = 4.4x
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `t_i` | Wall-clock time for specialist `i` to fetch and compute its slice |
+| `SUM` | Sequential execution — every agent waits for the one before it |
+| `MAX` | Parallel execution — you wait only for the straggler |
+| `orch` | Orchestrator's own time: fan-out, five callbacks, aggregation. ~1 min here |
+
+The `MAX` is also the vulnerability. Parallel fan-out gives you the fastest possible schedule and
+the worst possible tail sensitivity: one specialist degrading from 8 to 20 minutes drags the
+whole report to 21 minutes even though the other four finished long ago. That is precisely what
+the 900-second (15-minute) `wait_for_callbacks` timeout in the implementation below is guarding
+— it converts an unbounded straggler into a bounded, reportable failure.
+
+**The idea behind it.** The diagram is a star, and the choice of star over mesh is a
+combinatorial one. With `n` participants:
+
+```
+  mesh (everyone talks to everyone) : n(n-1)/2 connections
+  star (everyone talks to the hub)  : n-1      connections
+
+  n =  6  (orchestrator + 5 specialists) : mesh 15   star  5    ->  3.0x fewer
+  n = 11  (orchestrator + 10)            : mesh 55   star 10    ->  5.5x fewer
+  n = 21  (orchestrator + 20)            : mesh 210  star 20    -> 10.5x fewer
+```
+
+Each "connection" here is not a wire — it is an authenticated, versioned, monitored integration
+with its own agent card, JWT scope, and failure mode. The mesh count grows quadratically, so at
+6 agents you would be maintaining 15 trust relationships instead of 5, and the gap widens with
+every agent added. The star's `n-1` is why adding a sixth data source in this design costs one
+registration and nothing else: the new agent trusts the orchestrator and the orchestrator trusts
+it, and no existing specialist has to learn anything about it.
+
+What the star buys in edges it pays for in centrality — the hub is a single point of failure and
+a throughput ceiling for the whole system, which is why this design puts effort into freeing the
+orchestrator's HTTP thread pool (push notifications instead of polling) rather than into making
+specialists talk to each other.
 
 **Key Design Decisions**
 

@@ -289,6 +289,60 @@ tools = await client.call("tools/list")
 
 Most MCP servers support batching; reduces round-trips when listing multiple capability types at startup.
 
+**In plain terms.** "Three questions asked one after another cost three network round-trips;
+the same three questions in one array cost one — the payload barely changes, the waiting
+collapses."
+
+Batching does not make the server faster or the JSON smaller. It removes *serialization of
+waiting*, which is why it only helps where the round-trip dominates and does nothing on stdio.
+
+```
+  unbatched_time = fixed_overhead + n x RTT
+  batched_time   = fixed_overhead + 1 x RTT
+
+  saving = (n - 1) x RTT / (fixed_overhead + n x RTT)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Requests in the batch. 3 at startup: `tools/list`, `resources/list`, `prompts/list` |
+| `RTT` | One network round-trip. 10-50ms on Streamable HTTP, 1-2ms on stdio |
+| `fixed_overhead` | Connection setup, TLS handshake, auth — paid once, unaffected by batching |
+| `saving` | Fraction of startup latency removed |
+
+**Walk one example.** Startup capability discovery, at `RTT = 30ms` (mid-range HTTP):
+
+```
+  unbatched : 3 x 30 = 90 ms of round-trips
+  batched   : 1 x 30 = 30 ms of round-trips
+  pure RTT saving = 2/3 = 66.7%
+```
+
+The §14 gateway measured **40%**, not 66.7% — and the gap is the interesting part, because it
+lets you solve for the fixed overhead you cannot see directly:
+
+```
+  (n-1) x RTT / (F + n x RTT) = 0.40
+        2 x 30 / (F + 3 x 30) = 0.40
+                    60 / (F + 90) = 0.40
+                          F + 90 = 150
+                               F = 60 ms     <- equals two round-trips
+
+  check:  unbatched = 60 + 90 = 150 ms
+          batched   = 60 + 30 =  90 ms
+          saving    = 60/150  = 40%   matches the measured figure
+```
+
+So roughly 60ms of that gateway's startup is TLS handshake, OAuth validation, and connection
+establishment — cost that batching can never touch. That is the general shape: **batching's
+ceiling is set by how much of your latency is not round-trips.** A system where `F` dwarfs
+`n x RTT` gets almost nothing from batching, no matter how many calls you fold together.
+
+It also explains the transport asymmetry in the §8 table. On stdio at 1-2ms per message, three
+discovery calls cost 3-6ms total — batching saves single-digit milliseconds and adds
+response-correlation complexity for no user-visible gain. Batching is a remote-transport
+optimization that happens to be legal on local ones.
+
 ---
 
 ## 7. Real-World Examples
@@ -310,6 +364,47 @@ Most MCP servers support batching; reduces round-trips when listing multiple cap
 | Stdio | 1-2ms | High (no network) | One client per server | Local tools, single-user |
 | Streamable HTTP | 10-50ms | TLS + auth required | Many clients per server | Cloud services, shared |
 | Legacy SSE | 10-50ms | TLS + auth required | Same | Compat with older servers |
+
+**The idea behind it.** "Stdio and HTTP differ by about 20x per message, which is invisible on
+one call and turns into hours of aggregate waiting once an agent is making half a million of
+them a day."
+
+A single-message comparison makes the two transports look interchangeable — 1.5ms versus 30ms is
+below human perception either way. Multiplying by call volume is what turns the row into an
+architectural decision.
+
+```
+  total_wait = calls_per_day x latency_per_call
+  ratio      = latency_http / latency_stdio
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `calls_per_day` | Aggregate MCP traffic. 500,000/day at the §14 gateway |
+| `latency_stdio` | 1-2ms — a pipe write plus a JSON parse. No network at all |
+| `latency_http` | 10-50ms — TLS, HTTP framing, and a real network hop |
+| `total_wait` | Cumulative time the system spends waiting, across all users |
+
+**Walk one example.** The §14 gateway's measured 500K calls/day, priced both ways:
+
+```
+  stdio  @ 1.5 ms : 500,000 x 1.5 ms =    750,000 ms =  0.21 hours/day
+  HTTP   @  30 ms : 500,000 x  30 ms = 15,000,000 ms =  4.17 hours/day
+  per-call ratio  : 30 / 1.5 = 20x
+
+  measured gateway P95 = 95 ms  ->  500,000 x 95 ms = 13.2 hours/day of aggregate wait
+```
+
+The P95 figure is the honest one to plan against: 95ms is above the 10-50ms table range because
+the gateway adds its own hop — client to gateway, then gateway to backend — so a remote call
+pays the network cost roughly twice, plus OAuth validation and audit logging on the way through.
+Centralization is not free, and 95ms is what it costs here.
+
+Which is exactly why the §14 lesson lands on a **hybrid**: Streamable HTTP at the edge, where you
+need many clients, auth, and one URL to distribute — and stdio internally, where the gateway and
+the backend server share a host and paying 30ms to cross a process boundary would be absurd. The
+20x ratio is not an argument for stdio everywhere; it is an argument for spending network latency
+only where the network is actually buying you something.
 
 ---
 

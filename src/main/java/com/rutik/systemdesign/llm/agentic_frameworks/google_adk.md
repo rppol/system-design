@@ -231,6 +231,43 @@ stateDiagram-v2
 early exit; `max_iterations` is the unconditional hard bound — with neither set per iteration, the
 loop always burns the full 5 × 2 = 10 LLM calls (§6.4).
 
+**What this actually says.** "A `LoopAgent` costs you iterations times sub-agents, and if nobody sets `escalate` that product is not a worst case — it is the bill, every single run."
+
+| Symbol | What it is |
+|--------|------------|
+| `I` | `max_iterations`, the unconditional hard bound (5 here) |
+| `A` | LLM-backed sub-agents per iteration — `Generator` and `Critic`, so 2 |
+| `I x A` | LLM calls when `escalate` never fires: the full, unconditional cost |
+| `i` | The iteration at which the critic actually approves, when wiring works |
+| `i x A` | Actual calls paid — the whole point of the early exit |
+
+**Walk one example.** The same loop with a working critic and a broken one:
+
+```
+  escalate never set (the §6.4 BROKEN wiring)
+    calls  =  I x A  =  5 x 2   =  10 LLM calls     <- every run, always
+
+  escalate set on iteration 2 (critic wired to a tool)
+    calls  =  i x A  =  2 x 2   =   4 LLM calls
+    saved  =  10 - 4            =   6 calls         =  60%
+
+  cost at $0.004 per gemini-2.5-flash call
+    broken   10 x $0.004        =  $0.040 / run
+    working   4 x $0.004        =  $0.016 / run
+```
+
+The 60% is the whole argument for wiring the critic to a tool that sets
+`actions.escalate`. Note the failure mode is silent: a broken loop produces *correct
+output* — it just produced it on iteration 2 and then paid for three more rounds of
+polishing nobody read. Nothing errors, nothing looks wrong in the response, and the only
+visible symptom is the bill.
+
+**Why `max_iterations` still has to exist once escalate works.** `escalate` is set by an
+LLM's judgment, and a miscalibrated critic ("approve only if perfect") may never fire it.
+`max_iterations` is the term that converts an unbounded spend into a known one: without it,
+`I` is infinity and the product above has no upper bound at all. Early exit optimizes the
+common case; the hard bound is what makes the worst case survivable.
+
 ### 5.3 Session / State / Memory / Artifact Services
 
 ```
@@ -452,6 +489,38 @@ refine_loop_fixed = LoopAgent(
 # Measured on a product-description workload: 78% of requests approved
 # on iteration 1 -- average calls per request dropped from 10.0 to 3.8.
 ```
+
+**The idea behind it.** "Once early exit works, your cost is no longer the loop's bound — it is a weighted average of the easy path and the hard path, and the easy path's share is what you are really tuning."
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Fraction approved on iteration 1 — 0.78 on this workload |
+| `c_fast` | Calls for an approved-first-draft request: 1 generator + 1 critic = 2 |
+| `c_slow` | Calls for a request that runs to `max_iterations`: 5 x 2 = 10 |
+| `E[c]` | Expected calls per request = `p x c_fast + (1 - p) x c_slow` |
+
+**Walk one example.** The measured 78% approval rate, pushed through:
+
+```
+  E[c]  =  p x c_fast   +   (1 - p) x c_slow
+        =  0.78 x 2     +   0.22 x 10
+        =  1.56         +   2.20
+        =  3.76 calls               ->  the comment's "3.8"
+
+  versus the unconditional loop      =  10.0 calls
+  reduction  (10.0 - 3.76) / 10.0    =  62%
+```
+
+The lesson hiding in that weighted sum: the 22% minority contributes **more** total calls
+(2.20) than the 78% majority (1.56). Tail requests dominate agent cost. Chasing the
+approval rate from 78% to 85% saves only 0.56 calls (3.76 down to 3.20), whereas dropping
+`max_iterations` from 5 to 3 cuts `c_slow` from 10 to 6 and pulls `E[c]` down to 2.88 — a
+larger win from a one-line change.
+
+**Why you cannot read the average off the bound.** The tempting shortcut is "max is 10, most
+finish early, so call it 5." That is wrong in both directions depending on `p`, and the
+error is worst exactly where it matters: at `p = 0.5`, `E[c]` is 6.0, not 5. Always compute
+the weighted sum with a measured `p` rather than assuming the midpoint.
 
 ---
 

@@ -428,6 +428,40 @@ Without `max_consecutive_auto_reply` and `is_termination_msg`, agents can loop u
 **Pitfall 3: Context window exhaustion in long conversations**
 Each message is appended to history. After 20 rounds of 500-token messages: 10K tokens of history in every LLM call. After 50 rounds: 25K tokens. With GPT-4o's 128K context: potentially unlimited, but costs grow linearly. Set `max_turns` or `max_consecutive_auto_reply` to cap this. For long-running automation: summarize conversation history at checkpoints.
 
+**What this actually says.** "History size grows linearly with rounds, but the money you spend on it grows quadratically, because every round re-sends every earlier round."
+
+That distinction is the one the sentence above glosses. "Costs grow linearly" is true of the cost *of round `r`*; it is not true of the conversation total, which is a sum of a growing series.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | Rounds completed so far |
+| `t` | Tokens per message, 500 here |
+| `r x t` | History resent as input on the next call — linear in `r` |
+| `sum r x t` | Tokens paid across the whole conversation, roughly `t x r^2 / 2` |
+| `max_consecutive_auto_reply` | The cap that bounds `r`, and therefore bounds the square |
+
+**Walk one example.** Per-call history against cumulative spend, at GPT-4o's $5/M input:
+
+```
+  rounds r    history r x 500    cost of that call    cumulative history cost
+     10           5,000 tok         $0.025                 $0.14
+     20          10,000 tok         $0.050                 $0.53
+     50          25,000 tok         $0.125                 $3.19
+
+  ratio 50 rounds vs 20 rounds
+    per-call    0.125 / 0.050   =  2.5x     (linear, as the text says)
+    cumulative  3.19  / 0.53    =  6.0x     (quadratic, what you are billed)
+```
+
+Going from 20 rounds to 50 is 2.5× the messages but 6× the money. This is why
+`max_consecutive_auto_reply=10` is a cost control and not merely a safety rail: halving the
+cap cuts total spend roughly fourfold, not twofold.
+
+**Why the 128K context window is a trap here.** A large window removes the *error* that
+would otherwise stop a runaway conversation, so nothing fails — the loop just keeps going
+and the invoice keeps squaring. Before long context windows, context exhaustion was a crude
+but effective circuit breaker. Now the only circuit breaker is the one you configure.
+
 **Pitfall 4: Trusting LLM-generated TERMINATE signals**
 If the LLM is instructed to say "TERMINATE when done" but hallucinations trigger the word early, the conversation stops prematurely with an incomplete solution. Make termination signals unique and unambiguous: `"TASK_SUCCESSFULLY_COMPLETED"` is harder to accidentally trigger than `"TERMINATE"`.
 
@@ -628,3 +662,38 @@ print(result)
 | Cost per analysis | ~$80 (labor) | $0.45 (GPT-4o API) |
 
 Key finding: 73% of code generations have at least one error (import errors, SQL syntax, pandas version issues), but AutoGen's execute-and-feedback loop self-corrects 87% of these automatically within 3 turns.
+
+**The idea behind it.** "First-attempt accuracy is nearly irrelevant when the agent can run its own code — what matters is the product of the failure rate and the share of failures the loop cannot repair."
+
+| Symbol | What it is |
+|--------|------------|
+| `f` | Fraction of generations with at least one error on the first run, 0.73 |
+| `c` | Fraction of those errors the execute-and-feedback loop repairs, 0.87 |
+| `f x (1 - c)` | Residual failure rate — errors that survive the loop and reach a human |
+| `1 - f x (1 - c)` | Effective success rate the analyst experiences |
+
+**Walk one example.** Follow 100 generated scripts through the loop:
+
+```
+  100 scripts generated
+    clean on first run      100 x (1 - 0.73)          =  27
+    errored on first run    100 x 0.73                =  73
+
+  of the 73 that errored
+    self-corrected within 3 turns   73 x 0.87         =  63.5
+    still broken after the loop     73 x 0.13         =   9.5
+
+  effective success   27 + 63.5                       =  90.5 per 100
+  residual failure    f x (1 - c) = 0.73 x 0.13       =   9.5%
+```
+
+The table's 94% completion sits a little above this 90.5%, because some of the remaining
+9.5 recover on turns beyond the third rather than stopping dead. Either way the headline
+holds: a 73% first-run error rate — which sounds like an unusable system — becomes a ~90%
+success rate purely because the agent can execute and read its own traceback.
+
+**Why `1 - c` is the term to attack.** Improving the model so `f` drops from 0.73 to 0.60
+moves residual failure from 9.5% to 7.8%. Improving the feedback loop so `c` rises from 0.87
+to 0.95 moves it to 3.7% — better than twice the gain, from tooling rather than a model
+upgrade. Whenever a loop can retry, invest in the quality of the error signal it retries on
+before you invest in the generator.

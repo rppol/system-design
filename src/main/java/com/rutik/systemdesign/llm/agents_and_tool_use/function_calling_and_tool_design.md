@@ -166,6 +166,37 @@ Parallel (independent calls):
   Speedup: N× for N independent calls
 ```
 
+#### Decoding the sequential vs parallel latency
+
+```
+T_sequential = T1 + T2 + ... + TN
+T_parallel   = max(T1, T2, ..., TN)
+speedup      = T_sequential / T_parallel
+```
+
+**In plain terms.** "Waiting in a queue costs you the sum of everyone's time; waiting in parallel costs you only the slowest one."
+
+The `N×` speedup claimed above is the best case — it holds exactly when every call takes the same time. Skewed durations drag the real speedup back towards 1, because `max` is set entirely by the single slowest tool.
+
+| Symbol | What it is |
+|--------|------------|
+| `Ti` | Wall-clock duration of tool call `i` |
+| `sum` | Sequential total. Every call waits for the one before it to finish |
+| `max` | Parallel total. All calls start at once; you wait only for the laggard |
+| `speedup` | How many times faster parallel is. Never above `N`, never below 1 |
+| dependency | Whether call 2 needs call 1's output. If yes, `max` is unavailable at any price |
+
+**Walk one example.** The two cases above, plus a realistically skewed third:
+
+```
+                        durations              sequential   parallel   speedup
+  equal, 2 calls        1.0s, 1.0s                2.0s        1.0s      2.0x
+  equal, 4 calls        1.0s x 4                  4.0s        1.0s      4.0x
+  skewed, 4 calls       0.1, 0.1, 0.1, 3.0s       3.3s        3.0s      1.1x
+```
+
+The skewed row is the production case: one slow database tool alongside three fast cache reads yields almost no parallel win at all. Measure per-tool latency before promising `N×` — the payoff lives entirely in how uniform your tools are, and optimising the slowest tool beats parallelising the rest.
+
 ### tool_choice Parameter
 
 ```python
@@ -397,6 +428,37 @@ extract_tool = {
 | tool_choice="required" | ~same | High | Lower | Forcing output format |
 | No tools (prose) | Fastest | Low (hallucination risk) | Highest | Conversational responses |
 
+### Decoding the O(N) / O(max) latency column
+
+```
+O(N)   = cost grows once more for every additional call
+O(max) = cost is set by the single largest term; extra calls are free
+```
+
+**What this actually says.** "`O(N)` means the tenth tool call costs you as much as the first; `O(max)` means it costs you nothing unless it happens to be the slowest."
+
+| Symbol | What it is |
+|--------|------------|
+| `O(...)` | Big-O: how a quantity grows as `N` grows, ignoring constant factors |
+| `N` | Number of tool calls issued in one turn |
+| `O(N)` | Linear. Doubling the calls doubles the latency |
+| `O(max)` | Constant in `N`. Adding one more fast call changes the total by nothing |
+| "~same" | The other rows change decoding behaviour, not the number of calls |
+
+**Walk one example.** The same tool at 800ms, called `N` times, priced both ways:
+
+```
+   N calls        O(N) latency          O(max) latency
+     1              800 ms                 800 ms
+     2            1,600 ms                 800 ms
+     4            3,200 ms                 800 ms
+     8            6,400 ms                 800 ms
+
+   at N = 8 the gap is 6,400 - 800 = 5,600 ms of pure waiting
+```
+
+This is why "parallelize independent calls" is named the primary latency optimisation in Best Practices below: of everything in this table, it is the only change that alters the growth *class* rather than shaving the constant.
+
 | Tool Output Format | Parseability | Token Efficiency | Model Comprehension |
 |--------------------|-------------|-----------------|---------------------|
 | Raw JSON | High | Low (verbose) | Medium |
@@ -446,6 +508,39 @@ messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 ```
 
 6. **Overlapping tool responsibilities**: Two tools that do similar things confuse the model on which to pick. Ensure each tool has a unique, non-overlapping responsibility described explicitly in its description.
+
+### Decoding the context-bloat number in Pitfall 3
+
+```
+tokens_per_result = bytes / 4                    ~4 bytes per token for English JSON
+total_input       = sum over steps i of (i x tokens_per_result)
+                  = tokens_per_result x N x (N + 1) / 2
+```
+
+**Read it like this.** "Tool results do not cost you once — every later step re-sends every earlier result, so the bill grows with the square of the step count, not linearly."
+
+Nothing is removed from the message list between steps. Step 1 sends one result, step 2 re-sends result 1 plus result 2, step 3 re-sends all three. That is the triangular number `N(N+1)/2`, not `N`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of agent steps. 10 in the pitfall above |
+| `tokens_per_result` | One tool result converted to tokens. 10KB / 4 = 2,560 |
+| `N x (N+1) / 2` | Triangular number: total result payloads billed across all N calls |
+| `price_per_token` | $0.000005 for GPT-4o input, i.e. $5 per 1M tokens |
+
+**Walk one example.** Ten agent steps, 10KB of JSON per tool result:
+
+```
+  tokens_per_result = 10 x 1024 / 4 = 2,560 tokens
+
+  naive reading ("100KB of context"):   10 x 2,560 =  25,600 tokens -> $0.128
+  what you are actually billed:       2,560 x 10 x 11 / 2
+                                    = 2,560 x 55    = 140,800 tokens -> $0.704
+
+  ratio = 0.704 / 0.128 = 5.5x more than the context figure alone suggests
+```
+
+The "$0.50+ per run" quoted in the pitfall only makes sense on the accumulating total — the end-state context size understates the cost by 5.5x. This is also why the fix is truncation rather than a bigger context window: cutting each result to a 500-word equivalent (~670 tokens) brings the same ten-step run to `670 x 55 = 36,850` tokens, or $0.184.
 
 ---
 
@@ -673,6 +768,62 @@ async def execute_tools(tool_calls: list) -> list:
 - Booking error rate: 0.02% (eliminated wrong-tool booking via description disambiguation)
 - Average session latency: 3.1s per round (parallel search saves ~3s vs sequential)
 - User approval rate for booking: 84% (16% cancel after seeing confirmation details)
+
+### Decoding the 97.3% tool selection accuracy
+
+```
+P(session correct) = p ^ C            p = per-call accuracy, C = calls per session
+expected_bad       = sessions x (1 - p ^ C)
+```
+
+**Put simply.** "A per-call accuracy is not a per-session accuracy. Raise it to the power of the number of calls and the number gets a lot worse."
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Per-call tool selection accuracy, 0.973 here |
+| `C` | Tool calls in one session. 8–12 per the problem statement |
+| `p ^ C` | Probability every single call in the session was right |
+| `1 - p ^ C` | Probability at least one call in the session was wrong |
+
+**Walk one example.** The stated 8–12 calls per session, at p = 0.973:
+
+```
+   C =  8     0.973^8  = 0.8033   ->  19.7% of sessions contain a wrong call
+   C = 10     0.973^10 = 0.7606   ->  23.9%
+   C = 12     0.973^12 = 0.7200   ->  28.0%
+
+   at 50,000 daily sessions and C = 10:
+   50,000 x (1 - 0.7606) = 11,970 sessions/day touched by a selection error
+```
+
+A headline 97.3% quietly becomes "roughly one session in four goes wrong somewhere." That is precisely why the design separates read tools from write tools: almost all of those errors land on a harmless read-only search and self-correct on the next turn, and the approval gate catches the rare one that lands on `confirm_flight`.
+
+### Decoding the 0.02% booking error rate
+
+```
+bad_bookings = booking_attempts x error_rate
+executed     = booking_attempts x approval_rate
+```
+
+**Stated plainly.** "A rate this small only means something once you multiply it by daily volume — and for an irreversible action, that product is the only number that matters."
+
+| Symbol | What it is |
+|--------|------------|
+| `error_rate` | 0.02% = 0.0002. Wrong-tool bookings per booking attempt |
+| `approval_rate` | 84%. Share of proposed bookings the user actually confirms |
+| `1 - approval_rate` | 16% cancel after reading the confirmation. The gate doing its job |
+| `booking_attempts` | Not every session books, so scale total sessions by the booking share |
+
+**Walk one example.** Assume one session in ten of the 50,000 daily sessions reaches a booking step:
+
+```
+  booking attempts   = 50,000 x 0.10    = 5,000 per day
+  executed           =  5,000 x 0.84    = 4,200 bookings
+  cancelled at gate  =  5,000 x 0.16    =   800 stopped by the user
+  wrong bookings     =  5,000 x 0.0002  =     1 per day
+```
+
+The gate's real value is not the 1 model error it blocks but the 800 human changes of mind it catches — ordinary cancellations outnumber model mistakes by 800 to 1 here. That asymmetry is what justifies the 200ms HITL overhead discussed next.
 
 **Tradeoffs and Alternatives**:
 

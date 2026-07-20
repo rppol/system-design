@@ -564,6 +564,49 @@ Tools per agent vary:
 - Cost per ticket: $0.012 average (mostly triage agent + one specialist call)
 - L1 staffing reduced 40%; remaining L1 focused on complex tickets that escalated
 
+**Read it like this.** "Two independent percentages decide this system's value — how often triage sends a ticket to the right specialist, and how often that specialist can finish without a human — and they compose multiplicatively."
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Ticket volume per day, 800-1200 |
+| `m` | Misrouting rate — tickets handed to the wrong specialist, 0.22 then 0.04 |
+| `1 - m` | Correctly routed share |
+| `a` | Auto-resolution rate among handled tickets, 0.47 |
+| `(1 - m) x a` | Tickets that are both correctly routed and closed without a human |
+
+**Walk one example.** Take the midpoint volume of 1000 tickets/day:
+
+```
+  before the guardrail   m = 0.22
+    correctly routed   1000 x 0.78              =  780
+    misrouted          1000 x 0.22              =  220   <- each needs re-triage
+
+  after the guardrail    m = 0.04
+    correctly routed   1000 x 0.96              =  960
+    misrouted          1000 x 0.04              =   40
+    misroutes avoided                           =  180 / day
+    relative reduction (22 - 4) / 22            =  82%
+
+  end-to-end auto-resolution
+    (1 - m) x a  =  0.96 x 0.47                 =  45.1%  of all tickets
+    reaching a human                            =  54.9%
+
+  cost
+    1000 x $0.012                               =  $12 / day
+    per misroute avoided   $12 / 180            =  $0.067
+```
+
+The whole day of LLM inference costs $12 — less than a single hour of L1 time — while
+removing 180 misroutes. That asymmetry is why the lessons call the output guardrail the
+highest-ROI feature: it is the cheapest component and it multiplies the value of every
+component downstream of it.
+
+**Why the two rates multiply rather than add.** A ticket must clear both gates: routed
+correctly *and* resolvable by the specialist. Improving auto-resolution from 47% to 60%
+while leaving `m` at 0.22 yields `0.78 x 0.60 = 46.8%` — barely better than fixing routing
+alone achieved. Whenever stages compose in series, the weakest multiplier caps the whole
+chain, and routing was the weak one here.
+
 **Lessons learned**:
 1. The output guardrail catching misroutes was the highest-ROI feature — prevented broken handoffs before they hit the user.
 2. Handoff instructions matter more than agent instructions — ambiguous descriptions cause routing failures.

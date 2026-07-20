@@ -129,6 +129,31 @@ Resource limits applied to every sandbox tier:
 | Disk quota | 1–10GB (no disk exhaustion) |
 | Network ACL | allowlist-only or blocked |
 
+**Read it like this.** "These six rows are one statement: whatever the generated code turns out to be, here is the largest amount of damage it is arithmetically capable of doing before something kills it."
+
+A sandbox is not a prediction that code will behave. It is a *bound* on misbehaviour, and every row is a different unit that bound is denominated in — seconds, bytes, RAM, cores, disk, hosts. Anything not on this list is unbounded, which is why the missing sixth row on a home-grown sandbox is always the one that pages you.
+
+| Symbol | What it is |
+|--------|------------|
+| Timeout cap | Wall-clock ceiling, `15-300s`. Bounds infinite loops and the bill |
+| Output limit | `50KB` of stdout. Bounds how many tokens the result can inject downstream |
+| Memory limit | `512MB-8GB`. Bounds allocation bombs; the kernel OOM-kills past it |
+| CPU limit | `1-4 vCPU`. Bounds how much of a shared host one tenant can seize |
+| Disk quota | `1-10GB`. Bounds fork-and-write exhaustion of the node |
+| Network ACL | The only row that bounds *exfiltration* rather than *consumption* |
+
+**Walk one example.** Take the timeout row and price it at E2B's `$0.10/hour`, which is `$2.78e-5` per second:
+
+```
+  timeout   worst-case cost   cost across 1M hung runs
+    15s        $0.000417            $   417
+    30s        $0.000833            $   833
+    60s        $0.001667            $ 1,667
+   300s        $0.008333            $ 8,333
+```
+
+Choosing `300s` over `15s` because "some analyses are slow" is a 20× multiplier on your worst case — `$8,333` versus `$417` at a million hung runs. The right move is not one global timeout but a per-task-class one, because the ceiling is paid by every runaway regardless of how rare the slow legitimate task is. Note also that the first five rows only bound *resource* damage; a sandbox with perfect limits on all five and an open Network ACL still leaks every secret it can see, which is exactly the failure in the war story in Section 9.
+
 ---
 
 ## 5. How It Works — Detailed Mechanics
@@ -184,6 +209,29 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+**What this actually says.** The two timeouts in that snippet — `AsyncSandbox(timeout=60)` and `run_code(timeout=30)` — are not a duplicate. Together they say: "any one piece of code gets 30 seconds, and the box it runs in stops existing after 60 seconds no matter how many pieces you feed it."
+
+| Symbol | What it is |
+|--------|------------|
+| `AsyncSandbox(timeout=60)` | Lifetime of the VM itself. Billing clock and hard destroy |
+| `run_code(timeout=30)` | Per-execution ceiling. Kills one call, leaves the sandbox alive |
+| `async with` | The destroy guarantee — the VM dies on exit even if the body raises |
+| `execution.error` | Stderr handed back to the agent so it can self-correct and retry |
+| `[:50_000]` | The output cap from the table above, enforced at the call site |
+| `k` | How many `run_code` calls fit inside one sandbox lifetime |
+
+**Walk one example.** Bound the worst case for one `execute_agent_code` call at E2B's `$2.78e-5` per second:
+
+```
+  k = floor(60 / 30)      =  2 executions max inside one sandbox
+  sandbox lifetime cost   =  60s x $2.78e-5  =  $0.001667   (hard ceiling)
+  a single 30s execution  =  30s x $2.78e-5  =  $0.000833
+
+  1M agent calls, all hitting the ceiling    =  $1,667
+```
+
+The per-execution timeout is what makes the retry loop work: a `30s` kill returns a real error string the agent can reason about, whereas hitting the `60s` sandbox timeout destroys the VM and loses the session filesystem with it. Set them equal and you get only one attempt per sandbox and pay a fresh `500ms` cold start for every retry. The `2:1` ratio here buys exactly one retry inside a warm box — a deliberate choice, not a default.
 
 ### Riza: WebAssembly Execution (No Network)
 
@@ -307,6 +355,31 @@ with app.run():
 | Operational overhead | None | None (SaaS) | None (SaaS) | Low | High |
 | Self-hostable | Yes | No | No | No | Yes |
 
+**Put simply.** The Cost row is unreadable as printed because the units disagree — `$0.10/hr` against `$0.0002-0.002/s` against `$0.0001/s`. Converted to one unit, the row says: "per second of sandbox uptime, E2B is the cheap one and a Modal GPU container is 72× more expensive."
+
+| Symbol | What it is |
+|--------|------------|
+| `$0.10/hr` | E2B, billed per second. Divide by 3600 to compare: `$2.78e-5` per second |
+| `$0.0002/s` | Modal CPU container — the low end of its range |
+| `$0.002/s` | Modal with a GPU attached — the high end, and why the range is 10× wide |
+| `$0.0001/s` | Fly.io Machines, per second |
+| cold start | Latency you pay per invocation but, for billed-per-second providers, also *bill* for |
+| `T` | Total billed seconds: `cold_start + execution_time` |
+
+**Walk one example.** One 30-second execution, adding each provider's own cold start:
+
+```
+  provider        T (billed)     cost per run     per 1M runs
+  E2B             30.0 + 0.5s      $0.000833        $   833
+  Fly.io          30.0 + 2.0s      $0.003200        $ 3,200
+  Modal (CPU)     30.0 + 0.3s      $0.006060        $ 6,060
+  Modal (GPU)     30.0 + 0.3s      $0.060600        $60,600
+
+  Modal GPU / E2B  =  72.7x
+```
+
+Two things this makes visible that the table hides. First, cold start is a *cost* line, not only a latency line, on per-second billing — Fly.io's `2s` start adds `$0.0002` to every run before any code executes, which is 24% of an E2B run's entire price. Second, the `$0.0002-0.002/s` range for Modal is not a pricing band to average; it is the CPU-versus-GPU switch, and picking `gpu="A10G"` when the task is `pandas` work multiplies the bill by 10 for zero benefit. Match the tier to the workload before optimizing anything else in this table.
+
 ---
 
 ## 8. When to Use / When NOT to Use
@@ -379,6 +452,30 @@ result = output.text
 if len(result) > 50_000:
     result = result[:50_000] + f"\n[Truncated: {len(output.text)} chars total]"
 ```
+
+**The idea behind it.** The `[:50_000]` slice says: "sandbox output is not text, it is *tokens you will be billed for on every remaining turn* — so cap it at the source, before it ever becomes context."
+
+| Symbol | What it is |
+|--------|------------|
+| chars | Bytes of stdout the sandbox produced. `10_000_000` in the broken case |
+| `chars / 4` | Rough chars-per-token for English and code — the conversion that makes it money |
+| `50_000` | The cap, in characters, from the resource-limit table above |
+| `$3.00/M` | Sonnet input price per million tokens |
+| 200K | Sonnet's context window, for comparison against the token count |
+| `[Truncated: N chars total]` | Tells the agent output was cut, so it narrows the query instead of retrying |
+
+**Walk one example.** Price `print('x' * 10_000_000)` against the same run with the cap in place:
+
+```
+  uncapped   10,000,000 chars  ->  2,500,000 tok  ->  $7.50 at $3.00/M
+  capped         50,000 chars  ->     12,500 tok  ->  $0.0375
+
+  ratio                            200x fewer tokens, 200x cheaper
+
+  2,500,000 tok / 200,000 window   =  12.5x   -> the call cannot even be made
+```
+
+The comment in the broken snippet says `$5 wasted`, which brackets correctly — `$5.00` at a `$2.00/M` input rate, `$7.50` at Sonnet's `$3.00/M`. But the money is the smaller problem: at `12.5×` the context window the request fails outright, and on a model with a large enough window it would succeed and then re-send those 2.5M tokens on every subsequent turn of the loop. That is the compounding failure — one unbounded `print` poisons the entire remaining agent run, not just the call that produced it.
 
 ### Pitfall 3: Secrets in sandbox environment
 

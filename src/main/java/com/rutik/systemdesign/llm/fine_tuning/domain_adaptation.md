@@ -86,6 +86,34 @@ Why CPT uses higher LR than SFT:
   SFT adjusts behavioral patterns with minimal knowledge changes
 ```
 
+**What it means.** "CPT is just pre-training again, on a narrower diet — no masking, no instructions, every single token graded."
+
+That one line in the code, `# No label masking — predict ALL tokens`, is the whole difference from SFT. It is also what makes CPT's progress measurable in a way SFT's is not: because the loss covers every token, `exp(loss)` is a directly interpretable perplexity on the domain corpus.
+
+| Symbol | What it is |
+|--------|------------|
+| `labels = input_ids.copy()` | Every position is graded; no `-100` anywhere, unlike SFT |
+| `block_size=2048` | Documents are concatenated and sliced into fixed 2048-token blocks |
+| CLM loss | Mean negative log-likelihood per token, in nats, over the whole block |
+| `exp(loss)` | Perplexity — the model's effective number of equally-likely next tokens |
+| `1e-4` | CPT learning rate: above SFT's `1e-5`, below pre-training's `3e-4` |
+| effective batch | `per_device 4 × grad_accum 16 = 64` sequences per update |
+
+**Walk one example.** Illustrative CLM losses on a held-out slice of the domain corpus, converted to perplexity:
+
+```
+  checkpoint              loss (nats/token)     perplexity = exp(loss)
+  base model, pre-CPT           2.8              exp(2.8) = 16.44
+  after CPT                     2.1              exp(2.1) =  8.17
+
+  loss delta   2.8 - 2.1 = 0.7 nats
+  ppl ratio    16.44 / 8.17 = exp(0.7) = 2.01     ->  perplexity halved
+```
+
+Perplexity is the more honest number to report because it is a *count*, not an abstract score: 16.44 means the model was effectively choosing among 16 plausible next tokens; 8.17 means 8. Note the leverage — a loss drop that looks small, 0.7 nats, is a 2.01× perplexity improvement, because the relationship is exponential. A 0.1-nat improvement is already `exp(0.1) = 1.105`, or 10.5%. Read CPT loss curves with that exponent in mind or you will badly under-read your own progress.
+
+**Why the learning rate sits in the middle.** Initial pre-training starts from noise, so large steps are safe and necessary. SFT starts from a model that is already right and only needs its behaviour nudged, so steps must be tiny. CPT starts from a model that is right about English and wrong about the domain — it needs to move representations substantially without destroying them. `5e-5` to `1e-4` is that compromise, and the case study's forgetting incident is what happens at the aggressive end of it.
+
 ### 3.2 Data Mixing Strategy
 
 Pure domain corpus fine-tuning without mixing causes catastrophic forgetting:
@@ -133,6 +161,56 @@ where the gain finally drops off. 20% is the knee (Pareto-optimal): near-minimal
 forgetting (-2.1%) while keeping almost the full domain improvement (+16.2%).
 Below 10%, forgetting is unacceptable.
 
+**In plain terms.** "Keep feeding the model a steady trickle of the old world while you teach it the new one — otherwise it overwrites what it already knew."
+
+`probabilities=[0.85, 0.15]` is a sampling rule, not a split: at every step the loader draws from the general corpus 15% of the time. The general gradient arrives *continuously*, mixed into every batch, which is why it works and why a separate general-data phase afterward does not.
+
+| Symbol | What it is |
+|--------|------------|
+| `interleave_datasets` | Sampler that draws from multiple corpora per example, not per phase |
+| `probabilities=[0.85, 0.15]` | Per-draw sampling odds — domain 85%, general 15% |
+| general mix % | Share of the total CPT token budget spent on non-domain text |
+| MMLU regression | Absolute percentage-point drop in general knowledge vs the base model |
+| LegalBench F1 gain | Absolute percentage-point domain improvement vs the base model |
+| `seed=42` | Fixes the interleaving order so the run is reproducible |
+
+**Walk one example.** The Section 12 case study's 500B-token budget, redistributed at each mix ratio:
+
+```
+  corpus                                          tokens
+  SEC EDGAR contracts                              180B
+  Court opinions                                   120B
+  Legal textbooks and treatises                     80B
+  Bar exam prep materials                           20B
+                                                  -----
+  domain subtotal                                  400B
+  General mix (The Pile subset)                    100B
+                                                  -----
+  total CPT corpus                                 500B      100/500 = 20% general
+
+  holding the 500B budget fixed, each candidate ratio buys:
+    5%  ->   25B general,  475B domain
+   10%  ->   50B general,  450B domain
+   15%  ->   75B general,  425B domain      <- the "75B" the case study cites
+   20%  ->  100B general,  400B domain      <- selected
+   30%  ->  150B general,  350B domain
+```
+
+**Now price each step of the ablation as a trade.** Every extra 5% of general data buys back some forgetting and costs some domain gain. Divide the two and the knee stops being a judgement call:
+
+```
+  step        forgetting saved   domain gain given up   points bought per point spent
+  ------------------------------------------------------------------------------------
+   5% -> 10%       2.7 pts              1.2 pts                  2.25     good trade
+  10% -> 15%       1.1 pts              0.3 pts                  3.67     good trade
+  15% -> 20%       2.2 pts              0.6 pts                  3.67     good trade
+  20% -> 30%       1.2 pts              2.5 pts                  0.48     BAD trade
+```
+
+The ratio stays comfortably above 1.0 for every step up to 20%, then collapses to 0.48 — the first move where you pay more domain quality than you recover general quality. That sign change *is* the Pareto knee the chart describes, and it is why 20% was selected rather than 15% or 30%. Note that the ratio is flat at 3.67 across two consecutive steps, which is the signature of being on a plateau rather than at an optimum: 15% and 20% are both defensible, and the case study chose the safer end.
+
+**Why even 5% general data changes the outcome.** Gradient direction is set by what is in the batch. At 100% domain, every update points the same way and nothing ever pulls back toward general competence; drift compounds unopposed across tens of thousands of steps. At 5%, roughly one example in twenty pushes back — small, but it converts unopposed drift into an equilibrium. That is why the jump from 0% to 5% matters far more than the jump from 15% to 20%, and why the section calls mixing the single most effective mitigation.
+
 ### 3.3 The Domain-Then-Instruct Pipeline
 
 The most effective domain adaptation approach:
@@ -171,6 +249,52 @@ Why this ordering?
   If instruction-only: model doesn't know domain facts, even if it wants to express them
   If CPT-only: model knows domain facts but expresses them like training text (not user-friendly)
 ```
+
+**The idea behind it.** "Pick your token budget from arithmetic, not ambition — training compute is `6 × params × tokens`, and that number decides your GPU bill before you launch anything."
+
+The `1B-100B tokens` range above spans a hundredfold difference in cost. Two standard ratios turn that range into a decision: tokens-per-parameter tells you whether the budget is sane, and `6ND` tells you what it costs.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Model parameter count — 8e9 for LLaMA-3-8B |
+| `D` | Training tokens consumed |
+| `6ND` | Total training FLOPs: ~2 per forward MAC, ~4 per backward, per parameter per token |
+| `D/N` | Tokens per parameter — Chinchilla's compute-optimal point is about 20 |
+| MFU | Model FLOPs utilization: fraction of peak the run actually achieves, typically 35-50% |
+| A100 peak | 312 TFLOPS BF16 with sparsity off |
+
+**Walk one example.** The Section 12 CPT ablation (50B, 100B, 200B, 500B tokens on an 8B model), scored on both ratios and against its own reported F1 gains:
+
+```
+  tokens D    D/N tok/param    6ND FLOPs     LegalBench F1 gain   marginal gain
+  ---------------------------------------------------------------------------
+     50B          6.2          2.4e21             +9 pts             --
+    100B         12.5          4.8e21            +13 pts           +4 pts
+    200B         25.0          9.6e21            +15 pts           +2 pts
+    500B         62.5          2.4e22            +16 pts           +1 pt
+
+  Chinchilla compute-optimal for N=8e9:  20 x 8e9  =  160B tokens
+```
+
+The elbow lands at 200B, which is `25` tokens per parameter — essentially Chinchilla's `20`. That is not a coincidence: past the compute-optimal point, extra tokens buy progressively less because the model's capacity, not the data, has become the binding constraint. Pushing to 500B costs `2.5×` the FLOPs of 200B for **one** additional F1 point, exactly the "in retrospect, 200B would have achieved nearly equivalent results at 40% of the compute cost" the case study concludes. Priced out: `$18,000 × 0.4 = $7,200`, so that final point cost `$10,800`.
+
+**Sanity-check any stated wall clock against `6ND` before you trust it.** The same run's hardware line reads 64× A100 for ~4 days:
+
+```
+  GPU-hours available   64 x 4 x 24                        =     6,144
+  cost implied          $18,000 / 6,144                    =  $2.93 per GPU-hour   (plausible)
+
+  FLOPs available at 40% MFU
+    6,144 x 3600 s x 3.12e14 x 0.40                        =  2.76e21 FLOPs
+  FLOPs required for D = 500B
+    6 x 8e9 x 500e9                                        =  2.40e22 FLOPs
+
+  shortfall  2.40e22 / 2.76e21  =  8.7x
+  tokens that 4 days on 64 A100 actually buys at 40% MFU  =  2.76e21 / (6 x 8e9)  =  57.5B
+  days needed for the full 500B at 40% MFU                =  34.8 days
+```
+
+To consume 500B tokens in 6,144 GPU-hours would require 348% of an A100's peak throughput, which is not a thing. The lesson is the method, not the discrepancy: `6ND ÷ (GPUs × peak × MFU)` gives your wall clock in one line, and running it *before* provisioning is the difference between a 4-day plan and a 35-day invoice. Assume 40% MFU unless you have measured your own.
 
 ### 3.4 Catastrophic Forgetting Mitigation
 
@@ -211,6 +335,64 @@ Mitigation strategies (use in combination):
    Stop training or reduce LR if general capability degrades >5%
 ```
 
+**What the formula is telling you.** "Forgetting is not a feeling, it is a subtraction — the same benchmark, before and after, and the gap is the number you govern the run with."
+
+Every mitigation above is judged by one arithmetic: `regression = score_after - score_before` on a benchmark the domain training never touches. Fix the benchmark and the split before training starts, or the comparison means nothing.
+
+| Symbol | What it is |
+|--------|------------|
+| MMLU | General-knowledge benchmark; the primary forgetting tripwire |
+| HumanEval | Code benchmark; degrades first and fastest during non-code CPT |
+| regression | `after - before`, in absolute percentage points, always negative when forgetting |
+| alert threshold | Pre-committed limit that halts the run — 4% MMLU, 8% HumanEval here |
+| acceptance threshold | Pre-committed ship/no-ship limit — 5% MMLU, 8% HumanEval |
+| checkpoint interval | 1,000 gradient steps, so a bad trend is caught within one interval |
+
+**Walk one example.** The case study's forgetting incident and recovery, read as deltas against the fixed base-model baseline:
+
+```
+  step        MMLU regression    event
+  --------------------------------------------------------------------
+  0                0.0           base model baseline, frozen reference
+  7,000           -5.2           ALERT: exceeds the -4.0 threshold
+                                 -> training paused, LR 8e-5 -> 4e-5 (2x cut)
+  10,000          -2.8           recovered 2.4 pts over 3,000 steps
+  end of CPT      -2.1           within the -5.0 acceptance threshold
+  after SFT       -2.4           LoRA phase added only 0.3 pts more
+
+  HumanEval:  after CPT -3.8   ->  after SFT -4.1   (also +0.3 from SFT)
+
+  final budget consumed
+    MMLU        2.4 / 5.0  =  48.0% of the allowed regression
+    HumanEval   4.1 / 8.0  =  51.2% of the allowed regression
+```
+
+Three things fall out of that table. **Forgetting is reversible while training continues** — halving the LR recovered 2.4 points, so an alert is a steering signal, not a write-off. **The SFT phase contributed almost nothing to forgetting**, 0.3 points on each benchmark, because it ran under LoRA with frozen base weights; essentially all the damage came from full-weight CPT, which is exactly the split the section's mitigation list predicts. And **detection cadence is what made the save possible**: at 1,000-step checkpoints the alert fired at step 7,000; evaluating only at the end would have surfaced it after four days of GPU time.
+
+**On EWC.** The section names Elastic Weight Consolidation and its Fisher information matrix without writing the rule out; stated plainly, it is "charge the model rent for moving weights that mattered before, and let the unimportant ones move free." Each parameter gets an importance score `F_i` from the Fisher information, and the loss gains a penalty proportional to `F_i × (drift)²`:
+
+```
+  penalty contribution for one weight, drift = 0.1, lambda = 1
+
+    F = 100.00   ->  0.5 x 100.00 x 0.1^2  =  0.50000    heavily anchored
+    F =   1.00   ->  0.5 x   1.00 x 0.1^2  =  0.00500    mildly anchored
+    F =   0.01   ->  0.5 x   0.01 x 0.1^2  =  0.00005    effectively free
+
+  same drift, 10,000x difference in penalty
+```
+
+**Why it stays theoretical.** The Fisher term needs one importance value per parameter, plus a frozen copy of the original weights to measure drift against. On the 8B model in the case study:
+
+```
+  Fisher diagonal, fp32    8e9 x 4 bytes   =  32 GB
+  frozen theta*, bf16      8e9 x 2 bytes   =  16 GB
+                                              -----
+  extra resident memory                        48 GB   -- more than a whole A100 80GB's
+                                                          remaining headroom during CPT
+```
+
+Data mixing achieves comparable protection for zero extra memory and roughly ten lines of code. That is the entire reason the section calls EWC "rarely used in practice" — not that it fails, but that a 48GB tax buys something you can get for free.
+
 ### 3.5 Tokenizer Adaptation
 
 For domains with high-frequency specialized vocabulary:
@@ -240,6 +422,51 @@ Domain-specific tokenizer extension:
     - Domain vocabulary overlap with general English is high
     - Adding vocab changes the tokenizer structure (complicates deployment)
 ```
+
+**Put simply.** "If your domain's most common words each cost three tokens instead of one, you are renting a smaller context window than you paid for."
+
+The measurable quantity is fertility — tokens emitted per word. A tokenizer well-matched to the text sits near 1.0; the splits above are fertility 3 and 4 on exactly the terms that appear most often in domain text.
+
+| Symbol | What it is |
+|--------|------------|
+| fertility | Tokens produced per source word; 1.0 is ideal, higher is waste |
+| `"myocardial" → 3 tokens` | Fertility 3 on a term appearing constantly in clinical text |
+| `"COVID-19" → 4 tokens` | Fertility 4; punctuation and digits fragment badly |
+| domain-term share | Fraction of words in a document that are specialized vocabulary |
+| vocabulary extension | Adding terms as new tokens, dropping their fertility to 1 |
+| embedding cost | `new_tokens × d × 2` — both input and output embedding tables grow |
+
+**Walk one example.** A 1,000-word clinical document where 15% of words are domain terms at fertility 3:
+
+```
+  domain terms      1,000 x 0.15 = 150 words  x 3 tokens  =    450 tokens
+  ordinary English  1,000 x 0.85 = 850 words  x 1 token   =    850 tokens
+                                                              ----------
+  total                                                        1,300 tokens
+
+  fertility  =  1,300 / 1,000  =  1.30
+
+  after extending the vocabulary (domain terms -> 1 token each)
+    150 x 1 + 850 x 1  =  1,000 tokens        saving 300 tokens = 23.1%
+
+  what that means for a 2048-token window
+    before extension   2048 / 1.30  =  1,575 words of real content
+    after  extension   2048 / 1.00  =  2,048 words of real content
+                                       -----
+                                       +473 words, a 30% larger effective window
+```
+
+**And what the extension costs.** Adding 5,000 domain terms to LLaMA-3-8B (`d = 4096`) grows two tables, input and output embeddings:
+
+```
+  5,000 new tokens x 4,096 dims x 2 tables  =  40,960,000 parameters
+
+  as % of the 8B base   40,960,000 / 8,000,000,000  =  0.512%
+```
+
+Half a percent of the model for a 30% larger effective window is a good trade *if* your fertility is genuinely 1.30. Measure it first — tokenize 1,000 real domain documents, divide tokens by words, and only act if the number is well above 1.1. The section's caution is the reason: base tokenizers already cover most medical and legal vocabulary, so teams routinely pay the extension cost and the deployment complexity of a non-standard tokenizer to recover fertility 1.05, which was never the bottleneck.
+
+**Why initialization method decides whether this works.** Those 40,960,000 new parameters start with no meaning at all. Averaging the sub-token embeddings (Option A) places `"myocardial"` at the centroid of `["my", "ocard", "ial"]` — already close to correct, since that is roughly what the model was composing anyway. Random initialization (Option B) drops it in an arbitrary location and every occurrence during CPT must drag it back across the embedding space. Same final architecture, radically different token budget to converge, which is why Option A is the default in practice.
 
 ---
 

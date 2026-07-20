@@ -218,6 +218,47 @@ Human programmers: ~95%
 Note: HumanEval is considered largely "solved"; harder benchmarks needed
 ```
 
+**Read it like this.** "Let the model try `k` times and count the problem solved if *any* attempt
+works. pass@k is not the model's accuracy — it is the accuracy of a model plus `k` lottery tickets."
+
+That framing explains why pass@k numbers look so much better as `k` grows, and why comparing a
+pass@100 to a pass@1 is meaningless. The metric bakes the retry budget into the score, so the `k`
+must always travel with the number.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | How many completions you are allowed to generate per problem before judging |
+| `n` | How many you actually sampled to estimate the score. Must exceed `k` |
+| `c` | How many of those `n` samples passed all tests |
+| pass@1 | Effectively the per-sample success rate, `c / n` |
+| "passes" | All unit tests green. No partial credit, no judge model, no human |
+
+**Walk one example.** A model that solves a given problem 20% of the time per attempt — sampled
+`n = 200` times, of which `c = 40` passed:
+
+```
+  per-sample success rate = c / n = 40 / 200 = 0.20
+
+  pass@1   = 0.20     one shot, one chance
+  pass@10  = 0.899    ten shots -- almost certainly at least one works
+  pass@100 = 1.000    saturated
+
+  WHY THE JUMP IS SO STEEP
+    P(all k attempts fail) shrinks geometrically as k grows, so the
+    complement -- P(at least one succeeds) -- races toward 1.
+```
+
+A model at 20% per attempt reports ~90% at pass@10. Both numbers describe the identical model. This
+is why a bare "88% on HumanEval" is uninterpretable without its `k`, and why the benchmark's
+"largely solved" status deserves a caveat: solved *at some k*, on 164 problems that have been public
+since 2021 and reproduced across GitHub thousands of times.
+
+**Why pass@k is the right metric for code and the wrong one for prose.** Code has a free, exact
+verifier — run the tests. Generating 10 candidates and keeping whichever passes is a *deployable
+strategy*, not just a scoring trick, so pass@10 measures something a user can actually have. No such
+verifier exists for a summary or an email, which is why pass@k never migrated to those tasks and
+LLM-as-judge did instead.
+
 **SWE-bench** (real GitHub issues):
 ```
 2294 real GitHub issues from 12 Python repositories
@@ -496,6 +537,59 @@ def build_fim_prompt_safe(
 ```
 
 **Why left-truncate prefix, not right-truncate?** Code immediately before the cursor is far more predictive of the next token than code at the top of the file (imports, class declarations seen earlier). Always keep the suffix tail and the prefix tail closest to the cursor.
+
+**Stated plainly.** "The context window is a fixed pot. Reserve room for everything you *know* you
+need — the completion, the suffix, the special tokens — and whatever is left is the only space the
+prefix may occupy."
+
+The bug in the broken version is that it never computes a budget at all; it concatenates and hopes.
+The fix inverts the order of operations: subtract the non-negotiable allocations first, then size the
+one flexible piece to fit. That is the general pattern for every context-budget problem, not just
+FIM.
+
+| Symbol | What it is |
+|--------|------------|
+| `model_context` | Hard ceiling. 8,192 tokens — prompt *and* completion share it |
+| `completion_budget` | 256 tokens reserved for the model's output. Reserved, not requested |
+| `suffix_budget` | 512 tokens of code *after* the cursor. Capped because it is less predictive than the prefix |
+| `overhead` | 20 tokens for `<PRE>`, `<SUF>`, `<MID>` and framing |
+| `prefix_budget` | Whatever remains. The only term computed rather than chosen |
+| `[-prefix_budget:]` | Keeps the **tail** of the prefix — the code touching the cursor |
+
+**Walk one example.** Spend the 8,192 in the order the fix does:
+
+```
+  model context                        8,192
+  - completion_budget                   -256   reserved for output
+  - suffix tokens (capped at 512)       -512   code after the cursor
+  - overhead (special tokens)            -20
+                                       ------
+  = prefix_budget                       7,404 tokens
+
+  ALLOCATION SHARE
+    prefix      7,404 / 8,192 = 90.4%
+    suffix        512 / 8,192 =  6.2%
+    completion    256 / 8,192 =  3.1%
+    overhead       20 / 8,192 =  0.2%
+
+  WHAT THE BROKEN VERSION DID
+    an 8,000-token file as prefix, plus suffix, plus 256 completion:
+      8,000 + 512 + 256 + 20 = 8,788  >  8,192   -> HTTP 400, silently swallowed
+    overflow = 8,788 - 8,192 = 596 tokens
+```
+
+The failure needed only a 596-token overshoot — one moderately long generated file — and it produced
+no completion, no error surfaced to the user, and no alert. Detection came from a 14% drop in weekly
+active users, which is the worst possible monitor: a business metric standing in for an exception
+nobody caught.
+
+**Why the suffix gets a small fixed cap while the prefix gets the remainder.** Both sides inform the
+completion, but asymmetrically — the prefix establishes what the code *is doing*, while the suffix
+mostly constrains how the completion must *land* (matching braces, a following function signature).
+512 tokens is plenty to capture that landing constraint, and every token beyond it would be taken
+directly from prefix budget, which is the more predictive side. Note also that the suffix is capped
+*before* the subtraction, so a huge file cannot let the suffix crowd out the prefix — the order of
+those two lines is load-bearing.
 
 **Additional interview Q&As:**
 

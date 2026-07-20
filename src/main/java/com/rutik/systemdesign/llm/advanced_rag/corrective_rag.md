@@ -77,6 +77,62 @@ rather than blindly trusting whatever the retriever returned.
 The two cut points are the main tuning surface: they trade answer safety against latency and
 web-search cost, and should be calibrated on a labeled eval set, not guessed.
 
+**Read it like this.** The three-way rule is one number cut twice: "trust it, salvage it, or replace it." The two cut points are not opinions about relevance — they are the widths of three *routing buckets*, and moving either one redistributes traffic across three pipelines with three different costs.
+
+| Symbol | What it is |
+|--------|------------|
+| `score` | Evaluator output in `[0, 1]` for one `(query, document)` pair |
+| `t_inc` | Lower cut, 0.3 by default; at or below it the document is discarded |
+| `t_cor` | Upper cut, 0.7 by default; above it the document is used verbatim |
+| `t_cor - t_inc` | Width of the ambiguous band — the fraction of scores routed to refinement |
+| `K` | Documents retrieved per query, 5 in the pipeline above |
+| trigger rate | Fraction of queries where **all** `K` documents land in `incorrect` |
+
+**Walk one example.** Five retrieved documents for one query, scored, under the default cuts and then under the medical case study's cuts from Section 12:
+
+```
+  scores : 0.82   0.71   0.68   0.33   0.28
+
+  DEFAULT  t_inc = 0.30, t_cor = 0.70
+    band widths : incorrect 0.30 | ambiguous 0.40 | correct 0.30
+    0.82 > 0.70            -> correct
+    0.71 > 0.70            -> correct
+    0.68 in (0.30, 0.70]   -> ambiguous   -> sentence-level refine
+    0.33 in (0.30, 0.70]   -> ambiguous   -> sentence-level refine
+    0.28 <= 0.30           -> incorrect   -> discarded
+    counts: 2 correct, 2 ambiguous, 1 incorrect  -> route = MIXED (refine)
+
+  MEDICAL  t_inc = 0.35, t_cor = 0.65
+    band widths : incorrect 0.35 | ambiguous 0.30 | correct 0.35
+    0.68 > 0.65            -> correct     (promoted)
+    0.33 <= 0.35           -> incorrect   (demoted)
+    counts: 3 correct, 0 ambiguous, 2 incorrect -> route = ALL-CORRECT path
+
+  A 0.05 nudge on each cut promoted one document, demoted another, and
+  emptied the refinement path entirely for this query. Nothing about the
+  documents changed -- only the bucket boundaries did.
+```
+
+**Why the ambiguous band exists at all.** With a single cut you get two choices: use a partly-relevant document whole (its irrelevant two-thirds becomes distractor tokens in the prompt) or throw it away (you lose the one paragraph that answered the question). The middle band buys a third option — refine — at the cost of a second evaluator pass at sentence granularity. Narrowing that band, as the medical deployment does, says "our evaluator is well-calibrated enough that I would rather commit than salvage."
+
+**Walk the trigger rate.** Section 10 gives a health range for web-search triggering: above 30% means the cuts are too strict, below 5% too lenient. Turning that into a per-document requirement, with `K = 5` and treating the per-document verdicts as independent:
+
+```
+  P(trigger) = P(one doc is incorrect)^K = p^5
+
+  target trigger    required per-doc p = trigger^(1/5)
+  ---------------------------------------------------
+     5%             0.05^(0.2) = 0.5493
+    30%             0.30^(0.2) = 0.7860
+    50%             0.50^(0.2) = 0.8706
+
+  read the other way:
+    p = 0.50 -> trigger = 0.50^5 = 0.0312  (3.1%, below the healthy floor)
+    p = 0.60 -> trigger = 0.60^5 = 0.0778  (7.8%, healthy)
+```
+
+The exponent is the important part. Because the fallback needs *all K* documents to fail, the trigger rate is a fifth power of the per-document failure rate — so it is extremely sensitive to `t_inc`. Nudging `t_inc` upward enough to push per-document failure from 0.60 to 0.79 barely changes any individual verdict, but multiplies web-search volume by `0.30/0.0778 = 3.9x`, with the latency and API bill that implies. This is why Section 8's first pitfall is threshold miscalibration and why Section 10 recommends shipping in monitoring mode before enabling correction.
+
 ### 3.2 Context Refinement
 
 When documents are partially relevant (Ambiguous), CRAG refines them rather than discarding:

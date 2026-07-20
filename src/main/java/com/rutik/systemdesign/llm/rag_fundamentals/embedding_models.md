@@ -85,6 +85,38 @@ This is why "normalize embeddings" matters: without it, a longer vector could sc
 raw dot product regardless of direction. Normalize first, and similarity collapses to one
 interpretable number — the angle.
 
+**What it means.** `cos(a, b) = (a · b) / (||a|| ||b||)` says: "measure how much two vectors point the same way, after dividing out how long each one is." Normalizing at index time performs that division once and for all, which is why `dot product = cosine` on stored vectors.
+
+The reason this matters is that the denominator is the *only* thing protecting you from length bias. Drop it and you are no longer ranking by meaning — you are ranking partly by how long the text was.
+
+| Symbol | What it is |
+|--------|------------|
+| `a · b` | Dot product — sum of element-wise products; grows with both direction agreement and length |
+| `\|\|a\|\|` | L2 norm (length) of `a`, i.e. `sqrt(sum of squares)` |
+| `cos(θ)` | The similarity actually reported: `1.0` identical direction, `0.0` unrelated, `-1.0` opposite |
+| `v / \|\|v\|\|` | L2 normalization — rescales `v` to length 1 without turning it |
+| unit sphere | Where all normalized vectors live; `\|\|a\|\| = \|\|b\|\| = 1`, so the denominator becomes 1 |
+
+**Walk one example.** Two-dimensional stand-ins, so the arithmetic is visible. `a` and `b` point in exactly the same direction but `b` is twice as long — think "same meaning, longer passage":
+
+```
+  a = [3, 4]    ||a|| = sqrt(9 + 16)   = 5
+  b = [6, 8]    ||b|| = sqrt(36 + 64)  = 10      (same direction as a, 2x longer)
+  c = [10, 0]   ||c|| = 10                        (a different direction)
+
+  a . c = 3x10 + 4x0  = 30      cos = 30 / (5  x 10) = 0.6
+  b . c = 6x10 + 8x0  = 60      cos = 60 / (10 x 10) = 0.6
+
+  Same cosine (0.6, an angle of 53.13 degrees) -- correct, since a and b
+  point the same way. But the RAW DOT PRODUCT doubled, 30 -> 60, purely
+  because b is longer. Rank by raw dot on unnormalized vectors and b wins
+  a contest it is not actually better at.
+
+  a . b = 3x6 + 4x8   = 50      cos = 50 / (5 x 10)  = 1.0   (identical direction)
+```
+
+**Why the denominator has to be there.** Without it, embedding magnitude — which for most pooling schemes drifts with text length and token count — leaks into the score. That is Pitfall 3 in Section 8, and the fix is to divide *once* at index time rather than on every one of the millions of comparisons an ANN search performs. Normalizing up front makes the expensive-to-compute cosine and the cheap-to-compute dot product the same operation.
+
 ### 3.2 Major Embedding Models Compared
 
 ```
@@ -119,6 +151,35 @@ Cost at 10M chunks:
   text-embedding-ada-002: 10M × 1536 × 4B = 60GB storage
 ```
 
+**Stated plainly.** `bytes = N x d x 4` says: "your embedding bill is one multiplication — number of chunks, times dimensions, times four bytes per float32." Dimension is a *linear* storage multiplier, so doubling `d` doubles the index, every time, with no discount.
+
+The reason this is worth memorising is that dimension is the one model attribute that shows up in three budgets at once: RAM for the HNSW graph, bytes on disk, and floating-point work per distance computation.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of chunks (vectors) in the index |
+| `d` | Embedding dimensionality — 768 for bge-base, 1536 for 3-small, 3072 for 3-large |
+| `4` | Bytes per `float32` component (2 with float16, 1 with int8 quantization) |
+| `N x d x 4` | Raw vector bytes, before the ANN graph's own overhead |
+| MTEB Retrieval | The quality side of the trade — the score you are buying those bytes with |
+
+**Walk one example.** The 10M-chunk corpus used throughout this section, priced per model:
+
+```
+  model                     d      bytes/vec           index for 10M chunks
+  ------------------------------------------------------------------------
+  bge-base-en-v1.5          768    768  x 4 =  3072 B      30.72 GB
+  bge-large-en-v1.5        1024   1024  x 4 =  4096 B      40.96 GB
+  text-embedding-3-small   1536   1536  x 4 =  6144 B      61.44 GB
+  text-embedding-3-large   3072   3072  x 4 = 12288 B     122.88 GB
+
+  3-large vs bge-base : 122.88 / 30.72 = 4.0x the storage
+  quality bought      :  56.0  -  53.3  = 2.7 MTEB Retrieval points
+
+  So the last 2.7 points of retrieval score cost 4x the index. Whether that
+  is a good trade is exactly the question Section 6's table exists to answer.
+```
+
 ### 3.3 OpenAI Embedding API
 
 ```python
@@ -150,6 +211,44 @@ def embed_batch(texts: list[str], model: str = "text-embedding-3-small",
 #   small: $80 one-time indexing cost
 #   large: $520 one-time indexing cost
 ```
+
+**The idea behind it.** Two formulas hide in that comment block. Cost is `(N x tokens_per_chunk / 1e6) x price_per_1M_tokens`, and wall-clock is `ceil(N / batch_size) x (round_trip + batch_size x per_item)` — which is why `batch_size` barely touches the bill but dominates the clock.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Chunks to embed — 10,000,000 in the comment above |
+| `tokens_per_chunk` | Average chunk length, 400 tokens here |
+| `price_per_1M` | `$0.02` for text-embedding-3-small, `$0.13` for 3-large |
+| `batch_size` | Inputs per API call; up to 2048 for OpenAI, 256 for a GPU `encode()` |
+| `round_trip` | Fixed per-call network + queue latency, roughly 100 ms; paid once per call |
+| `per_item` | Marginal compute per input inside a call, roughly 0.5 ms |
+
+**Walk one example — the bill.** 10M chunks at 400 tokens:
+
+```
+  total tokens = 10,000,000 x 400 = 4,000,000,000 = 4000 million
+
+  3-small : 4000 x $0.02 = $80     one-time
+  3-large : 4000 x $0.13 = $520    one-time
+  ratio   : 520 / 80 = 6.5x        (the price ratio 0.13/0.02, exactly)
+
+  Self-hosted bge-base on one A10G at $1/hr for ~8 hours = $8.
+  Cheaper than 3-small by 10x -- but only once you already run the GPU.
+```
+
+**Walk one example — the clock.** 10,000 chunks, the scenario in Pitfall 6:
+
+```
+  one-at-a-time : 10000 calls x (100 ms + 1 x 0.5 ms) = 1,005,000 ms = 16.75 min
+  batch of 100  :   100 calls x (100 ms + 100 x 0.5)  =    15,000 ms = 15.0 s
+  batch of 256  :    40 calls x (100 ms + 256 x 0.5)  =     9,120 ms = 9.12 s
+
+  speedup vs unbatched:  15.0 s -> 67x        9.12 s -> 110x
+  token cost in all three cases: IDENTICAL. You are billed per token, not
+  per call, so batching is a pure win -- the ~100x in Pitfall 6 is real.
+```
+
+**Why the round trip is the whole story.** At 10,000 unbatched calls, 10,000 x 100 ms = 1000 s of the 1005 s total is network latency; only 5 s is actual embedding. Batching amortizes that fixed cost across 100 or 256 inputs, which is why the curve flattens hard after batch sizes of roughly 100 — beyond that, `batch_size x per_item` starts to dominate and further batching buys little.
 
 ### 3.4 Open Source Embedding with sentence-transformers
 
@@ -313,6 +412,36 @@ MRL models (text-embedding-3-small/large, nomic-embed-text-v1.5):
   3072d for final reranking
   Storage optimization: 6× smaller index at 512d vs 3072d, ~5% quality loss
 ```
+
+**What the formula is telling you.** "Truncate to `k` dimensions" is just `v[:k]` — keep the first `k` numbers, discard the rest — and the saving is the plain ratio `d_full / k`. MRL training is what makes that legal: the model was optimized so the leading dimensions already carry the most information, rather than meaning being smeared evenly across all 3072.
+
+| Symbol | What it is |
+|--------|------------|
+| `d_full` | The model's native dimensionality, 3072 for text-embedding-3-large |
+| `k` | The prefix length you keep — 512, 256, 64 |
+| `v[:k]` | The truncation itself; no projection matrix, no retraining, just a slice |
+| `d_full / k` | Storage and distance-computation saving factor |
+| quality retention | Recall@10 at `k` divided by recall@10 at `d_full` |
+
+**Walk one example.** The 10M-chunk index, truncating a 3072-dim model:
+
+```
+  k      bytes/vec        index size (10M)   saving vs 3072d
+  ------------------------------------------------------------
+  3072   3072 x 4 = 12288      122.88 GB     1.0x   (baseline)
+  1024   1024 x 4 =  4096       40.96 GB     3.0x
+   512    512 x 4 =  2048       20.48 GB     6.0x   <- the "6x" above
+   256    256 x 4 =  1024       10.24 GB    12.0x
+    64     64 x 4 =   256        2.56 GB    48.0x
+
+  Choosing k = 512: 122.88 - 20.48 = 102.40 GB of RAM freed, for a quality
+  cost of ~5% of recall@10. A 6x index reduction for a 5% quality dip is
+  the trade almost every production system takes.
+```
+
+Distance computation shrinks by the same factor, because a dot product over `k` dimensions is `k` multiply-adds: at `k = 512` each comparison does 512 instead of 3072, so the ANN scan is roughly 6x cheaper in FLOPs as well as 6x smaller in bytes. This is the arithmetic behind the two-speed pattern above — scan at 512d, then rescore only the survivors at 3072d.
+
+The e-commerce case study in Section 12 is the same formula on a different corpus: 8M SKUs at 1024d is `1024 x 4 x 8e6 = 32.77 GB`, and truncating to 512d gives `512 x 4 x 8e6 = 16.38 GB` — the 32GB-to-16GB halving it reports, bought for 2.3% recall@10.
 
 ---
 

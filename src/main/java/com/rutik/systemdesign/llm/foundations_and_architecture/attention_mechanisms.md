@@ -23,7 +23,7 @@ One-line analogy: Naive attention is like reading every page of a book to answer
 
 Mental model: GPU memory is organized as a hierarchy — HBM (High Bandwidth Memory, 80GB, ~2TB/s bandwidth) and SRAM (on-chip, ~20MB, ~19TB/s bandwidth). Naive attention materializes the N×N score matrix in HBM, requiring O(N²) HBM reads/writes. Flash Attention tiles the computation into SRAM-sized blocks, computing softmax incrementally without ever materializing the full N×N matrix in HBM.
 
-Why it matters: At N=8192 (8K context), naive attention needs 8192²×2bytes = 128MB per head per layer just for the attention scores. For a 70-layer, 64-head model, that's 571GB — impossible on any GPU. Flash Attention needs O(N) memory, enabling 100K+ context on a single H100.
+Why it matters: At N=8192 (8K context), naive attention needs 8192²×2bytes = 128MB per head per layer just for the attention scores. For a 70-layer, 64-head model, that's 601 GB (560 GiB) — impossible on any GPU. Flash Attention needs O(N) memory, enabling 100K+ context on a single H100.
 
 Key insight: Flash Attention doesn't change what is computed — the mathematical result is identical to naive attention. It changes where the computation happens: SRAM instead of HBM, which is 10x faster and eliminates most memory bandwidth as the bottleneck.
 
@@ -34,6 +34,78 @@ Key insight: Flash Attention doesn't change what is computed — the mathematica
 **Scaled dot-product attention:** `Attn(Q,K,V) = softmax(QK^T / sqrt(d_k)) V`. The scaling by `sqrt(d_k)` is mathematically necessary to prevent softmax saturation at high dimensions.
 
 **Variance argument for sqrt(d_k):** Assume Q and K have entries sampled from N(0,1). The dot product Q_i · K_j = Σ_{k=1}^{d_k} q_{ik} k_{jk} is a sum of d_k i.i.d. products. By the Central Limit Theorem, the variance of each product is 1, so the sum has variance d_k. Therefore the standard deviation is sqrt(d_k). Without scaling, large d_k (e.g., d_k=128) produces QK^T values with std ~11, pushing softmax into regions where the gradient is near-zero (the distribution becomes nearly one-hot). Dividing by sqrt(d_k) restores unit variance.
+
+**Read it like this.** `Attn(Q,K,V) = softmax(QK^T / sqrt(d_k)) V` says: "for every token, score how well its question matches every token's label, shrink those scores so they stay in a sane range, turn each row of scores into percentages that add to 100%, then mix the tokens' contents in exactly those percentages."
+
+Every output row is a *convex combination* of the V rows — a weighted average, never an amplification. That single property is why attention output magnitude does not blow up as the sequence grows.
+
+| Symbol | What it is |
+|--------|------------|
+| `Q` | Queries, one row per token — "what am I looking for?" |
+| `K` | Keys, one row per token — "what do I advertise about myself?" |
+| `V` | Values, one row per token — the content actually mixed into the output |
+| `QK^T` | Every-query-against-every-key score matrix, shape `[N, N]` |
+| `d_k` | Width of one query/key vector (128 in LLaMA-3 70B) |
+| `sqrt(d_k)` | Temperature divisor that undoes the variance growth of the dot product |
+| `softmax(...)` | Row-wise `exp` then divide by the row sum, so each row sums to `1` |
+| `... V` | The weighted sum: attention percentages applied to the value rows |
+
+**Walk one example.** Three tokens, `d_k = 4`, `d_v = 2`, with `Q = K` so a token matches itself best:
+
+```
+  Q (3 tokens, d_k=4)        K (3 tokens, d_k=4)       V (3 tokens, d_v=2)
+    t1 [1 0 1 0]               t1 [1 0 1 0]              t1 [2 0]
+    t2 [0 1 1 0]               t2 [0 1 1 0]              t2 [0 4]
+    t3 [1 1 0 1]               t3 [1 1 0 1]              t3 [1 1]
+
+  step 1  raw scores S = Q K^T        step 2  divide by sqrt(d_k) = sqrt(4) = 2
+            k1  k2  k3                          k1     k2     k3
+      q1 [  2   1   1 ]              q1 [  1.00   0.50   0.50 ]
+      q2 [  1   2   1 ]              q2 [  0.50   1.00   0.50 ]
+      q3 [  1   1   3 ]              q3 [  0.50   0.50   1.50 ]
+
+  step 3  softmax each ROW (exp, then divide by that row's sum)
+      q1: exp -> 2.7183 1.6487 1.6487   sum 6.0157
+          p   -> 0.4519 0.2741 0.2741   sums to 1.0000
+      q2: exp -> 1.6487 2.7183 1.6487   sum 6.0157
+          p   -> 0.2741 0.4519 0.2741   sums to 1.0000
+      q3: exp -> 1.6487 1.6487 4.4817   sum 7.7791
+          p   -> 0.2119 0.2119 0.5761   sums to 1.0000
+
+  step 4  output row = the V rows mixed in that row's percentages
+      out_1 = 0.4519*[2,0] + 0.2741*[0,4] + 0.2741*[1,1] = [1.1778, 1.3703]
+      out_2 = 0.2741*[2,0] + 0.4519*[0,4] + 0.2741*[1,1] = [0.8222, 2.0815]
+      out_3 = 0.2119*[2,0] + 0.2119*[0,4] + 0.5761*[1,1] = [1.0000, 1.4239]
+```
+
+Token 3 has the largest self-score (`3`, because its key has three ones), so after scaling and
+softmax it keeps `0.5761` of its own value and splits the rest evenly — its output leans hardest
+toward its own `V` row. Tokens 1 and 2 are more evenly spread. Nothing here exceeds the range of
+the `V` rows themselves: the outputs are averages, not sums.
+
+**Stated plainly.** The `1/sqrt(d_k)` is a thermostat. `Q_i · K_j` is a sum of `d_k` independent unit-variance products, so its variance is `d_k` and its standard deviation is `sqrt(d_k)`. Leave that in and the spread of the scores grows with head width; softmax reads a wide spread as "I am certain", collapses to one-hot, and the gradient it hands back is ~0.
+
+**Walk one example.** The same three scores, with and without the divisor, at `d_k = 128`:
+
+```
+  d_k = 128  ->  std(q.k) = sqrt(128) = 11.3137
+
+  Take three raw scores exactly one std apart: [ +11.3137,  0.0,  -11.3137 ]
+
+  WITHOUT the divide:  softmax([11.3137, 0, -11.3137])
+      p = [ 0.999988,  0.000012,  0.000000 ]      <- effectively one-hot
+      dp/ds at the peak = p(1-p) = 1.220e-05      <- gradient has vanished
+
+  WITH the divide by 11.3137:  softmax([1.0, 0.0, -1.0])
+      p = [ 0.665241,  0.244728,  0.090031 ]      <- a usable distribution
+      dp/ds at the peak = p(1-p) = 0.222695
+
+  Gradient at the peak is 1.825e+04 times larger once scaled.
+```
+
+Four orders of magnitude of gradient, recovered by one division. Note the failure is *silent* — an
+unscaled model still trains, it just learns far more slowly at large `d_k`, which is exactly why the
+term is easy to omit and hard to debug.
 
 **Why softmax, not ReLU:** ReLU attention is not row-normalized — each position's output would be a sum of values weighted by non-negative (but not summing-to-1) scores, making the magnitude of the output scale with the number of attended tokens. Softmax ensures each row of the attention matrix sums to 1, making the output a convex combination of values regardless of sequence length. Additionally, softmax preserves a dense gradient signal to all attended positions (though with varying magnitude), while ReLU would zero out all but the attended ones.
 
@@ -105,6 +177,47 @@ For each block of Q (outer loop, B_r rows):
 Memory complexity: O(N * d) in HBM (no N^2 matrix!)
 HBM accesses: O(N^2 * d / M)  vs naive O(N^2)   --> M/d speedup
 ```
+
+**Put simply.** `B_r = B_c = sqrt(M/(4d))` says: "make the tile as large as will fit, given that four `[B, d]` blocks have to sit in SRAM at once." The `O(N)` vs `O(N^2)` claim then reduces to one fact — Flash Attention keeps `Q`, `K`, `V`, `O` in HBM and never writes `S`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Sequence length (tokens attending) |
+| `d` | Per-head dimension, `d_head` — 128 in most production models |
+| `M` | SRAM capacity measured in *elements*, not bytes (divide bytes by dtype size) |
+| `B_r` | Rows of `Q` in one tile — the outer loop's step |
+| `B_c` | Rows of `K`/`V` in one tile — the inner loop's step |
+| `4` in `4d` | Four `[B, d]` blocks resident at once: `Q`, `K`, `V`, `O` |
+| `S` | The `[N, N]` score matrix — the thing that is never materialized |
+| `M/d` | HBM-traffic reduction factor versus naive attention |
+
+**Walk one example.** At the `N = 8192` figure used in Section 2, with `d_head = 128` and FP16:
+
+```
+  N = 8192, d_head = 128, FP16 (2 bytes)
+
+  naive: materialize S = Q K^T in HBM
+      8192 x 8192 x 2 bytes = 134,217,728 B = 128 MiB    per head, per layer
+      x 64 heads x 70 layers                = 560 GiB    -- no GPU holds this
+
+  tiled: never materialize S; keep only Q, K, V, O in HBM
+      each is 8192 x 128 x 2 bytes = 2 MiB   ->  4 tensors = 8 MiB
+      128 MiB / 2 MiB = 64x smaller, and 64 = N/d -- the saving grows with N
+
+  SRAM tile sizing:  B_r = B_c = sqrt(M / (4d)),  M = SRAM in elements
+      20 MB of SRAM in FP16  ->  M = 10,485,760 elements
+      sqrt(10,485,760 / (4 x 128)) = 143.1   ->  round down to B_r = B_c = 128
+
+  one 128x128 tile resident in SRAM (FP16):
+      Q,K,V,O blocks 4 x (128 x 128) + S block (128 x 128) = 5 x 16,384 values
+      x 2 bytes = 163,840 B = 160 KiB      fits A100's 192 KiB per-SM shared memory
+      tiles to sweep at N=8192: (8192/128)^2 = 4,096
+```
+
+The ratio to keep is `N/d`. At `N = 8192, d = 128` the score matrix is 64x the size of the tensors
+that replace it; double the context and it becomes 128x, because `S` grows quadratically while
+`Q, K, V, O` grow linearly. This is why tiling is not a constant-factor optimization — its payoff
+compounds with context length, which is precisely what made 100K+ windows tractable.
 
 ### GQA Head Reshaping
 
@@ -375,12 +488,58 @@ def compute_kv_cache_memory(
     Compute KV cache memory in GB for a given configuration.
 
     For LLaMA 3 70B (GQA, 8 KV heads, 128 d_head, 80 layers):
-    compute_kv_cache_memory(1, 4096, 80, 8, 128) ≈ 0.84 GB per sequence
+    compute_kv_cache_memory(1, 4096, 80, 8, 128) ≈ 1.34 GB (1.25 GiB) per sequence
     """
     # 2x for K and V
     bytes_total = 2 * num_layers * num_kv_heads * d_head * seq_len * batch_size * bytes_per_element
     return bytes_total / (1024 ** 3)
 ```
+
+**In plain terms.** `bytes = 2 * n_layers * n_kv_heads * head_dim * seq_len * batch * dtype_bytes` says: "store two vectors (a key and a value) of width `head_dim`, once per KV head, once per layer, for every token you have ever seen, for every sequence in flight."
+
+| Symbol | What it is |
+|--------|------------|
+| `2` (leading) | K and V are both cached — this is a count of tensors, not a dtype size |
+| `n_layers` | Transformer blocks; every block keeps its own independent cache |
+| `num_attention_heads` | Query head count `H` (64 on Llama-2-70B). **Absent from this formula** |
+| `n_kv_heads` | KV head count `G` (8 on Llama-2-70B). The ONLY head count that sizes the cache |
+| `head_dim` | Width of one head's K or V vector, `128` |
+| `seq_len` | Tokens currently cached — prompt plus everything generated so far |
+| `batch` | Concurrent sequences sharing the GPU |
+| `dtype_bytes` | `2` for BF16/FP16, `1` for FP8, `4` for FP32 |
+
+The trap worth naming: it is `n_kv_heads`, never `num_attention_heads`. Substituting the query head
+count on a GQA model over-counts the cache by exactly `H/G` — 8x on Llama-2-70B, 4x on LLaMA-3 8B.
+MHA is simply the special case `n_kv_heads == num_attention_heads`; MQA is the special case
+`n_kv_heads == 1`. All three variants use one formula, and only that one symbol changes.
+
+**Walk one example.** Llama-2-70B's real config, holding everything fixed except `n_kv_heads`:
+
+```
+  Llama-2-70B / LLaMA 3 70B:  n_layers = 80, head_dim = 128, BF16 -> 2 bytes
+  num_attention_heads = 64   (query heads -- does NOT appear in the formula)
+  num_kv_heads        =  8   (the ONLY head count that sizes the cache)
+
+  per token = 2 x 80 x n_kv_heads x 128 x 2 bytes
+
+    MHA   n_kv_heads = 64  ->  2,621,440 B = 2560.0 KiB per token
+    GQA   n_kv_heads =  8  ->    327,680 B =  320.0 KiB per token
+    MQA   n_kv_heads =  1  ->     40,960 B =   40.0 KiB per token
+
+  at seq_len = 131,072 (128K context), batch = 1:
+
+    MHA   343,597,383,680 B = 320.0 GiB
+    GQA    42,949,672,960 B =  40.0 GiB
+    MQA     5,368,709,120 B =   5.0 GiB
+
+  ratios:  MHA/GQA = 64/8 = 8x     MHA/MQA = 64/1 = 64x     GQA/MQA = 8x
+```
+
+Read the last column as a serving constraint, not a statistic. On one 80 GiB H100 the GQA cache
+alone permits `80 / 40 = 2` concurrent 128K sequences — before a single byte of model weights. The
+MHA variant at 320 GiB does not fit on an 8xH100 node once weights are resident, which is the whole
+reason GQA shipped. MQA's 5 GiB would allow 16 such sequences, and the 0.5-2 PPL it costs is the
+price of that 8x.
 
 ### Multi-Head Latent Attention (DeepSeek-V2)
 

@@ -538,6 +538,56 @@ Repo Map (context optimization):
   Window size: 100 lines — agent scrolls as needed
 ```
 
+**What this actually says.** "You cannot fit the repository in the context window, and you do not
+need to. Give the agent a map precise enough to decide *where to look*, then let it pay for detail
+only in the few places it actually opens."
+
+The map is not a summary of the code — it is an index. Signatures and the file tree carry no
+implementation at all, which is exactly why they compress so hard: locating a fault needs structure,
+and only fixing it needs bodies.
+
+| Symbol | What it is |
+|--------|------------|
+| full repo | 180k lines of Python, roughly 9M tokens if serialized whole |
+| repo map | File tree plus class and function signatures. 10k tokens |
+| window | A 100-line slice of one file, the unit the agent actually reads |
+| compression ratio | `full repo / repo map` — how much the index shrinks the problem |
+| scroll | Fetching the next window. The incremental cost of going deeper |
+
+**Walk one example.** Compare what each strategy costs to put in front of the model:
+
+```
+  FULL REPO IN CONTEXT
+    180,000 LOC -> ~9,000,000 tokens
+    exceeds every production context window by more than an order of magnitude
+
+  REPO MAP
+    file tree + signatures = 10,000 tokens
+    compression = 9,000,000 / 10,000 = 900x
+
+  WHAT THE AGENT ACTUALLY LOADS FOR ONE ISSUE
+    repo map                        10,000 tokens
+    issue context                    ~500 tokens
+    say 6 windows of 100 lines       ~6 x 1,300 = 7,800 tokens
+                                    ---------------------------
+    total working context           ~18,300 tokens
+
+    vs. 9,000,000 for the whole repo = 0.2% of the naive approach
+```
+
+The 900x is the headline, but the second calculation is the one that governs design. Even after
+loading the map *and* six file windows, the agent is sitting at roughly 18k tokens — comfortably
+inside any modern context window, with room for 30 iterations of accumulated tool output on top. The
+map is a fixed 10k cost paid once per task; windows are the variable cost, and at ~1,300 tokens each
+the agent can afford dozens. This is why the ACI's `goto`/`scroll` commands matter so much: they
+make detail *incremental*, so a wrong guess about where the bug lives costs one window, not one file.
+
+**Why signatures and not summaries.** A natural-language summary of each file would compress
+similarly but destroys the thing the agent needs most — exact, callable names. The agent must emit
+`grep "class UserAuth"` and have it match. Signatures preserve identifiers verbatim while dropping
+bodies, which is the only compression that keeps the map *actionable* rather than merely
+informative.
+
 **Key implementation — 3 Python code blocks:**
 
 Block 1 — SWE-agent integration wrapper:
@@ -869,6 +919,60 @@ def cost_aware_config() -> dict[str, object]:
 | Avg iterations to solution | — | 18 |
 | Engineer time freed/week | — | ~28 person-hours |
 | SWE-bench Verified (claude-sonnet-4-6) | N/A | ~49% (public benchmark) |
+
+**Put simply.** "The $1.12 is what an *attempt* costs, not what a *fix* costs — and since only about
+half of attempts succeed, the real price of a merged patch is roughly double the headline number."
+
+This is the arithmetic most coding-agent cost estimates get wrong. You pay the model for failures at
+very nearly the same rate as successes: a run that burns 30 iterations and gives up costs *more*
+than one that solves the issue in 12. Averaging spend over all attempts produces a comfortable
+number that no one can actually budget against.
+
+| Symbol | What it is |
+|--------|------------|
+| avg cost per issue | $1.12 — total LLM spend divided by attempts, successes and failures alike |
+| first-attempt success | 53% of tagged issues auto-close on the first run |
+| success with 1 retry | 67%, after re-running the 47% that failed |
+| `$2.00` spend cap | Per-run hard stop. Bounds the worst case, not the average |
+| `$2.50` p99 target | The budget goal the design was held to |
+| avg iterations | 18 used, against a 30 cap |
+
+**Walk one example.** Convert cost-per-attempt into cost-per-fix, with and without the retry:
+
+```
+  COST PER SUCCESSFUL FIX, single attempt
+    $1.12 / 0.53 = $2.11 per issue actually closed
+
+  COST PER SUCCESSFUL FIX, with one retry on failures
+    expected spend = $1.12 + (1 - 0.53) x $1.12
+                   = $1.12 + $0.53
+                   = $1.65 per issue attempted
+    success rate after retry            = 67%
+    cost per fix   = $1.65 / 0.67       = $2.46   <- just under the $2.50 p99 target
+
+  WHAT THE RETRY BUYS
+    success       53% -> 67%   = +14 percentage points
+    cost per fix  $2.11 -> $2.46 = +$0.35, a 17% increase
+
+  ITERATION HEADROOM
+    18 average / 30 cap = 60% utilized -- the cap is a safety net, not the binding
+    constraint; the $2.00 spend cap is what actually stops a runaway run first
+
+  WEEKLY ECONOMICS
+    180 issues x $1.12 = $201.60/week in LLM spend
+    against ~28 person-hours of engineer time freed
+```
+
+The retry decision is the interesting one, and the numbers say take it: +14 points of success for
++$0.35 per fix is an obvious trade when the alternative is 3.5 days of engineer time. But notice it
+consumes essentially all the remaining budget — $2.46 against a $2.50 target leaves 4 cents. A second
+retry would push past it while adding far fewer than 14 points, since the issues that fail twice are
+systematically the hard ones. That is the general shape: retries have sharply diminishing returns on
+success and linear returns on cost, so there is almost always exactly one worth taking.
+
+Set the whole thing against the labor comparison and the case is not close: 14 minutes of agent time
+plus 45 minutes of review is 59 minutes, against a 3.5-day (5,040-minute) manual baseline — about
+85x faster — at roughly $2.46 of compute per closed issue.
 
 **Interview Q&As:**
 

@@ -336,6 +336,60 @@ wandb.agent(sweep_id, function=train, count=20)  # 20 trials, Bayesian optimizat
 
 Grid search over 4 x 3 x 3 = 36 combinations takes 36 full training runs. Bayesian optimization with 20 trials typically finds results within 5% of the global optimum because it models which regions of the hyperparameter space are promising.
 
+**The idea behind it.** "Grid search multiplies — every knob you add multiplies the run count by the
+number of values you gave it. Bayesian search decides how many runs you can afford *first*, then
+spends them where the results so far look promising."
+
+The 36 in that sentence quietly excludes the most important hyperparameter in the config. Look
+again: `learning_rate` is declared as a continuous `log_uniform_values` distribution between 1e-5 and
+1e-3. Grid search cannot consume a continuous range at all — you must first chop it into discrete
+values, and every value you pick multiplies the whole grid.
+
+| Symbol | What it is |
+|--------|------------|
+| `lora_r` | 4 discrete values: 8, 16, 32, 64 |
+| `batch_size` | 3 discrete values: 4, 8, 16 |
+| `lora_alpha` | 3 discrete values: 16, 32, 64 |
+| `learning_rate` | **Continuous**, log-uniform over 1e-5 to 1e-3. Has no natural count |
+| grid run count | The product of every parameter's value count. Multiplicative, not additive |
+| `count=20` | Bayesian trial budget. Fixed up front, independent of how many parameters exist |
+| hyperband `min_iter: 3` | Kills a trial after 3 epochs if it is losing, instead of running all 10 |
+
+**Walk one example.** Count the grid honestly — including the learning rate — and compare:
+
+```
+  GRID SEARCH, discrete parameters only
+    4 (lora_r) x 3 (batch_size) x 3 (lora_alpha) = 36 runs
+
+  GRID SEARCH, once learning_rate is discretized (it must be)
+    coarse, 5 LR values:   36 x  5 =  180 runs   ->  9.0x the Bayesian budget
+    decent, 10 LR values:  36 x 10 =  360 runs   -> 18.0x the Bayesian budget
+
+  BAYESIAN SEARCH
+    count = 20 runs, regardless of parameter count, and it samples the
+    continuous LR range directly -- no discretization step at all
+
+  COMPUTE ACTUALLY SPENT (10 epochs per run)
+    grid, 180 runs, no early stopping:  180 x 10 = 1,800 epochs
+    bayes, 20 trials, all 10 epochs:     20 x 10 =   200 epochs
+    bayes with hyperband killing the bottom half at epoch 3:
+      10 good x 10 + 10 killed x 3     = 100 + 30 = 130 epochs
+```
+
+The honest comparison is 130 epochs against 1,800 — roughly 14x, not the 1.8x that "36 vs 20"
+suggests. And the gap widens with every parameter added, because grid cost is multiplicative while
+the Bayesian budget is a constant you choose. This is also why the LR being continuous matters
+beyond bookkeeping: grid search can only ever find the best LR *among the values you guessed*, while
+Bayesian search can land between them. If your discretization missed the good region, no amount of
+grid runs recovers it.
+
+**Why hyperband is separate from the search strategy.** Bayesian optimization decides *where* to
+sample; hyperband decides *when to stop wasting compute on a sample already going badly*. They
+compose — you can run hyperband under grid search too. Setting `min_iter: 3` means a trial gets 3
+epochs to show promise, which is why the number must exceed the epoch at which good and bad
+configurations become distinguishable. Set it to 1 and you kill slow-starting configurations that
+would have won.
+
 ### LangFuse Production Tracing
 
 LangFuse traces production LLM calls with minimal code changes. The `@observe()` decorator automatically captures the function call as a span.
@@ -895,6 +949,52 @@ FastAPI application
                customer_id: acme-corp
                latency_ms: 2,310
 ```
+
+**In plain terms.** "Total trace cost is the sum of every billable span inside it — and because each
+span carries a `customer_id` tag, that same sum can be re-grouped by customer, by feature, or by day
+without ever touching the provider invoice."
+
+The tag is what turns a debugging trace into a billing record. Without it you have one number per
+month from OpenAI and no way to split it; with it, every dollar is already attributed at the moment
+it is spent, and the monthly invoice becomes a reconciliation check rather than the source of truth.
+
+| Symbol | What it is |
+|--------|------------|
+| span cost | Cost of one billable operation — one embedding call or one generation call |
+| trace cost | Sum of the span costs. `$0.000013 + $0.00875 = $0.008763`, rounded to `$0.00876` |
+| `customer_id` tag | Propagated from the `X-Customer-ID` header onto every span in the trace |
+| grouping key | Whatever you aggregate by: customer, feature, model, day. The arithmetic is identical |
+| billing variance | Gap between what you charge and what the provider actually bills you |
+
+**Walk one example.** Roll one trace up to a daily bill, then to the accuracy claim in the results:
+
+```
+  ONE TRACE
+    embedding span   $0.000013
+    generation span  $0.008750
+                     ---------
+    trace total      $0.008763  -> logged as $0.00876
+
+  SCALE TO THE SYSTEM (10,000 support queries per day)
+    per day    10,000 x $0.00876 = $87.60
+    per month  $87.60 x 30       = $2,628
+    per year   $87.60 x 365      = $31,974
+
+  ONE ENTERPRISE CUSTOMER sending 500 queries/day
+    500 x $0.00876 = $4.38/day, tagged automatically, no estimation
+
+  WHAT THE ACCURACY IMPROVEMENT IS WORTH (monthly, at $2,628)
+    old flat-rate estimate, 40% variance:  +/- $1,051
+    traced attribution,      2% variance:  +/-    $53
+```
+
+That variance line is the whole business case for tracing. A 40% swing on a $2,628 monthly bill is
+±$1,051 of un-attributable cost, which means every enterprise contract is either overcharging a
+customer or silently eating margin, and nobody can tell which. Tagged spans collapse that to ±$53.
+Note also that the cost is dominated almost entirely by generation — the embedding span is
+`$0.000013 / $0.008763 = 0.15%` of the trace — so retrieval optimization is a latency lever, not a
+cost lever. Teams routinely invert this and spend weeks shrinking embedding calls that account for
+one-sixth of one percent of the bill.
 
 Daily cost attribution query run at midnight:
 

@@ -659,3 +659,42 @@ pipeline.connect("access_control.filters", "retriever.filters")
 | Access control violations | N/A | 0 (filter at retrieval time) |
 | Citations provided | N/A | 100% (5 source docs per answer) |
 | Monthly AI cost | $0 | $2,800 (250K queries × avg $0.011) |
+
+**What it means.** "Every row in this table is a price paid for the row above it — precision tripled, and the invoice for that is 1.1 cents and one extra second per query."
+
+| Symbol | What it is |
+|--------|------------|
+| `Q` | Monthly query volume, 250,000 |
+| `c` | Average cost per query, $0.011 — embedding + rerank + generation |
+| `Q x c` | Monthly AI spend |
+| `P50` / `P99` | Median and tail latency, before and after the RAG pipeline |
+| `P99 / P50` | Tail spread — how much worse a slow request is than a typical one |
+
+**Walk one example.** Cost first, then what happened to the latency distribution:
+
+```
+  spend
+    Q x c  =  250,000 x $0.011                =  $2,750 / month  -> "$2,800"
+    per 1,000 queries                         =  $11.00
+
+  latency
+                        P50      P99     spread
+    keyword search      0.3s     0.8s     2.7x
+    Haystack RAG        1.4s     3.1s     2.2x
+
+    P50 increase   1.4 / 0.3                  =  4.7x slower
+    P99 increase   3.1 / 0.8                  =  3.9x slower
+```
+
+Note the spread got *narrower* (2.7× down to 2.2×) even as both percentiles rose. That is
+the signature of a pipeline dominated by fixed work — embed, rerank, generate happen on
+every query regardless of the corpus — rather than by a variable search over documents. It
+means the RAG pipeline is more predictable than the keyword search it replaced, which is
+often worth more operationally than raw speed.
+
+**Where the 1.1 cents actually goes.** Three components run per query: an embedding call
+(cheap, fractions of a cent), a cross-encoder rerank over `top_k=20` (local model, no API
+cost but real latency), and one generation call over 3 retrieved documents (nearly all of
+the $0.011). This is why the Section 13 advice to retrieve 20 and rerank to 3 is
+cost-neutral and quality-positive: the expensive term is the generator's input, and the
+reranker is what keeps that input at three documents instead of twenty.

@@ -254,6 +254,32 @@ Three approaches to identifying what to click/type into:
    browser-use uses this approach
 ```
 
+**Read it like this.** "Those per-step accuracy percentages are multiplied together across a task, never averaged — so a ten-point gap per step becomes a forty-point gap per task."
+
+This is the single most important arithmetic in browser automation, and it is the reason the industry moved from pixel grounding to accessibility trees despite pixels working on strictly more interfaces.
+
+| Symbol | What it is |
+|--------|------------|
+| per-step accuracy | Probability this one click or fill targets the right element. 70-85% pixel, 85-95% tree |
+| `n` | Steps in the task. From the step counts below: 3-5 simple, 10-20 multi-page |
+| `accuracy^n` | Probability every step lands. Steps are serial, so probabilities multiply |
+| task success | What the user actually experiences. Always lower than the per-step number quoted |
+
+**Walk one example.** The three published accuracy figures, carried across an 8-step and a 20-step task:
+
+```
+  grounding method            per step     8-step task        20-step task
+    pixel (weak case)            70%       0.70^8 =  5.8%     0.70^20 = 0.08%
+    pixel (strong case)          85%       0.85^8 = 27.3%     0.85^20 =  3.9%
+    accessibility tree           95%       0.95^8 = 66.3%     0.95^20 = 35.8%
+
+  the per-step gap 85% -> 95% is 10 points
+  the 8-step task gap 27.3% -> 66.3% is 39 points
+  the 20-step task gap  3.9% -> 35.8% is 32 points, a 9.2x ratio
+```
+
+**Why hybrid grounding exists at all.** Read the bottom row: even at 95% per step, a 20-step workflow completes only about a third of the time end-to-end. No realistic per-step accuracy rescues a long task by itself, which is why every serious system pairs grounding with retry logic, post-action verification, and step budgets — mechanisms that break the pure multiplication by giving failed steps a second chance. Hybrid grounding is the same instinct applied one level down: it does not make any single method more accurate, it just makes the *fallback* path exist so that a Canvas element does not end the run at step 4.
+
 ### Action Latency Model
 
 ```
@@ -279,6 +305,42 @@ Comparison to API-based agents:
 Implication: computer use is appropriate for tasks with no API alternative,
 not for tasks where a structured API exists.
 ```
+
+**Put simply.** "Every action costs one full model call plus the physical time a browser needs to catch up — so task duration is just steps times that fixed toll."
+
+The five components are strictly serial: nothing can be overlapped, because each stage needs the previous stage's output. That is what makes the model additive rather than a max.
+
+| Symbol | What it is |
+|--------|------------|
+| screenshot + encode | Capturing and base64-ing the frame. Grows with resolution, `1280 x 800` here |
+| LLM API call | The dominant term. One full inference per action, with an image in the prompt |
+| action execution | The click or keystroke itself. Genuinely fast |
+| page load / settle | Waiting for `networkidle`. The most variable term — the site controls it, not you |
+| total per step | The sum of all five. Multiplied by step count to get task duration |
+
+**Walk one example.** Add the column ends to get the quoted 1.5-6 s band, then scale by step count:
+
+```
+                              fast case      slow case
+  screenshot capture             100 ms        300 ms
+  base64 encode                   50           100
+  LLM API call                 1,000         3,000
+  action execution               100           500
+  page load / settle             200         2,000
+                              -------       -------
+  total per step               1,450 ms      5,900 ms      (quoted as 1.5-6 s)
+
+  LLM share of the step   1,000/1,450 = 69%    3,000/5,900 = 51%
+
+  a 10-20 step multi-page workflow, at 2 s and 6 s per step:
+    10 x 2 =  20 s          20 x 2 =  40 s
+    10 x 6 =  60 s          20 x 6 = 120 s        -> the quoted 20-120 s band
+
+  versus an API agent at 200-1,000 ms per step:
+    6,000 / 1,000 = 6.0x        1,500 / 200 = 7.5x        midpoints 3,750/600 = 6.3x
+```
+
+**Why optimizing the wrong term is the usual mistake.** Teams reach first for screenshot compression, since it is the part they control — but capture plus encode is only 150 ms of a 1,450 ms fast step, so halving it buys about 5%. The LLM call is 51-69% of every step and the page settle is the term that spikes. The two changes that actually move the number are dropping the screenshot entirely in favour of the accessibility tree (a text prompt infers far faster than an image one) and replacing blanket `networkidle` waits with a targeted `wait_for_selector` on the one element the next action needs.
 
 ### Reliability Challenges
 
@@ -732,8 +794,68 @@ async def run_full_qa_suite(scenarios: list[dict], max_concurrent: int = 10) -> 
 - Cost per full suite run: $28 (200 scenarios × avg 8 steps × $0.018/step at Claude 3.5 prices)
 - Human review time per release: reduced from 16 hours to 3 hours
 
+**What it means.** "The suite bill is not per test — it is per LLM step, and the step count is what you are really buying."
+
+Scenario count is the number teams quote; steps per scenario is the number that sets the invoice. Doubling scenarios and doubling their average length cost exactly the same.
+
+| Symbol | What it is |
+|--------|------------|
+| `200 scenarios` | Distinct test cases in the suite. The unit QA engineers think in |
+| `avg 8 steps` | Actions per scenario. The multiplier that converts scenarios into LLM calls |
+| `$0.018/step` | Per-action cost at Claude 3.5 prices — one screenshot-bearing inference |
+| `10 parallel` | Concurrency in `run_full_qa_suite`. Divides wall-clock time, never total cost |
+
+**Walk one example.** Reconstruct both the invoice and the clock:
+
+```
+  total LLM steps      200 x 8              =  1,600 steps per suite run
+  suite cost           1,600 x $0.018       =  $28.80            (quoted $28)
+  cost per scenario    $28.80 / 200         =  $0.144
+
+  wall clock at 10 parallel agents:
+    scenarios per agent    200 / 10         =  20
+    seconds per scenario   42 x 60 / 20     =  126 s
+    seconds per step       126 / 8          =  15.8 s
+
+  but the latency model above caps a step at 6.0 s:
+    15.8 / 6.0  =  2.6x slower than the worst case it predicts
+
+  versus manual QA:  16 h / 42 min  =  22.9x faster
+```
+
+**Where the missing 9.8 seconds per step go.** The latency model measures a step on an already-open page. The measured 15.8 s absorbs everything the model excludes: launching a fresh Chromium per scenario, initial navigation and login, retries on stale elements, and the `networkidle` waits that a real checkout flow triggers repeatedly. Treat the per-step model as a floor for capacity planning, not a forecast — and note that concurrency fixed the clock without touching the $28.80, because parallelism buys latency, never cost.
+
 **Tradeoffs and Alternatives**:
 
 - Playwright test scripts (deterministic, no LLM): 10× faster and cheaper per run, but require 2-3 days of developer time per new scenario to write and maintain; they break on any DOM structure change. The browser agent approach requires ~15 minutes to add a new scenario in YAML. Net cost is lower for a team that ships UI changes frequently.
 - Screenshot-only mode was prototyped for the entire suite: failed on 28% of form fill steps because the vision model couldn't reliably distinguish similar form fields in a dense checkout form. Switching to accessibility tree for standard elements reduced form fill failures to 4%.
 - The chart verification gap (6.1% false negatives in D3.js charts) is being addressed by adding a dedicated chart verification tool that uses pixel comparison against a reference screenshot rather than semantic understanding.
+
+**Stated plainly.** "Switching form fields from vision to the accessibility tree removed six of every seven fill failures — and because failures compound, that turned an unusable scenario into a working one."
+
+This is the grounding-accuracy multiplication from Section 6 measured on a real suite rather than a table, which is what makes it worth the arithmetic.
+
+| Symbol | What it is |
+|--------|------------|
+| `28%` | Form-fill step failure rate under screenshot-only grounding. Per step, not per scenario |
+| `4%` | The same rate after switching standard elements to the accessibility tree |
+| per-step success | `1 - failure rate`. `0.72` and `0.96` respectively |
+| `success^n` | Chance an `n`-step form-fill scenario completes with every step landing |
+
+**Walk one example.** Convert the two failure rates into scenario-level outcomes at the suite's average of 8 steps:
+
+```
+  screenshot-only     28% step failure   ->  per-step success 0.72
+  accessibility tree   4% step failure   ->  per-step success 0.96
+
+  absolute reduction   28 - 4          =  24 points
+  relative reduction   (28 - 4) / 28   =  85.7% fewer failing steps
+
+  across an 8-step form-fill scenario:
+    screenshot-only     0.72^8  =   7.2% of scenarios complete
+    accessibility tree  0.96^8  =  72.1% of scenarios complete
+
+  10x more scenarios complete, off a per-step change of 24 points
+```
+
+**Why vision failed here specifically.** The stated cause is a dense checkout form whose fields look alike — "Billing address line 2" and "Shipping address line 2" are visually near-identical rectangles, and pixel grounding has only position to tell them apart. The accessibility tree carries the label as text, so the ambiguity disappears entirely rather than being resolved more accurately. That is the general rule behind the hybrid approach: use vision where semantics genuinely are not exposed, such as the D3.js charts still driving the 6.1% false-negative rate, and never where a label already exists in the DOM.

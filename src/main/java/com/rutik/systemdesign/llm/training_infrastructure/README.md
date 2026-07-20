@@ -83,6 +83,37 @@ AllReduce at end of each layer to combine partial outputs
 - Best within a single node (NVLink bandwidth 600-900 GB/s)
 - Typical TP degree: 4-8 within a server
 
+**Read it like this.** "Cut the weight matrix into vertical strips, give each GPU one strip, and every GPU computes a slice of the answer for the *same* tokens — then glue the slices back together."
+
+The slicing is along the output dimension, not the batch. Every GPU sees the full input activation and produces a different piece of the output, which is why the pieces must be stitched with an all-reduce before the next layer can run.
+
+| Symbol | What it is |
+|--------|------------|
+| `d_model` | Width of the model's hidden state — the input dimension of the layer |
+| `4d_model` | Output width of the MLP's up-projection. The "4x" expansion is the standard transformer FFN ratio |
+| `W[:, a:b]` | Columns `a` through `b` of the weight matrix. `:` = "all rows", so each GPU keeps every row but only its own columns |
+| TP degree | How many GPUs the layer is split across. Here 4, so each gets `4d_model / 4 = d_model` columns |
+| AllReduce | Sum the partial outputs across all TP ranks so every GPU ends up with the identical full output |
+
+**Walk one example.** One MLP up-projection at `d_model = 4096`, split across TP = 4:
+
+```
+  full weight matrix : 4096 x 16384  = 67,108,864 params  = 0.134 GB in BF16
+
+  columns per GPU    : 16384 / 4     = 4096 columns
+  shard per GPU      : 4096 x 4096   = 16,777,216 params  = 0.034 GB in BF16
+
+  GPU 0 holds W[:,     0:4096 ]  -> output features     0..4095
+  GPU 1 holds W[:,  4096:8192 ]  -> output features  4096..8191
+  GPU 2 holds W[:,  8192:12288]  -> output features  8192..12287
+  GPU 3 holds W[:, 12288:16384]  -> output features 12288..16383
+
+  memory per GPU  = 0.134 / 4 = 0.034 GB    <- the whole point: 4x less weight memory
+  each GPU output = 4096 of the 16384 features, so nothing is usable until AllReduce
+```
+
+**Why TP must stay inside a node.** That AllReduce fires *once per layer*, not once per step. An 80-layer model at TP=4 means 80 collectives in the forward pass and 80 more in the backward pass — every one of them a hard barrier where fast GPUs wait for slow links. Over NVLink at 600-900 GB/s that cost hides under compute; over InfiniBand it does not, which is exactly the "wrong TP/PP balance" failure in Section 10.
+
 ### 4.3 Pipeline Parallelism (PP)
 
 Split model layers across different GPUs. Each GPU handles a set of consecutive transformer layers.
@@ -103,6 +134,37 @@ Micro-batch pipeline:
 - Communication: Point-to-point between adjacent pipeline stages (cheap)
 - "Pipeline bubble" — GPUs idle at start/end of pipeline; minimize with micro-batching
 - Typical PP degree: 8-64 across nodes
+
+**What the formula is telling you.** The bubble fraction `(p − 1) / (m + p − 1)` says: "the pipeline wastes `p − 1` slots filling up and draining, spread over the `m + p − 1` slots the whole batch takes — so the only cure is to make `m` large relative to `p`."
+
+The wasted work is fixed by the pipeline's depth; the useful work grows with the number of micro-batches. You cannot remove the bubble, only dilute it.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Pipeline depth — number of stages, i.e. how many GPUs the layers are split across |
+| `m` | Micro-batches per global batch. The global batch is chopped into `m` pieces fed back-to-back |
+| `p − 1` | Slots stage `p` sits idle waiting for the first micro-batch to reach it — the fill cost, repeated on drain |
+| `m + p − 1` | Total slots to push `m` micro-batches through `p` stages: `m` steady-state slots plus `p − 1` of ramp |
+| bubble fraction | Share of GPU-time that is idle. Multiply by cluster cost to price it |
+
+**Walk one example.** Fix `p = 8` (the Section 10 pitfall) and raise only `m`:
+
+```
+                             wasted     total
+    m       formula          slots      slots      bubble    usable GPU time
+    4    (8-1)/(4+8-1)         7          11       63.6%        36.4%
+    8    (8-1)/(8+8-1)         7          15       46.7%        53.3%
+   16    (8-1)/(16+8-1)        7          23       30.4%        69.6%
+   32    (8-1)/(32+8-1)        7          39       17.9%        82.1%
+   64    (8-1)/(64+8-1)        7          71        9.9%        90.1%
+
+  The numerator never moves -- 7 wasted slots at every row. Only the denominator grows.
+  m = 4*p = 32 is where the curve flattens: doubling again to 64 buys only 8 more points.
+```
+
+Deeper pipelines need proportionally more micro-batches to stay at the same waste level. LLaMA 3's `PP = 16` needs `m = 64` for `15/79 = 19.0%` and `m = 128` for `15/143 = 10.5%` — the same 10% target that `p = 8` reached at `m = 64`.
+
+**Why `m ≥ 4 × p` is the rule of thumb.** Substituting `m = 4p` gives `(p − 1) / (5p − 1)`, which converges to `1/5 = 20%` for any depth — a bounded, predictable waste. Below that ratio the bubble grows fast enough to erase the speedup pipeline parallelism was bought for; above it you pay in activation memory, since all `m` in-flight micro-batches hold live activations until their backward pass runs. That memory ceiling is why 1F1B schedules exist and why, when memory blocks a larger `m`, the correct move is to cut `p` instead.
 
 ### 4.4 Sequence Parallelism (SP)
 
@@ -158,6 +220,38 @@ Total parallelism = TP × PP × DP
 Example: TP=8, PP=8, DP=16 = 1024 GPUs
 ```
 
+**Put simply.** "Three independent ways to cut the job, multiplied together — TP splits each layer, PP splits the stack of layers, DP splits the data — so `TP × PP × DP` is the GPU count, and each factor should be sized to the interconnect it runs over."
+
+The multiplication is the useful part: the three axes are orthogonal, so the cluster size is a product, not a sum. That is how you get to thousands of GPUs with only single-digit degrees on any one axis.
+
+| Symbol | What it is |
+|--------|------------|
+| TP | Tensor-parallel degree. GPUs sharing one layer. Needs NVLink, so cap it at GPUs-per-node (8) |
+| PP | Pipeline-parallel degree. Consecutive layer groups. Point-to-point only, so it may cross nodes |
+| DP | Data-parallel degree. Independent replicas of the whole TP×PP model, each on its own data shard |
+| TP × PP | GPUs holding exactly one complete copy of the model — the "model group" size |
+| TP × PP × DP | Total GPUs in the run |
+
+**Walk one example.** The configuration above, then the real LLaMA 3 405B run from Section 7:
+
+```
+  example cluster
+    TP = 8    (one node, NVLink)
+    PP = 8    (8 nodes deep, InfiniBand point-to-point)
+    DP = 16   (16 independent replicas)
+
+    model group  = TP x PP      =  8 x  8        =    64 GPUs hold one full model
+    total        = TP x PP x DP =  8 x  8 x 16   = 1,024 GPUs
+    replicas     = DP           = 16 copies, each on 64 GPUs, all averaged by AllReduce
+
+  LLaMA 3 405B (Section 7)
+    TP = 8, PP = 16, DP = 128
+    model group  =  8 x 16              =    128 GPUs per full model copy
+    total        =  8 x 16 x 128        = 16,384 GPUs   <- matches the 2048 nodes x 8
+```
+
+Read the assignment as a bandwidth ladder: TP takes the fastest link because it communicates every layer, PP takes the middle because it only ships activations between stages, DP takes the slowest because it synchronizes once per step. Reversing that order — a TP group spanning nodes — is what turns a 90% MFU run into a 30% one.
+
 ### ZeRO (Zero Redundancy Optimizer) Stages
 ```
 ZeRO Stage 0 (DDP):     Each GPU stores: [params] [gradients] [optimizer states]
@@ -174,6 +268,46 @@ ZeRO Stage 3 (FSDP):    Each GPU stores: [1/N params] [1/N gradients] [1/N optim
   Cost: All-gather parameters before each forward pass (extra communication)
 ```
 
+**In plain terms.** "Standard data parallelism makes every GPU store the same 16 bytes per parameter; ZeRO notices that `N` GPUs keeping `N` identical copies is pure waste and hands each GPU only `1/N` of the redundant parts — first the optimizer states, then the gradients, then the parameters themselves."
+
+The 16 bytes/param is the number to have memorized. Every ZeRO stage is just a decision about which slices of those 16 bytes get divided by `N`.
+
+| Symbol | What it is |
+|--------|------------|
+| params (2 B) | The BF16 weights used for forward and backward compute |
+| grads (2 B) | BF16 gradients, one per parameter — same size as the weights |
+| Adam `m` (4 B) | First moment, the running average of gradients. FP32 for precision |
+| Adam `v` (4 B) | Second moment, the running average of squared gradients. FP32 |
+| FP32 master (4 B) | The high-precision copy the optimizer actually updates, then casts down to BF16 |
+| "Adam states 12 B" | The three FP32 tensors together: `m` + `v` + master = 4 + 4 + 4 |
+| `N` | Number of data-parallel GPUs the shards are spread over |
+
+**Walk one example.** Decompose the 16 bytes, then apply each stage to a 70B model on `N = 16` GPUs:
+
+```
+  per-parameter budget
+    BF16 params        2 bytes
+    BF16 grads         2 bytes
+    Adam m   (FP32)    4 bytes  \
+    Adam v   (FP32)    4 bytes   > the "12 bytes of Adam states"
+    FP32 master copy   4 bytes  /
+    -----------------------------
+    total             16 bytes/param
+
+  70B params, N = 16 GPUs
+                  replicated   sharded    bytes/param    per-GPU memory   vs stage 0
+    Stage 0 (DDP)    16 B        0 B       16.000          1120.0 GB        1.00x
+    Stage 1           4 B       12 B        4.750           332.5 GB        3.37x
+    Stage 2           2 B       14 B        2.875           201.2 GB        5.57x
+    Stage 3 (FSDP)    0 B       16 B        1.000            70.0 GB       16.00x
+
+  Stage 3's bytes/param is exactly 16/N -- the "N/16x reduction" in the block above.
+```
+
+The quoted "~4x" and "~8x" for Stages 1 and 2 are the large-`N` limits, not the `N = 16` values. Push `N` to 64 and the replicated part dominates: Stage 1 lands at `4 + 12/64 = 4.19` bytes/param (`3.82x`) and Stage 2 at `2 + 14/64 = 2.22` bytes/param (`7.21x`), converging on the 16/4 and 16/2 ceilings set by what each stage refuses to shard.
+
+**What the extra communication buys.** Stage 1 and 2 are near-free: the optimizer step and the gradient reduce-scatter already had to touch that data, so sharding them changes *where* bytes live, not how many move. Stage 3 is different — parameters must be all-gathered back before every forward and again before every backward, which is why its overhead is the ~20-30% figure quoted in Section 12 and why Stage 2 is the default until the model itself stops fitting.
+
 ### GPU Memory Budget (70B Model, BF16)
 ```
 Model weights:      140 GB  (70B × 2 bytes)
@@ -186,6 +320,39 @@ Total (naive):     840+ GB  -- requires 11+ A100 80GB GPUs just for model/optim
 With ZeRO-3 + 16 GPUs:
   Per GPU: 840 / 16 = 52.5 GB + activations (manageable on 80GB GPU)
 ```
+
+**Stated plainly.** "Weights are the smallest line item, not the biggest — a 70B model needs 140 GB of weights but 840 GB of training state, so the optimizer is what actually decides how many GPUs you rent."
+
+Every number in that budget is `70B × (bytes per parameter for that tensor)`. Nothing else is happening.
+
+| Symbol | What it is |
+|--------|------------|
+| 70B × 2 | Weights in BF16 at 2 bytes each — the only line that also exists at inference time |
+| gradients | One BF16 number per weight, so identical in size to the weights |
+| "4x weights" | Adam's `m` and `v` in FP32: 4 + 4 = 8 bytes vs the weights' 2, hence 4x |
+| activations | Intermediate tensors kept for the backward pass. Scales with batch × sequence, not parameters |
+| `840 / 16` | Total state divided by GPUs — what ZeRO-3 does, because it shards all three tensors |
+
+**Walk one example.** Rebuild the budget from bytes/param, then divide it:
+
+```
+  tensor            bytes/param   x 70e9 params      running total
+    weights   BF16       2           140 GB             140 GB
+    gradients BF16       2           140 GB             280 GB
+    Adam m    FP32       4           280 GB             560 GB
+    Adam v    FP32       4           280 GB             840 GB   <- the "840+ GB" figure
+    FP32 master          4           280 GB            1120 GB   <- the full 16 bytes/param
+
+  how many 80 GB A100s just to hold it
+     840 GB / 80 GB = 10.5  -> 11 GPUs      (the "11+ A100 80GB" claim above)
+    1120 GB / 80 GB = 14.0  -> 14 GPUs      (if the FP32 master copy is kept too)
+
+  ZeRO-3 across N = 16
+     840 / 16 =  52.5 GB per GPU  + activations   -> fits 80 GB
+    1120 / 16 =  70.0 GB per GPU  + activations   -> uncomfortably tight
+```
+
+Note the budget stops at 840 GB because it counts Adam's `m` and `v` but not the FP32 master copy that the mixed-precision recipe in Section 6 also requires; carrying it takes the same model to the full 16 bytes/param and 1120 GB. Both framings appear in the wild, which is why "is the master copy in your number?" is a fair interview follow-up. Either way the conclusion is unchanged: weights are 17% of the bill at 840 GB and 12.5% at 1120 GB, so memory planning that only counts weights is off by roughly 6x.
 
 ---
 
@@ -225,6 +392,37 @@ With checkpointing: Store activations at N checkpoints -> recompute between chec
 Selective checkpointing: Only checkpoint expensive activations (attention, certain MLPs)
 ```
 
+**The idea behind it.** "Keep only a sparse set of save points on the way forward, throw the rest away, and when the backward pass needs a discarded activation, redo the small stretch of forward work that produced it."
+
+The `√layers` is not arbitrary — it is the checkpoint spacing that minimizes total memory, because you pay for both the saved checkpoints and the largest segment you must re-expand.
+
+| Symbol | What it is |
+|--------|------------|
+| activation | A layer's output tensor, held from forward until the backward pass consumes it |
+| checkpoint | A layer boundary whose activation you deliberately keep, as a restart point for recomputation |
+| `O(layers × batch × seq)` | Naive cost: one stored tensor per layer, scaling with tokens in flight |
+| `O(√layers)` | Cost with evenly spaced checkpoints — `√L` saved plus `√L` re-expanded at a time |
+| "+33% compute" | One extra forward pass on top of the normal forward + backward |
+
+**Walk one example.** An 80-layer model, checkpoints spaced at `√80`:
+
+```
+  without checkpointing
+    stored activation sets = 80  (one per layer, all resident until backward)
+
+  with sqrt spacing
+    sqrt(80)          = 8.94   -> 9 checkpoints, segments of 80/9 = 8.9 layers
+    resident at once  = 9 saved + ~9 recomputed inside the active segment = ~18 sets
+    memory ratio      = 80 / 17.9 = 4.5x less activation memory
+
+  the compute bill, in the 6N-per-token currency from Section 12
+    normal step    : 2N forward + 4N backward              = 6N
+    recomputed step: 2N forward + 2N re-forward + 4N back  = 8N
+    overhead       = 2N / 6N = 33.3%    <- exactly the "+33% compute" quoted above
+```
+
+The 33% falls straight out of the 6N rule: the forward pass is 2 of the 6 units, and checkpointing runs it twice. That is why the trade is usually worth taking — you buy a ~4.5x cut in activation memory for a third more compute, and the memory is what was blocking a larger batch. Selective checkpointing sharpens it further by recomputing only the cheap-to-redo layers and keeping the expensive attention activations resident.
+
 ### Communication Topology
 
 ```
@@ -241,6 +439,38 @@ Implication: Tensor parallelism (requires all-reduce every layer) MUST stay with
   Pipeline parallelism (point-to-point) can cross nodes
   Data parallelism all-reduce happens once per step -- tolerable across nodes
 ```
+
+**What this actually says.** "A ring all-reduce makes every GPU send and receive about twice the payload — once going around to sum it, once going around to hand the result back — so divide `2 × size` by the link bandwidth and you have the collective's time."
+
+That doubling is the `all-reduce = 2× ring latency` note above. It is the single most useful back-of-envelope in distributed training, and it is why the same 1 GB collective is invisible inside a node and painful across nodes.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Payload size — for gradient sync, the size of the model's gradients |
+| `N` | Number of participants in the ring |
+| `2 × (N−1)/N × S` | Bytes each GPU moves: a reduce-scatter pass plus an all-gather pass. Approaches `2S` as `N` grows |
+| ring | Each GPU talks only to its two neighbours, so cost stops growing once `N` is large |
+| bandwidth | Bytes/sec on the slowest link in the ring — NVLink inside a node, InfiniBand across nodes |
+
+**Walk one example.** The two cases quoted above, from the same 1 GB payload:
+
+```
+  inside one node, 8x H100 on NVLink at 900 GB/s
+    volume per GPU = 2 x (8-1)/8 x 1 GB = 1.750 GB
+    time           = 1.750 / 900        = 1.94 ms      <- the "~2ms" above
+
+  across 16 nodes on InfiniBand
+    volume per node = 2 x (16-1)/16 x 1 GB = 1.875 GB
+    at the nominal 200 GB/s  -> 9.4 ms
+    the quoted figure is     -> 40 ms
+    implied effective bw     = 1.875 / 0.040 = 46.9 GB/s = 23% of nominal
+
+  Real collectives land well under line rate -- protocol overhead, tree/ring topology
+  effects, and one slow link setting the pace for everyone. Budget from measured
+  bandwidth, never from the datasheet number.
+```
+
+**Why this decides the parallelism layout.** Scale `S` to a real model and the ranking is obvious. A 7B model in FP16 has 14 GB of gradients, so one data-parallel all-reduce moves `2 × 14 = 28 GB` — but it fires *once per step*, so at 46.9 GB/s effective it costs about 0.6 s against a multi-second step. Tensor parallelism fires a collective per layer, so the same bandwidth is charged 160 times per step for an 80-layer model. Same formula, same hardware; the frequency is what makes one placement tolerable and the other fatal.
 
 ### Mixed Precision Training
 

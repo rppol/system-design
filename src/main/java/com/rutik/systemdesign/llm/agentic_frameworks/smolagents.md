@@ -381,6 +381,40 @@ Yes for narrow tasks with proper sandboxing. The minimalist code base is auditab
 - Zero security incidents (E2B isolation)
 - Students learn faster — see the actual Pandas code the agent wrote
 
+**What it means.** "The average of 1.4 iterations is not a typical run — it is 85% of runs finishing in one and a stubborn 15% needing several, and that minority sets the cost."
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Share answered correctly on the first try, 0.85 |
+| `1 - p` | Share that needed the agent to re-run its code, 0.15 |
+| `k` | Average iterations used by that harder minority |
+| `E[i]` | Mean iterations overall = `p x 1 + (1 - p) x k`, measured at 1.4 |
+
+**Walk one example.** Solve the reported average for what the hard 15% actually cost:
+
+```
+  E[i]  =  p x 1  +  (1 - p) x k
+   1.4  =  0.85   +  0.15 k
+  0.55  =  0.15 k
+     k  =  3.67 iterations for the hard 15%
+
+  share of all iterations consumed
+    easy 85%    0.85 x 1.00    =  0.85   of 1.4  =  61%
+    hard 15%    0.15 x 3.67    =  0.55   of 1.4  =  39%
+```
+
+A sixth of the questions consume nearly two-fifths of the compute. This is the same tail
+shape that justifies the Section 14 lesson about routing the hard 15% to Sonnet: those runs
+are already costing ~3.7× a normal one on Haiku, so escalating them to a stronger model is
+close to cost-neutral while removing most of the retries.
+
+**Why CodeAgent's iteration count is lower than a tool-calling agent's to begin with.** A
+`ToolCallingAgent` needs one LLM round-trip per tool — search, then read, then summarize is
+three. A `CodeAgent` expresses all three as one Python block, so a task that costs three
+calls there costs one here. That is the concrete mechanism behind the "3-5× fewer LLM calls"
+claim in Section 2, and it compounds with the retry math above: fewer calls per iteration
+multiplied by 1.4 iterations is what produces the $0.003 per question.
+
 **Lessons**:
 1. CodeAgent's natural code output is itself a teaching artifact — students learn from the agent's solutions.
 2. Haiku is sufficient for ~85% of educational data tasks; escalating to Sonnet for the harder 15% via custom router.

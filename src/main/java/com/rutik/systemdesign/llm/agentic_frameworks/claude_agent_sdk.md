@@ -135,6 +135,41 @@ Prompt Caching for Agents
   +--------------------------------------------------+
 ```
 
+### Decoding the two numbers in that first diagram
+
+**What this actually says.** "Running tools one after another costs you the *sum* of their durations; running them together costs you only the *slowest* one."
+
+That swap — `sum` becomes `max` — is the entire reason `asyncio.gather()` appears in the loop above. It is also why the win grows as you add tools: every extra tool adds its full duration to the sequential number but adds nothing at all to the parallel number unless it happens to be the new slowest.
+
+| Symbol | What it is |
+|--------|------------|
+| `t_a, t_b, t_c` | Wall-clock duration of each individual tool call (1.5s, 2.1s, 0.8s) |
+| `sum(t)` | Sequential wall time — you wait for each tool before starting the next |
+| `max(t)` | Parallel wall time — all tools are in flight, you wait for the last to land |
+| `sum(t) - max(t)` | The time `asyncio.gather()` buys back |
+
+**Walk one example.** The three tools from the diagram, run both ways:
+
+```
+                       t_a     t_b     t_c    wall clock
+  sequential  sum      1.5  +  2.1  +  0.8  =   4.4s
+  parallel    max      1.5     2.1     0.8  =   2.1s   (t_b is the straggler)
+
+  saved   =  4.4 - 2.1                       =   2.3s
+  percent =  2.3 / 4.4                       =  52%
+```
+
+A 52% cut, and it lands inside the range the text quotes for real agents. Now add a
+fourth tool taking 0.9s: sequential becomes 5.3s, but parallel stays at 2.1s, because
+0.9 < 2.1. The straggler sets the floor, so the way to speed up a parallel tool round is
+never to trim the fast tools — it is to attack `t_b`.
+
+**Why the term `max` and not an average.** A common instinct is to expect parallel time to
+be the *mean* of the durations. It never is. You cannot return to the model until every
+tool_result block exists, so one slow tool holds the whole round hostage. This is exactly
+why a single un-timeout-ed tool can make an otherwise-fast agent feel broken: it becomes
+`max` for every turn it appears in.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -308,6 +343,46 @@ for block in response.content:
 
 Without caching: same task would cost ~$0.34 (2.1× more).
 
+**Read it like this.** "Every token in the request is priced by which of three buckets it fell into — fresh input, a cache write, or a cache read — and an agent loop is profitable precisely because the same 3500-token prefix keeps landing in the cheapest bucket."
+
+The `×$3`, `×$3.75`, `×$0.30` and `×$15` in that table are **dollars per million tokens**, so each product is `tokens / 1,000,000 × price`. Read them as raw multiplications and every row comes out a thousand times too large.
+
+| Symbol | What it is |
+|--------|------------|
+| `$3 / M` | Base input price — what an uncached prompt token costs |
+| `$3.75 / M` | Cache **write**: 1.25× base. The one-time premium for storing a prefix |
+| `$0.30 / M` | Cache **read**: 0.1× base. What that same prefix costs on every later step |
+| `$15 / M` | Output price — 5× base input, and never cacheable |
+| `3500` | The static prefix (system prompt + tool defs) that repeats on all 5 steps |
+
+**Walk one example.** Step 1 pays the write premium; steps 2-5 collect the payoff:
+
+```
+  step 1  (cache write)
+    input     4000 tok  x $3.00 / 1e6  =  $0.012000
+    write     3500 tok  x $3.75 / 1e6  =  $0.013125
+    output     800 tok  x $15.00 / 1e6 =  $0.012000
+                                          ---------
+                                          $0.037125   -> table's $0.038
+
+  the 3500-token prefix, per later step
+    as cache read   3500 x $0.30 / 1e6 =  $0.00105
+    as fresh input  3500 x $3.00 / 1e6 =  $0.01050
+    saved per step                     =  $0.00945
+    saved over steps 2-5   4 x $0.00945 =  $0.03780
+```
+
+That $0.0378 saved is roughly the entire cost of step 1 — the prefix pays for its own
+storage inside four turns. Scaled to the whole run, $0.34 uncached against $0.162 cached
+is `0.34 / 0.162 = 2.1x`, exactly the multiplier quoted above the fold.
+
+**Why a cache *write* costs more than plain input.** Without the 1.25× surcharge the
+provider would be storing your prefix for free, and every caller would mark everything
+ephemeral. The surcharge makes caching a bet: you pay 25% extra once, wagering that the
+prefix will be re-read at least a couple of times. The bet is cheap to win — one read at
+0.1× recovers far more than the 0.25× you staked, which is why the next section's
+break-even lands on the second call.
+
 ---
 
 ## 7. Real-World Examples
@@ -424,6 +499,48 @@ system = [{
 # Calls 2-10: 2000 tokens at $0.30/M (cache read) = 9 × $0.0006 = $0.0054
 # Total: $0.013 vs $0.06 — 78% savings
 ```
+
+**The idea behind it.** "Sending a fixed system prompt N times costs `N` full-price copies; caching it costs one premium copy plus `N-1` copies at a tenth the price."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of API calls that reuse the identical prefix (10 here) |
+| `P` | Base input price, $3 / M |
+| `1.25 P` | Cache-write price, $3.75 / M — paid on call 1 only |
+| `0.1 P` | Cache-read price, $0.30 / M — paid on calls 2 through `N` |
+| break-even `N` | The call count at which caching stops losing money and starts saving it |
+
+**Walk one example.** The 2000-token system prompt over 10 iterations:
+
+```
+  uncached
+    10 calls x 2000 tok x $3.00 / 1e6              =  $0.0600
+
+  cached
+    call 1     2000 tok x $3.75 / 1e6              =  $0.0075
+    calls 2-10  9 x 2000 tok x $0.30 / 1e6         =  $0.0054
+                                                      -------
+                                                      $0.0129   -> "$0.013"
+
+    saved  = (0.0600 - 0.0129) / 0.0600            =  78.5%
+
+  break-even: solve  1.25 P + 0.1 P (N-1)  =  P N
+                     1.25 + 0.1 N - 0.1    =  N
+                     1.15                  =  0.9 N
+                     N                     =  1.28 calls
+```
+
+Break-even at `N = 1.28` means caching is already ahead on the **second** call — you never
+need a long conversation to justify it. That is the number behind the war story below: at
+100K conversations/day with 5-20 messages each, every single conversation clears the
+threshold many times over, so the monthly bill falls from $4200 to $1100, a
+`(4200 - 1100) / 4200 = 74%` reduction.
+
+**What breaks without the 5-minute TTL in the picture.** The break-even above silently
+assumes the prefix is still resident when call 2 arrives. If a user's messages are spread
+20 minutes apart, every call is a fresh write at 1.25× and caching becomes a 25% *surcharge*
+rather than a 90% discount. Bursty traffic is not a nice-to-have for prompt caching — it is
+the precondition that makes the arithmetic work.
 
 **War story**: A team running 100K agent conversations/day was billed $4200/month before they added prompt caching. Their system prompt was 3500 tokens describing 12 tools. After enabling cache_control on system+tools: bill dropped to $1100/month (74% reduction). The 5-minute cache TTL was sufficient because the agent processed conversations in bursts (each user had 5-20 messages within a 5-minute window).
 

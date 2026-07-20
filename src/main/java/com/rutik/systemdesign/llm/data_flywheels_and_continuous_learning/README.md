@@ -259,6 +259,49 @@ Annotation budget allocation — given a budget of B annotations per week:
 - Allocate 30% to high-uncertainty examples from the production stream
 - Allocate 10% to randomly sampled examples (guards against systematic blind spots in the selector)
 
+**Put simply.** "Spend most of your labeling money where you already know the model failed, some
+where the model admits it is unsure, and a deliberate slice at random so you can still discover
+failures your selector is blind to."
+
+The 10% random slice is the counterintuitive one and the one most often cut first. It looks like
+pure waste — you are paying to label examples the selector said were uninteresting — but it is the
+only part of the budget that can find failure modes the uncertainty scorer systematically misses.
+Without it the flywheel gets very good at fixing the problems it can already see, and never learns
+that it cannot see the others.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Total annotations you can afford per week. Set by annotator headcount, not by ambition |
+| error proxy (60%) | Thumbs-down or regenerated responses. Already carry a negative label, so the annotator only supplies the correction |
+| high uncertainty (30%) | Top-scoring examples from token entropy, ensemble disagreement, or low reward-model score |
+| random (10%) | Uniform sample from production traffic, ignoring every score. The blind-spot detector |
+
+**Walk one example.** A team with two annotators sustaining `B = 1,000` examples/week:
+
+```
+  error proxy      1,000 x 60% = 600 examples/week
+  high uncertainty 1,000 x 30% = 300 examples/week
+  random           1,000 x 10% = 100 examples/week
+                                -----
+                                1,000
+
+  CHECK AGAINST SUPPLY -- at 2,000 conversations/day and a 30% escalation rate:
+    escalations available = 2,000 x 30% x 7 = 4,200 per week
+    error-proxy budget    =                     600 per week
+    coverage              = 600 / 4,200      = 14.3%
+
+  The error-proxy bucket is SUPPLY-RICH and BUDGET-POOR: you can label only 1 in 7
+  of the failures you already have. Uncertainty scoring is not what limits you here.
+```
+
+That coverage figure reframes the whole active-learning question. When failures outnumber your
+budget 7 to 1, sophisticated uncertainty scoring buys you very little — almost any selection rule
+finds enough genuinely-failed examples to fill the quota. Uncertainty scoring earns its keep only
+once the error-proxy supply runs dry, which happens when the model gets good. This is also why the
+case study's Zendesk webhook is called the highest-value engineering decision: it converts 2,000
+conversations/day into labeled outcomes at zero annotation cost, sidestepping the `B` ceiling
+entirely rather than allocating within it.
+
 ### 6.3 Data Curation: The Pipeline Before Fine-Tuning
 
 Raw production data must pass through the following stages before entering a fine-tuning dataset:
@@ -365,6 +408,64 @@ At 500 conversations/day with 50% split: 3,550 / 250 = 14 days
 ```
 
 This is why small LLM applications cannot run meaningful A/B tests on weekly update cycles — volume matters.
+
+**Read it like this.** "How many conversations do I need before a 3-point improvement stops being
+explainable by luck? Take how noisy the metric is, divide by how big the effect is, and square the
+whole thing."
+
+The squaring in the denominator is the part that governs everything else in this module. Sample size
+scales with `1 / MDE^2`, so chasing a smaller improvement is brutally expensive: halving the effect
+you want to detect does not double the test, it quadruples it. Every "let's just measure a 1-point
+gain" request is really a request for a 9x longer test.
+
+| Symbol | What it is |
+|--------|------------|
+| `p1` | Baseline rate. The current model resolves 70% autonomously |
+| `p2` | Target rate. `p1 + MDE` = 0.73 |
+| MDE | Minimum detectable effect — the smallest real improvement you insist on being able to see. +3 points here |
+| `z_alpha/2 = 1.96` | Significance at alpha = 0.05. "Accept a 5% chance of calling a win that isn't real" |
+| `z_beta = 0.84` | Power at 0.80. "Accept a 20% chance of missing a win that is real" |
+| `p(1-p)` | Variance of a yes/no outcome. Largest at p = 0.5, shrinking toward 0 or 1 |
+| `n` | Conversations needed **per arm**, not in total. A 50/50 test needs `2n` conversations overall |
+
+**Walk one example.** The stated calculation, step by step, then what changing the MDE does:
+
+```
+  z term:        (1.96 + 0.84)^2 = 2.80^2         = 7.84
+  variance term: 0.70 x 0.30     = 0.2100
+                 0.73 x 0.27     = 0.1971
+                 sum             = 0.4071
+  effect term:   (0.03)^2                          = 0.0009
+
+  n = 7.84 x 0.4071 / 0.0009 = 3,546 per arm       -> the ~3,550 quoted
+
+  MDE SENSITIVITY (baseline held at 70%)
+    +5 points ->  1,247 per arm
+    +3 points ->  3,546 per arm
+    +2 points ->  8,067 per arm
+    +1 point  -> 32,607 per arm    <- 26x the cost of detecting +5
+
+  DAYS TO SIGNIFICANCE = n / (daily volume x arm share)
+    500/day, 10% canary  -> 3,546 /    50 = 70.9 days
+    500/day, 50/50 split -> 3,546 /   250 = 14.2 days
+    2,000/day, 10% canary-> 3,546 /   200 = 17.7 days
+    2,000/day, 50/50     -> 3,546 / 1,000 =  3.5 days
+   10,000/day, 50/50     -> 3,546 / 5,000 =  0.7 days
+```
+
+The days-to-significance table is the real decision tool, and it explains the cadence choices
+elsewhere in this module. At 500 conversations/day a cautious 10% canary takes 71 days — longer than
+the update cycle it is supposed to gate, so the test never finishes before the next model ships. The
+fix is not more patience but more traffic per arm: going to a 50/50 split cuts the same test to 14
+days without changing the statistics at all, at the cost of exposing half your users to an unproven
+model. That is the actual tradeoff behind "canary vs split" — not safety versus speed in the
+abstract, but 71 days versus 14.
+
+**Why the variance term must use both rates.** A common shortcut uses `2 * p1(1-p1)`, assuming both
+arms share the baseline's variance. That understates `n` whenever the treatment moves the rate
+toward 0.5 and overstates it when the rate moves toward the extremes. Using `p1(1-p1) + p2(1-p2)`
+costs nothing and keeps the estimate honest — and at rates near 0.9, where the flywheel is heading,
+the difference is large enough to matter.
 
 ### 6.7 Cold Start Bootstrapping
 
@@ -649,6 +750,53 @@ Version everything an iteration consumed and produced: an immutable dataset snap
 ### Problem Statement
 
 A B2C e-commerce company has deployed a customer support chatbot handling 2,000 conversations per day. The current model achieves a 70% autonomous resolution rate — meaning 30% of conversations (600 per day) escalate to a human agent at an average cost of $8 per escalation ($4,800/day). The business target is 90% resolution rate within 6 months. Design the data flywheel system to achieve this.
+
+**What the formula is telling you.** "Every percentage point of resolution rate is worth a fixed
+number of dollars per day, so the flywheel's payoff is a straight line — and you can price a single
+point before you build anything."
+
+Framing the business case per *point* rather than per *project* is what makes the investment
+arguable. A stakeholder cannot evaluate "we want to build a data flywheel," but they can evaluate
+"each resolution point returns $58,400/year, and we are proposing to buy twenty of them."
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Conversation volume. 2,000 per day |
+| `r` | Autonomous resolution rate. 70% today, 90% targeted |
+| `1 - r` | Escalation rate — the fraction that reaches a human. This is the part that costs money |
+| `c` | Fully loaded cost of one escalation. $8 |
+| escalation cost | `V x (1 - r) x c` — the entire business case reduces to this one product |
+
+**Walk one example.** Price today, price the target, then price one single point:
+
+```
+  TODAY at r = 70%
+    escalations = 2,000 x 30%      =   600 per day
+    cost        =   600 x $8       = $4,800 per day
+
+  TARGET at r = 90%
+    escalations = 2,000 x 10%      =   200 per day
+    cost        =   200 x $8       = $1,600 per day
+
+  THE PRIZE
+    daily savings  = $4,800 - $1,600   = $3,200
+    annual savings = $3,200 x 365      = $1,168,000
+
+  PRICE OF ONE POINT (the number to quote stakeholders)
+    2,000 x 1% x $8 = $160 per day = $58,400 per year
+
+  SANITY-CHECK AGAINST THE MEASURED A/B RESULT (74% vs 70%, +4 points)
+    4 x $160 = $640 per day = $233,600 per year, from the FIRST cycle alone
+```
+
+The linearity is what makes this tractable: there is no threshold to cross and no minimum viable
+improvement. The +4 points the first A/B cycle actually delivered is already worth $233,600/year,
+which pays for the annotation program and the engineering time long before the 90% target arrives.
+It also sets an honest ceiling — at 2,000 conversations/day the *entire* remaining opportunity above
+70% is $1.17M/year, so an approach costing more than that is not worth designing regardless of how
+elegant it is. Note the same arithmetic run at 100 conversations/day yields `100 x 1% x $8 = $8/day`
+per point, which is why the module puts the flywheel's viability floor at 100+ conversations daily:
+below that, the prize is smaller than the salary of the person building it.
 
 ### Architecture Overview
 

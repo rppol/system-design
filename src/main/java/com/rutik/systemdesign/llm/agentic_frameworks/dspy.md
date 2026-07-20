@@ -268,6 +268,50 @@ loaded_rag = RAGProgram()
 loaded_rag.load("optimized_rag.json")
 ```
 
+### What those optimizer integers actually cost
+
+**Read it like this.** "Those three integers are not style settings — they define a combinatorial search space and the number of LLM calls you are about to spend exploring a sliver of it."
+
+| Symbol | What it is |
+|--------|------------|
+| `max_labeled_demos=16` | Size of the pool the optimizer may draw few-shot examples from |
+| `max_bootstrapped_demos=4` | How many of those 16 end up in any one prompt |
+| `num_candidate_programs=10` | How many distinct configurations actually get evaluated |
+| `C(16, 4)` | The full space of 4-example subsets — what "search" would mean exhaustively |
+| `V` | Validation examples each candidate is scored on; sets the cost per candidate |
+
+**Walk one example.** Size the space, then price the search:
+
+```
+  search space
+    C(16, 4)  =  16! / (4! x 12!)
+              =  (16 x 15 x 14 x 13) / (4 x 3 x 2 x 1)
+              =  43,680 / 24
+              =  1,820 possible few-shot sets
+
+    actually evaluated  =  num_candidate_programs  =  10
+    coverage            =  10 / 1,820              =  0.55%
+
+  compile cost (Section 14 settings: 300 train, V = 60)
+    bootstrapping demos     300 examples x 1 call  =    300 calls
+    scoring candidates       10 x 60               =    600 calls
+                                                      ---------
+                                                      900 LLM calls
+```
+
+Two things follow. First, DSPy is not exhaustively searching anything — it samples 0.55% of
+the space and keeps the best. That is why re-running compilation can yield a different
+program, and why the compiled JSON is versioned rather than regenerated on demand. Second,
+compile cost is dominated by `num_candidate_programs x V`, so doubling either doubles your
+bill. This is the arithmetic behind Pitfall 5's warning about calling `optimizer.compile()`
+at application startup: 900 calls is tolerable once, offline, and ruinous on every restart.
+
+**Why `max_labeled_demos` is larger than `max_bootstrapped_demos`.** If the two were equal
+there would be exactly one possible subset and nothing to search — `C(4, 4) = 1`. The gap
+between 16 and 4 is what creates the space in the first place. Widening the pool to 32 lifts
+`C(32, 4)` to 35,960 candidates, giving the optimizer more room while making the same 10
+evaluations an even thinner sample of it.
+
 ### MIPRO — Instruction Optimization
 
 ```python
@@ -639,5 +683,36 @@ compiled = optimizer.compile(
 | DSPy compiled BootstrapFewShot (GPT-4o) | 83% | 1.4s |
 | DSPy compiled MIPRO (GPT-4o) | 91% | 1.5s |
 | DSPy compiled MIPRO (Llama-3-70B, re-optimized) | 86% | 0.8s |
+
+**What it means.** "Accuracy points flatter the early wins and hide the late ones — the honest measure of an optimizer is how much of the remaining *error* it removed."
+
+| Symbol | What it is |
+|--------|------------|
+| `a` | Accuracy of a configuration, e.g. 0.74 for manual prompts |
+| `1 - a` | Error rate — the work still left to do |
+| `(e_before - e_after) / e_before` | Error reduction: the share of mistakes eliminated |
+| `a_after - a_before` | Accuracy points gained — the number that looks smaller |
+
+**Walk one example.** The same four rows, re-read as error rather than accuracy:
+
+```
+  configuration                 accuracy   error   pts gained   error reduced
+  manual prompts                  74%       26%       --            --
+  BootstrapFewShot                83%       17%      +9            34.6%
+  MIPRO                           91%        9%      +8            47.1%   (vs Bootstrap)
+  MIPRO vs manual                 91%        9%     +17            65.4%
+```
+
+Look at rows 2 and 3. In accuracy points the second optimizer step (+8) looks slightly
+*worse* than the first (+9). In error terms it is clearly better: Bootstrap removed 34.6% of
+the mistakes, MIPRO removed 47.1% of what Bootstrap left behind. Since each step gets harder
+as headroom shrinks, error reduction is the framing that keeps late-stage gains legible —
+and the one to use when justifying MIPRO's higher compile cost.
+
+**The Llama row is the interesting one.** At 86% it trails GPT-4o's 91%, which reads as a
+loss until you price it: error is `14% / 9% = 1.56x` higher, but latency is `1.5s / 0.8s =
+1.9x` better, on a self-hostable open model. Because the program was *re-optimized* rather
+than ported, the swap cost one compile run and no prompt rewriting — which is the specific
+claim DSPy's model-portability pitch makes, quantified.
 
 Key MIPRO finding: the optimizer discovered that specifying "if the CFO says 'approximately', include the qualifier in the extracted value" significantly improved accuracy on guidance metrics — something engineers had not included in their manual prompt.

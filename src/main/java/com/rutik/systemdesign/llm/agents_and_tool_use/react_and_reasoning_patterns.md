@@ -156,6 +156,34 @@ Use when: planning problems where early choices have large impact on outcome
 Avoid when: single-step tasks where one good CoT is sufficient
 ```
 
+**What this actually says.** "Every level of the tree multiplies the level above it, so cost is exponential in depth — and the only thing standing between you and that exponential is the pruning rule."
+
+The `B × D` figure quoted above is the *pruned* cost, not the tree's true size. Knowing which of the two you are paying for is the whole budgeting question for ToT.
+
+| Symbol | What it is |
+|--------|------------|
+| `B` | Branching factor — candidate thoughts generated per node. 3-5 in practice |
+| `D` | Search depth — reasoning steps before a final answer. 3-5 in practice |
+| `B^D` | Leaf count of the *unpruned* tree. What naive BFS actually expands |
+| `B x D` | Calls along a single surviving path — the beam-of-1 lower bound |
+| beam width | How many nodes survive per level. This is the exponent-killer |
+
+**Walk one example.** The same `B` and `D`, pruned and unpruned:
+
+```
+  unpruned BFS, B = 5, D = 5
+    leaves            = 5^5 = 3,125
+    nodes expanded    = 5 + 25 + 125 + 625 + 3,125 = 3,905 LLM calls
+
+  beam width 1, B = 3, D = 4  (the "3 branches x 4 depth" case above)
+    calls             = 3 x 4 = 12
+    unpruned would be = 3 + 9 + 27 + 81 = 120 calls   <- 10x more
+```
+
+3,905 calls is not a budget overrun, it is a different product. This is why the Common Pitfalls section caps ToT at 20-50 calls: that ceiling only holds if a beam width is set, because `B x D` and `B^D` diverge the moment depth passes 2.
+
+**Why the evaluator is load-bearing.** Pruning is what converts `B^D` into `B x D`, and pruning is only as good as the score that decides what to cut. A miscalibrated evaluator either prunes the correct branch early — in which case you paid exponential-ish cost for a wrong answer — or scores everything alike, in which case nothing prunes and you drift back toward the full tree. ToT without a trustworthy scorer is just expensive sampling.
+
 Full deep dive: [Tree of Thoughts for Agents](tree_of_thoughts_for_agents.md).
 
 ### Self-Consistency
@@ -188,6 +216,40 @@ Self-consistency:
   Gain: ~5-15% accuracy improvement on math and reasoning benchmarks
   No gain: factual lookup tasks (voting doesn't help if the fact is wrong)
 ```
+
+**The idea behind it.** "The vote is right whenever a majority of the chains happen to be right, so the accuracy you end up with is the binomial tail above the vote threshold — which is why voting amplifies a model that is already better than a coin flip and does nothing for one that is not."
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Probability one chain reaches the correct answer, sampled at temperature > 0 |
+| `N` | Number of chains sampled |
+| `t` | Votes needed to accept. Simple majority is `t = ceil((N+1)/2)` |
+| `C(N,k)` | Ways to choose which `k` of the `N` chains were the correct ones |
+| `sum C(N,k) p^k (1-p)^(N-k)` for `k >= t` | Probability at least `t` chains land on the right answer |
+
+**Walk one example.** A model at `p = 0.7` per chain, voted at simple majority:
+
+```
+  N = 1  (no voting)                              70.0%
+  N = 3, need 2   1 - P(0 or 1 correct)           78.4%
+  N = 5, need 3                                   83.7%   <- N=5-10 recommendation
+  N = 7, need 4                                   87.4%
+  N = 9, need 5                                   90.1%   <- +2.7 pts for +2 calls
+```
+
+The gain per added chain is already collapsing by `N = 9`, which is the arithmetic behind the "diminishing returns beyond N=20" note above — you are paying linearly for a tail that flattens.
+
+Now watch the same machinery at a weaker `p`, and then at a stronger one:
+
+```
+  p = 0.6   N=5 majority -> 68.3%    (+8.3 pts)
+  p = 0.7   N=5 majority -> 83.7%    (+13.7 pts)
+  p = 0.8   N=5 majority -> 94.2%    (+14.2 pts)
+```
+
+**Why "no gain on factual lookup" falls straight out of this.** Every line above assumes chain errors are *independent* — different chains slip in different places. On a fact the model does not know, the errors are perfectly correlated: all `N` chains reproduce the same wrong fact, so effectively `p = 0` for that item and the tail sum is 0 no matter how large `N` gets. Voting cannot manufacture information; it only suppresses uncorrelated noise.
+
+**Reading the medical 5-of-7 rule.** The clinical example below raises `t` from 4 to 5 out of 7. At `p = 0.7` that moves the accept probability from 87.4% down to 64.7% — the other 35.3% of cases fail to reach supermajority and escalate to a human reviewer. That is the trade being made on purpose: a higher `t` buys confidence in what gets auto-accepted by refusing to auto-accept as much.
 
 ### Scratchpad Prompting
 
@@ -391,6 +453,27 @@ A healthcare AI system uses N=7 self-consistency for clinical decision support:
 - Tasks where the model is essentially certain (factual lookups by capable models)
 - Cost-sensitive batch processing (self-consistency's N× cost rarely justified)
 
+**Stated plainly.** "A ReAct agent's wall-clock time is one model round-trip multiplied by however many steps it decides to take — and the step count is chosen by the model at runtime, not by you at design time."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Steps the loop actually runs. Bounded by the step limit, decided by the model |
+| `L` | Latency of one Thought-Action round-trip, 1-3s for a frontier model |
+| `N x L` | Serial wall-clock time. Tool execution time adds on top of this |
+| step limit | The worst case you are exposed to, not the case you usually pay |
+
+**Walk one example.** The Section 14 agent — 6.8 steps on average, 15-step cap:
+
+```
+  typical    6.8 steps x 2s  = 13.6s
+  slow model 6.8 steps x 3s  = 20.4s
+  worst case  15 steps x 3s  = 45.0s     <- what the step limit exposes you to
+
+  measured P95 in Section 14: 28s, sitting between the typical and worst cases.
+```
+
+**Why the multiplication is the design constraint.** `N x L` is serial and neither factor is easy to shrink: `L` is the model's, and `N` is the task's. This is why every latency fix in this module attacks the product structurally rather than trimming either term — parallel tool calls collapse several `L`s into one, a smaller model for routine steps lowers `L` on the majority of steps, and early termination cuts `N` directly. Combining them is where the 40-60% reduction comes from; none of them individually gets close.
+
 ---
 
 ## Common Pitfalls
@@ -519,6 +602,39 @@ Analyst Question
 **Key Design Decisions**:
 
 1. Concise Thoughts enforced: system prompt limits Thoughts to 2 sentences. Without this, the model generates 5-sentence Thoughts adding 200+ extra output tokens per step — on a 10-step task that is 2,000 extra tokens at $0.015/1K = $0.03 wasted per question.
+
+**Put simply.** "Tokens written at step 3 are not paid for once — they are re-sent as input on step 4, and step 5, and every step after, so a ReAct transcript costs quadratically in the step count even though it only grows linearly."
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Tokens one step appends to the transcript — Thought + Action + Observation |
+| `N` | Total steps in the loop |
+| `A x N` | Final transcript length. This grows linearly and is what people picture |
+| `A x N(N+1)/2` | Total tokens *billed as input*, since the whole transcript is re-sent each step |
+| `N - i` | Extra times a token written at step `i` gets re-sent before the loop ends |
+
+**Walk one example.** A transcript that grows by `A = 800` tokens per step:
+
+```
+  steps N     final length (A x N)      cumulative input (A x N(N+1)/2)
+     5           4,000                        12,000
+     7           5,600                        22,400      <- ~the 6.8-step average
+    10           8,000                        44,000
+    15          12,000                        96,000      <- the step cap
+
+  Doubling the steps from 5 to 10 doubles the transcript but nearly QUADRUPLES
+  what you pay to read it.
+```
+
+**Which is why the 2,000-token figure above understates the damage.** Those 200 extra Thought tokens per step are counted once as output — but each one is then re-read as input on every later step:
+
+```
+  extra re-reads = 200 tokens x sum(10 - i) for i = 1..10
+                 = 200 x 45
+                 = 9,000 extra INPUT tokens, on top of the 2,000 output tokens
+```
+
+So verbose Thoughts cost 4.5x more in re-sent input than in the output that produced them. This is also the real argument for the step countdown in decision 3 and the repetition detector in decision 4: every wasted step does not just add its own cost, it inflates the price of every step that follows it.
 
 2. Structured SQL results: `run_sql` returns `{"rows": [...], "row_count": N, "columns": [...], "truncated": bool, "query_time_ms": T}` — never raw psycopg2 output. The `truncated` flag tells the model to add a `LIMIT` or aggregate when the result was cut.
 

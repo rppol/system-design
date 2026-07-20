@@ -384,6 +384,52 @@ Key findings:
   - 90%+ of single-agent long tasks fail past 30 minutes
 ```
 
+**In plain terms.** "Splitting the work across workers buys back wall-clock time in proportion
+to how many run at once, but you always pay a fixed orchestration tax on top — so the speedup
+is never the worker count."
+
+The reason to write this out is that teams size fan-out by dividing the sequential time by the
+worker count and then miss their latency target by the orchestration term they forgot.
+
+```
+  wall_clock  ~=  sequential_time / num_workers  +  orchestration_overhead
+  speedup     =   sequential_time / wall_clock
+  cost_change =  (cost_single - cost_multi) / cost_single
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `sequential_time` | What one agent takes doing every sub-task back to back. Here 62 min |
+| `num_workers` | How many workers actually run in parallel. Here 8 |
+| `orchestration_overhead` | Planning call + integration call + dispatch/collect. Not divisible |
+| `wall_clock` | Time the user waits. Here 14 min |
+| `speedup` | Wall-clock ratio, not a token ratio — the two move in opposite directions |
+| `cost_change` | Fraction of spend removed. Positive means the parallel version is cheaper |
+
+**Walk one example.** The numbers above, decomposed:
+
+```
+  parallel work   : 62 / 8               =  7.75 min
+  measured total  :                         14.00 min
+  orchestration   : 14.00 - 7.75         =  6.25 min   <- the fixed tax
+                                             (2 Opus calls: plan, then integrate)
+
+  speedup         : 62 / 14              =  4.4x       (NOT 8x -- the tax eats 3.6x)
+  accuracy        : 89% - 71%            =  +18 points
+  cost reduction  : (0.94 - 0.41) / 0.94 =  56%
+```
+
+The counter-intuitive line is the cost one: the orchestrator-worker run makes *more* LLM calls
+(1 + 8 = 9 vs 1) and is still 56% cheaper. Model tier is doing all the work — Haiku is roughly
+20x cheaper per token than Opus, so moving 8 units of search onto Haiku more than pays for the
+extra orchestration calls. Flip the tiers (Opus workers under a Haiku orchestrator) and the same
+architecture becomes several times *more* expensive than the single agent. The pattern does not
+save money; the tier assignment does.
+
+Note also what shrank on the context axis: `187K` tokens in one context became `12K` peak per
+agent. That is a 15.6x reduction in the largest prompt any single model has to reason over, and
+it is the mechanism behind the +18 points — not extra intelligence, just no "lost in the middle."
+
 ---
 
 ## 7. Real-World Examples
@@ -492,6 +538,34 @@ async def safe_worker(task: Task, context: dict) -> dict | None:
 Production war story: An orchestrator accumulated every worker's full output into its context for the integration step. With 15 workers each returning 2,000 tokens, the orchestrator's integration call received 30,000+ tokens of worker outputs — causing the model to "lose" workers 5-10 (the middle of the context) and produce a final output that omitted entire sections.
 
 Fix: Each worker returns a structured summary capped at 500-1,000 tokens. The full raw output is stored externally (S3, database); the orchestrator receives only the summary. The integration prompt references summaries, not raw outputs.
+
+**Stated plainly.** "The orchestrator's integration prompt is the product of two numbers you
+control separately — how many workers you fan out to, and how much each is allowed to say back
+— and only the second one has a natural ceiling."
+
+```
+  integration_tokens = num_workers x tokens_per_worker_reply
+
+  BROKEN (uncapped raw output)
+    15 workers x 2,000 tokens = 30,000 tokens
+    scale to 50 workers       = 100,000 tokens   <- half of a 200K window, one call
+
+  FIXED (capped structured summary)
+    15 workers x   750 tokens = 11,250 tokens    <- 2.7x smaller
+    scale to 50 workers       = 37,500 tokens    <- still comfortably servable
+```
+
+Capping the reply is what makes fan-out width a free variable. Uncapped, `num_workers` is
+bounded by the context window, so "analyse more patents" and "analyse them well" trade against
+each other. Capped, the integration prompt grows linearly at a rate you set, and the full raw
+output still exists in S3 for any worker the integrator wants to inspect in detail — you have
+traded an unbounded push for a bounded push plus an optional pull.
+
+The 30,000-token failure mode is worth naming precisely: nothing errored. The call succeeded,
+stayed under the limit, and silently dropped workers 5-10 from the output because they sat in
+the middle of a long context. Context explosion in an orchestrator does not announce itself with
+a 400 — it announces itself with quietly incomplete answers, which is why the cap has to be an
+enforced schema constraint rather than a prompt request.
 
 ### Pitfall 4: No Rate Limit Coordination Between Workers
 
@@ -647,5 +721,28 @@ A law firm needed to analyze 200-400 patent documents per case to identify prior
 - Wall-clock time per case: 18 minutes (vs. 3-4 hours single-agent)
 - Patent coverage: 100% (all patents analyzed; single-agent capped at ~15)
 - Cost per case: $2.40 average (50 Haiku workers × ~$0.03 each + 2 Opus calls + 1 Sonnet call)
+
+**What the formula is telling you.** "Almost two-thirds of this bill is 50 cheap workers, and
+the remaining third is three expensive calls — so the lever on cost is which tier does the
+integration, not how many patents you analyse."
+
+```
+  cost_per_case = num_workers x cost_per_worker  +  cost_orchestration
+
+  workers       : 50 x $0.03          = $1.50    (62.5% of the bill)
+  orchestration : $2.40 - $1.50       = $0.90    (37.5%, across just 3 calls)
+                  2 Opus (plan + integrate) + 1 Sonnet (conflict detection)
+
+  per-call cost : workers       $1.50 / 50 = $0.030
+                  orchestration $0.90 /  3 = $0.300   <- 10x per call
+```
+
+Fifty-three calls, and the three at the top cost ten times each what the fifty at the bottom do.
+That ratio is the whole design argument: because the expensive tier is called a fixed 3 times
+regardless of case size, doubling the patent count to 100 does not double the bill — it adds
+`50 x $0.03 = $1.50`, taking the case from $2.40 to $3.90 — 100% more work for 62.5% more money.
+The orchestration cost amortises. That is why the pattern gets *more* attractive as fan-out
+widens, and why the ~4,000-token orchestrator budget noted above is worth defending: it is the
+one term that does not shrink when you move work to a cheaper model.
 - Attorney acceptance rate on first draft: 84% (minor revisions needed on 16%)
 - System ran 340 cases in first six months with 99.2% successful completion rate (0.8% required human intervention for corrupted patent PDFs)

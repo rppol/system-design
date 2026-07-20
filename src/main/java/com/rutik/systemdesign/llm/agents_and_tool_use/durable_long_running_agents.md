@@ -103,6 +103,34 @@ Temporal Workflow Execution
   Continues from Activity 3
 ```
 
+**In plain terms.** "How much work a crash destroys is not a property of your crash rate — it is the distance back to your last checkpoint, and checkpointing every step drives that distance to zero."
+
+The two diagrams above differ in exactly one quantity: work redone after restart. With checkpoints every `k` steps and a crash landing uniformly at random, you re-execute `(k-1)/2` steps on average.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Steps between checkpoints. `k = 1` is per-step checkpointing |
+| `(k-1)/2` | Average steps redone after a crash. Zero when `k = 1` |
+| `p` | Probability a given run is interrupted. The Section 14 agent measured `5%` |
+| `T` | Total run length. `32` minutes average for that same agent |
+| `p x (redo time)` | Expected wasted minutes per run — what durability actually buys back |
+
+**Walk one example.** The patent agent from Section 14: `T = 32` min, `p = 5%`, roughly 24 steps, so about `32 / 24 = 1.33` min per step:
+
+```
+  checkpoint every k    steps redone (avg)   minutes redone   expected loss/run
+  ------------------    ------------------   --------------   -----------------
+  never (k = all)             12.0               16.00           0.05 x 16.00
+                                                                  = 0.800 min
+  k = 10                       4.5                6.00           = 0.300 min
+  k = 5                        2.0                2.67           = 0.133 min
+  k = 1 (per step)             0.0                0.00           = 0.000 min
+```
+
+The "never" row is the diagram's first case: a crash at Step 4 sends you back to Step 1, and averaged over a uniformly-timed crash you lose half the run, `T/2 = 16` minutes. Note that `p` scales the whole column but changes no ranking — halving your crash rate halves the loss, while checkpointing every step eliminates it entirely. This is why the case study reports "5% baseline -> 0%" rather than "5% -> 2%": Temporal did not make crashes rarer, it made them free.
+
+**Why replay is not re-execution.** The Temporal panel says the new worker "replays events 1, 2 (no re-execution of activities)". Replay walks the event log to rebuild in-memory state, reading recorded results instead of calling the tools again. Without that distinction the checkpoint would be worthless for anything with side effects — Worker B would resend every email Worker A already sent, which is exactly the Pitfall 2 failure below.
+
 ### Human-in-the-Loop Pause Lifecycle
 
 ```mermaid
@@ -316,6 +344,32 @@ class DurableAgentWorkflow:
         ...
 ```
 
+**Put simply.** "Three attempts do not make a flaky call three times more likely to work — they make it fail only as often as the failure rate cubed, which is a far bigger win than the number 3 suggests."
+
+`retry_policy=workflow.RetryPolicy(maximum_attempts=3)` is one line, and its payoff compounds in the same way plan steps compound, only in your favour.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Probability one attempt succeeds. Transient API failures put this at `0.90–0.95` |
+| `1 - p` | Probability one attempt fails |
+| `a` | `maximum_attempts`. `3` in this workflow |
+| `(1-p)^a` | Probability all `a` attempts fail. Independent failures multiply |
+| `1 - (1-p)^a` | Effective success rate the workflow sees |
+
+**Walk one example.** Three attempts, three underlying reliabilities:
+
+```
+  per-attempt p    fails as 1-p    (1-p)^3     effective = 1 - (1-p)^3
+  -------------    ------------    --------    -----------------------
+      0.95            0.05         0.000125           0.99987
+      0.90            0.10         0.001              0.99900
+      0.70            0.30         0.027              0.97300
+
+  Read the 0.90 row: a 1-in-10 flaky call becomes 1-in-1,000 with 3 attempts.
+```
+
+**What exponential backoff adds, and its cost.** Retries only help if the failures are *independent*; immediate retries against a rate-limited or overloaded API are highly correlated, so the third attempt fails for the same reason as the first and the `(1-p)^3` model collapses. Backoff decorrelates them by spacing attempts out — doubling each time, `1 + 2 + 4 = 7` seconds of added latency in the worst case here. That 7 seconds is the price of the three-nines column above, and it is why `start_to_close_timeout=timedelta(seconds=120)` must be set generously enough to contain both the call and its backoff waits, or the timeout fires before the retries can pay off.
+
 ---
 
 ## 7. Real-World Examples
@@ -407,6 +461,33 @@ async def send_email(to: str, body: str, idempotency_key: str) -> str:
     await db.record_email(idempotency_key, response.id)
     return f"Sent: {response.id}"
 ```
+
+**Stated plainly.** "An idempotency cache only protects a workflow that finishes before the cache entry expires — so the TTL is not a storage setting, it is a ceiling on how long your workflow is allowed to live."
+
+The Temporal activity above caches with `ttl=86400`. That number has to be compared against workflow duration, and for one of this file's own examples it does not survive the comparison.
+
+| Symbol | What it is |
+|--------|------------|
+| `ttl = 86400` | Cache lifetime in seconds. `86400 / 3600 = 24` hours |
+| `idempotency_key` | `{run_id}:{tool_use_id}` — unique per tool call within one run |
+| `T_wf` | How long the workflow actually runs, wall-clock, including human waits |
+| `T_wf < ttl` | The safety condition. Violate it and a retry after expiry re-executes the side effect |
+
+**Walk one example.** This file's five real-world workloads against a 24-hour TTL:
+
+```
+  workload                        T_wf            vs 24h TTL
+  ----------------------------  --------------  --------------------------
+  patent analysis (Section 14)   32 min          0.02x TTL   safe
+  legal contract workflow        "hours"         ~0.2x TTL   safe
+  Cursor background agent        hours           ~0.2x TTL   safe
+  code migration                 days            > 1x TTL    UNSAFE
+  B2B onboarding (7-day waits)   30 days         30x TTL     UNSAFE
+
+  30 days = 2,592,000 s.  That is 30x past expiry -> the key is long gone.
+```
+
+The failure this produces is subtle because it is invisible in testing: short runs pass, and only the long-tail workflow retries a step whose cache entry has since expired, re-sending an email that went out three weeks ago. The rule is `ttl > max expected T_wf`, with margin — for the 30-day onboarding agent that means a 60-day TTL or, better, durable persistence of the dedup record in the workflow's own state rather than an expiring cache. Note that the human-in-the-loop pause is what makes this bite: `T_wf` is dominated by waiting, not computing, so the workflow is cheap and long-lived at the same time.
 
 **War story**: A B2B onboarding agent built without checkpointing crashed during a routine deployment. 47 in-flight workflows lost their state. Customers received partially completed onboarding (some emails sent, some not). 11 hours of engineering to manually reconcile. Migrated to Temporal: zero re-occurrences in 8 months across hundreds of deployments.
 
@@ -511,6 +592,33 @@ Per checkpoint: ~5-50KB (messages + state). For an agent running 50 iterations: 
 - Cost per patent: $1.40 average
 - Deploys during workflow execution: ~10/day, zero workflow losses
 - Attorney time saved per patent: 4-6 hours
+
+**What it means.** "Compaction at 140K is not a round number someone liked — it is 70% of a 200K window, and the 30% you hold back is exactly the room the next few iterations need to land in."
+
+Two of this architecture's constants are the same arithmetic seen from opposite ends, and Lesson 2 below quietly confirms it.
+
+| Symbol | What it is |
+|--------|------------|
+| `W` | Model context window. `200,000` tokens |
+| `0.70` | Compaction trigger fraction (Best Practice 4). Fires at `140,000` tokens |
+| `1 - 0.70` | The `60,000`-token reserve. Headroom for in-flight work, not waste |
+| `f` | Tokens each agent iteration adds to context |
+| `W / f` | Iterations until the window is full with no compaction |
+
+**Walk one example.** Lesson 2 says uncompacted workflows hit the context limit at iteration 35, and compaction triggers at 140K — divide one by the other:
+
+```
+  tokens per iteration  f = 140,000 / 35  = 4,000 tokens
+
+  iterations to fill the full window = 200,000 / 4,000 = 50
+  iterations to reach the 70% trigger = 140,000 / 4,000 = 35   <- matches Lesson 2
+
+  reserve after trigger = 60,000 / 4,000 = 15 more iterations of runway
+```
+
+That `50` is not a coincidence: it is the `for iteration in range(50)` bound in the Temporal workflow above. The loop cap and the context window are the same constraint expressed twice — the workflow simply cannot run longer than its context allows, so the iteration limit was set to where the tokens run out. The 15-iteration reserve is the safety margin: compaction is itself an LLM call that needs room to run, and a trigger set at 95% would leave no space to summarize in.
+
+**Reading the cost cap.** `Cost cap: $5/workflow` against a `$1.40` average gives `5 / 1.40 = 3.57x` headroom — the cap sits well above the typical run, so it never fires on normal work and only catches genuine runaways (a tool loop, a pathological document). Same design rule as the `max_calls` circuit breaker in tree search: set the limit above the analytical worst case, because a cap that trips routinely is silently degrading every run instead of protecting the outliers.
 
 **Lessons**:
 1. Idempotency keys saved the project — early version retried prior-art searches and double-billed the API.

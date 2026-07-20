@@ -131,6 +131,51 @@ def multi_query_retrieve(query: str, llm, retriever, n_queries: int = 4):
 
 Deduplication is critical: the same document retrieved by multiple query variants should appear only once in the final candidate set.
 
+**What the formula is telling you.** Fan-out multiplies cost linearly and recall sub-linearly. Gross candidates are exactly `N x top_k`, but *unique* candidates saturate — because every variant is fishing in the same small pool of genuinely relevant documents. Modelling each variant as drawing `k` documents from an effective relevant pool of size `P`, the expected unique count is `P x (1 - (1 - k/P)^N)`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Query variants retrieved for, including the original — 5 in the code above |
+| `k` | `top_k` per variant, 20 here |
+| `N x k` | Gross retrievals — the cost you pay in ANN searches every time |
+| `P` | Effective pool of documents any phrasing of this question can surface |
+| `(1 - k/P)^N` | Probability a given pool document is missed by all `N` variants |
+| dedup rate | `(gross - unique) / gross` — the fraction of your retrieval work thrown away |
+
+**Walk one example.** `k = 20`, `P = 80`:
+
+```
+  N    gross   unique   duplicates   dedup rate   new docs this variant added
+  ------------------------------------------------------------------------------
+   1      20    20.00       0.00        0.0%        20.00
+   2      40    35.00       5.00       12.5%        15.00
+   3      60    46.25      13.75       22.9%        11.25
+   5     100    61.02      38.98       39.0%         6.33
+  10     200    75.49     124.51       62.3%         1.50
+
+  Cost is a straight line: N = 10 runs 10x the ANN searches of N = 1.
+  Yield is a decaying curve: the 10th variant contributes 1.50 new documents
+  for the same price as the 1st, which contributed 20.
+```
+
+**Why the curve bends, and where to stop.** Each variant misses a pool document with probability `1 - k/P = 0.75`, so after `N` variants the miss probability is `0.75^N` — an exponential decay that flattens fast. The marginal column is the decision rule: variants 2-4 each add 11-15 documents, variant 5 adds 6, variant 10 adds 1.5. That is the arithmetic under Section 6's "3-5 variants" guidance and under Pitfall 4's warning about 10+ variants: past five, you are buying duplicates at full price.
+
+**What dedup actually saves.** At `N = 5`, 38.98 of the 100 retrievals are repeats. Removing them before the reranker cuts 39 cross-encoder passes — roughly `38.98 x 0.8 ms = 31 ms` — but the real damage of skipping dedup (Pitfall 3) is not latency. A document surfaced by four of five variants appears four times in the reranker's input and four times in the final context, so it both distorts the ranking and consumes context slots that other evidence needed.
+
+**Walk the transformation bill.** Section 12 measures `$0.0004` per query for the transformation LLM call:
+
+```
+  10,000 queries/day  -> $  4.00/day
+  100,000 queries/day -> $ 40.00/day
+  1,000,000 queries/day -> $400.00/day
+
+  with the case study's 34% semantic-cache hit rate:
+    $0.0004 x 0.66 = $0.000264 effective -> $264.00/day at 1M queries
+
+  latency paid alongside it: 0.8 s -> 1.4 s end to end, +0.6 s = +75%
+  (cache hits return in 0.2 s, which is what makes the 34% worth having)
+```
+
 ### 3.4 Step-Back Prompting
 
 Generate a more general "step-back" question to retrieve background context that helps answer the specific question:

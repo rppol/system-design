@@ -332,6 +332,61 @@ FIX: RL-CAI (RLAIF) for clear-cut harm categories
   Use RLAIF for:   safety, ethics, factual correctness -- clear principle applications
 ```
 
+**The idea behind it.** "Preference labels cost `count x price per label`. Swapping the labeler from
+a human to a model changes only the second term — but it changes it by two orders of magnitude, and
+that turns re-labeling from a quarterly project into a weekday task."
+
+The cost ratio is the headline, but the *iteration* line underneath it is what actually changes how
+you work. When re-labeling costs $1,000 and takes hours, the constitution becomes an editable
+artifact. When it costs $100,000 and takes months, the constitution is frozen at whatever it said
+the day the labeling contract was signed.
+
+| Symbol | What it is |
+|--------|------------|
+| labels | 1M preference comparisons for one training cycle. Set by model size and safety coverage |
+| human price | $0.05-$0.10 per label, reflecting annotator wages plus overhead and QA |
+| AI price | $0.001 per label — one API call scoring one comparison against a sampled principle |
+| throughput | ~200 labels/hour/annotator. The human ceiling; the AI has none that matters |
+| IAA | Inter-annotator agreement, ~60-70% on borderline safety cases |
+
+**Walk one example.** Price a single 1M-label training cycle both ways:
+
+```
+  HUMAN LABELING
+    cost, low end   1,000,000 x $0.05  = $50,000
+    cost, high end  1,000,000 x $0.10  = $100,000
+    labor           1,000,000 / 200/hr = 5,000 person-hours
+    with 50 annotators at 40 hrs/week  = 2.5 weeks of pure labeling time
+      (real programs run far longer -- recruiting, training, welfare rotation,
+       and adjudicating the 30-40% of borderline cases annotators disagree on)
+
+  AI LABELING (RLAIF)
+    cost            1,000,000 x $0.001 = $1,000
+    time            hours to days, parallel API calls, no scheduling
+
+  THE RATIO
+    vs $0.05/label:  50x cheaper
+    vs $0.10/label: 100x cheaper
+
+  WHAT ITERATION COSTS -- 5 constitution revisions in a quarter
+    human:  5 x $50,000  = $250,000  and 5 sequential labeling cycles
+    AI:     5 x  $1,000  =   $5,000  and 5 afternoons
+```
+
+The IAA figure is the part that deserves more attention than the price. At 60-70% agreement on
+borderline safety cases, roughly a third of your expensive human labels are contested — you are
+paying premium rates for a signal that two qualified humans disagree about. RLAIF is not merely
+cheaper there; on principle-grounded cases it is *more consistent*, because the same prompt against
+the same principle yields the same answer every time.
+
+**Why the split at the bottom is the actual lesson.** The cost table makes RLAIF look strictly
+dominant, and it is not. Consistency is an asset when a written principle determines the right
+answer and a liability when it does not — a model applying a constitution to questions of tone,
+humor, or cultural nuance will be consistently wrong in whatever direction the constitution's author
+leaned. Human disagreement on those questions is signal, not noise. Hence the division: RLAIF for
+safety and factual correctness where 100x cheaper buys a *better* label, RLHF for helpfulness and
+style where the disagreement is the thing you are trying to measure.
+
 ---
 
 ## 7. Real-World Examples

@@ -588,11 +588,80 @@ graph.add_conditional_edges("respond", route)
 - P99 latency: 8 seconds (down from 22 seconds)
 - Code maintainability: team rated 8/10 (up from 3/10)
 
+**In plain terms.** "Latency fell by more than steps did, because the steps that disappeared were the wasteful ones the old agent took when it was lost."
+
+| Symbol | What it is |
+|--------|------------|
+| `s` | Average steps per resolution, 5.8 before and 3.2 after |
+| `L99` | P99 end-to-end latency, 22s before and 8s after |
+| `L99 / s` | Implied worst-case seconds per step |
+| `steps_taken > 5` | The explicit guard in `route()` that caps the tail |
+
+**Walk one example.** Compare the two reductions, then look at what they imply per step:
+
+```
+  steps    (5.8 - 3.2) / 5.8              =  44.8% fewer
+  latency  (22 - 8) / 22                  =  63.6% faster
+
+  implied P99 seconds per step
+    before   22 / 5.8                     =  3.79s
+    after     8 / 3.2                     =  2.50s
+```
+
+If the only change were doing fewer steps, latency would have fallen ~45% alongside them.
+It fell 64%, so the per-step tail cost dropped too — from 3.79s to 2.50s. The extra
+improvement comes from the `steps_taken > 5` guard: previously the P99 request was one of
+the runs that wandered well past 5.8 steps before giving up, and bounding that tail shortens
+the 99th percentile by more than it changes the mean.
+
+**Why the average moved less than the tail.** Averages are dominated by the common case,
+which was already fine; percentiles are dominated by the pathological case, which was the
+whole problem. This is the general reason "3/week infinite-loop incidents" and "P99 22s"
+were the *same* bug reported twice — and why the fix shows up most dramatically in the
+metric nobody was originally tracking.
+
 ---
 
 **Additional war story — LangGraph state explosion causing OOM in insurance claims processing:**
 
 An insurance claims agent used LangGraph with a state dict that accumulated the full conversation history, all retrieved documents, all intermediate tool call results, and all node outputs in a single state object. For a complex claim with 12 agent steps, the state object grew to 480KB. With 200 concurrent claims, the Python process consumed 96MB for state alone — manageable. But a bug caused the retry loop to append (not replace) tool results on each retry, growing state unboundedly. After 3 hours, the process OOMed at 8GB.
+
+**What this actually says.** "Per-request state is multiplied by concurrency before it ever touches your heap, so a state size that looks harmless per claim is the number you must multiply, not the number you must judge."
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Serialized state per claim, 480KB at 12 steps |
+| `C` | Concurrent claims in flight, 200 |
+| `S x C` | Resident memory consumed by state alone |
+| `H` | Process heap ceiling, 8GB |
+| `H / C` | Per-claim state size at which the process dies |
+
+**Walk one example.** The healthy steady state, then the runaway:
+
+```
+  healthy
+    S x C  =  480 KB x 200                =  96,000 KB  =  96 MB   (fine)
+
+  the ceiling
+    H / C  =  8 GB / 200                  =  40.96 MB per claim
+    growth needed to reach it
+             40.96 MB / 0.469 MB          =  87x
+    observed over 3 hours                 =  ~13.5 MB per claim per hour
+
+  headroom, expressed as a multiple
+    8 GB / 96 MB                          =  85x
+```
+
+Read that last line carefully: the system had 85× headroom and still died in three hours,
+because appending rather than replacing makes growth **unbounded**, and no finite headroom
+survives an unbounded process. A capacity plan that reasons in multiples ("we have 85× room")
+is answering the wrong question when the failure mode is a leak.
+
+**Why `C` is the term that turns a small leak into an outage.** A single claim leaking to
+41MB would never be noticed. The same leak across 200 concurrent claims is 8GB. Concurrency
+does not cause the bug, but it divides your time-to-detection by `C` — which is why these
+incidents look fine in a staging environment running one request at a time and fail within
+hours in production.
 
 ```python
 # BROKEN: state accumulates tool results without replacement

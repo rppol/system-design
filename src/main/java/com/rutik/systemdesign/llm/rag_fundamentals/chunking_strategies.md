@@ -55,6 +55,48 @@ Advantages: simple, deterministic, fast, works on any text.
 Disadvantages: cuts mid-sentence frequently, destroys coherence.
 When to use: baseline only; always superseded by sentence-boundary chunking.
 
+**What this actually says.** The line `start = end - overlap` is a formula wearing a loop's clothing: "the window advances by `chunk_size - overlap`, not by `chunk_size`." So the number of chunks a document produces is `ceil((T - overlap) / (chunk_size - overlap))`, never the `T / chunk_size` people assume.
+
+That framing matters because overlap is subtracted from *every* step. Its cost is not paid once at a boundary — it compounds across the whole corpus, inflating chunk count, index size, and embedding bill together.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Total tokens in the document being split |
+| `chunk_size` | Window width — how many tokens each chunk carries |
+| `overlap` | Tokens re-copied from the tail of chunk k into the head of chunk k+1 |
+| `stride` | `chunk_size - overlap` — how far the window actually moves per step |
+| `ceil(...)` | Round up; the trailing partial window is still a chunk |
+| duplication factor | `chunks x chunk_size / T` — tokens stored divided by tokens of real text |
+
+**Walk one example.** A 10,000-token document at the defaults in the code above:
+
+```
+  T = 10000    chunk_size = 500    overlap = 50
+
+  stride  = 500 - 50               = 450
+  chunks  = ceil((10000 - 50)/450) = ceil(22.11) = 23
+  stored  = 23 x 500               = 11500 tokens
+  dup     = 11500 / 10000          = 1.15x
+
+  Reading: you index 15% more text than the document contains. That 15% is
+  the premium you pay for never losing a fact at a boundary.
+```
+
+Now halve the chunk size but leave `overlap` at its absolute value of 50:
+
+```
+  chunk_size = 250    overlap = 50
+
+  stride  = 250 - 50               = 200        <- fell 56%, not 50%
+  chunks  = ceil((10000 - 50)/200) = ceil(49.75) = 50
+  50 / 23 = 2.17x the chunks                    <- MORE than double
+  stored  = 50 x 250 = 12500  ->  dup = 1.25x   (was 1.15x)
+```
+
+**Why halving more than doubles.** Overlap is an absolute token count, so it consumes a larger *fraction* of a smaller window: 50 tokens is 10% of a 500-token window but 20% of a 250-token one. The denominator (`stride`) shrinks faster than the numerator, so chunk count grows super-linearly. Scale the overlap proportionally instead (50 -> 25) and the effect vanishes: `stride = 225`, `ceil(9975/225) = 45` chunks = 1.96x, just under double. This is the whole argument for expressing overlap as a percentage rather than a constant.
+
+At corpus scale the difference is a capacity-planning number, not a curiosity. The 200-million-token compliance corpus in Section 12 yields `ceil((200000000 - 50)/450) = 444,445` chunks at 500/50, but `ceil((200000000 - 60)/240) = 833,334` chunks at the 300/60 setting the case study uses for children — 1.88x the vectors, embeddings, and index bytes.
+
 ### 3.2 Sentence / Paragraph Chunking
 
 Split at natural linguistic boundaries:
@@ -214,6 +256,37 @@ Rule of thumb: overlap = 10-15% of chunk size
   1000 token chunk → 100-150 token overlap
 ```
 
+**Read it like this.** "Overlap = 10-15% of chunk size" is not advice about text — it is a statement about the *stride*: "move the window 85-90% of its width each step." What you buy is boundary coverage; what you pay is a bigger index and a bigger prompt.
+
+| Symbol | What it is |
+|--------|------------|
+| `overlap / chunk_size` | The rule's ratio — 0.10 to 0.15 in normal prose |
+| `stride / chunk_size` | Its complement, 0.85 to 0.90 — the fraction of new text per chunk |
+| `k` | How many chunks retrieval returns and injects into the prompt |
+| `k x chunk_size` | Context tokens spent per query — the number your token budget cares about |
+| duplication | `chunks x chunk_size / T` again — index bloat from the overlap |
+
+**Walk one example.** The same 10,000-token document, k = 5, compared against the 50%-overlap sliding window from Section 10:
+
+```
+  standard: chunk 500, overlap 50 (10%)
+    stride         = 450
+    chunks         = 23
+    stored         = 11500  -> dup 1.15x
+    context per query = 5 x 500 = 2500 tokens
+
+  sliding window: chunk 500, stride 250 (50% overlap)
+    chunks         = ceil((10000 - 250)/250) = 39
+    stored         = 39 x 500 = 19500  -> dup 1.95x
+    index size     = 39 / 23 = 1.70x the standard setting
+    context per query is UNCHANGED at 2500 tokens
+
+  So the sliding window costs 70% more storage, embeddings, and ANN work,
+  and buys zero extra prompt budget -- only better boundary coverage.
+```
+
+Halving the chunk instead changes the other side of the ledger: at chunk 250 with k = 5 the prompt carries `5 x 250 = 1250` tokens, half the context for the same number of retrieved units. Chunk size therefore sets two independent budgets at once — index size (through stride) and context spend (through `k x chunk_size`) — which is why the two are always tuned together.
+
 ---
 
 ## 4. Architecture Diagram
@@ -350,6 +423,32 @@ vectors = model.encode(chunks)   # tokens 513+ silently dropped — the embeddin
 model = SentenceTransformer("BAAI/bge-small-en-v1.5")
 print(model.max_seq_length)                                  # 512 — verify, don't assume
 splitter = RecursiveCharacterTextSplitter(chunk_size=1600)   # ~400 tokens < 512 limit
+```
+
+**Put simply.** Truncation is a silent ratio: the fraction of each chunk that actually reaches the embedding is `min(chunk_tokens, max_seq_length) / chunk_tokens`, and everything above that fraction is discarded without an error.
+
+| Symbol | What it is |
+|--------|------------|
+| `chunk_tokens` | Tokens the chunk actually contains (roughly characters / 4 for English) |
+| `max_seq_length` | The encoder's hard ceiling — 512 for `bge-small-en-v1.5` |
+| kept fraction | `min(chunk_tokens, max_seq_length) / chunk_tokens` |
+| headroom | `max_seq_length - chunk_tokens`; must stay positive to cover special tokens |
+
+**Walk one example.** The broken configuration above:
+
+```
+  chunk_size     = 3200 characters
+  chunk_tokens   ~ 3200 / 4      = 800 tokens
+  max_seq_length                 = 512 tokens
+
+  kept    = 512 / 800 = 0.64     -> 64% of every chunk is embedded
+  dropped = 1 - 0.64  = 0.36     -> 36% is silently thrown away
+
+  The vector therefore represents the first 512 tokens only. A query whose
+  answer lives in the last 288 tokens can never match, and no error is raised.
+
+  fixed: 1600 chars ~ 400 tokens; headroom = 512 - 400 = 112 tokens
+         kept = 400 / 400 = 1.00 -> nothing dropped
 ```
 
 **3. No overlap, information lost at boundaries**

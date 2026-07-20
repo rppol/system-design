@@ -14,6 +14,40 @@ Unlike reliability in conventional software (which means "the service responds w
 
 Agent reliability matters because production agents fail at high rates without explicit reliability engineering. Empirically: a 10-step agent with 10% per-step failure probability has only a (0.9)^10 = 35% end-to-end success rate without recovery logic. With retry and fallback, the same agent achieves >95%.
 
+**What this actually says.** "Every step is a coin flip the agent has to win, and win-probabilities multiply — so a long trajectory is a long unbroken run of coin flips."
+
+Reliability is not additive across steps, it is *multiplicative*. That single fact is why an agent built from tools that each look perfectly healthy in a dashboard can still fail most of the time end to end.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Probability one step succeeds — the tool call plus the model's correct use of its result |
+| `n` | Number of steps in the trajectory (loop iterations before a final answer) |
+| `p^n` | Probability *all* `n` steps succeed. Assumes independence; correlated failures are worse |
+| `1 - p` | Per-step failure probability — the "10% per-step" in the sentence above |
+
+**Walk one example.** Hold the tool at a healthy-looking `p = 0.9` and stretch the trajectory:
+
+```
+  steps n     p^n                    end-to-end success
+     5      0.9^5  = 0.59049              59.0%
+    10      0.9^10 = 0.34868              34.9%   <- the 35% quoted above
+    20      0.9^20 = 0.12158              12.2%
+    30      0.9^30 = 0.04239               4.2%   <- the Section 14 baseline
+
+  Identical 90% tool throughout. Triple the step count and 35% collapses to 4%.
+```
+
+**Why retry attacks the base, not the exponent.** You cannot shorten `n` much — the task needs the steps it needs. What retry does is raise `p` itself: three independent attempts fail only if all three fail, so `p` becomes `1 - (1 - 0.9)^3 = 1 - 0.001 = 0.999`.
+
+```
+  per-step p        n = 10          n = 30
+    0.9 (bare)      34.9%            4.2%
+    0.99 (2 tries)  90.4%           74.0%
+    0.999 (3 tries) 99.0%           97.0%   <- retry alone rescues a 30-step agent
+```
+
+Each extra attempt adds a *zero* to the failure probability, and that zero is then raised to the power `n`. Nothing else in the reliability toolkit has this leverage, which is why retry is the first mechanism you add and circuit breakers exist only to stop retry from becoming a weapon.
+
 ---
 
 ## 2. Intuition
@@ -51,6 +85,41 @@ Agent reliability matters because production agents fail at high rates without e
 ### 4.1 Optimistic Retry
 
 Retry the failed operation with the assumption that the failure is transient. Use when: the tool's failure mode is "transient" (rate limit, network timeout, 5xx). Limit to 3 retries maximum; use exponential backoff (1s, 2s, 4s). After 3 failures, transition to fallback strategy.
+
+**Read it like this.** "Wait twice as long after every failure, so a tool that just needs a moment gets one, while a tool that is genuinely down stops being hammered."
+
+The wait before attempt `i` is `min(multiplier x 2^(i-1), max) + jitter` — that is exactly what `wait_exponential(multiplier=1, min=1, max=10)` computes in the Section 6 code.
+
+| Symbol | What it is |
+|--------|------------|
+| `i` | Attempt number, 1-indexed. The first call is `i = 1` and never sleeps |
+| `multiplier x 2^(i-1)` | The doubling schedule. With `multiplier = 1`: 1s, 2s, 4s, 8s, ... |
+| `max` | Ceiling on any single sleep (10s here) so backoff cannot outgrow the task SLA |
+| `min` | Floor on the sleep, so attempt 2 never fires instantly into a rate limit |
+| `jitter` | A random offset, `random.uniform(0, 1)`, that desynchronizes concurrent agents |
+
+**Walk one example.** Three attempts against a tool with a 30s timeout:
+
+```
+  attempt   sleep before it        cumulative sleep
+     1        0s (immediate)             0s
+     2        1 x 2^0 = 1s               1s
+     3        1 x 2^1 = 2s               3s
+     (4th would be 1 x 2^2 = 4s, but stop_after_attempt(3) ends it)
+
+  worst-case wall time = 3 attempts x 30s timeout + 3s sleeping = 93s
+```
+
+Compare the broken config from Section 10 — `stop_after_attempt(10)` with `wait_fixed(1)`:
+
+```
+  worst-case wall time = 10 x 30s + 9 x 1s = 309s
+
+  Over five minutes on ONE tool call, inside an agent whose whole task SLA is
+  20 minutes. The step budget never fires because the agent never got a step.
+```
+
+**Why the jitter term exists.** Without it, every agent that failed at the same instant sleeps the same 1s and 2s, so all of them re-fire in the same millisecond — a synchronized wave against a service that is already unhealthy. Adding a uniform 0-1s offset spreads those retries across a window instead of a spike; the arithmetic of that spike is worked out in Section 10.
 
 ### 4.2 Conservative Fallback
 
@@ -262,6 +331,36 @@ async def circuit_broken_tool_call(tool_name: str, tool_fn: Callable, args: dict
         raise
 ```
 
+**The idea behind it.** "Count failures in a row; at the threshold, stop calling entirely for a cooldown, then let exactly one call through to test whether the tool came back."
+
+The breaker is two numbers and a clock: `failure_threshold` decides how much evidence counts as "broken", `cooldown_seconds` decides how often you are willing to re-check.
+
+| Symbol | What it is |
+|--------|------------|
+| `failure_count` | Consecutive failures. `record_success()` resets it to 0 — one success erases the streak |
+| `failure_threshold` | Evidence bar for declaring the tool broken. 5 here; lower = trigger-happy |
+| `cooldown_seconds` | How long OPEN suppresses all calls. 60s here |
+| `now - last_failure_time > cooldown` | The clock test that promotes OPEN to HALF-OPEN |
+| HALF-OPEN | Exactly one probe call allowed. Success closes the circuit; failure re-opens it |
+
+**Walk one example.** One agent worker facing a 2-hour (7200s) tool outage:
+
+```
+  without a breaker
+    every task retries 3x against a dead tool, forever, for the full 2 hours
+    1000 tasks x 10 attempts   = 10,000 doomed calls, plus 10,000 timeouts of waiting
+
+  with the breaker (threshold 5, cooldown 60s)
+    5 failing calls              -> circuit OPEN
+    then 7200 / 60 = 120 probes  -> one per cooldown window
+    ------------------------------------------------
+    total calls to the dead tool = 5 + 120 = 125
+```
+
+125 calls instead of 10,000 — an 80x reduction in load on a service that is already on fire, and every suppressed call returns instantly to the agent as an error observation instead of burning a 30s timeout first. That second effect matters as much as the first: the agent gets to its fallback path in milliseconds.
+
+**Why the counter resets on success.** `record_success()` setting `failure_count = 0` is what makes the threshold mean "5 in a row" rather than "5 ever". A tool with a steady 10% error rate would otherwise trip the breaker after 50 healthy calls, permanently disabling a perfectly usable tool. Consecutive-failure counting is the difference between detecting an outage and detecting normal noise.
+
 ### Progress Checkpointing (LangGraph)
 
 ```python
@@ -468,11 +567,61 @@ async def search(query):
     ...
 ```
 
+**What it means.** "The load you inflict on a failing service is the number of agents times the attempts each makes, divided by the width of the time window they land in — and backoff plus jitter exist purely to widen that denominator."
+
+| Symbol | What it is |
+|--------|------------|
+| `A` | Concurrent agent runs that hit the failing tool at roughly the same moment |
+| `R` | Retry attempts each run makes before giving up |
+| `W` | Width, in seconds, of the window those `A x R` calls actually spread across |
+| `A x R / W` | Requests per second arriving at the already-degraded service |
+
+**Walk one example.** The 500-agent case from this pitfall, both configs:
+
+```
+  fixed 1s backoff, no jitter
+    A x R = 500 x 5 = 2500 calls
+    W     = 1s  (everyone slept exactly 1s, so everyone wakes together)
+    rate  = 2500 / 1 = 2500 req/s     <- against a service that served 100 req/s
+
+  exponential backoff 1s, 2s, 4s + uniform(0, 1) jitter
+    W     = 1 + 2 + 4 + 1 = 8s  (the schedule's span, widened by the jitter tail)
+    rate  = 2500 / 8 = 312.5 req/s    <- 8x lower peak, same 2500 total calls
+```
+
+Note what backoff does *not* do: the total call count is unchanged at 2500. Backoff only reshapes when they arrive. Cutting the total is the circuit breaker's job — and that is why the two mechanisms are complements, not alternatives. Layer them and the 2500 becomes 125 calls arriving one per minute.
+
 **Pitfall 2: Infinite retry loops at the agent level**
 A step counter prevents infinite loops at the step level, but not at the retry level. An agent with `max_retries=∞` on each tool call can run a single tool call indefinitely. Always set `stop_after_attempt(3)` in tenacity and cap total task wall time with an outer timeout.
 
 **Pitfall 3: Checkpoint storage cost blowup**
 A research agent with 50 steps and 50KB state per step (retrieved documents included) × 10,000 daily tasks = 25GB/day of checkpoint data in Postgres. Fix: (1) store only IDs in state, not full document content; (2) compress checkpoints (zstd: 10× compression on JSON); (3) TTL-expire checkpoints older than 7 days; (4) only checkpoint at N-step intervals for short, cheap tasks.
+
+**Put simply.** "Daily checkpoint volume is three numbers multiplied together — bytes per step, steps per task, tasks per day — so halving any one of them halves the bill, and the cheapest one to attack is bytes."
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Serialized state size per checkpoint, in KB. The only factor you fully control |
+| `k` | Checkpoints per task — equals step count when checkpointing every step |
+| `T` | Tasks per day. Set by product demand, not by you |
+| `S x k x T` | Bytes written per day, before compression and before TTL expiry |
+| TTL | Retention days. Multiplies the *stored* total, not the daily write rate |
+
+**Walk one example.** The blowup above, then the Section 14 configuration:
+
+```
+  naive: full documents live inside the state
+    50 KB x 50 steps x 10,000 tasks/day = 25,000,000 KB = 25 GB/day
+
+  Section 14: S3 keys in state, documents out of band, zstd on the rest
+     4 KB x 30 steps x    500 tasks/day =     60,000 KB = 60 MB/day
+    -----------------------------------------------------------------
+    25 GB/day vs 60 MB/day  ->  417x less data written
+```
+
+The two configurations differ in every factor, but the decisive one is `S`: dropping from 50KB to 4KB is what turns document text into a 40-byte S3 key plus a compressed remainder. Steps and tasks are dictated by the workload; bytes-per-step is a design choice, and it is a multiplicative one.
+
+**Why TTL is a separate lever.** `S x k x T` is a *rate* — GB per day. Storage cost tracks the standing total, which is that rate times the retention window. At 60MB/day a 7-day TTL means 420MB resident forever; the same rate with 90-day retention means 5.4GB. Compression and TTL are the two knobs that act after the write has already happened.
 
 **Pitfall 4: Dead-loop detector with false positives**
 A legitimate research workflow calls `search("LLM architecture")` multiple times with different intents. A naive deduplication hash triggers a false dead-loop detection. Fix: include a sequence index in the action fingerprint, or detect loops only when both tool name AND semantic similarity of results are high (not just argument hash).

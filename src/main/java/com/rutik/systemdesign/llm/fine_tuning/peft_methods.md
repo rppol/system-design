@@ -6,6 +6,35 @@ Parameter-Efficient Fine-Tuning (PEFT) is a family of techniques that fine-tune 
 
 The core problem PEFT solves: a 70B model has 70B × 2 bytes × 3 (weights + gradients + optimizer states) ≈ 420GB of training memory requirements. Full fine-tuning of 70B models requires 6-8× A100 80GB GPUs. PEFT makes this same model trainable on 1-2 GPUs by training only 0.1-1% of parameters.
 
+**What this actually says.** "Training a model costs about three copies of it, not one — so the model you can *load* is far bigger than the model you can *train*."
+
+That factor of 3 is the whole reason fine-tuning is a different hardware problem from inference. Freeze the base and two of the three copies shrink to almost nothing, because gradients and optimizer state are sized by the *trainable* parameter count, not the total one.
+
+| Symbol | What it is |
+|--------|------------|
+| `70B` | Total parameter count of the base model |
+| `× 2 bytes` | BF16/FP16 storage — 2 bytes per parameter |
+| `× 3` | Weights + gradients + optimizer state, each roughly one full copy |
+| `420GB` | Resulting training-time footprint, before activations are counted |
+| `0.1-1%` | Fraction of parameters PEFT actually leaves trainable |
+
+**Walk one example.** Where the 420GB goes, and what freezing the base removes at 0.5% trainable:
+
+```
+  trainable params = 0.5% x 70e9 = 350,000,000
+
+                            full fine-tune          PEFT, 4-bit frozen base
+  weights      70e9 x 2 B  =  140.0 GB      70e9 x 0.5 B  =   35.0 GB
+  gradients    70e9 x 2 B  =  140.0 GB     350e6 x 2 B    =    0.7 GB
+  optimizer    70e9 x 2 B  =  140.0 GB     350e6 x 2 B    =    0.7 GB
+                              --------                        -------
+                              420.0 GB                         36.4 GB
+
+  420.0 / 36.4 = 11.5x smaller  ->  fits one 80GB A100 instead of six
+```
+
+The gradient and optimizer rows collapse by 200× because they scale with 350M, not 70B. The weight row only shrinks by quantizing it — which is exactly the division of labour between PEFT and QLoRA: PEFT kills two rows, quantization shrinks the third.
+
 ---
 
 ## Intuition
@@ -61,6 +90,37 @@ Inference overhead: ALWAYS present — adapter cannot be merged into base model
   Adds ~5-10% inference latency per adapter insertion
 ```
 
+**Read it like this.** "Squeeze the layer's output down to a tiny width, learn the correction there, then blow it back up — the correction costs two skinny matrices instead of one fat one."
+
+The `2 × d × r` is the entire cost model. Both projections are `d`-by-`r`, so the parameter count is linear in the bottleneck `r` while the layer it corrects is quadratic in `d`. That asymmetry is where all the savings come from.
+
+| Symbol | What it is |
+|--------|------------|
+| `d` | Model hidden dimension — 4096 for a 7B model |
+| `r` | Bottleneck width the adapter squeezes down to, typically 8 to 256 |
+| `d × r` | The down-projection matrix, one per adapter |
+| `r × d` | The up-projection matrix, one per adapter |
+| `2 × d × r` | Both projections together — the per-adapter parameter cost |
+| `× 32 × 2` | 32 transformer layers, 2 adapters inserted per layer |
+
+**Walk one example.** Building the 4M figure from the bottom up at `d=4096, r=8`:
+
+```
+  down-project   4096 x 8                 =     32,768
+  up-project        8 x 4096              =     32,768
+                                             ---------
+  per adapter    2 x 4096 x 8             =     65,536
+
+  per layer      65,536 x 2 adapters      =    131,072
+  whole model   131,072 x 32 layers       =  4,194,304   (64 adapters total)
+
+  as % of base   4,194,304 / 7,000,000,000  =  0.0599%
+```
+
+The full-width layer this sits beside is `4096 x 4096 = 16,777,216` parameters — so one adapter is `1/256` the size of the matrix it corrects. Doubling `r` from 8 to 16 doubles the adapter to 8.4M and 0.12%; the cost stays linear no matter how far you push it, which is why bottleneck width is such a safe dial to turn.
+
+**Why the bottleneck exists at all.** Without it — a full `d × d` correction matrix — you would be training 16.8M parameters per adapter and 1.07B across the model, which is 15% of the base and defeats the entire point. The narrow waist is what forces the update to be low-rank, and the low-rank constraint is the assumption every PEFT method rests on.
+
 ### 3.2 Prefix Tuning (Li and Liang, 2021)
 
 Learn soft prefix tokens prepended to keys and values in each attention layer:
@@ -93,6 +153,38 @@ Inference overhead:
   Doesn't physically lengthen input but increases KV cache size
 ```
 
+**In plain terms.** "Invent a handful of fake tokens that every real token is allowed to look at, and let gradient descent decide what they should say — separately in every layer."
+
+The `× 2` is keys *and* values; the `× num_layers` is the part people forget. Prefix tuning is not one prefix — it is 32 independent prefixes, one per layer, which is what separates it from prompt tuning and multiplies its parameter count by the model depth.
+
+| Symbol | What it is |
+|--------|------------|
+| `l` | Prefix length — how many virtual tokens per layer, e.g. 10 |
+| `d_k`, `d_v` | Key and value dimensions, both 4096 here |
+| `P_k`, `P_v` | The learned prefix matrices, each `l × d`, one pair per layer |
+| `× 2` | Keys and values are learned separately |
+| `num_layers` | 32 — each layer gets its own independent prefix |
+| `l × d × 2 × num_layers` | Total trainable parameters |
+
+**Walk one example.** The 2.6M figure at `l=10, d=4096, 32 layers`:
+
+```
+  P_k per layer      10 x 4096            =     40,960
+  P_v per layer      10 x 4096            =     40,960
+                                              --------
+  per layer          10 x 4096 x 2        =     81,920
+
+  whole model     81,920 x 32 layers      =  2,621,440
+
+  as % of base     2,621,440 / 7,000,000,000  =  0.0374%
+
+  KV cache cost   10 virtual tokens x 32 layers  =  320 prefix KV entries
+```
+
+Compare the same `l=10` under prompt tuning, which learns one prefix at the input only: `10 x 4096 = 40,960` parameters. Prefix tuning costs 64× more (`2 × 32`) for the identical prefix length — the `× 2 × 32` is the entire difference between the two methods.
+
+**What the depth buys, and what it costs.** Per-layer prefixes let the task conditioning re-assert itself at every depth instead of being diluted as the signal propagates, which is why prefix tuning outperforms prompt tuning on mid-sized models. The bill arrives as KV cache: 320 entries of permanently-resident cache per sequence, present on every request, that no amount of merging can remove.
+
 ### 3.3 Prompt Tuning (Lester et al. 2021)
 
 Learn soft prompt tokens prepended to the input embedding layer only (not all layers):
@@ -121,6 +213,30 @@ Inference overhead:
   Minimal overhead; often negligible
 ```
 
+**Put simply.** "Glue a few learned vectors onto the front of the input embeddings and change absolutely nothing else — the transformer never knows they weren't real words."
+
+`k × d` is the smallest parameter budget in all of PEFT, and the reason is that there is no `× num_layers` term. One prefix, at the input, full stop.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | Soft prompt length in tokens, e.g. 10 or 100 |
+| `d` | Embedding dimension — 768 for T5-base, 4096 for a 7B model |
+| `P` | The learned `k × d` embedding block, not tied to any vocabulary entry |
+| `k × d` | Total trainable parameters — no per-layer multiplier |
+
+**Walk one example.** The same `k` at two model scales, showing why scale changes the verdict:
+
+```
+                    k        d        k x d        as % of that model
+  BERT-base        10      768        7,680        0.0070%  of 110M
+  7B model         10     4096       40,960        0.00059% of 7B
+  7B model        100     4096      409,600        0.00585% of 7B
+```
+
+At `k=100` on a 7B model you are steering 7 billion frozen parameters with 409,600 trainable ones — a ratio of about 1 to 17,000. Nothing else in this file comes close.
+
+**Why that ratio is also the failure mode.** The whole method assumes the frozen model already contains the behaviour you want and merely needs to be pointed at it; the soft prompt is a pointer, not new capacity. Large models satisfy that assumption, which is why `k=100` matches full fine-tuning at GPT-3 scale. Small models do not — there is nothing to point at, and 7,680 parameters cannot supply it, which is exactly the T5-Small collapse the section describes.
+
 ### 3.4 LoRA (Low-Rank Adaptation)
 
 (See [lora.md](lora.md) for full details; the 4-bit training variant is covered in [qlora.md](qlora.md))
@@ -135,6 +251,47 @@ Summary:
 
   Trainable params (7B, r=16, all-attn+FFN): ~0.5%
 ```
+
+**The idea behind it.** "Leave the original matrix alone and learn a thin correction beside it — then, once training is done, just add the correction in and throw the scaffolding away."
+
+The reason LoRA merges and adapters do not is visible right in the formula: `B × A` has the same shape as `W_frozen`, so the sum is one matrix again. An adapter's down-up pair sits *between* layers with a nonlinearity in the middle, so there is nothing to add it into.
+
+| Symbol | What it is |
+|--------|------------|
+| `W_frozen` | The original pre-trained weight matrix, `d × k`, never updated |
+| `A` | Down-projection `r × k`, initialized random — the "read" side |
+| `B` | Up-projection `d × r`, initialized to zeros — the "write" side |
+| `r` | Rank of the update; `r ≪ min(d, k)` is the whole trick |
+| `alpha` | Scaling numerator, a fixed hyperparameter (commonly `2 × r`) |
+| `alpha/r` | Scale factor applied to the update, so changing `r` doesn't rescale it |
+| `B × A` | The rank-`r` correction, shaped exactly like `W_frozen` |
+
+**Walk one example.** Trainable count for a 7B model (`d = 4096`, 32 layers), taking every targeted projection as `4096 × 4096`:
+
+```
+  per module, rank r      r x (4096 + 4096)  =  r x 8192
+
+  r=16, one module        16 x 8192          =    131,072
+  vs the module itself    4096 x 4096        = 16,777,216     ->  128x smaller
+
+  target q,k,v,o only     131,072 x 4 x 32   = 16,777,216     ->  0.240% of 7B
+  target attn + FFN (7)   131,072 x 7 x 32   = 29,360,128     ->  0.419% of 7B
+```
+
+That bracket, 0.24% to 0.42%, is the `0.2-0.5%` the comparison table quotes — the spread is not rank, it is *which modules you target*.
+
+**Reading the `alpha/r` scale.** Its only job is to decouple two knobs that would otherwise be tangled. `B × A` grows with `r` simply because more rank means more terms in the sum, so without the divisor, raising `r` would silently raise the effective learning rate too. Dividing by `r` cancels that, letting you sweep rank without re-tuning anything else:
+
+```
+  billing adapter    r=16, alpha=32   ->  scale = 32/16 = 2.0
+  returns adapter    r= 8, alpha=16   ->  scale = 16/ 8 = 2.0
+
+  Same effective update strength at half the rank -- the point of the ratio.
+```
+
+Both configurations in the Section 12 case study use `alpha = 2r` for exactly this reason. Set `alpha = r` instead and the scale is `1.0`; the convention `alpha = 2r` is just a mildly aggressive default that survived experimentation.
+
+**Why `B` starts at zero.** At step 0, `B × A = 0`, so `W_adapted = W_frozen` exactly — training begins from the pre-trained model, not from a randomly perturbed one. Initialize both `A` and `B` randomly and the first forward pass injects noise into every targeted layer, which is the same initialization-gap problem LoftQ solves for the quantized case.
 
 ### 3.5 BitFit (Selective Parameter Fine-Tuning)
 
@@ -164,6 +321,38 @@ Use cases:
   Primarily academic interest; LoRA dominates in production
 ```
 
+**What it means.** "Every layer already has a knob that shifts its output up or down. Train only those knobs and leave every multiplication in the network untouched."
+
+In `y = Wx + b`, `W` is `d × d` and `b` is `d` — biases are a `1/d` sliver of the layer. That is why BitFit needs no new parameters at all, and also why its ceiling is low: you can translate each layer's output distribution, never rotate or reshape it.
+
+| Symbol | What it is |
+|--------|------------|
+| `W` | The weight matrix, `d × d` — frozen, and the overwhelming majority of the layer |
+| `b` | The bias vector, `d` values — the only thing BitFit trains |
+| `y = Wx + b` | A standard linear layer; only the additive term is left unfrozen |
+| `d` | Hidden dimension — 768 for BERT-base |
+
+**Walk one example.** Counting every bias in BERT-base (`d=768`, FFN width 3072, 12 layers):
+
+```
+  per encoder layer
+    q, k, v, o biases        4 x 768        =   3,072
+    attention LayerNorm bias     768        =     768
+    FFN intermediate bias       3072        =   3,072
+    FFN output bias              768        =     768
+    output LayerNorm bias        768        =     768
+                                               -------
+                                                 8,448
+
+  whole model      8,448 x 12 layers        = 101,376
+
+  as % of base   101,376 / 110,000,000      =  0.0922%
+```
+
+That is the `~0.1M parameters (<0.1%)` the section quotes, assembled term by term.
+
+**The gotcha nobody sees coming.** BitFit needs biases to exist. LLaMA, Mistral, and most modern decoder-only models ship with `bias=False` on every projection and use RMSNorm, which has a scale but no shift — so a 7B LLaMA has essentially no bias parameters to train and BitFit degenerates into a no-op. This, more than the quality ceiling, is why the section calls it academic: the architectures it was designed for are the ones production stopped using.
+
 ### 3.6 DoRA (Weight-Decomposed Low-Rank Adaptation)
 
 Decompose weight matrices into magnitude and direction components, apply LoRA to direction:
@@ -192,6 +381,47 @@ Parameters: slightly more than LoRA (adds d magnitude params per layer)
   Overhead: negligible vs. LoRA
 ```
 
+**Stated plainly.** "Split each weight column into *how long it is* and *where it points*, then let LoRA handle the pointing while a single scalar per column handles the length."
+
+LoRA has to spend rank on both jobs at once. DoRA hands the length job to a `d`-vector that costs almost nothing, freeing the low-rank budget to do only what low rank is good at.
+
+| Symbol | What it is |
+|--------|------------|
+| `W = m × (V / ‖V‖_c)` | The decomposition: a magnitude times a unit-length direction |
+| `m` | Magnitude vector, one scalar per output column — `d` trainable parameters |
+| `V` | The direction matrix, same shape as `W` |
+| `‖V‖_c` | Column-wise norm — divide by it and every column has length 1 |
+| `V / ‖V‖_c` | Pure direction, magnitude stripped out |
+| `V + B × A` | Direction updated by ordinary LoRA |
+
+**Walk one example.** DoRA at `r=8` on `q,k,v,o` of a 7B model, priced against its LoRA core:
+
+```
+  LoRA direction update
+    per module    8 x (4096 + 4096)        =    65,536
+    per layer     65,536 x 4 modules       =   262,144
+    whole model  262,144 x 32 layers       = 8,388,608     0.1198% of 7B
+
+  magnitude vector
+    per module    4096                     =     4,096
+    whole model   4,096 x 4 x 32           =   524,288     0.0075% of 7B
+                                             ---------
+  DoRA total                               = 8,912,896     0.1273% of 7B
+
+  magnitude cost as a share of LoRA:  524,288 / 8,388,608  =  6.25%
+```
+
+Now the payoff. LoRA at `r=16` on the same modules costs `16 x 8192 x 4 x 32 = 16,777,216`, or 0.240%. DoRA `r=8` reaches comparable quality at 8,912,896 — **1.88× fewer trainable parameters**:
+
+```
+  LoRA r=16     16,777,216   0.240%
+  DoRA r= 8      8,912,896   0.127%     <- matches or beats, at 53% of the params
+```
+
+That 6.25% surcharge is what "negligible vs. LoRA" means numerically, and it is bought back many times over by halving the rank.
+
+**Why magnitude wanted its own parameter.** A rank-8 update can only move `W` inside an 8-dimensional subspace, so if the task mostly needs "make this column stronger," LoRA must burn rank approximating a rescaling it could never express cleanly. Giving magnitude a free, unconstrained `d`-vector removes that waste entirely — and since `m` and `V` recombine into a single matrix, DoRA still merges to zero inference overhead exactly like LoRA.
+
 ### 3.7 Comparison Table
 
 ```
@@ -206,6 +436,39 @@ BitFit           <0.1%        Yes     0%          Simple classification
 DoRA (r=8)       ~0.12%       Yes     0% merged   LoRA quality at lower rank
 (*QLoRA merged requires dequantize first)
 ```
+
+**What the formula is telling you.** "Every one of these percentages is the same three-part product — how many parameters per site, times how many sites per layer, times 32 layers — and the methods differ only in what counts as a site."
+
+Percentages alone hide the structure. Written as absolute counts against one fixed model, the whole family lines up on a single axis and the reason for each method's position becomes arithmetic rather than folklore.
+
+| Symbol | What it is |
+|--------|------------|
+| Base model | 7B parameters, `d = 4096`, 32 layers, FFN width 11008 |
+| Per-site cost | Parameters one injection point costs — `2dr`, `r(d+k)`, `d`, etc. |
+| Sites per layer | How many places the method injects — 1 input prefix, 4 projections, 7 modules |
+| Depth multiplier | `× 32` for every per-layer method; absent for prompt tuning |
+| Trainable % | Absolute count divided by 7,000,000,000 |
+
+**Walk one example.** All seven methods costed on that one 7B model, cheapest first:
+
+```
+  method                 per-site x sites x layers            absolute      % of 7B
+  -------------------------------------------------------------------------------
+  IA3 (k,v,ffn)          4,096  x  3  x  32                    393,216       0.0056
+  Prompt tuning k=100    100 x 4096   (no depth term)          409,600       0.0059
+  BitFit (biases only)   39,680 per layer x 32               1,269,760       0.0181
+  Prefix l=10            10 x 4096 x 2  x  32                2,621,440       0.0374
+  Adapter r=8            2 x 4096 x 8  x  2  x  32           4,194,304       0.0599
+  DoRA r=8   (q,k,v,o)   8 x 8192 x 4 x 32  + 4096 x 4 x 32  8,912,896       0.1273
+  LoRA r=16  (q,k,v,o)   16 x 8192  x  4  x  32             16,777,216       0.2397
+  LoRA r=16  (attn+FFN)  16 x 8192  x  7  x  32             29,360,128       0.4194
+  -------------------------------------------------------------------------------
+  span, cheapest to dearest:  29,360,128 / 409,600  =  71.7x
+```
+
+Three readings fall straight out of that column. **IA3 undercuts LoRA by 32× per site** because a scaling vector costs `d = 4096` where a rank-16 update costs `16 × 8192 = 131,072` — the file's "roughly 32× fewer" is exactly `131,072 / 4,096`. **Prompt tuning is the only row with no `× 32`**, which is simultaneously why it is cheapest and why it needs an enormous frozen model to work. And **every method above 0.1% is a mergeable one** — LoRA and DoRA — which is the real pattern in the table: the methods that buy the most capacity are also the ones that cost nothing at inference.
+
+The BitFit row assumes a GPT-style 7B that has bias terms at all; on a LLaMA-style model with `bias=False` everywhere, that row is zero and the method does not apply.
 
 ### Trainable-Parameter Spectrum
 ```

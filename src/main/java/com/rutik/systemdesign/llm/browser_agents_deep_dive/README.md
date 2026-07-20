@@ -134,6 +134,45 @@ Semantic Selector Robustness
   Semantic:      "button with text 'Submit Order'"  STABLE
 ```
 
+### Decoding the extraction cost
+
+The three strategies above are usually compared with adjectives ("smaller", "expensive"). The actual arithmetic is two lines: `tokens ≈ bytes / 4` for text payloads, and `cost = tokens × price_per_token`, with Claude Sonnet at `$3 per 1M` input tokens.
+
+**What this actually says.** "Every page you hand the model is billed by size, so the extraction strategy is a token-budget decision before it is an accuracy decision — and the accessibility tree wins by roughly 30x on the same page."
+
+That framing matters because the 10-100x figure quoted in Section 2 is a *token* ratio, not a vague quality claim. It converts directly into dollars and into how many steps fit inside a context window.
+
+| Symbol | What it is |
+|--------|------------|
+| `bytes / 4` | Rough English-text tokenizer rate — 4 characters per token. Markup-heavy HTML runs worse than this, so the HTML column below is optimistic |
+| `10-100×` | The accessibility-tree shrink factor from Section 2. The realistic middle of that range is ~30x |
+| `$3 / 1M` | Sonnet input price. Multiply tokens by `3e-6` to get dollars |
+| `500-2000 tok` | What a screenshot costs the model to *analyze*, from Section 5. Independent of the PNG's byte size |
+| `50KB cap` | The DOM-truncation limit named in Section 12 — a ceiling on the worst case, not the typical page |
+
+**Walk one example.** One page, priced three ways:
+
+```
+  Page payload             bytes      tokens (bytes/4)   input cost @ $3/1M
+  raw HTML (200 KB)       204800           51,200             $0.1536
+  raw HTML (150 KB)       153600           38,400             $0.1152
+  a11y tree (5 KB)          5120            1,280             $0.0038
+  a11y tree (50 KB cap)    51200           12,800             $0.0384
+  screenshot (analysis)       --      500 -  2,000      $0.0015 - $0.0060
+
+  Same page, one step:
+    raw HTML     38,400 tok  ->  $0.1152
+    a11y tree     1,280 tok  ->  $0.0038     30x cheaper, same page
+    screenshot    1,500 tok  ->  $0.0045     ~1.2x the a11y tree
+
+  Over a 15-step task:
+    raw HTML    576,000 tok  ->  $1.7280
+    a11y tree    19,200 tok  ->  $0.0576
+    a11y + shot  41,700 tok  ->  $0.1251
+```
+
+**The surprise is that vision is not the expensive part.** A screenshot costs about the same per step as the accessibility tree it supplements — `$0.0045` vs `$0.0038`. What vision actually costs is *latency* (1-3s vs 50-200ms, from Section 8) and *accuracy* (70-80% vs 95%+). The real budget disaster is raw HTML: at `$1.73` per task it is 30x the hybrid approach and will exhaust a context window long before the agent finishes. This is why the shift to accessibility-tree extraction, not the choice between DOM and vision, is what made browser agents practical.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -258,6 +297,50 @@ WebArena benchmark scores (approximate, 2024-2025):
 - Stagehand + Claude Sonnet 4: ~50%
 - GPT-4 + Computer Use: ~30-40%
 - SeeAct + GPT-4V (screenshot): ~30%
+
+### Why 95% per-step accuracy is not a 95% agent
+
+The accuracy column above is *per action*. A WebArena task is a chain of them, and a browser agent only succeeds if every link holds:
+
+```
+P(task succeeds) = p ^ n
+```
+
+**What the formula is telling you.** "Per-step accuracy is multiplied, not averaged — so a number that sounds excellent in isolation decays into a number that sounds broken once you chain fifteen of them."
+
+This single exponent explains the whole benchmark table. Nobody's agent is 30% accurate at clicking buttons; the vision-only agents scoring ~30% on WebArena are individually right well over 90% of the time. Compounding does the rest.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Per-step reliability. One click, one type, one extraction landing correctly |
+| `n` | Actions in the task. The Section 14 agent averages 15 and caps at `max_steps=25` |
+| `p ^ n` | End-to-end task success. What a benchmark like WebArena actually reports |
+| `p = S^(1/n)` | The inverse. Given an observed task success `S`, the per-step reliability it implies |
+| `S` | Observed end-to-end success rate — the ~58% / ~30% figures above |
+
+**Walk one example.** Per-step reliability across realistic task lengths:
+
+```
+  Per-step p         n=5      n=10     n=15     n=25
+    0.99           0.9510   0.9044   0.8601   0.7778
+    0.98           0.9039   0.8171   0.7386   0.6035
+    0.97           0.8587   0.7374   0.6333   0.4670
+    0.95           0.7738   0.5987   0.4633   0.2774
+    0.90           0.5905   0.3487   0.2059   0.0718
+    0.80           0.3277   0.1074   0.0352   0.0038
+
+  Read the 0.95 row -- the "95%+ on standard sites" claim in the table above.
+  At 15 steps it delivers 0.4633: the agent fails more than half its tasks
+  while every individual action is 95% correct.
+
+  Now invert the benchmark scores, assuming n = 15 actions per task:
+    WebArena 58%  ->  p = 0.58 ^ (1/15) = 0.9643    (DOM, Browser Use)
+    WebArena 30%  ->  p = 0.30 ^ (1/15) = 0.9229    (screenshot-only)
+
+  4.15 points of per-step reliability  ->  28 points of task success.
+```
+
+**Why this reframes the DOM-vs-vision argument.** The gap between the best and worst rows of the benchmark table looks like a chasm — 58% vs 30%. Run it back through the exponent and the two approaches differ by just 4.15 percentage points per action. Compounding is an amplifier: it makes small per-step edges look like architectural revolutions, which is exactly why marginal-seeming techniques (semantic selectors over CSS, waiting for explicit state, verifying after each action) pay off so disproportionately. It also sets the engineering target — chasing `p` from 0.96 to 0.99 is worth far more than any prompt-level cleverness, and shortening `n` is the other lever, which is what `max_actions_per_step` chaining buys you.
 
 ---
 
@@ -583,8 +666,54 @@ def _estimate_cost(result: Any) -> float:
     # ~800 input tokens + 200 output tokens per step, 15 steps avg
     # claude-sonnet-4-6: $3/$15 per 1M in/out
     avg_steps = 15
-    return round((800 * avg_steps * 3 + 200 * avg_steps * 15) / 1e9, 4)
+    # Prices are per 1M tokens, so divide by 1e6 (not 1e9).
+    return round((800 * avg_steps * 3 + 200 * avg_steps * 15) / 1e6, 4)
 ```
+
+**Read it like this.** "Each step of the agent buys one LLM turn — a page of accessibility tree in, a short action out — and the per-order bill is just that turn's price multiplied by how many steps the task takes."
+
+The whole cost model of a browser agent collapses into `steps × price_per_step`. That is why every cost control in Section 13 targets one of those two factors: DOM truncation and low-res screenshots shrink the price per step, while max-pages and max-steps caps bound the count.
+
+| Symbol | What it is |
+|--------|------------|
+| `800` | Input tokens per step — the truncated accessibility tree plus recipe hints |
+| `200` | Output tokens per step — a short action sequence like "type SKU in search box" |
+| `3` / `15` | Sonnet pricing, dollars per 1M input / output tokens. Output is 5x the input rate |
+| `avg_steps = 15` | Actions per order, from login through confirmation. The `max_steps=25` cap is the ceiling, not the average |
+| `/ 1e9` | The scaling divisor in the code. Note the units below — dollars-per-1M-tokens requires `1e6` |
+
+**Walk one example.** One step, then one order, then one month:
+
+```
+  One step:
+    input    800 tok  x  $3  / 1M  =  $0.00240
+    output   200 tok  x  $15 / 1M  =  $0.00300   <- costs more from 4x fewer tokens
+    step total                     =  $0.00540
+
+  One order (15 steps):
+    input   12,000 tok  ->  $0.0360
+    output   3,000 tok  ->  $0.0450
+    order total         ->  $0.0810
+
+  One month, at 200 orders/day x 30 days = 6,000 orders:
+    LLM spend         6,000 x $0.0810  =  $486
+    remainder of the $640 reported     =  $154   (Browserbase sessions)
+    against the $800 budget ceiling    =  $160 headroom
+```
+
+**Output tokens dominate despite being 4x scarcer.** `$0.0450` of output against `$0.0360` of input, because the 5x price multiplier beats the 4x volume difference. This is the practical argument for terse action formats: a verbose reasoning trace on every step is billed at the expensive rate, and trimming 100 output tokens per step saves more than trimming 400 input tokens.
+
+**What turning on vision does to the budget.** The worker above sets `use_vision=False` deliberately. Adding a screenshot to every step costs 1,500 extra input tokens:
+
+```
+  DOM only          $0.00540/step  ->  $0.0810/order  ->  $486/month
+  vision @ 20%      $0.00630/step  ->  $0.0945/order  ->  $567/month
+  vision every step $0.00990/step  ->  $0.1485/order  ->  $891/month   <- over budget
+```
+
+The hybrid discipline from Section 8 — vision on only 10-20% of steps — is what keeps the design inside the `$800` ceiling. Vision on every step blows it by `$91` before a single Browserbase session is billed.
+
+**A units note on the code.** The divisor has to be `1e6`, not `1e9`: prices are quoted per 1M tokens, so `(800 * 15 * 3 + 200 * 15 * 15) / 1e6 = 81000 / 1e6 = $0.081`, matching the figure derived above. Using `1e9` returns `$0.000081`, which `round(..., 4)` flattens to `$0.0001` — a 1000x under-report. This is the classic per-1M-vs-per-token units slip, and it is worth checking before wiring any cost estimator to a budget alarm, since a per-task kill switch fed by the wrong number would never fire.
 
 Block 2 — Session refresh and orchestrator (production concern):
 
@@ -838,6 +967,65 @@ async def fixed_rate_limited(orders: list[Any], per_portal_limit: int = 3) -> li
 | Monthly labor cost | $18,400 (4 FTE × 60% time) | $640 (LLM API + Browserbase) |
 | Errors causing incorrect orders | ~0.3%/month | 0.05%/month (verification catches) |
 | WebArena benchmark (12-portal subset) | N/A | 61% zero-shot success |
+
+### Reading the metrics table as arithmetic
+
+Three of those rows are a single outcome funnel, and two more are a throughput budget. Both are worth pushing through explicitly.
+
+**Stated plainly.** "Every order lands in exactly one of three buckets — worked first time, worked on retry, or needs a human — and those three percentages must sum to 100, which is what makes the retry layer's contribution measurable rather than decorative."
+
+Reading the rows as a partition rather than as independent statistics is what turns them into a design argument for the retry layer.
+
+| Symbol | What it is |
+|--------|------------|
+| `93.1%` | First-try success. The agent completed the order in one dispatch |
+| `5.2%` | Recovered by the single retry. Carved out of the 6.9% that failed first |
+| `1.7%` | Human escalation — CAPTCHA plus SKU-not-found, the two explicit bail-outs in the worker prompt |
+| `1 - 0.931` | The residual the retry layer gets to work on |
+| `p = S^(1/n)` | Same inversion as Section 8, applied to this deployment's own numbers |
+
+**Walk one example.** The funnel, per 1,000 orders:
+
+```
+  first try succeeds     93.1%   ->   931 orders
+  fails first try         6.9%   ->    69 orders
+    of those 69, retry recovers  ->    52 orders   (5.2% of 1,000)
+    remainder escalates          ->    17 orders   (1.7% of 1,000)
+
+  93.1 + 5.2 + 1.7 = 100.0   <- a partition, not three loose stats
+
+  Retry effectiveness  =  52 / 69  =  75.4% of first-try failures rescued.
+
+  Implied per-step reliability at 15 actions per order:
+    p = 0.931 ^ (1/15) = 0.99524
+
+  What that same 99.524% per-step delivers at other task lengths:
+    n =  5  ->  0.9764
+    n = 10  ->  0.9534
+    n = 15  ->  0.9304     <- matches the observed 93.1%
+    n = 25  ->  0.8876     <- the max_steps cap, well under target
+
+  Per-step reliability required to hold 90% end-to-end:
+    n = 10  ->  p >= 0.98952
+    n = 15  ->  p >= 0.99300
+    n = 25  ->  p >= 0.99579
+```
+
+**This is why the retry is worth more than tuning the agent.** Going from 93.1% to 98.3% end-to-end via one retry would otherwise demand pushing per-step reliability from 0.99524 to about 0.99885 — chasing the last thousandth of a percent on every click. Re-running a cheap 15-step task is `$0.081`; engineering that reliability gain is not. The escalation path matters for the same reason: the residual 1.7% is dominated by CAPTCHAs, which no amount of per-step accuracy fixes.
+
+**The throughput budget.** The concurrency numbers are also multiplicative, and they disagree with each other:
+
+```
+  Per-order wall time  =  38 s (p50)  +  2 s inter-request delay  =  40 s
+
+  Per-portal view -- 12 portals x 3 concurrent = 36 slots:
+    200 orders / 36 slots  =  5.6 rounds  ->  5.6 x 40 s  =   222 s  =  3.7 min
+
+  Global orchestrator cap -- max_concurrent = 6:
+    200 orders /  6 slots  = 33.3 rounds  -> 33.3 x 40 s  = 1,333 s  = 22.2 min
+```
+
+The per-portal semaphores are not the binding constraint — the orchestrator's global `max_concurrent=6` is, and it is nearly 6x slower than the per-portal capacity suggests. Note also that the p99 of 82 s sits only 8 s under the 90 s SLA, so the `2 s` politeness delay is already consuming a tenth of the error budget. Raising the global cap toward 36 is the cheap win here, bounded by how many concurrent Browserbase sessions the plan allows.
 
 **Interview Q&As:**
 

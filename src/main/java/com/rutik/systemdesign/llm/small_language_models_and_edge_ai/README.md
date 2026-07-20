@@ -42,7 +42,7 @@ Edge AI extends SLMs beyond phones to IoT sensors, manufacturing equipment, robo
 
 **1. Data quality over quantity.** The Phi-3 training recipe demonstrated that a 3.8B model trained on synthetic "textbook" data — structured, educational, logically coherent — matches or exceeds 13B models trained on 10x the raw web tokens. Garbage in produces a garbage model regardless of scale.
 
-**2. Quantization is a first-class strategy, not an afterthought.** Deploying an SLM on edge hardware almost always requires quantization to 4-bit or 8-bit integer weights. Q4_K_M quantization (GGUF format) reduces a 3.8B model from ~7.2 GB (FP16) to ~2.4 GB — fitting comfortably in 4 GB device RAM. Quantization must be evaluated on target tasks before deployment (method internals: [Optimization & Quantization](../optimization_and_quantization/README.md)).
+**2. Quantization is a first-class strategy, not an afterthought.** Deploying an SLM on edge hardware almost always requires quantization to 4-bit or 8-bit integer weights. Q4_K_M quantization (GGUF format) reduces a 3.8B model from ~7.6 GB (FP16) to ~2.4 GB — fitting comfortably in 4 GB device RAM. Quantization must be evaluated on target tasks before deployment (method internals: [Optimization & Quantization](../optimization_and_quantization/README.md)).
 
 **3. Distillation transfers capability, not just weights.** Knowledge distillation from a large teacher model (70B) to a small student model (3B) allows the student to learn the teacher's probability distributions — not just the hard labels. This transfers soft reasoning patterns that raw pretraining on small datasets cannot replicate (see [Knowledge Distillation & Model Merging](../knowledge_distillation_and_model_merging/README.md)).
 
@@ -91,7 +91,32 @@ Edge AI extends SLMs beyond phones to IoT sensors, manufacturing equipment, robo
 | GGUF Q2_K | 2 | ~7x | High (>10% perplexity) | Last resort / embedding |
 | INT4 (AWQ) | 4 | ~4x | Low, activations preserved | Mobile NPU targets |
 
-Q4_K_M is the practical sweet spot for most edge deployments: it reduces a 3.8B Phi-3 model from 7.2 GB to approximately 2.4 GB while preserving 97%+ of the original model's task performance on most benchmarks.
+Q4_K_M is the practical sweet spot for most edge deployments: it reduces a 3.8B Phi-3 model from 7.6 GB to approximately 2.4 GB while preserving 97%+ of the original model's task performance on most benchmarks.
+
+**Stated plainly.** "Weights are just a long row of numbers. Shrink each number from 16 bits to 4 and the file shrinks by the same factor — the Size Reduction column is nothing more than `16 / bits`."
+
+The whole table is one division repeated. The reason the measured ratios land slightly *under* the nominal ones is that no quantization format stores only the weights: each block also carries scale factors, and those are kept in FP16.
+
+| Symbol | What it is |
+|--------|------------|
+| `bits` | How many bits each stored weight occupies. The only variable in the table |
+| `16 / bits` | The size reduction versus the FP16 baseline. 4 bits → 4x, 8 bits → 2x |
+| `params x bits / 8` | Bytes of weight data. Divide by 8 because there are 8 bits in a byte |
+| "effective bits" | Real bits per weight *including* the per-block scale factors. Always a little above the nominal |
+
+**Walk one example.** Phi-3 Mini, 3.8B parameters, using `1 GB = 10^9 bytes` throughout:
+
+```
+  format      bits    size = 3.8e9 x bits / 8       reduction = 16 / bits
+  FP16        16      3.8e9 x 2      = 7.60 GB        1.00x   (baseline)
+  Q8          8       3.8e9 x 1      = 3.80 GB        2.00x
+  Q4 nominal  4       3.8e9 x 0.5    = 1.90 GB        4.00x
+  Q4_K_M      4.125   3.8e9 x 0.5156 = 1.96 GB        3.88x   <- scales cost the 0.125
+
+  Shipped Q4_K_M file: 2.4 GB  ->  2.4 / 7.6 = 31.6% of FP16
+```
+
+That last line is where "cutting file size to 32% of FP16" comes from. The gap between the 1.96 GB of pure weight data and the 2.4 GB file is the packaging — embedding tables often kept at higher precision, zero points, and the tensor metadata described in Section 6.3.
 
 ### 4.4 On-Device Fine-Tuning
 
@@ -135,6 +160,36 @@ On-device inference performance depends heavily on which hardware accelerator is
 **Framework support mapping:** Core ML targets ANE on Apple devices. QNN SDK (Qualcomm Neural Network) targets Hexagon NPU. NNAPI provides a generic Android abstraction across NPU vendors. TensorFlow Lite delegates to hardware-specific backends automatically.
 
 **TOPS as a sizing metric:** Divide model FLOPs per token by the NPU's TOPS rating to estimate minimum inference time. A 3B model at ~6 GFLOPs/token on a 35 TOPS NPU theoretically achieves ~0.17 ms/token (nearly 6,000 tokens/second) — but memory bandwidth and scheduling overhead typically reduce this to 50-100 tokens/second in practice.
+
+**What the formula is telling you.** "`FLOPs / TOPS` tells you how fast the *arithmetic* could finish. It says nothing about how fast the weights can be *fetched* — and on a phone, fetching is the slow part."
+
+This is the single most common sizing mistake in edge deployment. Token generation (decode) has to pull every weight in the model through the memory bus to produce one token, so the ceiling is set by bandwidth, not by TOPS.
+
+| Symbol | What it is |
+|--------|------------|
+| FLOPs/token | Arithmetic operations needed to emit one token. Roughly `2 x params` for a dense model |
+| TOPS | Trillions of INT8 operations per second the accelerator can do at peak. A compute rating |
+| `FLOPs / TOPS` | Seconds of pure math per token. The compute ceiling — an optimistic floor on latency |
+| memory bandwidth | GB/s the chip can read from RAM. Phones: LPDDR5X, roughly 50-77 GB/s |
+| `bandwidth / model bytes` | Tokens per second the memory system can sustain. The ceiling that actually binds decode |
+
+**Walk one example.** The same 3B model, measured against both ceilings:
+
+```
+  COMPUTE CEILING (what the TOPS math predicts)
+    6 GFLOPs/token / 35 TOPS = 6e9 / 35e12 = 0.000171 s = 0.171 ms per token
+    1 / 0.000171 s                                      = 5,833 tokens/sec
+
+  BANDWIDTH CEILING (what actually binds)
+    each token must stream all 1.9 GB of INT4 weights through the bus once
+      50 GB/s / 1.9 GB = 26.3 tokens/sec    <- low-end LPDDR5X
+      77 GB/s / 1.9 GB = 40.5 tokens/sec    <- high-end LPDDR5X
+
+  binding ceiling = min(5833, 26.3) = 26.3 tokens/sec
+  the TOPS estimate overstates decode by 5833 / 26.3 = 222x
+```
+
+Flagship parts with wider memory buses land at the 50-100 tokens/second quoted above — but the answer still tracks bandwidth, not TOPS. **Prefill is the exception**: processing a prompt reuses each loaded weight across every prompt token at once, so prefill really is compute-bound and really does scale with TOPS. That is why the M3 Pro numbers in Section 6.3 show ~200 tokens/sec prefill against ~35-50 tokens/sec decode on identical hardware. Estimate decode from `bandwidth / model size`, estimate prefill from `FLOPs / TOPS`, and never quote one number for both.
 
 ---
 
@@ -210,7 +265,7 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    OG["Original Model (FP32/FP16)\nweights: 7.2 GB (Phi-3 3.8B, FP16)"]
+    OG["Original Model (FP32/FP16)\nweights: 7.6 GB (Phi-3 3.8B, FP16)"]
     QUANT["Quantization Step\nGPTQ / AWQ / GGUF\ncalibration dataset\ngroup-wise scaling (Q4_K_M: groups of 32)"]
     INT4["Quantized Model (INT4)\nweights: 2.4 GB\n2 INT4 per byte · FP16 scale per 32 · zero points"]
     DEQU["Runtime Dequantisation (on-the-fly)\nINT4 → FP16 per matmul\nXNNPACK / Metal / Vulkan / Qualcomm HTP"]
@@ -347,6 +402,35 @@ Q4_K_M block layout (per 256 weights):
   - Total: 132 bytes per 256 weights = 4.125 bits/weight effective
 ```
 
+**Read it like this.** "Four-bit quantization is never exactly four bits. You also pay for the scale factors that tell the runtime how to turn those 4-bit integers back into real numbers."
+
+Quantization stores each weight as a small integer plus a shared multiplier. The integers are cheap; the multipliers are the tax. Choosing a block size is choosing how thinly to spread that tax.
+
+| Symbol | What it is |
+|--------|------------|
+| block | A run of 256 consecutive weights that share the same scale factors |
+| FP16 scale factor | The multiplier that converts a stored 4-bit integer back to a real weight. 2 bytes each |
+| 4-bit value | The quantized weight itself. Two of them pack into one byte |
+| bits/weight effective | Total block bytes x 8, divided by the 256 weights in the block |
+
+**Walk one example.** One Q4_K_M block, from bytes to the 4.125 figure:
+
+```
+  per block of 256 weights:
+    2 FP16 scale factors        2 x 2 bytes   =    4 bytes
+    256 weights at 4 bits       256 x 0.5     =  128 bytes
+    ----------------------------------------------------
+    total                                        132 bytes
+
+  effective bits/weight = 132 bytes x 8 bits / 256 weights
+                        = 1056 / 256
+                        = 4.125 bits            <- 3% overhead over a clean 4.0
+
+  across the whole model:  3.8e9 x 4.125 / 8 = 1.96 GB of weight data
+```
+
+**Why the block size matters.** Shrink the block to 32 weights and the same 4-byte scale overhead is spread over 8x fewer values — the tax jumps from 0.125 to 1.0 extra bits per weight, and your "4-bit" model is really 5-bit. Grow the block to 4096 and the overhead vanishes, but a single pair of scales now has to cover 4096 weights of wildly different magnitude, so outliers get crushed and quality drops. 256 is the compromise llama.cpp settled on: 3% size overhead for scales that stay locally accurate.
+
 llama.cpp inference loop (simplified):
 ```
 for each token position t:
@@ -446,6 +530,54 @@ Total working set for Phi-3 Mini Q4 at 2048 ctx: ~3.2 GB
 Minimum device RAM recommendation: 6 GB (leaving headroom for OS + app)
 ```
 
+**In plain terms.** "Model weights are a fixed cost you pay once at load time. The KV cache is rent you pay per token of context — and it is the one that keeps growing while the user keeps talking."
+
+That split is the whole reason on-device chat apps OOM at hour two but never at launch. Weights are a constant you can plan for; the cache is a slope.
+
+| Symbol | What it is |
+|--------|------------|
+| leading `2` | One entry for K, one for V. Attention caches both |
+| `n_layers` | Number of transformer blocks. Each keeps its own cache. Phi-3 Mini: 32 |
+| `n_heads_kv` | KV heads *after* GQA sharing. Phi-3 Mini: 8, not the 32 query heads |
+| `head_dim` | Width of one head's vector. Phi-3 Mini: 96 |
+| `context_len` | Tokens currently in the conversation. The only term that changes at runtime |
+| trailing `2` | Bytes per cached value — the cache stays FP16 even when weights are INT4 |
+
+**Walk one example.** Everything except `context_len` is fixed, so the cache is a straight line:
+
+```
+  KV cache = 2 x n_layers x n_heads_kv x head_dim x context_len x 2 bytes
+             |       |          |            |          |          |
+            K,V     32       8 (GQA)        96      tokens      FP16
+
+  cost per token = 2 x 32 x 8 x 96 x 2 = 98,304 bytes = 98.3 KB per token
+
+    1,024 ctx  ->  100.7 MB
+    2,048 ctx  ->  201.3 MB
+    4,096 ctx  ->  402.7 MB     <- the "~402 MB at full context" figure above
+    8,192 ctx  ->  805.3 MB
+
+  Without GQA (32 KV heads instead of 8) the 4,096 figure is 4x worse:
+    2 x 32 x 32 x 96 x 4096 x 2 = 1.61 GB of cache alone
+```
+
+Note that `402.7 MB` and `384 MiB` are the same 402,653,184 bytes — device memory tools usually report the MiB number, so the same cache looks smaller there. Now assemble the full working set:
+
+```
+  Phi-3 Mini Q4 at 2,048 ctx (1 GB = 10^9 bytes):
+    weights (shipped Q4_K_M file)          2.40 GB
+    KV cache at 2,048 tokens               0.20 GB
+    activations, peak                      0.40 GB
+    ----------------------------------------------
+    subtotal                               3.00 GB
+    plus runtime + allocator overhead  ->  ~3.2 GB as quoted above
+
+  On a 4 GB phone that leaves ~0.8 GB for the OS and every other running app.
+  On a 6 GB phone it leaves ~2.8 GB -- which is why 6 GB is the recommendation.
+```
+
+**Why GQA is load-bearing here, not an optimization.** Every term in the cache formula is fixed by the architecture except `n_heads_kv`, and GQA is the only knob that reduces it. Cutting 32 KV heads to 8 turns a 1.61 GB cache into 402.7 MB at 4K context. Without that 4x, Phi-3 Mini's weights plus cache alone would exceed 4 GB before activations are counted, and the model simply would not run on a mid-range phone at usable context lengths.
+
 ### 6.6 Thermal and Battery Constraints
 
 Edge inference must respect device thermal design power (TDP):
@@ -468,6 +600,30 @@ Mitigation strategies:
   3. Progressive generation with early stopping
   4. Offload rare/complex queries to cloud, local for common tasks
 ```
+
+**Put simply.** "A phone can only convert a fixed number of watts into tokens before it must slow down to stay cool — so the thermal envelope, not the silicon, sets sustained speed."
+
+Every published tokens/second number is really two numbers: a burst figure measured before the chip heats up, and a sustained figure measured after. Quoting the burst number is how apps ship and then feel broken.
+
+| Symbol | What it is |
+|--------|------------|
+| sustained TDP | Watts the device can dissipate indefinitely without throttling. Flagship phone: ~5W |
+| burst throughput | Tokens/sec before thermal limits engage. Phi-3 Mini Q4 on M3 CPU: 40-50 |
+| sustained throughput | Tokens/sec after throttling. The same model on a phone: 15-20 |
+| joules per token | `watts / tokens per second`. The energy price of one token, independent of duration |
+
+**Walk one example.** 5W sustained, Phi-3 Mini Q4 on CPU at the throttled ~20 tokens/sec:
+
+```
+  energy per token   = 5 W / 20 tokens/sec  = 0.25 joules/token
+  a 300-token answer = 300 x 0.25 joules    = 75 joules
+  time for it        = 300 / 20 tokens/sec  = 15 seconds  <- inside the <30s burst budget
+
+  Battery, at the stated ~5% drain per minute of continuous inference:
+    100% / 5% per minute = 20 minutes of continuous generation to a flat battery
+```
+
+**Why this kills streaming chat but not burst tasks.** A 15-second, 75-joule answer is affordable; a user can request dozens per day. Continuous generation is not — 20 minutes to empty means an always-on writing assistant is a battery emergency, which is exactly the Pitfall 8 failure mode in Section 10. The NPU is the escape hatch: at roughly 10x the matmul efficiency of the CPU, the same 0.25 joules/token drops toward 0.025, and the sustained-vs-burst gap that drives users to say "the app got slow" mostly closes.
 
 ---
 

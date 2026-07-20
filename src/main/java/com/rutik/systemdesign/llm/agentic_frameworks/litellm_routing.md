@@ -123,6 +123,57 @@ flowchart TD
     class ERR lossN
 ```
 
+### The arithmetic behind a three-tier fallback chain
+
+**Stated plainly.** "A request only fails when every tier fails, so chaining independent deployments multiplies their failure rates together instead of adding their successes."
+
+| Symbol | What it is |
+|--------|------------|
+| `p_i` | Probability tier `i` serves the request successfully |
+| `1 - p_i` | Tier `i`'s failure rate — the quantity that actually gets multiplied |
+| `prod (1 - p_i)` | Probability the whole chain falls through to the 503 |
+| `1 - prod (1 - p_i)` | End-to-end availability the client experiences |
+| `T` | Timeout waited before giving up on a tier and trying the next |
+
+**Walk one example.** Three tiers with deliberately unequal reliability:
+
+```
+  tier             p_i      failure (1 - p_i)
+  A1 Anthropic    0.99          0.01
+  A2 Bedrock      0.98          0.02
+  A3 OpenAI       0.95          0.05
+
+  all three fail  =  0.01 x 0.02 x 0.05      =  0.00001
+  availability    =  1 - 0.00001             =  99.999%
+
+  compare: best single tier alone            =  99.0%
+  downtime per year   99.0%   -> 87.6 hours
+                      99.999% ->  5.3 minutes
+```
+
+The weakest tier in that chain is only 95% reliable, yet the chain beats every member by
+orders of magnitude. That is the counter-intuitive part worth internalizing: **a mediocre
+third fallback is still enormously valuable**, because it only ever runs on the 0.02% of
+requests the first two already dropped.
+
+**Where the cost shows up instead.** Availability is not free — it is paid in latency, and
+the bill lands on the tail rather than the mean. If `T` is a 10s timeout:
+
+```
+  requests served by A1   0.99         -> no extra latency
+             by A2        0.01 x 0.98  =  0.98%   -> waited T = 10s
+             by A3        0.0002       =  0.02%   -> waited 2T = 20s
+
+  expected added latency  =  0.01 x 10s          =  100ms  (mean)
+  P99 added latency       =  0                   (99th request is still an A1 hit)
+  P999 added latency      =  10s                 (now you are inside the A2 band)
+```
+
+The mean says "100ms, negligible" and the P999 says "ten full seconds." Both are correct.
+This is exactly why a fallback chain that looks healthy on average dashboards produces
+furious tail-latency complaints, and why `T` — not the number of tiers — is the knob to
+tune first.
+
 ### Virtual Key Budgets
 
 ```
@@ -443,6 +494,43 @@ OpenRouter (managed service, no self-hosting), Cloudflare AI Gateway (free, basi
 - Cost visibility: per-team dashboards exposed cost overruns (one team using GPT-4 for what could've been Haiku)
 - Semantic cache saved $4.2K/month (12% of total spend)
 - Average request added latency: 8ms
+
+**What it means.** "A semantic cache converts a hit rate into a discount at one-to-one — save 12% of the spend and you served 12% of the calls from Redis instead of a provider."
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Total monthly LLM spend across all 12 teams |
+| `h` | Semantic cache hit rate — the fraction of requests answered from cache |
+| `h x S` | Money saved, since a hit costs an embedding call rather than a completion |
+| `0.85` | The cosine-similarity threshold that decides what counts as a hit |
+
+**Walk one example.** Back out the gateway's total spend, then check the claim in §4.5:
+
+```
+  saved   =  h x S
+  $4,200  =  0.12 x S
+  S       =  $4,200 / 0.12          =  $35,000 / month
+
+  what §4.5 says a chatty workload should reach
+    h = 0.20   ->  0.20 x 35,000    =  $ 7,000 / month
+    h = 0.40   ->  0.40 x 35,000    =  $14,000 / month
+
+  actual h = 0.12, i.e. below the quoted 20-40% band
+```
+
+The gap is the interesting part. This gateway is fronting 12 *different* products, so
+queries are heterogeneous — the 20-40% band in Section 4.5 assumes a chatty workload where
+users repeat near-identical questions. Mixed-tenant traffic caches worse, and per-team
+namespacing (used here for isolation) lowers `h` further by construction, since Team A's hit
+can never serve Team B.
+
+**Why raising the threshold is not free money.** It is tempting to lift `h` by lowering the
+0.85 cosine threshold. The war story earlier in this file is what that costs: "Q1 sales" and
+"Q2 sales" are lexically near-identical and clear a loose threshold easily, so the cache
+returns last quarter's numbers with full confidence. Cache savings scale linearly with `h`,
+but wrong-answer risk scales with how much semantic distance you agreed to ignore — which is
+why the 8ms average added latency is the cheap part of this design and the threshold is the
+expensive one.
 
 **Lessons**:
 1. Virtual key budget alerts caught one team's runaway agent loop within 2 hours (alert → investigate → fix).

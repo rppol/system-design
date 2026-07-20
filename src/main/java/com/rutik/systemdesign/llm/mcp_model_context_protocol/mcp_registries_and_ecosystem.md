@@ -417,6 +417,58 @@ Emerging. Smithery has a paid tier for enterprises. Companies are starting to pu
 
 **Lessons**:
 1. Curating to ~20 servers covered 90% of developer needs; the long tail of community servers was mostly unnecessary.
+
+**Put simply.** "Two thirds of one percent of the ecosystem covered ninety percent of what 1,500
+engineers actually needed — the registry is enormous, and almost none of it is load-bearing."
+
+This is the single most useful number in the module, because it decides the whole allowlist
+argument. If curation cost 40% of coverage it would be a genuine tradeoff; at this ratio it is
+close to free.
+
+```
+  coverage_efficiency = coverage_achieved / (servers_curated / servers_available)
+
+  approval_rate = approved / reviewed
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `servers_available` | 3000+ published across registries by mid-2025 |
+| `servers_curated` | ~20 the company approved (12 internal + 8 community) |
+| `coverage_achieved` | 90% of developer needs met by those 20 |
+| `reviewed` | Every submission that went through security review: 20 approved + 24 rejected |
+
+**Walk one example.** Curation ratio and coverage, side by side:
+
+```
+  servers curated / available : 20 / 3,000 = 0.67% of the ecosystem
+  developer needs covered     :              90%
+
+  -> 0.67% of the catalogue does 90% of the work
+     the remaining 99.3% competes for the last 10%
+```
+
+Now the review funnel, which is where the security cost actually lands:
+
+```
+  reviewed : 20 approved + 24 rejected = 44 submissions
+  approval_rate = 20 / 44 = 45.5%       -> more than half were turned away
+
+  of community submissions specifically:
+     8 approved of 32 considered = 25%   -> 3 in 4 community servers rejected
+```
+
+The 25% community pass rate is the number that justifies the whole program. If community servers
+cleared review 90% of the time, the registry would be pure bureaucracy — a gate that never
+catches anything. At 25%, three of every four ad-hoc installs a developer would have made
+unsupervised carried a real concern (dynamic code execution, overly broad scopes, low quality).
+The pre-registry "wild west" was not hypothetically risky; it was admitting servers at four times
+the rate review would allow.
+
+Set that against the same case study's `0` MCP security incidents in six months versus 2 close
+calls before, and lesson 4's split — internal builds were "80% of the work but 100% of the
+security peace of mind" — reads as the natural consequence: the 12 internal servers cost the most
+effort precisely because they are the ones no external review could ever have validated.
 2. The 1-2 week review SLA pushed back on some adoption; faster review process being investigated.
 3. Audit pipeline revealed which servers were actually used → guided which ones to maintain/improve.
 4. Building internal servers for company-specific tools was 80% of the work but 100% of the security peace of mind.

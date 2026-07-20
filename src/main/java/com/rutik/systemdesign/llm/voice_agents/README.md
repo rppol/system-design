@@ -143,6 +143,46 @@ Pure silence threshold:
 Best practice: 700-900ms + prosody analysis
 ```
 
+**Read it like this.** "The silence threshold is not a tuning knob with a right answer — it is a
+direct trade of *how often you cut people off* against *how much dead air you add to every single
+turn*."
+
+Every turn pays the threshold in full as latency, because the agent cannot start until the timer
+expires. So a 900 ms threshold silently adds 900 ms on top of the 425 ms pipeline budget — the user
+experiences 1,325 ms, not 425 ms. That is why turn detection, not model latency, is usually the real
+bottleneck in a voice agent that "feels slow."
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Silence threshold in ms — how long the agent waits after the last speech frame before assuming the turn ended |
+| mid-sentence pause | The natural hesitation while a user recalls a claim number or a date. Typically 400-700 ms |
+| false cut | Threshold fired during a mid-sentence pause; the agent responds to half an utterance |
+| dead air | `T` ms of silence added to every turn, whether or not the user was actually done |
+
+**Walk one example.** Treat mid-sentence pauses as spread evenly over the 400-700 ms range the
+pitfall section quotes, and ask what fraction of them trip each threshold:
+
+```
+  pauses land uniformly across 400 ms .. 700 ms  (span = 300 ms)
+  a false cut happens whenever pause >= T
+
+    T        pauses >= T             false-cut rate    dead air per turn
+   300 ms    all of 400..700          100.0%             300 ms
+   500 ms    (700-500)/300 = 0.667      66.7%            500 ms
+   700 ms    (700-700)/300 = 0.000       0.0%            700 ms
+   900 ms    none                        0.0%            900 ms
+
+  T = 300 ms  -> every hesitation is an interruption; agent talks over the user
+  T = 700 ms  -> first threshold that clears the pause range entirely
+  T = 900 ms  -> 200 ms of pure margin bought at 200 ms of added latency per turn
+```
+
+The interesting result is that 700 ms — not 900 ms — is where the false-cut rate first hits zero
+under this model. The extra 200 ms in the "700-900 ms" best practice is safety margin for pauses in
+the tail beyond 700 ms, and it costs 200 ms of latency on every turn to buy. This is exactly why
+prosody and semantic-completeness checks are worth adding: they let you drop `T` back toward 500 ms
+and recover a quarter-second per turn, because the cut decision no longer rests on silence alone.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -494,6 +534,43 @@ Latency Budget (pipeline, target p50 < 450ms):
   Total p50:                              425ms
   Total p99 (with tool call):             900ms (with filler phrase)
 ```
+
+**In plain terms.** "First-audio-byte latency is a plain sum, not a max — every stage in the chain
+adds its own delay in series, so the budget is spent the moment you pick the components."
+
+There is no parallelism to hide behind here. The STT partial must exist before the LLM can start;
+the LLM's first token must exist before TTS can synthesize anything; the TTS chunk must exist before
+Twilio can deliver audio. Each arrow in the architecture diagram is an addition sign.
+
+| Symbol | What it is |
+|--------|------------|
+| STT partial | Time until Deepgram emits a usable partial transcript — the LLM does not wait for the final |
+| LLM first token | Time to first token (TTFT), not total generation. Streaming means only the *first* token gates audio |
+| TTS first chunk | Time until ElevenLabs Flash emits its first playable audio chunk, not the full utterance |
+| Pipecat overhead | Audio framing, buffering, and VAD work done on every ~20 ms frame |
+| Twilio delivery | Network hop from your server through PSTN termination to the caller's handset |
+
+**Walk one example.** Add the five stages, then see what a single regression costs:
+
+```
+  STT streaming partial (Deepgram Nova-2)      50 ms
+  LLM first token (Sonnet 4.6 streaming)      180 ms
+  TTS first chunk (ElevenLabs Flash)           75 ms
+  Pipecat framing + buffering overhead         80 ms
+  Twilio audio delivery                        40 ms
+                                             ------
+  Total p50 first-audio-byte                  425 ms   <- target was < 500 ms
+  headroom = 500 - 425 =                       75 ms
+
+  swap ElevenLabs Flash (75 ms) for a standard voice (250 ms):
+    425 - 75 + 250 = 600 ms                            <- target BLOWN by 100 ms
+```
+
+The 75 ms of headroom is the whole story. One component swap — a slower TTS voice, a larger LLM, a
+cross-region hop — eats it entirely, and no amount of tuning elsewhere buys it back, because the
+remaining stages are already at their floor. This is why the module says the latency budget cascades
+through every architectural decision: you are not optimizing a system, you are spending a fixed
+425-of-500 ms allowance.
 
 **Key implementation — 3 Python code blocks:**
 
@@ -855,6 +932,46 @@ def fixed_log_redacted(transcript: str) -> None:
 | Cost per call (automated) | $4.80 (labor) | $0.27 (STT+LLM+TTS) |
 | Monthly infra cost | $576,000 (labor) | $14,200 |
 | STT API cost reduction | — | 63% (VAD gating) |
+
+**Put simply.** "Voice-agent cost is billed per *minute of conversation*, not per request — so the
+unit economics are handle time multiplied by a per-minute rate, and shortening the call is
+mathematically identical to negotiating a discount."
+
+This is the one place voice diverges sharply from text agents. A text agent's cost tracks tokens; a
+voice agent's cost tracks wall-clock duration, including the silence. Every second the user spends
+listening to a filler phrase or waiting out a turn-detection timer is a second you are billed for at
+all three stages at once.
+
+| Symbol | What it is |
+|--------|------------|
+| handle time | Wall-clock call duration. The automated path runs 1 min 55 s = 115 s |
+| per-minute rate | Blended STT + LLM + TTS cost. The tradeoff table quotes $0.10-$0.20/min for the hybrid pipeline |
+| automation rate | Share of the 3,000 daily calls the agent finishes without a human. Achieved: 68% |
+| loaded labor cost | $4.80 per call — wages, benefits, and overhead, not just hourly pay |
+
+**Walk one example.** Build the $0.27 from the rate card, then scale it to the fleet:
+
+```
+  handle time = 1 min 55 s = 115 s = 115 / 60 = 1.9167 min
+
+  cost at the hybrid band's low end:  1.9167 x $0.10 = $0.192
+  cost at the hybrid band's midpoint: 1.9167 x $0.14 = $0.268  -> the $0.27 in the table
+  cost at the hybrid band's high end: 1.9167 x $0.20 = $0.383
+
+  savings per automated call = $4.80 - $0.27       = $4.53
+  ratio                      = $4.80 / $0.27       = 17.8x cheaper
+
+  automated calls per day    = 3,000 x 68%         = 2,040
+  savings per day            = 2,040 x $4.53       = $9,241
+  savings per year           = 2,040 x 365 x $4.53 = $3,373,038
+
+  monthly labor -> monthly infra: $576,000 -> $14,200 = $561,800 saved, a 97.5% cut
+```
+
+Notice how sensitive the whole model is to that single 115-second figure. The same call at 3 minutes
+costs `3 x $0.14 = $0.42` — a 57% cost increase from nothing but a slower conversation. That is the
+economic argument for the 425 ms latency budget and the 900 ms turn threshold: they are not just UX
+tuning, they are the two largest levers on handle time, and handle time *is* the bill.
 
 **Interview Q&As:**
 

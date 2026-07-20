@@ -235,6 +235,63 @@ Result: 7-DOF action -> 7 discrete tokens, generated AUTOREGRESSIVELY:
   precision/speed cost of the discretized-token approach (see Tradeoffs 8.1).
 ```
 
+**What this actually says.** "Rescale the real-world motion onto a 0-to-1 scale, multiply by how
+many bins you have, and throw away the fraction — the bin index is just 'what fraction of the way
+across the range was this motion, counted in 256ths'."
+
+The formula has three moves stacked into one line, and separating them makes the precision loss
+obvious. `(dx - low)` shifts the range so it starts at zero. `/ (high - low)` squashes it to 0-1.
+`* n_bins` stretches it to 0-256. The `floor` is where the information is destroyed — everything
+after the decimal point is gone forever, and the size of that discarded fraction is your control
+error.
+
+| Symbol | What it is |
+|--------|------------|
+| `dx` | One dimension of the commanded motion, in metres. Here a 12 mm move in x |
+| `action_low` / `action_high` | The observed range of that dimension across the training data. Here -0.05 m to +0.05 m |
+| `high - low` | The span the bins must cover. Here 0.1 m of travel |
+| `n_bins` | How many discrete values you allow. 256, chosen so one bin fits one repurposed vocabulary token |
+| `floor(...)` | Drops the fractional part. The discarded fraction *is* the quantization error |
+| `vocab_offset` | Where the action tokens start in the vocabulary, so dimension `i`'s bins do not collide with dimension `i+1`'s |
+
+**Walk one example.** Push the 12 mm move through, then decode it back and measure what was lost:
+
+```
+  ENCODE  dx = 0.012 m,  range [-0.05, 0.05]
+
+    shift to zero:  0.012 - (-0.05)      = 0.062
+    squash to 0-1:  0.062 / 0.1          = 0.620
+    stretch to 256: 0.620 x 256          = 158.72
+    floor:          floor(158.72)        = 158        <- 0.72 of a bin thrown away
+
+  DECODE  bin 158 back to metres (take the bin's CENTER, not its edge)
+
+    bin center frac: (158 + 0.5) / 256   = 0.6191
+    back to metres:  -0.05 + 0.6191 x 0.1 = 0.011914 m
+
+  ROUND-TRIP ERROR
+    commanded 0.012000 m
+    recovered 0.011914 m
+    error     0.000086 m = 0.086 mm
+
+  BIN WIDTH (the worst case, and the number quoted in 6.1)
+    0.1 m / 256 = 0.000391 m = 0.39 mm
+```
+
+The 0.39 mm figure is the *bin width*; the error on any single command is at most half of it,
+because decoding takes the bin center. Our example landed 0.086 mm off — comfortably inside that
+bound. Whether 0.39 mm is acceptable is entirely task-dependent: for placing a box on a conveyor it
+is invisible, for seating a connector with a 0.2 mm tolerance the discretization alone exceeds the
+tolerance budget before any model error is counted. That single comparison is the whole argument for
+continuous flow-matching action heads.
+
+**Why the `vocab_offset + i * n_bins` term exists.** Without it, every dimension would map onto the
+same 256 token ids, and the model could not tell "bin 158 of dx" from "bin 158 of dyaw" — the
+decoder would have no way to know which axis a token referred to. Offsetting dimension `i` by
+`i * 256` gives each of the 7 dimensions its own private block, consuming `7 x 256 = 1,792`
+vocabulary slots in total. RT-2 harvests these from the least-used text tokens precisely so the
+pretrained embedding table never has to be resized.
+
 ### 5.3 Action Chunking Timeline
 
 ```
@@ -258,6 +315,52 @@ WITH chunking (H=16): one VLM forward pass produces 16 future actions
   Effective control rate: 20ms per action = 50Hz  <-- meets target,
   VLM latency is AMORTIZED across H=16 actions instead of paid per-action
 ```
+
+**The idea behind it.** "Control rate is one divided by the time between actions — so if you must
+run a 150 ms model to get each action, you are capped at roughly 6 Hz, and the only escape is to get
+more than one action per model run."
+
+Stated that way, chunking stops looking like an architecture trick and starts looking like the only
+available move. You cannot make a multi-billion-parameter VLM run in 20 ms. You *can* make it emit
+16 actions instead of 1, which divides its cost by 16.
+
+| Symbol | What it is |
+|--------|------------|
+| `H` | Chunk size — how many future timesteps one forward pass predicts |
+| VLM latency | Time for one backbone forward pass. ~150 ms here |
+| control period | How long the robot spends executing one action. 20 ms at 50 Hz |
+| effective rate | `1 / (time between consecutive actions)`, which is what the hardware actually feels |
+| open-loop window | `H x control period` — how long the robot runs on stale predictions before the next chunk lands |
+
+**Walk one example.** Compute the rate both ways, then find the smallest `H` that works:
+
+```
+  WITHOUT chunking (H = 1) -- pay the VLM once per action
+    time per action = VLM 150 ms + execute 20 ms = 170 ms
+    control rate    = 1 / 0.170 s                = 5.88 Hz
+    target          = 20-50 Hz                   -> MISSED by ~8.5x
+
+  WITH chunking (H = 16) -- pay the VLM once per 16 actions
+    VLM cost per action = 150 ms / 16            = 9.4 ms  (amortized)
+    but it is PIPELINED, so it overlaps execution and costs 0 on the critical path
+    time per action     = 20 ms
+    control rate        = 1 / 0.020 s            = 50 Hz   -> MET
+
+  THE PIPELINING CONDITION -- the chunk must outlast the next forward pass
+    execution window = H x 20 ms  must be >=  VLM latency 150 ms
+    minimum H        = 150 / 20   = 7.5  ->  H >= 8
+
+    at H = 16:  16 x 20 ms = 320 ms of execution vs 150 ms of compute
+                slack = 320 - 150 = 170 ms of margin
+```
+
+The `H >= 8` floor is the number worth remembering. Below it the action queue drains before the next
+chunk arrives and the robot stalls mid-motion — visible as a stutter, and dangerous if the gripper is
+mid-grasp. `H = 16` doubles that floor, buying 170 ms of slack to absorb a GPU hiccup or a slow
+camera frame. Push `H` much higher and a different cost appears: the chunk is executed open-loop, so
+`H = 50` at 20 ms means the robot commits to a full second of motion based on a one-second-old
+observation. `H` is therefore squeezed from both sides — too small and you stall, too large and you
+stop reacting to the world.
 
 ### 5.4 Dual-System Architecture (Helix / GR00T style)
 
@@ -432,6 +535,56 @@ class FlowMatchingActionExpert:
 vs. the multi-billion-parameter VLM backbone) and runs `num_integration_steps ≈ 10` — far fewer than
 the 50-100 steps typical of image diffusion — because the action space is low-dimensional (a
 `16 x 7` chunk = 112 numbers, vs. an image's tens of thousands of pixel values).
+
+**Stated plainly.** "Draw a straight line from random noise to the real action chunk, and train the
+network to answer one question at every point on that line: which direction is the finish, and how
+fast?"
+
+The straightness is the entire reason flow matching needs ~10 steps where diffusion needs 50-100.
+Along a straight line the correct velocity is the *same constant everywhere* — `a_1 - a_0` — so a
+crude Euler integrator with big steps lands exactly on target. Diffusion's path curves, so large
+steps cut the corner and you must take many small ones to stay on it.
+
+| Symbol | What it is |
+|--------|------------|
+| `a_0` | A pure-noise sample from `N(0, I)`. The start of the path, at `t = 0` |
+| `a_1` | The real action chunk from the demonstration data. The end of the path, at `t = 1` |
+| `t` | Position along the path, 0 to 1. Not wall-clock time, not a robot timestep |
+| `a_t = (1-t)a_0 + t*a_1` | The straight-line interpolation. At `t=0` it is pure noise, at `t=1` pure action |
+| `v_theta(a_t, t, cond)` | The network's guess at which way to move. This is all it ever learns |
+| `a_1 - a_0` | The training target. Constant along the whole path — the source of the step-count win |
+| `dt = 1 / steps` | Euler step size. 10 steps means `dt = 0.1` |
+| `cond` | The VLM's hidden state — what makes the generated chunk match *this* scene and instruction |
+
+**Walk one example.** One action dimension, noise `a_0 = -0.8`, true action `a_1 = 0.3`:
+
+```
+  TARGET VELOCITY (constant for the entire path)
+    v = a_1 - a_0 = 0.3 - (-0.8) = 1.1
+
+  EULER INTEGRATION, 10 steps, dt = 1/10 = 0.1, each step adds v x dt = 0.11
+
+    step   t      a
+      0   0.0   -0.80        <- pure noise
+      1   0.1   -0.69
+      5   0.5   -0.25
+     10   1.0    0.30        <- the real action, recovered exactly
+
+  CROSS-CHECK against the interpolation formula at t = 0.5
+    a_t = (1 - 0.5) x (-0.8) + 0.5 x 0.3 = -0.40 + 0.15 = -0.25   <- matches step 5
+```
+
+The integrator arrives exactly, not approximately, and it would arrive exactly with 2 steps or 100 —
+because integrating a constant is exact at any step size. Real error comes only from `v_theta`
+mispredicting the velocity, never from the integrator. That is why `num_integration_steps = 10` is a
+safe default rather than a quality compromise.
+
+**Why this beats discrete tokens on step count.** For an `H = 16` chunk of 7-DOF actions, the
+discretized approach must autoregressively decode `16 x 7 = 112` tokens — 112 sequential passes
+through the multi-billion-parameter backbone. Flow matching produces the entire chunk in 10 passes
+through a tens-of-millions-parameter action expert. That is 11x fewer steps through a model roughly
+two orders of magnitude smaller, and it is why pi-0-style architectures hit high control rates
+without the amortization gymnastics that discrete-token VLAs depend on.
 
 ### 6.4 Control Loop with Latency Budget
 

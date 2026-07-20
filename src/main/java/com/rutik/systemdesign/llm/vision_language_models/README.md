@@ -49,6 +49,39 @@ Each patch = 16 x 16 x 3 RGB values = 768 raw values
 -> linear projection -> d_model embedding (typically 1024 for ViT-L)
 ```
 
+**Read it like this.** "Chop the image into a grid of fixed squares, flatten each square into a list of numbers, and hand the LLM that grid as if it were a sentence."
+
+Everything downstream — cost, latency, context budget, how much detail survives — is decided by this one grid size. Halve the patch size and you quadruple the token count.
+
+| Symbol | What it is |
+|--------|------------|
+| `224` | Image side length in pixels after resizing. ViT requires a fixed input size |
+| `16` | Patch side length in pixels. The grid cell the image is diced into |
+| `224 / 16 = 14` | Patches along one side. Must divide evenly — this is why input sizes are fixed |
+| `14 x 14 = 196` | Total patches = the sequence length the transformer sees |
+| `16 x 16 x 3` | Raw values in one patch: width x height x 3 colour channels (RGB) = 768 |
+| `d_model` | Width of each patch embedding after the linear projection (1024 for ViT-L) |
+| `[CLS]` | One extra learned token prepended to hold the whole-image summary |
+
+**Walk one example.** Push a single 224x224 photo all the way to a token count:
+
+```
+  image 224 x 224, patch 16 x 16
+
+  patches per side  = 224 / 16          =  14
+  patches per image = 14 x 14           = 196
+  values per patch  = 16 x 16 x 3 (RGB) = 768
+  ViT sequence      = 196 + 1 [CLS]     = 197 tokens
+
+  CLIP keeps  1 token   ([CLS] only)      -> a single global vector
+  LLaVA keeps 196 tokens (drops [CLS])    -> spatial detail survives
+
+  LLaVA-1.6 tiling: 4 tiles + 1 thumbnail, each 196 tokens
+  total = 5 x 196 = 980 visual tokens for ONE image
+```
+
+**Why the `+1` for `[CLS]` matters.** The 196 patch tokens each describe a 16x16 corner of the picture; none of them describes the picture. `[CLS]` is a slot with no pixels attached, so attention is free to fill it with whatever global summary the training objective rewards — which is exactly the vector CLIP pools and compares against text. Drop `[CLS]` and CLIP has nothing to embed; keep only `[CLS]` and you get CLIP's blindness to location.
+
 ---
 
 ## 3. Core Principles
@@ -335,6 +368,54 @@ def clip_loss(image_embeddings: torch.Tensor, text_embeddings: torch.Tensor,
     return (loss_i2t + loss_t2i) / 2
 ```
 
+**What the formula is telling you.** "For every image in the batch, make picking its own caption out of a lineup of N captions a multiple-choice question — and grade the model on how confidently it picks the right one."
+
+InfoNCE is not a similarity target; it is a *ranking* target dressed as classification. The model is never told "this pair should score 0.9" — only "this pair must outscore the other N-1 in the same batch." That is why the batch itself is the training signal.
+
+| Symbol | What it is |
+|--------|------------|
+| `f_i`, `g_j` | L2-normalized image and text embeddings. Normalized, so `dot(f, g)` is cosine similarity in `[-1, 1]` |
+| `S[i,j]` | Similarity of image `i` to caption `j`, divided by tau. The `[N, N]` grid of logits |
+| Diagonal `S[i,i]` | The true pairs — the N correct answers the loss pushes up |
+| Off-diagonal | The `N^2 - N` in-batch negatives, free of charge, pushed down |
+| `tau` | Learnable temperature, initialized to `0.07`. Divides every similarity before softmax |
+| `labels = arange(N)` | "The correct answer for row `i` is column `i`" — the diagonal, written as class labels |
+| `CE(logits, labels)` | Cross-entropy: `-log(probability assigned to the correct column)` |
+| `(loss_i2t + loss_t2i) / 2` | Grade both directions — find the caption AND find the image — then average |
+
+**Walk one example.** One row of the `N = 4` matrix from Section 5 (image `I1` against captions `T1..T4`), correct answer `T1`:
+
+```
+  cosine sims from the matrix :   .90     .10     .20     .00
+  correct column is T1 (the diagonal cell)
+
+  with tau = 0.07 (CLIP's init)
+    logits = sim / tau        12.857   1.429   2.857   0.000
+    softmax                    0.9999  0.0000  0.0000  0.0000
+    loss = -log(0.9999)      = 0.0001      <- solved; almost no gradient left
+
+  with tau = 1.0 (no sharpening)
+    logits = sim              0.900   0.100   0.200   0.000
+    softmax                   0.4251  0.1910  0.2111  0.1728
+    loss = -log(0.4251)     = 0.8555      <- still plenty of signal
+```
+
+**Why the temperature exists at all.** Cosine similarity is trapped in `[-1, 1]`, so the widest gap the model can ever express between a true pair and a negative is 2.0 — far too flat for softmax to produce a confident distribution. Dividing by `tau = 0.07` multiplies every gap by ~14x, stretching that cramped range into logits softmax can actually separate. Making tau *learnable* lets the model choose its own confidence: it sharpens tau as alignment improves, and CLIP clamps it to stop the loss collapsing to zero by driving tau toward 0 instead of learning anything.
+
+**Why bigger batches are the whole game.** A model that guesses randomly scores `-log(1/N) = ln(N)`, so the batch size sets both the difficulty and the loss floor:
+
+```
+  random-guess loss = ln(N)
+    N = 4       ->  ln 4      =  1.386   (1 in 4 -- trivial)
+    N = 32,768  ->  ln 32768  = 10.397   (1 in 32,768 -- brutal)
+
+  one CLIP batch at N = 32,768 yields
+    positives = 32,768
+    negatives = 32,768^2 - 32,768 = 1,073,709,056 off-diagonal cells
+```
+
+Over a billion negative comparisons in a single step, for the price of one forward pass per encoder — the negatives cost nothing because they are just the other cells of a matrix you already computed. This is also SigLIP's target: the softmax must normalize across the whole row, so every GPU needs every other GPU's embeddings, and that all-gather is what caps batch size on real hardware. Sigmoid loss scores each cell independently, so the coupling disappears.
+
 ---
 
 ### LLaVA Stage 1 and Stage 2 Training
@@ -351,6 +432,33 @@ Task:    Predict the caption token by token; gradients flow only to MLP
 Result:  MLP learns to map ViT patch embeddings into LLM's embedding space
 Compute: ~6 hours on 8xA100 80GB GPUs
 ```
+
+**Put simply.** "Both expensive models are bolted shut; the only thing learning in Stage 1 is a two-matrix adapter that translates ViT-speak into LLM-speak."
+
+The reason six hours on 8xA100 is enough becomes obvious once you count the trainable parameters. Almost nothing is being trained.
+
+| Symbol | What it is |
+|--------|------------|
+| `1024` | ViT-L/14 output width — the size of each patch embedding leaving the frozen encoder |
+| `4096` | LLM hidden size — the width the backbone expects for every input token |
+| 2-layer MLP | `Linear(1024 -> 4096)` then `Linear(4096 -> 4096)`, with an activation between |
+| `in x out` | Weight-matrix parameter count for one Linear layer |
+| `+ out` | The bias vector, one number per output dimension |
+| "Frozen" | Weights receive no gradient update; they still run forward, still cost VRAM for activations |
+
+**Walk one example.** Count every parameter that actually moves in Stage 1:
+
+```
+  layer 1 :  1024 x 4096 + 4096  =   4,198,400
+  layer 2 :  4096 x 4096 + 4096  =  16,781,312
+                                    ----------
+  projector total                =  20,979,712    (~21M parameters)
+
+  share of a 7B LLM backbone     =  21M / 7B     =  0.30%
+  fp16 checkpoint on disk        =  20,979,712 x 2 bytes  =  42 MB
+```
+
+**What the freeze actually buys.** Training 0.30% of the stack means the optimizer state (Adam keeps roughly two extra copies per trainable weight) covers 21M parameters instead of 7B, which is the difference between a projector that fits in a rounding error of GPU memory and a full fine-tune. It also makes the artifact portable: a 42 MB file is the entire vision capability, swappable onto the same frozen backbone. The cost of the freeze is that the LLM never learns to *interpret* visual tokens more skilfully — it can only receive whatever the MLP can express — which is exactly why Stage 2 has to unfreeze it.
 
 **Stage 2 — Instruction Tuning**:
 ```
@@ -591,6 +699,36 @@ Standard VQA evaluation measures correctness on questions where the answer exist
 
 GPT-4V and GPT-4o charge per image based on resolution and tile count. A 1024x1024 image uses ~765 image tokens at high-detail mode in GPT-4o, costing approximately $0.002 per image beyond the base text token cost. At 1M images/day, this becomes $2,000/day from image tokens alone. Always calculate image token costs separately from text token costs when budgeting API-based VLM workloads.
 
+**Stated plainly.** "An image is not a free attachment — it is a block of tokens that is charged, and that eats your context window, before the user has typed a single word."
+
+The tile formula is the part people miss: cost scales with image *area*, so doubling both dimensions quadruples the token bill.
+
+| Symbol | What it is |
+|--------|------------|
+| `512` | Tile side length. High-detail mode dices the image into 512px squares |
+| `170` | Tokens charged per tile |
+| `85` | Flat base cost per image, charged once regardless of size |
+| "low" detail | Fixed 85 tokens, no tiles — the whole image as one coarse thumbnail |
+| `765` | Total for a 1024x1024 image at high detail: 4 tiles plus the base |
+| `980` | LLaVA-1.6's visual token count for one tiled image (5 x 196) |
+
+**Walk one example.** Price a single request that carries ten 1024x1024 images:
+
+```
+  one image, high detail
+    tiles     = (1024 / 512)^2 = 2 x 2   =    4
+    tile cost = 4 x 170                  =  680 tokens
+    base cost =                               85 tokens
+    per image =                             765 tokens
+
+  ten images in one request  = 10 x 765  = 7,650 image tokens
+  at $2.50 per 1M input tokens           = $0.019 per request
+
+  daily volume, 1M images   x $0.002     = $2,000/day from images alone
+```
+
+**The same tax appears self-hosted, as latency instead of dollars.** LLaVA-1.6 spends 980 visual tokens where LLaVA-1.5 spent 196 — `980 / 196 = 5x` — and those tokens sit at the front of every prompt, attended to on every generated token. Nothing was billed, but the prefill got 5x longer and the KV cache 5x bigger, which is precisely the ~1.5x latency increase quoted in Section 12. Whether the bill arrives from a vendor or from your own GPU, resolution is bought with tokens.
+
 ---
 
 ## 11. Technologies & Tools
@@ -780,6 +918,34 @@ Storage options:
     -> Tiered storage: hot embeddings in GPU memory, cold on SSD
     -> Serve ~5M most-queried products from GPU VRAM, rest from SSD
 ```
+
+**What this actually says.** "An embedding index is just rows x dimensions x bytes-per-number, and Product Quantization wins by shrinking the third term from 4 bytes per dimension to a fraction of a byte."
+
+Nothing about vector search is mysterious at the storage layer. The whole IVF-PQ decision is this one multiplication run twice.
+
+| Symbol | What it is |
+|--------|------------|
+| `50M` | Row count — one embedding per indexed product image |
+| `768` | Dimensions per embedding, fixed by the encoder's projection width |
+| `4 bytes` | Size of one float32 number. The uncompressed per-dimension cost |
+| `96 bytes` | Size of the entire PQ code that replaces all 768 floats for one vector |
+| PQ | Product Quantization: split the vector into sub-vectors, replace each with a learned centroid ID |
+| precision@10 | Fraction of the returned top-10 that are genuinely relevant — the accuracy PQ trades away |
+
+**Walk one example.** Same 50M catalog, priced both ways:
+
+```
+  float32, uncompressed
+    50,000,000 x 768 x 4 bytes = 153,600,000,000 bytes = 153.6 GB
+
+  IVF-PQ codes
+    50,000,000 x 96 bytes      =   4,800,000,000 bytes =   4.8 GB
+
+  compression = (768 x 4) / 96 = 3072 / 96 = 32x smaller
+  paid for with ~2% precision@10 loss vs exact search
+```
+
+**Why 32x is the decision, not 4.8 GB.** The absolute numbers matter less than which memory tier each lands in: 153.6 GB does not fit a single commodity host and forces a sharded, multi-node HNSW deployment; 4.8 GB fits in one server's RAM with room to spare, and even inside GPU VRAM for the hot shard. The 2% precision loss buys the collapse of an entire distributed system into one process. That is the trade to state out loud in an interview — PQ is bought for the operational simplification, and the accuracy is the invoice.
 
 ---
 

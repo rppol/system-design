@@ -10,6 +10,35 @@ Constrained decoding (also: guided decoding, grammar-constrained generation) gua
 
 This sits in contrast to the two softer approaches: prompting ("respond only in JSON") which fails 1–10% of the time depending on model and schema complexity, and validate-and-retry loops (Instructor/Pydantic style) which fix failures after the fact at 2–3× cost in the tail. Provider features like OpenAI Structured Outputs and the JSON modes in vLLM/SGLang/TensorRT-LLM are all constrained decoding under the hood.
 
+That "2–3× cost in the tail" is not a vibe — it falls straight out of two lines of arithmetic. If a single unconstrained attempt produces schema-valid output with probability `p`, and you retry until it parses, then `expected attempts = 1/p` and `P(all k attempts fail) = (1-p)^k`.
+
+**What this actually says.** "Retrying is a geometric process: the average cost is the reciprocal of your success rate, and your residual failure rate is that success rate's complement raised to the number of tries."
+
+The framing matters because it separates the two things people confuse. `1/p` is what you pay *on average* (the budget line); `(1-p)^k` is what still leaks through *after* all your retries (the manual-queue line). Constrained decoding sets `p = 1.0`, which collapses both to `1` attempt and `0` leakage — no retry budget, no residual queue.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Probability one unconstrained attempt yields schema-valid output. Prompting gives ~0.90–0.99 |
+| `1 - p` | Failure probability of a single attempt. The `1–10%` the paragraph above cites |
+| `k` | Total attempts allowed (1 original + retries). Instructor defaults are typically 2–3 |
+| `1/p` | Expected attempts to first success. The cost multiplier vs a one-shot call |
+| `(1-p)^k` | Probability every attempt fails, assuming attempts are independent |
+
+**Walk one example.** Three prompting quality levels, each with `k = 3` attempts:
+
+```
+   p       1 - p      1/p       cost vs one-shot     (1-p)^3  = leak after 3 tries
+  0.99      0.01     1.0101         +1.0%            0.000001    1 in 1,000,000
+  0.95      0.05     1.0526         +5.3%            0.000125    1 in 8,000
+  0.90      0.10     1.1111        +11.1%            0.001       1 in 1,000
+
+  constrained decoding:  p = 1.0  ->  1/p = 1.000  ->  +0%  ->  leak = 0 exactly
+```
+
+At `p = 0.90` you burn 11% extra GPU spend on average *and* still hand 1 document in 1,000 to a human. The mask removes both columns at once — which is why the tradeoff is rarely close once you control the serving stack.
+
+**Why `1/p` understates the pain.** The average hides the tail. The retried 10% of requests each cost roughly double, so your p95 latency roughly doubles even though the *mean* only moved 11%. Retry loops are cheap on average and expensive exactly where users notice.
+
 The engineering substance is in *how* the valid-token set is computed fast enough: a naive grammar check across a 128K-token vocabulary per step would dwarf the model's own forward pass. The solutions — DFA compilation over the token vocabulary (Outlines), adaptive token-mask caches with pushdown automata (XGrammar), token-trie lexers (llguidance) — are what this file covers.
 
 ---
@@ -139,15 +168,104 @@ def naive_constrained_step(
 # exists to replace this loop with a precomputed lookup.
 ```
 
+**In plain terms.** "Per-token masking cost is vocabulary size times the cost of one grammar check — so the naive loop is slow not because the parser is slow, but because you call it 128,000 times per token."
+
+The comment's `~100ms+/token` is `V x t_parse`. Reading it that way makes the fix obvious: you cannot make `t_parse` small enough to matter, so every real engine attacks the `V` factor instead — by answering the whole vocabulary at once from a precomputed table.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Vocabulary size, ~128K (`logits.shape[0]`). The loop bound on line 132 |
+| `t_parse` | Cost of one `is_valid_prefix` call — a decode plus a parser run |
+| `V x t_parse` | Total per-token mask cost of the naive loop |
+| `-inf` | The masked logit value: `exp(-inf) = 0`, so softmax gives that token zero probability |
+
+**Walk one example.** Push the file's own `~100ms/token` figure back through the product:
+
+```
+  V          = 131,072 tokens          (the "128K vocab" in the comment)
+  budget     = 100 ms  per token       (the measured naive cost)
+
+  t_parse    = 100 ms / 131,072
+             = 0.00076 ms
+             = 0.76 us per grammar check   <- the parser is already fast
+
+  compare to XGrammar's whole-vocab mask:  36 us
+  speedup    = 100 ms / 36 us = 2,778x
+```
+
+A 0.76 us parser call is not the problem — you just cannot afford 131,072 of them. XGrammar answers for the entire vocabulary in 36 us, less than 48 of those individual checks would have cost.
+
 ### 6.2 Outlines: regex → DFA → token-level index
 
 Outlines lowers a JSON schema to a regex, compiles the regex to a character-level DFA, then walks the *token vocabulary* against the DFA once at build time: for every DFA state, it records which tokens (multi-character!) trace a path of valid transitions, and which state each lands in. The result is a dict `index[state] -> {token_id: next_state}`. At runtime, masking is a hash lookup — O(1) regardless of vocab size.
 
 Costs: index construction is O(states × vocab) — sub-second for simple schemas, but complex schemas (long enums, deeply nested objects, unbounded strings) can take seconds to tens of seconds; production deployments cache compiled indexes by schema hash. Limitation: regexes cannot express unbounded nesting, so recursive schemas are bounded to a fixed depth during lowering.
 
+**Read it like this.** "Pay `states x vocab` grammar checks exactly once at build time, and every one of the thousands of decode steps afterwards becomes a single table lookup."
+
+That is the precompute-versus-runtime split in one sentence, and it explains both of the section's claims at once: why compilation can take seconds (the product is large) and why masking is `O(1)` (the product is already spent). It also explains the caching rule — the build cost is per *schema*, so amortization depends entirely on how many requests reuse the same schema hash.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Number of DFA states the schema's regex compiles to. Grows with schema size and enum count |
+| `V` | Vocabulary size, ~128K. Every token is traced against every state at build time |
+| `S x V` | Total build-time work — the `O(states x vocab)` in the paragraph above |
+| `index[state]` | The built artifact: `{token_id -> next_state}` per state. One hash lookup at runtime |
+| bitmask width | `V` bits = `V/8` bytes per state — the dense form of "which tokens are legal here" |
+
+**Walk one example.** A mid-sized schema compiling to 500 DFA states, `V = 131,072`:
+
+```
+  build-time work   = S x V
+                    = 500 x 131,072
+                    = 65,536,000 token-vs-state traces   <- the "seconds" of compile
+
+  mask storage      = V / 8 bytes per state
+                    = 131,072 / 8 = 16,384 bytes = 16 KiB per state
+  total index       = 500 x 16 KiB = 7.81 MiB           <- pin this, do not rebuild it
+
+  runtime per token = 1 hash lookup, ~50 us
+  naive equivalent  = 100 ms
+  speedup           = 100 ms / 50 us = 2,000x
+
+  amortization: a 1,000-token response spends 1,000 x 50 us = 50 ms masking total,
+                against a one-time 2.3 s compile (the case study's 22-field schema).
+                Break-even ~ after the first response; everything after is free.
+```
+
+**Why the cache key is the schema hash and not the request.** The `S x V` build depends only on the schema, so one compile serves every request with that schema forever. Interpolate a dynamic enum into the schema and you mint a new hash, a new 7.81 MiB index, and another multi-second stall in the request path — which is exactly pitfall 4 and best practice 10, arriving from the arithmetic.
+
 ### 6.3 XGrammar: pushdown automaton + adaptive token mask cache
 
 JSON's nesting needs a stack. XGrammar keeps a byte-level pushdown automaton but observes that for any grammar state, the validity of *most* tokens does not depend on the stack at all (a token of pure ASCII letters is fine inside any string context). It therefore classifies tokens per state as **context-independent** (validity precomputed into an "adaptive token mask cache" at compile time) or **context-dependent** (the ~1% needing a runtime stack check), and maintains a persistent execution stack with rollback for those. Mask generation runs on CPU *overlapped with the GPU forward pass*, so its ~36μs effectively disappears from token latency. The paper reports up to ~100× faster mask generation than prior CFG engines; it is the default JSON-schema backend in vLLM and SGLang.
+
+**Put simply.** "Split the vocabulary into the ~99% of tokens whose legality you can decide at compile time and the ~1% you cannot, and pay runtime stack work only on that 1%."
+
+The per-token cost is therefore `f_dep x V x t_stack`, not `V x t_stack`. Shrinking a workload by 100× is what turns a pushdown automaton — historically the slow option — into something you can run inside a serving loop, and it is the whole reason a PDA engine became the default over the faster-in-principle DFA approach.
+
+| Symbol | What it is |
+|--------|------------|
+| `f_dep` | Fraction of tokens that are context-dependent for a given state, ~1% |
+| `1 - f_dep` | The context-independent remainder, ~99% — answered free from the mask cache |
+| `V` | Vocabulary size, ~128K |
+| `t_stack` | Cost of one runtime PDA stack check, with rollback for speculative paths |
+| "overlapped" | The 36 us runs on CPU while the GPU does the forward pass, so it adds ~0 to latency |
+
+**Walk one example.** One decode step, `V = 131,072`, `f_dep = 1%`:
+
+```
+  context-independent :  0.99 x 131,072 = 129,761 tokens  -> cache hit, 0 stack work
+  context-dependent   :  0.01 x 131,072 =   1,311 tokens  -> runtime PDA check
+
+  work reduction      =  131,072 / 1,311 = 100x fewer stack checks
+
+  measured mask cost  =  36 us   (vs the naive loop's 100 ms)
+  overlapped with GPU =  effective added latency ~ 0 us
+```
+
+The `100x` here and the paper's "up to ~100× faster mask generation" are the same number seen from two sides: you only do stack work on a hundredth of the vocabulary.
+
+**What breaks without the context-dependent bucket.** You cannot simply precompute everything. Whether `}` is legal depends on brace depth, which the compile-time cache cannot know — the same grammar state means different things at nesting depth 1 and depth 4. Drop the runtime stack and the engine either rejects legal closes or accepts unbalanced ones, which is precisely the unbounded-nesting limitation that regex/DFA backends carry (§6.2, Q3).
 
 ### 6.4 llguidance: lexer over the token trie
 
@@ -198,6 +316,52 @@ class Verdict(BaseModel):
 ### 6.7 Quality: does constraining hurt?
 
 The 2024 "Let Me Speak Freely?" paper reported reasoning degradation under format restriction; the rebuttal from the Outlines team ("Say What You Mean") showed that with schema-aware prompting (tell the model the schema in the prompt, don't rely on the mask alone) and reasoning-first field order, constrained generation matches or beats unconstrained-then-parse. The synthesis that holds up in practice: **the mask is not the problem; surprising the model is.** Degradation appears when (a) the prompt never mentions the format the mask enforces, (b) fields force premature commitment, or (c) forced/healed boundaries leave non-canonical tokenizations. Fix those three and constrained decoding is quality-neutral with a 100% parse rate.
+
+### 6.8 Decoding the renormalization — how masking promotes a token the model disliked
+
+Core principle 5 says masking "renormalizes probability over surviving tokens". That phrase hides the entire quality gotcha, so it is worth writing out. Masking is two operations: force illegal logits to `-inf`, then softmax over what is left.
+
+```
+  masked_logit(i) = logit(i)            if token i is grammar-legal
+                    -inf                otherwise
+
+  P(i) = exp(masked_logit(i)) / sum over legal j of exp(logit(j))
+```
+
+**What the formula is telling you.** "Deleting tokens does not delete their probability — softmax redistributes every bit of the removed mass onto the survivors, in proportion to what those survivors already had."
+
+Probability must still sum to 1, so the denominator shrinks to just the legal tokens and every survivor's share is scaled up by the same factor. The model's *ranking among legal tokens* is preserved exactly; what changes is that a token the model ranked fourth with 3% can become the argmax with 60%. Nothing is broken here — that is the constraint doing its job — but it is why "the mask only vetoes" is a claim about syntax, not about the sampled distribution.
+
+| Symbol | What it is |
+|--------|------------|
+| `logit(i)` | The model's raw pre-softmax score for token `i`. Bigger = the model prefers it |
+| `-inf` | The masked value. `exp(-inf) = 0`, so an illegal token gets exactly zero probability |
+| `exp(logit)` | Unnormalized weight. Because it is exponential, a 1.0 logit gap is a ~2.7x weight gap |
+| denominator | Sum of `exp` over *legal* tokens only. Shrinking it is what boosts every survivor |
+| `Z_legal / Z_all` | Fraction of the model's original mass that was grammar-legal. Small = large distortion |
+
+**Walk one example.** State is `{"age":` — the grammar admits only digits, whitespace, or `-`:
+
+```
+  token       logit   exp(logit)   P before mask   legal?   P after mask
+  ---------------------------------------------------------------------
+   "           6.0      403.429       0.5945        no          0
+  null         5.2      181.272       0.2671        no          0
+  "N/A"        4.1       60.340       0.0889        no          0
+   3           3.0       20.086       0.0296        YES       0.5987
+   42          2.6       13.464       0.0198        YES       0.4013
+  ---------------------------------------------------------------------
+  Z_all   = 678.591            Z_legal = 20.086 + 13.464 = 33.549
+
+  surviving mass = Z_legal / Z_all = 33.549 / 678.591 = 0.0494  -> only 4.94%
+  boost factor   = Z_all / Z_legal = 678.591 / 33.549 = 20.2x
+
+  P(" 3") after = 20.086 / 33.549 = 0.5987
+```
+
+The token ` 3` went from the model's **4th** choice at 2.96% to the **argmax** at 59.87% — a 20.2× promotion — without a single weight changing. Meanwhile the model's actual intent (open a string, or emit `null`) held 95.06% of the mass and was thrown away entirely.
+
+**Why the surviving-mass ratio is the number to instrument.** `Z_legal / Z_all` is a per-step measure of how hard the grammar is fighting the model. Near 1.0 the mask is merely confirming what the model was already going to do — this is the regime where §6.7's rebuttal holds and constrained decoding is quality-neutral. At 0.0494, as above, the model wanted something else entirely, and you are sampling from its 4th and 5th preferences. That is exactly the state that schema-in-the-prompt (pitfall 1) fixes: describing the format raises the legal tokens' logits, so the mask has almost nothing left to redirect.
 
 ---
 
@@ -342,6 +506,35 @@ Three layers. Parse rate (should be 100% with constraints — if you're measurin
 **Scenario**: An insurance company extracts 22 structured fields (dates, amounts, ICD codes, free-text summaries) from claim documents — 1.2M documents/month on self-hosted vLLM (Qwen2.5-32B, 4×A100). The v1 pipeline used prompt-only JSON with an Instructor-style retry loop.
 
 **v1 pain (quantified)**: 6.8% first-pass parse failures; retries pushed mean calls/doc to 1.11 (+11% GPU cost ≈ $4,100/month) and p95 latency from 3.1s to 7.4s; 0.4% of documents failed all 3 retries and fell to a manual queue (~4,800 docs/month at ~$0.85 handling cost each).
+
+**Stated plainly.** "Run the retry arithmetic from §1 against these measurements and it under-predicts both the cost and the leakage — because document failures are not independent coin flips, they are the same hard documents failing over and over."
+
+This is the most useful thing in the v1 numbers. The geometric model is the right first estimate, but it assumes each retry is a fresh draw at the same `p`. Real failures cluster on a subset of inputs (bad scans, unusual layouts), so the tail is far heavier than `(1-p)^k` predicts — and the tail is what staffs your manual queue.
+
+| Symbol | What it is |
+|--------|------------|
+| `p = 0.932` | Single-attempt success rate, from the measured 6.8% first-pass parse failure |
+| `q = 0.068` | Single-attempt failure rate |
+| `1 + q + q^2 + q^3` | Expected calls/doc with 3 retries — the geometric sum, truncated at the cap |
+| `q^4` | Predicted fall-through rate after the original attempt plus 3 retries |
+| observed 1.11 / 0.4% | What the pipeline actually measured for calls/doc and manual-queue rate |
+
+**Walk one example.** Prediction versus measurement, on the v1 numbers above:
+
+```
+  predicted calls/doc = 1 + q + q^2 + q^3
+                      = 1 + 0.068 + 0.004624 + 0.000314
+                      = 1.0729
+  observed calls/doc  = 1.11                       -> 3.5% more calls than predicted
+
+  predicted leak      = q^4 = 0.068^4
+                      = 0.0000214  = 0.0021%       -> ~25 docs/month of 1.2M
+  observed leak       = 0.4%                       -> 4,800 docs/month
+
+  underestimate       = 0.004 / 0.0000214 = 187x
+```
+
+The mean was off by 3.5% but the tail was off by **187×** — 4,800 documents to a human queue where independence predicted 25. Any capacity plan built on `(1-p)^k` would have under-staffed that queue by two orders of magnitude. Constrained decoding is attractive here precisely because it makes both columns exactly zero rather than merely small, so no correlation assumption has to hold.
 
 **v2 design**:
 1. Switched to vLLM guided JSON with the XGrammar backend; schema compiled and cache-pinned at pod startup (one dummy request per schema version in the readiness probe — first-request compile was 2.3s for the 22-field schema).

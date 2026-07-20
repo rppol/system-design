@@ -18,6 +18,29 @@ The key tension: language models can reason about their errors, but they are als
 
 **Why it matters**: Many tasks have verifiable correct answers (code passes tests, SQL returns expected rows, math result matches ground truth). In these domains, automatic grading enables autonomous improvement without human involvement. Reflexion improves HumanEval pass@1 from 65% to 91% on GPT-4 — a 40% relative improvement with zero additional training.
 
+**Stated plainly.** "Do not read that as '26 more points'. Read it as 'three-quarters of the problems it used to get wrong, it now gets right' — that is the number that actually predicts what happens to your bug queue."
+
+| Symbol | What it is |
+|--------|------------|
+| `pass@1` | Fraction correct on the first attempt, no retries. The baseline, 65.8% here |
+| `pass@k` | Fraction correct within `k` attempts. Reflexion@4 reaches 91.0% |
+| absolute gain | `after - before`, in percentage points. Flattering when the baseline is low |
+| relative gain | `(after - before) / before`. The "40% relative improvement" phrasing |
+| error reduction | `(err_before - err_after) / err_before`. What survives into production |
+
+**Walk one example.** The same 65.8 -> 91.0 move, read three ways:
+
+```
+                        before    after    metric
+  pass rate              65.8%    91.0%
+  absolute gain                            +25.2 points
+  relative gain          25.2 / 65.8    =  +38.3%     <- the "40%" claim
+  residual error         34.2%     9.0%
+  error reduction        25.2 / 34.2    =  -73.7%     <- what ops actually feels
+```
+
+**Why error reduction is the honest framing.** Absolute points compress as you approach the ceiling: going 90% -> 95% is only 5 points but halves your failures, while 40% -> 45% is the same 5 points and barely dents them. Error reduction is scale-free, so it is the metric that stays comparable across tasks with different baselines — and the one to quote when arguing that a 2-4x cost increase is worth paying.
+
 **Key insight**: The quality of self-correction is bounded by the quality of the evaluator. An LLM evaluating its own output using only the original prompt will regress to sycophancy. External ground truth (test execution, API calls, calculator) breaks this cycle.
 
 ---
@@ -341,6 +364,39 @@ Generates multiple code candidates, scores each against public test cases, filte
 - Cost of incorrect output is high (production code, medical data extraction).
 - A budget of 2-4× LLM calls per task is acceptable.
 
+**What the formula is telling you.** "If attempts were independent coin flips, `k` tries fail only when every one of them fails — so the naive ceiling is `1 - (1 - p)^k`, and any real system has to be measured against that free baseline, not against `p` alone."
+
+This is the yardstick that makes the 60-85% band above non-arbitrary. It is also the reason the standard evaluation compares Reflexion@4 to pass@4 rather than to pass@1.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | First-attempt pass rate on your task, measured before enabling any retries |
+| `k` | Attempt budget. `k = 4` is Reflexion's usual 1 attempt + 3 retries |
+| `(1 - p)^k` | Probability every attempt fails, assuming attempts are independent |
+| `1 - (1 - p)^k` | pass@k — the ceiling that plain resampling with a perfect verifier would hit |
+
+**Walk one example.** Sitting at the middle of the recommended band, `p = 0.68`:
+
+```
+  k      1 - (1 - 0.68)^k          pass@k
+  1      1 - 0.32                   68.00%
+  2      1 - 0.32^2 = 1 - 0.1024    89.76%
+  3      1 - 0.32^3 = 1 - 0.0328    96.72%
+  4      1 - 0.32^4 = 1 - 0.0105    98.95%
+```
+
+Now the same arithmetic at the top of the "do NOT use" range, `p = 0.95`:
+
+```
+  k = 1    95.000%
+  k = 2    99.750%     <- one retry already removes 95% of the remaining failures
+  k = 3    99.987%
+```
+
+**Why this bounds where self-correction pays.** Two failure modes bracket the useful band. Above ~95%, the residual error is so small that a second attempt exhausts nearly all of it and there is little left for reflection to earn — you pay 2-4x for fractions of a point. Below ~40%, `(1 - p)^k` stays large no matter what `k` you buy, because the model is missing capability rather than missing an edge case; more attempts sample from the same broken distribution.
+
+The independence assumption is also where this ceiling is optimistic rather than predictive. Real attempts from one model on one prompt are strongly correlated — the model tends to make the same mistake again — which is precisely the gap Reflexion's episodic memory targets. A reported Reflexion@4 of 91% against a `p = 0.68` baseline is *below* the 98.95% independent-sampling ideal, and that is expected: the true comparison is against measured pass@4 on your own task, where correlated retries fall well short of the formula.
+
 ### Do NOT use self-correction when:
 - Task is subjective (creative writing, preference ranking) — no ground truth to evaluate against.
 - First-attempt quality is already >95% — marginal gain does not justify cost.
@@ -518,11 +574,66 @@ Grounded pytest failures drive the retry loop: pass rate rises from 68% at first
 - Pass@4 with Reflexion: 91%
 - Human manual fix rate: dropped from 32% to 9%
 - Average extra cost per task: $0.04 (2 extra Sonnet calls for actors + 1 Haiku call for reflector)
-- Analyst time saved: ~20 minutes/script × (32% - 9%) × 400 scripts/month = ~1,840 hours/month saved
+- Analyst time saved: ~20 minutes/script × (32% - 9%) × 400 scripts/month = ~1,840 minutes/month = ~30.7 hours/month saved
 - Using Haiku for the reflector (vs Sonnet) cut reflection cost by 80% with no measurable quality loss
+
+**In plain terms.** "Multiply the minutes each rescued script saves by the share of scripts that got rescued by the monthly volume — and note that the answer comes out in minutes, because the first factor was minutes."
+
+| Symbol | What it is |
+|--------|------------|
+| `20 min/script` | Analyst time to hand-fix one failing script (the 15-30 min range, midpoint) |
+| `32% - 9%` | Share of scripts that used to need a manual fix and no longer do — 23 points |
+| `400 scripts/month` | Monthly volume the pipeline handles |
+| the product | Person-minutes saved per month. Divide by 60 for hours |
+
+**Walk one example.** The saving, carried through with units attached:
+
+```
+  20 min/script x 0.23 x 400 scripts/month = 1,840 min/month
+  1,840 min / 60                           =    30.7 hours/month
+
+  The 1,840 figure above is in minutes, not hours; the hour figure is 30.7.
+```
+
+**And the cost side of the same ledger.** The $0.04 average extra cost per task is an *average*, not the 4x worst case, because most tasks never reach the retry budget. Attempt counts follow the pass curve — 68% finish in one attempt, 16% more in two, 7% across attempts three and four, and the 9% that never pass burn all four:
+
+```
+  attempts   share    contribution
+     1       0.68        0.68
+     2       0.16        0.32
+     3-4     0.07        0.21 to 0.28   (depending which of the two it lands on)
+     4       0.09        0.36
+  ----------------------------------------
+  expected attempts per task  =  1.57 to 1.64
+```
+
+So the realistic multiplier is ~1.6x the single-attempt call cost, not the 4x worst case that a naive budget calculation would provision for. Sizing the retry budget off the worst case is correct for rate limits and timeouts; sizing the monthly bill off it overstates spend by roughly 2.5x.
 
 ### Key Lessons
 
 - Separating the reflector from the actor and using a cheaper model for reflection cuts cost without quality loss.
 - Test cases must be written before deployment — incomplete test suites produced false positives (accepted wrong scripts), which were harder for analysts to catch than test failures.
 - The biggest improvement came on retry 1 (68% → 84%); retries 2 and 3 added 7 more points combined. A retry budget of 1 captures most of the value at half the cost.
+
+**Read it like this.** "Each retry works on whatever failures the previous one left behind, so the points it can add shrink even when it is doing an equally good job — judge a retry by the share of the remaining errors it clears, not by the points it adds."
+
+| Symbol | What it is |
+|--------|------------|
+| residual error | `100% - pass rate` — the pool of failures the next retry gets to work on |
+| points added | `pass_after - pass_before`. Shrinks mechanically as the pool shrinks |
+| error clear rate | `points added / residual before`. The retry's actual effectiveness |
+| retry budget | How many retries you pay for. Each costs roughly the same as the first |
+
+**Walk one example.** The three retries in this deployment, scored both ways:
+
+```
+                    pass    residual    points added    share of residual cleared
+  attempt 1        68%        32%            -                    -
+  after retry 1    84%        16%         +16 pts          16 / 32 = 50.0%
+  after retries
+  2 and 3          91%         9%          +7 pts          7 / 16  = 43.8%
+```
+
+Retries 2 and 3 look four times weaker than retry 1 on the points column (+7 versus +16) but are clearing 43.8% of what remained against retry 1's 50.0% — nearly as effective per attempt, working a pool half the size. The flat-looking tail of the curve is mostly arithmetic, not the retries getting worse.
+
+**Why the budget still stops at 1 here.** Each retry costs a roughly constant amount, while the points it can return are bounded above by the residual. Retry 1 buys 16 points for one unit of cost; retries 2 and 3 together buy 7 points for two units — about 4.6x worse per point. When analyst time is the thing being bought back, that is the crossover, and it lands at a budget of 1 for this workload.

@@ -110,6 +110,59 @@ graph.set_entry_point("retrieve")
 graph.add_edge("generate", END)
 ```
 
+**What it means.** `max_iterations` is not one budget, it is three, and they grow at different rates. Each pass costs 2 LLM calls plus 1 retrieval, so **call count is `2i + 1`** — linear. Context grows by `top_k x chunk_size` per pass — also linear. But every sufficiency check re-reads the *whole* accumulated context, so **tokens billed grow as `Σ` — quadratic in `i`**. That third one is the budget that surprises people.
+
+| Symbol | What it is |
+|--------|------------|
+| `i` | Iterations actually executed; capped by `max_iterations`, 3-5 in production |
+| `2i + 1` | LLM calls: one query generation + one sufficiency check per pass, plus the final generation |
+| `top_k x chunk_size` | Context added per iteration — 5 docs x 500 tokens = 2500 here |
+| `2500 x i` | Context size entering the final generation |
+| `2500 x i(i+1)/2` | Cumulative tokens *read* across all sufficiency checks — the quadratic term |
+| per-iteration latency | ~3 s in Pitfall 5's accounting (query gen + retrieval + check) |
+
+**Walk the three budgets.**
+
+```
+  i     LLM calls   context at end   cumulative tokens read   latency @3s/iter
+  ----------------------------------------------------------------------------
+   1      3            2,500                2,500                 3 s
+   2      5            5,000                7,500                 6 s
+   3      7            7,500               15,000                 9 s
+   5     11           12,500               37,500                15 s
+  10     21           25,000              137,500                30 s
+
+  standard RAG for comparison: 1 LLM call, 1 retrieval, ~1.5 s
+
+  latency multiple vs standard: i = 3 -> 9/1.5  =  6x
+                                i = 5 -> 15/1.5 = 10x   <- the "5-10x" in Section 1
+
+  doubling i from 5 to 10 doubles the calls (11 -> 21) but multiplies tokens
+  read by 137,500 / 37,500 = 3.67x. Cost does not scale with iterations; it
+  scales with iterations squared.
+```
+
+**Why the quadratic term exists.** The sufficiency check must see everything gathered so far or it cannot judge sufficiency — so iteration 5 re-reads what iterations 1-4 already paid to read. That is exactly what Section 10's context-compression strategies attack: summarizing the accumulated context after each pass replaces the growing `2500 x i` prefix with a flat few-hundred-token digest, collapsing the sum back toward linear.
+
+**Walk the context-window risk.** Pitfall 2 warns that iteration 3 can exhaust a 128K window. Whether that happens is entirely a function of `top_k x chunk_size`:
+
+```
+  small chunks : 5 docs  x   500 tok =  2,500/iter -> i=5 reaches  12,500 tok  (10% of 128K)
+  large chunks : 10 docs x 2,000 tok = 20,000/iter -> i=5 reaches 100,000 tok  (78% of 128K)
+
+  Same max_iterations, same loop, 8x difference in exposure. The iteration
+  cap is a poor context guard; a token-budget guard is the real control.
+```
+
+**Walk the cost control.** At GPT-4o-mini input pricing (`$0.15` per 1M tokens), the sufficiency checks alone for a 5-iteration query read 37,500 tokens = `$0.0056`. Section 10's routing advice — send only 20-30% of traffic down the agentic path — is what makes that affordable:
+
+```
+  always agentic        : $0.00562 per query
+  25% agentic / 75% std : 0.25 x $0.00562 + 0.75 x $0.00038 = $0.00169 per query
+
+  a 3.3x reduction, achieved by a classifier and no change to the loop itself
+```
+
 ### 3.3 FLARE (Forward-Looking Active REtrieval)
 
 FLARE takes a different approach: instead of pre-emptive retrieval, it retrieves mid-generation when the LLM is about to generate uncertain tokens.

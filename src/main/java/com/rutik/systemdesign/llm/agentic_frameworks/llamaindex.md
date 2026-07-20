@@ -499,6 +499,40 @@ query_engine = index.as_query_engine(
 **Pitfall 6: SubQuestion engine cost explosion**
 SubQuestionQueryEngine generates N sub-questions and executes N LLM queries + N retrieval calls. For complex questions: 8 sub-questions × (1 retrieval + 1 synthesis) × GPT-4o = $0.80/query. In production, a customer asked a complex question that generated 12 sub-questions, costing $1.20 for a single query. Fix: `SubQuestionQueryEngine.from_defaults(num_questions=3)` to limit sub-questions, or use it only for confirmed complex queries.
 
+**Put simply.** "The engine does not answer your question once — it answers `N` smaller questions, each with its own retrieval and its own synthesis call, so the price of a query is set by a number the model chooses at runtime."
+
+That last clause is the whole danger. `N` is decided by the LLM while decomposing, not by you, so cost per query is unbounded until you pass `num_questions`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Sub-questions the decomposer generated — model-chosen unless capped |
+| `c` | Cost of one sub-question: 1 retrieval + 1 synthesis LLM call, $0.10 here |
+| `N x c` | Total query cost — linear in a number you did not pick |
+| `num_questions` | The cap that converts `N` from model-chosen into engineer-chosen |
+
+**Walk one example.** Back out the unit cost from the pitfall, then apply it:
+
+```
+  unit cost   c  =  $0.80 / 8 sub-questions        =  $0.10 each
+
+  N = 3   (capped)    3 x $0.10                    =  $0.30
+  N = 8   (typical)   8 x $0.10                    =  $0.80
+  N = 12  (the incident)  12 x $0.10               =  $1.20
+
+  capping 8 -> 3   (0.80 - 0.30) / 0.80            =  62.5% cheaper
+  worst observed vs capped   1.20 / 0.30           =  4.0x
+```
+
+The $1.20 single query is not a bug — the engine did exactly what it was asked. It is a
+missing bound. And because a normal vector query on this corpus runs a couple of cents, one
+uncapped complex question costs more than fifty ordinary ones, which is why these blow-ups
+show up as spiky bills rather than a gradual climb.
+
+**Why `use_async=True` does not help here.** Running sub-questions in parallel cuts latency
+60-80% (Section 13), but every sub-question still issues its own retrieval and synthesis
+call — `N x c` is unchanged. Parallelism buys wall-clock time; only `num_questions` buys
+money. Conflating the two is a common and expensive mistake.
+
 **Pitfall 7: KnowledgeGraphIndex quality depends on LLM extraction**
 Building a knowledge graph uses an LLM to extract entity-relationship triples from text. With GPT-3.5-turbo, extraction quality is poor; with GPT-4o it's acceptable but expensive ($0.05-0.20 per document at 1K tokens). Teams built KG indices with a cheap model, got low-quality graphs, and saw worse Q&A results than basic vector search. Recommendation: use KnowledgeGraphIndex only when your data has strong entity relationships; test extraction quality before committing to it.
 

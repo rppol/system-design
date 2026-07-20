@@ -867,6 +867,48 @@ if len(raw) > 10_000:
     progress_ledger.last_observation = summarized[:MAX_OBSERVATION_CHARS]
 ```
 
+**The idea behind it.** "A 50 KB observation is not a big string — it is a 12,500-token bill that
+you pay again on every remaining step of a 30-step task."
+
+English text runs about 4 characters per token, which is the conversion that turns a size in
+kilobytes into a number you can put in a context budget and a price:
+
+```
+  tokens ~= chars / 4
+  cost_per_step = tokens x $2.50/1M      (observation rides in as input)
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `chars` | Raw observation length. A rendered HTML page is 50,000-200,000 |
+| `/ 4` | Characters per token for English/HTML. A working approximation, not exact |
+| `MAX_OBSERVATION_CHARS` | The cap, 3,000 chars. Applied to the *tail* — newest output survives |
+| `MAX_STEPS` | 30. How many times the per-step cost gets paid |
+
+**Walk one example.** The broken path versus the fixed path, on a 50 KB page:
+
+```
+  BROKEN : 50,000 chars / 4     = 12,500 tokens per observation
+           share of a 128K window          = 9.8%  from ONE observation
+           30 steps x 12,500 x $2.50/1M    = $0.94
+
+  FIXED  :  3,000 chars / 4     =    750 tokens per observation
+           30 steps x   750 x $2.50/1M     = $0.056
+
+  reduction = 12,500 / 750 = 16.7x        savings = $0.88 per task
+```
+
+Set that $0.94 beside the case study's $0.06 total: one unbounded observation stream costs more
+than the entire correctly-built report pipeline. And 12,500 tokens is the *small* case — the
+200 KB end of the HTML range is 50,000 tokens, 39% of the window, from a single page fetch.
+
+The reason the cap slices the **tail** (`raw[-MAX_OBSERVATION_CHARS:]`) rather than the head is
+that agent observations are chronological: the end of a stdout stream holds the exception, the
+end of a page render holds the content below the boilerplate. Head-truncation would reliably
+preserve the least informative 3,000 characters. And the `10_000` threshold above it exists
+because past that size, tail-slicing starts cutting real information — so the code pays for one
+cheap summarization call instead of throwing 90% of the observation away.
+
 ### Pitfall 4: Missing message type registration in AutoGen v0.4 RoutedAgent
 
 **Broken — message handler silently dropped:**
@@ -1065,6 +1107,56 @@ A "fact deduplication" step runs before each Orchestrator LLM call: if the new_f
 | **Total** | | | | **~$0.06** |
 
 At $0.06 per report vs the $2.00 budget, there is a 33x cost margin — sufficient to absorb GPT-4o price fluctuations and occasional replanning steps.
+
+**What this actually says.** "Every row is the same two-line sum — tokens in times the input
+price, plus tokens out times the output price — and output tokens cost 4x what input tokens do,
+so a component's bill is driven by how much it *writes*, not how much it reads."
+
+Worth reconstructing because the intuition it produces is counter-intuitive: the WebSurfer reads
+6,000 tokens and the Orchestrator reads 5,400, yet they cost almost the same — the read volume
+barely matters.
+
+```
+  cost = input_tokens x $2.50/1M  +  output_tokens x $10.00/1M
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `input_tokens` | Everything in the prompt: ledger, instructions, last observation |
+| `output_tokens` | What the model generates. Priced 4x higher |
+| `Calls` | How many times that component ran. Multiplies both token columns |
+| `$2.50/1M`, `$10.00/1M` | GPT-4o list pricing as of mid-2024 |
+
+**Walk one example.** Every row, rebuilt from scratch:
+
+```
+  Orchestrator : 5,400 x 2.50/1M = $0.01350
+                   900 x 10.0/1M = $0.00900   ->  $0.0225
+  WebSurfer    : 6,000 x 2.50/1M = $0.01500
+                   800 x 10.0/1M = $0.00800   ->  $0.0230
+  Coder        : 2,000 x 2.50/1M = $0.00500
+                   600 x 10.0/1M = $0.00600   ->  $0.0110
+  FileSurfer   :   500 x 2.50/1M = $0.00125
+                   100 x 10.0/1M = $0.00100   ->  $0.0023
+  wkhtmltopdf  : local binary, no model call    ->  $0.0000
+                                                   -------
+                                          total     $0.0588  -> "~$0.06"
+
+  margin vs $2.00 budget = 2.00 / 0.06 = 33x
+```
+
+Two things fall out that the table alone does not show. First, the Orchestrator and WebSurfer are
+38.3% and 39.2% of the bill — **77.5% of the cost sits in two components**, so any optimization
+effort aimed at the Coder or FileSurfer is aimed at the remaining 22%. Second, look at the
+Coder's row: it reads only 2,000 tokens but writes 600, and its output cost ($0.006) exceeds its
+input cost ($0.005). Generation-heavy agents invert the usual ratio. That is why "just truncate
+the prompts" is the wrong first move on a code-generation agent and the right first move on a
+web-reading one.
+
+The 33x margin is the number that makes the design defensible under change. It means the report
+can trigger a full replan, double its step count, and still land 16x under budget — the system is
+not operating anywhere near a cost cliff, so the stall-detection and replanning machinery can be
+tuned for accuracy rather than for thrift.
 
 **Tradeoffs and Alternatives**
 

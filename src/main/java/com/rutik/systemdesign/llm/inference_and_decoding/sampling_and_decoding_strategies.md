@@ -200,6 +200,43 @@ def apply_temperature(logits: torch.Tensor, temperature: float) -> torch.Tensor:
 #        -> [1,0.5,0] -> softmax closer to uniform)
 ```
 
+**In plain terms.** "Divide every logit by the same number before softmaxing — dividing by something small stretches the gaps apart and makes the leader run away with it; dividing by something large squashes the gaps together and gives the underdogs a real chance."
+
+The key realization is that temperature never changes the *ranking* of tokens — `logits/T` is monotonic, so the most likely token stays the most likely at every `T`. All it changes is how much of the probability mass the leader takes. This is why "raise the temperature to get a different answer" only works because sampling is stochastic; at `T=5` the argmax token is still the argmax.
+
+| Symbol | What it is |
+|--------|------------|
+| `logit` | The raw, unnormalized score the model assigns a token. No fixed scale; only differences matter |
+| `T` | Temperature. The divisor. `T<1` sharpens, `T=1` leaves the model's own distribution, `T>1` flattens |
+| `logits / T` | The rescale. Every gap between two logits is multiplied by `1/T` |
+| `exp(logit/T)` | Turns a score into a positive weight. Exponentiation is why small logit gaps become large probability gaps |
+| `softmax` | Divides each weight by the sum of all weights, so the results add to `1.0` |
+
+**Walk one example.** The same 10 logits at three temperatures. Nothing but the divisor changes:
+
+```
+  token      logit    T=0.7    T=1.0    T=1.5
+  blue        3.6     0.4408   0.3427   0.2597
+  green       3.2     0.2489   0.2297   0.1989
+  red         2.8     0.1406   0.1540   0.1523
+  purple      2.4     0.0794   0.1032   0.1167
+  black       2.0     0.0448   0.0692   0.0894
+  white       1.6     0.0253   0.0464   0.0684
+  orange      1.1     0.0124   0.0281   0.0490
+  teal        0.5     0.0053   0.0154   0.0329
+  mauve      -0.2     0.0019   0.0077   0.0206
+  ochre      -1.0     0.0006   0.0034   0.0121
+
+  top-1 share       0.4408   0.3427   0.2597    <- leader's grip loosens
+  top-1 / top-2      1.771    1.492    1.306    <- gap shrinks
+  entropy (nats)    1.5151   1.7764   2.0016    <- distribution spreads
+  bottom-4 mass     0.0202   0.0547   0.1146    <- tail gets 5.7x more mass
+```
+
+Trace one cell to see the mechanism. At `T=0.7`, `blue`'s logit `3.6` becomes `3.6/0.7 = 5.143` and `green`'s `3.2` becomes `4.571`. The gap was `0.4`; it is now `0.572`, a factor of `1/0.7 = 1.43` wider. Exponentiate and that widened gap turns into `blue` taking `0.4408` instead of `0.3427`.
+
+**Why the tail row is the one that matters operationally.** Going `T=1.0 -> T=1.5` moves the bottom four tokens from `0.0547` to `0.1146` of the mass. Those are the tokens most likely to be incoherent, and raising temperature hands them more than double the odds. That is the mechanical reason "turn the temperature up for creativity" so often reads as "the model started producing garbage" — and the reason temperature is almost always paired with a truncation method that deletes the tail first.
+
 ### 6.2 Top-k, top-p, and min-p — the failure modes each one fixes
 
 ```python
@@ -263,6 +300,61 @@ top_k=50 was a near-universal default for years despite never being
 optimal: it's a safety net, not a principled cutoff.
 ```
 
+**What this actually says.** "All three rules answer the same question — *where does the shortlist end?* — but they read a different column to decide: top-k counts rows, top-p sums a running total, and min-p compares each row against the winner."
+
+That is the whole taxonomy. Once you know which column a sampler consults, you can predict its failure mode without running it: a rule that counts rows is blind to probability, a rule that sums cannot see individual tokens, and a rule that compares to the mode cannot see how many tokens it is keeping.
+
+| Symbol | What it is |
+|--------|------------|
+| `p(x)` | The token's probability after softmax. What min-p and top-p both read |
+| `k` | Top-k's row count. Keep the `k` highest, delete the rest. Ignores `p(x)` entirely |
+| `p` (in top-p) | Cumulative-mass target, e.g. `0.9`. Keep tokens until the running total first reaches it |
+| `cum` | The running sum of `p(x)` down the sorted list. Top-p's only input |
+| `min_p` | A *fraction of the mode*, e.g. `0.05`. Not an absolute probability |
+| `max_prob` | `p(x)` of the single most likely token. The yardstick min-p scales against |
+| `min_p * max_prob` | The actual absolute floor min-p enforces. Moves with every distribution |
+
+**Walk one example.** One realistic next-token distribution after "My favorite color is", sorted, with a running cumulative column. Watch all three cutoffs land in *different places*:
+
+```
+  rank  token     logit    p(x)     cum      top-k=5   top-p=0.9   min-p=0.05
+  ----------------------------------------------------------------------------
+   1    blue        3.6   0.3427   0.3427     keep       keep         keep
+   2    green       3.2   0.2297   0.5725     keep       keep         keep
+   3    red         2.8   0.1540   0.7265     keep       keep         keep
+   4    purple      2.4   0.1032   0.8297     keep       keep         keep
+   5    black       2.0   0.0692   0.8989     keep       keep         keep
+  ====== top-k=5 cuts here (5 tokens) ========= CUT ======
+   6    white       1.6   0.0464   0.9453      cut       keep         keep
+  ====== top-p=0.9 cuts here (6 tokens) =================== CUT ======
+   7    orange      1.1   0.0281   0.9734      cut        cut         keep
+  ====== min-p=0.05 cuts here (7 tokens) ============================ CUT
+   8    teal        0.5   0.0154   0.9889      cut        cut          cut
+   9    mauve      -0.2   0.0077   0.9966      cut        cut          cut
+  10    ochre      -1.0   0.0034   1.0000      cut        cut          cut
+
+  How each cutoff was computed
+  ----------------------------
+  top-k=5    : count 5 rows down. Done. Never looked at the p(x) column.
+  top-p=0.9  : walk cum until it first reaches 0.9.
+               cum after 5 = 0.8989  -> still short of 0.90, keep going
+               cum after 6 = 0.9453  -> crossed. Keep 6 tokens.
+               (0.8989 misses 0.90 by 0.0011 -- that hair's breadth is
+                what buys "white" its place in the nucleus.)
+  min-p=0.05 : threshold = 0.05 x max_prob = 0.05 x 0.3427 = 0.017135
+               orange p=0.0281 >= 0.017135  -> keep
+               teal   p=0.0154 <  0.017135  -> cut. Keep 7 tokens.
+
+  Three cutoffs, one distribution, three different candidate sets:
+     top-k=5    -> 5 tokens, 0.8989 of the mass
+     top-p=0.9  -> 6 tokens, 0.9453 of the mass
+     min-p=0.05 -> 7 tokens, 0.9734 of the mass
+```
+
+**The `0.8989` line is the whole argument against top-p.** Top-p's decision to admit `white` turned on the cumulative sum missing `0.90` by `0.0011`. Nudge any of the five tokens above it by a rounding error and `white` is excluded — the nucleus boundary is decided by an accumulated quantity no single token controls. Min-p's boundary, by contrast, is a direct comparison: `orange` is in because `0.0281` clears `0.017135`, a fact about `orange` alone.
+
+**Why min-p's threshold is a fraction and not a number.** If min-p were an absolute floor (say "keep everything above `0.017`"), it would behave like epsilon sampling and break at the extremes: on the peaked distribution from Section 5.2, where `p(Paris)=0.92`, an absolute `0.017` floor still admits every token in a long mediocre tail; on a genuinely flat 200-way distribution where nothing exceeds `0.01`, it admits *nothing*. Scaling by `max_prob` is what makes one parameter value work on both — the floor auto-tightens to `0.05 x 0.92 = 0.046` on the peaked case and auto-loosens on the flat one, which is the entire pitch for min-p as a single global default.
+
 ### 6.3 Sampler ordering — the classic cross-engine gotcha
 
 The order in Section 5.1 (penalties → temperature → top-k → top-p → min-p) is the de facto convention, but it is **not universal** — different engines historically applied these steps in different orders, and the *same numeric parameters* produce *different final distributions* depending on order:
@@ -291,6 +383,48 @@ Same (T=2, top_p=0.9) parameters; genuinely different candidate sets.
 This is a real source of "we ported our prompts to vLLM/llama.cpp and
 quality changed even though we used the same sampling config" reports.
 ```
+
+**Read it like this.** "Temperature and truncation are not two independent settings — truncation reads whatever distribution temperature hands it, so running them in the other order silently converts temperature from a *candidate-set* control into a mere *tie-breaker* among survivors."
+
+The reason this bug is so hard to spot in the field is that nothing errors and no parameter changes. The config file is identical on both engines; only the output distribution differs.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Temperature, `2.0` here. Flattens the distribution when `> 1` |
+| `top_p` | Cumulative-mass cutoff, `0.9` here |
+| Order A | temperature, then top-p. Truncation sees the flattened distribution |
+| Order B | top-p, then temperature. Truncation sees the original distribution |
+| "nucleus" | The surviving candidate set after top-p |
+
+**Walk one example.** Same starting distribution, same `T=2.0` and `top_p=0.9`, exact softmax arithmetic:
+
+```
+  ORIGINAL (T=1)      p:  0.5000  0.3000  0.1500  0.0400  0.0100
+                    cum:  0.5000  0.8000  0.9500  0.9900  1.0000
+
+  AFTER T=2.0         p:  0.3641  0.2820  0.1994  0.1030  0.0515
+                    cum:  0.3641  0.6461  0.8455  0.9485  1.0000
+
+  Order A -- temperature THEN top_p (recommended)
+    walk the T=2 cum row to 0.9:
+      cum after 3 = 0.8455  -> short of 0.90
+      cum after 4 = 0.9485  -> crossed
+    nucleus = 4 tokens
+
+  Order B -- top_p THEN temperature (legacy)
+    walk the ORIGINAL cum row to 0.9:
+      cum after 2 = 0.8000  -> short of 0.90
+      cum after 3 = 0.9500  -> crossed
+    nucleus = 3 tokens; token 4 is deleted before temperature ever runs
+    then T=2 is applied to the 3 survivors and re-softmaxed
+
+  Same T=2.0, same top_p=0.9.  Order A: 4 candidates.  Order B: 3 candidates.
+  Token 4 held 0.1030 of the mass under Order A and exactly 0 under Order B.
+```
+
+**Why token 4 is the entire story.** Under Order A the temperature flattened the head enough that the cumulative sum needed a fourth token to reach `0.9`; under Order B the un-flattened head reached `0.95` in three, so the fourth was gone before temperature was consulted. Raising temperature further under Order B cannot bring it back — the candidate set was frozen at three. That is the precise mechanism behind Pitfall #3 ("temperature appears to have no effect on diversity"): the knob is still moving, it just has nothing left to move.
+
+
 
 The practical rule: **temperature should be applied before truncation** (it changes *which* tokens are even candidates), and **min-p should be computed on the post-temperature distribution** (since its threshold is relative to the post-temperature max). Always check your serving engine's documented order when migrating, and re-run your eval suite — don't assume "same numbers" means "same behavior."
 
@@ -368,7 +502,86 @@ def dry_penalty(logits, generated_ids, base: float = 1.75, allowed_length: int =
     ...
 ```
 
+**What it means.** "Repetition penalty shrinks a seen token's logit *toward zero* by a multiplicative factor; presence penalty subtracts a flat amount the moment a token is seen once; frequency penalty subtracts that amount again for every additional time it was used."
+
+Multiplicative versus additive is the real dividing line, and it is why repetition penalty needs the sign branch while the OpenAI-style penalties do not. Subtracting `0.6` always moves a logit down. Dividing by `1.15` only moves a logit down if the logit is positive.
+
+| Symbol | What it is |
+|--------|------------|
+| `penalty` (rep) | Multiplicative factor, e.g. `1.15`. `1.0` = no effect; larger = stronger discouragement |
+| `logits[tid] /= penalty` | The positive-logit branch. `3.6 / 1.15 = 3.130`, a move *down* |
+| `logits[tid] *= penalty` | The negative-logit branch. `-1.0 x 1.15 = -1.15`, also a move *down* |
+| `penalty` (pres/freq) | Additive amount in logit units, e.g. `0.6`. OpenAI's range is `-2.0` to `2.0` |
+| `count` | How many times the token already appeared. Frequency penalty's multiplier; presence penalty ignores it |
+| `set(generated_ids)` | Unique tokens seen. Repetition and presence penalties fire once per token regardless of count |
+
+**Walk one example.** The Section 6.2 distribution, with a history where `blue` was already used 3 times, `red` once, and `ochre` once. All three penalties applied at their code-default strengths:
+
+```
+                 logit ->  rep(1.15)  freq(0.6)  pres(0.6)      resulting p(x)
+  token    base   base_p      logit     logit      logit    base    rep    freq   pres
+  ---------------------------------------------------------------------------------------
+  blue      3.6   0.3427      3.130      1.80       3.00   0.3427 0.2601 0.0881 0.2429
+  green     3.2   0.2297      3.200      3.20       3.20   0.2297 0.2788 0.3574 0.2967
+  red       2.8   0.1540      2.435      2.20       2.20   0.1540 0.1297 0.1315 0.1092
+  purple    2.4   0.1032      2.400      2.40       2.40   0.1032 0.1253 0.1606 0.1333
+  black     2.0   0.0692      2.000      2.00       2.00   0.0692 0.0840 0.1076 0.0894
+  ochre    -1.0   0.0034     -1.150     -1.60      -1.60   0.0034 0.0036 0.0029 0.0024
+
+  How "blue" was hit, by rule
+    repetition : 3.6 / 1.15 = 3.130       (once -- count of 3 is ignored)
+    presence   : 3.6 - 0.6  = 3.00        (once -- count of 3 is ignored)
+    frequency  : 3.6 - 0.6 x 3 = 1.80     (3x the hit; this is the whole difference)
+
+  blue's probability      0.3427 -> rep 0.2601 (-24%)
+                                 -> pres 0.2429 (-29%)
+                                 -> freq 0.0881 (-74%)   <- count-scaling bites hard
+```
+
+Presence and repetition penalties barely distinguish a word used once from a word used ten times. Frequency penalty took `blue` from the clear leader to below `black` — and `green`, which was never penalized at all, rose from `0.2297` to `0.3574` purely because the leader's mass had to go somewhere. That redistribution is worth internalizing: penalties do not just demote the penalized token, they promote everything else.
+
+**Why the sign branch exists, and what breaks without it.** Look at `ochre`, whose logit is negative (`-1.0`). The correct rule multiplies: `-1.0 x 1.15 = -1.15`, further from zero, less likely — `p` moves `0.00345 -> 0.00360` (it still ticks up slightly only because the head shrank more). The naive "always divide" implementation gives `-1.0 / 1.15 = -0.870`, which is *closer* to zero, i.e. **more** likely:
+
+```
+  ochre, logit -1.0, penalty 1.15
+    correct (multiply) : -1.0 x 1.15 = -1.150   p = 0.00360
+    buggy   (divide)   : -1.0 / 1.15 = -0.870   p = 0.00476   <- 1.38x MORE likely
+
+  A penalty that makes a repeated token 38% more likely to be chosen again.
+```
+
+The bug is self-reinforcing: the tokens with negative logits are the unlikely ones, and each time one slips through it gets "penalized" into being even more attractive. This is a genuine class of implementation bug in hand-rolled samplers, and knowing *why* the branch is there — logits are unbounded in both directions, so "shrink toward zero" and "make less likely" are the same operation only on the positive side — is a common interview follow-up.
+
 **Why DRY exists despite repetition/frequency penalties already existing**: those penalties operate per-*token*, uniformly. A model stuck in a loop repeating an entire 12-token sentence has each individual token only modestly penalized (each token also appears in normal text) — the *loop* isn't punished, only common words are. DRY detects the *structural* repetition (an exact long substring recurrence) and penalizes it specifically, regardless of whether the individual tokens are common.
+
+**The idea behind it.** "Charge nothing for a repeat short enough to be a coincidence, then make every additional token of verbatim match multiply the bill by `1.75`."
+
+The exponent is a *length*, not a count — that is the design choice that separates DRY from every other penalty in Section 6.4. DRY does not care how often a token was used; it cares how long the matching run would become.
+
+| Symbol | What it is |
+|--------|------------|
+| `penalty(x)` | Multiplier applied against the candidate token's logit. `1.0` = untouched |
+| `base` | Growth rate per extra token of match, default `1.75` |
+| `repeat_length` | How long a verbatim run choosing `x` would create |
+| `allowed_length` | Free allowance, default `2`. Runs at or under this cost nothing |
+| `repeat_length - allowed_length` | The exponent. Zero at the allowance, then one per extra token |
+
+**Walk one example.** `base = 1.75`, `allowed_length = 2`:
+
+```
+  repeat_length   exponent   penalty = 1.75^exponent
+  ---------------------------------------------------
+        2            0                1.0      free -- coincidence
+        3            1                1.75     mild nudge
+        5            3                5.36     clearly discouraged
+        8            6               28.72     effectively banned
+       12           10              269.39     annihilated
+
+  Each extra token of verbatim match multiplies the penalty by 1.75.
+  From a 3-token to a 12-token run: 1.75 -> 269.39, a 154x increase.
+```
+
+Compare that curve against `no_repeat_ngram_size=3`, which is a step function: penalty `0` at length 2, penalty `infinity` at length 3, forever. DRY at length 3 charges `1.75` — a nudge the model can overrule if the continuation is genuinely correct — while still reaching `28.72` by length 8, where nothing legitimate lives. The exponential is doing the job the hard ban cannot: being wrong about a short repeat is cheap, and being wrong about a long one is impossible. This is why the case study in Section 14 could set `dry_allowed_length=3` and still leave a user's name or a recurring topic noun untouched.
 
 ### 6.5 Contrastive search and contrastive decoding
 
@@ -385,6 +598,36 @@ alpha typically 0.6; top-k typically 4-8 (small -- this re-scores a
 short candidate list, it doesn't replace a wide sampler).
 ```
 
+**Put simply.** "Score each candidate as mostly-how-likely-it-is minus a fine for how much it would make the model's internal state look like something it has already said."
+
+The second term is the entire contribution. Every other method in this file reads token IDs or probabilities; this one reads the model's hidden states, which is how it notices a repeat that shares no words with the original.
+
+| Symbol | What it is |
+|--------|------------|
+| `p_theta(x \| context)` | The model's own probability for candidate `x`. The confidence half |
+| `alpha` | Balance knob, typically `0.6`. `0` = pure greedy; `1` = pure anti-repetition |
+| `(1 - alpha)` | Weight on confidence. At `alpha=0.6`, only `0.4` |
+| `h_x` | The hidden state the model would be in if `x` were chosen |
+| `h_j` | Hidden state of an already-generated token `j` |
+| `cos_sim` | Similarity of two hidden states, `-1` to `1`. `1` = the states point the same direction |
+| `max_{j < t}` | Take the *worst* match against any earlier token. One collision is enough to convict |
+
+**Walk one example.** Three candidates from a top-k list, `alpha = 0.6`:
+
+```
+  candidate   p(x)    max_cos_sim   0.4 x p(x)   0.6 x sim    score
+  ------------------------------------------------------------------
+  again       0.32       0.91         0.128        0.546     -0.418
+  however     0.11       0.24         0.044        0.144     -0.100   <- winner
+  moreover    0.09       0.55         0.036        0.330     -0.294
+
+  Pure sampling would favor "again" (p=0.32, nearly 3x the others).
+  Contrastive search picks "however" -- 1/3 the probability, but its
+  hidden state is far from anything already generated (sim 0.24).
+```
+
+Note that `again` loses despite being by far the most likely token. That is the intended behavior, and also the risk: at `alpha=0.6` the similarity term carries more weight than probability, so contrastive search will overrule the model's confident choice whenever the context has drifted toward familiar territory. This is why `alpha` is tuned per task and why contrastive search is applied to a *small* top-k list (4-8) — restricting the candidate pool keeps a genuinely bad token from winning on low similarity alone.
+
 This catches *semantic* repetition — a token that's superficially different from anything said before but whose representation is nearly identical to recent context (e.g., paraphrasing the same sentence with synonyms), which surface-level penalties (Section 6.4) cannot detect since they key on token IDs.
 
 **Contrastive decoding** (two models) instead amplifies the *difference* between a strong "expert" and a weak "amateur" (a smaller model, or the same model given less context):
@@ -392,6 +635,35 @@ This catches *semantic* repetition — a token that's superficially different fr
 ```
 score(x) = log p_expert(x | context) - alpha * log p_amateur(x | context)
 ```
+
+**Stated plainly.** "Reward a token for how much the expert likes it *more than the amateur does* — anything both models agree on was never expert knowledge in the first place."
+
+Working in log space is what makes this a subtraction rather than a division, and it is why the score can go negative: a negative score means the amateur liked the token more than the expert, which is exactly the profile of a generic filler word.
+
+| Symbol | What it is |
+|--------|------------|
+| `p_expert(x)` | The strong model's probability for `x` |
+| `p_amateur(x)` | The weak model's probability for the same token — a smaller model, or the same one with less context |
+| `log p` | Log-probability. Always negative for `p < 1`; closer to `0` means more likely |
+| `alpha` | How much of the amateur's opinion to subtract, typically `0.5` to `1.0` |
+| `log p_e - alpha x log p_a` | The score. Positive when the expert's edge is large; negative when the amateur agrees or dominates |
+
+**Walk one example.** Two candidates, `alpha = 0.5`:
+
+```
+  token             p_expert  p_amateur   log p_e   log p_a    score
+  --------------------------------------------------------------------
+  "the"               0.30      0.420     -1.2040   -0.8675   -0.7702
+  "photosynthesis"    0.10      0.005     -2.3026   -5.2983   +0.3466   <- wins
+
+  Raw probability says "the" wins by 3x (0.30 vs 0.10).
+  Contrastive decoding flips it: the amateur ALSO loves "the" (0.42, more
+  than the expert does), so "the" carries no expert signal. The amateur
+  finds "photosynthesis" nearly impossible (0.005), so the expert's 0.10
+  is real knowledge -- and that gap is what the score rewards.
+```
+
+The `-0.7702` on `the` is the mechanism working as designed: because `p_amateur > p_expert` for that token, subtracting the amateur's log-probability pushes the score below what raw likelihood alone would give. Generic high-frequency tokens are precisely the ones every model, however small, assigns high probability — so they are systematically suppressed without anyone having to enumerate a stopword list.
 
 Tokens that BOTH models find likely (generic, high-frequency continuations — "the", "and", common phrases) get suppressed because the amateur also assigns them high probability; tokens the expert specifically favors get amplified. This is the same family of idea as classifier-free guidance in diffusion models, applied to language model logits — and it's a useful interview connection to draw.
 
@@ -448,6 +720,118 @@ XTC (Exclude Top Choices):
      phrasing" in creative-writing communities (llama.cpp ecosystem).
 ```
 
+#### Decoding typical sampling
+
+**What the formula is telling you.** "Work out how surprised the model expects to be at this position, then keep the tokens that deliver *about that much* surprise — discarding both the boringly obvious and the wildly improbable."
+
+The move that makes typical sampling unusual is that it sorts by `|distance from H|`, not by probability. The most likely token is not automatically first, and can be excluded outright — no other method here can do that except XTC.
+
+| Symbol | What it is |
+|--------|------------|
+| `p(x)` | The token's probability |
+| `-log p(x)` | That token's *surprise* in nats. Small `p` = large surprise |
+| `H` | Entropy: the probability-weighted average surprise. "How surprised the model expects to be here" |
+| `deviation(x)` | `abs(-log p(x) - H)`. How far this token is from the expected surprise |
+| `tau` | Cumulative-mass budget, e.g. `0.9`. How much mass to accumulate once sorted by deviation |
+
+**Walk one example.** The Section 6.2 distribution, whose entropy is `H = 1.7764` nats. Re-sorted by deviation rather than by probability:
+
+```
+  First compute H over the whole distribution:
+    H = -sum p(x) log p(x) = 1.7764 nats
+
+  token     p(x)    -log p(x)   deviation   cum(deviation order)
+  ----------------------------------------------------------------
+  red      0.1540     1.8708      0.0944       0.1540
+  green    0.2297     1.4708      0.3056       0.3838
+  purple   0.1032     2.2708      0.4944       0.4870
+  blue     0.3427     1.0708      0.7056       0.8297    <- the MODE, 4th
+  black    0.0692     2.6708      0.8944       0.8989
+  white    0.0464     3.0708      1.2944       0.9453    <- tau=0.9 crossed
+  ------------------------------------------------- CUT at tau=0.9
+  orange   0.0281     3.5708      1.7944       0.9734
+  teal     0.0154     4.1708      2.3944       0.9889
+  mauve    0.0077     4.8708      3.0944       0.9966
+  ochre    0.0034     5.6708      3.8944       1.0000
+
+  "red" wins the ordering with p=0.1540 -- less than half of "blue"'s
+  0.3427 -- because its surprise (1.8708) sits closest to H (1.7764),
+  off by only 0.0944 nats.
+```
+
+`blue`, the single most likely token, ranks *fourth*. It is too predictable: its surprise of `1.0708` sits `0.7056` nats below what the model expects to feel here. Typical sampling still keeps it at `tau=0.9` (it enters at cumulative `0.8297`), but it has been stripped of its privileged position — it is now one candidate among six rather than the token holding `34%` of the mass. Tighten `tau` to `0.5` and `blue` is cut entirely while `red`, `green`, and `purple` survive, which is the configuration that makes typical sampling's "never say the obvious thing" character most visible.
+
+#### Decoding eta sampling
+
+**Here is the plain reading.** "Set an absolute probability floor, but never let it sit higher than an entropy-derived ceiling — so on a genuinely uncertain distribution the floor gets out of the way."
+
+The `min(...)` is the whole formula. Everything turns on which of the two arguments is smaller, and that flips based on entropy.
+
+| Symbol | What it is |
+|--------|------------|
+| `epsilon` | The fixed floor you configure, e.g. `0.01`. The `min`'s first argument |
+| `H` | Entropy of the current distribution in nats. Low = peaked, high = flat |
+| `exp(-H)` | Shrinks fast as entropy rises. `H=0.4 -> 0.670`; `H=3.0 -> 0.050` |
+| `sqrt(epsilon) * exp(-H)` | The entropy-derived candidate floor. The `min`'s second argument |
+| `eta` | Whichever is smaller. The probability floor actually enforced |
+
+**Walk one example.** `epsilon = 0.01`, so `sqrt(epsilon) = 0.1`. Three distributions:
+
+```
+  case      H        exp(-H)    0.1 x exp(-H)     eta        which branch won
+  --------------------------------------------------------------------------
+  peaked   0.4000    0.670320     0.067032      0.010000     epsilon
+  ours     1.7764    0.169246     0.016925      0.010000     epsilon
+  flat     3.0000    0.049787     0.004979      0.004979     entropy term
+
+  Applied to the Section 6.2 distribution:
+    eta = 0.010000  -> keeps 8 tokens (cuts mauve 0.0077, ochre 0.0034)
+    eta = 0.004979  -> keeps 9 tokens (mauve 0.0077 now clears the bar)
+
+  Below H = 2.303, the entropy term exceeds epsilon and the min pins
+  eta at epsilon. Above it, entropy takes over and the floor drops.
+```
+
+The crossover is the design. When the model is confident (low `H`), the entropy term is large and the `min` clamps to `epsilon` — a firm floor that cuts tail junk. When the model is genuinely uncertain (high `H`), the entropy term dives below `epsilon` and *relaxes* the floor, because on a flat distribution a fixed `0.01` floor would delete legitimate candidates that simply have many peers to share mass with. Without the `min`, a single fixed `epsilon` would be too loose on peaked distributions and too aggressive on flat ones — the same failure top-k has, and the same one min-p solves by a different route.
+
+#### Decoding the Mirostat feedback update
+
+**The short version.** "Measure how surprising the token you just drew turned out to be, compare it to the surprise you wanted, and widen or narrow the candidate window for the next token by exactly that error."
+
+This is a proportional controller — the same shape as a thermostat. Recognizing it as classical control theory rather than a sampling heuristic is what makes its behavior (and its instability on short generations) predictable.
+
+| Symbol | What it is |
+|--------|------------|
+| `k_t` | The current top-k window width at step `t` |
+| `tau` | Target surprise in nats, the setpoint. Roughly `log(target perplexity)` |
+| `observed_surprise_t` | `-log p` of the token actually sampled at step `t` |
+| `observed - tau` | The error. Positive = more surprising than wanted; negative = too predictable |
+| `learning_rate` | How aggressively to correct. Large = fast but oscillates |
+| `k_t - lr x error` | The correction. Note the minus: too-surprising shrinks `k`, too-predictable grows it |
+
+**Walk one example.** `tau = 5.0` nats, `k_0 = 40`, `learning_rate = 1.0`, four steps:
+
+```
+  step  observed surprise   error = obs - tau    k_next = k - 1.0 x error
+  ---------------------------------------------------------------------
+   1          3.2                 -1.80                 41.80
+   2          4.1                 -0.90                 42.70
+   3          5.6                 +0.60                 42.10
+   4          6.4                 +1.40                 40.70
+
+  Steps 1-2: tokens too predictable (surprise below 5.0) -> k grows,
+             admitting more candidates to inject diversity.
+  Steps 3-4: tokens too surprising (above 5.0) -> k shrinks back,
+             pulling generation away from incoherence.
+
+  k travelled 40 -> 42.70 -> 40.70 and is still hunting for equilibrium
+  after 4 tokens.
+```
+
+**Why the minus sign is the one thing to remember.** A *low* surprise means the model is taking obvious choices — the road to repetition loops — so the controller responds by *widening* `k`. A *high* surprise means it is reaching into the tail, so it *narrows*. Flip the sign and you have built a divergence amplifier: loops would tighten `k` until only the looping token remained.
+
+That four-step trace is also Pitfall #8 made visible. After four tokens `k` has oscillated around its setpoint without settling — on a ten-token completion you are sampling from the initial `k_0`, not from anything Mirostat converged to. The controller needs hundreds of tokens for the error to average out, which is exactly why Mirostat is a long-form tool.
+
 ### 6.7 Beam search — mechanics, cost, and why it's rare in production
 
 Beam search maintains `k` candidate sequences ("beams"). At each step, every beam is expanded by all `V` vocabulary tokens, scored by cumulative (often length-normalized) log-probability, and only the global top-`k` survive:
@@ -459,6 +843,39 @@ score(sequence) = (1/len^alpha) * sum_t log p(token_t | token_<t)
                    sequences, which have fewer negative log-probs
                    to sum)
 ```
+
+**Said without the notation.** "Add up the log-probability of every token in the sequence, then divide by the length raised to `alpha` — because a raw sum of negative numbers always makes shorter sequences look better."
+
+The problem being solved is structural, not empirical: every `log p` term is negative, so appending any token to any sequence lowers its score. Without normalization, beam search's optimum is to stop immediately.
+
+| Symbol | What it is |
+|--------|------------|
+| `log p(token_t \| token_<t)` | Log-probability of one token given everything before it. Always negative |
+| `sum_t log p(...)` | Joint log-probability of the whole sequence. Grows more negative with length |
+| `len` | Sequence length in tokens |
+| `alpha` | Length-normalization strength, `0.6-1.0`. `0` = no normalization, `1` = plain mean |
+| `1/len^alpha` | The divisor. Partially cancels the length-driven decline in the sum |
+
+**Walk one example.** Two finished beams, one short and one long:
+
+```
+  beam    sum log p    len     raw score    alpha=1.0      alpha=0.6
+  -------------------------------------------------------------------
+  short      -2.4        4       -2.4000     -0.6000        -1.0447
+  long       -5.2       12       -5.2000     -0.4333        -1.1708
+
+  winner                          short        long           short
+
+  alpha = 0   : -2.4 vs -5.2. Short wins by a mile -- the raw sum
+                punishes the long beam for 8 extra negative terms.
+  alpha = 1.0 : -0.60 vs -0.4333. Long wins -- dividing by full length
+                is a plain average, which now FAVORS long sequences that
+                stay confident per token.
+  alpha = 0.6 : -1.0447 vs -1.1708. Short wins again, but narrowly
+                (gap 0.126, versus 2.8 at alpha=0).
+```
+
+`alpha` is a dial between two opposite biases, not a correction toward neutrality. At `alpha=0` beam search truncates everything; at `alpha=1.0` it rambles, because a long sequence of moderately-confident tokens beats a short decisive one on average. The `0.6-1.0` range in the formula is where neither pathology dominates, and it is genuinely task-tuned — translation systems calibrate it against output-length statistics on a dev set rather than accepting a default.
 
 **Cost**: `k×` the KV cache of a single sequence (each beam maintains its own cache) and `k×` the compute per step. For `k=5`, that's 5× the memory footprint of greedy/sampling for the same request.
 

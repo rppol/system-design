@@ -344,6 +344,40 @@ For OpenAI (GPT-4o-mini, GPT-4o on API), automatic prefix caching is enabled by 
 
 **Cost impact**: A RAG chain with a 4096-token system prompt making 1000 calls/day: uncached = $0.02/call × 1000 = $20/day; cached = $0.002/call × 1000 = $2/day. Cache hits also reduce TTFT by 400-600ms for long prompts.
 
+**In plain terms.** "The repeated part of your prompt is charged at full price on every single call unless you tell the provider it repeats — then it is charged at a tenth."
+
+| Symbol | What it is |
+|--------|------------|
+| `4096` | Size of the fixed system prompt, in tokens — identical on all 1000 calls |
+| `$0.02 / call` | Uncached cost of that prefix: 4096 tokens at roughly $5 per million |
+| `$0.002 / call` | Cached cost of the same prefix at the 0.1× cache-read rate |
+| `1000` | Calls per day — the multiplier that turns a rounding error into a line item |
+
+**Walk one example.** Push the 4096 tokens through both paths:
+
+```
+  uncached   4096 tok x $5.00 / 1e6   =  $0.0205 / call   -> "$0.02"
+  cached     4096 tok x $0.50 / 1e6   =  $0.0020 / call   -> "$0.002"
+
+  per day    1000 x $0.020            =  $20.00
+             1000 x $0.002            =  $ 2.00
+  saved                               =  $18.00 / day
+  reduction  (0.020 - 0.002) / 0.020  =  90%
+  per year   $18.00 x 365             =  $6,570
+```
+
+The 90% figure quoted at the top of this section is not a marketing round number — it falls
+straight out of the 0.1× read rate. Note also what is *not* discounted: output tokens and
+the user's actual question. Caching only ever attacks the fixed prefix, so its leverage is
+exactly the ratio of static prefix to total prompt. A chain with a 200-token system prompt
+and 4000 tokens of retrieved context has almost nothing to cache.
+
+**A warning about the minimum block size.** The `>= 1024` / `>= 2048` token thresholds in
+the code above are the reason many teams see zero savings after wiring this up. A
+900-token system prompt is simply not cached — no error is raised, `cache_read_input_tokens`
+just stays 0. Always verify against the usage metadata rather than assuming the header took
+effect.
+
 ### Streaming Structured Outputs
 
 When using `with_structured_output` or `JsonOutputParser`, LangChain supports partial JSON streaming — yielding parsed fragments as tokens arrive:
@@ -413,6 +447,51 @@ for partial_dict in chain.stream("Extract review info: ..."):
 | Version stability | Low (frequent breaking changes) | N/A | Medium |
 | Lock-in risk | High (framework-specific APIs) | None | Medium |
 | Streaming support | Native in LCEL | Manual | Native |
+
+### Decoding the "50-150ms per chain step" row
+
+**Stated plainly.** "Framework overhead is charged per step, not per chain, so the tax you pay is the per-step cost multiplied by how many Runnables you piped together."
+
+| Symbol | What it is |
+|--------|------------|
+| `s` | Number of Runnables in the chain — every `\|` adds one |
+| `o` | LCEL overhead per step, 50-150ms depending on callbacks and tracing |
+| `s x o` | Total framework tax added to the request |
+| `L` | The real work — the LLM call itself, 1.8s P50 in the case study below |
+| `s x o / L` | Overhead as a fraction of user-visible latency |
+
+**Walk one example.** A four-step RAG chain (`retriever | prompt | model | parser`) against the 1.8s P50 measured in Section 14:
+
+```
+                       s     o        s x o     as % of 1.8s
+  best case            4  x   50ms  =   200ms       11.1%
+  worst case           4  x  150ms  =   600ms       33.3%
+
+  same overhead on a 10-step chain
+  best case           10  x   50ms  =   500ms
+  worst case          10  x  150ms  =  1500ms   <- now rivals the LLM call itself
+```
+
+At four steps the tax is an annoyance; at ten steps the worst case adds 1.5s, which is
+most of another model call spent entirely inside Python. This is the concrete reason the
+"When NOT to use" section flags performance-critical paths — the overhead does not
+amortize, it accumulates linearly with composition depth.
+
+**Why chain P99 is not the sum of the steps' P99s.** The tempting move is to add the four
+steps' P99 latencies and call that the chain's P99. That badly overestimates. A chain hits
+the summed figure only if all four steps are simultaneously at their tail, and if the steps
+are roughly independent the chance that *any* one of them exceeds its own P99 is:
+
+```
+  P(at least one step over its p99)  =  1 - (0.99 ^ 4)
+                                     =  1 - 0.9606
+                                     =  0.0394   ->  3.94%
+```
+
+So about 4% of requests have a straggler somewhere, while the probability of all four
+stalling at once is ~1e-8. The chain's true P99 therefore sits **above any single step's
+P99 but far below their sum** — which is why you must measure end-to-end latency rather
+than compose it from per-step percentiles.
 | Test coverage | Medium (framework is complex) | High (your code) | Medium |
 | Community/docs | Excellent | N/A | Good |
 
@@ -498,6 +577,38 @@ This approach is thread-safe (LangSmith handles concurrency), captures full inpu
 
 **Pitfall 7: Memory in production**
 `ConversationBufferMemory` stores entire conversation history in RAM. A chat session with 100 messages and 500 tokens each = 50K tokens of history passed on every call. Cost: $0.25/call for GPT-4o. Fix: use `ConversationSummaryMemory` with a 2K token budget, or `ConversationBufferWindowMemory(k=5)` to keep last 5 turns only.
+
+**What the formula is telling you.** "An unbounded buffer makes the cost of turn number `n` proportional to `n`, so the conversation's total cost grows with the *square* of its length."
+
+| Symbol | What it is |
+|--------|------------|
+| `m` | Messages so far in the session |
+| `t` | Average tokens per message, 500 here |
+| `m x t` | History tokens re-sent on the next call — the buffer is resent in full, every time |
+| `$5 / M` | GPT-4o input price |
+| `k` | Window size in `ConversationBufferWindowMemory(k=5)` — caps `m` at `2k` messages |
+
+**Walk one example.** Watch the per-call cost climb as the same session goes on:
+
+```
+  messages m    history tokens (m x 500)    input cost (x $5 / 1e6)
+      10                5,000                    $0.025
+      50               25,000                    $0.125
+     100               50,000                    $0.250   <- the pitfall's number
+
+  with ConversationBufferWindowMemory(k=5)
+     any m     2 x 5 x 500 = 5,000 tok           $0.025   <- flat forever
+```
+
+The buffer version charges 10× more at message 100 than at message 10, for a conversation
+the user experiences as identical. The window version is flat: `k` turns is `2k` messages
+regardless of how long the session runs, so cost per call never moves.
+
+**Why the quadratic bites harder than the table shows.** The table prices a *single* call.
+Summing across the whole session, an unbounded buffer costs roughly `t x m^2 / 2` tokens in
+total — a 100-message session moves about 2.5M history tokens, or ~$12.50, versus $2.50
+for the windowed version. This is the mechanism behind most "our chatbot bill grew but
+traffic didn't" incidents: usage per session got longer, not more frequent.
 
 ---
 

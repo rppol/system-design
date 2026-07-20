@@ -146,6 +146,52 @@ muP Scaling Rules (simplified):
 
 ## 6. How It Works — Detailed Mechanics
 
+### Reading the Loss Number
+
+Every quantity in this file — `3.2`, `2.76`, `8.3`, the final `2.31` — is token-level
+cross-entropy in nats. Its exponential is perplexity:
+
+```
+loss = -(1/N) * sum over the N tokens of  ln P(next_token given preceding tokens)
+
+perplexity = exp(loss)
+```
+
+**What the formula is telling you.** "Average surprise per token — and `exp(loss)` is how many
+equally likely tokens the model is effectively choosing between at each position."
+
+This is why a loss drop of `0.5` sounds tiny but is not: loss is logarithmic, so small absolute
+moves late in training are large multiplicative changes in the model's uncertainty.
+
+| Symbol | What it is |
+|--------|------------|
+| `ln P(next_token given ...)` | Natural log of the probability the model gave the token that actually came next |
+| `-(1/N) * sum` | Negate (so lower is better) and average over tokens, making loss batch-size independent |
+| `loss` | Mean surprise in nats. `0.0` = perfect prediction; every extra nat is one `e`-fold more uncertainty |
+| `exp(loss)` | Perplexity — the effective branching factor, expressed in tokens |
+| `ln(V)` | Loss of a model guessing uniformly over a `V`-token vocabulary; the untrained ceiling |
+
+**Walk one example.** Push this file's own loss values through `exp` and the training curve turns
+into a count of plausible next tokens:
+
+```
+                     loss (nats)   exp(loss) = perplexity   effectively choosing among
+  untrained (V=128K)    11.76           128,000.0           the entire 128K vocabulary
+  step 2001              3.20                24.5           ~25 plausible next tokens
+  step 50000             2.80                16.4           ~16 plausible next tokens
+  step 51342             2.76                15.8           baseline just before the spike
+  step 51343             8.30             4,023.9           bad-batch spike -- 254.7x worse
+  final                  2.31                10.1           ~10 plausible next tokens
+
+  loss 2.0  ->  exp(2.0) = 7.389
+  loss 1.5  ->  exp(1.5) = 4.482
+  Half a nat of loss cuts the branching factor by 7.389 / 4.482 = 1.649x.
+```
+
+The last two lines are the reason the §14 outcome cares about `2.31` vs the projected `2.28`:
+`exp(2.31) / exp(2.28) = exp(0.03) = 1.030`, a 3.0% higher branching factor — small, but a real
+model-quality gap bought by 200 wasted steps.
+
 ### Learning Rate Warmup Theory
 
 ```python
@@ -233,6 +279,43 @@ def warmup_theory_demonstration() -> None:
     print("- Typical warmup: 2000 steps for 7B, 1000 for 1B")
     print("- Evidence: removing warmup from LLaMA causes PPL spike in first epoch")
 ```
+
+**In plain terms.** `get_cosine_with_warmup` says: "ramp the learning rate up in a straight line
+for the first `warmup_steps`, then walk it down the first half of a cosine wave until it flattens
+out at one tenth of peak."
+
+Both `lr_lambda` functions return a *multiplier*, not a learning rate — PyTorch's `LambdaLR`
+multiplies each parameter group's base LR by it. That indirection is why the same schedule code
+works unchanged under muP, where each group has a different base LR (§6, `get_mup_optimizer_groups`).
+
+| Symbol | What it is |
+|--------|------------|
+| `current_step / warmup_steps` | The linear ramp. Climbs `0 -> 1` across warmup, so LR climbs `0 -> peak` |
+| `progress` | Fraction of *post-warmup* training completed: `0.0` at warmup end, `1.0` at the last step |
+| `cos(pi * progress)` | Falls from `+1` to `-1`, so `(1 + cos) / 2` falls smoothly from `1.0` to `0.0` |
+| `min_lr_ratio` | The floor as a fraction of peak (`0.1`). LR decays toward it, never to zero |
+| `min_lr_ratio + (1 - min_lr_ratio) * (1+cos)/2` | Remaps the `1 -> 0` cosine onto `1.0 -> min_lr_ratio` |
+
+**Walk one example.** Run the §14 config through it — `peak_lr = 3e-4`, `warmup_steps = 2000`,
+`total_steps = 1e12 / 4,194,304 = 238,418`, `min_lr_ratio = 0.1`:
+
+```
+   step        phase        multiplier      actual LR
+      0     warmup            0.0000       0.000e+00    LR is exactly zero at step 0
+    500     warmup            0.2500       7.500e-05    quarter way up the ramp
+   1000     warmup            0.5000       1.500e-04    half way up
+   2000     warmup ends       1.0000       3.000e-04    peak reached, decay begins
+  60000     cosine decay      0.8728       2.619e-04    24.5% through decay, only 12.7% down
+ 119209     cosine decay      0.5560       1.668e-04    halfway in steps, ~56% of peak LR
+ 180000     cosine decay      0.2289       6.867e-05    the curve is steepest in this stretch
+ 238418     final step        0.1000       3.000e-05    lands exactly on min_lr_ratio x peak
+```
+
+Two things fall out of the numbers. The cosine is deliberately *flat at both ends*: a quarter of the
+way through decay the LR has only dropped 12.7%, so most of training happens near peak, and the last
+stretch crawls so late updates barely move the weights. And the warmup is 2,000 steps out of 238,418
+— 0.84% of the run, matching the `max(1000, 0.01 * total_steps) = max(1000, 2384) = 2384` heuristic
+in Pitfall 3 to within a rounding.
 
 ### Loss Spike Detection and Recovery
 
@@ -370,6 +453,92 @@ def handle_loss_spike(
     for param_group in optimizer.param_groups:
         param_group['lr'] *= 0.5
 ```
+
+**Stated plainly.** `clip_grad_norm_(model.parameters(), max_norm)` implements two lines of math:
+
+```
+total_norm = sqrt( sum over every parameter tensor p of  ||grad_p||^2 )
+
+if total_norm > max_norm:
+    every gradient *= (max_norm / total_norm)
+```
+
+"Measure the length of the whole gradient vector across every parameter at once; if it is longer
+than `1.0`, shrink the entire vector back to length `1.0` without turning it."
+
+The direction-preserving part is the whole point. Clipping scales *all* gradients by one shared
+factor, so the update points exactly where it did before — only shorter. Per-element clamping
+(`clip_grad_value_`) would clip big components and leave small ones, which rotates the update into a
+direction no batch actually asked for; that is why LLM training universally uses norm clipping.
+
+| Symbol | What it is |
+|--------|------------|
+| `norm(grad_p)` | L2 norm of one parameter tensor's gradient (embeddings, one attention matrix, ...) |
+| `sum of squares, then sqrt` | Pythagoras across every tensor — treats all parameters as one long vector |
+| `total_norm` | The global gradient norm. This is the number logged every step and alerted on |
+| `max_norm` | The clip threshold, `1.0` in the §14 config and in essentially all LLM pre-training |
+| `max_norm / total_norm` | The scale factor. Exactly `1.0` when no clipping happens, `< 1` when it does |
+
+Note the return value is the norm **before** clipping — which is what makes it the monitoring
+signal, not just a safety mechanism.
+
+**Walk one example.** Take the §14 run's healthy step and its spike step:
+
+```
+  healthy step (grad norm 0.6 group breakdown)
+    embeddings     0.30      squared  0.0900
+    attention      0.40      squared  0.1600
+    ffn            0.35      squared  0.1225
+    layernorm      0.10      squared  0.0100
+                             sum      0.3825
+    total_norm = sqrt(0.3825) = 0.6185     > max_norm 1.0 ?  NO
+    scale = 1.0                            gradients pass through untouched
+
+  spike step 51342
+    total_norm = 4.8                       > max_norm 1.0 ?  YES
+    scale = 1.0 / 4.8 = 0.2083
+    every gradient shrinks to 20.83% of its length
+    effective LR for this one step = 3.0e-4 x 0.2083 = 6.25e-05
+```
+
+Clipping did not *stop* the spike — the loss still went `2.76 -> 8.3` on the next step. What it did
+was cap the damage of one 4.8-norm step to the size of a 1.0-norm step, which is why the run
+recovered in 600 steps instead of diverging. Note also the last line: a step that clips at `4.8`
+silently trains at a 4.8x smaller learning rate. If clipping fires on most steps, the configured
+peak LR is fiction — that is the clip-fraction warning in §12.
+
+**Read it like this.** The spike detector in `detect_gradient_spike` is a rolling-baseline rule:
+
+```
+rolling_mean = mean(last 50 gradient norms)
+spike        = grad_norm > rolling_mean * spike_threshold_factor
+```
+
+| Symbol | What it is |
+|--------|------------|
+| `rolling_mean` | Recent-history baseline over a 50-step window, so it tracks the run as the norm drifts |
+| `spike_threshold_factor` | Sensitivity, `3.0`. Fire only when a step is 3x the recent baseline |
+| `len(self.grad_norms) < 10` guard | Refuse to judge until there is history; the first steps have no baseline |
+| `deque(maxlen=100)` | Bounded history — old norms fall off so the baseline cannot go stale |
+
+**Walk one example.** The §14 incident, using its stated `Grad norm: 0.6±0.15`:
+
+```
+  rolling_mean          = 0.60
+  rolling_std           = 0.15
+  multiplicative rule   : threshold = 0.60 x 3.0        = 1.80
+  k-sigma rule (k = 3)  : threshold = 0.60 + 3 x 0.15   = 1.05
+  k-sigma rule (k = 4)  : threshold = 0.60 + 4 x 0.15   = 1.20
+
+  observed at step 51342: grad_norm = 4.8
+    vs multiplicative    : 4.8 / 0.6 = 8.0x the mean   -> FIRES (8.0 > 3.0)
+    vs k-sigma           : (4.8 - 0.6) / 0.15 = 28.0 sigma -> FIRES by a mile
+```
+
+Both rules fire, and that is the design intent: a real data spike is 8x or 28-sigma out, not a
+borderline `3.1x`. The factor of `3.0` is set loose *on purpose* — a tighter threshold like `2.0`
+would page on-call for ordinary batch-to-batch variance (`0.6 + 4 x 0.15 = 1.2` is still only `2.0x`
+the mean), and an alarm that cries wolf gets muted, which is how a $200K divergence goes unnoticed.
 
 ### BF16 vs FP16 Numerical Analysis
 
@@ -719,6 +888,47 @@ def compute_effective_epochs(
 | BF16 fwd + FP32 optim | 2+8=10 bytes | Very good | Very good | Standard |
 | FP16 fwd + FP32 optim | 2+8=10 bytes | Moderate | Good (needs scaling) | Avoid for LLMs |
 | FP8 fwd + BF16 bwd | 1+2=3 bytes | Experimental | Variable | H100 only |
+
+**Put simply.** The `2+8=10 bytes` in the second row is the AdamW state-memory arithmetic, and it
+is worth unpacking because it is the single largest number in a training-run capacity plan:
+
+```
+bytes_per_param = bytes(weights) + bytes(Adam m) + bytes(Adam v)   [+ bytes(FP32 master copy)]
+
+resident_memory = num_params x bytes_per_param
+```
+
+"Every parameter you train drags two same-shape optimizer accumulators along with it, and those
+accumulators are kept in FP32 even when the weights are not."
+
+| Symbol | What it is |
+|--------|------------|
+| `m` | Adam's first moment — an exponential moving average of the gradient (the momentum term) |
+| `v` | Adam's second moment — EMA of the *squared* gradient, the per-parameter LR normalizer |
+| `bytes(weights)` | `2` under BF16, `4` under FP32. The only term the precision choice shrinks |
+| FP32 master copy | A separate full-precision weight copy the optimizer steps on; `+4` when used |
+| `num_params` | `7e9` for the §14 model. Memory is linear in it, so the per-param figure is the lever |
+
+**Walk one example.** The §14 run is a 7B model in BF16 with FP32 optimizer states:
+
+```
+                          bytes/param    x 7e9 params    notes
+  BF16 weights                 2            14.0 GB      what the forward pass reads
+  Adam m (FP32)                4            28.0 GB      one float per parameter
+  Adam v (FP32)                4            28.0 GB      one more float per parameter
+                            ------        ---------
+  the table's "2+8=10"        10            70.0 GB      5x the weights alone
+
+  + FP32 master copy          14            98.0 GB      what most frameworks actually hold
+  all-FP32 baseline           16           112.0 GB      w + grad + m + v, all 4 bytes
+```
+
+Two consequences. First, optimizer state is `8` of the `10` bytes — switching the *weights* from
+FP32 to BF16 saves `14 GB`, while keeping `m` and `v` in FP32 costs `56 GB`, which is why the
+standard recipe never economizes there: `v` underflows in low precision and the per-parameter LR
+normalizer silently breaks. Second, `70 GB` does not fit on one 80GB A100 once activations and
+gradients are added — this is precisely why the §14 run needs 64 GPUs and 3D parallelism rather
+than one node, and why ZeRO/FSDP shard exactly these `m` and `v` tensors first.
 
 | Batch Size | Training Speed | Convergence | Risk |
 |------------|---------------|-------------|------|

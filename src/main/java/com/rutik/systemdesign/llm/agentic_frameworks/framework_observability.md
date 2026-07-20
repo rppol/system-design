@@ -459,11 +459,73 @@ User messages often contain names, emails, phone numbers, medical data. Traces s
 **Pitfall 3: Unbounded trace storage**
 With 10K requests/day × 20KB per trace = 200MB/day. After 1 year: 73GB. Without retention policies, storage costs balloon. Set retention: LangSmith allows 30/90/365-day retention per project. Langfuse: configure PostgreSQL/ClickHouse retention. Archive old traces to S3 for long-term analysis.
 
+**Put simply.** "Trace storage grows without bound because you keep adding and never subtract — a retention window is the only term that turns a growing pile into a steady state."
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Requests per day, 10,000 |
+| `b` | Bytes per trace, 20KB — grows with span count and prompt size |
+| `R x b` | Daily ingest, the rate at which the pile grows |
+| `d` | Retention window in days — the term that caps the total |
+| `R x b x d` | Steady-state footprint once the window is full |
+
+**Walk one example.** The same ingest under each retention setting LangSmith offers:
+
+```
+  daily ingest   10,000 x 20 KB          =  200,000 KB  =  0.2 GB / day
+
+  d =  30 days    0.2 x  30              =   6.0 GB     steady state
+  d =  90 days    0.2 x  90              =  18.0 GB
+  d = 365 days    0.2 x 365              =  73.0 GB     <- the pitfall's number
+  d = infinity                              unbounded, grows 0.2 GB every day forever
+```
+
+The 73GB is not the problem — it is the *only* row that is stable. The last row is, and it
+is the default when nobody sets a policy. Also note `b` is the lever nobody thinks of:
+traces that log full retrieved-document text instead of document IDs can push 20KB to 200KB,
+turning the 365-day figure into 730GB without a single extra request.
+
+**Why the daily rate matters more than the total.** Storage cost is usually the smaller
+worry; query performance is the real one. A ClickHouse or PostgreSQL trace table that grows
+0.2GB/day makes the "show me last week's slow traces" dashboard progressively slower, and
+that degradation arrives long before the storage bill does. Set retention: LangSmith allows 30/90/365-day retention per project. Langfuse: configure PostgreSQL/ClickHouse retention. Archive old traces to S3 for long-term analysis.
+
 **Pitfall 4: Missing cost model for new models**
 When switching to a new model (e.g., Claude 3.7 Sonnet), cost dashboard shows $0 until you update the price config. Teams made model switches and assumed costs were similar — actual costs 3x higher, not detected for a month. Always update cost configs before switching models.
 
 **Pitfall 5: Sampling too aggressively for evaluation**
 Teams sampling 0.1% of traces for quality evaluation get 10 samples/day at 10K RPD — statistically insufficient to detect regressions. For meaningful evaluation: minimum 50-100 evaluated traces/day; prioritize sampling of user sessions with negative feedback signals. Use stratified sampling: some random, some from error traces, some from long-latency traces.
+
+**What the formula is telling you.** "Your sample rate is not a cost setting — it is a statistical-power setting, and 0.1% buys you a sample too small to distinguish a real regression from noise."
+
+| Symbol | What it is |
+|--------|------------|
+| `R` | Requests per day, 10,000 here |
+| `s` | Sample rate — the fraction of traces sent to LLM-as-judge |
+| `n = R x s` | Evaluated traces per day, the number that governs detection power |
+| `sqrt(p(1-p)/n)` | Standard error of a measured quality rate at sample size `n` |
+
+**Walk one example.** Measure a faithfulness rate near 90% at three sample rates:
+
+```
+  s        n = 10,000 x s     std error = sqrt(0.9 x 0.1 / n)    +/- 95% band
+  0.001            10             sqrt(0.09/10)  = 0.0949           +/- 18.6 pts
+  0.005            50             sqrt(0.09/50)  = 0.0424           +/-  8.3 pts
+  0.010           100             sqrt(0.09/100) = 0.0300           +/-  5.9 pts
+```
+
+At `s = 0.001` the daily faithfulness reading swings +/-18.6 points on noise alone: a true
+drop from 90% to 80% is completely invisible. At the 50-100 trace floor the pitfall
+recommends, the band tightens to 6-8 points — still coarse, but now a 10-point regression
+clears it. Note that `n` sits under a square root, so buying 4× the samples only halves the
+error; there is no cheap route to a tight band.
+
+**Why stratified sampling changes the economics.** The table assumes uniform random
+sampling, where finding the rare bad traces requires a large `n`. Sampling all error traces
+and all thumbs-down sessions, plus a random remainder, concentrates the evaluation budget on
+the traces that actually carry signal. You get regression detection at a far smaller `n`
+than the formula suggests — at the cost of a biased estimate of the *overall* rate, which is
+why you keep a random stratum alongside it.
 
 **Pitfall 6: Not correlating traces with user feedback**
 Collecting traces without linking them to user outcomes (thumbs up/down, conversion, task completion) means you know latency/cost but not quality. Always log a `session_id` or `user_id` in traces, and when a user provides feedback, log it as a score against the trace ID. This creates labeled data for evaluation.

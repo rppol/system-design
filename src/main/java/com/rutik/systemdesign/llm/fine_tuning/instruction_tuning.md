@@ -72,6 +72,36 @@ Training with LLaMA-3 template + Inference with ChatML template:
   → Common cause of "the fine-tuned model is worse" reports
 ```
 
+**Read it like this.** "A template is a fixed frame of marker slots wrapped around your content — and the model learned to expect that exact frame, marker for marker."
+
+Templates differ in two ways that matter: how many slots the frame costs, and whether those slots are reserved special tokens or ordinary English. Both have consequences, and the second is the one that bites.
+
+| Symbol | What it is |
+|--------|------------|
+| `<\|begin_of_text\|>` | LLaMA-3 sequence-start marker, emitted once per example |
+| `<\|start_header_id\|>` / `<\|end_header_id\|>` | Wrap a role name; one pair per turn |
+| `<\|eot_id\|>` | End-of-turn marker, closing each of system/user/assistant |
+| `[INST]` / `[/INST]` | Mistral's instruction delimiters — one pair for the whole example |
+| `<\|im_start\|>` / `<\|im_end\|>` | ChatML turn delimiters, one pair per turn |
+| `### Instruction:` / `### Response:` | Alpaca's delimiters — plain text, not reserved tokens |
+
+**Walk one example.** Counting the frame slots each template in the block above spends on one system/user/assistant example:
+
+```
+  template     special markers   role words   frame slots   overhead on a 200-tok example
+  --------------------------------------------------------------------------------------
+  LLaMA-3            10               3            13         13/213  =  6.1%
+  ChatML              6               3             9          9/209  =  4.3%
+  Mistral             4               0             4          4/204  =  2.0%
+  Alpaca              0              ~26           ~26        26/226  = 11.5%
+
+  Alpaca's ~26 = a 16-word preamble sentence + "### Instruction:" + "### Response:"
+```
+
+Mistral's frame is the thinnest because it has no system slot and no per-turn headers; LLaMA-3 pays for structure it can reuse across many turns. Over the 4,800-example, 2-epoch run in the Section 12 case study, the gap between Alpaca and LLaMA-3 framing is `13 x 4,800 x 2 = 124,800` tokens — real, but small.
+
+**Why the special-token distinction matters far more than the count.** LLaMA-3, Mistral, and ChatML markers are *reserved* vocabulary entries the model can never emit by accident from user text. Alpaca's `### Response:` is ordinary text — a user whose input happens to contain `### Response:` injects a turn boundary the model will honour. That is a prompt-injection surface, and it is the structural reason the field moved to reserved-token templates. It is also why a template mismatch is so destructive: swap frames and every one of these slots becomes an unrecognized token sequence in a position where the model expected a hard boundary, which is exactly the incoherence described above.
+
 ### 3.2 Label Masking (Instruction Masking)
 
 Compute cross-entropy loss only on the response tokens; mask the instruction tokens:
@@ -99,6 +129,65 @@ Implementation:
   labels[:instruction_length] = -100   # mask instruction tokens
   # Train on (input_ids, labels) — loss only on response tokens
 ```
+
+The loss the trainer actually optimizes is a mean over the *unmasked* positions only:
+
+```
+  loss = -(1 / N_unmasked) * sum over positions t where label_t != -100
+                              of  log P(token_t | tokens_<t)
+
+  where N_unmasked = count of positions whose label is not -100
+```
+
+**What this actually says.** "Read the whole sequence, but only get graded on the part you were supposed to write."
+
+The model still *sees* every instruction token — they remain in `input_ids` and every response token attends back to them. Masking removes them from the grade, not from the context. Confusing "masked from loss" with "masked from attention" is the single most common misreading of this section.
+
+| Symbol | What it is |
+|--------|------------|
+| `input_ids` | The full tokenized sequence, instruction and response together — unchanged |
+| `labels` | A copy of `input_ids` with instruction positions overwritten by `-100` |
+| `-100` | PyTorch's `ignore_index` sentinel; cross-entropy skips these positions entirely |
+| `P(token_t \| tokens_<t)` | Model's predicted probability of the correct token at position `t` |
+| `log P(...)` | Always negative; closer to 0 means a more confident correct prediction |
+| `N_unmasked` | Number of positions that survived masking — the denominator |
+| `-(1/N) * sum` | Negative mean log-likelihood, i.e. cross-entropy over the response only |
+
+**Walk one example.** The 10-token sequence from the Label Masking Illustration below — 5 instruction tokens, 5 response tokens — with a plausible predicted probability at each position:
+
+```
+  pos   role          label     P(correct)   -log P     counted?
+  ------------------------------------------------------------
+  T1    instruction   -100        0.02        3.912      no
+  T2    instruction   -100        0.15        1.897      no
+  T3    instruction   -100        0.05        2.996      no
+  T4    instruction   -100        0.30        1.204      no
+  T5    instruction   -100        0.10        2.303      no
+  T6    response        77        0.60        0.511      YES
+  T7    response        23        0.85        0.163      YES
+  T8    response        68        0.40        0.916      YES
+  T9    response        44        0.90        0.105      YES
+  T10   response        55        0.95        0.051      YES
+  ------------------------------------------------------------
+  masked (correct)   sum = 1.746   N_unmasked = 5    loss = 1.746 / 5  = 0.349
+```
+
+Now the same forward pass with masking forgotten — every position counted, denominator 10:
+
+```
+  unmasked (wrong)   sum = 1.746 + 12.311 = 14.058   N = 10   loss = 14.058 / 10 = 1.406
+
+  0.349  ->  1.406      the reported loss is 4.03x higher
+  instruction tokens contribute 12.311 / 14.058 = 87.6% of the total gradient signal
+```
+
+**What breaks, precisely.** Two separate failures, and the second is the dangerous one.
+
+First, the number lies. Loss jumps from 0.349 to 1.406 and *stays high forever*, because instruction tokens are genuinely unpredictable — the model cannot know a user will ask about French translation. You will read that plateau as "the model isn't learning" and burn epochs chasing it.
+
+Second, and worse: 87.6% of the gradient is now spent teaching the model to generate instructions. It is being optimized to produce `<|begin_of_text|><|start_header_id|>user...` — which is exactly the reported symptom, a fine-tuned model whose responses begin with prompt template tokens. The response, the only thing you wanted to teach, contributes 12.4% of the signal.
+
+Note that the ratio depends on the mix: this example is half instruction, half response. A short instruction with a long response dilutes the damage; a long document in the instruction with a one-line answer makes it near-total. That is why the fix is verification, not intuition — print `labels` beside `input_ids` for the first few examples and confirm the `-100` boundary sits exactly where the response begins.
 
 ### 3.3 Data Curation
 
@@ -212,6 +301,40 @@ trainer = SFTTrainer(
 trainer.train()
 ```
 
+**Stated plainly.** "Two batch-size knobs multiply into one effective batch, and that effective batch times the sequence length is how many tokens each optimizer step actually consumes."
+
+Nearly every SFT config quantity derives from one chain: examples to tokens, tokens to steps, steps to warmup. Getting the chain wrong is how people ship runs whose eval callbacks never fire.
+
+| Symbol | What it is |
+|--------|------------|
+| `per_device_train_batch_size` | Sequences per forward pass, 4 — bounded by GPU memory |
+| `gradient_accumulation_steps` | Forward passes accumulated before one optimizer update, 8 |
+| effective batch | `4 × 8 = 32` sequences per weight update |
+| `max_seq_length` | 2048 — every sequence is this long once packed or padded |
+| tokens per step | `effective batch × max_seq_length` |
+| `num_train_epochs` | 2 — how many times the dataset is traversed |
+| `warmup_ratio` | 0.03 — fraction of total steps spent ramping the learning rate up |
+
+**Walk one example.** The Section 12 case study's dataset (4,800 examples after filtering) through this exact config, at two plausible average example lengths:
+
+```
+  tokens per optimizer step  =  32 x 2048  =  65,536
+
+                             avg 400 tok/ex        avg 800 tok/ex
+  tokens per epoch           4,800 x 400            4,800 x 800
+                           =  1,920,000           =  3,840,000
+  x 2 epochs               =  3,840,000           =  7,680,000
+
+  steps = tokens / 65,536  =     58.6  -> 59      =    117.2  -> 118
+  warmup = 0.03 x steps    =      1.8  ->  2      =      3.5  ->  4
+```
+
+**The trap this arithmetic exposes.** The case study sets `eval_steps=200`, `save_steps=200`, and `load_best_model_at_end=True` with `metric_for_best_model="eval_loss"`. The whole run is 59 to 118 steps. **The evaluation callback never fires once**, no checkpoint is ever written, and "load best model at end" has no evaluations to choose between — it silently loads the final model. Always compute your step count before setting `eval_steps`; a good rule is 10 to 20 evals per run, which here means `eval_steps=5` or `10`, not 200.
+
+The warmup row has the same problem in miniature: a 3% ratio on a 59-step run gives a **2-step** warmup. Warmup exists to stop the first few updates from destabilizing the optimizer's moment estimates, and two steps barely does that. On short SFT runs, set warmup by absolute step count (20 to 50 steps) rather than by ratio.
+
+**Why the two batch knobs are separate.** `per_device_train_batch_size × gradient_accumulation_steps` is the number that affects learning — gradient noise, effective learning rate, convergence. The split between them is purely a memory accommodation: `4 × 8` and `8 × 4` and `32 × 1` all train identically, but only the first may fit on your GPU. Halve the device batch and double accumulation and nothing about the learning changes; the run just gets slower.
+
 ### 3.5 Sequence Packing
 
 Pack short examples into full-length sequences to maximize GPU utilization:
@@ -237,6 +360,56 @@ Caution: packing combines multiple examples in one sequence
     Example 1 tokens should not attend to Example 2 tokens
   SFTTrainer handles this correctly; manual implementations must be careful
 ```
+
+**Put simply.** "You pay for 2048 token slots whether or not you fill them, so stop shipping half-empty sequences."
+
+Attention cost is set by `max_seq_length`, not by how much real content sits inside it. A padded slot consumes the same compute as a real token and teaches the model nothing. Utilization is therefore just `real tokens / allocated slots`.
+
+| Symbol | What it is |
+|--------|------------|
+| `max_seq_length` | 2048 — the slot budget every sequence occupies regardless of content |
+| real tokens | Actual example content in a sequence |
+| padding tokens | Slots filled to reach 2048; compute is spent, nothing is learned |
+| GPU utilization | `real tokens / (num_sequences × 2048)` |
+| `ConstantLengthDataset` | The TRL machinery that concatenates examples to fill 2048 exactly |
+
+**Walk one example.** The five examples from the block above (200, 300, 400, 600, 500 tokens), costed both ways:
+
+```
+  real content = 200 + 300 + 400 + 600 + 500 = 2,000 tokens
+
+  WITHOUT packing -- one example per sequence
+    sequences          5
+    slots allocated    5 x 2048          = 10,240
+    padding             10,240 - 2,000   =  8,240   (80.5% wasted)
+    utilization         2,000 / 10,240   =  19.5%
+
+  WITH packing -- all five concatenated into one sequence
+    sequences          1
+    slots allocated    1 x 2048          =  2,048
+    padding             2,048 - 2,000    =     48   (2.3% wasted)
+    utilization         2,000 / 2,048    =  97.7%
+
+  speedup on this batch:  10,240 / 2,048  =  5.0x fewer sequences to process
+```
+
+The section's two-example figure works the same way: `500 / (2 x 2048) = 12.2%`, matching the `~12%` quoted. And 5.0× sits squarely inside the `5-10×` the Best Practices section claims — the multiplier is simply `max_seq_length / average example length`, so a dataset of 200-token examples gets `2048 / 200 = 10.2x` and one of 1000-token examples gets only `2.0x`. Packing pays in inverse proportion to how long your examples already are.
+
+**Packing changes your step count, and that surprises people.** Fewer sequences means fewer optimizer steps for the same data:
+
+```
+  4,800 examples x 2 epochs, effective batch 32, avg 400 tokens
+
+  packing=False   4,800 x 2 / 32                         = 300 steps
+  packing=True    2048/400 = 5.12 examples per sequence
+                  (4,800 / 5.12) x 2 / 32                =  59 steps
+
+  same tokens, same learning -- 5.12x fewer logged steps
+```
+
+This is why the `eval_steps=200` above never fires: with packing off it would have triggered once, and turning packing on pushed the whole run below the threshold. Any step-indexed setting — eval, save, logging, LR schedule length — must be recomputed when you toggle packing.
+
+**Why the attention mask is the whole risk.** Concatenating examples puts unrelated content in one causal sequence, so by default example 3's tokens attend back over examples 1 and 2. The model then learns spurious conditioning: it sees a French translation followed by a Python function and infers a relationship that does not exist. TRL constructs a block-diagonal mask so each example only attends within itself. A hand-rolled packer that skips this trains on a corrupted objective and — because loss still descends smoothly — gives you no signal that anything is wrong.
 
 ---
 

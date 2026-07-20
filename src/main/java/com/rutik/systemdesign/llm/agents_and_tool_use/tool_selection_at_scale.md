@@ -20,6 +20,44 @@ Why it matters: GPT-4 function-calling accuracy drops roughly 15 percentage poin
 
 Key insight: the model reads the tool description, not the name, to decide whether to call a tool. A precise, example-rich description is the highest-leverage lever for improving tool selection quality.
 
+### Decoding the tool-block token budget
+
+The two numbers in "Why it matters" are one formula:
+
+```
+tool_block_tokens = N x S           N = tools registered, S = avg tokens per schema
+context_fraction  = (N x S) / W     W = usable context window
+```
+
+**What this actually says.** "Every tool you register is rent charged on every single call, whether the model uses it or not."
+
+Registration is not free storage. The schema block is re-sent with each request, so cost scales with `N` — the size of your catalogue — and not with how many tools the model actually invokes.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of tool schemas injected into the system prompt |
+| `S` | Average tokens per schema: name, description, and every parameter description. ~300 here |
+| `W` | Usable context window. 64,000 tokens in the paragraph above |
+| `N x S` | Tokens spent before the user has said a word |
+| `context_fraction` | Share of the window gone to tools, leaving the rest for history and output |
+
+**Walk one example.** The 100-tool case stated above:
+
+```
+  N = 100 tools,  S = 300 tokens,  W = 64,000
+
+  tool_block   = 100 x 300        = 30,000 tokens
+  fraction     = 30,000 / 64,000  =  0.469   ->  46.9% of the window, "nearly half"
+
+  same S, but only k = 10 retrieved tools:
+  tool_block   =  10 x 300        =  3,000 tokens
+  fraction     =  3,000 / 64,000  =  0.047   ->   4.7%
+
+  saved = 30,000 - 3,000 = 27,000 tokens per call  (90% of the tool block)
+```
+
+Both failure modes named in the overview fall out of that one line. The cost failure is `N x S` landing on the bill; the accuracy failure is `N x S` competing for attention. The 15-point accuracy drop and the 30,000 tokens are not two problems — they are the same multiplication seen from two sides.
+
 ---
 
 ## 3. Core Principles
@@ -56,11 +94,76 @@ Key parameters:
 - Embedding model: `text-embedding-3-small` (cost: $0.02 per 1M tokens) or `all-MiniLM-L6-v2` (free, local)
 - Index: FAISS `IndexFlatIP` for exact search up to ~50K tools; HNSW for larger catalogues
 
+#### Decoding Recall@k
+
+```
+Recall@k = (queries whose correct tool is in the top-k) / (all queries)
+miss@k   = 1 - Recall@k
+```
+
+**Read it like this.** "Out of every 100 requests, how often did the right tool even make it onto the shortlist?"
+
+Recall@k measures the retriever alone and says nothing about whether the model then picks correctly — it is the ceiling on everything downstream. A tool that is never retrieved can never be called, so every point of missing recall is an unrecoverable failure.
+
+| Symbol | What it is |
+|--------|------------|
+| `k` | How many tools the retriever hands to the model. The one knob you tune |
+| `Recall@k` | Probability the correct tool sits somewhere in those k. 0.95 at k=10 above |
+| `miss@k` | The complement: fraction of queries the agent cannot possibly get right |
+| top-k | The k highest cosine scores. Ranked, but rank order does not affect recall |
+
+**Walk one example.** The k=5 versus k=10 choice above, at S = 300 tokens per schema:
+
+```
+              Recall@k    miss@k     tool tokens = k x 300
+   k =  5       0.88       0.12           1,500
+   k = 10       0.95       0.05           3,000
+
+   doubling k:  tokens   1,500 -> 3,000    (+1,500 tokens, +100%)
+                misses    0.12 -> 0.05     (-58.3% of the failures)
+```
+
+Paying 1,500 extra tokens removes 58.3% of the unrecoverable misses, which is why k=10 is the default recommended in Section 13. Pushing k higher is a losing trade in the other direction: recall is already near its asymptote while tokens keep climbing linearly.
+
 ### 4.3 Hierarchical menus
 
 Organize tools into L1 categories (e.g., `data`, `communication`, `analysis`, `payments`, `devops`) and L2 subcategories. The agent makes two tool calls: one to select a category, one to select the specific tool within that category. This reduces the per-step decision space by the category branching factor (typically 10x).
 
 Limitation: requires two LLM round-trips per tool selection; adds 200–500ms latency.
+
+#### Decoding the two-stage menu
+
+```
+decision_space = C + (N / C)          C = categories, N = tools
+P(correct)     = P(category right) x P(tool right | category right)
+```
+
+**The idea behind it.** "Splitting one big choice into two smaller ones shrinks each decision but multiplies the two chances of getting it wrong."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Total tools in the catalogue |
+| `C` | Number of L1 categories |
+| `N / C` | Tools shown at the second step, assuming categories are evenly sized |
+| `C + N/C` | Options the model reads across both calls, instead of `N` all at once |
+| `P(category right)` | Accuracy of LLM call 1. A miss here is fatal — the right tool is never shown |
+| `x` | Multiplication, not addition. Both steps must succeed |
+
+**Walk one example.** N = 500 tools split into C = 10 categories of 50 each:
+
+```
+  decision space:  10 + (500 / 10) = 10 + 50 = 55 options
+                   vs 500 flat     ->  500 / 55 = 9.1x smaller   ("typically 10x")
+
+  accuracy:        P(category)      = 0.94
+                   P(tool|category) = 0.90
+                   P(correct)       = 0.94 x 0.90 = 0.846   ->  ~85%
+
+  0.94 alone looks fine. 0.90 alone looks fine.
+  Chained, they land below either one.
+```
+
+That `0.846` is the ~85% recall reported in the Section 8 table, and the multiplication is exactly why the note there says category assignment errors "eliminate the correct tool entirely" — no amount of skill at step 2 recovers a wrong step 1.
 
 ### 4.4 Tool routing classifier
 
@@ -397,6 +500,44 @@ if __name__ == "__main__":
         print(f"  - {f['function']['name']}")
 ```
 
+#### Decoding the normalise-then-inner-product trick
+
+```
+cosine(a, b) = dot(a, b) / (norm(a) x norm(b))
+
+norm(v)      = sqrt(v1^2 + v2^2 + ... + vD^2)
+
+if norm(a) = norm(b) = 1   then   cosine(a, b) = dot(a, b)
+```
+
+**Put simply.** "Shrink every vector to length 1 first, and the cheap dot product *is* the cosine — no division left to do at query time."
+
+This is why `build_index` divides by `norms` before `index.add(...)`, and why the index is `IndexFlatIP` (inner product) rather than an L2 index. Skip the normalisation and FAISS silently ranks by raw dot product, which rewards long vectors — verbose tool descriptions would out-rank precise short ones regardless of topic.
+
+| Symbol | What it is |
+|--------|------------|
+| `dot(a, b)` | Multiply matching dimensions, add them all up. Collapses to one number |
+| `norm(v)` | Length of the vector: square root of the sum of its squared components |
+| `D` | Dimensions. 384 for `all-MiniLM-L6-v2`, 1536 for `text-embedding-3-small` |
+| `1e-10` | Guard added to the norm in the code so an all-zero vector cannot divide by zero |
+| `IndexFlatIP` | FAISS index that scores by inner product only. It does no normalising for you |
+
+**Walk one example.** Two toy 3-dimensional "embeddings" pointing the same way, one twice as long:
+
+```
+  a = (3, 4, 0)   norm = sqrt(9 + 16 + 0)  =  5
+  b = (6, 8, 0)   norm = sqrt(36 + 64 + 0) = 10      same direction, twice as long
+  q = (1, 0, 0)   norm = 1                            the query vector
+
+  raw dot:      dot(q, a) = 3        dot(q, b) = 6
+                -> b wins, purely for being longer
+
+  normalised:   a/5  = (0.6, 0.8, 0)     b/10 = (0.6, 0.8, 0)     identical
+                dot(q, a/5) = 0.6        dot(q, b/10) = 0.6       tie, correctly
+```
+
+Direction carries the meaning; length is an artefact of how much text went in. Normalising throws the artefact away, which is the whole reason cosine — not raw dot product — is the standard similarity measure for retrieval.
+
 ### 6.3 Tool routing classifier (DistilBERT)
 
 ```python
@@ -535,6 +676,40 @@ class VersionedToolRegistry(ToolRegistry):
 
 **Stripe's internal agent.** Stripe's developer tools team documented (engineering blog, 2024) that their internal coding agent had access to 340 internal microservice APIs. Injecting all 340 into each prompt cost ~$0.18 per call in GPT-4 token fees and reduced accuracy due to context dilution. After implementing RAG-over-tools (k=12, `text-embedding-3-small`), token cost dropped by 82% and task completion rate rose from 61% to 79%.
 
+### Decoding Stripe's 82%
+
+```
+total_input   = fixed_overhead + (N x S)
+cost_per_call = total_input x price_per_token
+reduction     = 1 - (cost_after / cost_before)
+```
+
+**Stated plainly.** "The 82% is a saving on the whole prompt, not on the tool block — the parts of the prompt that were never tools cannot be cut."
+
+| Symbol | What it is |
+|--------|------------|
+| `N x S` | The tool block. 340 schemas before, k=12 after |
+| `fixed_overhead` | System prompt, history, user message. Retrieval never touches these |
+| `price_per_token` | $5 per 1M input tokens for GPT-4o, i.e. $0.000005 per token |
+| `reduction` | The headline percentage, always measured against the total, not the tool block |
+
+**Walk one example.** Work backwards from the two published figures:
+
+```
+  upper bound on schema size (treat the whole $0.18 as tool tokens):
+  $0.18 / ($5 per 1,000,000 tokens) = 36,000 input tokens per call
+  36,000 / 340 tools                =    105.9 tokens per schema at most
+
+  -> Stripe's schemas are well under the 300-token average used elsewhere
+     in this file. Schema size is a design choice, not a constant.
+
+  the tool block itself:  1 - (12 / 340) = 96.5% fewer schemas
+  the bill:               1 - 0.82       = 82.0% cheaper
+  cost after:             0.18 x 0.18    = $0.0324 per call
+```
+
+The gap between 96.5% and 82% is the tell: a fixed overhead rides along on every call and dilutes the saving. Whenever a vendor quotes a retrieval saving below the schema-count reduction, that difference *is* the non-tool part of their prompt.
+
 **Salesforce Agentforce.** Salesforce's production agent platform supports custom tool catalogues per org, often 100–500 tools. Agentforce uses a two-stage retrieval pipeline: an offline category classifier routes the query, then a per-category FAISS index retrieves the final tool set injected into the agent prompt.
 
 ---
@@ -553,6 +728,35 @@ Notes:
 - Recall is the probability the correct tool appears in the retrieved set.
 - Hierarchical menu recall is lower because category assignment errors eliminate the correct tool entirely.
 - Hybrid achieves highest recall by using two independent filtering signals.
+
+### Decoding the token-cost column
+
+```
+tool_tokens  = k_effective x S
+dollars_call = tool_tokens x price_per_token
+```
+
+**What it means.** "Every row is the same multiplication with a different `k_effective` — a strategy only ever changes how many schemas survive into the prompt."
+
+| Symbol | What it is |
+|--------|------------|
+| `k_effective` | Schemas that actually reach the model. 500 naive, ~10 for RAG, ~8 for hybrid |
+| `S` | 300 tokens per schema, the working assumption behind the N=500 column |
+| `price_per_token` | $0.000005 for GPT-4o input |
+| Recall @10 | A separate axis entirely. See the Recall@k decoder in Section 4.2 |
+
+**Walk one example.** Reproduce three rows of the table above at N = 500:
+
+```
+                     k_eff    tool tokens          $ / call (GPT-4o input)
+  Naive               500     500 x 300 = 150,000        0.7500
+  RAG-over-tools       10      10 x 300 =   3,000        0.0150
+  Hybrid                8       8 x 300 =   2,400        0.0120
+
+  Naive -> RAG:  150,000 - 3,000 = 147,000 tokens saved = 98.0% of the block
+```
+
+The hybrid row in the table reads ~2.5K rather than the 2,400 computed here because the classifier stage adds its own small prompt. Note the shape of the two columns: latency is *additive* (a fixed 5–15ms for FAISS) while cost is *multiplicative*. Spending 15ms once to delete 98% of the tool block is why the RAG row dominates the naive row on every axis except implementation effort.
 
 | Schema design factor | Impact on accuracy |
 |---|---|
@@ -866,6 +1070,41 @@ Filter: 380 tools -> 95 tools (code_and_devops + monitoring)
 - Latency added by retrieval pipeline: 53ms (45ms classifier + 8ms FAISS)
 - Recall@12 on internal eval set of 500 labelled queries: 96.4%
 - Tool schema drift incidents caught before reaching production in 3-month period: 7
+
+### Decoding the case-study arithmetic
+
+```
+prompt_tokens = (k x S) + fixed_overhead
+cost_call     = prompt_tokens x price_per_token
+index_bytes   = N x D x 4                      4 bytes per float32
+```
+
+**What the formula is telling you.** "The 96% cost saving and the 584KB index are the same two multiplications run at different scales — tools times schema size, and tools times dimensions."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Catalogue size, 380 tools |
+| `k` | Tools retrieved per call, 12 |
+| `S` | 280 tokens per schema in this catalogue |
+| `D` | Embedding dimensions, 384 for `all-MiniLM-L6-v2` |
+| `4` | Bytes per `float32`. Halves with float16, quarters with int8 quantisation |
+| `fixed_overhead` | ~1,140 tokens of system prompt plus user message, to reach the stated ~4,500 |
+
+**Walk one example.** Every published number in this case study, recomputed:
+
+```
+  naive prompt   :  380 x 280 = 106,400 tokens  ->  x $5/1M  = $0.532    ("$0.53")
+  RAG prompt     :   12 x 280 =   3,360 tokens
+                   + 1,140 overhead =  4,500    ->  x $5/1M  = $0.0225   ("$0.022")
+  reduction      :  1 - 0.0225 / 0.532 = 95.77%                          ("96%")
+
+  index size     :  380 x 384 x 4 = 583,680 bytes = 584 KB  (570 KiB)
+
+  catalogue seen :  classifier keeps  95 / 380 = 25.0% of tools
+                    FAISS keeps       12 / 380 =  3.2% of tools
+```
+
+**Why Recall@12 of 96.4% can beat a 94.2% classifier.** Chained stages normally multiply, and `0.942 x 0.99 = 0.933` would cap recall *below* the classifier's own accuracy. It does not here because of design decision 4: when no category clears 0.5 confidence, the classifier is bypassed and RAG runs across all 380 tools. That escape hatch converts the chain from a product into a union, and it is worth `0.964 / 0.942 = 1.023x` the recall the classifier could reach alone. Delete the fallback and Recall@12 drops to roughly 93%.
 
 **Lessons Learned**
 

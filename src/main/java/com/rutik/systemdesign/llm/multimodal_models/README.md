@@ -55,6 +55,36 @@ Image
   Standard autoregressive generation
 ```
 
+**Read it like this.** "The vision encoder speaks one vector language and the LLM speaks another; the projection layer is a dictionary that rewrites each visual token into a word-shaped vector the LLM can read."
+
+The projection is the only piece trained in Stage 1, and it is astonishingly small — which is why a lab can build a working VLM on a single GPU-day by bolting an off-the-shelf encoder onto an off-the-shelf LLM.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of visual tokens the encoder emits — one per image patch |
+| `d_vis` | Vision encoder's output width. CLIP ViT-L/14 emits 1024 |
+| `d_llm` | LLM's embedding width. LLaMA 7B expects 4096 |
+| `Linear(d_vis -> d_llm)` | One weight matrix, `d_vis x d_llm` numbers, applied to every visual token |
+| `[v1..vN, t1..tM]` | The concatenated sequence. After projection the LLM cannot tell which came from pixels |
+
+**Walk one example.** LLaVA-style: CLIP ViT-L/14 at 224x224 feeding LLaMA 7B.
+
+```
+  encoder output   :  N = 256 visual tokens, each 1024-dim
+  LLM expects      :  4096-dim token embeddings
+
+  projection shape :  1024 x 4096
+  parameters       :  1024 x 4096 = 4,194,304   ~= 4.19 M
+
+  as a share of the 7B backbone:
+      4,194,304 / 6,700,000,000 = 0.063 %      <- the ONLY thing Stage 1 trains
+
+  a 2-layer MLP projector instead (LLaVA-1.5):
+      1024 x 4096 + 4096 x 4096 = 20,971,520   ~= 20.97 M   (still 0.3 % of 7B)
+```
+
+The whole VLM recipe hinges on that `0.063 %`. Both large models stay frozen, so alignment pretraining is a tiny optimization problem over 4 million weights — cheap enough that the 595K LAION-CC-SBU caption pairs in Stage 1 are plenty of data. Unfreeze the LLM in Stage 1 instead and you get catastrophic forgetting of text ability, which is exactly why the stages are split.
+
 **Training stages:**
 ```
 Stage 1: Alignment pretraining
@@ -104,6 +134,35 @@ Key models:
   Imagen (Google): large T5 text encoder; photorealistic
 ```
 
+**The idea behind it.** "Every denoising step lets each patch of the noisy latent image look at every word of the prompt — and because there are only ~77 words but thousands of patches, that lookup is nearly free compared to the patches looking at each other."
+
+Cross-attention is where the text actually steers the picture, yet it is the cheap part of the U-Net. The expensive part is spatial self-attention, which is why resolution — not prompt length — is what makes image generation slow.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Latent tokens — the noisy image, after the VAE shrinks it 8x. `(512/8)^2 = 4096` at 512px |
+| `T` | Text tokens from the CLIP/T5 encoder. CLIP's text branch is fixed at 77 slots |
+| self-attention | Every latent token attends to every latent token: `L x L` pairs |
+| cross-attention | Every latent token attends to every text token: `L x T` pairs |
+| denoising steps | How many times the whole thing runs. Typically 20-50 for Stable Diffusion |
+
+**Walk one example.** Stable Diffusion at 512x512, one attention block, one step:
+
+```
+  latent tokens  L = (512 / 8)^2 = 64^2 = 4096
+  text tokens    T = 77
+
+  self-attention  pairs :  4096 x 4096 = 16,777,216
+  cross-attention pairs :  4096 x   77 =    315,392
+
+  ratio  16,777,216 / 315,392 = 53.2x        <- self-attn is 53x the work
+  cross-attn share of the two : 1.8 %        <- conditioning is almost free
+
+  over a 50-step sample: 50 x 315,392 = 15,769,600 cross-attention pairs
+```
+
+Two consequences interviewers like. First, **doubling the prompt length barely changes cost** — `T` is a rounding error in the total. Second, **doubling the image side quadruples `L`, which sixteen-times the self-attention term** — latency scales with pixels squared, so 1024x1024 is roughly 16x the attention work of 512x512, not 4x. That is the entire reason latent diffusion encodes to an 8x-smaller latent before denoising instead of working on raw pixels.
+
 ### 4.3 Speech Models
 
 **Speech-to-Text (ASR):**
@@ -120,6 +179,32 @@ Wav2Vec 2.0 (Meta):
   Fine-tuned for ASR with CTC loss
   Excellent low-resource language performance
 ```
+
+**Stated plainly.** "Audio becomes tokens the same way images do — chop the waveform into fixed time slices, turn each slice into a vector, and hand the transformer a sequence whose length is set by *duration*, not by how much was said."
+
+That is the audio budget rule in one sentence: a minute of silence costs exactly as many tokens as a minute of dense speech. Text tokenizers charge by content; audio encoders charge by the clock.
+
+| Symbol | What it is |
+|--------|------------|
+| mel spectrogram | The waveform redrawn as an image of frequency-over-time — that is what the encoder actually sees |
+| hop length | How far the analysis window slides per frame. Whisper uses 10 ms, so 100 frames per second |
+| conv stride | Whisper's two front-end convolutions halve the frame count before the transformer |
+| window | Whisper's fixed 30-second input. Shorter clips are zero-padded to the full 30 s |
+| encoder tokens | What the decoder cross-attends to — the real cost driver |
+
+**Walk one example.** One Whisper window, and then an hour of audio:
+
+```
+  30 s of audio at a 10 ms hop  ->  30 x 100 = 3,000 mel frames
+  conv front-end stride 2       ->  3,000 / 2 = 1,500 encoder tokens per window
+
+  1 hour of audio               ->  3,600 / 30 = 120 windows
+                                ->  120 x 1,500 = 180,000 encoder tokens
+
+  Same 1,500 tokens whether the 30 s holds 90 spoken words or pure silence.
+```
+
+**Why the fixed 30-second window exists.** It makes the encoder shape constant, so batching is trivial and the positional embedding table has exactly one size. The cost is padding waste: transcribing a 2-second voice command still pays for a full 3,000-frame spectrogram. Production ASR pipelines therefore run voice-activity detection first and pack several short utterances into one window rather than burning a window per clip.
 
 **Text-to-Speech (TTS):**
 ```
@@ -159,6 +244,33 @@ Video generation:
 Architecture: DiT (Diffusion Transformer) replacing UNet for video
   Apply attention across spatial + temporal dimensions
 ```
+
+**Put simply.** "A video is just a stack of images, so its token cost is `sampled frames x tokens per frame` — and the sampling rate you pick is the only knob standing between a one-hour clip and a blown context window."
+
+This is why "can it process a 1-hour video?" is really a question about frame sampling, not about model capability. Gemini 1.5 Pro's 1M-token context is what buys the headroom.
+
+| Symbol | What it is |
+|--------|------------|
+| `fps_sample` | Frames actually encoded per second — usually far below the video's native 24-30 fps |
+| `frames` | `duration_seconds x fps_sample` |
+| `tokens_per_frame` | Whatever the vision encoder emits for one image. 256 at 224x224 with 14x14 patches |
+| `total = frames x tokens_per_frame` | The full video's context bill |
+| context window | The hard ceiling. 1M for Gemini 1.5 Pro; 128K for GPT-4o |
+
+**Walk one example.** One hour of video at 256 tokens per frame:
+
+```
+  duration = 3600 s,  tokens_per_frame = 256
+
+  at 2   fps :  7,200 frames  x 256 = 1,843,200 tokens   -> overflows a 1M window
+  at 1   fps :  3,600 frames  x 256 =   921,600 tokens   -> fits 1M, barely
+  at 0.5 fps :  1,800 frames  x 256 =   460,800 tokens   -> comfortable
+
+  Inverting it: 1,000,000 / 256 = 3,906 frames max
+                at 1 fps that is 3,906 s = 65.1 minutes of video.
+```
+
+**Why sampling rate is the whole design decision.** Drop to 0.5 fps and an hour fits with room to spare — but any event shorter than two seconds can fall between frames, which is exactly how needle-in-a-haystack video retrieval fails. Raise it to 2 fps for fine motion and you cannot fit the hour at all. Real systems make this adaptive: sample sparsely by default, then re-encode a dense window around whatever the first pass flagged as interesting.
 
 ---
 
@@ -235,6 +347,57 @@ OCR capability:
   Claude 3.5 Sonnet excels at document OCR
   GPT-4o excels at mathematical expressions in images
 ```
+
+**What this actually says.** "Tile the image with square patches and call each tile a token — so the token count is `(image side / patch side)` squared, and it grows with the *area* of the image, not its width."
+
+The squaring is the entire story of VLM cost. Every complaint about high-resolution images being expensive traces back to this one exponent.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Image side length in pixels after resizing. 224 or 336 for most encoders |
+| `P` | Patch side length. `14` for ViT-L/14, `16` for ViT-B/16 — the number after the slash in the name |
+| `S / P` | Patches along one edge — how many tiles fit across |
+| `(S / P)^2` | Total patch tokens, because the grid is two-dimensional |
+| ViT-L/14 | Reads as "Large vision transformer, 14-pixel patches" |
+
+**Walk one example.** The same formula across the resolutions in this module:
+
+```
+  S = 224, P = 14   ->  224 / 14 = 16   ->  16^2  =   256 tokens
+  S = 336, P = 14   ->  336 / 14 = 24   ->  24^2  =   576 tokens
+  S = 224, P = 16   ->  224 / 16 = 14   ->  14^2  =   196 tokens
+  S = 1024, P = 14  -> 1024 / 14 = 73   ->  73^2  = 5,329 tokens
+
+  224 -> 1024 is 4.6x wider, but:
+      5,329 / 256 = 20.8x the tokens        <- area, not width
+```
+
+**In plain terms.** "Those visual tokens then sit in the LLM's sequence like words, and attention costs pairs — so 20x the tokens is 400x the attention work, which is why nobody feeds a raw 1024x1024 image to a ViT."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Visual tokens entering the LLM, from `(S/P)^2` above |
+| `N^2` | Attention pairs — every token attends to every other token |
+| AnyRes | LLaVA-NeXT's fix: split into 336x336 tiles, encode each, concatenate the tokens |
+| thumbnail | The extra downsized whole-image tile AnyRes prepends so global context survives tiling |
+
+**Walk one example.** Why tiling beats one giant encode:
+
+```
+  one 1024x1024 encode :  N = 5,329
+                          attention pairs = 5,329^2   = 28,398,241
+
+  one 224x224 encode   :  N =   256
+                          attention pairs =   256^2   =     65,536
+
+  ratio = 28,398,241 / 65,536 = 433x the attention work for 20.8x the tokens
+
+  AnyRes instead: 1024 / 336 = 3 tiles per edge -> up to 4 tiles + 1 thumbnail
+                  5 x 576 = 2,880 tokens, and each tile self-attends over
+                  only 576 tokens, not 5,329.
+```
+
+Tiling wins twice: fewer total tokens *and* each encoder pass is quadratic over a much smaller `N`. The price is that no single tile sees the whole image, so a table spanning a tile boundary can be misread — which is precisely the failure mode behind the OCR caveat in Section 10. The thumbnail tile is the patch for that: it gives the LLM one low-resolution view of the full layout to anchor the detailed tiles against.
 
 ### Multimodal Training Data
 
@@ -321,6 +484,30 @@ Medical multimodal:
 3. **Not testing on domain images**: General VLMs may struggle with medical, industrial, or satellite imagery.
 4. **Ignoring image token cost**: 1 high-res image = 1000-4000 tokens. Cost and latency add up quickly.
 5. **Assuming spatial reasoning is reliable**: VLMs struggle with precise spatial/geometric reasoning. Verify on your specific task.
+
+**What the formula is telling you.** "Budget images the way you budget text: `images x tokens per image` is a line item in your context window, and at high detail a handful of pages can eat most of it before the user has typed a word."
+
+Pitfall 4 above is the one that surprises teams in production, because an image is a single line in the API request but a four-figure number in the token count.
+
+| Symbol | What it is |
+|--------|------------|
+| `tokens_per_image` | 1,000-4,000 depending on detail mode and resolution (Pitfall 4) |
+| high detail | GPT-4o's mode that tiles the image for fine text — "4x more tokens" per Section 7 |
+| `n_images` | How many images ride along in one request |
+| context window | 128K for GPT-4o, 200K for Claude 3.5 Sonnet, 1M for Gemini 1.5 Pro |
+| headroom | What is left for the system prompt, the question, history, and the answer |
+
+**Walk one example.** A 20-page scanned contract, one image per page, into a 128K window:
+
+```
+  low detail  : 20 x 1,000 =  20,000 tokens  ->  15 % of 128K   plenty of headroom
+  high detail : 20 x 4,000 =  80,000 tokens  ->  61 % of 128K   only 39 % left
+
+  Add conversation history and a long system prompt to the high-detail case and
+  the request overflows -- on page 20, after 19 pages were already paid for.
+```
+
+**Why this decides your architecture.** The fix is not a bigger model but retrieval over pages: OCR or caption each page once, index the text, and send only the 2-3 pages the question actually needs as images. That converts a fixed 80,000-token floor into roughly 12,000 tokens per query, and it is the standard answer when an interviewer asks how you would build document Q&A over a 500-page filing.
 
 ---
 

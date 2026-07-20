@@ -428,6 +428,45 @@ if not re.match(r"^[A-Z]{3}-\d{6}$", product.sku):
     flag_for_human_review(product)
 ```
 
+**In plain terms.** "A retry rate is a cost multiplier hiding as a reliability number — a 30% retry rate means you are quietly paying for 1.3 extractions every time you ask for one."
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | Probability a single attempt fails validation, 0.30 for the over-constrained schema |
+| `max_retries` | Attempt cap, 3 in this file's recommended setting |
+| `E[calls]` | Expected LLM calls per successful extraction |
+| `r ^ max_retries` | Probability every attempt fails and you raise `InstructorRetryException` |
+
+**Walk one example.** The over-constrained schema against the relaxed one, at `max_retries=3`:
+
+```
+  expected calls  E =  1 + r + r^2   (attempt 1 always; attempt 2 with prob r; etc.)
+
+  over-constrained   r = 0.30
+    E  =  1 + 0.30 + 0.09                    =  1.39 calls
+    hard failure  r^3 = 0.30^3               =  2.7%  of extractions
+
+  relaxed schema     r = 0.05
+    E  =  1 + 0.05 + 0.0025                  =  1.05 calls
+    hard failure  0.05^3                     =  0.0125%  of extractions
+
+  cost overhead   1.39 / 1.05                =  1.32x
+  failures reaching a human   2.7% / 0.0125% =  216x more
+```
+
+The 39% cost overhead is the part teams notice. The 216× difference in unrecoverable
+failures is the part that matters more — at 500 invoices/month a 2.7% hard-failure rate is
+13-14 documents dumped into a human queue every month purely because a regex was in the
+extraction schema rather than after it.
+
+**Why moving the regex out of the model fixes both.** The constraint has not disappeared —
+the `re.match` below still enforces it. What changed is *who* is asked to satisfy it. A
+model asked to invent a SKU matching `^[A-Z]{3}-\d{6}$` fails whenever the invoice's real
+SKU is formatted differently, and retrying cannot help, because the document does not
+contain what the schema demands. Extraction schemas should describe what is *on the page*;
+business rules belong in code that runs after, where a violation is a flag rather than a
+retry loop.
+
 **Pitfall 2: Not handling InstructorRetryException**
 After `max_retries` attempts, Instructor raises `InstructorRetryException`. Production code must handle this.
 ```python
@@ -676,3 +715,44 @@ async def process_batch(pdf_paths: list[Path]) -> list[Invoice]:
 | Confidence "medium/low" | N/A | 19% (human review) |
 | Human review time | 3 hours/day | 25 minutes/day |
 | Cost per invoice | ~$1.50 (labor) | $0.038 (GPT-4o + infrastructure) |
+
+**What this actually says.** "The pipeline is not replacing humans — it is sorting invoices into a large pile nobody has to look at and a small pile that still needs eyes, and the confidence split is what decides the ratio."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Invoices per month, 500 |
+| `a` | Auto-approved share — extractions with "high" confidence, 0.81 |
+| `1 - a` | Routed to human review, 0.19 |
+| `N x (1 - a)` | Documents a human still opens each month |
+| `$0.038` / `$1.50` | Machine cost and fully-loaded manual cost per invoice |
+
+**Walk one example.** Split the month's volume, then price both paths:
+
+```
+  routing
+    auto-approved    500 x 0.81               =  405 invoices
+    human review     500 x 0.19               =   95 invoices
+
+  human time
+    before   3 hours/day x ~21 working days   =   63 hours/month
+    after    25 minutes/day x ~21 days        =  8.75 hours/month
+    reduction                                 =  86%
+    per reviewed invoice  8.75 h x 60 / 95    =  5.5 minutes each
+
+  money
+    manual   500 x $1.50                      =  $750 / month
+    pipeline 500 x $0.038                     =  $ 19 / month
+    ratio    $1.50 / $0.038                   =  39x cheaper per invoice
+```
+
+The economics are dominated by the 81%, not by the 39×. If confidence calibration slipped so
+that only 50% auto-approved, the human queue would grow from 95 to 250 invoices and the time
+saving would roughly halve — while the per-invoice API cost would not move at all. In
+extraction pipelines the confidence threshold, not the model price, is the lever on total
+cost of ownership.
+
+**Why 96.2% accuracy is acceptable when humans hit 99.8%.** The pipeline is not asked to
+match the human rate; it is asked to *know when it might be wrong*. The 3.8% of imperfect
+extractions overwhelmingly land in the 19% low-confidence bucket, where a human catches
+them. A system with 98% accuracy and no confidence signal would be strictly worse in
+production, because there would be no principled way to decide which 500 outputs to trust.

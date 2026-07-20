@@ -679,6 +679,42 @@ With `add_messages` reducer and checkpointing, a 100-turn conversation accumulat
 **Pitfall 7: Large state objects in checkpointer**
 State with large blobs (retrieved documents, binary data) gets checkpointed after every node. With SQLite checkpointer, a 100KB state × 10 nodes × 1000 runs/day = 1GB/day of checkpoint data. Store large objects in external storage (S3, database); keep only references (IDs) in graph state.
 
+**In plain terms.** "Checkpoint volume is not the size of your state — it is the size of your state multiplied by every node it survives and every run you serve."
+
+The trap is that `nodes` is a multiplier people forget. A checkpoint is written **after each node**, not once per run, so a graph that grows from 10 nodes to 20 doubles your storage bill without a single extra user.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Serialized size of the graph state, 100KB when documents are inlined |
+| `N` | Nodes per run — one checkpoint write each, so this is a straight multiplier |
+| `R` | Runs per day, 1000 here |
+| `S x N x R` | Checkpoint bytes written per day |
+
+**Walk one example.** The pitfall's numbers, then the same graph after moving blobs out:
+
+```
+  blobs inlined in state
+    S x N x R  =  100 KB  x  10  x  1000   =  1,000,000 KB
+                                           =  1.0 GB / day
+                                           =  365 GB / year
+
+  blobs in S3, state holds only IDs (S drops to ~2 KB)
+    S x N x R  =    2 KB  x  10  x  1000   =     20,000 KB
+                                           =  0.02 GB / day
+                                           =  7.3 GB / year
+```
+
+A 50× reduction from a change that alters no graph logic at all — the nodes still see the
+same documents, they just fetch them by ID. Note the asymmetry worth remembering in an
+interview: **adding nodes is as expensive as adding traffic.** Splitting one node into three
+for readability triples checkpoint volume, which is a genuinely surprising cost for a
+refactor that looks free.
+
+**What breaks if you skip checkpointing to avoid this.** The writes are what make
+`interrupt()`, time-travel replay, and crash resumption work — they are the feature, not
+overhead. The fix is therefore always to shrink `S`, never to reduce `N` or checkpoint less
+often.
+
 ---
 
 ## 11. Technologies & Tools
@@ -911,3 +947,41 @@ app = graph.compile(
 - False positive rate: 8% after prompt tuning (reduced from 31% with generic security prompts)
 - GitHub API failures handled: retry node with `step_count` guard, max 3 retries
 - Checkpointing: all reviews recoverable from PostgreSQL if agent crashes mid-run
+
+**Read it like this.** "Fanning two scans out in parallel buys back the shorter scan's entire duration, and tuning the prompts buys back most of the human review queue — the two savings are independent and multiply through to the same number: engineer-minutes."
+
+| Symbol | What it is |
+|--------|------------|
+| `45s` | Measured end-to-end review time with `security_scan` and `style_check` in parallel |
+| `30s` | Time the parallel fan-out saves — i.e. the duration of whichever scan finishes first |
+| `12%` | Share of PRs routed through the `human_approval` interrupt |
+| `8%` / `31%` | False-positive rate after / before prompt tuning |
+
+**Walk one example.** First the fan-out, then the queue it feeds:
+
+```
+  latency
+    parallel     (measured)                      =  45s
+    saving from fan-out                          =  30s
+    sequential   45 + 30                         =  75s
+    speedup      75 / 45                         =  1.67x
+
+  human queue, per 1000 PRs/day
+    routed to human   1000 x 0.12                =  120 PRs
+    of those, false alarms  before  120 x 0.31   =   37.2 PRs
+                            after   120 x 0.08   =    9.6 PRs
+    wasted reviews avoided                       =   27.6 PRs / day
+    at 10 min each                               =  276 min = 4.6 engineer-hours / day
+```
+
+Two things are worth noticing. First, the fan-out speedup is capped: `add_edge` from
+`fetch_pr_diff` to both scans means wall time is the *slower* scan, so a third parallel
+scan taking 20s would be free, while making `security_scan` 10s slower costs the full 10s.
+Second, the prompt tuning is worth more than the parallelism here — 4.6 engineer-hours/day
+dwarfs 30 seconds of machine time, which is the usual shape of these systems.
+
+**Why `interrupt_before` sits on `post_to_github` and not on the scans.** Interrupting
+costs a human context-switch, so you want it at the single point where the graph does
+something irreversible. Placing it earlier would multiply the 12% by every node it guarded;
+placing it at the write boundary means one pause per PR at most, no matter how many nodes
+ran.

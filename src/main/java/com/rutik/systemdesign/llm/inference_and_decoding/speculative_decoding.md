@@ -103,6 +103,42 @@ in the SAME target forward pass):
    └──────────────────────────────────────────────────────┘
 ```
 
+**Read it like this.** "Keep the draft's guess as often as the target itself would have produced it — and whenever the draft was *over*-confident, keep it only in proportion, then fix the shortfall by hand."
+
+The ratio `p/q` is the whole rule. If the target likes the token at least as much as the draft did (`p >= q`), the ratio is `>= 1`, the `min` clamps to `1`, and the token is accepted unconditionally. The draft is only ever penalized for proposing tokens the target likes *less* than it does — never for being too conservative.
+
+| Symbol | What it is |
+|--------|------------|
+| `x_i` | The i'th token the draft proposed, at position i of the K-token chain |
+| `q(x_i)` | How likely the *draft* thought that token was. The proposal probability |
+| `p(x_i)` | How likely the *target* thinks it is, scored in the single verify pass |
+| `p / q` | "Overconfidence factor." `>= 1` = draft undersold it; `< 1` = draft oversold it |
+| `min(1, p/q)` | Accept probability. Capped at 1 — you cannot accept a token more than always |
+| `max(0, p - q)` | Residual: the probability mass the target wanted that the draft under-supplied |
+| `normalize(...)` | Divide by the residual's own sum so it becomes a valid distribution again |
+
+**Walk one example.** A four-token vocabulary, one position, draft `q` vs target `p`:
+
+```
+  token      q (draft)   p (target)   p/q    min(1, p/q)   verdict
+  ---------  ----------  -----------  -----  ------------  ------------------------
+  "of"          0.50        0.30      0.60      0.60       accept 60% of the time
+  "in"          0.20        0.30      1.50      1.00       always accept
+  "at"          0.20        0.25      1.25      1.00       always accept
+  "near"        0.10        0.15      1.50      1.00       always accept
+
+  Draft proposed "of". Roll a uniform number u in [0, 1):
+    u = 0.41  ->  0.41 < 0.60  ->  ACCEPT "of", move to position i+1
+    u = 0.83  ->  0.83 > 0.60  ->  REJECT, discard every later draft token
+
+  On rejection, build the residual and sample the replacement from it:
+    p - q     = [-0.20, +0.10, +0.05, +0.05]
+    max(0, .) = [ 0.00,  0.10,  0.05,  0.05]   sum = 0.20
+    normalize = [ 0.00,  0.50,  0.25,  0.25]   <- "of" can never be the correction
+```
+
+The draft oversold `"of"` (0.50 vs the target's 0.30), so it survives only 60% of the time; and when it is rejected, the residual assigns it zero mass — the correction step never re-proposes the token you just rejected. That is exactly the bookkeeping that makes the two paths sum back to `p`.
+
 ### 5.3 Tree-based verification (Medusa / EAGLE-2 / EAGLE-3 / Sequoia)
 
 ```
@@ -253,6 +289,42 @@ P(output = x) = min(p(x), q(x)) + max(0, p(x) - q(x)) = p(x)
 
 The two cases collapse to exactly `p(x)` for every token — the draft distribution `q` cancels out completely. This is why speculative decoding is described as an **exact sampler**: regardless of how good or bad the draft is, the *marginal* distribution of each output token equals what the target model alone would have produced. A bad draft only costs *throughput* (more rejections → shorter accepted runs → less speedup), never *quality*.
 
+**What this actually says.** "There are exactly two ways a token can come out of this round — the draft guessed it and you kept it, or the draft blew it and you re-sampled — and those two paths always add back up to the target's own probability."
+
+The proof is three lines of bookkeeping, but the *shape* is what to remember: `min(p, q)` is the mass the draft got right, `max(0, p - q)` is the mass it missed, and `min + max-shortfall = p` by definition of min and max. Nothing about `q` survives the addition.
+
+| Symbol | What it is |
+|--------|------------|
+| `p(x)` | Target model's probability for token `x`. The distribution you are *required* to reproduce |
+| `q(x)` | Draft's probability for `x`. Appears in both terms and cancels between them |
+| `min(p(x), q(x))` | Mass the draft supplied and the target agreed with. The "accepted" channel |
+| `sum_z min(p(z), q(z))` | Total overlap between the two distributions. Call it the agreement mass |
+| `P(reject)` | `1 - agreement mass`. How much of the target's distribution the draft failed to cover |
+| `max(0, p(x) - q(x))` | Per-token shortfall. The "correction" channel, before normalizing |
+| `sum_z max(0, p(z)-q(z))` | Total shortfall — provably equal to `P(reject)`, which is why the two cancel |
+
+**Walk one example.** Reuse the same `p` and `q` from Section 5.2 and add the two channels per token:
+
+```
+  token     q       p     min(p,q)   max(0,p-q)   accepted + corrected   = p?
+  --------  -----  -----  ---------  -----------  --------------------   -----
+  "of"      0.50   0.30     0.30        0.00        0.30 + 0.00 = 0.30   = 0.30
+  "in"      0.20   0.30     0.20        0.10        0.20 + 0.10 = 0.30   = 0.30
+  "at"      0.20   0.25     0.20        0.05        0.20 + 0.05 = 0.25   = 0.25
+  "near"    0.10   0.15     0.10        0.05        0.10 + 0.05 = 0.15   = 0.15
+                            -----       -----
+                   sums     0.80        0.20
+
+  agreement mass = 0.80   ->   P(reject) = 1 - 0.80 = 0.20
+  total shortfall = 0.20  ->   identical, by construction
+
+  P(reject) x P(correction = "in") = 0.20 x (0.10 / 0.20) = 0.10 = max(0, p - q)
+```
+
+Every row's last column matches `p` exactly. Change `q` to anything you like — a terrible draft, a random draft — and the `min` column shrinks while the `max` column grows by precisely the same amount, so the sum is still `p`. That is the entire safety argument: a bad draft moves work from the cheap channel to the expensive one, never off the target's distribution.
+
+**Why the `max(0, ...)` clamp has to be there.** Without it, tokens the draft *over*-proposed (like `"of"`, at `p - q = -0.20`) would contribute negative probability to the correction distribution, which is not a distribution at all. The clamp is what encodes "you already over-served this token in the accept channel, so serve none of it here" — and it is precisely the term that makes the shortfall sum equal `P(reject)`.
+
 ### 6.2 Acceptance rate math, expected speedup, and break-even
 
 For K draft tokens with a constant per-token acceptance probability α (geometric approximation), the expected number of tokens produced per verification round is:
@@ -275,6 +347,85 @@ Break-even (speedup = 1): solve for α such that
   E[accepted] = 1 + K * draft_cost_fraction
   For K=4, draft_cost_fraction ≈ 0.014 (1B/70B):  α ≈ 0.45
 ```
+
+**What the formula is telling you.** "Count on the first draft token surviving with probability α, the second only if the first also survived (α²), the third α³, and so on — then add them all up, because the run stops dead at the first rejection."
+
+Every dense-looking piece of `(1 - α^(K+1)) / (1 - α)` is just the closed form of that sum. Speculation is all-or-nothing *in sequence*: token 3 is worthless unless tokens 1 and 2 were both accepted, because token 3 was drafted conditioned on them. That compounding is why acceptance rate matters so much more than draft speed.
+
+| Symbol | What it is |
+|--------|------------|
+| `α` | Per-token acceptance probability. Share of proposed tokens the target keeps |
+| `K` | How many tokens the draft proposes per round (`num_speculative_tokens`) |
+| `α^i` | Probability the run survives all the way to depth `i`. Compounds, so it decays fast |
+| `1 + α + α² + ... + α^K` | Expected accepted length. The sum the closed form collapses |
+| `α^(K+1)` | The tail you never get to collect, because you only drafted `K` tokens |
+| `(1 - α^(K+1)) / (1 - α)` | Closed form of that geometric sum — one division instead of `K` additions |
+| `E[accepted]` | Tokens emitted per target forward pass. This is the raw speedup, before draft cost |
+
+The `+1` in the exponent is the **bonus token**. If all `K` drafts are accepted, the verify pass already computed the target's distribution at position `K+1`, so you sample one more token for free. That is why the sum starts at `α^0 = 1`: even at `α = 0`, a round still produces exactly one token — the correction — so speculation can never emit *fewer* tokens than plain decoding, only cost more wall-clock.
+
+**Walk one example.** `α = 0.8`, `K = 4` — expand the sum before collapsing it:
+
+```
+  depth i   survives with   contribution
+  -------   -------------   ------------
+     0        alpha^0          1.0000     <- guaranteed token (accepted or corrected)
+     1        alpha^1          0.8000
+     2        alpha^2          0.6400
+     3        alpha^3          0.5120
+     4        alpha^4          0.4096     <- the bonus token, only if all 4 accepted
+                              --------
+                       sum =   3.3616
+
+  closed form check:
+    (1 - 0.8^5) / (1 - 0.8)  =  (1 - 0.32768) / 0.2  =  0.67232 / 0.2  =  3.3616
+
+  Meaning: one target forward pass emits 3.36 tokens on average instead of 1.
+```
+
+**Put simply.** "No matter how many tokens you let the draft propose, the expected run length can never exceed `1 / (1 - α)` — the acceptance rate alone sets a hard ceiling."
+
+Push `K -> infinity` and `α^(K+1) -> 0`, so `E[accepted] -> 1 / (1 - α)`. This is the single most useful number in the whole topic, because it tells you the maximum speedup available *before* you tune anything.
+
+| α | Ceiling `1 / (1 - α)` | `E[accepted]` at K=4 | Fraction of ceiling reached |
+|---|----------------------|----------------------|------------------------------|
+| 0.50 | 2.00 | 1.94 | 97% |
+| 0.60 | 2.50 | 2.31 | 92% |
+| 0.75 | 4.00 | 3.05 | 76% |
+| 0.80 | 5.00 | 3.36 | 67% |
+| 0.90 | 10.00 | 4.10 | 41% |
+
+Read the last column as "how much headroom raising K would buy you." At α=0.50 a K=4 chain is already within 3% of everything speculation can ever give you — raising K is wasted draft compute. At α=0.90 you have captured only 41% of the ceiling, and a longer chain (or a tree) pays. **This is the real reason high-acceptance methods like EAGLE and MTP matter**: they do not just move you along the curve, they raise the ceiling itself. Going from α=0.52 (the case study's 1B chat draft) to α=0.83 (its EAGLE replacement) lifts the ceiling from 2.08 to 5.88 tokens per pass.
+
+**In plain terms.** "Divide what you gained by what you paid — the accepted tokens are the numerator, and every draft token you generated is a small tax in the denominator, whether or not it survived."
+
+The denominator `1 + K × draft_cost_fraction` is the part teams forget. Draft tokens are generated *sequentially*, before the verify pass, and you pay for all `K` of them even when the target rejects at depth 1.
+
+| Symbol | What it is |
+|--------|------------|
+| `draft_cost_fraction` | Cost of one draft token as a share of one target forward pass. `c` below |
+| `K × c` | Total draft tax per round — linear in K, and paid on rejected tokens too |
+| `1 + K × c` | Cost of a full round: one target verify pass plus the draft chain |
+| `E[accepted] / (1 + K × c)` | Net speedup. Numerator saturates at the ceiling; denominator grows forever |
+
+**Walk one example.** Sweep K at a fixed α = 0.80 under two cost regimes — the theoretical FLOPs ratio `c = 0.014` (1B draft vs 70B target) and a measured wall-clock ratio `c = 0.20`:
+
+| K | `E[accepted]` | cost at c=0.014 | net speedup | cost at c=0.20 | net speedup |
+|---|---------------|------------------|-------------|-----------------|-------------|
+| 1 | 1.800 | 1.014 | 1.775 | 1.20 | 1.500 |
+| 2 | 2.440 | 1.028 | 2.374 | 1.40 | 1.743 |
+| 3 | 2.952 | 1.042 | 2.833 | 1.60 | 1.845 |
+| 4 | 3.362 | 1.056 | 3.183 | 1.80 | **1.868** |
+| 5 | 3.689 | 1.070 | 3.448 | 2.00 | 1.845 |
+| 6 | 3.951 | 1.084 | 3.645 | 2.20 | 1.796 |
+| 7 | 4.161 | 1.098 | 3.790 | 2.40 | 1.734 |
+| 8 | 4.329 | 1.112 | 3.893 | 2.60 | 1.665 |
+
+The right-hand column is the one that matches production: net speedup **peaks at K=4 (1.868×) and falls off after it**, because `E[accepted]` is climbing toward its 5.00 ceiling with rapidly diminishing steps (+0.41 from K=3→4, but only +0.17 from K=7→8) while the draft tax keeps adding a flat `c` per token. Under the optimistic `c = 0.014` the tax is so small that the curve never turns over within K≤8 — which is exactly why a FLOPs-ratio estimate will tell you to crank K up and real hardware will not agree.
+
+**Why the measured cost ratio is so much larger than the parameter ratio.** A 1B draft is ~1.4% of a 70B model's FLOPs, but decode is memory-bandwidth-bound and latency-floored: kernel launches, sampling, and Python-side scheduling do not shrink with the model. Invert the file's own break-even to see the implied number — solving `E[accepted] = 1 + 4c` at the stated break-even of α≈0.45 gives `E(0.45, 4) = 1.7846`, so `c = (1.7846 - 1) / 4 = 0.196`. The real draft tax is ~20% of a target pass per token, roughly 14× the FLOPs ratio. Budget with measured wall-clock, never with parameter counts.
+
+**A note on the K=4 table above.** Plugging the stated α values straight into `(1 - α^(K+1)) / (1 - α)` gives `4.10 / 3.05 / 2.31 / 1.94` for α = 0.90 / 0.75 / 0.60 / 0.50, so the listed `3.52 / 2.63 / 2.07 / 1.69` are the more conservative end-to-end figures rather than the raw geometric idealization. The gap is the point: the geometric model assumes a *constant* per-token α, but real acceptance decays with depth — the 4th draft token is conditioned on three prior guesses and is empirically harder to accept than the 1st. Treat the closed form as an upper bound on a real system, not a forecast.
 
 When α < 0.45 for K=4, the draft model's sequential overhead exceeds the savings from accepted tokens — speculative decoding becomes a net *slowdown*. This is the number production monitors alarm on (Section 6.9).
 
@@ -474,6 +625,40 @@ def fixed_conditional_on_output_length(expected_output_tokens: int) -> dict:
 
 ---
 
+**Stated plainly.** "At high concurrency the draft stops being a rounding error, because every one of the 512 sequences in the batch wants its own K draft tokens — and the verify pass stops being free, because 2,560 positions is a real batch, not a few passengers riding along on a weight-load."
+
+This is the one regime where the entire premise of Section 2 inverts. Speculation is profitable precisely *because* decode is memory-bandwidth-bound and the extra positions are free; once the batch is large enough to be compute-bound, those positions cost what they weigh.
+
+| Symbol | What it is |
+|--------|------------|
+| `batch_size` | Concurrent sequences in the decode step. 512 in the worked case |
+| `K` | Draft tokens proposed per sequence per round. 5 here |
+| `batch_size × K` | Total draft tokens the draft model must generate every single step |
+| draft step cost | Wall-clock of that batched draft pass. ~7.5 ms at typical HBM bandwidths |
+| target step cost | Wall-clock of one target decode step. 20 ms/token from the Section 14 baseline |
+| `speculative_disable_by_batch_size` | The vLLM threshold (commonly 32–64) that trips the fallback |
+
+**Walk one example.** The 512-concurrency step, priced against the case study's 20 ms baseline:
+
+```
+  draft tokens per step  = 512 sequences x K=5      = 2,560 tokens
+  draft pass wall-clock                             =    7.5 ms
+  target decode step (baseline, Section 14)         =   20.0 ms
+
+  draft tax as a share of one target step = 7.5 / 20.0 = 0.375  ->  37.5%
+
+  And the verify pass is no longer a free ride:
+    plain decoding scores  512 x 1 = 512 positions per pass
+    speculative scores     512 x 5 = 2,560 positions per pass   (5x the work)
+
+  At batch 512 the GPU is already past the roofline crossover (~batch 156 on
+  an A100), so those 5x positions cost ~5x compute -- they are not passengers.
+```
+
+Compare that 37.5% to the ~1.4% FLOPs-ratio estimate a capacity plan would have used and the failure mode is obvious: the draft tax scales with `batch_size × K` while the benefit per sequence is capped at `1/(1-α)` no matter how many sequences you run. Concurrency multiplies the cost and does nothing for the ceiling, which is why the fallback is a *batch-size* threshold rather than an acceptance-rate one — it fires even when α is excellent.
+
+---
+
 ## 7. Real-World Examples
 
 - **vLLM** — supports multiple speculative methods via `speculative_model`: independent draft models (any HF causal LM with a matching tokenizer), `"[ngram]"` for prompt-lookup decoding, and dedicated integrations for EAGLE and Medusa checkpoints. Exposes `num_speculative_tokens`, `speculative_disable_by_batch_size`, and `use_v2_block_manager` for KV cache sharing between draft and target.
@@ -636,6 +821,38 @@ Only TPOT (decode). TTFT is dominated by the prefill pass over the input prompt,
 | Chat α | — | 0.52 | 0.55 |
 | GPU count (same load) | 8×H100 | 8×H100 | 8×H100 |
 | Cost reduction | — | 65% | 68% |
+
+**What it means.** "The measured 20 ms → 7.8 ms per token is a 2.56× decode win, and you can rebuild that number from nothing but the two acceptance rates in the table — which is the check that tells you the deployment is behaving as theory predicts rather than getting lucky."
+
+Always close this loop after a rollout. A measured speedup that *exceeds* the theoretical ceiling for your α means your acceptance instrumentation is wrong; one that falls far short means overhead you have not accounted for.
+
+| Symbol | What it is |
+|--------|------------|
+| `α = 0.71 / 0.52` | Measured acceptance on the code and chat routes respectively |
+| `K = 5` | `num_speculative_tokens` in the deployed vLLM config |
+| `E[accepted]` | Predicted tokens per target pass, from `(1 - α^6) / (1 - α)` |
+| `1 / (1 - α)` | The ceiling for each route — the best any K could ever reach |
+| 20 → 7.8 ms/token | The measured per-token decode improvement, i.e. the observed speedup |
+
+**Walk one example.** Predict each route from its α, then compare to what shipped:
+
+```
+  code route,  alpha = 0.71, K = 5:
+    E = (1 - 0.71^6) / (1 - 0.71) = (1 - 0.12810) / 0.29 = 3.007 tokens/pass
+    ceiling = 1 / (1 - 0.71) = 3.448      -> already at 87% of it, K=5 is enough
+
+  chat route,  alpha = 0.52, K = 5:
+    E = (1 - 0.52^6) / (1 - 0.52) = (1 - 0.01977) / 0.48 = 2.042 tokens/pass
+    ceiling = 1 / (1 - 0.52) = 2.083      -> at 98% of it, raising K buys nothing
+
+  measured decode speedup = 20.0 / 7.8 = 2.56x
+  measured throughput     = 510 / 180   = 2.83x
+
+  2.56x sits between the chat prediction (2.04) and the code prediction (3.01)
+  -- exactly where a mixed traffic blend should land.
+```
+
+The chat route's 98%-of-ceiling number is the actionable one: adaptive K correctly held chat at K=3-4, because at α=0.52 the 5th draft token contributes `0.52^5 = 0.038` expected tokens and costs a full draft step. The only way to improve that route is to raise α itself — which is precisely what the EAGLE evaluation below does, lifting chat's ceiling from 2.08 to `1 / (1 - 0.83) = 5.88`.
 
 **Lesson that generalized beyond this deployment**: the p99 TTFT improvement (1,800ms → 650ms) was *not* from speculative decoding directly — it came because higher decode throughput freed GPU time for chunked prefill of incoming long requests, which had previously been queued behind ongoing decode work. Speculative decoding's TPOT win had a second-order effect on TTFT through the scheduler. The team subsequently evaluated EAGLE for the same target and measured α≈0.83 for chat (vs. 0.52 for the 1B draft) with no separate model deployment — now in rollout, projected to push chat throughput past the code-route numbers above.
 

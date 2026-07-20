@@ -20,6 +20,41 @@ This deep-dive covers six concrete cost-management strategies — per-task budge
 
 **Key insight**: Reading a single 500KB file into context once costs you on EVERY subsequent LLM call for the remainder of that agent loop. The #1 cost sink in production agents is tool outputs that get appended verbatim and re-sent forever after. Targeted extraction (grep, head, summary) beats raw file dump.
 
+### Decoding the O(N squared) claim
+
+**What this actually says.** "Every step re-sends everything that came before, so the bill for an N-step agent is not N copies of one call — it is the sum `1 + 2 + 3 + ... + N`, and that sum grows with N *squared*."
+
+This is the single most important arithmetic fact in agent engineering, and it is why every mitigation in this file (compaction, truncation, caching) attacks the *context size* term rather than the step count. Halving the number of steps saves you 2×; halving what each step appends saves you close to 4×.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of LLM calls in the loop — one per tool round-trip |
+| `c0` | Starting context: system prompt + tool schemas + the user request |
+| `g` | Tokens each step appends — the tool result plus the assistant's own message |
+| `ctx(k)` | Context billed at step `k`, which is `c0 + g x (k - 1)` |
+| `p` | Input price per token. Sonnet `$3.00 / 1M` = `3.0e-6` |
+| `sum ctx(k)` | Total input tokens for the whole run: `N x c0 + g x N(N-1)/2` |
+
+The `N(N-1)/2` piece is the quadratic term, and it carries `g` — the per-step growth — as its coefficient. That is the formal version of "tool outputs re-sent forever after."
+
+**Walk one example.** A 10-step loop, 2K starting context, 6K appended per step, Sonnet input pricing:
+
+```
+  step   context (tok)    this call     running total
+    1        2,000          $0.006         $0.006
+    2        8,000          $0.024         $0.030
+    3       14,000          $0.042         $0.072
+    5       26,000          $0.078         $0.210
+    8       44,000          $0.132         $0.552
+   10       56,000          $0.168         $0.870
+
+  billed input tokens = 10 x 2,000 + 6,000 x 10 x 9 / 2  =  290,000
+  if context never grew = 10 x 2,000                     =   20,000
+  ratio                                                  =     14.5x
+```
+
+Ten calls, but you paid for 14.5 calls' worth of a flat context. Step 10 alone costs 28× what step 1 did, and nothing about step 10's *work* is 28× bigger — you are paying rent on step 1 through step 9's leftovers.
+
 ---
 
 ## 3. Core Principles
@@ -99,6 +134,35 @@ Step  Total context  Cached prefix  Cost (Sonnet w/ cache)
 Total caches save ~70% on prefix portion
 ```
 
+**Read it like this.** "Pay 1.25× once to park the static prefix in cache, then pay 0.1× every time you reuse it — you are ahead from the second call onward."
+
+| Symbol | What it is |
+|--------|------------|
+| `1.25x` | Cache-write multiplier. Sonnet's `$3.00/M` input becomes `$3.75/M` on the write call |
+| `0.1x` | Cache-read multiplier. That same prefix costs `$0.30/M` on every later call |
+| `3K (write)` | The static prefix — system prompt plus tool schemas — paid for once |
+| `3K (read)` | The same prefix on a later call, billed at the read rate |
+| `Total context` | Everything sent; only the non-prefix remainder is billed at full input price |
+| 5-min TTL | Anthropic's ephemeral cache lifetime. Each read refreshes the clock |
+
+The dollar figures in the table above come straight out of those two rates: the write is `3,000 x $3.75/M = $0.01125` (shown as `$0.011`), and every subsequent read is `3,000 x $0.30/M = $0.0009`.
+
+**Walk one example.** Track the same prefix over five calls, in units of "one uncached send":
+
+```
+  call   uncached      cached                     cumulative saving
+    1      1.00        1.25   (write, 1.25x)           -25%
+    2      2.00        1.35   (+0.10 read)            +32.5%
+    3      3.00        1.45                           +51.7%
+    5      5.00        1.65                           +67.0%
+
+  breakeven:  1.25 + 0.1 x (N - 1)  =  N
+              1.15                  =  0.9 x N
+              N                     =  1.28
+```
+
+Call 1 is 25% *worse* than not caching — that is the write premium, and it is the whole risk. Breakeven lands at `N = 1.28`, so the second call has already paid it back. By call 5 you are keeping 67%, converging toward the 90% ceiling that `1 - 0.1x` implies. This is also why Pitfall 3 below is so expensive: a prefix that changes every call pays the 1.25× write *forever* and never reaches a single read — a permanent 25% surcharge for a feature meant to save 70%.
+
 ### Model Cascade
 
 ```
@@ -121,6 +185,34 @@ Total caches save ~70% on prefix portion
   Savings: 72%
 ```
 
+**Put simply.** "Your real per-step price is not the expensive model's price — it is the two prices averaged together, weighted by how often the router actually picks each one."
+
+| Symbol | What it is |
+|--------|------------|
+| `f_easy` | Fraction of steps routed to the cheap model. Here `0.8` |
+| `f_hard` | The remainder, `1 - f_easy = 0.2` — steps escalated to Opus |
+| `c_easy` | Haiku cost per step, `$0.005` |
+| `c_hard` | Opus cost per step, `$0.05` — 10× the cheap one |
+| `c_router` | Classification overhead paid on *every* step, `$0.0005` |
+| blended | `f_easy x c_easy + f_hard x c_hard + c_router` |
+
+**Walk one example.** Sweep the escalation rate `f_hard` and watch the savings collapse:
+
+```
+  f_hard   blended cost/step   savings vs all-Opus
+   0.00        $0.00500              90%
+   0.10        $0.00950              81%
+   0.20        $0.01400              72%    <- the case shown above
+   0.35        $0.02075            58.5%
+   0.50        $0.02750              45%
+   1.00        $0.05000               0%
+
+  with the router's own $0.0005 folded in, at f_hard = 0.20:
+     0.8 x 0.005 + 0.2 x 0.05 + 0.0005 = $0.0145   ->  71% (not 72%)
+```
+
+**Why the 10× price gap makes `f_hard` the only knob that matters.** Because `c_hard` is 10× `c_easy`, the hard branch dominates the average the moment `f_hard` clears about 10%: at `f_hard = 0.2` the 20% of hard steps contribute `$0.010` of the `$0.014` total — 71% of the bill from a fifth of the traffic. So cascade savings are a bet on router *precision*, not on the cheap model being cheap. A router that over-escalates from 20% to 50% keeps only half the promised win, and the router's own `$0.0005` per step is noise by comparison — it costs 1 percentage point of savings.
+
 ### Cost Attribution Per Tool Call
 
 ```mermaid
@@ -132,6 +224,32 @@ xychart-beta
 ```
 
 The two raw `read_file` calls (steps 3 and 5) dominate — $0.39 of the $0.40 total (97%). Replacing raw file reads with grep-based extraction cuts roughly 80% of the cost.
+
+**What the formula is telling you.** "Two of five tool calls carry 97% of the bill, so the only optimization worth writing is the one that shrinks those two — everything else is rounding error."
+
+| Symbol | What it is |
+|--------|------------|
+| bar height | Dollar cost of the tokens that one tool call injected into context |
+| `read_file 50KB` / `80KB` | Raw file dumps — cost scales linearly with bytes returned |
+| `grep 0.5KB` | Targeted extraction — same question answered, ~100× fewer tokens |
+| total | `$0.401` across all five calls |
+| `r` | Extraction ratio: how many times smaller the targeted read is than the raw one |
+
+**Walk one example.** Hold the three cheap calls fixed and shrink only the two file reads by a factor `r`:
+
+```
+                                total     saving vs $0.401
+  r =  1   (no change)          $0.401           0%
+  r =  2                        $0.206        48.6%
+  r =  4                        $0.109        72.9%
+  r =  5                        $0.089        77.8%
+  r = 10                        $0.050        87.5%
+  r = 25                        $0.027        93.4%
+
+  hard floor (file reads free)  $0.011        97.3%
+```
+
+The "roughly 80%" claim above corresponds to about `r = 5` — a 50KB dump becoming a 10KB extract, which is a modest ask for grep. Note the floor: even a *perfect* extractor only reaches 97.3%, because the other three calls cost `$0.011` no matter what. That is the shape of every Pareto cost problem — chase the top two line items, then stop, because the remaining 2.7% is not recoverable at any engineering price.
 
 ---
 
@@ -283,6 +401,42 @@ async def cost_aware_agent(user_request: str, budget: AgentBudget) -> str:
     
     return "Max iterations"
 ```
+
+**Stated plainly.** The four-term sum inside `update_budget` says: "a response's price is four separate meters read at four different rates — fresh input, generated output, tokens you paid to *store*, and tokens you paid to *reuse* — and you must add all four or your budget cap is a lie."
+
+| Symbol | What it is |
+|--------|------------|
+| `in_toks` | `usage.input_tokens` — tokens sent that were NOT served from cache |
+| `out_toks` | `usage.output_tokens` — what the model generated. Priced 5× input on Sonnet |
+| `cw` | `cache_creation_input_tokens` — prefix written to cache at 1.25× input |
+| `cr` | `cache_read_input_tokens` — prefix served from cache at 0.1× input |
+| `p["input"]` | `3.00e-6` — dollars per token, i.e. `$3.00` per million |
+| `or 0` | Guard: these fields are absent on non-caching models, and `None + int` raises |
+
+The `getattr(..., 0) or 0` on `cw` and `cr` is the term most often dropped. Omit it and cache traffic silently costs `$0`, so `budget.cost_usd` under-reports and the `>= max_total_cost_usd` check never trips — the cap looks enforced while spend runs free.
+
+**Walk one example.** Two Sonnet calls, the first writing a 3,000-token prefix to cache and the second reading it back:
+
+```
+  call 1 (cache write)
+    input        5,000 x $3.00/M   =  $0.01500
+    output         800 x $15.00/M  =  $0.01200
+    cache_write  3,000 x $3.75/M   =  $0.01125
+    cache_read       0             =  $0.00000
+                                      ---------
+                                      $0.03825
+
+  call 2 (cache read)
+    input        2,000 x $3.00/M   =  $0.00600
+    output         500 x $15.00/M  =  $0.00750
+    cache_read   3,000 x $0.30/M   =  $0.00090
+                                      ---------
+                                      $0.01440
+
+  budget.cost_usd after 2 calls     =  $0.05265   ->  10.5% of the $0.50 cap
+```
+
+Call 2 without caching would have re-sent all 5,000 input tokens: `$0.01500 + $0.00750 = $0.02250`, so the cache saved `$0.0081` on a single call — 36%. Two things fall out of the arithmetic. First, output tokens are the quiet expense: 800 output tokens cost more than 3,000 cached-write tokens, which is why `max_tokens=2048` is itself a cost control, not just a truncation guard. Second, `$0.50 - $0.05265 = $0.44735` remains, which at call 2's steady-state `$0.01440` buys 31 more calls — except that context keeps growing, so the real number is far lower. That gap between "31 if flat" and reality is exactly the quadratic term from Section 2, and it is why the cap must be checked every iteration rather than estimated once up front.
 
 ### Targeted File Reading
 
