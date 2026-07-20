@@ -345,6 +345,60 @@ resilience4j:
         max-wait-duration: 50ms
 ```
 
+**What this actually says.** "Do not judge a dependency until you have seen enough calls to judge it fairly — then, if half of a fixed-size recent window failed, stop calling it for a while."
+
+Every one of these numbers is a rate over a *denominator*, and the denominator is the part people forget. `failure-rate-threshold: 50` on its own means nothing; it is `50%` of whatever `sliding-window-size` and `minimum-number-of-calls` decide to count.
+
+| Symbol | What it is |
+|--------|------------|
+| `sliding-window-size` | How many recent calls (COUNT_BASED) form the denominator |
+| `minimum-number-of-calls` | Floor before the rate is evaluated at all; below it the breaker stays CLOSED |
+| `failure-rate-threshold` | Percentage of the window that must fail to trip the breaker |
+| `slow-call-duration-threshold` | A call slower than this counts as a failure even though it succeeded |
+| `permitted-number-of-calls-in-half-open-state` | Probe calls allowed through to test recovery |
+| `wait-duration-in-open-state` | How long OPEN lasts before probing |
+
+**Walk one example.** The tuned config (window 10, threshold 50%, minimum 5) meeting a downstream that dies:
+
+```
+  call #   outcome    window contents        failures  rate     evaluated?
+   1       fail       [F]                      1       100%     no  (1 < min 5)
+   2       fail       [F F]                    2       100%     no  (2 < min 5)
+   3       ok         [F F S]                  2        67%     no  (3 < min 5)
+   4       fail       [F F S F]                3        75%     no  (4 < min 5)
+   5       fail       [F F S F F]              4        80%     YES -> 80 >= 50
+                                                                 -> OPEN
+
+  5 failures were enough because 4 of the 5 were failures: 4 / 5 = 80% >= 50%.
+```
+
+Recovery, 60 s later:
+
+```
+  OPEN for 60 s        -> every call short-circuits to the fallback, 0 downstream load
+  HALF_OPEN            -> 5 probe calls permitted
+      5 of 5 succeed   -> 0 / 5 = 0% failure   ->  0 <  50  ->  CLOSED
+      3 of 5 succeed   -> 2 / 5 = 40% failure  -> 40 <  50  ->  CLOSED (still!)
+      2 of 5 succeed   -> 3 / 5 = 60% failure  -> 60 >= 50  ->  back to OPEN
+```
+
+Note the middle row: a 40%-failing dependency is *accepted back*, because the threshold is 50, not 0. That surprises people during incident review.
+
+**Why the broken config trips constantly.** Contrast the two windows on the exact same traffic — one unlucky failure in an otherwise healthy service:
+
+```
+  BROKEN: window 2, minimum 1, threshold 50
+      one failure, one success -> 1 / 2 = 50% >= 50  ->  OPEN
+      a single transient blip takes the dependency out for the full wait duration.
+
+  FIXED : window 20, minimum 10, threshold 50
+      one failure in 20        -> 1 / 20 =  5% <  50  ->  stays CLOSED
+      needs 10 of the last 20 to fail before it opens.
+```
+
+The smaller the window, the higher the variance of the measured rate — with a denominator of 2 the rate can only ever be 0%, 50%, or 100%, so it lands on or above the threshold constantly. `minimum-number-of-calls` exists precisely to stop the breaker from acting on a sample too small to mean anything; set it to 1 and you have disabled the safeguard.
+
+**Reading the sibling limits.** `limit-for-period: 20` over `limit-refresh-period: 1s` is 20 permits per second, refilled in one lump at each second boundary rather than smoothly — so 20 calls can fire in the first millisecond and the 21st waits up to `timeout-duration: 100ms` before throwing. `max-concurrent-calls: 10` is a different currency: not calls per second but calls *at the same instant*. By Little's Law they connect — a bulkhead of 10 with an average call duration of 200 ms sustains `10 / 0.2 = 50` calls/s, which is why a bulkhead sized without reference to latency silently becomes the rate limiter.
 ```java
 @Service
 public class OrderClient {

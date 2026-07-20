@@ -301,6 +301,51 @@ default_deferrable = False            ; set True to flip every deferrable-capabl
 
 Rule of thumb: `parallelism` is the cluster ceiling, pool slots are per-resource ceilings, and `max_active_tasks_per_dag` is the per-DAG ceiling — a task runs only if it clears all three.
 
+**Stated plainly.** "Four separate ceilings sit between a ready task and a running one, and your actual concurrency is the smallest of them — never the one you last edited."
+
+Written as a `min()` it stops being four config values and becomes one arithmetic question: which term is currently smallest? Raising any other term changes nothing at all, which is why "I doubled the workers and throughput did not move" is the most common Airflow complaint.
+
+| Symbol | What it is |
+|--------|------------|
+| `parallelism` | Cluster-wide cap on task instances in the `running` state. Default `32` |
+| `max_active_tasks_per_dag` | Cap on concurrent tasks within a single DAG. Default `16` |
+| pool slots | Cap for a named shared resource; a task may claim `pool_slots > 1` |
+| `worker_concurrency` | Task processes one Celery worker will run at once. Default `16` |
+| worker count | How many Celery worker hosts are in the fleet |
+
+**Walk one example.** A 200-task fan-out DAG on a 4-worker Celery fleet, all defaults:
+
+```
+  fleet execution capacity : worker_concurrency 16 x 4 workers = 64 slots
+  cluster ceiling          : parallelism                       = 32
+  per-DAG ceiling          : max_active_tasks_per_dag          = 16
+  default pool             : default_pool_task_slot_count      = 128
+
+  effective concurrency = min(64, 32, 16, 128) = 16 tasks running
+
+  hardware idle           : 64 - 16 = 48 slots paid for and unused
+  wall clock for 200 tasks at 60 s each:
+      ceil(200 / 16) = 13 waves  ->  13 x 60 s = 780 s = 13.0 min
+```
+
+Raise only the per-DAG ceiling and watch which term takes over:
+
+```
+  max_active_tasks_per_dag 16 -> 64
+  effective = min(64, 32, 64, 128) = 32     <- parallelism is now binding
+      ceil(200 / 32) = 7 waves -> 7 x 60 s = 420 s = 7.0 min
+
+  now also raise parallelism 32 -> 64
+  effective = min(64, 64, 64, 128) = 64     <- the fleet itself is binding
+      ceil(200 / 64) = 4 waves -> 4 x 60 s = 240 s = 4.0 min
+```
+
+Three edits, each unlocking the next bottleneck: 13.0 min, 7.0 min, 4.0 min. Stopping after the first edit and concluding "Airflow does not scale" is the trap.
+
+**Why `pool_slots > 1` breaks the naive count.** A pool's capacity is measured in slots, not tasks, so a task declaring `pool_slots: 4` against a 5-slot `warehouse` pool leaves room for exactly one more single-slot task, not four. This is deliberate — it is how you express "this Spark submit costs as much warehouse capacity as four small queries." Forget it and the pool looks under-utilized in the UI while tasks queue behind it.
+
+**Why sensor mode dominates all four ceilings.** A `poke` sensor occupies one of these scarce slots for its entire wait; 1,000 concurrent S3 waits consume 1,000 slots against a `parallelism` of 32, so the cluster deadlocks before any real work is scheduled. `reschedule` frees the slot between pokes, and `deferrable` holds **zero** — which is why the triggerer changes the capacity equation rather than merely tuning it.
+
 ### 6.3 Connections and provider hooks
 
 A **Connection** is a named credential/endpoint (`conn_id`) — a host, login, password, port, and a JSON `extra` blob — resolved at run time by a **Hook**. `PostgresHook(postgres_conn_id="warehouse")` looks up the `warehouse` connection and returns a live client; operators wrap hooks. Connections resolve through a lookup chain: **secrets backend → environment variable (`AIRFLOW_CONN_WAREHOUSE`) → metadata DB**. Never hard-code credentials in a DAG file — that leaks them into every parse and into version control.

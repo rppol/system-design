@@ -18,6 +18,33 @@ HikariCP is the fastest, most widely used JDBC connection pool for Java. Spring 
 
 **Key insight**: The formula `pool_size = (core_count * 2) + effective_spindle_count` (where effective_spindle_count = 1 for SSDs) comes from Little's Law applied to queuing theory. For a 4-core database with SSD: optimal pool = (4 * 2) + 1 = 9 connections per application server. This is shockingly small for most engineers who expect "more connections = more parallelism."
 
+**In plain terms.** "The number of connections you actually need is throughput multiplied by how long each query holds one — and the database's core count, not your traffic, sets the ceiling on how many are useful."
+
+Little's Law (`L = λ × W`) tells you the *demand* side; the HikariCP formula tells you the *supply* side. Pool sizing is the smaller of "enough for the arrival rate" and "not more than the database can execute in parallel."
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Average number of connections busy at any instant — what the pool must cover |
+| `λ` | Arrival rate, queries per second |
+| `W` | Average time one query holds a connection, in **seconds** (10ms = `0.010`) |
+| `core_count` | CPU cores on the **database** server, not the application server |
+| `effective_spindle_count` | Concurrent disk seeks the storage supports; `1` for SSD |
+
+**Walk one example.** A service at 100 req/s against a 4-core PostgreSQL box on SSD, 10ms queries:
+
+    Little's Law (demand)
+      L = lambda x W = 100 x 0.010 s        = 1.0 connections busy on average
+      naive "+50% headroom"                  = 1.5 connections
+
+    HikariCP formula (supply ceiling)
+      pool = (core_count x 2) + spindles
+           = (4 x 2) + 1                     = 9 connections
+
+    what 9 connections can actually absorb
+      capacity = pool / W = 9 / 0.010 s      = 900 req/s sustained
+
+Provisioning the Little's Law answer of 1 connection would collapse on the first burst, because `L` is a *mean* and arrivals are not uniform. Provisioning 50 would not help either: past roughly `cores × 2`, extra connections do not add parallelism, they add context switches and lock contention on the database — which is why the danger zone in the chart below starts near 25.
+
 ---
 
 ## 3. Core Principles
@@ -285,6 +312,38 @@ sequenceDiagram
 
 *The pool behaves identically in both runs — grant up to `maximumPoolSize`, queue the rest — but a 200ms query drains and refills the pool every cycle while a 10s query holds all 10 connections past the 5000ms `connectionTimeout`, turning healthy queuing into `ConnectionTimeoutException` for every waiter. The fix is never to enlarge the pool blindly: watch `hikaricp_connections_pending` — a value pinned near maximumPoolSize means the query, not the pool, is the real bottleneck.*
 
+**What this actually says.** "A queued thread waits one full query duration for every 10 threads ahead of it — so whether you get served or get an exception is decided entirely by query latency, never by how deep the queue is."
+
+The queue drains in *waves* of `maximumPoolSize`. That gives an exact test for whether a pool is too small: compute the wait for the last thread in line and compare it to `connectionTimeout`.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Concurrent threads demanding a connection (50 here) |
+| `P` | `maximumPoolSize` — threads served per wave (10 here) |
+| `W` | Query duration; how long one wave lasts |
+| `wave(k)` | `ceil(k / P)` — which wave the k-th thread is served in |
+| `wait(k)` | `(wave(k) - 1) × W` — how long that thread sits pending |
+| `connectionTimeout` | Wall clock a waiter tolerates before `ConnectionTimeoutException` (5000ms) |
+
+**Walk one example.** The two runs in the diagram, 50 threads against a 10-connection pool:
+
+    healthy run, W = 200 ms
+      waves needed        = 50 / 10                = 5 waves
+      last thread's wave  = 5, so wait             = (5 - 1) x 200 ms = 800 ms
+      800 ms < 5000 ms timeout                     -> everyone served, 0 errors
+      total drain time    = 5 x 200 ms             = 1000 ms
+
+    degraded run, W = 10 s (same pool, same 50 threads)
+      waves that fit in the timeout = 5000 / 10000 = 0.5 waves
+      -> wave 1 has not even finished when the clock runs out
+      every one of the 40 queued threads           -> ConnectionTimeoutException
+
+    how many waiters this pool COULD serve at 200 ms
+      waves within timeout = 5000 / 200            = 25
+      threads servable     = 25 x 10               = 250
+
+The last line is the point: at 200ms the same 10-connection pool absorbs 250 concurrent threads inside the timeout, so 50 threads was never a sizing problem. Only `W` changed. Enlarging the pool to 50 during the degraded run would put 50 ten-second queries on the database at once instead of 10, which is how a slow-query incident becomes a database outage.
+
 ---
 
 ## 7. Real-World Examples
@@ -292,6 +351,37 @@ sequenceDiagram
 **Stack Overflow**: Famously used with default PostgreSQL and SQL Server settings. Their blog documented that a 4-core web server with pool size 10 per instance handled their entire traffic. Most engineers are shocked — 10 connections per web server is often sufficient.
 
 **PgBouncer at scale**: Companies with thousands of microservice instances (each with a 10-connection HikariCP pool) would create 10,000+ connections to PostgreSQL — far exceeding its capacity (recommended max: 100-200). PgBouncer in transaction mode multiplexes 10,000 application connections to 50 PostgreSQL connections, enabling microservices scale without PostgreSQL connection limit issues.
+
+**Read it like this.** "The database never sees your pool size — it sees your pool size times your instance count, and that product is what has to fit under `max_connections`."
+
+This is the single most common way a per-service configuration that looks conservative in isolation takes down a shared database. Nothing in the application's own config hints at the problem; the number only exists at the fleet level.
+
+| Symbol | What it is |
+|--------|------------|
+| `I` | Number of application instances, including canaries and instances mid-deploy |
+| `P` | `maximumPoolSize` on **one** instance |
+| `total_conns` | `I × P` — connections the fleet will attempt against the database |
+| `max_connections` | Hard PostgreSQL ceiling; attempts beyond it are refused, not queued |
+| `I_safe` | `max_connections / P` — instances you may run before the ceiling breaks |
+
+**Walk one example.** The payment-service fleet from the case study, `max_connections = 100`:
+
+    per-instance config looks harmless
+      P = 20 connections                    ("plenty of headroom" for one service)
+
+    the number the database actually sees
+      total_conns = I x P = 30 x 20         = 600 attempted
+      600 / 100                             = 6.0x over max_connections
+
+    how many instances that pool size ever allowed
+      I_safe = 100 / 20                     = 5 instances
+      instance 6 onward                     -> FATAL: sorry, too many clients already
+
+    after halving the pool to the formula's 9-10
+      total_conns = 30 x 10                 = 300 attempted
+      I_safe      = 100 / 10                = 10 instances -> still 3x short
+
+Halving the pool moves the cliff from 5 instances to 10; it does not reach 30. That is why the fix is a pooling proxy rather than tuning: PgBouncer in transaction mode holds a real PostgreSQL connection only for the duration of a transaction, so 300 idle-most-of-the-time application connections collapse onto ~50 real ones — a fan-in ratio of `300 / 50 = 6:1`. Autoscaling makes this worse quietly, because `I` grows while `P` stays in a config file nobody re-reads.
 
 ---
 
@@ -326,7 +416,63 @@ sequenceDiagram
 
 **maxLifetime longer than load balancer/firewall timeout**: AWS RDS, Azure Database, and cloud proxies close idle connections after a timeout (typically 1800–3600 seconds). If maxLifetime is 30 minutes (1,800,000 ms) and the load balancer timeout is 1800 seconds (1,800,000 ms), connections may be closed by the LB exactly as HikariCP tries to retire them — causing connection errors. Set maxLifetime to at least 30 seconds below the firewall/LB timeout: `maxLifetime = LB_timeout_ms - 30_000`.
 
+**Put simply.** "Retire the connection yourself, with a safety margin, before anything on the network path decides to retire it for you."
+
+The failure mode is a race, not a leak: if both sides expire the connection at the same instant, HikariCP can hand a borrower a socket the load balancer closed microseconds earlier, and the error surfaces as a user-facing request failure rather than a pool log line.
+
+| Symbol | What it is |
+|--------|------------|
+| `LB_timeout_ms` | Idle timeout of the load balancer, firewall, NAT, or RDS Proxy in the path |
+| `maxLifetime` | Age at which HikariCP retires a connection on its own terms |
+| `margin` | `LB_timeout_ms - maxLifetime` — the gap that keeps the two from colliding |
+| `keepaliveTime` | How often an idle connection is probed so it never *looks* idle to the LB |
+
+**Walk one example.** The default HikariCP settings against a typical 30-minute LB timeout:
+
+    the collision (defaults)
+      LB_timeout  = 1,800,000 ms   (30 min)
+      maxLifetime = 1,800,000 ms   (HikariCP default, also 30 min)
+      margin      = 1,800,000 - 1,800,000     = 0 ms   <- race condition
+
+    the rule applied
+      maxLifetime = LB_timeout - 30,000
+                  = 1,800,000 - 30,000        = 1,770,000 ms
+
+    what this module's config actually uses
+      maxLifetime = 1,740,000 ms   (29 min)
+      margin      = 1,800,000 - 1,740,000     = 60,000 ms  (2x the minimum)
+
+The 29-minute value in section 6.1 is deliberately more conservative than the `- 30,000` floor: 60 seconds of margin also covers clock skew between the application host and the proxy, and one missed `keepaliveTime` probe at 60,000 ms. Note the ordering constraint that follows — `keepaliveTime` must be well under `maxLifetime`, or a connection is retired before it is ever probed.
+
 **Holding connections across external service calls**: A `@Transactional` method that calls an external HTTP API holds a database connection for the entire duration of the HTTP call. If the external call is slow (500ms), 10 active requests hold all 10 pool connections while waiting for HTTP — blocking all other database operations. Fix: minimize the code inside @Transactional to only the database operations; perform external calls outside the transaction.
+
+**The idea behind it.** "Your maximum request rate through a code path is the pool size divided by how long that path *holds* a connection — including every millisecond it holds one while doing nothing."
+
+Hold time, not query time, is the denominator. A transaction that spends 5ms querying and 500ms waiting on HTTP occupies a connection for all 505ms, and the pool cannot tell the difference.
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | `maximumPoolSize` (10) |
+| `T_hold` | Seconds a connection is checked out, **not** seconds of query execution |
+| `throughput` | `P / T_hold` — the hard ceiling this code path can sustain |
+| `utilization` | `query_time / T_hold` — the fraction of hold time doing real database work |
+
+**Walk one example.** A `@Transactional` method with a 5ms query wrapped around a 500ms HTTP call:
+
+    external call INSIDE the transaction
+      T_hold      = 5 ms query + 500 ms HTTP  = 505 ms  = 0.505 s
+      throughput  = 10 / 0.5                  ~ 20 req/s
+      utilization = 5 / 505                   = 0.99%   <- 99% of the pool is idle-but-held
+
+    external call moved OUTSIDE the transaction
+      T_hold      = 5 ms                      = 0.005 s
+      throughput  = 10 / 0.005                = 2000 req/s
+      utilization = 5 / 5                     = 100%
+
+    speedup from moving one line of code
+      2000 / 20                               = 100x
+
+No database work changed and no connection was added; only the checkout window moved. This is why "the database is slow" is so often wrong — at 20 req/s the database in this example is 99% idle, and adding read replicas or a bigger instance would improve nothing. Watch `hikaricp_connections_acquire_seconds` alongside actual query timings: a large gap between them is exactly this pattern.
 
 **minimumIdle causing connection thrashing**: If minimumIdle is set to 0 (no warm connections), every incoming request must create a new connection. Connection creation takes 20-100ms, adding latency to the first request after an idle period. Keep minimumIdle equal to expected steady-state concurrent connections.
 

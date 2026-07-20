@@ -666,6 +666,44 @@ Concrete arithmetic ties the levers together. Take a ResNet-50-class model on on
 
 The point is that throughput is `batch_efficiency x precision_speedup x instance_overlap`, each measured, not assumed — and the queue-delay budget (say 1.5 ms at a 25 ms P99 SLO) sets how large a batch can actually form under real inter-arrival times.
 
+**What this actually says.** "Throughput is not one number you tune. It is three independent multipliers stacked on top of a baseline, and each one is bought with a different currency — latency, accuracy, or GPU memory."
+
+Writing it as a product is what makes the tradeoffs visible: the multipliers compose, but so do their costs, and only one of the three (memory) has a hard wall you can hit.
+
+| Symbol | What it is |
+|--------|------------|
+| `batch_efficiency` | Throughput gain from making the matmul wider. Paid for in queue latency |
+| `precision_speedup` | Gain from FP32 -> INT8. Paid for in accuracy, and requires calibration |
+| `instance_overlap` | Gain from concurrent CUDA streams. Paid for in GPU memory, which is a hard limit |
+| `max_queue_delay_microseconds` | How long the batcher waits for a batch to fill before firing anyway |
+| P99 SLO | End-to-end latency ceiling; the queue delay must be a small slice of it |
+
+**Walk one example.** Stack the three multipliers on the 6 ms FP32 baseline:
+
+```
+  baseline, batch 1, FP32     : 1 / 0.006 s            =  167 infer/s
+  x batching to 8 (14 ms)     : 8 / 0.014 s            =  571 infer/s
+  x INT8 halves compute (7ms) : 8 / 0.007 s            = 1143 infer/s
+  x 2 instances, ~1.7x real   : 1143 x 1.7             = 1943 infer/s
+
+  net multiplier              : 1943 / 167             = ~11.6x
+  cross-check as a product    : 3.4 x 2.0 x 1.7        = 11.6   (agrees)
+```
+
+Now the two ceilings that decide whether you can actually keep it:
+
+```
+  memory   : 1.6 GB x 2 instances = 3.2 GB of 24 GB  -> 20.8 GB left over. Fits.
+             raise count to 8     : 1.6 x 8 = 12.8 GB + activations -> tight
+             raise count to 14    : 1.6 x 14 = 22.4 GB              -> OOM at deploy
+
+  latency  : queue delay 1500 us  = 1.5 ms of the 25 ms P99 budget  =  6%
+             compute at batch 8   = 7 ms                            = 28%
+             remaining for network, pre/post-processing, ranker     = 66%
+```
+
+**Why the instance multiplier is 1.7 and not 2.0.** Two model instances get separate CUDA streams, but they share the same SMs, the same L2, and the same memory bandwidth. The second instance only wins on the gaps the first leaves idle — kernel-launch overhead, memory stalls — so the gain shrinks as the model gets better at saturating the GPU on its own. That is the useful inversion: a model that scales *well* with instance count is telling you it was under-utilizing the GPU, which usually means batching was the cheaper fix all along. Never assume linear scaling; measure `nv_inference_count` before and after and divide.
+
 ### 6.26 Backend-Specific Tuning
 
 Each backend exposes its own knobs; the ones that matter in production:

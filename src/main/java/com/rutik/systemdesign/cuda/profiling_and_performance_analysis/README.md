@@ -515,6 +515,55 @@ AI < 295  ->  kernel sits under the bandwidth-limited slope  ->  memory-bound
 AI > 295  ->  kernel sits on the flat compute-limited roof    ->  compute-bound
 ```
 
+**What this actually says.** "Count how much math you do per byte you drag out of HBM. If that
+ratio is above the machine's break-even point, the ALUs are your limit; below it, the memory
+pipe is, and no amount of extra arithmetic will ever slow you down."
+
+The ridge point is a property of the *GPU*, not your kernel — it is where the sloped bandwidth
+roof meets the flat compute roof. Arithmetic intensity is a property of your *algorithm*. The
+whole roofline model is just comparing those two numbers, which is why you can call the regime
+before you ever launch the profiler.
+
+| Symbol | What it is |
+|--------|------------|
+| `AI` | Arithmetic intensity: useful FLOPs divided by bytes that must cross HBM. Units: FLOPs/byte |
+| `FLOPs performed` | The algorithm's math count. For a GEMM it is `2 x M x N x K` (one multiply + one add per MAC) |
+| `bytes moved from HBM` | Minimum traffic the algorithm forces, counting each matrix once. Cache hits do not count |
+| `peak compute` | The GPU's best-case FLOP/s for the precision in use. H100 BF16 dense: `989e12` |
+| `peak bandwidth` | The GPU's best-case HBM throughput. H100 HBM3: `3.35e12` bytes/s |
+| `Ridge point` | `peak compute / peak bandwidth`. The AI at which the two roofs cross — H100: `295 FLOPs/byte` |
+
+**Walk one example.** Two kernels, same GPU, opposite verdicts:
+
+```
+  Kernel A: FP16 GEMM, M = N = K = 4096
+    FLOPs = 2 x M x N x K        = 2 x 4096^3           = 137,438,953,472   (137.44 GFLOP)
+    bytes = 3 x M x N x 2 B      (A, B, C at 2 B/elt)   =     100,663,296   (100.66 MB)
+    AI    = 137,438,953,472 / 100,663,296               =        1365.3     FLOPs/byte
+
+    1365.3  >  295   ->  far past the ridge  ->  compute-bound
+      if compute-limited : 137.44e9  / 989e12   = 138.97 us   <- the binding one
+      if memory-limited  : 100.66e6  / 3.35e12  =  30.05 us
+
+  Kernel B: SAXPY, y = a*x + y, FP32
+    FLOPs = 2 per element        (one multiply, one add)
+    bytes = 12 per element       (read x 4 B, read y 4 B, write y 4 B)
+    AI    = 2 / 12                                      =           0.17    FLOPs/byte
+
+    0.17  <  295    ->  1771x below the ridge  ->  hopelessly memory-bound
+```
+
+Kernel A can be sped up by using Tensor Cores; Kernel B cannot be sped up by any arithmetic
+change at all, because it spends 30.05 us worth of its budget waiting on bytes either way. The
+ridge point is the single number that tells you which of those two sentences applies, and it is
+why "add more math to hide the stall" (the §10 anti-pattern below) is arithmetically doomed.
+
+**Why the ratio and not the raw counts.** A kernel that does 10x the FLOPs and moves 10x the
+bytes has the *same* AI and lands in the same regime — scaling the problem up does not move you
+along the roofline. Only changing the FLOPs-per-byte *ratio* does, which is precisely what
+tiling and shared-memory reuse accomplish: they cut the denominator while leaving the numerator
+alone.
+
 Computing AI from the algorithm (before profiling) predicts which regime a kernel *should*
 land in; `ncu`'s SOL bars and roofline chart then confirm or contradict that prediction
 empirically — a mismatch (e.g. AI predicts compute-bound but SOL Memory is at 90%) usually
@@ -857,6 +906,45 @@ Achieved occupancy                  63%             67%
 Top stall reason                    long scoreboard  long scoreboard (58%)
                                      (44%)
 ```
+
+**Read it like this.** "The memory pipe was already 94% full before the change and is still
+94% full after it. The only thing that moved is how much arithmetic we pile on top — and
+arithmetic was never what we were waiting for."
+
+Speed-of-Light bars are percentages *of that unit's own peak*, not shares of a single budget,
+so they do not sum to 100. Reading them as a pair is the entire diagnostic: which roof is the
+kernel pinned against, and did the change move that roof or a different one?
+
+| Symbol | What it is |
+|--------|------------|
+| `SOL Memory` | DRAM throughput as a percentage of the GPU's peak HBM bandwidth. 94% = the memory pipe is saturated |
+| `SOL Compute` | SM issue throughput as a percentage of peak instruction/FLOP rate. 41% = ALUs are less than half busy |
+| `Achieved occupancy` | Average resident warps divided by the SM's maximum. A latency-hiding *capacity* number, not a speed |
+| `long scoreboard` | Stall reason: the warp is parked waiting on a global-memory load to return |
+| `--launch-count 1` | Profile exactly one launch of the named kernel, so the numbers describe a single invocation |
+
+**Walk one example.** Push the two releases' bars through the roofline verdict:
+
+```
+                                  previous   this release   delta
+    SOL Memory                       93%          94%        +1 pt      <- pinned, unchanged
+    SOL Compute                      14%          41%        41/14 = 2.93x
+    Achieved occupancy               67%          63%        -4 pt
+    long-scoreboard stall            58%          44%        still the top reason
+
+    Regime check (both releases): SOL Memory 94  >>  SOL Compute 41
+      -> memory-bound in both  ->  runtime is set by bytes/s, not FLOPs/s
+
+    Headroom left on the memory roof = 100% - 94% =  6 pt
+      -> best case from ANY arithmetic change      =  6% faster, and only if it
+         somehow also freed bandwidth, which added expf/logf does not
+```
+
+The extra `expf`/`logf` tripled SOL Compute and bought nothing, because 2.93x of a number that
+was never binding is still not binding. Note the trap in the stall column: `long scoreboard`
+*fell* from 58% to 44%, which looks like an improvement — it is not. The memory waits did not
+shrink; the added arithmetic simply gave the scheduler other work to attribute cycles to, so
+the same stalls now occupy a smaller share of a longer run.
 
 **Step 3 — hypothesize.** SOL Memory is essentially unchanged (94% vs. 93%), ruling out a
 new coalescing regression. SOL Compute nearly tripled (14% → 41%) — a code change added

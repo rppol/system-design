@@ -120,6 +120,34 @@ flowchart LR
 
 *Blast radius widens one deliberate step at a time — from a risk-free staging run to a full availability-zone failure — so confidence is earned before the next stage runs against real production traffic.*
 
+**In plain terms.** "Blast radius is not 'how many boxes did I break' — it is the fraction of real user requests that could see an error, multiplied by how long they could see it."
+
+Stating it as a fraction of *traffic* rather than a count of *instances* is what makes the four stages comparable, and it is the only form that plugs into an error budget.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Instances the fault targets |
+| `N` | Total healthy instances behind the load balancer |
+| `f` | `n / N` — fraction of traffic routed at the faulted instances |
+| `t_detect` | Seconds until the readiness probe or load balancer stops sending traffic there |
+| `D` | Total experiment duration |
+| `affected` | `f × RPS × t_detect` — requests that can actually fail |
+
+**Walk one example.** Stage 2 of the diagram (kill 1 of 20 pods) on a service doing 1000 RPS, run for 10 minutes, with a readiness probe that ejects the pod in 10 seconds:
+
+    blast radius as a traffic fraction
+      f = n / N = 1 / 20                        = 0.05  = 5% of traffic
+
+    requests that can actually fail
+      affected = f x RPS x t_detect
+               = 0.05 x 1000 x 10 s             = 500 requests
+
+    as a share of the whole experiment window
+      total requests = 1000 x (10 x 60 s)       = 600,000
+      500 / 600,000                             = 0.083% of requests
+
+The gap between the two numbers is the point of the exercise: the *instantaneous* blast radius is 5%, but because the load balancer ejects the pod after 10 seconds, the *experiment-wide* impact is 0.083% — roughly sixty times smaller. If detection took 5 minutes instead of 10 seconds, the same 5% fault would touch 15,000 requests. `t_detect`, not `f`, is usually the term worth shrinking first.
+
 ---
 
 ## 6. How It Works — Detailed Mechanics
@@ -338,6 +366,39 @@ ACTION ITEMS:
   1. [Fix: describe]  Owner: [name]  Due: [date]
 ```
 
+### Budgeting an Experiment Against the SLO
+
+The runbook's "Blast radius" and "Duration" fields are not two independent choices — their product is the bill the experiment charges to the error budget, and that bill is what makes an experiment approvable or not.
+
+**What this actually says.** "An experiment costs you blast radius times duration in error-minutes, and you may only spend what the SLO's error budget has left this month."
+
+This converts an argument about risk appetite into an arithmetic check that anyone can run before the Game Day, not after it.
+
+| Symbol | What it is |
+|--------|------------|
+| `SLO` | Availability target, e.g. `99.9%` |
+| `budget` | `(1 - SLO) × minutes_in_period` — total error-minutes allowed per period |
+| `f` | Blast radius as a fraction of traffic |
+| `D` | Experiment duration in minutes |
+| `cost` | `f × D` — error-minutes the experiment burns if the fault is fully user-visible |
+| `burn` | `cost / budget` — share of the month's budget one run consumes |
+
+**Walk one example.** A 99.9% monthly SLO, compared against the Stage 2 experiment and the "over-broad blast radius" incident in section 10:
+
+    the budget for the period
+      minutes_in_month = 30 x 24 x 60           = 43,200 min
+      budget = (1 - 0.999) x 43,200             = 43.2 error-minutes
+
+    the planned Stage 2 experiment (5% blast radius, 10 minutes)
+      cost = f x D = 0.05 x 10                  = 0.5 error-minutes
+      burn = 0.5 / 43.2                         = 1.16% of the month
+
+    the section 10 incident (50% of services, down 2 hours)
+      cost = 0.50 x 120                         = 60 error-minutes
+      burn = 60 / 43.2                          = 138.9% of the month
+
+The first run is affordable — you could execute it roughly 86 times in a month and still meet the SLO. The second was never an experiment; at 138.9% it spent the entire month's budget and then some in a single Friday afternoon, which is why it reads as an outage in the postmortem rather than as a learning exercise. Run this two-line calculation in the approval step, and treat any experiment above roughly 5% of the remaining budget as needing a smaller `f` or a shorter `D`.
+
 ---
 
 ## 7. Real-World Examples
@@ -373,6 +434,32 @@ Do NOT run chaos experiments without: clear steady-state metrics and monitoring,
 ## 10. Common Pitfalls
 
 **No kill switch**: A team ran a chaos experiment that injected CPU pressure on all order-service pods simultaneously. The experiment script had a bug and did not stop after 5 minutes. CPU pressure continued for 45 minutes, causing the checkout service to time out. With no kill switch, engineers had to manually SSH into each pod. Fix: always implement an automated rollback trigger (stop if error rate > threshold) and a one-command manual kill switch.
+
+**Read it like this.** "Availability is the share of time between failures that you are *not* spending on recovery — so a kill switch does not reduce how often you break things, it reduces the only term you control during the break."
+
+The kill switch is worth its engineering cost precisely because `MTTR` sits in the denominator: an experiment that was supposed to last 5 minutes and ran 45 is a 9x multiplier on the one number that decides whether the SLO survives.
+
+| Symbol | What it is |
+|--------|------------|
+| `MTBF` | Mean time between failures — how long the system runs healthy between incidents |
+| `MTTR` | Mean time to recovery — detect plus mitigate plus verify |
+| `A` | `MTBF / (MTBF + MTTR)` — resulting availability |
+
+**Walk one example.** One incident per 30-day month (`MTBF = 43,200` minutes), with and without a working kill switch:
+
+    kill switch works: fault removed on schedule
+      MTTR = 5 min
+      A = 43,200 / (43,200 + 5)         = 99.9884%   -> inside a 99.9% SLO
+
+    kill switch absent: manual SSH into every pod
+      MTTR = 45 min
+      A = 43,200 / (43,200 + 45)        = 99.8959%   -> SLO breached
+
+    what changed
+      MTBF identical, MTTR 5 -> 45       = 9x
+      budget spent: 5 min vs 45 min of the 43.2-min monthly allowance
+
+Note that the second row breaches 99.9% from a single incident, because 45 minutes already exceeds the 43.2-minute monthly budget computed in section 6. Chaos engineering improves `MTBF` over months by finding latent faults, but the kill switch is what protects `MTTR` on the day — build the second one first.
 
 **Testing the wrong thing**: A team ran chaos experiments killing random instances. Their circuit breakers activated correctly. They concluded the system was resilient. Six months later, a slow dependency (not a down dependency) caused a thread pool exhaustion failure. Their chaos experiments only tested fast failures; slow failures (200ms → 5000ms latency) were never tested. Fix: inject latency degradation, not just instance kills.
 
@@ -473,6 +560,37 @@ Network-layer faults like tc netem test the real transport path including OS-lev
 3. Experiment: injected 2000ms latency to ML API using WireMock stub + traffic routing
 4. Observed: product page p99 jumped to 28000ms, error rate hit 35% — hypothesis REJECTED
 5. Root cause: recommendation service had no circuit breaker, no timeout shorter than 30s, no fallback to cached recommendations
+
+**What the formula is telling you.** "A rejected hypothesis is worth the price when the experiment's error-minutes are a rounding error next to the outage it predicts — and here the same failure in production would have cost 30 times more."
+
+The value of a chaos experiment is not the incident it caused; it is the incident it priced. Putting both on the same error-minute scale is what justifies the practice to the people who approve it.
+
+| Symbol | What it is |
+|--------|------------|
+| `p99_base` / `p99_fault` | Steady-state and observed p99 (300ms and 28,000ms) |
+| `err_base` / `err_fault` | Steady-state and observed error rate (0.1% and 35%) |
+| `cost` | `err_fault × D` — error-minutes the run actually burned |
+| `budget` | 43.2 error-minutes per month at a 99.9% SLO |
+
+**Walk one example.** The rejected run, held to the same 10-minute window used above:
+
+    how far steady state was violated
+      latency blowup = 28,000 / 300           = 93.3x over baseline p99
+      error blowup   = 35% / 0.1%             = 350x over baseline error rate
+
+    what the experiment itself cost
+      cost = 0.35 x 10 min                    = 3.5 error-minutes
+      burn = 3.5 / 43.2                        = 8.1% of the monthly budget
+
+    what the same fault would have cost unannounced
+      a 2 h third-party ML API degradation
+      cost = 0.35 x 120 min                    = 42 error-minutes
+      burn = 42 / 43.2                         = 97.2% of the month, unplanned
+
+    after the fix, the validation re-run
+      p99 held at 280ms vs the 300ms steady-state bound   -> hypothesis CONFIRMED
+
+Eight percent of the budget, spent deliberately with the on-call team watching, bought the discovery of a fault that would otherwise have consumed 97% of it during an unannounced third-party slowdown at an hour nobody chose. That ratio — 3.5 error-minutes against 42 — is the entire business case for chaos engineering, and it is why the practice pays for itself only when experiments are short and narrowly scoped.
 
 **Fix applied**:
 - Added Resilience4j circuit breaker on ML API client

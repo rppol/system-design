@@ -237,6 +237,52 @@ fill/drain overhead (the first H2D and the last D2H, which have nothing to overl
 becomes negligible relative to the steady-state throughput, and the single shared compute
 engine — the busiest of the three — becomes the true bound on total time.
 
+**Read it like this.** The `(3 chunks + 3 stages - 1) x 10 ms` line above is the whole
+pipeline compressed into one expression, `T_pipe = (N + S - 1) x T`: "you pay one
+stage-time for every chunk, plus a fixed toll of `S - 1` stage-times to fill the pipe at
+the start and drain it at the end."
+
+Set that beside the serial cost, `T_serial = N x S x T`, and the structural difference is
+visible in the operators alone: serial *multiplies* chunk count by stage count, pipelined
+*adds* them. Turning a product into a sum is the entire trick — everything else in this
+module (pinned memory, non-default streams, events) exists only to make that swap legal.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | How many chunks the data is split into. `3` in the diagram above |
+| `S` | How many pipeline stages each chunk passes through. `3` here — H2D, compute, D2H |
+| `T` | Time for one stage on one chunk. `10 ms`, equal across all three stages by construction |
+| `N x S x T` | Serial total. Every chunk waits through every stage before the next chunk starts |
+| `(N + S - 1) x T` | Pipelined total. `N` steady-state beats plus `S - 1` beats of fill/drain |
+| `S - 1` | The fixed toll: `2` stage-times. The very first H2D and very last D2H overlap with nothing |
+
+**Walk one example.** Hold the stages at `S = 3` and `T = 10 ms`, raise `N`, and watch the
+fixed 20 ms toll shrink as a share of the total:
+
+```
+  N chunks   serial = 3N x 10   pipelined = (N+2) x 10   speedup   toll share
+      1            30 ms                30 ms            1.00x       66.7%
+      2            60 ms                40 ms            1.50x       50.0%
+      3            90 ms                50 ms            1.80x       40.0%
+      4           120 ms                60 ms            2.00x       33.3%
+      8           240 ms               100 ms            2.40x       20.0%
+     16           480 ms               180 ms            2.67x       11.1%
+     64          1920 ms               660 ms            2.91x        3.0%
+
+  toll share = 20 ms of fill/drain / pipelined total.
+  At N=1 the pipeline IS the toll (1.00x -- nothing to overlap with).
+  At N=64 the toll is 3.0% of wall clock and the speedup sits 0.09x below the ceiling.
+```
+
+**Why the ceiling is exactly `S`, never more.** Divide the two expressions and the `T`
+cancels: `speedup = NS / (N + S - 1)`, which for `S = 3` is `3N / (N + 2)` and rises to `3`
+as `N` grows — but never past it. The reason is physical, not algebraic: the compute engine
+is a single shared resource that must still perform `N x 10 ms` of work no matter how many
+streams queue in front of it. `S` counts the independent engines you own, and no amount of
+pipelining manufactures a fourth one. Remove the `S - 1` toll term and the formula would
+promise `3x` at `N = 1`, which is exactly the mistake behind "I added streams to a one-shot
+transfer and nothing got faster."
+
 ### Three Engines, One Instant — Actor View of the Overlap
 
 ```mermaid
@@ -596,6 +642,41 @@ pipelined = `(N + 2) x 10 ms`), speedup climbs fast at first — matching the 1.
 measured for 3 streams above — then flattens as it approaches the 3x ceiling set by
 the single shared compute engine, which alone must still do `N x 10 ms` of work no
 matter how many streams feed it.
+
+**What this actually says.** The curve is one ratio, `speedup(N) = 3N / (N + 2)`, and it
+reads as: "you keep `3N` stage-times of work but now pay for only `N + 2` of them." The
+flattening is not a hardware limit kicking in at some stream count — it is the `+2` in the
+denominator becoming irrelevant.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Chunks in flight, one per stream in this plot. The x-axis |
+| `3N` | Serial stage-times — the numerator never stops growing linearly |
+| `N + 2` | Pipelined stage-times: `N` of real throughput plus the 2-stage fill/drain toll |
+| `3N / (N + 2)` | The speedup. The y-axis of the chart above |
+| `3 - speedup` | Distance still left to the ceiling. Algebraically equal to `6 / (N + 2)` |
+
+**Walk one example.** Track the remaining gap rather than the speedup, and the shape stops
+being mysterious — it is a `1/N` decay:
+
+```
+   N     speedup = 3N/(N+2)     gap to 3x = 6/(N+2)
+    3          1.800                  1.200
+   12          2.571                  0.429
+   30          2.812                  0.188
+   60          2.903                  0.097
+  120          2.951                  0.049
+
+  Doubling N roughly halves the remaining gap: 0.188 -> 0.097 -> 0.049.
+  Getting from 1.8x to 2.57x costs 9 extra chunks.
+  Getting from 2.90x to 2.95x costs 60 extra chunks.
+```
+
+That asymmetry is the practical lesson hiding in the curve: the first handful of chunks buy
+almost all the available win, and everything past roughly `N = 8` is chasing tenths. It is
+why production pipelines settle on 3-4 streams and spend the remaining engineering effort on
+the kernel instead — 4 streams already captures `2.00 / 3.00`, two-thirds of the theoretical
+maximum, for a fraction of the buffer-management complexity that 16 streams demands.
 
 ---
 
@@ -1004,6 +1085,48 @@ struct PhotoPipeline {
 |------|-----|--------|-----|-------------------------------|--------------------------|
 | Naive (pageable, default stream) | ~0.8 ms | ~8 ms | ~0.8 ms | ~104 photos/sec/GPU (1 / 9.6 ms) | ~2 (with no margin) |
 | Pinned + 4 streams (pipelined) | ~0.43 ms (hidden) | ~8 ms (the bound) | ~0.43 ms (hidden) | ~125 photos/sec/GPU (1 / 8 ms) | ~2 (with headroom) |
+
+**Stated plainly.** The two throughput numbers in that table come from two different
+operators applied to the same three stage times: serial throughput is `1 / (H2D + K + D2H)`
+— a **sum** — while pipelined throughput is `1 / max(H2D, K, D2H)` — a **max**. "Overlap
+does not delete the transfer cost; it demotes the transfer from an addend to a loser in a
+max()."
+
+That framing answers the question the table only implies — *which* stage is worth
+optimizing. In a sum, every stage matters proportionally. In a max, only the largest one
+does, and shaving anything off the other two changes the answer by exactly zero.
+
+| Symbol | What it is |
+|--------|------------|
+| `H2D` | Host-to-device copy time for one photo. `0.8 ms` pageable, `0.43 ms` pinned |
+| `K` | Kernel time for one photo. `8 ms` — fixed by the filter, unchanged by any stream work |
+| `D2H` | Device-to-host copy of the result. Same size, so same cost as `H2D` |
+| `1 / (H2D + K + D2H)` | Serial ceiling. Every stage is on the critical path |
+| `1 / max(H2D, K, D2H)` | Pipelined ceiling. Only the slowest engine is on the critical path |
+| `photos_per_sec / ceiling` | GPUs required to hold the 200 photos/sec target |
+
+**Walk one example.** The same 12 MB photo through both formulas, with bytes divided by
+bandwidth to get each transfer:
+
+```
+  pageable H2D : 12 MB / 15 GB/s  = 0.80 ms      (staging copy halves PCIe Gen4)
+  pinned   H2D : 12 MB / 28 GB/s  = 0.43 ms      (near full PCIe Gen4)
+
+  serial    : 0.80 + 8.00 + 0.80  = 9.60 ms  ->  1000 / 9.60  = 104.2 photos/sec
+  pipelined : max(0.43, 8.00, 0.43) = 8.00 ms ->  1000 / 8.00  = 125.0 photos/sec
+
+  GPUs for 200/sec :  200 / 104.2 = 1.92   (2 GPUs, 4% headroom -- one hiccup and it misses)
+                      200 / 125.0 = 1.60   (2 GPUs, 25% headroom)
+```
+
+**What pinning alone would have bought, and why it is not enough.** Swapping to pinned
+memory without streams still leaves a *sum*: `0.43 + 8.00 + 0.43 = 8.86 ms`, or 112.9
+photos/sec — it recovers 8.7 of the 20.8 photos/sec on the table, less than half. Pinning
+makes the transfers faster; only the streams make them free. Note also that transfers were
+never the dominant cost here — they are `1.6 / 9.6 = 16.7%` of serial time, so 16.7% is the
+absolute most any transfer optimization could ever return. Both facts are worth carrying
+into an interview, because the instinct is to reach for pinned memory as the fix and stop
+there.
 
 **Resolution**: switching to pinned, double-buffered host memory and a 4-stream
 round-robin pipeline moves the bottleneck from "serial transfer + compute" to purely

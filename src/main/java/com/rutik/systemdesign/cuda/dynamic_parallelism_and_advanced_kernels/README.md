@@ -387,6 +387,49 @@ whether the queue ends up holding 10,000 items or 10,000,000 -- the
 "relaunch" work is only an atomicAdd plus a loop iteration.
 ```
 
+**What this actually says.** "Size the grid to the *machine*, never to the problem. Ask how many
+blocks physically fit on the GPU at once, launch exactly that many, and let each one loop until
+the work runs out."
+
+Every other kernel in this section sizes its grid by dividing the problem by the block size. A
+persistent kernel inverts that completely: the problem size does not appear in the launch
+configuration at all. That is the whole trick, and it is why the queue can grow at runtime
+without a relaunch.
+
+| Symbol | What it is |
+|--------|------------|
+| `SMs` | Streaming multiprocessors on the device, from `cudaDevAttrMultiProcessorCount`. `108` here |
+| `blocksPerSM` | How many blocks of *this* kernel fit resident on one SM, from `cudaOccupancyMaxActiveBlocksPerMultiprocessor`. Set by register and shared-memory usage |
+| `Resident blocks` | `SMs x blocksPerSM` — the grid size. The GPU is exactly full, no block ever waits to be scheduled |
+| `g_nextWorkItem` | Global counter every resident block bumps with `atomicAdd` to claim its next chunk |
+| `chunkSize` | Items claimed per atomic. Trades atomic traffic against load imbalance at the tail |
+
+**Walk one example.** Same kernel, two queue sizes, and the sizing that does not move:
+
+```
+    SMs                    = 108
+    blocksPerSM            =   2        (register/shared-mem limited)
+    Resident blocks        = 108 x 2    = 216 blocks     <- the launch config
+
+    queue = 10,000 items     -> 216 blocks launched, 1 launch
+    queue = 10,000,000 items -> 216 blocks launched, 1 launch   (identical)
+
+    conventional flat grid, 256 threads/block, one thread per item:
+      10,000 items          -> ceil(10,000 / 256)      =     40 blocks, 1 launch
+      10,000,000 items      -> ceil(10,000,000 / 256)  = 39,063 blocks, 1 launch
+                                                          ^ grid tracks the problem
+
+    per-item "relaunch" cost, persistent : one atomicAdd + one loop iteration
+    per-item "relaunch" cost, device-side launch : 3-8 us of bookkeeping
+```
+
+Launching more than 216 blocks does not help — the extra blocks cannot be resident, so they
+queue behind the first 216 and, worse, will deadlock any grid-wide barrier the kernel relies on
+because the blocks it is waiting for are not running yet. Launching fewer leaves SMs idle. The
+formula has exactly one right answer, which is unusual in CUDA launch configuration and is the
+reason both API calls in it are mandatory rather than nice-to-have.
+
+
 Launch *fewer* blocks than SM-capacity and compute sits idle; launch *more*
 than the device can run at once and blocks queue behind each other, turning
 a bounded resident loop into unpredictable time-sliced scheduling — a
@@ -1135,6 +1178,59 @@ The refined-cell arithmetic did not change between versions — the entire 6x
 speedup came from replacing ~21,000 device-side launches with a compaction
 pass plus one flat kernel: dynamic parallelism earns its overhead only when
 child launches are coarse and few, and this workload's shape was neither.
+
+**Read it like this.** "Twenty-one thousand launches at five microseconds each is a hundred
+milliseconds of pure paperwork wrapped around eighteen milliseconds of actual physics."
+
+The table is really one multiplication and one comparison, and both are worth doing out loud
+because the losing design *looks* elegant — one child grid per flagged cell maps beautifully
+onto the problem, and that is exactly the trap.
+
+| Symbol | What it is |
+|--------|------------|
+| `flagged cells` | Cells the refinement criterion marked this timestep. `~20,972` in this trace |
+| `T_child` | Device-side launch bookkeeping per child grid, `3-8 us`. Charged whether the child does 1 element or 1M |
+| launch overhead | `flagged cells x T_child`. The term that exploded |
+| refined-cell compute | The real numerical work, `~18 ms`. Identical in both designs |
+| compaction pass | A prefix-sum/stream-compaction over the flag array, gathering flagged indices into one dense list |
+
+**Walk one example.** Push both designs through, at the low end of the launch tax:
+
+```
+    BROKEN: one child launch per flagged cell
+      launch overhead = 20,972 x 5 us = 104,860 us = 104.86 ms
+      refined compute =                              18.00 ms
+      total           = 104.86 + 18.00              = 122.86 ms   (table: ~123 ms)
+      fraction of the timestep spent on paperwork
+                      = 104.86 / 122.86             = 85.3%
+
+    FIX: compact first, then one flat child grid
+      launch overhead = 1 launch x 5-10 us          =  0.005-0.010 ms
+      refined compute =                                18.00 ms   (unchanged)
+      total           =                             ~= 19-20 ms
+
+      speedup = 122.86 / 19 = 6.47x
+                122.86 / 20 = 6.14x                 (table: ~6x)
+```
+
+**When would CDP have been the right call?** Solve for the break-even instead of guessing. A
+child launch pays for itself only once the child's own runtime exceeds its `3-8 us` tax, and you
+want the tax to be noise — say 10% or less:
+
+```
+    break-even           : child runtime  >   3-8 us
+    comfortable (tax<=10%): child runtime  >  30-80 us
+
+    per-cell design: each child refines ONE cell -> child runtime is sub-microsecond
+                     -> 20,972 children, every one of them far below break-even
+    AMR done right : one child per refinement REGION of thousands of cells
+                     -> tens of children, each running milliseconds -> tax is noise
+```
+
+Same API, same problem, opposite verdict — the deciding number is not "does the work depend on
+runtime data" (it does in both cases) but "is each child grid big enough to amortize 3-8 us."
+This is the arithmetic that separates engineers who reach for CDP reflexively from those who
+reach for it correctly.
 
 ### Discussion Questions
 

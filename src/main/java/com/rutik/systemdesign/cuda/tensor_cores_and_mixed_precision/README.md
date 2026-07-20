@@ -171,6 +171,34 @@ directly -- only load_matrix_sync/store_matrix_sync touch memory layout.
 
 The K-dimension loop in a real GEMM chains many of these 16×16×16 tiles: each iteration loads the next 16-deep slab of `A` and `B` and calls `mma_sync` again with the running accumulator as both input and output, so the FP32 `D` tile only ever touches memory once, at the very end.
 
+**What this actually says.** "One `mma_sync` call retires the work that would take the same 32 threads 128 clock cycles of back-to-back scalar multiply-adds." That single ratio — not any clock-speed or core-count difference — is the entire reason a Tensor Core exists.
+
+| Symbol | What it is |
+|--------|------------|
+| `M`, `N`, `K` | The three GEMM extents: `A` is `M×K`, `B` is `K×N`, `D`/`C` are `M×N`. All 16 for the canonical WMMA tile |
+| `D = A × B + C` | Multiply-accumulate: the product tile is *added into* the existing accumulator, not written over it |
+| MAC | One multiply-accumulate — the hardware's unit of work. Counts as 2 FLOPs (one multiply, one add) |
+| `M × N × K` | Total MACs the instruction performs: one per (output element, K-slice) pair |
+| FMA | The per-thread scalar equivalent on a CUDA core: `d = a*b + c`, one per thread per cycle |
+| warp | The 32 threads that cooperatively own one set of fragments; the MMA's unit of issue |
+
+**Walk one example.** Count the arithmetic in a single `m16n16k16` MMA and price it in CUDA-core cycles:
+
+```
+  tile shape             M x N x K  =  16 x 16 x 16
+
+  multiply-accumulates   16 x 16 x 16              =  4,096 MACs
+  FLOPs (mul + add each) 2 x 4,096                 =  8,192 FLOPs
+
+  same warp on CUDA cores:
+    32 lanes x 1 FMA per lane per cycle            =     32 MACs/cycle
+    cycles needed to cover 4,096 MACs  4,096 / 32  =    128 cycles
+
+  one warp-level MMA instruction  ==  128 cycles of scalar FMA issue
+```
+
+The multiplier comes from the *shape*, not the clock. A scalar FMA reads two operands and produces one result, so each of the 4,096 products would need its own operand fetch; the MMA loads 16×16 + 16×16 = 512 elements once and reuses each of them 16 times inside the hardware unit. That reuse factor — `K` for the `A` operand, `M` for the `B` operand — is exactly why the tile must be square-ish and why a shape with a tiny `K` gets almost none of the benefit even when every dimension is legally aligned.
+
 ### Precision formats — range, mantissa, and Tensor Core support
 
 ```
@@ -196,6 +224,43 @@ range during backward).
 ```
 
 The two formats with 8 exponent bits (TF32, BF16, FP32) share FP32's dynamic range and therefore never need loss scaling; FP16's 5 exponent bits are the entire reason mixed-precision training needed a scaling trick before BF16 hardware existed.
+
+**Read it like this.** Every row of that table is one sentence: "spend a fixed bit budget, `1 sign + e exponent + m mantissa`, and whatever you give the exponent field buys *range* while whatever you give the mantissa field buys *precision*." Two formats with the same total width are two different answers to how that budget is split.
+
+| Symbol | What it is |
+|--------|------------|
+| `s` | The single sign bit — never traded away, every format spends 1 bit here |
+| `e` | Exponent bit count. Sets how far the format reaches up and down in magnitude |
+| `m` | Mantissa (fraction) bit count. Sets how finely it resolves values *within* a magnitude |
+| `bias` | `2^(e-1) - 1`. The offset subtracted from the stored exponent so it can go negative |
+| `value` | `(-1)^s × 2^(stored_e − bias) × 1.f` — sign, scale, then the fraction bits as `1.f` |
+| smallest normal | `2^(1 − bias)`. Below this a value is subnormal, then zero — the underflow floor |
+| relative precision | `2^-(m+1)`. The worst-case rounding error as a *fraction* of the value |
+
+**Walk one example.** Split the same 16-bit budget two ways and watch which property each split buys:
+
+```
+  budget:  1 sign  +  e exponent  +  m mantissa  =  total bits
+
+    FP32    1 +  8 + 23 = 32          BF16    1 + 8 +  7 = 16
+    TF32    1 +  8 + 10 = 19          FP16    1 + 5 + 10 = 16
+
+  bias = 2^(e-1) - 1
+    FP16 (e=5):  2^4 - 1 =  15
+    BF16 (e=8):  2^7 - 1 = 127        <- identical to FP32's bias
+
+  smallest normal = 2^(1 - bias)
+    FP16:  2^-14   = 6.104e-05
+    BF16:  2^-126  = 1.175e-38        <- 33 decades further down
+
+  relative precision = 2^-(m+1)
+    FP16:  2^-11 = 4.883e-04  (~3.3 decimal digits)
+    BF16:  2^-8  = 3.906e-03  (~2.4 decimal digits)
+
+  BF16 hands 3 mantissa bits to the exponent and buys back FP32's whole range.
+```
+
+The asymmetry between the two costs is what settles the format argument. Losing mantissa bits costs *accuracy* — an answer slightly off, which stochastic-gradient training tolerates because it is already averaging over noisy minibatches. Losing exponent bits costs *representability* — a value that becomes exactly `0` or `inf`, which no amount of averaging recovers. That is why BF16 became the training default the moment Ampere shipped it, and why TF32 keeps all 8 exponent bits even while truncating 13 mantissa bits: both formats protect the property whose failure mode is unrecoverable.
 
 ```mermaid
 quadrantChart
@@ -384,6 +449,37 @@ for batch in dataloader:
                                         # grows it after N clean steps
 ```
 
+**What the formula is telling you.** Loss scaling is one sentence: "multiply the loss by `S` before backward and divide every gradient by the same `S` before the optimizer reads it — the chain rule makes those two cancel exactly, so the only thing `S` changes is *which bits the numbers land on* while they sit in FP16."
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | The scale factor. A power of two, so multiplying is exact — it only shifts the exponent, never touches the mantissa |
+| `scaler.scale(loss)` | Computes `S × loss`. Every gradient in the backward pass is then `S × g` by linearity |
+| `scaler.unscale_` | Divides gradients by `S`, restoring the true `g` before clipping or the optimizer step |
+| underflow floor | FP16's smallest subnormal, `2^-24 = 5.96e-08`. Anything smaller becomes exactly `0` |
+| overflow ceiling | FP16's largest finite value, `65,504`. Anything larger becomes `inf` |
+| `scaler.update()` | Halves `S` after an `inf`/`NaN` is seen, grows it after N clean steps — the "dynamic" part |
+
+**Walk one example.** Push a realistic late-block gradient through the format with and without a scale of `S = 65536`:
+
+```
+  fp16 smallest subnormal  2^-24  =   5.960e-08     <- below this, exactly 0
+  fp16 smallest normal     2^-14  =   6.104e-05
+  fp16 largest finite               =  65,504
+
+  a late-block gradient          g =   1.0e-08
+
+    unscaled   1.0e-08  <  5.960e-08   -> rounds to 0, gradient LOST
+    x S=65536  6.554e-04  >  6.104e-05 -> a fully normal fp16 value, kept
+    unscale_   6.554e-04 / 65536       =  1.0e-08, the original value back
+
+  what the same S costs at the top end:
+    largest gradient still representable  65,504 / 65,536  =  0.9995
+    any true gradient above ~1.0 now overflows to inf
+```
+
+That last pair of lines is why the scale is *dynamic* rather than a constant compiled in. `S` slides a fixed-width window (FP16 spans about 6e-8 to 6.5e4, roughly 12 decades) up and down the real number line; it cannot widen the window. Set `S` too low and small gradients still flush to zero; set it too high and large ones saturate to `inf`. `GradScaler` resolves this empirically — it pushes `S` up until something overflows, throws away that step, halves `S`, and climbs again — which is also why an occasional skipped step early in training is normal behaviour and not a bug. BF16, whose window already spans FP32's ~76 decades, needs no window-sliding at all.
+
 On Ampere and later, **BF16 needs none of the `GradScaler` machinery**:
 
 ```python
@@ -434,6 +530,35 @@ for dtype in (torch.float32, torch.bfloat16, torch.float16):
     ms, tflops = bench_matmul(dtype)
     print(f"{dtype}: {ms:.3f} ms/iter, {tflops:.1f} TFLOP/s")
 ```
+
+**In plain terms.** The `tflops` line says: "a GEMM's work is a fixed, known quantity — `2·M·N·K` floating-point operations — so dividing it by measured seconds gives an achieved rate you can hold against the spec sheet." Because the numerator depends only on the shape, this is the one GPU metric that is comparable across precisions, libraries, and GPUs.
+
+| Symbol | What it is |
+|--------|------------|
+| `2 * m * n * k` | Total FLOPs in the GEMM. `m*n*k` multiply-accumulates, each counted as 2 FLOPs |
+| `2` | The mul-and-add pair inside one MAC. It is a *definition*, not a speedup — every FLOP/s figure uses it |
+| `ms_per_iter * 1e-3` | Milliseconds converted to seconds so the quotient is FLOPs per second |
+| `/ 1e12` | Rescales FLOP/s to TFLOP/s |
+| `torch.cuda.Event` | GPU-side timestamps. CPU `time.time()` would measure only the async launch, not the kernel |
+| `torch.cuda.synchronize()` | Blocks until the queued kernels actually finish, so `elapsed_time` covers real work |
+
+**Walk one example.** Same arithmetic, three precisions, using the measured rates from the table below:
+
+```
+  m = n = k = 8192
+
+  MACs   =  8192 x 8192 x 8192              =    549,755,813,888
+  FLOPs  =  2 x MACs                        =  1,099,511,627,776
+                                            =  1.0995 TFLOP per iteration
+
+  at   19 TFLOP/s (FP32)  ->  1.0995 /  19  =  57.869 ms per iteration
+  at  150 TFLOP/s (TF32)  ->  1.0995 / 150  =   7.330 ms
+  at  270 TFLOP/s (BF16)  ->  1.0995 / 270  =   4.072 ms
+
+  identical arithmetic every time; 57.869 / 4.072  =  14.2x less wall time
+```
+
+Note what stays fixed and what moves: the FLOP count is a property of the shape and never changes, so the entire 14.2x is the hardware executing the *same* arithmetic through a different pipe. This is also why the metric catches a silent fallback that wall-clock alone would not — a shape that drops to the CUDA-core path still completes, just at a TFLOP/s figure that no longer resembles the spec sheet.
 
 Representative results for an 8192×8192×8192 GEMM on an A100 (numbers vary by cuBLAS/driver version — always re-measure on the target hardware, never assume the spec-sheet peak is achieved):
 
@@ -563,6 +688,35 @@ Both gates are silent AND conditions — there is no third branch that raises a 
 | FP8 (Tensor Core) | ~2000 | ~59x |
 
 This is the concrete basis for the "FP64 vs FP16" gap engineers quote informally — an H100 running dense FP16 GEMMs through its Tensor Cores has roughly 15x the throughput of the same GPU running the identical operation in FP64 on ordinary CUDA cores, before sparsity is even considered. HPC/scientific-computing workloads that must stay in FP64 for correctness (climate modeling, certain linear-solver-heavy simulations) are the primary reason the FP64 Tensor Core path exists at all — it recovers roughly 2x over the CUDA-core FP64 rate without leaving double precision.
+
+**Stated plainly.** The right-hand column is one division: "how many times the FP64 CUDA-core rate is this precision's peak?" The trap is that the phrase "the FP64 rate" names two different numbers on an H100 — 34 TFLOP/s on ordinary CUDA cores, 67 TFLOP/s through the FP64 Tensor Core path — and every headline multiplier changes by 2x depending on which one you meant.
+
+| Symbol | What it is |
+|--------|------------|
+| peak TFLOP/s | The hardware ceiling for that precision — dense, no sparsity, never actually achieved in full |
+| FP64 CUDA core, ~34 | The baseline this table's ratio column divides by. No Tensor Core involved at all |
+| FP64 Tensor Core, ~67 | A separate dedicated FP64 path on Ampere+; ~2x the CUDA-core FP64 rate, still double precision |
+| dense | Without 2:4 structured sparsity (§4.3), which multiplies these figures by roughly another 2x |
+| ratio | `peak(precision) / peak(baseline)` — meaningless unless the baseline is stated alongside it |
+
+**Walk one example.** Run the division against both candidate baselines and watch the headline number move:
+
+```
+  against FP64 on CUDA cores (34 TFLOP/s) -- this table's ratio column:
+
+    FP64 Tensor Core     67 / 34  =   1.97x    -> table's "~2x"
+    TF32                500 / 34  =  14.71x    -> table's "~15x"
+    FP16 / BF16       1,000 / 34  =  29.41x    -> table's "~29x"
+    FP8               2,000 / 34  =  58.82x    -> table's "~59x"
+
+  against FP64 on Tensor Cores (67 TFLOP/s) -- the other reading:
+
+    TF32                500 / 67  =   7.46x
+    FP16 / BF16       1,000 / 67  =  14.93x
+    FP8               2,000 / 67  =  29.85x
+```
+
+Both columns are correct arithmetic on the same table; only the denominator differs. So when the surrounding prose says FP16 is "roughly 15x" FP64, that is the 14.93x figure — FP16 measured against the FP64 *Tensor Core* path. Measured against the FP64 *CUDA-core* rate, the same comparison is 29.41x, which is the `~29x` this table's own row reports. The two are not in conflict, but quoting either multiplier without naming its baseline is how a spec-sheet number ends up off by 2x in a design review.
 
 ```mermaid
 xychart-beta

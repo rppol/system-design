@@ -271,6 +271,51 @@ spring:
             maxSize: 5MB
 ```
 
+**In plain terms.** "Every caller gets 100 requests per second forever, plus a one-time 200-request cushion for bursts — and a failed GET is retried three times with the wait doubling each round."
+
+The two rate-limiter numbers are not redundant: `replenishRate` sets the sustainable budget, `burstCapacity` sets how much a client may spend faster than it earns. Sizing them independently is what lets a mobile app fire a burst of calls on cold start without being throttled, while still capping its long-run cost.
+
+| Symbol | What it is |
+|--------|------------|
+| `replenishRate: 100` | Tokens added per second. The steady-state ceiling, in requests/second per key |
+| `burstCapacity: 200` | Maximum tokens the bucket can hold. The largest instantaneous burst allowed |
+| `key-resolver` | What the bucket is keyed by — here user ID, so limits are per user, not per IP |
+| `retries: 3` | Extra attempts after the first one fails. Total attempts = `1 + 3 = 4` |
+| `firstBackoff: 50ms` | Wait before retry 1 |
+| `factor: 2` | Each subsequent wait doubles |
+| `maxBackoff: 500ms` | Ceiling on any single wait, so doubling cannot run away |
+
+**Walk one example.** One client that opens with a burst, then settles into steady traffic:
+
+```
+  bucket starts full : 200 tokens
+
+  t = 0.0s   client fires 200 requests at once
+             200 tokens spent, bucket = 0   -> all 200 admitted
+  request 201 at t = 0.0s                   -> 429, bucket is empty
+
+  refill rate = 100 tokens/s
+    time to refill the full 200-token cushion = 200 / 100 = 2.0s
+
+  next 10 seconds of steady traffic:
+    earned  = 100 x 10 = 1000 requests
+    total admitted over the 10.0s window = 200 (burst) + 1000 = 1200
+```
+
+Now the retry ladder on a failing GET to `order-service`, with a 200ms service call:
+
+```
+  attempt 1  -> 503        wait  50ms   (firstBackoff)
+  attempt 2  -> 503        wait 100ms   (50 x 2)
+  attempt 3  -> 503        wait 200ms   (100 x 2, still under the 500ms cap)
+  attempt 4  -> final
+
+  added wait      =  50 + 100 + 200          =  350ms
+  worst-case call = (200 x 4 attempts) + 350 = 1150ms
+```
+
+That 1150ms is the number that matters: a client timeout set below it will fire *while the gateway is still retrying*, so the client gives up on a request the gateway was about to satisfy. Retry budgets must always be smaller than the caller's timeout.
+
 ### JWT Authentication Global Filter
 
 ```java
@@ -382,6 +427,33 @@ public class ProductCompositionController {
 }
 ```
 
+**What this actually says.** "Ask all four services at the same time, then wait for whichever one is slowest — the other three cost you nothing."
+
+`Mono.zip` is the whole reason composition is worth doing. Fan out sequentially and the aggregate latency is the *sum* of the four calls; fan out in parallel and it is the *max*. Everything else in this controller is plumbing.
+
+| Symbol | What it is |
+|--------|------------|
+| `Mono<T>` | A promise of one future value. Creating it does not start waiting |
+| `Mono.zip(a,b,c,d)` | Runs all four concurrently, completes when the last one completes |
+| `tuple.getT1()..getT4()` | The four results, positionally, once all have arrived |
+| sequential latency | `L1 + L2 + L3 + L4` — the cost of `await`-ing one at a time |
+| parallel latency | `max(L1, L2, L3, L4)` — the cost of `Mono.zip` |
+
+**Walk one example.** Four real downstream p99s behind `/products/123/detail`:
+
+```
+  catalog    :  40ms
+  pricing    :  25ms
+  inventory  :  15ms
+  reviews    :  90ms   <- the straggler
+
+  sequential : 40 + 25 + 15 + 90        = 170ms
+  parallel   : max(40, 25, 15, 90)      =  90ms
+  saved                                   80ms   (170 / 90 = 1.89x faster)
+```
+
+Note what parallelism does *not* buy you: the aggregate can never be faster than `reviews` at 90ms. Speeding up catalog, pricing, and inventory changes nothing at all. Once you fan out, the only latency work that pays is on the slowest branch — which is also why one slow service silently sets the p99 of every composed endpoint that touches it.
+
 ### Fallback Controller
 
 ```java
@@ -433,6 +505,34 @@ public class FallbackController {
 | BFF flexibility | Per-client tailoring possible | All clients hit same APIs |
 | Protocol translation | HTTP to gRPC, WebSocket, etc. | Each client handles protocols |
 
+**Read it like this.** "The gateway hop costs you 5-20ms on every single request — the only question is whether it saves the client more round trips than that."
+
+The `+5-20ms` row is the one line in this table with a number, and it is the line the decision actually turns on. Treat it as a latency tax charged per request, then check whether aggregation refunds it.
+
+| Symbol | What it is |
+|--------|------------|
+| gateway hop | Added one-way latency: TLS termination, filter chain, upstream connect. `5-20ms` |
+| direct p99 | What the client would see calling the service itself |
+| tax % | `hop / direct p99` — how much of the budget the gateway eats |
+| round trips saved | Client calls collapsed into one composed call |
+
+**Walk one example.** A single service call, then the same page built two ways:
+
+```
+  one route, no aggregation
+    direct p99          = 60ms
+    through the gateway = 60 + 20 = 80ms
+    tax = 20 / 60 = 33.3% slower for zero benefit
+
+  a product page needing 4 services, client on mobile (60ms RTT each)
+    client calls them itself : 4 x 60             = 240ms
+    gateway composes them    : 90 (slowest) + 20  = 110ms
+                                                    ------
+    net win                                         130ms
+```
+
+That is the rule the "sub-millisecond latency" bullet in Section 9 is really stating: a gateway that only *proxies* is pure tax, and a gateway that *aggregates* pays for itself several times over. Route-by-route, not gateway-wide, is the level at which this should be decided.
+
 ### Gateway Products Comparison
 
 | Feature | Spring Cloud Gateway | Kong | AWS API GW |
@@ -444,6 +544,31 @@ public class FallbackController {
 | Service discovery | Eureka, Kubernetes, Consul | Consul, DNS | Not applicable (Lambda/EC2 targets) |
 | Cost | Open source | Open source (EE paid) | Per-request pricing (~$3.50/million) |
 | Best for | Spring Boot shops, full control | Polyglot, plugin ecosystem | AWS-native, serverless |
+
+**Put simply.** "Managed gateways bill per request, so their cost grows with your traffic while a self-hosted gateway's cost grows with your instance count — and those two curves cross."
+
+The `~$3.50/million` figure looks trivially small per request and stops looking small the moment you multiply it by a production request rate. This is the single arithmetic that decides the "Cost" row.
+
+| Symbol | What it is |
+|--------|------------|
+| `$3.50/million` | AWS API Gateway per-request price for REST APIs |
+| requests/month | `rps x 86,400 seconds/day x 30 days` |
+| managed cost | `requests/month / 1,000,000 x 3.50` |
+| self-hosted cost | Roughly flat: instance hours + the engineer-time to operate it |
+
+**Walk one example.** A steady 500 rps, which is a mid-sized service, not a giant:
+
+```
+  requests/day   = 500 x 86,400              =    43,200,000
+  requests/month = 43,200,000 x 30           = 1,296,000,000  (1,296M)
+
+  cost = 1,296 x $3.50                       = $4,536 / month
+
+  at the 10,000 rps default throttle ceiling:
+  cost = 25,920M / 1M x $3.50                = $90,720 / month
+```
+
+$4,536/month buys a lot of Spring Cloud Gateway instances, which is why high-volume shops self-host and low-volume or spiky serverless shops do not. The break-even is not about features — both gateways do the same job — it is about whether your traffic is high enough that a per-request price beats a per-instance one.
 
 ---
 

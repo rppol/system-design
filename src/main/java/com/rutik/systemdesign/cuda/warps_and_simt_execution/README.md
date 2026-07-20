@@ -88,6 +88,48 @@ Fully divergent worst case (32 distinct paths, one per lane):
 
 Caption: the mask shows *which* lanes are live on each path, not how much work each path does — even a 31-versus-1 split still costs two full passes, because divergence cost depends on the *number of distinct paths taken by the warp*, not the ratio of lanes on each side.
 
+The cost the caption describes has an exact closed form:
+
+```
+passes                    = number of distinct paths taken by lanes of this warp
+warp_execution_efficiency = (sum of active lanes over all passes) / (32 x passes)
+```
+
+**What this actually says.** "The warp pays one full issue pass per distinct path, and every
+lane still does exactly its own one path's work — so efficiency is simply one over the number
+of passes."
+
+| Symbol | What it is |
+|--------|------------|
+| `passes` | Distinct control-flow paths any lane of this warp takes. `1` = no divergence |
+| sum of active lanes | Always exactly `32` — each lane is live in exactly one pass |
+| `32 x passes` | Lane-slots the hardware issued and paid for, live or masked |
+| efficiency | Useful lane-slots over paid-for lane-slots; what Nsight reports as warp exec eff |
+| `32` | Warp size, and therefore the hard ceiling on `passes` |
+
+**Walk one example.** The numerator never moves, which is the whole trick:
+
+```
+  branch shape              lanes per pass       passes  active sum  efficiency
+  ------------------------- -------------------- ------- ----------- ------------
+  uniform (no divergence)   32                     1        32        100.000 %
+  checkerboard  16 / 16     16, 16                 2        32         50.000 %
+  lopsided      31 /  1     31, 1                  2        32         50.000 %
+  4-way switch  8x4         8, 8, 8, 8             4        32         25.000 %
+  fully divergent 32-way    1 x 32                32        32          3.125 %
+
+  Active sum is 32 on EVERY row -- each lane runs its own path exactly once, always.
+  So efficiency collapses to 1/passes, and NOTHING ELSE. The 31/1 row is the one that
+  surprises people: 31 lanes agreeing buys you nothing, because one dissenter still
+  forces a second pass, and a second pass alone already halves efficiency.
+```
+
+**Why lane balance is the wrong thing to optimize.** The natural instinct on seeing 50% warp
+execution efficiency is to rebalance the split — make it 24/8, or 30/2 — and the table above
+says that is wasted effort: `passes` is unchanged, so efficiency is unchanged. The only
+lever that moves the denominator is making whole warps agree, which is precisely what the
+`warpId % 2` fix in §10 does: it drives `passes` from 2 back to 1 and recovers the full 2x.
+
 ### Lockstep SIMT Execution — Divergent vs. Non-Divergent Warp
 
 ```
@@ -186,6 +228,46 @@ __global__ void warpBasics() {
 ```
 
 A block of 256 threads is exactly 8 warps (`256 / 32`); a block of 100 threads is padded to 4 warps (128 lanes reserved, 28 permanently masked off — wasted occupancy, one reason block sizes should be multiples of 32).
+
+```
+warps_per_block  = ceil(threads_per_block / 32)
+lanes_reserved   = warps_per_block x 32
+lanes_wasted     = lanes_reserved - threads_per_block
+```
+
+**Stated plainly.** "The hardware only knows how to reserve whole warps, so a block's cost is
+always rounded up to the next multiple of 32 — and you are charged for the rounding."
+
+| Symbol | What it is |
+|--------|------------|
+| `threads_per_block` | What you asked for in `<<<grid, block>>>` |
+| `ceil(... / 32)` | The rounding-up that the warp-slot allocator performs, unavoidably |
+| `lanes_reserved` | Warp slots actually consumed on the SM, expressed in lanes |
+| `lanes_wasted` | Lanes that hold state and count against occupancy but never execute |
+
+**Walk one example.** Two different waste percentages fall out, and they answer two different
+questions:
+
+```
+  threads   warps   lanes      idle    waste of the       waste of the
+  /block    /block  reserved   lanes   WHOLE BLOCK        LAST WARP
+  --------- ------- ---------- ------- ------------------ ------------------
+    32        1        32        0       0.000 %            0.00 %
+   100        4       128       28      21.875 %           87.50 %
+   128        4       128        0       0.000 %            0.00 %
+   256        8       256        0       0.000 %            0.00 %
+  1000       32      1024       24       2.344 %           75.00 %
+  1024       32      1024        0       0.000 %            0.00 %
+
+  The 87.5% figure quoted above is the LAST warp's own idle fraction (28 of its 32 lanes).
+  Spread across the whole 100-thread block it is 28/128 = 21.875% of reserved capacity.
+  Both are true; the first is the more alarming number, the second is what occupancy loses.
+```
+
+Notice that 1000 threads/block wastes only 2.34% while 100 wastes 21.875% — the penalty is a
+fixed shortfall of at most 31 lanes divided by the block size, so it hurts small blocks most.
+It never disappears on its own, though: rounding the launch to a multiple of 32 is free, and
+it is the only version of this arithmetic where `lanes_wasted` is zero.
 
 ### A divergent branch, instruction by instruction
 
@@ -592,6 +674,38 @@ xychart-beta
 ```
 
 Caption: warp and branch efficiency roughly double while duration (plotted inverted, so taller = faster) nearly doubles in the other direction — the same 2x the ASCII lockstep diagram in §5 predicts for a 2-way divergence.
+
+**The idea behind it.** "Efficiency nearly doubled and runtime nearly halved — and the small
+gap between those two 'nearlys' is a measurement, not a rounding error: it tells you what
+fraction of the kernel was actually inside the divergent region."
+
+| Symbol | What it is |
+|--------|------------|
+| efficiency ratio | Fixed metric over broken metric, `99.8 / 50.1` — the local win in the branch |
+| speedup | Broken duration over fixed duration, `412 / 218` — the win you actually shipped |
+| inverted duration | `218 / 412` as a percent — how the chart plots time so taller = faster |
+| `f` | Fraction of the original runtime spent in the divergent region (Amdahl's fraction) |
+
+**Walk one example.** Push the four measured numbers through:
+
+```
+  efficiency ratio  = 99.8 / 50.1 = 1.992 x   (divergence essentially fully removed)
+  wall-clock speedup = 412 / 218  = 1.890 x   (what the kernel actually got faster by)
+  chart bar, inverted = 218 / 412 = 52.9 %    (this is where the 52.9 in the plot comes from)
+
+  Amdahl, solved backwards for the divergent fraction f:
+      speedup = 1 / ((1 - f) + f / efficiency_ratio)
+      1.890   = 1 / ((1 - f) + f / 1.992)
+      f       = (1 - 1/1.890) / (1 - 1/1.992) = 0.9455
+
+  So ~94.6% of the original 412 us sat inside the divergent branch, and the other ~5.4%
+  (index math, the guard, the load and store) was never going to speed up at all.
+```
+
+That 1.890 was never going to reach 1.992, and reporting the gap as "close enough" throws
+away the useful part. The gap *is* the non-divergent 5.4% of the kernel, and it also sets the
+ceiling on any further work here: even eliminating the branch entirely cannot beat 1.992x, so
+the next optimization has to come from somewhere other than divergence.
 
 **BROKEN — implicit warp-synchronous code with no `__syncwarp()` on Volta+**
 

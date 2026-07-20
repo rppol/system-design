@@ -152,6 +152,33 @@ flowchart LR
 
 For 1000 concurrent requests, ~1-2 MB platform-thread stacks cost ~1 GB of RAM versus ~10 MB for ~few-KB virtual-thread stacks; the unmount/remount trick (~100 ns JVM-level switch instead of a ~1-10 μs kernel context switch) is what lets Spring Boot 3.2's 200 Tomcat threads serve 10,000 concurrent requests.
 
+**Stated plainly.** "Platform threads make you pay a megabyte to sit and wait; virtual threads make waiting nearly free, so the limit stops being memory and starts being the downstream service."
+
+Two separate ceilings are in play. The memory ceiling is how many threads fit in RAM. The throughput ceiling is Little's Law. Platform threads hit the memory ceiling first, which is the entire reason the 200-thread Tomcat default exists.
+
+| Symbol | What it is |
+|--------|------------|
+| platform thread stack | `~1 MB` reserved per thread, whether it works or waits |
+| virtual thread stack | `~few KB`, heap-allocated, grows only as deep as the call stack |
+| switch cost | `~1-10 us` kernel context switch vs `~100 ns` JVM unmount |
+| `L = λ x W` | Concurrency = throughput x latency — the throughput ceiling |
+
+**Walk one example.** Serving 10,000 concurrent requests, each waiting 50ms on a database:
+
+```
+  platform threads, one per request
+    memory  = 10,000 x 1 MB                     = 10 GB     <- will not fit
+    so Tomcat caps at 200 threads:
+    lambda_max = 200 / 0.050s                   = 4,000 req/s
+    request 201 waits in the accept queue
+
+  virtual threads, one per request
+    memory  = 10,000 x ~4 KB                    = ~39 MB    <- trivially fits
+    the 200 carrier threads never block; they unmount at every wait
+```
+
+Watch what actually changed: virtual threads did not make any single request faster -- the database still takes 50ms. They removed the *memory* ceiling so the thread count could follow the concurrency instead of capping it. The corollary bites in production: with 10,000 virtual threads all reaching for a 10-connection HikariCP pool, the bottleneck simply relocates to the connection pool. Virtual threads move the queue; they do not delete it.
+
 ### CompletableFuture Chain
 
 ```mermaid
@@ -410,6 +437,64 @@ ThreadPoolExecutor cpuPool = new ThreadPoolExecutor(
 );
 ```
 
+**What this actually says.** "Add one extra thread for every unit of time a thread spends waiting rather than computing — because a waiting thread costs a slot but no CPU."
+
+The ratio `waitTime / cpuTime` is the whole formula. It is a *blocking coefficient*: it asks what fraction of a task's life the thread is idle-but-occupied. CPU-bound work has a coefficient near zero and needs roughly one thread per core; I/O-bound work has a large coefficient and needs many.
+
+| Symbol | What it is |
+|--------|------------|
+| `availableProcessors()` | Usable cores. `8` in the worked case below |
+| `waitTimeMs` | Time per task spent blocked — DB round trip, HTTP call. `50ms` |
+| `cpuTimeMs` | Time per task actually burning CPU — parsing, mapping. `5ms` |
+| `1 + wait/cpu` | Threads needed per core to keep that core busy while others wait |
+| `+ 1` (CPU pool) | One spare so a page fault or brief stall does not idle a core |
+
+**Walk one example.** The DB-heavy service in the comment, on an 8-core box:
+
+```
+  blocking coefficient = wait / cpu   =  50 / 5    = 10
+  threads per core     = 1 + 10                    = 11
+  ioThreads            = 8 cores x 11              = 88
+
+  sanity check -- of each 55ms task, CPU is busy only 5ms:
+    88 threads x (5 / 55 CPU duty cycle) = 8.0 cores fully saturated
+
+  the same box, CPU-bound work (wait = 0):
+    1 + 0/5 = 1  ->  8 x 1 = 8, plus the spare = 9 threads
+```
+
+Those two answers -- 88 and 9 -- come from identical hardware. That gap is why a single shared pool is always wrong for a service doing both kinds of work: size it for I/O and CPU tasks thrash on context switches; size it for CPU and I/O tasks starve.
+
+**The idea behind it.** "A pool's maximum throughput is fixed at threads divided by service time — so the bounded queue does not add capacity, it only decides how long doomed requests wait before you admit you are overloaded."
+
+This is Little's Law, `L = λ x W`: concurrency equals arrival rate times latency. Read backwards it gives the pool's ceiling, and read forwards it turns any queue depth into a latency number. Sizing a queue without doing this arithmetic is how "we made the queue bigger" becomes "now we time out *and* waste the work."
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Concurrency — requests in flight. For a saturated pool, the thread count `88` |
+| `λ` | Arrival rate, requests/second |
+| `W` | Service time per request: `cpuTime + waitTime = 5 + 50 = 55ms` |
+| `λ_max` | Pool throughput ceiling, `threads / W` |
+| queue capacity | `1000` in `LinkedBlockingQueue<>(1000)` — pure waiting room, not capacity |
+
+**Walk one example.** The same 88-thread pool, pushed past its ceiling:
+
+```
+  ceiling  : lambda_max = 88 threads / 0.055s          = 1600 req/s
+  check    : L = lambda x W = 1600 x 0.055             =   88   (matches)
+
+  arrivals climb to 1800 req/s -- 200 req/s more than the pool can retire.
+  the queue is the only place the excess can go:
+
+    queue full (1000 tasks) wait = 1000 / 1600         = 0.625s
+    total latency = 0.625 + 0.055                      = 0.680s
+
+  compare a 50-slot queue:
+    wait = 50 / 1600                                   = 0.031s
+```
+
+The lesson is counterintuitive: the *smaller* queue is the better one. Both queues serve exactly 1600 req/s -- throughput is set by threads and service time, and no queue length changes it. All the 1000-slot queue buys is 680ms of latency on requests whose callers have usually timed out already, so the pool burns capacity computing responses nobody will read. This is precisely the "unbounded queue" failure in Section 10, just with a bound: the fix is a queue short enough that rejection arrives faster than the client's timeout.
+
 ---
 
 ## 7. Real-World Examples
@@ -594,6 +679,32 @@ CompletableFuture.allOf(productFuture, invFuture, reviewsFuture, recsFuture)
 // Total: max(80ms, 80ms, 80ms, 200ms timeout) = 200ms (limited by timeout)
 // Worst case without timeout: 80ms (all four in parallel)
 ```
+
+**What the formula is telling you.** "Four calls that used to add up now only overlap — so the page costs whatever the slowest single call costs, and the timeout you put on the slowest one becomes the page's latency."
+
+This is Amdahl's law in miniature: parallelism only pays on the portion of work that is actually parallel, and the answer can never drop below the longest serial branch. Here that branch is `fetchRecommendations`, which is why capping it with `orTimeout` is not a defensive nicety -- it is the latency design.
+
+| Symbol | What it is |
+|--------|------------|
+| sequential total | `L1 + L2 + L3 + L4` — each call waits for the previous one |
+| parallel total | `max(L1, L2, L3, L4)` — all four in flight at once |
+| `orTimeout(200ms)` | Hard cap on the recommendations branch; converts a hang into a fallback |
+| `exceptionally(...)` | Degrades to an empty list rather than failing the whole page |
+| `allOf(...).join()` | Waits for the last of the four to finish |
+
+**Walk one example.** The four calls at their stated 80ms, with the recommendations branch degrading:
+
+```
+  sequential : 80 + 80 + 80 + 80          = 320ms   (the "before")
+  parallel   : max(80, 80, 80, 80)        =  80ms   -> 320 / 80 = 4.0x faster
+
+  recommendations goes bad and hangs:
+    without orTimeout : max(80, 80, 80, hang)     = the page hangs too
+    with orTimeout    : max(80, 80, 80, 200)      = 200ms, list empty
+                                                    320 / 200 = 1.6x
+```
+
+Note the ceiling that parallelism cannot break: even at a perfect 4.0x, the page can never beat 80ms, because one call must still happen. Optimizing three of the four branches to 10ms would change the total by exactly nothing. After a fan-out, the only latency work that pays is on the slowest branch -- and the only lever that beats *that* is the timeout, which trades completeness for a bounded response.
 
 **Phase 2: Bulkhead isolation**:
 ```java

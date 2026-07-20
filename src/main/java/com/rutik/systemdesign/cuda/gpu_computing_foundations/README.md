@@ -284,6 +284,33 @@ No matter how many thousands of CUDA cores are thrown at this workload, it canno
 GPU-porting decisions: profiling the serial fraction *before* buying more GPU is mandatory,
 because past a certain `N` more hardware buys almost nothing.
 
+**What this actually says.** "Whatever fraction of your program refuses to go parallel eventually becomes the entire bill."
+
+Adding processors only shrinks the `p / N` term. The `(1 - p)` term never moves, so past some `N` it *is* the denominator. That is why the ceiling is `1 / (1 - p)` — a property of your code, not of your hardware budget.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Fraction of runtime that is parallelizable. `0.95` = 95% of the wall clock |
+| `1 - p` | The serial remainder. The part `N` cannot touch, ever |
+| `N` | Number of parallel workers — CUDA cores, SMs, threads |
+| `p / N` | The parallel part after being split `N` ways. Shrinks toward `0` |
+| `Speedup(N)` | Old runtime ÷ new runtime. `1.0` = no gain at all |
+
+**Walk one example.** Same `p = 0.95` pipeline. Watch what each 10x of hardware actually buys:
+
+```
+  N        (1 - p)   +    p / N    =  denominator   Speedup   gain over previous row
+  1         0.05          0.95000     1.00000        1.00x       -
+  10        0.05          0.09500     0.14500        6.90x     +5.90x
+  100       0.05          0.00950     0.05950       16.81x     +9.91x
+  1000      0.05          0.00095     0.05095       19.63x     +2.82x
+  10000     0.05          0.00010     0.05010       19.96x     +0.33x
+```
+
+Going from 100 to 1000 workers is **10x the hardware for a 16.8% gain** (16.81x -> 19.63x); the next 10x buys 1.7%. The denominator is already 98% serial term by then.
+
+**Why the `(1 - p)` term is the one to attack.** Every dollar of extra `N` fights the `p / N` term, which is already near zero — so the only lever left is shrinking `1 - p` itself. Reaching a 50x ceiling requires `p = 0.98`, i.e. cutting the serial 5% down to 2%; no quantity of GPUs substitutes for that code change. Skip this arithmetic and you buy an 8-GPU node to accelerate a workload capped at 20x by five lines of serial preprocessing.
+
 ### Gustafson's Law, Derived and Contrasted
 
 Gustafson's Law asks a different question: instead of holding problem size fixed and adding
@@ -303,6 +330,32 @@ This is why GPU throughput scales so well in practice for training and batch inf
 instead of staying fixed, so the serial fraction becomes proportionally smaller rather than
 dominating. Interviewers probing "why doesn't Amdahl's Law doom GPU scaling in practice"
 are testing whether you know this distinction.
+
+**Read it like this.** "Nobody buys a GPU to run yesterday's problem faster — they buy it to run a bigger problem in the same hour."
+
+Amdahl holds the *work* constant and asks how much time you save. Gustafson holds the *time* constant and asks how much more work you finish. Neither is wrong; they answer different questions, and GPU workloads almost always live in Gustafson's world.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Workers — and here also the factor by which the problem grows |
+| `p` | Share of the **fixed** wall-clock second spent in parallel work |
+| `1 - p` | Serial share of that same fixed second. A constant amount of time, not a shrinking one |
+| `p * N` | Parallel work now completed inside that same second |
+| `Speedup(N)` | Work done by `N` workers ÷ work one worker could do in the same time |
+
+**Walk one example.** Same `p = 0.95`, but now measure the serial part as a share of the *total work done*:
+
+```
+  N         serial work   parallel work   total work   serial share of total
+  1            0.05           0.95            1.00          5.0000%
+  10           0.05           9.50            9.55          0.5236%
+  100          0.05          95.00           95.05          0.0526%
+  10000        0.05        9500.00         9500.05          0.0005%
+```
+
+The serial column never changes — 0.05 forever. It only *looks* smaller because the parallel column grew past it. That is the entire trick, and it is why the same `p = 0.95` yields **16.81x under Amdahl but 95.05x under Gustafson at `N = 100`**: identical code, identical hardware, opposite framing of the question.
+
+**When the Gustafson framing is a lie.** It only holds if the problem genuinely scales. A fixed 1080p frame that must render in 16 ms does not grow to fill 132 SMs — that workload is squarely Amdahl's, and quoting scaled speedup there is how teams end up disappointed by a GPU that "benchmarked at 95x."
 
 ### SIMT Execution — What Actually Happens Per Cycle
 
@@ -448,6 +501,33 @@ and the GPU frequently loses to a well-vectorized CPU loop; high-AI kernels like
 where GPUs deliver their headline speedups. This is the same roofline reasoning used
 per-kernel throughout [profiling_and_performance_analysis](../profiling_and_performance_analysis/),
 introduced here at its simplest.
+
+**The idea behind it.** "How much math do you get out of each byte you were forced to drag across the memory bus?"
+
+Memory is the scarce resource on a GPU, not arithmetic — an H100 can issue vastly more FLOPs per second than HBM can feed it bytes. Arithmetic intensity is therefore the ratio that decides whether a kernel is limited by the ALUs or by the memory system, and it is the first number to compute before optimizing anything.
+
+| Symbol | What it is |
+|--------|------------|
+| `FLOPs performed` | Useful floating-point operations the kernel actually does |
+| `Bytes moved` | Bytes read from plus written to memory to make those FLOPs possible |
+| `AI` | Their ratio, in FLOPs per byte. High = compute-bound, low = memory-bound |
+| `N` | Matrix dimension in the `N x N x N` dense matmul case |
+
+**Walk one example.** Why `AI ~ N/6` means matmul *earns* its place on a GPU and vector add does not:
+
+```
+  N        FLOPs = 2*N^3    Bytes = 3*N^2*4      AI = FLOPs/Bytes
+  64          0.0005 GF        0.05 MB              10.67
+  256         0.034  GF        0.75 MB              42.67
+  1024        2.15   GF       12.0  MB             170.67
+  4096      137.4    GF      192.0  MB             682.67
+
+  vector add (any N)                                  0.125   <- flat, never improves
+```
+
+FLOPs grow as `N^3` while bytes grow only as `N^2`, so every doubling of `N` doubles the arithmetic intensity: 4096 buys **682.67 FLOPs per byte, 5461x the intensity of vector add**. Vector add's `0.125` is a constant — no problem size rescues it, because every element is touched exactly once.
+
+**Why the ratio, and not either number alone.** A kernel doing 137 GFLOP sounds impressive until you learn it moved 192 MB to do it; a kernel moving 192 MB sounds wasteful until you learn it got 137 GFLOP out of them. Only the ratio tells you which hardware limit you are about to hit, and therefore which optimization is worth attempting — tiling and reuse for a low-AI kernel, better instruction mix or Tensor Cores for a high-AI one. Optimize the wrong side and the profiler shows no change at all.
 
 ---
 

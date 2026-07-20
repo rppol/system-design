@@ -114,6 +114,61 @@ and production inference engines (vLLM, TensorRT-LLM, PyTorch's
 improvements on exactly this launch-bound decode regime, for what is close to
 a drop-in change once the graph is captured.
 
+**In plain terms.** "You are charged a flat fee per conversation with the driver, not per unit
+of work. Sixty tiny errands cost sixty fees; one errand list costs one fee."
+
+The whole model reduces to two lines of arithmetic, and it is worth writing them down because
+the eager cost is a *product* while the graph cost is a *constant*:
+
+| Symbol | What it is |
+|--------|------------|
+| `T_launch` | Fixed CPU/driver tax to submit one kernel, `5-10 us`. Independent of how long the kernel runs |
+| `N` | Number of kernel launches in the step. A 32-layer decode step issues on the order of `60` |
+| `T_gpu` | Actual GPU execution time for the step's kernels — "a handful of microseconds" each |
+| `N x T_launch` | Total eager CPU cost. Grows linearly with node count |
+| `cudaGraphLaunch` | One submission for the whole DAG. Costs `T_launch` once, regardless of `N` |
+| `T_instantiate` | One-time compile cost paid at `cudaGraphInstantiate`, amortized over every replay |
+
+**Walk one example.** One decode step, `N = 60` nodes, GPU work `60 x 3 us = 180 us`:
+
+```
+                            T_launch = 5 us        T_launch = 10 us
+    eager CPU cost           60 x 5  = 300 us       60 x 10 = 600 us
+    graph CPU cost            1 x 5  =   5 us        1 x 10 =  10 us
+    CPU cost eliminated                 295 us                 590 us
+
+    step time, eager   = max(CPU, GPU) = max(300, 180) = 300 us
+                                         max(600, 180) = 600 us
+    step time, graph   = T_gpu + T_launch =  180 + 5   = 185 us
+                                             180 + 10  = 190 us
+
+    idealized speedup  = 300 / 185 = 1.62x
+                         600 / 190 = 3.16x
+```
+
+The `1.62x - 3.16x` bracket is the ceiling with the CPU tax removed entirely; the
+`roughly 1.2-2x` reported by vLLM and TensorRT-LLM above sits below it, because real decode
+steps do CPU work the graph cannot absorb (sampling, Python bookkeeping, scheduler decisions)
+and because `T_gpu` is not perfectly back-to-back. Both ranges tell the same story: once
+`N x T_launch` exceeds `T_gpu`, the driver — not the GPU — is what you are paying for.
+
+**Stated plainly.** The break-even is "how many replays before the one-time compile pays for
+itself?" — `N* = T_instantiate / (savings per replay)`:
+
+```
+    savings per replay = (N - 1) x T_launch = 59 x 5  = 295 us   (at 5 us tax)
+                                              59 x 10 = 590 us   (at 10 us tax)
+
+    if T_instantiate = 450 us   ->  N* = 450 / 295 = 1.53  ->  2 replays
+    if T_instantiate = 900 us   ->  N* = 900 / 295 = 3.05  ->  4 replays
+```
+
+Two to four replays is the entire payback period, which is why graphs are close to a free win
+in a decode loop that replays thousands of times per request — and why they are worthless for a
+DAG you capture and run once. `T_instantiate` here is illustrative (the toolkit does not fix
+it); the shape of the answer is what matters, and the shape is that the denominator grows with
+`N` while the numerator does not.
+
 **Key insight**: A CUDA graph is a bet that the *topology* of GPU work — which
 kernels run, in what order, with what launch configuration — will be
 **identical on every replay**, and only scalar arguments or buffer pointers

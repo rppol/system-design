@@ -388,6 +388,50 @@ public class BatchProcessor {
 }
 ```
 
+**Put simply.** "Chunk size is the dial between how much work one failure destroys and how much bookkeeping you pay — and it also decides how long a single database connection stays hostage."
+
+Chunking looks like a loop-tidiness choice. It is really three constraints traded against each other at once, and they pull in opposite directions, so there is no chunk size that is best on all three.
+
+| Symbol | What it is |
+|--------|------------|
+| `100` | Chunk size — rows inside one `REQUIRES_NEW` transaction |
+| `REQUIRES_NEW` | Suspends any outer transaction and starts a fresh one per chunk |
+| `setTimeout(30)` | Seconds one chunk's transaction may run before being rolled back |
+| commits | Round-trips to the DB for transaction bookkeeping: `total_rows / chunk_size` |
+| work-at-risk | Rows lost and re-done when a chunk fails: at most `chunk_size` |
+
+**Walk one example.** 10,000 items at 2 ms per row, one failure somewhere in the middle:
+
+```
+  chunk   commits           rows at risk    connection held per txn      first-level
+  size    = 10000/size      per failure     = size x 2 ms                cache entries
+  ------  ----------------  --------------  ---------------------------  -------------
+      1       10,000              1          0.002 s                          1
+    100          100            100          0.200 s                        100
+   1000           10          1,000          2.000 s                      1,000
+  10000            1         10,000         20.000 s  (near the 30 s cap) 10,000
+
+  chunk 100 vs chunk 1 : 100x fewer commits, 100 rows re-done instead of 1.
+  chunk 100 vs 10000   : 100x more commits, but 0.2 s of connection hold, not 20 s.
+```
+
+Now put chunk 100 next to the single-transaction version the Best Practices section warns about:
+
+```
+  one transaction around all 10,000 rows
+    connection held   : 10000 x 0.002 s = 20 s
+    rows at risk      : 10,000  (any failure rolls back everything)
+    entities in the persistence context : 10,000  -> OOM risk
+
+  chunked at 100
+    connection held   : 0.2 s per chunk, released 100 times
+    rows at risk      : 100
+    entities per context : 100 (cleared each commit)
+```
+
+The connection-hold column is the one that reaches outside this method: with a 10-connection pool, a 20 s hold caps the whole service at `10 / 20 = 0.5` transactions per second, while a 0.2 s hold supports `10 / 0.2 = 50`. Chunk size is quietly a throughput setting for every other caller of the database.
+
+**Why `REQUIRES_NEW` and not `REQUIRED` here.** With `REQUIRED` each chunk would join the caller's transaction, so nothing commits until the loop ends — you would get every cost of chunking and none of its benefit. `REQUIRES_NEW` is what makes "failure in one chunk does not affect others" true; it is also why each chunk temporarily needs a *second* connection while the outer one is suspended, so a pool of 10 supports fewer concurrent batch jobs than it appears to.
 ### 6.8 @Async + @Transactional Interaction
 
 ```java

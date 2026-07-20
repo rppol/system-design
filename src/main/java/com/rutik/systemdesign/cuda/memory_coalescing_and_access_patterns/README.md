@@ -275,6 +275,64 @@ Since Pascal (compute capability 6.0+), a warp's global-memory instruction is se
 - **128-byte transactions** (4 sectors) are the largest single unit typically issued for one coalesced warp request — exactly `32 lanes x 4 bytes`.
 - A stall on an uncached global load is **~400-800 cycles**; every wasted sector is latency and bandwidth you pay whether or not the byte was useful.
 
+#### 6.1.1 The Sector-Count Rule, Decoded
+
+The whole coalescing story is one counting rule plus one division:
+
+```
+sector_id(lane i) = floor(addr_i / 32)
+
+sectors(warp)  = count of DISTINCT sector_id values across the 32 lanes,
+                 capped at 32 (only 32 lanes can ask for anything)
+bytes_moved    = sectors x 32
+bytes_used     = 32 lanes x element_bytes
+bus efficiency = bytes_used / bytes_moved
+```
+
+**What this actually says.** "The hardware never counts your loads — it counts the 32-byte buckets your loads happened to land in, and bills you for every whole bucket it had to open."
+
+That framing matters because it explains why coalescing is a property of *addresses*, not of code shape: two lanes landing in the same bucket are free, and a lane landing alone in its own bucket costs a full 32 bytes to deliver 4. Every efficiency number in the §4.1 table is this one division.
+
+| Symbol | What it is |
+|--------|------------|
+| `addr_i` | The byte address lane `i` computed for this single load/store instruction |
+| `floor(addr_i / 32)` | Which 32-byte sector that address lives in — the bucket ID |
+| `sectors(warp)` | How many distinct buckets the hardware must open. Duplicates are free — that sharing *is* the win |
+| `element_bytes` | Bytes each lane actually wants: `4` for `float`, `8` for `double`, `16` for `float4` |
+| `bytes_used` | What the algorithm asked for: `32 x 4 = 128 B` in the scalar-`float` case |
+| `bytes_moved` | What the bus actually carried. Always a whole multiple of 32 |
+| cap at 32 | 32 lanes cannot open more than 32 buckets, no matter how far apart they are |
+
+**Walk one example.** Push a stride ladder through the rule, holding `bytes_used` fixed at 128 B:
+
+```
+  32 lanes, 4 B floats -> bytes_used = 32 x 4 = 128 B in every row below.
+  Address span of the warp = 31 x stride + 4 bytes.
+
+  stride    address span      distinct sectors       bytes_moved    efficiency
+  (bytes)   31*stride + 4     ceil(span / 32)        sectors x 32   128 / moved
+  ------    -------------     -----------------      ------------   ----------
+      4          128 B                4                  128 B        100.0%
+      8          252 B                8                  256 B         50.0%
+     16          500 B               16                  512 B         25.0%
+     32          996 B               32                 1024 B         12.5%
+   4096       126980 B          3969 -> capped 32       1024 B         12.5%
+```
+
+The last row is the one to internalize. A stride of 4096 bytes spans enough address
+space for 3969 sectors, but only 32 lanes issued a request, so the cap pins the cost at
+32 sectors — 1024 bytes moved, 128 used. **12.5% is a floor, not a coincidence**: it is
+exactly 4 useful bytes out of every 32-byte sector, and it is the same number whether the
+stride is 4 KB (§5.3), 4 MB, or fully random. This is why the §5.6 chart flattens instead
+of continuing to fall, and why "reduce the stride a bit" is not a fix once you are past
+stride 32 — you have to change the *layout* to put lanes back in the same bucket.
+
+**Why the cap exists at all.** Without it the rule would predict unbounded traffic for
+large strides, which the hardware cannot produce: a warp issues at most 32 addresses, so
+at most 32 sectors. The cap is what makes "scattered" and "column-major" and "random" all
+converge on the same worst case rather than degrading forever — bad news, but *bounded*
+bad news, and the reason a single shared-memory staging hop (§14.3) can recover all of it.
+
 ### 6.2 Coalesced vs Strided Kernel — CUDA C++
 
 ```cuda
@@ -444,6 +502,54 @@ __global__ void updateSoA(float* __restrict__ x, float* __restrict__ y,
     }
 }
 ```
+
+#### 6.5.1 Where the AoS 25% Comes From
+
+The 25% quoted in the code comment above and in diagram §5.4 is not a measurement — it drops straight out of the sector rule once you notice that a struct's size *is* the stride:
+
+```
+AoS warp-wide field read:   stride = sizeof(struct)
+SoA warp-wide field read:   stride = sizeof(field)
+
+useful fraction = sizeof(field) / stride         (valid while stride <= 32 B)
+
+  AoS Particle{float x,y,z,w}:  4 / 16 = 0.25
+  SoA float x[N]:               4 /  4 = 1.00
+```
+
+**Read it like this.** "Whatever you wrap a field inside becomes the distance between two lanes' copies of it — so the struct you chose for readability is the stride the memory bus is charged."
+
+| Symbol | What it is |
+|--------|------------|
+| `sizeof(field)` | Bytes one lane genuinely consumes — `4` for a `float x` |
+| `sizeof(struct)` | The AoS stride. Every extra field you pack in widens it and lowers efficiency |
+| `stride <= 32 B` | The regime where the fraction is exact; past 32 B every lane owns a whole sector and you hit the 12.5% floor instead |
+| useful fraction | Same quantity as bus efficiency in §6.1.1, just expressed per-byte instead of per-sector |
+
+**Walk one example.** One million particles, kernel touches only `x` (the `updateAoS` / `updateSoA` pair above, `n = 1 << 20`):
+
+```
+  AoS: Particle[1048576], 16 B each = 16 MB resident
+       warp reads x only -> stride 16 B -> 16 sectors per warp
+       bytes used  = 1048576 x  4 B =  4 MB   (the x values)
+       bytes moved = 1048576 x 16 B = 16 MB   (whole structs dragged along)
+       efficiency  = 4 / 16 = 25%    -> 12 MB of y, z, w fetched and discarded
+
+  SoA: float x[1048576] = 4 MB resident in its own array
+       warp reads x -> stride 4 B -> 4 sectors per warp
+       bytes used  = 4 MB
+       bytes moved = 4 MB
+       efficiency  = 4 / 4 = 100%    -> 4x less DRAM traffic, same math done
+```
+
+Same arithmetic, same result array, one quarter of the bus traffic. The AoS kernel is not
+slower because it computes more — it computes exactly as much and moves 4x the bytes.
+
+**Why AoS is not simply wrong.** The fraction flips if a kernel reads *all four* fields of
+its own element: then AoS moves 16 B and uses 16 B (100%), while SoA touches four separate
+arrays and gets no reuse across them. That is the tradeoff §5.7 plots — pick the layout that
+matches which axis your warp sweeps, and reach for AoSoA only when the kernel genuinely does
+both.
 
 ### 6.6 Vectorized Loads — `float4` Moves 16 Bytes/Thread
 
@@ -881,6 +987,61 @@ __global__ void transposeTiled(const float* in, float* out) {
 // 1.4-1.7 TB/s -- about 74-89% of peak bandwidth, a ~6-8x wall-clock
 // improvement over transposeNaive for the same 64 MB matrix.
 ```
+
+#### 14.3.1 Turning Those Bandwidth Numbers Into a Speedup
+
+Both kernels above are quoted in GB/s rather than milliseconds. The bridge is one definition:
+
+```
+effective bandwidth = (bytes_read + bytes_written) / elapsed_time
+percent of peak     = effective bandwidth / peak_HBM_bandwidth
+elapsed_time        = (bytes_read + bytes_written) / effective bandwidth
+```
+
+**Stated plainly.** "Count every byte that had to cross the DRAM bus, divide by how long the kernel ran, and compare that to what the chip is physically capable of — anything well under peak means the bus was idle waiting on badly shaped addresses."
+
+A transpose is the cleanest possible subject for this: it does *zero* arithmetic, so its
+runtime is purely a bandwidth question and the percent-of-peak number is a direct
+scorecard for coalescing.
+
+| Symbol | What it is |
+|--------|------------|
+| `bytes_read + bytes_written` | The kernel's mandatory traffic. For a transpose, the matrix once in each direction |
+| `elapsed_time` | Wall-clock kernel duration from `cudaEvent` timing or Nsight |
+| effective bandwidth | Bytes the *algorithm* needed, per second — not the bytes the bus actually carried |
+| `peak_HBM_bandwidth` | The device spec sheet number: `~1.9 TB/s` on an A100 (HBM2e) |
+| percent of peak | The scorecard. Above ~70% means coalesced; near 12.5% means one side is scattered |
+
+**Walk one example.** The `N = 4096` transpose from §14.2 and §14.3, using the midpoint of each quoted range:
+
+```
+  Mandatory traffic:
+    matrix bytes = 4096 x 4096 x 4 B = 67,108,864 B = 64 MiB
+    read + write = 2 x 64 MiB        = 134,217,728 B = 128 MiB
+
+  NAIVE  (quoted 200-280 GB/s, midpoint 240 GB/s):
+    time = 134,217,728 B / 240e9 B/s = 0.5592 ms
+    percent of peak = 240 / 1900 = 12.6%      <- the 12.5% floor, exactly
+
+  TILED  (quoted 1.4-1.7 TB/s, midpoint 1550 GB/s):
+    time = 134,217,728 B / 1550e9 B/s = 0.0866 ms
+    percent of peak = 1550 / 1900 = 81.6%
+
+  speedup = 0.5592 ms / 0.0866 ms = 6.46x     <- matches the quoted "6-8x"
+```
+
+Notice that the naive kernel's 12.6% of peak lands on the §6.1.1 floor to within a
+rounding error. That is not luck: its read is perfectly coalesced and its write is a
+stride-16384 scatter, so the write leg moves 8x the bytes it uses and dominates total
+time. **The percent-of-peak figure is the sector-efficiency table showing up in wall-clock
+form** — which is exactly why an experienced reviewer asks for GB/s before asking to see
+the kernel.
+
+**Why "effective" and not just "achieved".** Nsight's DRAM counters report the bytes the
+bus really carried (1024 MiB-worth of sectors for the naive write), while effective
+bandwidth divides only the bytes the *algorithm* required. The gap between the two is the
+waste. Report effective bandwidth when you want an honest speed number, and report both
+when you want to prove *why* a kernel is slow.
 
 ### 14.4 CuPy `RawKernel` Equivalent
 

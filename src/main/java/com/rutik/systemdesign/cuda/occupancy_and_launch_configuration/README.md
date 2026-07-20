@@ -302,6 +302,55 @@ SM budget: 65,536 registers | up to 164 KB shared memory (A100, opt-in) | 32 blo
 this is the common case for compute-heavy kernels, and it is why "just add more shared
 memory tiling" does not raise occupancy once registers are already the tighter constraint.
 
+**What the formula is telling you.** "Ask each resource how many whole blocks it can hold,
+take the stingiest answer, and that many blocks — times the warps inside each one — is all
+the SM will ever run at once."
+
+Occupancy is a *derived* quantity, never a knob. There is no dial labelled "occupancy": you
+change one of the four inputs below and read back whatever `min(...)` reports.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Threads per block, chosen at launch. Should be a multiple of 32 |
+| `R` | Registers per thread, assigned by `ptxas` — read it from `nvcc --ptxas-options=-v` |
+| `S` | Shared-memory bytes per block: static `__shared__` plus the dynamic launch argument |
+| `65,536 / (T x R)` | How many blocks the register file can hold |
+| `smem_per_SM / S` | How many blocks the shared-memory pool can hold |
+| `32` | Hard block-slot ceiling per SM, the same regardless of block size |
+| `64 / (T / 32)` | How many blocks the 64-warp-slot ceiling can hold |
+| `min(...)` | The binding limiter — the only one of the four that affects the answer |
+| Occupancy | `min(...) x (T / 32) / 64` — resident warps over the 64-warp ceiling |
+
+**Walk one example.** The table above lands on registers; here is the identical arithmetic on
+a FlashAttention-shaped kernel — small blocks, enormous tile — where a *different* resource
+binds:
+
+```
+Config: T = 128 threads/block (4 warps), R = 40 regs/thread, S = 48 KB shared/block.
+SM budget: 65,536 registers | 164 KB shared (A100 opt-in pool) | 32 block slots | 64 warps.
+
+  Limiter          Per-SM budget     Per-block cost          Blocks/SM allowed
+  ---------------- ----------------- ----------------------- --------------------------
+  Registers        65,536 regs       128 x 40 = 5,120 regs   65536/5120 = 12.8  -> 12
+  Shared memory    164 KB            48 KB                   164/48     =  3.42 ->  3
+  Block slots      32 blocks         1 block                 32
+  Warp slots       64 warps          4 warps (128/32)        64/4       = 16
+
+  Binding limiter = min(12, 3, 32, 16) = 3 blocks/SM
+  Resident warps  = 3 blocks x 4 warps = 12 warps/SM
+  Occupancy       = 12 / 64 = 18.75%
+
+  Now shave registers hard, 40 -> 20 regs/thread:
+    128 x 20 = 2,560 regs/block -> 65536/2560 = 25.6 -> 25 blocks
+    min(25, 3, 32, 16) is STILL 3.  Occupancy is STILL 18.75%.
+  The register work bought nothing. Only shrinking the 48 KB tile moves this kernel.
+```
+
+The un-bound resources are paid for whether or not they are used: an SM holding 3 of these
+blocks has `65,536 - 3 x 5,120 = 50,176` registers sitting completely idle. FlashAttention
+takes that deal deliberately — 18.75% occupancy buys a tile big enough that the Tensor Cores
+never wait on HBM, which is the §7 point restated as arithmetic.
+
 ```mermaid
 flowchart LR
     classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -447,6 +496,42 @@ nvcc -O3 -arch=sm_90 --ptxas-options=-v -c kernel.cu -o kernel.o
 a register constraint did **not** force spilling; nonzero spill bytes is the signal to back
 off the constraint or refactor the kernel instead.
 
+**Read it like this.** "`__launch_bounds__(T, B)` is a promise, and the compiler bills you for
+it — divide the register file by the threads you just promised to keep resident, and the
+quotient is every thread's entire register allowance."
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | `maxThreadsPerBlock` — the largest block you promise ever to launch |
+| `B` | `minBlocksPerMultiprocessor` — the blocks/SM you are demanding be resident |
+| `T x B` | Threads the SM must hold at once for that promise to be keepable |
+| `65,536 / (T x B)` | Registers each of those threads may use, floored to an integer |
+| spill | What `ptxas` does with the surplus when the kernel needs more than the allowance |
+
+**Walk one example.** Hold `T = 256` fixed and turn the occupancy demand `B` up one notch at a
+time:
+
+```
+  B (blocks/SM)   threads resident   reg allowance = 65536/(T x B)   warps/SM   occupancy
+  --------------- ------------------ ------------------------------ ---------- -----------
+   2                512               65536/512  = 128 regs/thread    16          25 %
+   4               1024               65536/1024 =  64 regs/thread    32          50 %
+   6               1536               65536/1536 =  42 regs/thread    48          75 %
+   8               2048               65536/2048 =  32 regs/thread    64         100 %
+
+  Every doubling of B halves the allowance. "Get me to 100% occupancy" on a 256-thread
+  block is the same sentence as "fit this kernel into 32 registers per thread."
+```
+
+**Why the promise can backfire.** Nothing in `__launch_bounds__` makes a kernel need fewer
+registers — it only changes what `ptxas` is allowed to hand out. A kernel whose natural live
+set is 50 registers, compiled under `__launch_bounds__(256, 8)`, gets 32 and must push the
+other 18 registers' worth of live values into **local memory**, which is global memory wearing
+a different name: an L1/L2 miss on a spilled value costs the same 400-800 cycles the extra
+resident warps were supposed to hide. That is the whole trade in one line — you bought 100%
+occupancy with a 400-800 cycle tax on every spilled access, and `ptxas -v` reporting nonzero
+spill bytes is how you find out you paid it.
+
 ### 6.3 Block-Size Selection — Grid-Stride Loop Pattern
 
 ```cpp
@@ -553,6 +638,55 @@ def launch_scale(data, alpha):
 Numba's `cuda.jit` kernels are compiled through the same nvcc/ptxas pipeline underneath, so
 the same register/shared-memory arithmetic applies — Numba just handles the launch syntax
 and device-array marshaling in Python.
+
+### 6.6 Wave Quantization — Sizing the Grid Against the SM Count
+
+Occupancy answers "how many warps fit on **one** SM." Wave quantization answers the other
+half: "how evenly does my grid divide across **all** of them." A **wave** is one full pass of
+concurrently-resident blocks over the entire GPU:
+
+```
+blocks_per_wave = SM_count x blocks_per_SM
+waves           = ceil(grid_blocks / blocks_per_wave)
+wave_efficiency = grid_blocks / (waves x blocks_per_wave)
+```
+
+**Put simply.** "Blocks are dealt to the GPU a full round at a time; if the last round is one
+card short of complete, you still pay for the whole round."
+
+| Symbol | What it is |
+|--------|------------|
+| `SM_count` | Physical SMs — 132 on an H100, 108 on an A100. Query it, never hardcode it |
+| `blocks_per_SM` | The §5 answer: whatever the binding limiter allowed |
+| `blocks_per_wave` | Blocks the whole GPU runs concurrently — one full deal |
+| `ceil(...)` | The source of all the waste: a partial round costs a full round of time |
+| `wave_efficiency` | Fraction of the block-slots you paid for that carried real work |
+
+**Walk one example.** An H100 (132 SMs) running the §5 kernel at its binding 5 blocks/SM, so
+`blocks_per_wave = 132 x 5 = 660`:
+
+```
+  grid_blocks   waves   slots paid for   last wave fill    wave efficiency
+  ------------- ------- ----------------- ----------------- -----------------
+      660        1         660             660/660 = 100 %     100.00 %
+      700        2        1320              40/660 = 6.06%      53.03 %   <- worst case
+     1320        2        1320             660/660 = 100 %     100.00 %
+     3907        6        3960             607/660 = 91.97%     98.66 %
+
+  (3907 = ceil(1,000,000 elements / 256 threads per block) -- a realistic elementwise grid.)
+
+  Read the 700-block row twice. It costs the same wall-clock as the 1320-block row: 40
+  straggler blocks pin the whole GPU for a second full wave while 620 of 660 slots idle.
+  Launching 660 blocks and giving each ~6% more work FINISHES SOONER than launching 700.
+```
+
+**Why the tail stops mattering as grids grow.** The waste is bounded by one wave, so it is a
+*fixed* cost divided by a growing grid: one block of overshoot costs 47 percentage points of
+efficiency at 700 blocks, but only 1.3 points at 3907. Small grids are where wave
+quantization does real damage — and it is exactly why the grid-stride loop in §6.3 is the
+default idiom: it pins `grid_blocks` at `blocks_per_wave` (or a small multiple of it) and
+lets the loop absorb any `n`, making `wave_efficiency` 100% by construction instead of by
+luck.
 
 ---
 

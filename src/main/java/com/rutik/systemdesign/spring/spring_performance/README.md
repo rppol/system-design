@@ -58,6 +58,52 @@ Key insight: Most Spring Boot performance problems are not JVM problems — they
 - **Throughput formula**: poolSize = (requests_per_second * avg_query_duration_ms) / 1000. For 1000 RPS with 5ms average query: poolSize = (1000 * 5) / 1000 = 5 connections minimum.
 - **Empirical tuning**: Start with the formula, load test, watch HikariCP's pending connection count metric. If pending > 0 regularly, increase pool size.
 
+**In plain terms.** "A connection is only useful while something is actually running on it. Size the pool to the number of queries genuinely in flight at once — not to the number of threads that might ask."
+
+Both formulas are answering the same question from opposite ends. The OLTP one asks what the *database server* can usefully execute in parallel; the throughput one asks how many connections your *arrival rate* keeps busy. Take the larger, then add headroom.
+
+| Symbol | What it is |
+|--------|------------|
+| `CPU cores` | Cores on the **database** host, not the app host — the DB is what executes the query |
+| `effective_spindle_count` | How many independent disks can seek concurrently. SSD: use `1` |
+| `requests_per_second` | Arrival rate of requests that touch the database |
+| `avg_query_duration_ms` | How long one connection is *held*, including transaction time, not just query time |
+| `/ 1000` | Converts milliseconds to seconds so the units cancel and the result is a plain count |
+
+**Walk one example.** Same 4-core SSD box, run through both formulas:
+
+```
+  OLTP formula      : (4 cores x 2) + 1 spindle   =  8 + 1  =  9 connections
+  Throughput formula: (1000 rps x 5 ms) / 1000    =  5000/1000 =  5 connections
+
+  take the larger   : max(9, 5) = 9   ->  configure 10 (round up for headroom)
+```
+
+Now hold the connection longer and watch the throughput formula take over:
+
+```
+  same 1000 rps, but the transaction holds the connection 40 ms (HTTP call inside it)
+    (1000 x 40) / 1000 = 40 connections needed
+
+  40 > 9, so hold time -- not core count -- is now the binding constraint.
+```
+
+**Why `avg_query_duration_ms` is really hold time.** The formula is Little's Law (`L = λ × W`) wearing a different hat: connections-in-use equals arrival rate times time-held. Measure the wrong `W` — query time instead of transaction time — and you undersize by exactly the ratio of the two. That is the single most common pool-sizing error, and it is why an external API call inside `@Transactional` is so destructive: it inflates `W` without changing a single line of SQL.
+
+**The multiplication trap.** Pool size is per JVM, but `max_connections` is per database. The real constraint is `pool_size × instance_count <= max_connections`, with room left for admin sessions:
+
+```
+  PostgreSQL default max_connections  : 100
+  pool 20 x  4 instances = 80    ->  ok, 20 spare for psql/backups/migrations
+  pool 20 x  5 instances = 100   ->  exactly at the ceiling, zero spare -- fragile
+  pool 20 x  8 instances = 160   ->  60 over; the 5th replica onward cannot connect
+
+  Safe ceiling: pool_size <= (100 - 20 reserved) / instance_count
+                          = 80 / 8 = 10 connections per instance
+```
+
+A pool that is perfectly sized in isolation becomes an outage the moment autoscaling doubles the replica count — the pool never changed, the multiplier did.
+
 ### Caching Strategies
 
 - **Cache-aside (lazy loading)**: Application checks cache on read. On miss, reads from DB, writes to cache. Spring @Cacheable implements this.
@@ -105,6 +151,44 @@ flowchart TD
 ```
 
 Saturation scenario: 200 Tomcat threads all blocked waiting on HikariCP (pool size 10) leaves 190 threads in the pending queue, so `connection-timeout` is exceeded for late arrivals and `SQLTimeoutException` is thrown to callers.
+
+**What this actually says.** "Your real concurrency limit is the *smallest* pool in the chain, and every thread beyond it is not working — it is queueing."
+
+Two independently-sized pools sit in series here, and engineers tune them independently. Tomcat's 200 and Hikari's 10 are both defaults; nobody chose the combination.
+
+| Symbol | What it is |
+|--------|------------|
+| `200` | Tomcat's default `max-threads` — how many requests can be *in the building* |
+| `10` | HikariCP's default `maximum-pool-size` — how many can actually *reach the database* |
+| pending | Threads parked in Hikari's handoff queue waiting for a free connection |
+| `connection-timeout` | How long a thread waits in that queue before Hikari gives up (default 30 s) |
+
+**Walk one example.** Trace what the two defaults do to a request that needs a 40 ms query:
+
+```
+  in-flight requests             : 200   (Tomcat let them all in)
+  connections available          :  10
+  actively querying              :  10
+  waiting in Hikari queue        : 200 - 10 = 190
+
+  service rate of the pool       : 10 conns / 0.040 s = 250 queries/s
+  time to drain 190 waiters      : 190 / 250          = 0.76 s of pure queueing
+
+  a request at the back of the line pays 760 ms before its query even starts.
+```
+
+Now hold each connection for 800 ms instead (an HTTP call inside the transaction):
+
+```
+  service rate  : 10 / 0.800 =  12.5 queries/s      <- the hard ceiling
+  target load   : 300 rps
+  deficit       : 300 - 12.5 = 287.5 rps with nowhere to go
+
+  wait to drain 190 waiters : 190 / 12.5 = 15.2 s   >  30 s timeout is close;
+  raise the load a little and every waiter times out together.
+```
+
+**Why raising Tomcat's 200 makes it worse, not better.** Admitting more requests cannot increase the 12.5/s the pool can serve; it only lengthens the queue, so latency climbs while throughput stays flat. The fix is always on the other side of the bottleneck — shorten hold time, or widen the pool the DB can afford. Admission control (a smaller Tomcat pool, or a short `connection-timeout`) is how you convert a slow, compounding pile-up into a fast, honest rejection.
 
 ### @Cacheable — Cache-Aside Flow
 
@@ -1122,6 +1206,44 @@ pie showData
 CPU utilization: 22% (8 cores × 22% = 1.76 cores in use). Thread utilization: 98% (196/200 threads blocked at any given time) — a classic I/O-bound profile: threads are the bottleneck, not CPU.
 
 After virtual threads: CPU utilization rises to 45% (same I/O time, but threads never block OS threads); thread count is effectively unlimited (JVM creates carriers on demand, 8 OS threads total); TPS capacity reaches 400+ (the I/O-bound ceiling is removed).
+
+**Read it like this.** "Nearly every thread is asleep waiting on somebody else's network, while seven of your eight cores sit idle. You are not out of CPU — you are out of *threads*."
+
+That single pair of percentages is the whole diagnosis. High thread utilization with low CPU utilization is the exact signature that says "virtual threads will help"; the mirror image (high CPU, low thread util) says they will not.
+
+| Symbol | What it is |
+|--------|------------|
+| `22%` | Fraction of total CPU capacity actually executing application code |
+| `8 cores × 22%` | Converts that percentage into cores genuinely in use |
+| `196/200` | Threads parked in a blocking call at any instant, out of the Tomcat pool |
+| `180 TPS` | Measured ceiling — where added load stops raising throughput |
+| `40 ms` | Average time a request spends blocked on JDBC |
+
+**Walk one example.** Derive the 180 TPS ceiling from the thread pool and the blocking time:
+
+```
+  request profile (ms blocked, from the pie above)
+    JDBC          40
+    GPS HTTP      25
+    Redis         15
+    -------------------
+    blocked total 80 ms per request
+
+  a platform thread can serve   : 1 s / 0.080 s   = 12.5 requests/s
+  200 threads therefore serve   : 200 x 12.5      = 2500 TPS in theory
+
+  measured ceiling is 180 TPS -- 14x below theory. The pool is not the only
+  limit: the 20-connection HikariCP pool caps DB-touching work at
+    20 / 0.040 = 500 TPS,
+  and lock/pinning effects pull the real number down further.
+
+  CPU actually consumed        : 8 x 0.22 = 1.76 cores of 8  -> 6.24 cores idle
+  threads actually working     : 200 - 196 = 4 of 200
+```
+
+Four working threads and 1.76 busy cores describe the same machine: work is not CPU-bound, it is *waiting*-bound.
+
+**Why the pool formula changes shape under virtual threads.** With platform threads, pool size and thread count are the same knob — a thread holds a connection for its whole blocking window, so `(cores × 2) + spindles = (8×2) + 0 = 16` is a statement about the *database's* parallelism. With virtual threads the app can hold millions of requests in flight, so the connection pool becomes the only admission control left and must be sized by arrival rate instead: `(400 TPS × 40 ms) / 1000 = 16`. The two happen to land on the same 16 here, which is a coincidence worth noticing — change the hold time to 100 ms and the second formula demands 40 while the first still says 16.
 
 **Virtual threads enablement (Spring Boot 3.2+):**
 

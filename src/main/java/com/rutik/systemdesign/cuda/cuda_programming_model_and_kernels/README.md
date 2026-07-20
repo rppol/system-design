@@ -250,6 +250,33 @@ blocks, so `gridDim.x * blockDim.x` rounds *up* to the next multiple of `blockDi
 See the BROKEN -> FIX walkthrough in Section 10 for what happens when that guard is
 missing.
 
+**In plain terms.** "Which block am I in, times how many threads a block holds, plus my seat number inside that block."
+
+It is street addressing. `blockIdx.x` is the block number, `blockDim.x` is the houses per block, `threadIdx.x` is the house number — multiply and add to get one globally unique address. Every thread in the entire grid runs this same line and every thread gets a different `i`.
+
+| Symbol | What it is |
+|--------|------------|
+| `blockIdx.x` | Which block this thread belongs to. Ranges `0 .. gridDim.x - 1` |
+| `blockDim.x` | Threads per block — the same value for every block in the launch |
+| `threadIdx.x` | This thread's position inside its own block. Ranges `0 .. blockDim.x - 1` |
+| `i` | The flat global element index. Unique across the whole grid |
+| `if (i < n)` | The guard. Retires threads whose `i` ran past the real data |
+
+**Walk one example.** The realistic launch from Section 6.1 — `n = 1,000,000`, `blockDim.x = 256`:
+
+```
+  thread                blockIdx.x   blockDim.x   threadIdx.x   i = b*bd + t
+  first thread overall       0          256            0               0
+  last thread of block 0     0          256          255             255
+  first thread of block 1    1          256            0             256   <- no gap, no overlap
+  an arbitrary thread     2891          256           37         740,133
+  very last thread        3906          256          255       1,000,191   <- past n!
+```
+
+The last row is Case B in miniature: `1,000,191 >= 1,000,000`, so that thread — and the 191 before it — must be turned away by `if (i < n)`. Drop the guard and those 192 threads write past the end of `c[]`, corrupting whatever allocation the driver placed next.
+
+**Why multiply rather than concatenate.** `blockIdx.x * blockDim.x` is what makes block 1 start exactly where block 0 stopped. Any other combination either leaves holes (elements no thread ever computes, so stale memory is read back as a result) or overlaps (two threads writing the same `c[i]`, a race whose winner varies run to run). The multiply-then-add form is the only one that partitions `[0, gridDim.x * blockDim.x)` exactly once.
+
 ### 2D Indexing Sketch — Mapping Threads onto an Image
 
 ```
@@ -354,6 +381,34 @@ int main() {
 `blockSize = 256` and `gridSize = ceil(n / blockSize)` is the idiom you will type
 hundreds of times; it appears again, unchanged in spirit, in the Numba and CuPy
 versions below.
+
+**Put simply.** "Round the block count up, never down — it is always safe to launch a few threads too many, and never safe to launch one too few."
+
+`(n + blockSize - 1) / blockSize` is integer ceiling division written without floating point. Adding `blockSize - 1` before the truncating divide forces any nonzero remainder to carry into the quotient.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of real data elements to process |
+| `blockSize` | Threads per block. `256` here |
+| `blockSize - 1` | The bias that makes the truncating `/` round up instead of down |
+| `gridSize` | Blocks to launch = `ceil(n / blockSize)` |
+| `gridSize * blockSize` | Threads actually launched. Always `>= n`, never `< n` |
+
+**Walk one example.** `n = 1,000,000`, `blockSize = 256`, and the wrong version beside it:
+
+```
+  correct (ceil):   (1,000,000 + 255) / 256  =  1,000,255 / 256  =  3907  blocks
+                    threads launched = 3907 x 256 = 1,000,192
+                    surplus threads  = 1,000,192 - 1,000,000 = 192  -> retired by if (i < n)
+
+  wrong (floor):     1,000,000 / 256          =  3906  blocks
+                    threads launched = 3906 x 256 =   999,936
+                    MISSING elements = 1,000,000 -   999,936 = 64   -> silently never computed
+```
+
+Both versions compile, both run, both exit `0`. The floor version simply leaves the last **64 elements** of `c[]` holding whatever `cudaMalloc` handed back — usually stale data from a previous allocation, which is why the bug reproduces intermittently and never in the first test run.
+
+**The two errors are not symmetric.** Over-launching costs 192 threads that evaluate one comparison and retire — nanoseconds, and the guard already exists to handle it. Under-launching costs correctness with no error code, no exception, and no profiler warning. That asymmetry is why `ceil` is the unconditional idiom rather than a judgement call.
 
 **Numba `@cuda.jit`** — same arithmetic, Python syntax, JIT-compiled to PTX:
 

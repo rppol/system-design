@@ -80,6 +80,40 @@ current_count = previous_window_count * (1 - elapsed_fraction) + current_window_
 
 Where `elapsed_fraction` is how far into the current window we are (0.0 to 1.0). This approximation is accurate to within ~1% in practice and requires only two counters per identity instead of per-request storage.
 
+**What the formula is telling you.** "Keep whatever fraction of the previous window still
+overlaps the last 60 seconds, and add everything in the current one."
+
+It is a straight-line guess: assume the previous window's requests were spread evenly across
+it, so the portion still inside the sliding window is proportional to how little of the new
+window has elapsed. Two integers replace a per-request timestamp log.
+
+| Symbol | What it is |
+|--------|------------|
+| `previous_window_count` | Total requests counted in the window that just closed |
+| `current_window_count` | Requests so far in the window now open |
+| `elapsed_fraction` | How far into the current window you are, `0.0` to `1.0` |
+| `1 - elapsed_fraction` | The share of the previous window still inside the sliding view |
+| `current_count` | The estimate compared against the limit |
+
+**Walk one example.** Previous window 80, current window 30, limit 100, as the window advances:
+
+```
+   elapsed_fraction   prev x (1 - frac)   + current   =  estimate    vs limit 100
+        0.00            80 x 1.00 = 80        30          110          REJECT
+        0.25            80 x 0.75 = 60        30           90          allow
+        0.50            80 x 0.50 = 40        30           70          allow
+        0.75            80 x 0.25 = 20        30           50          allow
+        1.00            80 x 0.00 =  0        30           30          allow
+
+  The old window's weight bleeds off linearly instead of vanishing at a boundary.
+  That single change is what removes the 2x boundary burst.
+```
+
+The approximation's error comes entirely from the even-spread assumption. If the previous
+window's 80 requests all landed in its *first* second, the true overlap is zero but the
+formula still charges you 60 at `frac = 0.25` — it over-counts, so it fails closed. That is
+the right direction to be wrong in for a limiter.
+
 ### Adaptive Throttling (Client-Side)
 
 Google's approach from SRE: clients track their own accept rate and self-throttle based on the server's observed rejection ratio.
@@ -124,6 +158,41 @@ sequenceDiagram
 ```
 
 *A client sends 100 requests in the final second of Window 1 and 100 more in the first second of Window 2 — the hard counter reset at the boundary lets 200 requests through in 2 seconds, double the intended 100/min limit.*
+
+**Read it like this.** "A fixed window promises `limit` per window, but what a client can
+actually extract in one continuous stretch is `2 x limit`, because two full windows can be
+adjacent to the boundary."
+
+The limiter is not broken — it never let more than 100 through in either window. The bug is
+that "window" and "any 60-second interval" are different things, and the client gets to choose
+which interval to aim at.
+
+| Symbol | What it is |
+|--------|------------|
+| `limit` | Requests permitted per window, `100` here |
+| `windowSize` | Window length, `60` s |
+| `2 x limit` | Worst-case requests in one continuous span across the boundary |
+| intended rate | `limit / windowSize` — the rate you thought you configured |
+| achieved rate | `2 x limit / burstSpan` — what a boundary-aware client gets |
+
+**Walk one example.** Limit 100 per 60 s, a client that knows where the boundary is:
+
+```
+  intended sustained rate :  100 / 60 s        =   1.67 requests/second
+
+  00:59.0   100 requests  ->  window 1 counter 0 -> 100, all allowed
+  01:00.0   counter resets to 0
+  01:01.0   100 requests  ->  window 2 counter 0 -> 100, all allowed
+
+  achieved  :  200 requests in a 2-second span  =  100 requests/second
+
+  100 / 1.67  =  60x the intended rate, and the limiter reports zero violations
+```
+
+The `2x` is the headline, but the burst-span ratio is the number that actually hurts: the
+shorter the client makes the span around the boundary, the higher the instantaneous rate,
+while the "2x per window" framing stays constant. That is why a downstream service sized for
+1.67 rps still falls over.
 
 ### Sliding Window Counter Approximation
 
@@ -277,6 +346,40 @@ public class TokenBucket {
     }
 }
 ```
+
+**In plain terms.** "You may spend what has piled up in the bucket all at once, but you can
+only ever earn it back at the refill rate."
+
+Two numbers, two independent guarantees: `capacity` is the biggest burst you tolerate, and
+`refillRate` is the sustained rate you are actually willing to serve. Conflating them is the
+usual configuration mistake.
+
+| Symbol | What it is |
+|--------|------------|
+| `capacity` | Maximum tokens the bucket holds. Equals the largest single burst allowed |
+| `refillRatePerSecond` | Tokens added per second. The long-run throughput ceiling |
+| `elapsed x refillRatePerNano` | Tokens earned since the last refill — computed lazily, not by a timer |
+| `Math.min(capacity, ...)` | The cap. Tokens earned above `capacity` are thrown away |
+| `tokensRequested` | Cost of this call. Expensive endpoints can charge more than 1 |
+
+**Walk one example.** `capacity = 100`, `refillRate = 10/s`, a client that opens at full tilt:
+
+```
+  t = 0.0 s   bucket full at 100.  Client sends a 100-request burst.
+              100 allowed instantly.  bucket -> 0
+
+  t = 0.0 s   client keeps pushing at 60 rps, bucket empty
+              earns  10 tokens/s , spends 60 tokens/s
+              allowed rate settles at exactly 10 rps ; 50 rps rejected
+
+  refill from empty back to full :  100 tokens / 10 per s  =  10.0 s
+              so a second 100-burst is only available 10 s after the first
+```
+
+Note what `refill()` does *not* do: there is no background thread. Tokens are computed from
+elapsed time on the next request, which is why an idle client costs nothing and why the
+`Math.min(capacity, ...)` clamp exists — an hour of idleness would otherwise mint 36,000
+tokens and let one client replay a whole hour of quota in a single second.
 
 ### Redis Lua Script — Sliding Window Log (Exact)
 

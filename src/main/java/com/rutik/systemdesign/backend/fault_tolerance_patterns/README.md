@@ -234,6 +234,46 @@ Try.ofSupplier(decoratedSupplier)
     .get();
 ```
 
+**In plain terms.** "Over the last 100 calls, once at least 20 have happened, if half of them
+failed then stop calling and come back in a minute."
+
+Every one of those knobs is a guard against a different way the breaker misbehaves. The window
+sets how much history counts, the minimum stops a two-call sample from tripping it, the
+threshold sets how bad is bad enough, and the wait duration sets how long the downstream gets
+to recover unbothered.
+
+| Symbol | What it is |
+|--------|------------|
+| `slidingWindowSize = 100` | How many recent calls the failure rate is computed over |
+| `minimumNumberOfCalls = 20` | Floor before the rate is even evaluated. Below this the breaker stays CLOSED no matter what |
+| `failureRateThreshold = 50` | Percent of the window that must fail to trip. `50` means half |
+| `slowCallDurationThreshold = 2s` | A call slower than this counts as slow even if it succeeds |
+| `slowCallRateThreshold = 80` | Percent slow calls that also trips the breaker |
+| `waitDurationInOpenState = 60s` | How long OPEN rejects everything before probing |
+| `permittedNumberOfCallsInHalfOpenState = 10` | Probe budget on the way back to CLOSED |
+
+**Walk one example.** A service at 1000 rps that starts failing half its calls:
+
+```
+  calls seen so far :   2 failed / 2 total  = 100% fail rate
+                        but 2 < minimumNumberOfCalls (20) -> NOT evaluated, stays CLOSED
+
+  calls seen so far :  10 failed / 20 total =  50% fail rate
+                        20 >= 20 and 50 >= 50 -> trips OPEN
+
+  OPEN for 60s at 1000 rps :  60 x 1000 = 60,000 calls rejected instantly
+                              downstream receives ZERO load for a full minute
+
+  HALF_OPEN probe budget   :  10 calls
+                              10 x 50% = 5 failures reopens it
+                              4 or fewer failures -> back to CLOSED
+```
+
+Drop `minimumNumberOfCalls` to its default of 100 on a low-traffic service and the opposite
+failure appears: 30 failures out of 30 calls is a 100% failure rate the breaker never acts on,
+because it is still waiting for call number 100. The minimum is a statistical-significance
+guard in both directions.
+
 ### Resilience4j Metrics Events
 
 ```java
@@ -295,6 +335,80 @@ long jitteredDelay(int attempt, long baseMs, long capMs) {
 }
 ```
 
+**What this actually says.** "Pick the ceiling that doubles every attempt, then throw a dart
+anywhere between zero and that ceiling."
+
+The exponent grows the *window*; the random pick spreads clients *inside* the window. Both
+halves are load-bearing. Exponential alone still fires every client at the same instant —
+it just moves that instant further out.
+
+| Symbol | What it is |
+|--------|------------|
+| `baseMs` | First-attempt ceiling, `100`ms here. Sets the scale of the whole schedule |
+| `attempt` | Zero-indexed retry number. `0` is the first retry, not the original call |
+| `2^attempt` | The doubling. `1, 2, 4, 8, ...` |
+| `capMs` | Hard ceiling, `10s`. Stops the doubling from reaching hours by attempt 20 |
+| `min(cap, base * 2^attempt)` | The ceiling actually in force for this attempt |
+| `random(0, ceiling)` | Full jitter. Uniform pick, so the expected delay is half the ceiling |
+
+**Walk one example.** The three attempts this config allows, and where clients land:
+
+```
+                 base x 2^attempt    ceiling after cap    delay drawn from   mean delay
+  attempt 0       100 x 1 =  100          100 ms          [0, 100)             50 ms
+  attempt 1       100 x 2 =  200          200 ms          [0, 200)            100 ms
+  attempt 2       100 x 4 =  400          400 ms          [0, 400)            200 ms
+
+  worst-case added latency :  100 + 200 + 400 =  700 ms
+  expected added latency   :   50 + 100 + 200 =  350 ms
+
+  10,000 clients all failing at t=0, attempt 0:
+    fixed delay 1s  ->  all 10,000 arrive in the same millisecond at t=1000ms
+    full jitter     ->  10,000 spread uniformly over 100 ms = ~100 per ms
+```
+
+That last pair is the whole point. The retry count is identical; only the *arrival shape*
+changed, and a recovering service survives 100 requests per millisecond where 10,000 at once
+kills it again.
+
+### Retry Amplification Across a Call Chain
+
+Retries multiply, they do not add. With `r` total attempts allowed at every hop of an `n`-hop
+chain, one user request can become `r^n` requests at the deepest service.
+
+```
+  total requests at depth n  =  r ^ n
+```
+
+**Read it like this.** "Every layer that retries multiplies the layer below it, so three
+polite retries at three layers is a 27x hammer at the bottom."
+
+Each team sets `maxAttempts(3)` locally and considers it conservative. Nobody owns the
+product, which is why the deepest service — usually the database — is the one that dies.
+
+| Symbol | What it is |
+|--------|------------|
+| `r` | Total attempts per hop, including the original. `maxAttempts(3)` means `r = 3` |
+| `n` | Number of chained services that each independently retry |
+| `r^n` | Requests reaching the deepest service per one user request |
+
+**Walk one example.** The same `maxAttempts(3)` at every hop, under 1000 rps of user traffic:
+
+```
+  hops n     amplification r^n     load at the deepest service (user traffic 1000 rps)
+    1              3^1 =   3                 3,000 rps
+    2              3^2 =   9                 9,000 rps
+    3              3^3 =  27                27,000 rps
+    4              3^4 =  81                81,000 rps
+
+  A database sized for 1000 rps sees 27,000 rps at n = 3. It does not recover;
+  every retry it fails generates three more.
+```
+
+The defence is to retry at exactly one layer — usually the outermost, closest to the user —
+and set `maxAttempts(1)` everywhere else, or to spend a shared retry budget (retry only while
+retries are under ~10% of total traffic) rather than a per-call count.
+
 ### Bulkhead Configuration
 
 ```java
@@ -316,6 +430,43 @@ ThreadPoolBulkheadConfig threadPoolBulkhead = ThreadPoolBulkheadConfig.custom()
 // Semaphore: use when calling code is already async/reactive (non-blocking)
 // Thread pool: use when calling code is synchronous and you want complete isolation
 ```
+
+**The idea behind it.** "A concurrency limit is a throughput limit in disguise — divide the
+permits by how long each call holds one and you have the requests per second you just capped
+yourself at."
+
+This is Little's Law read backwards. You configure `maxConcurrentCalls` because it sounds like
+a safety number, but what you actually chose was a hard rps ceiling, and nobody notices until
+traffic reaches it.
+
+| Symbol | What it is |
+|--------|------------|
+| `maxConcurrentCalls = 25` | Permits in flight at once. The `L` in Little's Law |
+| `latency` | How long one call holds its permit. The `W` |
+| `throughput = permits / latency` | The `L / W` rearrangement — your actual rps ceiling |
+| `maxWaitDuration = 100ms` | How long a caller waits for a permit before being rejected |
+| `queueCapacity = 20` | Thread-pool variant: requests parked ahead of the 10 threads |
+
+**Walk one example.** The two bulkheads in this config, at a 200 ms downstream latency:
+
+```
+  semaphore bulkhead
+    25 permits / 0.200 s per call  =  125 rps ceiling
+    at 150 rps offered, 25 rps have no permit -> rejected after waiting 100 ms
+
+  thread pool bulkhead
+    10 threads  / 0.200 s per call =   50 rps ceiling
+    queue of 20 requests drains at 50 rps -> 20 / 50 = 0.400 s = 400 ms of queue wait
+    a request that queues therefore sees 400 + 200 = 600 ms, not 200 ms
+
+  now the pitfall-5 case: JDBC call blocking 10 s, 20 permits
+    20 permits / 10 s = 2 rps ceiling
+    the other 180 Tomcat threads are parked on the semaphore, still consumed
+```
+
+The queue is the term people add for comfort and regret later. A queue does not raise
+throughput at all — it is fixed at `threads / latency` — it only converts rejection into
+latency. Set `queueCapacity` to zero if you would rather shed load than serve 600 ms responses.
 
 ### Composing All Patterns Together
 
@@ -403,6 +554,42 @@ OkHttpClient httpClient = new OkHttpClient.Builder()
 // The circuit breaker's slowCallDurationThreshold=2s means this call is
 // counted as slow even if it eventually returns data in 3s.
 ```
+
+**Stated plainly.** "Each timeout must be strictly smaller than the one wrapping it, or the
+outer layer fires first and the inner one never gets to do its job."
+
+The ordering is the entire design. Timeouts are not independent knobs; they are a nested
+budget, and any inversion silently disables a layer you believe is protecting you.
+
+| Symbol | What it is |
+|--------|------------|
+| `connectTimeout = 2s` | TCP handshake budget. Catches a firewall silently dropping SYNs |
+| `readTimeout = 5s` | Budget for the first response byte after connecting |
+| `callTimeout = 10s` | Total end-to-end wall clock, retries included |
+| `slowCallDurationThreshold = 2s` | Breaker's "slow" line. Must sit *below* `readTimeout` |
+| worst single attempt | `connectTimeout + readTimeout` — the two run in sequence |
+
+**Walk one example.** The budget in this config, and where it runs out:
+
+```
+  worst single attempt   :  2 s connect  +  5 s read   =  7 s
+  3 attempts of that     :  7 x 3                      = 21 s
+  callTimeout            :                               10 s
+
+  10 s < 21 s  ->  the call is killed mid-attempt-2. The third retry never happens,
+                   and the caller sees a timeout, not a retry-exhausted error.
+
+  the pitfall-4 inversion:
+    readTimeout 3 s  ,  slowCallDurationThreshold 5 s
+    every call dies at 3 s, so no call ever reaches 5 s
+    slow-call counter increments : 0, forever
+    slowCallRateThreshold is dead config
+```
+
+The fix is to make the inequality explicit and check it in a test:
+`slowCallDurationThreshold < readTimeout < callTimeout`, and
+`callTimeout >= maxAttempts x (connectTimeout + readTimeout)` if you actually want every retry
+to get its chance.
 
 ---
 

@@ -290,6 +290,60 @@ one global address" failure; the second is the fix — push the contention
 down to fast shared memory, and only pay the expensive global atomic once
 per block instead of once per thread.
 
+**What this actually says.** The "128x reduction" in the diagram is one division,
+`threads / blocks`, but the sentence behind it is worth spelling out: "atomics on a single
+address do not run in parallel — they form a queue whose *length* is the number of threads
+aiming at that address, and privatization does not shorten the queue, it splits one long
+queue into many short ones."
+
+The quantity that actually governs cost is therefore not thread count but **serialization
+depth**: how many updates must happen strictly one after another on the same address. A
+kernel with a million threads and a million distinct addresses has depth 1 and costs
+nothing extra. A kernel with 4,096 threads and one address has depth 4,096, and the 4,095
+threads not currently holding the address are doing nothing at all.
+
+| Symbol | What it is |
+|--------|------------|
+| `W` | Threads contending on one address — the serialization depth. `4096` in the BEFORE diagram |
+| `B` | Blocks in the grid. `32` here, each holding its own private shared-memory counter |
+| `W / B` | Threads per block, `128`. The depth of each *shared*-memory queue after privatization |
+| `B` (again) | Global-atomic count after privatization — one merge per block, `32` total |
+| `W / B` as a ratio | `4096 / 32 = 128x` fewer operations reaching the expensive global address |
+| depth | Length of the longest must-be-sequential chain, the thing that actually sets the time |
+
+**Walk one example.** Count the sequential steps on each path, separating the cheap on-chip
+queue from the expensive off-chip one:
+
+```
+  BEFORE -- one global address
+    global-atomic queue depth    : 4096   (every thread, one at a time, through HBM)
+    shared-atomic queue depth    :    0
+    expensive (global) ops total : 4096
+
+  AFTER -- 32 private counters merged once each
+    shared-atomic queue depth    :  128   (per block; the 32 blocks queue in parallel
+                                           on 32 different SMs, so depth stays 128)
+    global-atomic queue depth    :   32   (the merge phase)
+    expensive (global) ops total :   32
+
+    total sequential steps : 4096  ->  128 + 32 = 160     = 25.6x fewer steps
+    steps that touch HBM   : 4096  ->             32      = 128x  fewer
+```
+
+The two ratios differ because they measure different things, and interviewers ask about
+exactly this gap: `25.6x` is the drop in raw sequential steps, while `128x` is the drop in
+*expensive* steps. Since the file's own §8 table puts a contended global atomic at 10-100x
+the cost of an uncontended one, and the 128 remaining shared steps run on-chip with no
+~400-800 cycle HBM round trip to arbitrate, the `128x` figure is much closer to the real
+speedup than the `25.6x` one. This is also why the technique keeps paying as the grid grows:
+`B` scales with the grid, so the global queue stays short while `W` climbs.
+
+**Why the merge step cannot be skipped.** The shared counters are per-block and die with the
+block, so the `atomicAdd(&globalCounter, sBlockCount)` is what makes the result correct, not
+merely fast. Without it every block computes a private answer nobody ever reads. The design
+is a two-level tree reduction wearing atomics as its combining operator — the same shape as
+any reduction, with the cheap level made wide and the expensive level made narrow.
+
 ```mermaid
 flowchart LR
     classDef io     fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
@@ -1023,6 +1077,60 @@ Global-atomic traffic comparison:
 
   -> roughly a 512x reduction in GLOBAL atomic traffic for the same total count.
 ```
+
+**Put simply.** Every number in that comparison falls out of one relationship,
+`depth = elements / addresses`: "contention is just how many updates have to line up behind
+each other on a single address, and you lower it by adding addresses, never by adding
+threads."
+
+The naive kernel has 256 addresses for 16,777,216 updates. Privatization does not reduce the
+updates — all 16,777,216 still happen — it multiplies the address count by the block count,
+turning 256 global addresses into `128 x 256 = 32,768` *effective* addresses, of which
+32,512 are cheap on-chip ones.
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Elements to bin. `16,777,216` (16M) |
+| `bins` | Histogram buckets. `256`, fixed by the `unsigned char` value range |
+| `B` | Blocks in the privatized launch. `128`, each with its own 256-entry `sBins` |
+| `n / bins` | Naive depth: `65,536` threads queued per global address |
+| `n / (B x bins)` | Shared depth: `512` updates per bin per block, all on-chip |
+| `B x bins` | Global atomics after the merge: `32,768` — and `B` per address, not `n / bins` |
+| `(n / bins) / B` | The `512x` figure: naive depth `65,536` divided by merged depth `128` |
+
+**Walk one example.** Follow one single bin — say bin 42 — down both paths:
+
+```
+  NAIVE     16,777,216 elements / 256 bins
+              = 65,536 threads all issuing atomicAdd on &bins[42], in GLOBAL memory
+              = a 65,536-deep queue, every step paying an HBM round trip
+
+  PRIVATIZED  16,777,216 elements / 128 blocks = 131,072 elements per block
+              131,072 / 256 bins = 512 updates to sBins[42] per block, in SHARED memory
+              -> 512-deep queue per block, on-chip, and the 128 blocks do this in parallel
+
+              merge: 1 atomicAdd(&bins[42], sBins[42]) per block
+              -> 128 global updates to &bins[42], total
+
+  Global-queue depth for bin 42 : 65,536  ->  128        = 512x shallower
+  Global atomic ops, all bins   : 16,777,216 -> 32,768   = 512x fewer
+```
+
+Both ratios land on the same `512x` because `B = 128` divides both, which is the tidy part
+of this design: the reduction factor *is* the block count. Want 1,024x? Launch 256 blocks.
+The ceiling is not arithmetic but capacity — every block needs its own 256-entry `sBins`
+(1 KB of shared memory at 4 bytes per `unsigned int`), so the block count is bounded by
+shared memory per SM and by how much merge traffic you are willing to add back.
+
+**The idea behind it.** Note what the guard `if (sBins[b] > 0)` does to the `32,768` figure:
+it is an upper bound, not a count. A block only pays a global atomic for bins it actually
+touched, so with 128 blocks × 1024 threads each grid-striding 128 elements, a skewed input
+that only ever produces a handful of distinct byte values drives the real global-atomic
+count far below 32,768. The flip side is the pathological case in the discussion questions —
+if all 16M bytes are the *same* value, every block still funnels 131,072 shared updates onto
+one `sBins` slot, and privatization has moved the 65,536-deep queue on-chip without ever
+splitting it. Privatization multiplies addresses; it cannot create diversity the data does
+not have.
 
 In a representative benchmark on a data-center GPU, the naive kernel is
 memory-atomic-bound and the privatized kernel is closer to bandwidth-bound,
