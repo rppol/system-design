@@ -282,7 +282,7 @@ This is Little's Law wearing a networking costume: sockets in TIME_WAIT are the 
 |--------|------------|
 | MSL | Maximum segment lifetime — how long the network may plausibly still hold a stray packet. 30–60 s on Linux |
 | 2×MSL | TIME_WAIT duration, 60–120 s. One MSL for the final ACK to arrive, one for any reply it triggers |
-| Port pool | Ephemeral range width, `60999 − 32768` = 28,231 ports by default |
+| Port pool | Ephemeral range width, `60999 − 32768 + 1` = 28,232 ports by default |
 | Sustainable rate | `port pool ÷ 2×MSL` — new connections per second before ports run out |
 | Ports in use | `connection rate × 2×MSL` — the steady-state TIME_WAIT count |
 
@@ -291,8 +291,8 @@ This is Little's Law wearing a networking costume: sockets in TIME_WAIT are the 
 ```
   How fast can I go?      rate = ports / TIME_WAIT
 
-    28,231 / 60 s   =   470 conn/s        (MSL = 30 s)
-    28,231 / 120 s  =   235 conn/s        (MSL = 60 s)
+    28,232 / 60 s   =   470 conn/s        (MSL = 30 s)
+    28,232 / 120 s  =   235 conn/s        (MSL = 60 s)
 
   How many ports will I burn?    ports = rate x TIME_WAIT
 
@@ -317,7 +317,7 @@ ss -s | grep TIME-WAIT
 
 # Check ephemeral port range
 cat /proc/sys/net/ipv4/ip_local_port_range
-# default: 32768 60999 (28,231 ports)
+# default: 32768 60999 (28,232 ports, inclusive)
 
 # Tuning options:
 # 1. Widen port range
